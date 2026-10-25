@@ -423,11 +423,11 @@ fn new_text_child(
     } else {
         t.nodes[el].ns = ns;
     }
+    // (xmlNewDocRawNode(): an empty content still makes an empty text
+    // child, serialized as <e></e>)
     if let Some(c) = content {
-        if !c.is_empty() {
-            let tx = t.new_text(doc, c);
-            t.link_child_raw(el, tx);
-        }
+        let tx = t.new_text(doc, c);
+        t.link_child_raw(el, tx);
     }
     t.add_child(parent, el);
     el
@@ -873,6 +873,7 @@ fn prop_dim_write(
     value: Option<&Value>,
     mut access: Access,
 ) -> Option<NodeId> {
+    let mut retval_error = false;
     let s = sxe_of(obj)?;
     let mem: Option<Member> = match member {
         None => {
@@ -1058,7 +1059,9 @@ fn prop_dim_write(
                                     nm, n
                                 ),
                             );
-                            return None;
+                            // (retval = &EG(error_zval), but the value is
+                            // still assigned to the node)
+                            retval_error = true;
                         }
                     }
                 } else if let Some(Member::Long(n)) = &mem {
@@ -1164,6 +1167,9 @@ fn prop_dim_write(
                 }));
             }
         }
+    }
+    if retval_error {
+        return None;
     }
     newnode
 }
