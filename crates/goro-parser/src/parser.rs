@@ -4351,7 +4351,6 @@ impl Parser {
             TokenKind::LessEqual => (7, Bin(BinaryOp::LessEqual)),
             TokenKind::GreaterEqual => (7, Bin(BinaryOp::GreaterEqual)),
             TokenKind::Spaceship => (7, Bin(BinaryOp::Spaceship)),
-            TokenKind::Instanceof => (7, Instanceof),
             // `|>` binds tighter than the comparisons and looser than `.`
             TokenKind::PipeGreater => (8, Pipe),
             // `.` binds looser than the shifts and `+`/`-` (PHP 8)
@@ -4371,7 +4370,7 @@ impl Parser {
     /// tighter (see binary_op_level); its operands are `**` / unary
     /// expressions.
     fn parse_binary(&mut self, min: u8) -> ParseResult<Expr> {
-        let mut left = self.parse_pow()?;
+        let mut left = self.parse_instanceof()?;
         while let Some((level, op)) = Self::binary_op_level(self.peek()) {
             if level < min {
                 break;
@@ -4396,10 +4395,6 @@ impl Parser {
                         op,
                         left: Box::new(left),
                         right: Box::new(right),
-                    },
-                    BinLevelOp::Instanceof => ExprKind::Instanceof {
-                        expr: Box::new(left),
-                        class: Box::new(right),
                     },
                     BinLevelOp::Pipe => ExprKind::Pipe {
                         value: Box::new(left),
@@ -4462,6 +4457,37 @@ impl Parser {
             }
         }
         Ok(right)
+    }
+
+    /// `instanceof` binds tighter than the binary operators and `!`, looser
+    /// than `**`, the casts and the other unary operators; its right side is
+    /// a class name reference, not an expression.
+    fn parse_instanceof(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_pow()?;
+        while matches!(self.peek(), TokenKind::Instanceof) {
+            self.advance();
+            let right = self.parse_unary()?;
+            left = Expr {
+                span: left.span.merge(right.span),
+                kind: ExprKind::Instanceof {
+                    expr: Box::new(left),
+                    class: Box::new(right),
+                },
+            };
+            // (`$a instanceof B ** 2`: the instanceof is the base)
+            if self.eat(&TokenKind::Pow) {
+                let exp = self.parse_pow()?;
+                left = Expr {
+                    span: left.span.merge(exp.span),
+                    kind: ExprKind::BinaryOp {
+                        op: BinaryOp::Pow,
+                        left: Box::new(left),
+                        right: Box::new(exp),
+                    },
+                };
+            }
+        }
+        Ok(left)
     }
 
     fn parse_pow(&mut self) -> ParseResult<Expr> {
@@ -7633,6 +7659,5 @@ mod tests {
 #[derive(Clone, Copy)]
 enum BinLevelOp {
     Bin(BinaryOp),
-    Instanceof,
     Pipe,
 }
