@@ -195,13 +195,9 @@ fn lex(s: &str) -> Result<Vec<Tok>, XErr> {
                     toks.push(Tok::DotDot);
                     i += 2;
                 } else if i + 1 < n && chars[i + 1].is_ascii_digit() {
-                    let st = i;
-                    i += 1;
-                    while i < n && chars[i].is_ascii_digit() {
-                        i += 1;
-                    }
-                    let s: String = chars[st..i].iter().collect();
-                    toks.push(Tok::Number(format!("0{}", s).parse().unwrap_or(f64::NAN)));
+                    let (v, end) = scan_number(&chars, i).unwrap_or((f64::NAN, i + 1));
+                    i = end;
+                    toks.push(Tok::Number(v));
                 } else {
                     toks.push(Tok::Dot);
                     i += 1;
@@ -221,18 +217,9 @@ fn lex(s: &str) -> Result<Vec<Tok>, XErr> {
                 i += 1;
             }
             '0'..='9' => {
-                let st = i;
-                while i < n && chars[i].is_ascii_digit() {
-                    i += 1;
-                }
-                if i < n && chars[i] == '.' {
-                    i += 1;
-                    while i < n && chars[i].is_ascii_digit() {
-                        i += 1;
-                    }
-                }
-                let s: String = chars[st..i].iter().collect();
-                toks.push(Tok::Number(s.parse().unwrap_or(f64::NAN)));
+                let (v, end) = scan_number(&chars, i).unwrap_or((f64::NAN, i + 1));
+                i = end;
+                toks.push(Tok::Number(v));
             }
             '=' => {
                 toks.push(Tok::Op("="));
@@ -1400,32 +1387,95 @@ pub fn to_bool(v: &XValue) -> bool {
 }
 
 pub fn str_to_num(s: &str) -> f64 {
-    let t = s.trim_matches(|c| c == ' ' || c == '\t' || c == '\n' || c == '\r');
-    if t.is_empty() {
+    // xmlXPathStringEvalNumber()
+    let blank = |c: char| c == ' ' || c == '\t' || c == '\n' || c == '\r';
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() && blank(chars[i]) {
+        i += 1;
+    }
+    let neg = i < chars.len() && chars[i] == '-';
+    if neg {
+        i += 1;
+    }
+    let Some((v, mut end)) = scan_number(&chars, i) else {
+        return f64::NAN;
+    };
+    while end < chars.len() && blank(chars[end]) {
+        end += 1;
+    }
+    if end != chars.len() {
         return f64::NAN;
     }
-    let b = t.as_bytes();
-    let mut i = 0;
-    if b[0] == b'-' {
-        i = 1;
+    if neg { -v } else { v }
+}
+
+/// libxml2's number scanner (xmlXPathCompNumber / xmlXPathStringEvalNumber):
+/// digits, an optional fraction (at most MAX_FRAC significant digits) and an
+/// optional exponent; None when there is no digit before or after the '.'.
+fn scan_number(c: &[char], mut i: usize) -> Option<(f64, usize)> {
+    const MAX_FRAC: i32 = 20;
+    let digit = |i: usize| c.get(i).and_then(|ch| ch.to_digit(10));
+    if c.get(i) != Some(&'.') && digit(i).is_none() {
+        return None;
     }
-    let digits_start = i;
-    while i < b.len() && b[i].is_ascii_digit() {
+    let mut ret = 0.0f64;
+    let mut ok = false;
+    while let Some(d) = digit(i) {
+        ret = ret * 10.0 + d as f64;
+        ok = true;
         i += 1;
     }
-    let mut had_digits = i > digits_start;
-    if i < b.len() && b[i] == b'.' {
+    if c.get(i) == Some(&'.') {
         i += 1;
-        let fs = i;
-        while i < b.len() && b[i].is_ascii_digit() {
+        if digit(i).is_none() && !ok {
+            return None;
+        }
+        let mut frac = 0i32;
+        let mut fraction = 0.0f64;
+        while c.get(i) == Some(&'0') {
+            frac += 1;
             i += 1;
         }
-        had_digits |= i > fs;
+        let max = frac + MAX_FRAC;
+        while let Some(d) = digit(i) {
+            if frac >= max {
+                break;
+            }
+            fraction = fraction * 10.0 + d as f64;
+            frac += 1;
+            i += 1;
+        }
+        fraction /= 10f64.powf(frac as f64);
+        ret += fraction;
+        while digit(i).is_some() {
+            i += 1;
+        }
     }
-    if i != b.len() || !had_digits {
-        return f64::NAN;
+    if matches!(c.get(i), Some('e') | Some('E')) {
+        i += 1;
+        let mut neg = false;
+        match c.get(i) {
+            Some('-') => {
+                neg = true;
+                i += 1;
+            }
+            Some('+') => i += 1,
+            _ => {}
+        }
+        let mut exponent = 0i32;
+        while let Some(d) = digit(i) {
+            if exponent < 1_000_000 {
+                exponent = exponent * 10 + d as i32;
+            }
+            i += 1;
+        }
+        if neg {
+            exponent = -exponent;
+        }
+        ret *= 10f64.powf(exponent as f64);
     }
-    t.parse::<f64>().unwrap_or(f64::NAN)
+    Some((ret, i))
 }
 
 pub fn to_num(v: &XValue) -> f64 {

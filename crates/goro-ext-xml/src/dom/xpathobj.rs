@@ -195,6 +195,10 @@ fn dispatch(
         Value::False => Ok(XValue::Bool(false)),
         Value::Undef => Ok(XValue::Str(String::new())),
         other => {
+            // zval_get_string(): an array warns and becomes "Array"
+            if matches!(other, Value::Array(_)) {
+                vm.emit_warning("Array to string conversion");
+            }
             let s = vm.value_to_string(&other);
             if vm.current_exception.is_some() {
                 return Err(XErr::Ext);
