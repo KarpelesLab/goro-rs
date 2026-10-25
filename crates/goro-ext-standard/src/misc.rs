@@ -4711,12 +4711,15 @@ fn sort_regular_cmp(vm: &mut Vm, a: &Value, b: &Value) -> i64 {
     let b = b.deref();
     if let (Some(cmp_fn), Some(is_type)) = (vm.object_compare, vm.object_is_operator_type) {
         if is_type(&a) || is_type(&b) {
-            return match cmp_fn(vm, &a, &b) {
-                Some(std::cmp::Ordering::Less) => -1,
-                Some(std::cmp::Ordering::Equal) => 0,
+            match cmp_fn(vm, &a, &b) {
+                Some(std::cmp::Ordering::Less) => return -1,
+                Some(std::cmp::Ordering::Equal) => return 0,
+                Some(std::cmp::Ordering::Greater) => return 1,
                 // ZEND_UNCOMPARABLE (an exception is pending)
-                Some(std::cmp::Ordering::Greater) | None => 1,
-            };
+                None if vm.current_exception.is_some() => return 1,
+                // left to the objects' compare handlers (BcMath\Number)
+                None => {}
+            }
         }
     }
     // zend_std_compare_objects(): an object compared with a string is cast

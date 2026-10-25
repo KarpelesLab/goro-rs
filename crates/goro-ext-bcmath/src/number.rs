@@ -72,7 +72,8 @@ type ObjectCompare = fn(&mut Vm, &Value, &Value) -> Option<std::cmp::Ordering>;
 /// "loses precision" deprecation). The comparison itself is left to the
 /// compare handler (None).
 fn object_compare(vm: &mut Vm, a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
-    if !is_number(a) && !is_number(b) {
+    // (another object on the left: op1's handler compares)
+    if !is_number(a) && (!is_number(b) || matches!(a.deref(), Value::Object(_))) {
         return PREV_COMPARE.with(|p| p.get()).and_then(|f| f(vm, a, b));
     }
     // op1's own handler compares another object; bools and null never
@@ -441,6 +442,16 @@ fn do_operation(vm: &mut Vm, opstr: &str, a: &Value, b: &Value) -> Option<Result
         return PREV_DO_OPERATION
             .with(|p| p.get())
             .and_then(|f| f(vm, opstr, a, b));
+    }
+    // Another operator-overloading object on the left: its handler is tried
+    // first (ZEND_TRY_BINARY_OBJECT_OPERATION).
+    if !is_number(a) && PREV_IS_TYPE.with(|p| p.get()).is_some_and(|f| f(a)) {
+        if let Some(r) = PREV_DO_OPERATION
+            .with(|p| p.get())
+            .and_then(|f| f(vm, opstr, a, b))
+        {
+            return Some(r);
+        }
     }
     let op = match opstr {
         "+" => Op::Add,
