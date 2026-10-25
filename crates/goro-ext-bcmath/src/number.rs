@@ -667,6 +667,20 @@ impl Method {
 /// `__bcmath_number(method, $this, func_get_args())`: the native bodies of
 /// the BcMath\Number methods.
 fn number_method(vm: &mut Vm, args: &[Value]) -> R {
+    // The method runs as the internal method itself: the dispatcher has no
+    // frame of its own in backtraces.
+    let hide = vm.current_builtin_name().as_deref() == Some("__bcmath_number");
+    if hide {
+        vm.pop_builtin_frame();
+    }
+    let r = number_method_inner(vm, args);
+    if hide {
+        vm.push_builtin_frame(b"__bcmath_number", &[], 0);
+    }
+    r
+}
+
+fn number_method_inner(vm: &mut Vm, args: &[Value]) -> R {
     let mname = args
         .first()
         .map(|v| v.to_php_string().to_string_lossy())
