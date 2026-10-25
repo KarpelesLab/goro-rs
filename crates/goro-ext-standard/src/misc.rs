@@ -773,7 +773,17 @@ fn error_reporting(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 strict,
                 line,
             ) {
-                Ok(Some(v)) => vm.error_reporting = v.to_long(),
+                Ok(Some(v)) => {
+                    // zend_alter_ini_entry_chars(): the INI entry changes too
+                    // (restored at request end / by ini_restore()).
+                    let n = v.to_long();
+                    vm.error_reporting = n;
+                    ini_remember(vm, b"error_reporting");
+                    vm.constants.insert(
+                        b"error_reporting".to_vec(),
+                        Value::String(PhpString::from_string(n.to_string())),
+                    );
+                }
                 Ok(None) => {
                     return Err(throw_type_error_msg(
                         vm,
