@@ -275,4 +275,56 @@ impl Vm {
                 .collect(),
         )
     }
+
+    /// Whether the argument the top pending call takes next is known to be
+    /// by value (a builtin's by-reference `array &$array` is passed the
+    /// variable's array itself).
+    pub(crate) fn next_arg_by_value(&self) -> bool {
+        let Some(call) = self.pending_calls.last() else {
+            return false;
+        };
+        let idx = call.args.len();
+        if let Some(f) = self.call_user_fn(call) {
+            return !crate::vm::arg_by_ref(f, idx);
+        }
+        let name = call.name.as_bytes();
+        if name.contains(&b':') || name.is_empty() {
+            return false;
+        }
+        let name = name.strip_prefix(b"\\").unwrap_or(name);
+        let lname = match name.iter().rposition(|&b| b == b'\\') {
+            Some(p) if !call.target.no_ns_fallback || call.target.ns_global => &name[p + 1..],
+            Some(_) => return false,
+            None => name,
+        };
+        let Some(info) = crate::arginfo::lookup(&lname.to_ascii_lowercase()) else {
+            return false;
+        };
+        match info
+            .params
+            .get(idx)
+            .or_else(|| info.params.last().filter(|p| p.variadic))
+        {
+            Some(p) => p.by_ref == 0,
+            None => true,
+        }
+    }
+
+    /// SEND_VAR of a variable's array at `ip` of `op_array`: whether code
+    /// runs between it and the call (evaluating the next arguments), which
+    /// may write the variable. The value sent is then a copy of its own
+    /// (copy-on-write: SEND_VAR's zval copy), not the variable's array the
+    /// write would change in place.
+    #[inline]
+    pub(crate) fn send_needs_snapshot(op_array: &crate::opcode::OpArray, ip: usize) -> bool {
+        use crate::opcode::OpCode;
+        for op in op_array.ops.iter().skip(ip + 1).take(32) {
+            match op.opcode {
+                OpCode::SendVal | OpCode::SendValChecked | OpCode::SendValRaw => {}
+                OpCode::DoFCall => return false,
+                _ => return true,
+            }
+        }
+        true
+    }
 }

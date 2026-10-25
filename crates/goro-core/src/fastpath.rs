@@ -970,6 +970,22 @@ fn fetched_container(
     }
 }
 
+/// Whether the send at `ip` sends a variable's array that code run before
+/// the call may write (see Vm::send_needs_snapshot): the general handler
+/// sends a copy of its own.
+#[inline]
+fn send_snapshot(op_array: &crate::opcode::OpArray, ip: usize, op: &Op, cvs: &[Value]) -> bool {
+    let OperandType::Cv(c) = op.op1 else {
+        return false;
+    };
+    let arr = match cvs.get(c as usize) {
+        Some(Value::Array(_)) => true,
+        Some(Value::Reference(r)) => matches!(r.try_borrow().as_deref(), Ok(Value::Array(_))),
+        _ => false,
+    };
+    arr && crate::vm::Vm::send_needs_snapshot(op_array, ip)
+}
+
 /// `$s[i]` of a string and an int offset within it (FETCH_DIM_R on a
 /// string): the one-byte string there; anything else (an offset outside
 /// it warns, other offset types convert or throw) takes the general path.
@@ -1650,7 +1666,9 @@ impl crate::vm::Vm {
                 // A by-value argument of a call resolved when it was set up
                 // (see the SEND_VAL handler).
                 OpCode::SendVal => {
-                    if self.send_val_fast(op, cvs, tmps, literals) {
+                    if !send_snapshot(op_array, ip, op, cvs)
+                        && self.send_val_fast(op, cvs, tmps, literals)
+                    {
                         Fast::Done
                     } else {
                         break 'run ip;
@@ -1681,7 +1699,10 @@ impl crate::vm::Vm {
                                 _ => false,
                             }
                     });
-                    if by_value_target && self.send_val_fast(op, cvs, tmps, literals) {
+                    if by_value_target
+                        && !send_snapshot(op_array, ip, op, cvs)
+                        && self.send_val_fast(op, cvs, tmps, literals)
+                    {
                         Fast::Done
                     } else {
                         break 'run ip;

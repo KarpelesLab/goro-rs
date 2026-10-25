@@ -28190,6 +28190,19 @@ impl Vm {
                             } else {
                                 self.globals_by_value(val)
                             };
+                            // SEND_VAR's copy of a variable's array, when code
+                            // runs before the call (see send_needs_snapshot)
+                            let val = match val {
+                                v @ Value::Array(_)
+                                    if !separate
+                                        && matches!(op.op1, OperandType::Cv(_))
+                                        && Self::send_needs_snapshot(op_array, ip - 1)
+                                        && self.next_arg_by_value() =>
+                                {
+                                    self.dup_array_value(v)
+                                }
+                                v => v,
+                            };
                             let val = match val {
                                 Value::Array(a) if separate => {
                                     // (holders besides this value and its tmp)
@@ -28242,7 +28255,16 @@ impl Vm {
                                 }
                                 Value::Null
                             } else {
-                                v.clone() // Keep Reference wrapper intact!
+                                match v {
+                                    // (SEND_VAR's copy, see send_needs_snapshot)
+                                    Value::Array(_)
+                                        if Self::send_needs_snapshot(op_array, ip - 1)
+                                            && self.next_arg_by_value() =>
+                                    {
+                                        self.dup_array_value(v.clone())
+                                    }
+                                    v => v.clone(), // Keep Reference wrapper intact!
+                                }
                             }
                         } else {
                             Value::Null
