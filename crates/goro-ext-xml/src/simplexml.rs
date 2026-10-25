@@ -35,6 +35,9 @@ pub struct Sxe {
     pub xpath_ns: RefCell<Vec<(String, String)>>,
     /// user subclass overrides count()
     pub fptr_count: Cell<bool>,
+    /// sxe->properties: the last non-debug property table (it keeps the
+    /// child objects alive until the next fetch or the object dies)
+    pub properties: RefCell<Option<PhpArray>>,
 }
 
 impl Sxe {
@@ -49,6 +52,7 @@ impl Sxe {
             data: RefCell::new(None),
             xpath_ns: RefCell::new(Vec::new()),
             fptr_count: Cell::new(false),
+            properties: RefCell::new(None),
         }
     }
 }
@@ -1946,8 +1950,16 @@ fn h_unset_dimension(vm: &mut Vm, o: &Obj, key: &Value) -> bool {
 }
 
 fn h_get_properties(vm: &mut Vm, o: &Obj, purpose: u8) -> Option<PhpArray> {
-    sxe_of(o)?;
-    Some(get_prop_hash(vm, o, purpose == 0))
+    let s = sxe_of(o)?;
+    if purpose == 0 {
+        return Some(get_prop_hash(vm, o, true));
+    }
+    // zend_hash_clean(sxe->properties) frees the previous children first
+    let old = s.properties.borrow_mut().take();
+    drop(old);
+    let rv = get_prop_hash(vm, o, false);
+    *s.properties.borrow_mut() = Some(rv.clone());
+    Some(rv)
 }
 
 // ---------------------------------------------------------------------------
