@@ -469,7 +469,9 @@ fn sapi_filter(vm: &mut Vm, _arg: u8, val: &[u8]) -> Value {
 
 fn register_classes(vm: &mut Vm) {
     const PRELUDE: &[u8] = include_bytes!("prelude.php");
-    let Some((op_array, classes)) = compile_prelude(PRELUDE) else {
+    let Some((op_array, classes)) =
+        goro_core::script_cache::prelude("filter", || compile_prelude(PRELUDE))
+    else {
         return;
     };
     let saved_file = std::mem::take(&mut vm.current_file);

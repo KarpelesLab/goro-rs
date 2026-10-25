@@ -474,7 +474,7 @@ pub fn register(vm: &mut Vm) {
     vm.ini_validators
         .insert(b"phar.cache_list".to_vec(), on_update_cache_list);
     // classes
-    if let Some((op_array, classes)) = compile_prelude() {
+    if let Some((op_array, classes)) = goro_core::script_cache::prelude("phar", compile_prelude) {
         let names: Vec<Vec<u8>> = classes
             .iter()
             .map(|c| c.name.to_ascii_lowercase())

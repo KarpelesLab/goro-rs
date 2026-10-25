@@ -47,7 +47,8 @@ thread_local! {
 
 pub(crate) fn register(vm: &mut Vm) {
     vm.register_function(b"__bcmath_number", number_method);
-    let Some((op_array, classes)) = compile_prelude() else {
+    let Some((op_array, classes)) = goro_core::script_cache::prelude("bcmath", compile_prelude)
+    else {
         return;
     };
     let saved_file = std::mem::take(&mut vm.current_file);

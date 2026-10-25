@@ -864,3 +864,26 @@ impl crate::vm::Vm {
         r
     }
 }
+
+thread_local! {
+    /// The compiled PHP preludes of extensions (see prelude()).
+    static PRELUDES: RefCell<HashMap<&'static str, Option<(OpArray, Vec<ClassEntry>)>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// The compiled form of extension `ext`'s PHP prelude (the classes an
+/// extension declares from PHP source, see goro-ext-bcmath's for one),
+/// compiled by `compile` once per thread: each engine of a server's
+/// worker runs it again (the code of earlier engines' sites is stale for
+/// a new one, see opcode::new_site_epoch, as for the scripts cached here).
+pub fn prelude(
+    ext: &'static str,
+    compile: impl FnOnce() -> Option<(OpArray, Vec<ClassEntry>)>,
+) -> Option<(OpArray, Vec<ClassEntry>)> {
+    if let Some(c) = PRELUDES.with(|m| m.borrow().get(ext).cloned()) {
+        return c;
+    }
+    let c = compile();
+    PRELUDES.with(|m| m.borrow_mut().insert(ext, c.clone()));
+    c
+}

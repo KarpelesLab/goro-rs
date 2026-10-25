@@ -313,7 +313,9 @@ fn compile_prelude(src: &[u8]) -> Option<(OpArray, Vec<ClassEntry>)> {
 
 fn register_classes(vm: &mut Vm) {
     const PRELUDE: &[u8] = b"<?php\nclass SodiumException extends Exception {}\n";
-    let Some((op_array, classes)) = compile_prelude(PRELUDE) else {
+    let Some((op_array, classes)) =
+        goro_core::script_cache::prelude("sodium", || compile_prelude(PRELUDE))
+    else {
         return;
     };
     let saved_file = std::mem::take(&mut vm.current_file);

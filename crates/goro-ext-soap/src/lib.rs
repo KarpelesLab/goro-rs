@@ -190,7 +190,8 @@ pub fn register(vm: &mut Vm) {
 }
 
 fn register_classes(vm: &mut Vm) {
-    let Some((op_array, classes)) = compile_prelude() else {
+    let Some((op_array, classes)) = goro_core::script_cache::prelude("soap", compile_prelude)
+    else {
         return;
     };
     let saved_file = std::mem::take(&mut vm.current_file);
