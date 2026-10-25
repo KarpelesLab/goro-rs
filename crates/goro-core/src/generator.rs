@@ -1692,7 +1692,11 @@ impl PhpGenerator {
                 }
 
                 OpCode::GeneratorReturn => {
+                    let had_exc = vm.current_exception.is_some();
                     let val = self.read_operand_r(vm, &op.op1, &op_array.literals, op.line);
+                    if !had_exc && vm.current_exception.is_some() {
+                        return Err(self.return_cv_escape(vm, ip, op.line));
+                    }
                     self.return_value = val;
                     self.state = GeneratorState::Completed;
                     self.has_returned = true;
@@ -1706,7 +1710,11 @@ impl PhpGenerator {
                     // In a generator, return acts as GeneratorReturn.
                     // An explicit return inside a finally block discards any pending
                     // exception that triggered the finally (matches PHP semantics).
+                    let had_exc = vm.current_exception.is_some();
                     let val = self.read_operand_r(vm, &op.op1, &op_array.literals, op.line);
+                    if !had_exc && vm.current_exception.is_some() {
+                        return Err(self.return_cv_escape(vm, ip, op.line));
+                    }
                     self.return_value = val;
                     self.state = GeneratorState::Completed;
                     self.has_returned = true;
@@ -2086,7 +2094,28 @@ impl PhpGenerator {
 
                 OpCode::SaveReturn => {
                     // Save return value for deferred return (finally blocks)
-                    let val = self.read_operand(&op.op1, &op_array.literals);
+                    let val = if vm.current_exception.is_none() {
+                        // (copied out first: an undefined variable warns, and
+                        // an exception the error handler throws is caught here)
+                        let v = self.read_operand_r(vm, &op.op1, &op_array.literals, op.line);
+                        if vm.current_exception.is_some() {
+                            vm.error_handler_threw = false;
+                            if let Some(t) = self.dispatch_exception() {
+                                ip = t;
+                                continue;
+                            }
+                            self.state = GeneratorState::Completed;
+                            self.current_value = Value::Null;
+                            self.ip = ip;
+                            return Err(VmError {
+                                message: "Uncaught exception in generator".to_string(),
+                                line: op.line,
+                            });
+                        }
+                        v
+                    } else {
+                        self.read_operand(&op.op1, &op_array.literals)
+                    };
                     self.pending_return = Some(val);
                     self.pending_finally_jump = None;
                     vm.current_exception = None;
@@ -2459,6 +2488,24 @@ impl PhpGenerator {
     }
 
     /// A read (BP_VAR_R) of an operand: an undefined CV warns and reads null.
+    /// ZEND_GENERATOR_RETURN of an undefined CV: an exception the error
+    /// handler throws on its warning leaves the generator (finished) past
+    /// its catch blocks.
+    #[inline(never)]
+    fn return_cv_escape(&mut self, vm: &mut Vm, ip: usize, line: u32) -> VmError {
+        vm.error_handler_threw = false;
+        self.state = GeneratorState::Completed;
+        self.has_returned = true;
+        self.return_value = Value::Null;
+        self.current_value = Value::Null;
+        self.current_key = Value::Null;
+        self.ip = ip;
+        VmError {
+            message: "Uncaught exception in generator".to_string(),
+            line,
+        }
+    }
+
     fn read_operand_r(
         &self,
         vm: &mut Vm,

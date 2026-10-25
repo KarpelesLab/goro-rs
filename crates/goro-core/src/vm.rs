@@ -242,6 +242,9 @@ macro_rules! native_exc_check {
             if let Some((catch_target, _, _, _, saved_pc)) = $handlers.pop() {
                 $pending = Some(saved_pc);
                 $ip = catch_target as usize;
+                // (dispatched here: the after-opcode check must not
+                // dispatch it a second time)
+                $self.error_handler_threw = false;
                 return Ok(Flow::Continue);
             }
             let msg = match &$self.current_exception {
@@ -37970,6 +37973,18 @@ impl Vm {
                         );
                         self.dup_returned_ref_array(&op.op1, &cvs, v)
                     };
+                    // ZEND_RETURN of an undefined CV warns without checking
+                    // for an exception: one the error handler throws is
+                    // rethrown in the caller, past this frame's catch blocks
+                    // (unless VERIFY_RETURN_TYPE read the variable first).
+                    if !had_exc
+                        && self.current_exception.is_some()
+                        && matches!(op.op1, OperandType::Cv(_))
+                        && !op_array.returns_by_ref
+                        && !return_type_check_emitted(op_array)
+                    {
+                        return Err(self.return_cv_exception_escape(op.line));
+                    }
                     // An error handler that threw on the operand's warning
                     // ("Undefined variable") aborts the return.
                     if !had_exc {
@@ -60972,6 +60987,22 @@ impl Vm {
     }
 
     /// Read an operand, emitting "Undefined variable" warning for undef CVs
+    /// The pending exception leaves the frame unhandled (as an uncaught
+    /// one does): the caller dispatches it at its call site.
+    #[inline(never)]
+    fn return_cv_exception_escape(&mut self, line: u32) -> VmError {
+        self.error_handler_threw = false;
+        let message = match &self.current_exception {
+            Some(Value::Object(o)) => o
+                .borrow()
+                .get_property(b"message")
+                .to_php_string()
+                .to_msg_string(),
+            _ => "Uncaught exception".to_string(),
+        };
+        VmError { message, line }
+    }
+
     fn read_operand_warn(
         &mut self,
         operand: &OperandType,
@@ -64085,6 +64116,16 @@ fn commutative_swap(op1: &OperandType, op2: &OperandType) -> bool {
 /// are reported as a bare "syntax error").
 /// Whether a declared return type is checked by VERIFY_RETURN_TYPE and
 /// accepts null (`mixed` is not checked).
+/// Whether `return <expr>;` in this function is preceded by a
+/// ZEND_VERIFY_RETURN_TYPE (not for generators, nor for `mixed`).
+fn return_type_check_emitted(op_array: &OpArray) -> bool {
+    !op_array.is_generator
+        && op_array
+            .return_type
+            .as_ref()
+            .is_some_and(|t| !matches!(t, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"mixed")))
+}
+
 fn return_type_verifies_null(t: &ParamType) -> bool {
     match t {
         ParamType::Nullable(_) => true,
