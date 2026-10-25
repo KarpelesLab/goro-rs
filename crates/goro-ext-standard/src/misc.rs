@@ -531,7 +531,6 @@ final class StreamBucket {
     // String extras
     vm.register_function(b"str_split", str_split);
     vm.register_function(b"number_format", number_format);
-    vm.register_function(b"money_format", money_format);
     // hex2bin and bin2hex are registered in strings.rs
     vm.register_function(b"base64_encode", base64_encode);
     vm.register_function(b"base64_decode", base64_decode);
@@ -974,6 +973,9 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
+    if args.get(2).is_some_and(|v| v.to_bool()) {
+        vm.emit_warning("define(): Argument #3 ($case_insensitive) is ignored since declaration of case-insensitive constants is no longer supported");
+    }
     // Check if it's a built-in keyword constant (TRUE, FALSE, NULL)
     let name_upper: Vec<u8> = name_bytes.iter().map(|b| b.to_ascii_uppercase()).collect();
     // zend_register_constant(): __COMPILER_HALT_OFFSET__ is reserved.
@@ -1216,6 +1218,9 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     if let Some(val) = vm.constants.get(lookup_name).cloned() {
         if let Some(m) = vm.internal_deprecated_constants.get(lookup_name).cloned() {
+            vm.emit_deprecated_at(&m, vm.current_line);
+        }
+        if let Some(m) = goro_core::vm::builtin_constant_deprecation(lookup_name) {
             vm.emit_deprecated_at(&m, vm.current_line);
         }
         return Ok(val);
@@ -6955,10 +6960,6 @@ pub(crate) fn number_format_ex(
         out.extend(std::iter::repeat_n(b'0', dec.saturating_sub(frac.len())));
     }
     Ok(out)
-}
-
-fn money_format(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::empty()))
 }
 
 // hex2bin and bin2hex moved to strings.rs

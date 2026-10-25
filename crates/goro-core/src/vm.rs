@@ -464,6 +464,24 @@ pub fn native_handlers(obj: &Rc<RefCell<PhpObject>>) -> Option<&'static NativeOb
     obj.borrow().native.as_ref().map(|n| n.handlers)
 }
 
+/// The deprecation of a core/bundled constant whose fetch deprecates
+/// (CONST_DEPRECATED), by name; constant() raises it too.
+#[inline(never)]
+pub fn builtin_constant_deprecation(name: &[u8]) -> Option<String> {
+    Some(match name {
+        b"E_STRICT" => "Constant E_STRICT is deprecated since 8.4, the error level was removed".into(),
+        b"MT_RAND_PHP" => "Constant MT_RAND_PHP is deprecated since 8.3, as it uses a biased non-standard variant of Mt19937".into(),
+        b"SUNFUNCS_RET_TIMESTAMP" | b"SUNFUNCS_RET_STRING" | b"SUNFUNCS_RET_DOUBLE" => format!(
+            "Constant {} is deprecated since 8.4, as date_sunrise() and date_sunset() were deprecated in 8.1",
+            crate::string::msg_str(name)
+        ),
+        b"DATE_RFC7231" => "Constant DATE_RFC7231 is deprecated since 8.5, as this format ignores the associated timezone and always uses GMT".into(),
+        b"FILE_BINARY" => "Constant FILE_BINARY is deprecated since 8.1, as the constant has no effect".into(),
+        b"FILE_TEXT" => "Constant FILE_TEXT is deprecated since 8.1, as the constant has no effect".into(),
+        _ => return None,
+    })
+}
+
 impl Vm {
     /// The BP_VAR_* type of the read_dimension() call in progress, given the
     /// handler's `mode` (0 read, 1 write fetch, 2 isset fetch, 3 reference).
@@ -44013,47 +44031,8 @@ impl Vm {
                                 self.emit_deprecated_at(&m, op.line);
                             }
                         }
-                        // Emit deprecation for E_STRICT (deprecated since PHP 8.4)
-                        if name_bytes == b"E_STRICT" {
-                            self.emit_deprecated_at(
-                                "Constant E_STRICT is deprecated since 8.4, the error level was removed",
-                                op.line,
-                            );
-                        }
-                        if name_bytes == b"MT_RAND_PHP" {
-                            self.emit_deprecated_at(
-                                "Constant MT_RAND_PHP is deprecated since 8.3, as it uses a biased non-standard variant of Mt19937",
-                                op.line,
-                            );
-                        }
-                        if matches!(
-                            name_bytes,
-                            b"SUNFUNCS_RET_TIMESTAMP"
-                                | b"SUNFUNCS_RET_STRING"
-                                | b"SUNFUNCS_RET_DOUBLE"
-                        ) {
-                            self.emit_deprecated_at(
-                                &format!("Constant {} is deprecated since 8.4, as date_sunrise() and date_sunset() were deprecated in 8.1", crate::string::msg_str(name_bytes)),
-                                op.line,
-                            );
-                        }
-                        if name_bytes == b"DATE_RFC7231" {
-                            self.emit_deprecated_at(
-                                "Constant DATE_RFC7231 is deprecated since 8.5, as this format ignores the associated timezone and always uses GMT",
-                                op.line,
-                            );
-                        }
-                        if name_bytes == b"FILE_BINARY" {
-                            self.emit_deprecated_at(
-                                "Constant FILE_BINARY is deprecated since 8.1, as the constant has no effect",
-                                op.line,
-                            );
-                        }
-                        if name_bytes == b"FILE_TEXT" {
-                            self.emit_deprecated_at(
-                                "Constant FILE_TEXT is deprecated since 8.1, as the constant has no effect",
-                                op.line,
-                            );
+                        if let Some(m) = builtin_constant_deprecation(name_bytes) {
+                            self.emit_deprecated_at(&m, op.line);
                         }
                         self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     } else {
