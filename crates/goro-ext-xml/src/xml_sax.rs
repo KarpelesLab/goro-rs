@@ -1242,6 +1242,12 @@ fn parse_helper(
     };
     engine.parser.sink.ctx = None;
     let failed = engine.parser.sink.failed.take();
+    // libxml2 errors of ext/xml's parser reach xmlLastError and, with
+    // libxml_use_internal_errors(), the error list; never warnings
+    let errs = std::mem::take(&mut engine.parser.st.errors);
+    if !errs.is_empty() {
+        crate::libxml::report_ex(vm, f, &errs, crate::libxml::Style::Generic, &|_| true);
+    }
     let mut b = st.borrow_mut();
     b.isparsing = false;
     let (l, c, bi) = engine.parser.st.position();
