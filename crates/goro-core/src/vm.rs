@@ -3442,6 +3442,132 @@ impl Vm {
     /// Check if `caller_class` (lowercase) has access to a member with the given visibility
     /// declared in `declaring_class` (lowercase), where the member belongs to `target_class` (lowercase).
     /// Returns None if access is allowed, or Some(error_message) if denied.
+    /// do_inherit_property() for a trait property replacing an inherited
+    /// (non-private) one: traits are bound before the parent is inherited,
+    /// so the trait's property is checked like an own redeclaration.
+    #[inline(never)]
+    fn trait_property_inheritance_error(
+        &self,
+        class: &ClassEntry,
+        child: &crate::object::PropertyDef,
+        parent: &crate::object::PropertyDef,
+    ) -> Option<String> {
+        let cname = crate::string::msg_str(&class.name).to_string();
+        let pname = self
+            .classes
+            .get(&parent.declaring_class.to_ascii_lowercase())
+            .map(|c| crate::string::msg_str(&c.name).to_string())
+            .unwrap_or_else(|| crate::string::msg_str(&parent.declaring_class).to_string());
+        let key = crate::string::msg_str(&child.name).to_string();
+        if parent.is_final {
+            return Some(format!(
+                "Cannot override final property {}::${}",
+                pname, key
+            ));
+        }
+        if parent.is_static != child.is_static {
+            let s = |st: bool| if st { "static " } else { "non static " };
+            return Some(format!(
+                "Cannot redeclare {}{}::${} as {}{}::${}",
+                s(parent.is_static),
+                pname,
+                key,
+                s(child.is_static),
+                cname,
+                key
+            ));
+        }
+        if parent.is_readonly != child.is_readonly && !parent.is_abstract {
+            let r = |ro: bool| if ro { "readonly" } else { "non-readonly" };
+            return Some(format!(
+                "Cannot redeclare {} property {}::${} as {} {}::${}",
+                r(parent.is_readonly),
+                pname,
+                key,
+                r(child.is_readonly),
+                cname,
+                key
+            ));
+        }
+        let level = |v: Visibility| match v {
+            Visibility::Public => 0,
+            Visibility::Protected => 1,
+            Visibility::Private => 2,
+        };
+        if level(child.visibility) > level(parent.visibility) {
+            let (vis, suffix) = match parent.visibility {
+                Visibility::Public => ("public", ""),
+                _ => ("protected", " or weaker"),
+            };
+            return Some(format!(
+                "Access level to {}::${} must be {} (as in class {}){}",
+                cname, key, vis, pname, suffix
+            ));
+        }
+        if parent.property_type.is_none() {
+            if child.property_type.is_some() {
+                return Some(format!(
+                    "Type of {}::${} must be omitted to match the parent definition in class {}",
+                    cname, key, pname
+                ));
+            }
+            return None;
+        }
+        let (status, parent_type, decl) = self.variance_property_types(
+            class,
+            &parent.declaring_class,
+            &parent.property_type,
+            &child.property_type,
+            0,
+        );
+        if status == variance::Status::Error {
+            return Some(format!(
+                "Type of {}::${} must be {} (as in class {})",
+                cname,
+                key,
+                parent_type,
+                crate::string::msg_str(&decl)
+            ));
+        }
+        None
+    }
+
+    /// do_inheritance_check_on_method() for a trait method replacing an
+    /// inherited (non-private) one: it may not be less visible.
+    #[inline(never)]
+    fn trait_method_access_level_error(
+        &self,
+        class: &ClassEntry,
+        m: &crate::object::MethodDef,
+        pm: &crate::object::MethodDef,
+    ) -> Option<String> {
+        let level = |v: Visibility| match v {
+            Visibility::Public => 0,
+            Visibility::Protected => 1,
+            Visibility::Private => 2,
+        };
+        if level(m.visibility) <= level(pm.visibility) {
+            return None;
+        }
+        let pdecl = self
+            .classes
+            .get(&pm.declaring_class.to_ascii_lowercase())
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| pm.declaring_class.clone());
+        let (vis, suffix) = match pm.visibility {
+            Visibility::Public => ("public", ""),
+            _ => ("protected", " or weaker"),
+        };
+        Some(format!(
+            "Access level to {}::{}() must be {} (as in class {}){}",
+            crate::string::msg_str(&class.name),
+            crate::string::msg_str(&m.name),
+            vis,
+            crate::string::msg_str(&pdecl),
+            suffix
+        ))
+    }
+
     /// zend_do_link_class() binds a class's (concrete) trait methods before
     /// it inherits its parent's: the method table lists the class's own
     /// methods, then the trait ones (in binding order, each alias before its
@@ -52437,6 +52563,28 @@ impl Vm {
                                                             },
                                                         });
                                                     }
+                                                    if let Some(msg) =
+                                                        Self::trait_method_access_level_error(
+                                                            self, &class, &m, &pm,
+                                                        )
+                                                    {
+                                                        if !m.op_array.filename.is_empty() {
+                                                            self.current_file =
+                                                                String::from_utf8_lossy(
+                                                                    &m.op_array.filename,
+                                                                )
+                                                                .into_owned()
+                                                                .into();
+                                                        }
+                                                        return Err(VmError {
+                                                            message: msg,
+                                                            line: if m.op_array.decl_line > 0 {
+                                                                m.op_array.decl_line
+                                                            } else {
+                                                                op.line
+                                                            },
+                                                        });
+                                                    }
                                                     if key.as_slice() != b"__construct"
                                                         || pm.is_abstract
                                                     {
@@ -52610,6 +52758,18 @@ impl Vm {
                                             if class.properties[idx].visibility
                                                 != Visibility::Private =>
                                         {
+                                            if let Some(msg) = self
+                                                .trait_property_inheritance_error(
+                                                    &class,
+                                                    &p,
+                                                    &class.properties[idx],
+                                                )
+                                            {
+                                                return Err(VmError {
+                                                    message: msg,
+                                                    line: op.line,
+                                                });
+                                            }
                                             class.properties[idx] = p;
                                         }
                                         _ => class.properties.push(p),
