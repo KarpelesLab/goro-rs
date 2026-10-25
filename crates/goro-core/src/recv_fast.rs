@@ -38,6 +38,34 @@ pub(crate) fn args_match_exactly(f: &OpArray, args: &[Value]) -> bool {
     true
 }
 
+/// args_match_exactly() of the argument `v` parameter `i` of `f` (its CV
+/// index) receives.
+#[inline]
+pub(crate) fn arg_matches_exactly(f: &OpArray, i: usize, v: &Value) -> bool {
+    match f.param_types.get(i) {
+        Some(Some(t)) => matches!(v, Value::Undef) || value_is_exactly(v, &t.param_type),
+        _ => true,
+    }
+}
+
+/// Whether `v`, returned by `f` (`implicit`: by falling off its end), is
+/// exactly of the declared return type: VERIFY_RETURN_TYPE would neither
+/// coerce nor report anything.
+#[inline]
+pub(crate) fn return_matches_exactly(f: &OpArray, v: &Value, implicit: bool) -> bool {
+    let Some(t) = &f.return_type else {
+        return true;
+    };
+    match t {
+        ParamType::Simple(n) if n.eq_ignore_ascii_case(b"void") => {
+            matches!(v, Value::Null | Value::Undef)
+        }
+        // ("none returned" for any other type)
+        _ if implicit => false,
+        t => value_is_exactly(v, t),
+    }
+}
+
 fn value_is_exactly(v: &Value, t: &ParamType) -> bool {
     match t {
         ParamType::Simple(n) => simple_exactly(v, n),

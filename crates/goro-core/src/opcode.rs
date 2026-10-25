@@ -748,15 +748,16 @@ impl OpArray {
     #[inline(never)]
     fn lean_kind_init(&self) -> u8 {
         *self.lean_kind.0.get_or_init(|| {
-            let plain = self.return_type.is_none()
-                && !self.returns_by_ref
+            // (typed parameters and a return type: the arguments and the
+            // returned value are checked to have their types already, see
+            // vm::leancall)
+            let plain = !self.returns_by_ref
                 && !self.is_generator
                 && self.variadic_param.is_none()
                 && self.attributes.is_empty()
                 && self.internal_sig.is_none()
                 && self.static_defaults.is_none()
                 && !self.name.is_empty()
-                && self.param_types.iter().all(|t| t.is_none())
                 && !crate::closure::is_closure_fn_name(&self.name)
                 && self.cv_name_info().plain_cvs;
             match (plain, self.cv_names.first().map(|n| n.as_slice())) {

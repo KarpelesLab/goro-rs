@@ -250,6 +250,13 @@ impl Vm {
         let Some((f, sep)) = self.lean_target(false) else {
             return false;
         };
+        // (typed parameters: see recv_fast.rs)
+        if f.param_types.iter().any(|t| t.is_some()) {
+            let args = &self.pending_calls.last().expect("pending call").args;
+            if !self.recv_has_nothing_to_do(f, args) {
+                return false;
+            }
+        }
         let f = Rc::clone(f);
         if !self.lean_ready(op, tmps) {
             return false;
@@ -307,7 +314,31 @@ impl Vm {
         }
         // The sends: what send_val_fast() sends.
         let sends = &ops[ip + 1..do_ip];
+        // (typed parameters: the arguments must have their types already,
+        // see recv_fast.rs)
+        let typed = f.param_types.iter().any(|t| t.is_some());
+        if typed && !self.pending_callable_deprecations.borrow().is_empty() {
+            return None;
+        }
         for (i, s) in sends.iter().enumerate() {
+            if typed {
+                let v = match s.op1 {
+                    OperandType::Cv(c) => match cvs.get(c as usize) {
+                        Some(Value::Reference(r)) => match r.try_borrow() {
+                            Ok(b) => b.clone(),
+                            Err(_) => return None,
+                        },
+                        Some(v) => v.clone(),
+                        None => return None,
+                    },
+                    OperandType::Tmp(t) => tmps.get(t as usize)?.clone(),
+                    OperandType::Const(c) => literals.get(c as usize)?.clone(),
+                    _ => return None,
+                };
+                if !crate::recv_fast::arg_matches_exactly(f, base + i, &v) {
+                    return None;
+                }
+            }
             let ok = !arg_by_ref(f, base + i)
                 && match s.op1 {
                     OperandType::Cv(c) => match cvs.get(c as usize) {
@@ -624,6 +655,12 @@ impl Vm {
             OperandType::Tmp(i) => i as usize,
             _ => usize::MAX,
         };
+        // (a declared return type: the value must have it already, see
+        // recv_fast.rs)
+        let implicit = r.line == 0;
+        if !crate::recv_fast::return_matches_exactly(f, &v, implicit) {
+            return None;
+        }
         if (unused && !is_plain_scalar(&v))
             || !cvs.iter().all(drops_quietly)
             || !tmps
