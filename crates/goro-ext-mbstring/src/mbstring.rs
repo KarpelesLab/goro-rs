@@ -572,7 +572,10 @@ pub fn get_strlen(s: &[u8], enc: &Encoding) -> usize {
     if char_len != 0 {
         return s.len() / char_len as usize;
     }
-    if is_utf8_family(enc.no) && std::str::from_utf8(s).is_ok() {
+    // (php counts bytes only for strings flagged valid UTF-8, which a
+    // string to count in a mobile UTF-8 variant hardly ever is: those
+    // decode some emoji to two characters)
+    if enc.no == EncNo::Utf8 && std::str::from_utf8(s).is_ok() {
         return fast_strlen_utf8(s);
     }
     to_wchars(enc, s).len()
