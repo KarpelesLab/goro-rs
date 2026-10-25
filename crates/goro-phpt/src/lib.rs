@@ -1704,6 +1704,13 @@ fn execute_php_inner_impl(
     }
     let mut compiler = Compiler::new();
     compiler.source_file = filename.as_bytes().to_vec();
+    // A compile error preceded by classes PHP binds at compile time: those
+    // are bound (their linking errors come first) before it is reported.
+    let mut deferred_compile_error: Option<(
+        String,
+        goro_core::compiler::CompileError,
+        Vec<goro_core::object::ClassEntry>,
+    )> = None;
     let (op_array, compiled_classes, compile_warnings) = match compiler.compile(&program) {
         Ok(r) => {
             // Drain any pending compile warnings so they don't leak into the next test
@@ -1718,11 +1725,16 @@ fn execute_php_inner_impl(
                     kind, msg, filename, wline
                 ));
             }
-            out.push_str(&format!(
-                "\nFatal error: {} in {} on line {}\n",
-                e.message, filename, e.line
-            ));
-            return Ok(out.into_bytes());
+            // (taken now: the extensions' startup compiles code)
+            let Some((chunk, classes)) = goro_core::compiler::take_compile_time_binds() else {
+                out.push_str(&format!(
+                    "\nFatal error: {} in {} on line {}\n",
+                    e.message, filename, e.line
+                ));
+                return Ok(out.into_bytes());
+            };
+            deferred_compile_error = Some((out, e, classes));
+            (chunk, Vec::new(), Vec::new())
         }
     };
 
@@ -2034,6 +2046,15 @@ fn execute_php_inner_impl(
         vm.set_global(b"_SERVER".to_vec(), Value::Array(server));
     }
 
+    if let Some((prior, e, classes)) = deferred_compile_error {
+        vm.write_output(prior.as_bytes());
+        if !vm.run_compile_time_binds_of(&op_array, classes, true) {
+            vm.display_error("Fatal error", &e.message, filename, e.line);
+        }
+        #[cfg(unix)]
+        SCRIPT_EXIT.store(255, std::sync::atomic::Ordering::Relaxed);
+        return Ok(vm.take_output());
+    }
     // php_execute_script(): auto_prepend_file / auto_append_file run as
     // part of the main script
     let main_result = {

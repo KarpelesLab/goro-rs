@@ -113,6 +113,12 @@ const CORE_INI_DEFAULTS: &[(&[u8], &[u8])] = &[
     (b"zend.signal_check", b"0"),
 ];
 
+thread_local! {
+    /// Vm::run_compile_time_binds_of() is binding the declarations ahead of
+    /// a compile error.
+    static COMPILE_TIME_BINDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// The core INI directives that only php.ini (PHP_INI_SYSTEM, and
 /// PHP_INI_PERDIR: .htaccess / .user.ini) can change: ini_set() fails.
 pub const CORE_INI_SYSTEM: &[&[u8]] = &[
@@ -18848,6 +18854,49 @@ impl Vm {
         self.bind_next_frame = true;
         self.observe_code = true;
         self.execute_op_array(op_array, cvs)
+    }
+
+    /// A file failed to compile: bind the classes PHP early-binds at compile
+    /// time ahead of the error (compiler::take_compile_time_binds), whose
+    /// linking errors come before the compile error. True when one of them
+    /// raised a fatal error (the compile error is then never reached).
+    /// `main`: the file is the main script (else an included file).
+    #[inline(never)]
+    pub fn run_compile_time_binds(&mut self, main: bool) -> bool {
+        let Some((chunk, classes)) = crate::compiler::take_compile_time_binds() else {
+            return false;
+        };
+        self.run_compile_time_binds_of(&chunk, classes, main)
+    }
+
+    /// run_compile_time_binds() of declarations taken earlier.
+    #[inline(never)]
+    pub fn run_compile_time_binds_of(
+        &mut self,
+        chunk: &OpArray,
+        classes: Vec<ClassEntry>,
+        main: bool,
+    ) -> bool {
+        let saved = std::mem::replace(&mut self.pending_classes, Rc::new(classes));
+        COMPILE_TIME_BINDING.with(|c| c.set(true));
+        let r = if main {
+            self.execute_chunk(chunk)
+        } else {
+            self.execute_op_array(chunk, Vec::new())
+        };
+        COMPILE_TIME_BINDING.with(|c| c.set(false));
+        self.pending_classes = saved;
+        match r {
+            Ok(_) => false,
+            Err(e) => {
+                // (a linking error is displayed as the request ends)
+                if self.current_exception.is_some() || !self.fatal_emitted {
+                    self.report_uncaught(&e);
+                }
+                self.fatal_emitted = true;
+                true
+            }
+        }
     }
 
     /// End of the main script: uncaught exception handling and display,
@@ -44959,12 +45008,14 @@ impl Vm {
                                             {
                                                 self.display_error(kind, &msg, &abs_path, wline);
                                             }
-                                            self.display_error(
-                                                "Fatal error",
-                                                &e.message,
-                                                &abs_path,
-                                                e.line,
-                                            );
+                                            if !self.run_compile_time_binds(false) {
+                                                self.display_error(
+                                                    "Fatal error",
+                                                    &e.message,
+                                                    &abs_path,
+                                                    e.line,
+                                                );
+                                            }
                                             self.fatal_emitted = true;
                                             return Err(VmError {
                                                 message: e.message,
@@ -50386,7 +50437,9 @@ impl Vm {
                                 } else {
                                     &class.name[..]
                                 };
-                            if short_name == b"_" {
+                            // (the compiler reported it before the compile
+                            // error that the compile-time bindings precede)
+                            if short_name == b"_" && !COMPILE_TIME_BINDING.with(|c| c.get()) {
                                 let type_name = if class.is_enum {
                                     "an enum"
                                 } else if class.is_interface {

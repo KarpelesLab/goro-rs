@@ -424,6 +424,14 @@ pub fn report_compile_error(vm: &mut Vm, e: &CompileError, filename: &str) {
     for (kind, msg, line) in &e.prior {
         vm.display_error(kind, msg, filename, *line);
     }
+    if e.kind == "Fatal error" {
+        let saved = std::mem::replace(&mut vm.current_file, filename.into());
+        let bound_fatal = vm.run_compile_time_binds(true);
+        vm.current_file = saved;
+        if bound_fatal {
+            return;
+        }
+    }
     vm.display_error(e.kind, &e.message, filename, e.line);
 }
 

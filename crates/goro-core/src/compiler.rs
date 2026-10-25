@@ -9,6 +9,10 @@ use crate::string::PhpString;
 use crate::value::Value;
 
 thread_local! {
+    /// The declarations PHP binds at compile time ahead of a file's compile
+    /// error (see Compiler::stash_compile_time_binds).
+    static COMPILE_TIME_BINDS: std::cell::RefCell<Option<(OpArray, Vec<ClassEntry>)>>
+        = const { std::cell::RefCell::new(None) };
     /// Global counter for generating unique closure names across all compilation units
     static CLOSURE_COUNTER: Cell<u64> = const { Cell::new(0) };
     /// Compile-time diagnostics (Warning/Deprecated) collected even when compilation
@@ -186,6 +190,13 @@ pub fn take_pending_compile_warnings() -> Vec<(&'static str, String, u32)> {
     PENDING_COMPILE_DIAGNOSTICS.with(|w| std::mem::take(&mut *w.borrow_mut()))
 }
 
+/// After a failed `compile()`: the class declarations PHP early-binds at
+/// compile time before reaching the error (a chunk of DeclareClass ops and
+/// the classes it declares), whose linking errors come first. None when
+/// there are none.
+pub fn take_compile_time_binds() -> Option<(OpArray, Vec<ClassEntry>)> {
+    COMPILE_TIME_BINDS.with(|b| b.borrow_mut().take())
+}
 /// "Class C declares abstract method m() and must therefore be declared
 /// abstract" (or an anonymous class's "must not be abstract").
 #[inline(never)]
@@ -2829,6 +2840,7 @@ impl Compiler {
         // Each file (and eval'd string) starts without declare(ticks).
         let saved_ticks = TICKS.with(|t| t.replace(0));
         let pending_base = PENDING_COMPILE_DIAGNOSTICS.with(|w| w.borrow().len());
+        COMPILE_TIME_BINDS.with(|b| *b.borrow_mut() = None);
         let r = self.compile_file(program);
         TICKS.with(|t| t.set(saved_ticks));
         // (a compiled file reports its diagnostics with its warnings)
@@ -3056,8 +3068,12 @@ impl Compiler {
         }
         // First pass: process namespace/use declarations and compile function/class declarations
         // Namespace/use must be processed in order so that class/function names are prefixed correctly
-        self.compile_hoisting_pass(&program.statements)?;
+        if let Err(e) = self.compile_hoisting_pass(&program.statements) {
+            self.stash_compile_time_binds(e.line, None);
+            return Err(e);
+        }
         self.emit_delayed_hoisted_decls();
+        let hoist_end = self.op_array.ops.len();
         // Reset namespace state for second pass (will be re-applied by NamespaceDecl/UseDecl)
         self.current_namespace = Vec::new();
         self.use_map = HashMap::new();
@@ -3065,94 +3081,107 @@ impl Compiler {
         self.use_const_map = HashMap::new();
         // Second pass: compile everything else
         self.in_main_pass = true;
-        for stmt in &program.statements {
-            match &stmt.kind {
-                StmtKind::FunctionDecl { name, .. } => {
-                    // Already compiled in first pass
-                    self.note_symbol_decl(&UseKind::Function, name, stmt.span.line)?;
-                }
-                StmtKind::ClassDecl { name, .. } if !name.starts_with(b"__anonymous_class_") => {
-                    // Hoisted (early-bound) classes were already compiled in the first
-                    // pass; non-early-bindable ones are compiled here, in source order.
-                    let qn_lower: Vec<u8> = self
-                        .prefix_with_namespace(name)
-                        .iter()
-                        .map(|b| b.to_ascii_lowercase())
-                        .collect();
-                    self.note_symbol_decl(&UseKind::Normal, name, stmt.span.line)?;
-                    if !self
-                        .hoisted_class_stmts
-                        .contains(&(stmt as *const Statement as usize))
+        let main_pass = (|| -> CompileResult<()> {
+            for stmt in &program.statements {
+                match &stmt.kind {
+                    StmtKind::FunctionDecl { name, .. } => {
+                        // Already compiled in first pass
+                        self.note_symbol_decl(&UseKind::Function, name, stmt.span.line)?;
+                    }
+                    StmtKind::ClassDecl { name, .. }
+                        if !name.starts_with(b"__anonymous_class_") =>
                     {
-                        self.compile_stmt(stmt)?;
-                    } else {
-                        self.emit_late_hoisted_decl(&qn_lower, stmt.span.line);
-                    }
-                }
-                StmtKind::NamespaceDecl { name, body } => {
-                    // Set namespace state for second pass
-                    if let Some(parts) = name {
-                        let mut ns = Vec::new();
-                        for (i, part) in parts.iter().enumerate() {
-                            if i > 0 {
-                                ns.push(b'\\');
-                            }
-                            ns.extend_from_slice(part);
+                        // Hoisted (early-bound) classes were already compiled in the first
+                        // pass; non-early-bindable ones are compiled here, in source order.
+                        let qn_lower: Vec<u8> = self
+                            .prefix_with_namespace(name)
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
+                        self.note_symbol_decl(&UseKind::Normal, name, stmt.span.line)?;
+                        if !self
+                            .hoisted_class_stmts
+                            .contains(&(stmt as *const Statement as usize))
+                        {
+                            self.compile_stmt(stmt)?;
+                        } else {
+                            self.emit_late_hoisted_decl(&qn_lower, stmt.span.line);
                         }
-                        self.current_namespace = ns;
-                    } else {
-                        self.current_namespace = Vec::new();
                     }
-                    self.use_map = HashMap::new();
-                    self.use_function_map = HashMap::new();
-                    self.use_const_map = HashMap::new();
-                    self.reset_seen_symbols();
-
-                    if let Some(body_stmts) = body {
-                        // Bracketed namespace: compile body statements (except func/class decls)
-                        for s in body_stmts {
-                            match &s.kind {
-                                StmtKind::FunctionDecl { name, .. } => {
-                                    // Already compiled in first pass
-                                    self.note_symbol_decl(&UseKind::Function, name, s.span.line)?;
+                    StmtKind::NamespaceDecl { name, body } => {
+                        // Set namespace state for second pass
+                        if let Some(parts) = name {
+                            let mut ns = Vec::new();
+                            for (i, part) in parts.iter().enumerate() {
+                                if i > 0 {
+                                    ns.push(b'\\');
                                 }
-                                StmtKind::ClassDecl { name, .. }
-                                    if !name.starts_with(b"__anonymous_class_") =>
-                                {
-                                    // Hoisted classes already compiled in first pass; compile
-                                    // non-early-bindable ones here, in source order.
-                                    let qn_lower: Vec<u8> = self
-                                        .prefix_with_namespace(name)
-                                        .iter()
-                                        .map(|b| b.to_ascii_lowercase())
-                                        .collect();
-                                    self.note_symbol_decl(&UseKind::Normal, name, s.span.line)?;
-                                    if !self
-                                        .hoisted_class_stmts
-                                        .contains(&(s as *const Statement as usize))
-                                    {
-                                        self.compile_stmt(s)?;
-                                    } else {
-                                        self.emit_late_hoisted_decl(&qn_lower, s.span.line);
-                                    }
-                                }
-                                _ => {
-                                    self.compile_stmt(s)?;
-                                }
+                                ns.extend_from_slice(part);
                             }
+                            self.current_namespace = ns;
+                        } else {
+                            self.current_namespace = Vec::new();
                         }
-                        // Reset after block
-                        self.current_namespace = Vec::new();
                         self.use_map = HashMap::new();
                         self.use_function_map = HashMap::new();
                         self.use_const_map = HashMap::new();
                         self.reset_seen_symbols();
+
+                        if let Some(body_stmts) = body {
+                            // Bracketed namespace: compile body statements (except func/class decls)
+                            for s in body_stmts {
+                                match &s.kind {
+                                    StmtKind::FunctionDecl { name, .. } => {
+                                        // Already compiled in first pass
+                                        self.note_symbol_decl(
+                                            &UseKind::Function,
+                                            name,
+                                            s.span.line,
+                                        )?;
+                                    }
+                                    StmtKind::ClassDecl { name, .. }
+                                        if !name.starts_with(b"__anonymous_class_") =>
+                                    {
+                                        // Hoisted classes already compiled in first pass; compile
+                                        // non-early-bindable ones here, in source order.
+                                        let qn_lower: Vec<u8> = self
+                                            .prefix_with_namespace(name)
+                                            .iter()
+                                            .map(|b| b.to_ascii_lowercase())
+                                            .collect();
+                                        self.note_symbol_decl(&UseKind::Normal, name, s.span.line)?;
+                                        if !self
+                                            .hoisted_class_stmts
+                                            .contains(&(s as *const Statement as usize))
+                                        {
+                                            self.compile_stmt(s)?;
+                                        } else {
+                                            self.emit_late_hoisted_decl(&qn_lower, s.span.line);
+                                        }
+                                    }
+                                    _ => {
+                                        self.compile_stmt(s)?;
+                                    }
+                                }
+                            }
+                            // Reset after block
+                            self.current_namespace = Vec::new();
+                            self.use_map = HashMap::new();
+                            self.use_function_map = HashMap::new();
+                            self.use_const_map = HashMap::new();
+                            self.reset_seen_symbols();
+                        }
+                    }
+                    _ => {
+                        self.compile_stmt(stmt)?;
                     }
                 }
-                _ => {
-                    self.compile_stmt(stmt)?;
-                }
             }
+            Ok(())
+        })();
+        if let Err(e) = main_pass {
+            self.stash_compile_time_binds(e.line, Some(hoist_end));
+            return Err(e);
         }
         self.in_main_pass = false;
         // Reject any unresolved gotos at top level (PHP: "'goto' to undefined label").
@@ -3300,6 +3329,59 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+
+    /// A compile error at `err_line`: PHP compiles a file top to bottom and
+    /// binds the early-bindable classes as it reaches them, so the classes
+    /// hoisted before that line are linked (and report their linking errors)
+    /// before the compile error. `hoist_end`: the end of the hoisted
+    /// declarations in the op array (None: the hoisting pass failed, its
+    /// delayed declarations are not emitted yet).
+    #[inline(never)]
+    fn stash_compile_time_binds(&mut self, err_line: u32, hoist_end: Option<usize>) {
+        if err_line == 0 {
+            return;
+        }
+        let end = hoist_end
+            .unwrap_or(self.op_array.ops.len())
+            .min(self.op_array.ops.len());
+        let mut chunk = OpArray::new();
+        chunk.literals = self.op_array.literals.clone();
+        chunk.strict_types = self.op_array.strict_types;
+        let wanted = |o: &Op| o.opcode == OpCode::DeclareClass && o.line < err_line;
+        chunk.ops = self.op_array.ops[..end]
+            .iter()
+            .filter(|o| wanted(o))
+            .cloned()
+            .collect();
+        if hoist_end.is_none() {
+            let delayed: Vec<Op> = self
+                .delayed_hoist_ops
+                .iter()
+                .filter(|o| wanted(o))
+                .cloned()
+                .collect();
+            if !delayed.is_empty() {
+                let flag = chunk.add_literal(Value::Long(3));
+                for mut op in delayed {
+                    op.result = OperandType::Const(flag);
+                    chunk.ops.push(op);
+                }
+            }
+        }
+        if chunk.ops.is_empty() {
+            return;
+        }
+        let null_idx = chunk.add_literal(Value::Null);
+        chunk.emit(Op {
+            opcode: OpCode::Return,
+            op1: OperandType::Const(null_idx),
+            op2: OperandType::Unused,
+            result: OperandType::Unused,
+            line: 0,
+        });
+        let classes = self.compiled_classes.clone();
+        COMPILE_TIME_BINDS.with(|b| *b.borrow_mut() = Some((chunk, classes)));
     }
 
     /// Whether an earlier declaration in this file already hoisted `qn_lower`.
