@@ -20672,6 +20672,7 @@ impl Vm {
 
     /// fast_fcall_target(): closure `f` takes the call as is; Some(number
     /// of captured values among the arguments).
+    #[inline(always)]
     fn fast_closure_simple(f: &OpArray, call: &PendingCall) -> Option<usize> {
         let nargs = call.args.len();
         let captures = f.closure_capture_names.len().min(nargs);
