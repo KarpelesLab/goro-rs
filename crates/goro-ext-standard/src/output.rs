@@ -1500,7 +1500,9 @@ fn print_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .collect();
 
     prepare_closure_debug(vm, &args[0]);
+    let saved_memo = PRINT_R_MEMO_OBJ.with(|k| k.take());
     let materialized = materialize_print_r(vm, &args[0], &mut std::collections::HashMap::new());
+    PRINT_R_MEMO_OBJ.with(|k| k.replace(saved_memo));
     let args: &[Value] = match &materialized {
         Some(v) => std::slice::from_ref(v),
         None => args,
@@ -2474,6 +2476,32 @@ fn print_r_key(buf: &mut Vec<u8>, key: &[u8]) {
     buf.extend_from_slice(key);
 }
 
+type WeakObj = std::rc::Weak<std::cell::RefCell<goro_core::object::PhpObject>>;
+
+thread_local! {
+    /// The objects materialize_print_r() memoized, by address: a temporary
+    /// freed meanwhile (a native object's child) may see its address reused.
+    static PRINT_R_MEMO_OBJ: std::cell::RefCell<std::collections::HashMap<usize, WeakObj>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Drop a memo entry whose object died (its address was reused).
+fn print_r_memo_stale(memo: &mut std::collections::HashMap<usize, Option<Value>>, key: usize) {
+    let dead = PRINT_R_MEMO_OBJ.with(|m| {
+        let mut m = m.borrow_mut();
+        match m.get(&key) {
+            Some(w) if w.upgrade().is_none() => {
+                m.remove(&key);
+                true
+            }
+            _ => false,
+        }
+    });
+    if dead {
+        memo.remove(&key);
+    }
+}
+
 /// For print_r(): replace the objects inside `v` by shadow objects holding
 /// the property table print_r() shows (zend_get_properties_for(DEBUG):
 /// __debugInfo(), an extension's table, or the standard table with mangled
@@ -2493,6 +2521,7 @@ pub fn materialize_print_r(
         }
         Value::Array(a) => {
             let key = Rc::as_ptr(a) as *const u8 as usize;
+            print_r_memo_stale(memo, key);
             if let Some(m) = memo.get(&key) {
                 return m.clone();
             }
@@ -2526,6 +2555,7 @@ pub fn materialize_print_r(
         }
         Value::Object(o) => {
             let key = Rc::as_ptr(o) as *const u8 as usize;
+            print_r_memo_stale(memo, key);
             if let Some(m) = memo.get(&key) {
                 return m.clone();
             }
@@ -2570,6 +2600,7 @@ pub fn materialize_print_r(
             let shadow = Rc::new(RefCell::new(shadow));
             let shadow_val = Value::Object(shadow.clone());
             memo.insert(key, Some(shadow_val.clone()));
+            PRINT_R_MEMO_OBJ.with(|k| k.borrow_mut().insert(key, Rc::downgrade(o)));
             let rows: Vec<(Vec<u8>, Value)> = if let Some(rows) = internal_debug_rows(vm, o, &cl) {
                 rows
             } else if let Some(arr) = native_props(vm, o, 0) {
