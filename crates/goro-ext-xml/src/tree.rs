@@ -1547,8 +1547,13 @@ impl Tree {
         };
         let nid = self.alloc(n);
         if src.t == NType::EntityRef {
-            let ent = doc.and_then(|d| self.get_doc_entity(d, &src.name));
-            let ent = ent.or(src.children);
+            // a copy into another (or no) document only keeps a reference
+            // to that document's own declaration
+            let ent = if doc.is_none() || src.doc != doc {
+                doc.and_then(|d| self.get_doc_entity(d, &src.name))
+            } else {
+                src.children
+            };
             self.nodes[nid].children = ent;
             self.nodes[nid].last = ent;
             return nid;
