@@ -292,7 +292,11 @@ impl Vm {
         args: &[Value],
     ) -> Result<Value, crate::vm::VmError> {
         // Located at the call site when called through a direct call_user_func()
-        let at = self.ucf_call_line.take().unwrap_or(0);
+        // (ZEND_INIT_USER_CALL: the call is the calling code's, made in its
+        // strict_types mode)
+        let direct = self.ucf_call_line.take();
+        let at = direct.unwrap_or(0);
+        let strict = direct.is_some() && std::mem::take(&mut self.ucf_strict);
         // zend_call_function(): a by-reference parameter given a plain value
         // warns (zend_param_must_be_ref) and gets a temporary reference (to
         // a separated copy: the caller's array is not modified).
@@ -353,7 +357,7 @@ impl Vm {
         let line = self.current_line;
         let mut owned = args.to_vec();
         let mut orig = None;
-        if let Err(e) = self.zpp_check(info, flags, &mut owned, &mut orig, false, line) {
+        if let Err(e) = self.zpp_check(info, flags, &mut owned, &mut orig, strict, line) {
             if let crate::arginfo::ZppError::Throw(cls, msg) = e {
                 let shown = orig.unwrap_or_else(|| owned.clone());
                 self.push_builtin_frame(lname, &shown, at);
@@ -565,6 +569,7 @@ impl Vm {
             self.push_builtin_frame(lname, frame_args, line);
         } else {
             self.ucf_call_line = Some(line);
+            self.ucf_strict = false;
         }
         let r = if own_frame {
             self.call_builtin_observed(f, lname, &args)

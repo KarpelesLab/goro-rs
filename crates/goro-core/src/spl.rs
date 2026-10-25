@@ -844,6 +844,7 @@ impl Vm {
                 } else if self.user_functions.contains_key(&lower) {
                     // The callee's frame is located at the current line.
                     self.ucf_call_line = Some(site_line);
+                    self.ucf_strict = false;
                     if let Err(e) = self.call_callback(cb, &args) {
                         fatal = Some(e);
                     }
@@ -859,6 +860,7 @@ impl Vm {
                 // line (zend_call_known_function from the running opcode).
                 if !from_builtin {
                     self.ucf_call_line = Some(site_line);
+                    self.ucf_strict = false;
                 }
                 let r = self.call_callback(cb, &args);
                 self.ucf_call_line = None;

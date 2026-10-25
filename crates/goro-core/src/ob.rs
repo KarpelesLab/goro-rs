@@ -360,6 +360,7 @@ impl Vm {
                 let saved_ucf = if no_frame || self.in_builtin_frame() {
                     None
                 } else {
+                    self.ucf_strict = false;
                     Some(self.ucf_call_line.replace(call_line))
                 };
                 let r = self.call_callback(&cb, &args);

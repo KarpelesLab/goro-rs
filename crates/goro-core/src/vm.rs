@@ -1791,6 +1791,10 @@ pub struct Vm {
     pub(crate) pending_callable_deprecations: RefCell<Vec<String>>,
     /// Line of a direct call_user_func() call, for its callee's frame.
     pub ucf_call_line: Option<u32>,
+    /// The direct call_user_func() that set `ucf_call_line` was made from
+    /// strict_types code: its callee's arguments are checked in strict mode
+    /// (ZEND_INIT_USER_CALL makes the call the calling code's).
+    pub(crate) ucf_strict: bool,
     /// A resource destructor runs at a release point of user code (call
     /// stack depth, line): the user methods it calls directly are called
     /// from that line, not from "[internal function]".
@@ -3095,6 +3099,7 @@ impl Vm {
             gc_call_args: std::ptr::null(),
             pending_callable_deprecations: RefCell::new(Vec::new()),
             ucf_call_line: None,
+            ucf_strict: false,
             release_call_at: None,
             closure_invoke_call: false,
             pending_call_via_invoke: false,
@@ -8635,6 +8640,8 @@ impl Vm {
             None => false,
         };
         let mut err = None;
+        // (a direct call_user_func() from strict_types code)
+        let strict = self.ucf_call_line.is_some() && self.ucf_strict;
         for i in lead..args.len() {
             let cv = i + cv_shift;
             let (ti, variadic) = match op_array.variadic_param {
@@ -8648,7 +8655,7 @@ impl Vm {
             if matches!(v, Value::Undef) {
                 continue;
             }
-            if !self.value_matches_type_mode(&v, &info.param_type, false) {
+            if !self.value_matches_type_mode(&v, &info.param_type, strict) {
                 let fname = if let Some(n) = self.closure_scoped_display(op_array) {
                     n
                 } else if !op_array.display_name.is_empty() {
@@ -10167,6 +10174,7 @@ impl Vm {
         if pushed {
             // call_user_func() called directly is compiled away by php-src: its
             // callee is located at the call site instead of "[internal function]".
+            self.ucf_strict = false;
             let (file, line) = match self.ucf_call_line.take() {
                 Some(l) => (self.current_file.clone(), l),
                 None => match self.release_call_at {
@@ -10351,6 +10359,7 @@ impl Vm {
         // The initializer appears in backtraces as called from the code that
         // triggered initialization.
         self.ucf_call_line = Some(self.current_line);
+        self.ucf_strict = false;
         // A properties table a view built while the object was lazy is shared
         // with the initialization snapshot: watch for its separation.
         let ht_watch = state_bytes == b"ghost" && obj.borrow().has_property(b"__lazy_ht");
@@ -29319,6 +29328,7 @@ impl Vm {
                             self.pop_builtin_frame();
                         } else {
                             self.ucf_call_line = None;
+                            self.ucf_strict = false;
                         }
                         match builtin_result {
                             Ok(result) => {
@@ -31690,6 +31700,8 @@ impl Vm {
                             );
                         } else if is_direct_ucf {
                             self.ucf_call_line = Some(op.line);
+                            // (a dynamic call is a real one: not compiled)
+                            self.ucf_strict = op_array.strict_types && !call.target.dynamic;
                         }
                         let builtin_result = if own_frame {
                             self.call_builtin_observed(func, &func_name_lower, &call.args)
@@ -31708,6 +31720,7 @@ impl Vm {
                             self.pop_builtin_frame();
                         } else {
                             self.ucf_call_line = None;
+                            self.ucf_strict = false;
                         }
                         match builtin_result {
                             Ok(result) => {

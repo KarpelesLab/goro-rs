@@ -278,6 +278,7 @@ impl Vm {
             self.materialize_builtin_frames(false);
         } else {
             self.ucf_call_line = Some(line);
+            self.ucf_strict = false;
         }
         let fatal_before = self.fatal_emitted;
         let r = self.call_callback(&handler, &args);
@@ -425,6 +426,7 @@ impl Vm {
                 self.tick_functions[i].2 = true;
                 // (called from the ticked statement's code)
                 self.ucf_call_line = Some(self.current_line);
+                self.ucf_strict = false;
                 let _ = self.call_callback(&cb, &args);
                 self.ucf_call_line = None;
                 // The list may have changed while the function ran.
