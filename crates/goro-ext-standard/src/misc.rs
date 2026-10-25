@@ -8742,6 +8742,7 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if lower_path.starts_with("php://filter/")
         || lower_path.starts_with("http://")
         || lower_path.starts_with("https://")
+        || lower_path.starts_with("glob://")
         || matches!(
             lower_path.as_str(),
             "php://stdin" | "php://stdout" | "php://stderr" | "php://memory"
@@ -12076,6 +12077,14 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         filename = path;
     }
 
+    // glob:// has no stream opener (php_glob_stream_wrapper).
+    if filename.len() >= 7 && filename[..7].eq_ignore_ascii_case("glob://") {
+        vm.emit_warning(&format!(
+            "{}({}): Failed to open stream: wrapper does not support stream open",
+            fopen_caller, filename
+        ));
+        return Ok(Value::False);
+    }
     // http:// and https:// (php_stream_url_wrap_http()): the socket stream
     // of the request, positioned at the body.
     if filename.len() > 7
@@ -15812,6 +15821,11 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn opendir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    opendir_impl(vm, args, "opendir")
+}
+
+/// opendir() / dir(): php_stream_opendir() of the path.
+fn opendir_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
     if let Some(pattern) = path_str.strip_prefix("glob://") {
@@ -15830,7 +15844,8 @@ fn opendir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             Err(e) => {
                 vm.emit_warning(&format!(
-                    "opendir({}): Failed to open directory: {}",
+                    "{}({}): Failed to open directory: {}",
+                    fname,
                     path_str,
                     strip_os_error(&e.to_string())
                 ));
@@ -15843,8 +15858,8 @@ fn opendir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(_) => "Not a directory".to_string(),
         };
         vm.emit_warning(&format!(
-            "opendir({}): Failed to open directory: {}",
-            path_str, err_msg
+            "{}({}): Failed to open directory: {}",
+            fname, path_str, err_msg
         ));
         Ok(Value::False)
     }
@@ -21560,6 +21575,14 @@ fn headers_list_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
+    // glob:// (php_glob_stream_opener)
+    if path_str.starts_with("glob://") {
+        let r = opendir_impl(vm, args, "dir")?;
+        return Ok(match r {
+            Value::Resource(_) => dir_class::new_directory(vm, Value::String(path.clone()), r),
+            other => other,
+        });
+    }
     let dir_path = std::path::Path::new(&*path_str);
     if !dir_path.is_dir() {
         vm.emit_warning(&format!(
