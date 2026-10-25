@@ -50331,6 +50331,107 @@ impl Vm {
                         // Record own property names before parent inheritance
                         let own_prop_names_pre_inherit: std::collections::HashSet<Vec<u8>> =
                             class.properties.iter().map(|p| p.name.clone()).collect();
+                        // zend_do_link_class(): the parent, then the traits, then the
+                        // interfaces are loaded (autoloaded) before anything is bound.
+                        if let Some(parent_name) = &class.parent.clone() {
+                            let parent_lower: Vec<u8> =
+                                parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            // If the parent class isn't loaded yet, give a registered
+                            // autoloader the chance to define it (PHP triggers autoload
+                            // when resolving a parent during class declaration).
+                            if !self.classes.contains_key(&parent_lower)
+                                && !self.is_known_builtin_class(&parent_lower)
+                                && !variance::is_linking(&parent_lower)
+                            {
+                                variance::push_linking_ex(&class, false);
+                                self.try_autoload_class(parent_name);
+                                variance::pop_linking();
+                                if let Some(e) = variance::take_autoload_fatal() {
+                                    return Err(e);
+                                }
+                                if let Some(e) =
+                                    self.unrecoverable_load_failure(&class.name, &parent_lower, op.line)
+                                {
+                                    return Err(e);
+                                }
+                                // An exception thrown by the autoloader propagates.
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                        exception_handlers.last()
+                                    {
+                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                        ip = *catch_target as usize;
+                                        return Ok(Flow::Continue);
+                                    }
+                                    let msg = self
+                                        .current_exception
+                                        .as_ref()
+                                        .map(|e| {
+                                            if let Value::Object(o) = e {
+                                                let ob = o.borrow();
+                                                format!(
+                                                    "Uncaught {}: {}",
+                                                    crate::value::display_class_name(
+                                                        &ob.class_name
+                                                    ),
+                                                    ob.get_property(b"message")
+                                                        .to_php_string()
+                                                        .to_msg_string()
+                                                )
+                                            } else {
+                                                "Uncaught exception".to_string()
+                                            }
+                                        })
+                                        .unwrap_or_default();
+                                    return Err(VmError {
+                                        message: msg,
+                                        line: op.line,
+                                    });
+                                }
+                            }
+                            // An interface may extend any internal interface.
+                            let internal_iface_parent = class.is_interface
+                                && crate::stubs::find_class(&parent_lower)
+                                    .is_some_and(|c| c.kind == crate::stubs::K_INTERFACE);
+                            if !self.classes.contains_key(&parent_lower)
+                                && !self.is_known_builtin_class(&parent_lower)
+                                && !internal_iface_parent
+                                && variance::linking_entry(&parent_lower).is_none()
+                            {
+                                // Parent class still missing after autoload attempt:
+                                // PHP raises a fatal "Class \"X\" not found".
+                                // Not linkable at early binding: PHP declares it at its
+                                // source position instead (the parent may appear by then,
+                                // e.g. through class_alias()).
+                                if is_early_attempt {
+                                    variance::defer(&class.name);
+                                    return Ok(Flow::Continue);
+                                }
+                                let parent_display = crate::value::display_class_name(parent_name);
+                                // zend_fetch_class_by_name() with
+                                // ZEND_FETCH_CLASS_INTERFACE for an interface's parents.
+                                let kind = if class.is_interface {
+                                    "Interface"
+                                } else {
+                                    "Class"
+                                };
+                                let msg = format!("{} \"{}\" not found", kind, parent_display);
+                                let exc_val = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc_val);
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    let ct = *catch_target;
+                                    ip = ct as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught Error: {}", msg),
+                                    line: op.line,
+                                });
+                            }
+                        }
                         // Resolve traits: copy trait methods/properties/constants into the class
                         // (zend_do_link_class() binds the concrete trait methods, then the
                         // trait constants and properties, before inheriting the parent's: the
@@ -50424,6 +50525,60 @@ impl Vm {
                             }
                         }
 
+                        // (the interfaces are loaded before the traits are bound)
+                        for iface_name in class.interfaces.clone().iter() {
+                            let iface_lower: Vec<u8> =
+                                iface_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if self.classes.contains_key(&iface_lower)
+                                || self.is_known_builtin_class(&iface_lower)
+                                || matches!(iface_lower.as_slice(), b"unitenum" | b"backedenum")
+                            {
+                                continue;
+                            }
+                            variance::push_linking_ex(&class, false);
+                            self.try_autoload_class(iface_name);
+                            variance::pop_linking();
+                            if let Some(e) = variance::take_autoload_fatal() {
+                                return Err(e);
+                            }
+                            if let Some(e) =
+                                self.unrecoverable_load_failure(&class.name, &iface_lower, op.line)
+                            {
+                                return Err(e);
+                            }
+                            native_exc_check!(
+                                self,
+                                exception_handlers,
+                                pending_calls_catch_depth,
+                                ip,
+                                op.line
+                            );
+                            if !self.classes.contains_key(&iface_lower)
+                                && !self.is_known_builtin_class(&iface_lower)
+                            {
+                                if is_early_attempt {
+                                    variance::defer(&class.name);
+                                    return Ok(Flow::Continue);
+                                }
+                                let msg = format!(
+                                    "Interface \"{}\" not found",
+                                    crate::value::display_class_name(iface_name)
+                                );
+                                let exc_val = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc_val);
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    ip = *catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught Error: {}", msg),
+                                    line: op.line,
+                                });
+                            }
+                        }
                         // Validate trait adaptations (zend_traits_init_trait_structures)
                         {
                             let used_traits: Vec<Vec<u8>> = trait_names
@@ -51246,101 +51401,6 @@ impl Vm {
                                         });
                                     }
                                 }
-                            }
-                            // If the parent class isn't loaded yet, give a registered
-                            // autoloader the chance to define it (PHP triggers autoload
-                            // when resolving a parent during class declaration).
-                            if !self.classes.contains_key(&parent_lower)
-                                && !self.is_known_builtin_class(&parent_lower)
-                                && !variance::is_linking(&parent_lower)
-                            {
-                                variance::push_linking_ex(&class, false);
-                                self.try_autoload_class(parent_name);
-                                variance::pop_linking();
-                                if let Some(e) = variance::take_autoload_fatal() {
-                                    return Err(e);
-                                }
-                                if let Some(e) =
-                                    self.unrecoverable_load_failure(&class.name, &parent_lower, op.line)
-                                {
-                                    return Err(e);
-                                }
-                                // An exception thrown by the autoloader propagates.
-                                if self.current_exception.is_some() {
-                                    if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                        exception_handlers.last()
-                                    {
-                                        pending_calls_catch_depth = Some(*eh_pc_depth);
-                                        ip = *catch_target as usize;
-                                        return Ok(Flow::Continue);
-                                    }
-                                    let msg = self
-                                        .current_exception
-                                        .as_ref()
-                                        .map(|e| {
-                                            if let Value::Object(o) = e {
-                                                let ob = o.borrow();
-                                                format!(
-                                                    "Uncaught {}: {}",
-                                                    crate::value::display_class_name(
-                                                        &ob.class_name
-                                                    ),
-                                                    ob.get_property(b"message")
-                                                        .to_php_string()
-                                                        .to_msg_string()
-                                                )
-                                            } else {
-                                                "Uncaught exception".to_string()
-                                            }
-                                        })
-                                        .unwrap_or_default();
-                                    return Err(VmError {
-                                        message: msg,
-                                        line: op.line,
-                                    });
-                                }
-                            }
-                            // An interface may extend any internal interface.
-                            let internal_iface_parent = class.is_interface
-                                && crate::stubs::find_class(&parent_lower)
-                                    .is_some_and(|c| c.kind == crate::stubs::K_INTERFACE);
-                            if !self.classes.contains_key(&parent_lower)
-                                && !self.is_known_builtin_class(&parent_lower)
-                                && !internal_iface_parent
-                                && variance::linking_entry(&parent_lower).is_none()
-                            {
-                                // Parent class still missing after autoload attempt:
-                                // PHP raises a fatal "Class \"X\" not found".
-                                // Not linkable at early binding: PHP declares it at its
-                                // source position instead (the parent may appear by then,
-                                // e.g. through class_alias()).
-                                if is_early_attempt {
-                                    variance::defer(&class.name);
-                                    return Ok(Flow::Continue);
-                                }
-                                let parent_display = crate::value::display_class_name(parent_name);
-                                // zend_fetch_class_by_name() with
-                                // ZEND_FETCH_CLASS_INTERFACE for an interface's parents.
-                                let kind = if class.is_interface {
-                                    "Interface"
-                                } else {
-                                    "Class"
-                                };
-                                let msg = format!("{} \"{}\" not found", kind, parent_display);
-                                let exc_val = self.create_exception(b"Error", &msg, op.line);
-                                self.current_exception = Some(exc_val);
-                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                    exception_handlers.last()
-                                {
-                                    pending_calls_catch_depth = Some(*eh_pc_depth);
-                                    let ct = *catch_target;
-                                    ip = ct as usize;
-                                    return Ok(Flow::Continue);
-                                }
-                                return Err(VmError {
-                                    message: format!("Uncaught Error: {}", msg),
-                                    line: op.line,
-                                });
                             }
                             if class.is_interface
                                 && !self.classes.contains_key(&parent_lower)

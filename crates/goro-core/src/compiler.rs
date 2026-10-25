@@ -186,6 +186,40 @@ pub fn take_pending_compile_warnings() -> Vec<(&'static str, String, u32)> {
     PENDING_COMPILE_DIAGNOSTICS.with(|w| std::mem::take(&mut *w.borrow_mut()))
 }
 
+/// "Class C declares abstract method m() and must therefore be declared
+/// abstract" (or an anonymous class's "must not be abstract").
+#[inline(never)]
+fn abstract_method_in_concrete_class(
+    modifiers: &ClassModifiers,
+    is_anonymous: bool,
+    class_name: &[u8],
+    method_name: &[u8],
+    is_abstract: bool,
+    line: u32,
+) -> Option<CompileError> {
+    if !is_abstract
+        || modifiers.is_abstract
+        || modifiers.is_trait
+        || modifiers.is_interface
+        || modifiers.is_enum
+    {
+        return None;
+    }
+    let message = if is_anonymous {
+        format!(
+            "Anonymous class method {}() must not be abstract",
+            crate::string::msg_str(method_name)
+        )
+    } else {
+        format!(
+            "Class {} declares abstract method {}() and must therefore be declared abstract",
+            crate::string::msg_str(class_name),
+            crate::string::msg_str(method_name)
+        )
+    };
+    Some(CompileError { message, line })
+}
+
 /// "Private methods cannot be final as they are never overridden by other
 /// classes" (a constructor may be).
 #[inline(never)]
@@ -7896,6 +7930,18 @@ impl Compiler {
                                     ),
                                     line: *method_line,
                                 });
+                            }
+                            // An abstract method in a class not declared abstract
+                            // (zend_begin_method_decl())
+                            if let Some(e) = abstract_method_in_concrete_class(
+                                modifiers,
+                                is_anonymous,
+                                &qualified_name,
+                                method_name,
+                                *is_abstract,
+                                *method_line,
+                            ) {
+                                return Err(e);
                             }
                             // Check: interface methods must not be abstract (they are implicitly abstract)
                             if modifiers.is_interface && *is_abstract {
