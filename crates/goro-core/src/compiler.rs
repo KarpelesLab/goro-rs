@@ -3384,6 +3384,17 @@ impl Compiler {
         COMPILE_TIME_BINDS.with(|b| *b.borrow_mut() = Some((chunk, classes)));
     }
 
+    /// Whether a `catch (Throwable ...)` name resolves to \Throwable (it then
+    /// catches everything); in a namespace it is that namespace's Throwable
+    /// unless imported.
+    #[inline(never)]
+    fn catch_names_global_throwable(&self, name: &[u8]) -> bool {
+        let r = self.resolve_class_name(name);
+        r.strip_prefix(b"\\")
+            .unwrap_or(&r)
+            .eq_ignore_ascii_case(b"Throwable")
+    }
+
     /// Whether an earlier declaration in this file already hoisted `qn_lower`.
     #[inline(never)]
     fn hoist_name_taken(&self, qn_lower: &[u8]) -> bool {
@@ -6106,7 +6117,8 @@ impl Compiler {
                     if !catch.types.is_empty()
                         && !(catch.types.len() == 1
                             && catch.types[0].len() == 1
-                            && catch.types[0][0].eq_ignore_ascii_case(b"Throwable"))
+                            && catch.types[0][0].eq_ignore_ascii_case(b"Throwable")
+                            && self.catch_names_global_throwable(&catch.types[0][0]))
                     {
                         // Check if exception matches any of the catch types
                         let mut match_jumps = Vec::new();
