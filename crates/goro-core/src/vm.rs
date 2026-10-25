@@ -17980,6 +17980,25 @@ impl Vm {
     /// Whether the ArrayIsset op before `ip` is the existence probe of
     /// `empty($c[k])` (compiled as ArrayIsset; JmpZ; ArrayGet of the same
     /// dimension; ErrorRestore).
+    /// The PropertyIsset of empty($o->p): JmpZ, PropertyGet of the same
+    /// property, ErrorRestore, BooleanNot.
+    #[inline(never)]
+    fn is_empty_prop_probe(op_array: &OpArray, ip: usize, op: &crate::opcode::Op) -> bool {
+        op.opcode == OpCode::PropertyIsset
+            && matches!(
+                (op_array.ops.get(ip), op_array.ops.get(ip + 1), op_array.ops.get(ip + 2), op_array.ops.get(ip + 3)),
+                (Some(j), Some(g), Some(r), Some(n))
+                    if j.opcode == OpCode::JmpZ
+                        && j.op1 == op.result
+                        && g.opcode == OpCode::PropertyGet
+                        && g.op1 == op.op1
+                        && g.op2 == op.op2
+                        && r.opcode == OpCode::ErrorRestore
+                        && n.opcode == OpCode::BooleanNot
+                        && n.op1 == g.result
+            )
+    }
+
     fn is_empty_dim_probe(op_array: &OpArray, ip: usize, op: &crate::opcode::Op) -> bool {
         matches!(
             (op_array.ops.get(ip), op_array.ops.get(ip + 1), op_array.ops.get(ip + 2)),
@@ -45337,7 +45356,9 @@ impl Vm {
 
                     if let Value::Object(obj) = &obj_val_raw {
                         if let Some(f) = native_handlers(obj).and_then(|h| h.has_property) {
-                            if let Some(b) = f(self, obj, prop_name.as_bytes(), 0) {
+                            // empty($o->p): has_property(ZEND_PROPERTY_NOT_EMPTY)
+                            let check = Self::is_empty_prop_probe(op_array, ip, &op) as u8;
+                            if let Some(b) = f(self, obj, prop_name.as_bytes(), check) {
                                 native_exc_check!(
                                     self,
                                     exception_handlers,
