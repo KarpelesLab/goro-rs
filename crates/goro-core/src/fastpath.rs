@@ -970,10 +970,22 @@ fn fetched_container(
     }
 }
 
+/// ARRAY_NEW (`[]`, the start of an array literal) into a temporary.
+#[inline(never)]
+fn fast_array_new(op: &Op, tmps: &mut [Value]) -> Fast {
+    if matches!(op.result, OperandType::Tmp(_)) && tmp_writable(&op.result, tmps) {
+        let a = Rc::new(RefCell::new(crate::array::PhpArray::new()));
+        store_tmp(&op.result, Value::Array(a), tmps);
+        Fast::Done
+    } else {
+        Fast::No
+    }
+}
+
 /// Whether the send at `ip` sends a variable's array that code run before
 /// the call may write (see Vm::send_needs_snapshot): the general handler
 /// sends a copy of its own.
-#[inline]
+#[inline(always)]
 fn send_snapshot(op_array: &crate::opcode::OpArray, ip: usize, op: &Op, cvs: &[Value]) -> bool {
     let OperandType::Cv(c) = op.op1 else {
         return false;
@@ -1041,6 +1053,7 @@ fn fast_string_offset(op: &Op, cvs: &[Value], tmps: &mut [Value], literals: &[Va
 /// FETCH_OBJ_W of a plain property (slot `idx` of `obj`) holding an array
 /// (see fast_prop_op): the array, separated from its other holders, is left
 /// in the result temporary for the write into it that follows.
+#[inline(never)]
 fn prop_fetch_w(
     obj: &Rc<RefCell<crate::object::PhpObject>>,
     idx: usize,
@@ -1419,7 +1432,7 @@ pub(crate) struct FeView<'a> {
 impl FeView<'_> {
     /// The temporaries whose foreach state (snapshot, object or iterator
     /// handle) the frame holds.
-    #[inline]
+    #[inline(always)]
     fn busy(&self) -> FeTmps {
         // (no loop with such state: the common case, without walking the maps)
         if self.snap.is_empty() && self.obj.is_empty() && self.iter_handles.is_empty() {
@@ -1882,15 +1895,7 @@ impl crate::vm::Vm {
                 OpCode::BitwiseOr => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::BitwiseXor => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 // `[]` (the start of an array literal) into a temporary
-                OpCode::ArrayNew => {
-                    if matches!(op.result, OperandType::Tmp(_)) && tmp_writable(&op.result, tmps) {
-                        let a = Rc::new(RefCell::new(crate::array::PhpArray::new()));
-                        store_tmp(&op.result, Value::Array(a), tmps);
-                        Fast::Done
-                    } else {
-                        break 'run ip;
-                    }
-                }
+                OpCode::ArrayNew => fast_array_new(op, tmps),
                 OpCode::CastBool => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 // (the silence of isset() / empty() / `??` / `@`)
                 OpCode::ErrorSuppress => {
@@ -2778,6 +2783,7 @@ impl crate::vm::Vm {
     /// the element is an array, null or missing: what the general handler
     /// (fetch_dim_from_array()) does then: the element is separated from
     /// its other holders, or made a new array, and left in the result.
+    #[inline(never)]
     pub(crate) fn fast_dim_fetch_w(
         &mut self,
         op_array: &crate::opcode::OpArray,

@@ -33,8 +33,9 @@ pub(crate) struct LeanFrame {
     pub(crate) tmps: *const Vec<Value>,
     pub(crate) fe: *const ForeachState,
     pub(crate) call: *const PendingCall,
-    /// (of a method: where "::" is in the call's name)
-    pub(crate) sep: Option<usize>,
+    /// (of a method: where "::" is in the call's name, and whether `$this`
+    /// leads the arguments)
+    pub(crate) sep: Option<(usize, bool)>,
     /// The line of the DO_FCALL that made the call.
     pub(crate) line: u32,
     /// The number of arguments the call passed (`$this` included).
@@ -267,8 +268,9 @@ impl Vm {
                 _ if !f.display_name.is_empty() => push_lossy(&mut display, &f.display_name),
                 _ => push_lossy(&mut display, call.name.as_bytes()),
             }
-            let base = usize::from(lf.sep.is_some());
-            let frame_this = lf.sep.is_some() && matches!(slots.first(), Some(Value::Object(_)));
+            let this = lf.sep.is_some_and(|(_, this)| this);
+            let base = usize::from(this);
+            let frame_this = this && matches!(slots.first(), Some(Value::Object(_)));
             let mut args = self.value_pool.pop().unwrap_or_default();
             args.clear();
             if let Some(a) = slots.get(base..lf.nargs.min(slots.len())) {

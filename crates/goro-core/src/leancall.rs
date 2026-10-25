@@ -38,8 +38,9 @@ pub(crate) struct LeanResume {
     caller_ip: usize,
     depth: u32,
     user_fn: Rc<OpArray>,
-    /// (of a method: where "::" is in the call's name)
-    sep: Option<usize>,
+    /// (of a method: where "::" is in the call's name, and whether `$this`
+    /// leads the arguments: not for a static method)
+    sep: Option<(usize, bool)>,
     /// The call (its arguments were moved to the callee's variables).
     call: PendingCall,
     cvs: Vec<Value>,
@@ -57,10 +58,21 @@ pub(crate) struct ResumeFrame {
 /// Whether a call of `f` may be a lean one (what DO_FCALL's fast path
 /// accepts of a plain function or of a public instance method of a user
 /// class, see Vm::fast_fcall_simple, without what the frame would have to
-/// check or set up: see OpArray::lean_kind). `method`: an instance method.
+/// check or set up: see OpArray::lean_kind). `sep`: of a method, whether
+/// it is an instance method.
 #[inline]
-fn lean_function(f: &OpArray, method: bool) -> bool {
-    f.lean_kind() == 1 + u8::from(method) && f.scope_class.is_some() == method
+fn lean_function(f: &OpArray, sep: Option<(usize, bool)>) -> bool {
+    match sep {
+        None => f.lean_kind() == 1 && f.scope_class.is_none(),
+        Some((_, this)) => f.lean_kind() == 1 + u8::from(this) && f.scope_class.is_some(),
+    }
+}
+
+/// How many of a lean call's first arguments are not its parameters (its
+/// `$this`).
+#[inline]
+fn lead(sep: Option<(usize, bool)>) -> usize {
+    usize::from(sep.is_some_and(|(_, this)| this))
 }
 
 /// Whether the last holder of `v` letting it go here only frees memory
@@ -136,7 +148,7 @@ impl Vm {
     /// but a method's `$this`) or with enough arguments; and for a method,
     /// where "::" is in the call's name.
     #[inline]
-    fn lean_target(&self, fresh: bool) -> Option<(&Rc<OpArray>, Option<usize>)> {
+    fn lean_target(&self, fresh: bool) -> Option<(&Rc<OpArray>, Option<(usize, bool)>)> {
         let call = self.pending_calls.last()?;
         let t = &call.target;
         let f = t.user.as_ref()?;
@@ -174,16 +186,29 @@ impl Vm {
                 {
                     return None;
                 }
-                Some(sep)
+                Some((sep, true))
             }
-            Some((_, true)) => return None,
+            // A static method, named by its class (late static binding:
+            // that class).
+            Some((sep, true)) => {
+                let sep = sep as usize;
+                if !t
+                    .method_info
+                    .as_ref()
+                    .is_some_and(|i| i.name.ptr_eq(&call.name) || i.name.as_bytes() == name)
+                    || name.get(sep + 2..).is_none_or(|m| m.starts_with(b"__"))
+                {
+                    return None;
+                }
+                Some((sep, false))
+            }
         };
-        if !lean_function(f, sep.is_some()) {
+        if !lean_function(f, sep) {
             return None;
         }
         if !fresh {
             let nargs = call.args.len();
-            let base = usize::from(sep.is_some());
+            let base = lead(sep);
             let required = f.required_param_count as usize;
             if nargs > f.param_count as usize
                 || nargs < base + required
@@ -210,7 +235,7 @@ impl Vm {
         let Some(f) = t.user.as_ref() else {
             return false;
         };
-        if t.closure || t.forward.is_some() || matches!(t.method, Some((_, true))) {
+        if t.closure || t.forward.is_some() {
             return false;
         }
         if f.lean_kind() == 0 {
@@ -266,7 +291,7 @@ impl Vm {
         // The parameters move to the callee's variables; `$this` stays
         // (DO_FCALL's fast path, move_args()).
         let mut slots = self.take_values(f.cv_names.len());
-        let keep = usize::from(sep.is_some());
+        let keep = lead(sep);
         if keep == 1 {
             slots[0] = call.args[0].clone();
         }
@@ -296,7 +321,7 @@ impl Vm {
         let literals = &op_array.literals;
         let (f, sep) = self.lean_target(true)?;
         // (a method's `$this` leads the arguments)
-        let base = usize::from(sep.is_some());
+        let base = lead(sep);
         // The sends, then the DO_FCALL (a nested call's INIT_* ends them).
         let nsends = ops
             .get(ip + 1..)?
@@ -404,7 +429,7 @@ impl Vm {
         op_array: &OpArray,
         ip: usize,
         f: Rc<OpArray>,
-        sep: Option<usize>,
+        sep: Option<(usize, bool)>,
         mut slots: Vec<Value>,
         nargs: usize,
         mut call: PendingCall,
@@ -415,7 +440,7 @@ impl Vm {
         self.last_call_by_ref = false;
         // By-value array parameters get their own copy (nothing of the call
         // holds one any more: the frame's copy of the arguments is not made).
-        let base = usize::from(sep.is_some());
+        let base = lead(sep);
         for (ci, slot) in slots.iter_mut().enumerate().take(nargs).skip(base) {
             if let Value::Array(a) = slot {
                 if Rc::strong_count(a) > 1 && !f.by_ref_params.get(ci).copied().unwrap_or(false) {
@@ -441,10 +466,10 @@ impl Vm {
             match sep {
                 // (a method runs in its class's scope, called on its object's
                 // class: DO_FCALL's fast path)
-                Some(sep) => self.push_fast_method_scopes(
+                Some((sep, this)) => self.push_fast_method_scopes(
                     &call,
                     sep,
-                    true,
+                    this,
                     false,
                     None,
                     call.target.method_info.as_ref().map(|i| i.scope.as_slice()),
@@ -705,7 +730,7 @@ impl Vm {
         };
         self.pending_calls.push(r.call);
         self.fast_fcall_fn = Some(r.user_fn);
-        self.fast_fcall_sep = r.sep.map(|s| (s, true));
+        self.fast_fcall_sep = r.sep;
         self.fast_fcall_captures = None;
         self.fast_fcall_forward = false;
         self.lean_resumed = Some((r.cvs, r.frame));
