@@ -298,14 +298,16 @@ impl MimeReader {
                             self.pos += n;
                             v
                         }
+                        // (ext/curl's read_cb(): the file is opened on the
+                        // first read; a failure returns CURL_READFUNC_ABORT)
                         MimeData::File(p) => {
                             if self.file.is_none() {
                                 match std::fs::File::open(&*p) {
                                     Ok(f) => self.file = Some(f),
                                     Err(_) => {
                                         return Err((
-                                            code::READ_ERROR,
-                                            "read error getting mime data".into(),
+                                            code::ABORTED_BY_CALLBACK,
+                                            "operation aborted by callback".into(),
                                         ));
                                     }
                                 }
@@ -319,8 +321,8 @@ impl MimeReader {
                                 }
                                 Err(_) => {
                                     return Err((
-                                        code::READ_ERROR,
-                                        "read error getting mime data".into(),
+                                        code::ABORTED_BY_CALLBACK,
+                                        "operation aborted by callback".into(),
                                     ));
                                 }
                             }
