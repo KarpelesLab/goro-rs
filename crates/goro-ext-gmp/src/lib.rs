@@ -4,10 +4,10 @@ mod mt;
 use puremp::Int;
 
 use goro_core::array::PhpArray;
+use goro_core::object::NativeData;
 use goro_core::object::PhpObject;
 use goro_core::string::PhpString;
 use goro_core::value::Value;
-use goro_core::object::NativeData;
 use goro_core::vm::{NativeObjectHandlers, Vm, VmError};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -25,11 +25,7 @@ static GMP_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
 
 /// gmp_get_debug_info(): the properties plus `num` (debug purpose only;
 /// the number is no property).
-fn gmp_get_properties(
-    _vm: &mut Vm,
-    obj: &Rc<RefCell<PhpObject>>,
-    purpose: u8,
-) -> Option<PhpArray> {
+fn gmp_get_properties(_vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, purpose: u8) -> Option<PhpArray> {
     if purpose != 0 {
         return None;
     }
@@ -1347,7 +1343,8 @@ fn get_int_arg(
         Value::Null | Value::Undef => Ok(0),
         // zend_parse_arg_long_weak()
         Value::Double(d)
-            if !d.is_nan() && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d) =>
+            if !d.is_nan()
+                && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d) =>
         {
             Ok(vm.dval_to_lval_safe(d))
         }

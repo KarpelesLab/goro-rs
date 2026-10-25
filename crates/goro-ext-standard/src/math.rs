@@ -941,7 +941,8 @@ fn rand_args(vm: &mut Vm, fname: &str, args: &[Value]) -> Result<Option<(i64, i6
     // Z_PARAM_LONG(min) / Z_PARAM_LONG(max): the diagnostics of the
     // accepted conversions (null, fractional floats) are emitted by the
     // builtin parameter types already.
-    let fits = |d: f64| !d.is_nan() && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d);
+    let fits =
+        |d: f64| !d.is_nan() && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d);
     let mut out = [0i64; 2];
     for (i, name) in ["min", "max"].iter().enumerate() {
         let v = args[i].deref();

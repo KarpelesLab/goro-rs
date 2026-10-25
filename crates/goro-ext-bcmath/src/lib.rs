@@ -118,7 +118,11 @@ fn check_alloc(vm: &mut Vm, scale: usize) -> Result<(), VmError> {
 
 /// bc_standard_raise()'s safe_emalloc(n, sizeof(BC_VECTOR) * 3, 0): the
 /// overflow and memory-limit fatal errors of a power too large to compute.
-pub(crate) fn raise_alloc_check(vm: &mut Vm, base: &num::Num, exponent: i64) -> Result<(), VmError> {
+pub(crate) fn raise_alloc_check(
+    vm: &mut Vm,
+    base: &num::Num,
+    exponent: i64,
+) -> Result<(), VmError> {
     let Some(n) = num::raise_buffer_vectors(base, exponent) else {
         return Ok(());
     };
@@ -127,7 +131,10 @@ pub(crate) fn raise_alloc_check(vm: &mut Vm, base: &num::Num, exponent: i64) -> 
         None => {
             let line = vm.current_line;
             Err(vm.emit_fatal_at(
-                &format!("Possible integer overflow in memory allocation ({} * 24 + 0)", n),
+                &format!(
+                    "Possible integer overflow in memory allocation ({} * 24 + 0)",
+                    n
+                ),
                 line,
             ))
         }

@@ -73,9 +73,7 @@ type ObjectCompare = fn(&mut Vm, &Value, &Value) -> Option<std::cmp::Ordering>;
 /// compare handler (None).
 fn object_compare(vm: &mut Vm, a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     if !is_number(a) && !is_number(b) {
-        return PREV_COMPARE
-            .with(|p| p.get())
-            .and_then(|f| f(vm, a, b));
+        return PREV_COMPARE.with(|p| p.get()).and_then(|f| f(vm, a, b));
     }
     // op1's own handler compares another object; bools and null never
     // reach the handler.

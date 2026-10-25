@@ -284,11 +284,7 @@ fn open_stream(
 
 /// php_stream_read() of up to `n` bytes: None at EOF, Err(None) when the
 /// read failed.
-fn stream_read(
-    vm: &mut Vm,
-    stream: &Value,
-    n: usize,
-) -> Result<Option<Vec<u8>>, Option<VmError>> {
+fn stream_read(vm: &mut Vm, stream: &Value, n: usize) -> Result<Option<Vec<u8>>, Option<VmError>> {
     match call_builtin(vm, b"fread", &[stream.clone(), Value::Long(n as i64)]) {
         Some(Ok(Value::String(s))) if !s.as_bytes().is_empty() => Ok(Some(s.as_bytes().to_vec())),
         Some(Ok(Value::False)) => Err(None),
@@ -1164,7 +1160,9 @@ fn hash_update_stream_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
         if length > 0 && toread > length {
             toread = length;
         }
-        let Some(buf) = stream_read(vm, &stream, toread as usize).or_else(|e| e.map_or(Ok(None), Err))? else {
+        let Some(buf) =
+            stream_read(vm, &stream, toread as usize).or_else(|e| e.map_or(Ok(None), Err))?
+        else {
             break;
         };
         if let Some(c) = st.borrow_mut().ctx.as_mut() {
