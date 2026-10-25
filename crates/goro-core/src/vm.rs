@@ -6273,6 +6273,30 @@ impl Vm {
     /// Whether creating a dynamic property on an instance of `class_lower`
     /// raises the PHP 8.2 deprecation (user classes without
     /// #[AllowDynamicProperties] anywhere in their hierarchy, stdClass aside).
+    /// A write from inside the object's own __set() (its guard is active)
+    /// creating a dynamic property deprecates it like any other write.
+    #[inline(never)]
+    fn guarded_set_dynamic_deprecation(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        class_lower: &[u8],
+        key: &[u8],
+    ) {
+        if obj.borrow().has_property(key)
+            || key.first() == Some(&0)
+            || !self.dynamic_property_deprecated(class_lower)
+            || self.find_property_def(class_lower, key).is_some()
+        {
+            return;
+        }
+        let msg = format!(
+            "Creation of dynamic property {}::${} is deprecated",
+            crate::value::display_class_name(&obj.borrow().class_name),
+            String::from_utf8_lossy(key)
+        );
+        self.emit_deprecated(&msg);
+    }
+
     fn dynamic_property_deprecated(&self, class_lower: &[u8]) -> bool {
         if !self.classes.contains_key(class_lower)
             || class_lower == b"stdclass"
@@ -58361,6 +58385,7 @@ impl Vm {
                                 // (PHP semantics: recursive __set creates a
                                 // dynamic property rather than re-entering
                                 // __set).
+                                self.guarded_set_dynamic_deprecation(obj, &class_lower, &pkey);
                                 obj.borrow_mut().set_property(pkey.to_vec(), value);
                             } else {
                                 if matches!(
