@@ -59787,7 +59787,15 @@ impl Vm {
     /// warn and wrap, in-range floats with a fraction are deprecated.
     pub fn double_offset_to_long(&mut self, f: f64, line: u32) -> i64 {
         if !f.is_finite() || !crate::value::php_double_fits_long(f) {
-            return self.float_to_int_cast(f, line);
+            let l = self.float_to_int_cast(f, line);
+            // (NAN passes ZEND_DOUBLE_FITS_LONG(), and 0 is not NAN)
+            if f.is_nan() {
+                self.emit_deprecated_at(
+                    "Implicit conversion from float NAN to int loses precision",
+                    line,
+                );
+            }
+            return l;
         }
         if f.fract() != 0.0 {
             self.emit_deprecated_at(
