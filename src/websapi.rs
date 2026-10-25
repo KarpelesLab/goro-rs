@@ -70,8 +70,13 @@ impl PhpRun {
     #[allow(clippy::field_reassign_with_default)] // fields filled in step by step
     pub fn startup(req: &ScriptRequest) -> PhpRun {
         let mut vm = engine::new_vm(req.ini, req.sapi);
+        // Module startup errors (an invalid -d session.name ...) happen
+        // before the server serves anything: they never reach a response.
+        let _ = vm.take_output();
         vm.register_function(b"apache_request_headers", apache_request_headers);
         vm.register_function(b"getallheaders", apache_request_headers);
+        // sapi_send_headers() when the first output goes out.
+        vm.sapi_send_headers = Some(goro_ext_standard::misc::sapi_add_default_content_type);
         REQUEST_HEADERS.with(|h| *h.borrow_mut() = req.headers.to_vec());
         let _ = goro_ext_standard::misc::take_sent_headers();
         let _ = goro_ext_standard::misc::take_status_line();

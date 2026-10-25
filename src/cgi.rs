@@ -363,29 +363,7 @@ fn send_headers(vm: &mut Vm) {
     if NO_HEADERS.with(|n| n.get()) {
         return;
     }
-    // sapi_send_headers(): the default Content-type joins the list.
-    if goro_core::sapi_headers::send_default_content_type() {
-        let get = |k: &[u8]| {
-            vm.constants
-                .get(k)
-                .map(|v| v.to_php_string().as_bytes().to_vec())
-        };
-        let mimetype = get(b"default_mimetype")
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| b"text/html".to_vec());
-        let charset = get(b"default_charset").unwrap_or_else(|| b"UTF-8".to_vec());
-        let mut line = b"Content-type: ".to_vec();
-        line.extend_from_slice(&mimetype);
-        if !charset.is_empty()
-            && mimetype.len() >= 5
-            && mimetype[..5].eq_ignore_ascii_case(b"text/")
-        {
-            line.extend_from_slice(b"; charset=");
-            line.extend_from_slice(&charset);
-        }
-        goro_ext_standard::misc::sapi_add_header(&line, false);
-        goro_core::sapi_headers::content_type_set(&line[14..]);
-    }
+    goro_ext_standard::misc::sapi_add_default_content_type(vm);
     let code = goro_ext_standard::misc::peek_response_code();
     let status_line = goro_ext_standard::misc::peek_status_line();
     let headers = goro_ext_standard::misc::peek_sent_headers();

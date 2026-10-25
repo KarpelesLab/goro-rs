@@ -13879,6 +13879,30 @@ pub fn set_status_line(line: &[u8]) {
 pub fn take_status_line() -> Option<Vec<u8>> {
     STATUS_LINE.with(|s| s.borrow_mut().take())
 }
+/// sapi_send_headers(): the default Content-type joins the header list
+/// (when the script set none).
+pub fn sapi_add_default_content_type(vm: &mut Vm) {
+    if !goro_core::sapi_headers::send_default_content_type() {
+        return;
+    }
+    let get = |k: &[u8]| {
+        vm.constants
+            .get(k)
+            .map(|v| v.to_php_string().as_bytes().to_vec())
+    };
+    let mimetype = get(b"default_mimetype")
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| b"text/html".to_vec());
+    let charset = get(b"default_charset").unwrap_or_else(|| b"UTF-8".to_vec());
+    let mut line = b"Content-type: ".to_vec();
+    line.extend_from_slice(&mimetype);
+    if !charset.is_empty() && mimetype.len() >= 5 && mimetype[..5].eq_ignore_ascii_case(b"text/") {
+        line.extend_from_slice(b"; charset=");
+        line.extend_from_slice(&charset);
+    }
+    sapi_add_header(&line, false);
+    goro_core::sapi_headers::content_type_set(&line[14..]);
+}
 /// SG(request_info).request_body: the buffered request body.
 pub fn set_request_body(body: Vec<u8>) {
     REQUEST_BODY.with(|b| *b.borrow_mut() = body);
