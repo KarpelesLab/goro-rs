@@ -1980,6 +1980,11 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
     vm.set_global(b"_REQUEST".to_vec(), Value::Array(request));
     crate::misc::set_request_body(input_body);
     crate::misc::set_sapi_body(req.body.clone(), sapi_read);
+    // Output sent by a request-startup error has no script position
+    // (php_output_header(): no executed file yet).
+    if vm.headers_sent {
+        vm.output_start = None;
+    }
 }
 
 /// check_http_proxy() (bug #72573, httpoxy): HTTP_PROXY only ever comes
