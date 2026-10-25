@@ -596,11 +596,37 @@ impl Vm {
                 .as_deref()
                 .is_some_and(|s| self.class_chain_has(class_lower, s)),
         };
+        // (a class deriving from an internal one: a method a user class of
+        // its declared, not of the internal ancestor's; not of the SPL
+        // classes whose methods all check their object was constructed,
+        // see the general handler)
+        let user_method = || {
+            method.op_array.internal_sig.is_none()
+                && self
+                    .spl_find_base(
+                        class_lower,
+                        &[
+                            b"splfileobject",
+                            b"globiterator",
+                            b"recursiveiteratoriterator",
+                        ],
+                    )
+                    .is_none()
+                && !method.is_abstract
+                && self
+                    .classes
+                    .get(method.declaring_class.to_ascii_lowercase().as_slice())
+                    .is_some_and(|c| c.filename.is_some() && !c.is_enum)
+                && self
+                    .classes
+                    .get(class_lower)
+                    .is_some_and(|c| c.filename.is_some() && !c.is_enum)
+        };
         if !visible
             || !method.attributes.is_empty()
             || !method.op_array.attributes.is_empty()
             || scope_private
-            || !self.user_class_chain(class_lower)
+            || !(self.user_class_chain(class_lower) || user_method())
         {
             return fallback(class_name_orig, scope);
         }
