@@ -124,7 +124,7 @@ fn release_slots(slots: &mut Vec<Value>) {
 impl Vm {
     /// What a lean call needs of the running state, for the call made by
     /// the DO_FCALL `op` (its result stored in `tmps`).
-    #[inline]
+    #[inline(always)]
     fn lean_ready(&self, op: &Op, tmps: &[Value]) -> bool {
         self.lean_resume.is_empty()
             && self.observer.is_none()
@@ -150,7 +150,7 @@ impl Vm {
     /// `static::m()`, `parent::m()`, resolved when it was set up: see
     /// push_forward_call) is one when fast_fcall_target() takes it: "::" is
     /// then where it is in the name it resolved to, which the call takes.
-    #[inline]
+    #[inline(always)]
     fn lean_target(&self, fresh: bool) -> Option<(&Rc<OpArray>, Option<(usize, bool)>)> {
         let call = self.pending_calls.last()?;
         let t = &call.target;
@@ -272,7 +272,7 @@ impl Vm {
     }
 
     /// The top pending call, taken for a lean call of its function.
-    #[inline]
+    #[inline(always)]
     fn pop_lean_call(&mut self) -> PendingCall {
         let call = self.pending_calls.pop().expect("pending call");
         while matches!(self.closure_pending_calls.last(), Some(&i) if i > self.pending_calls.len())
