@@ -3442,6 +3442,56 @@ impl Vm {
     /// Check if `caller_class` (lowercase) has access to a member with the given visibility
     /// declared in `declaring_class` (lowercase), where the member belongs to `target_class` (lowercase).
     /// Returns None if access is allowed, or Some(error_message) if denied.
+    /// zend_do_link_class() binds a class's (concrete) trait methods before
+    /// it inherits its parent's: the method table lists the class's own
+    /// methods, then the trait ones (in binding order, each alias before its
+    /// original), then the inherited ones, then late-bound abstract ones.
+    #[inline(never)]
+    fn order_trait_methods_before_inherited(
+        class: &mut ClassEntry,
+        class_lower: &[u8],
+        own: &std::collections::HashSet<Vec<u8>>,
+        trait_bound: &[Vec<u8>],
+    ) {
+        let keys: Vec<Vec<u8>> = class.methods.keys().cloned().collect();
+        let bound_pos = |k: &[u8]| trait_bound.iter().position(|t| t.as_slice() == k);
+        let mut ranked: Vec<(u8, usize, usize)> = Vec::with_capacity(keys.len());
+        for (i, k) in keys.iter().enumerate() {
+            let m = &class.methods[i];
+            let (group, rank) = if own.contains(k) {
+                (0, i)
+            } else if !m.declaring_class.eq_ignore_ascii_case(class_lower) {
+                (2, i)
+            } else if let Some(p) = bound_pos(k) {
+                (1, p * 2 + 1)
+            } else if m.is_abstract {
+                (3, i)
+            } else {
+                // An alias: just before the trait method that follows it.
+                let next = keys[i + 1..].iter().find_map(|n| bound_pos(n));
+                (1, next.map_or(usize::MAX, |p| p * 2))
+            };
+            ranked.push((group, rank, i));
+        }
+        if ranked
+            .windows(2)
+            .all(|w| (w[0].0, w[0].1) <= (w[1].0, w[1].1))
+        {
+            return;
+        }
+        ranked.sort_by_key(|r| (r.0, r.1, r.2));
+        let mut entries: Vec<Option<(Vec<u8>, crate::object::MethodDef)>> =
+            std::mem::take(&mut class.methods)
+                .into_iter()
+                .map(Some)
+                .collect();
+        for (_, _, i) in ranked {
+            if let Some((k, m)) = entries[i].take() {
+                class.methods.insert(k, m);
+            }
+        }
+    }
+
     /// zend_init_dynamic_call_array(): `[$obj, 'm']()` naming a method the
     /// calling scope cannot access (and no __call() to fall back on).
     #[inline(never)]
@@ -52113,6 +52163,8 @@ impl Vm {
                         // composition collisions between two traits with the same method.
                         let mut method_from_trait: std::collections::HashMap<Vec<u8>, Vec<u8>> =
                             std::collections::HashMap::new();
+                        // (the concrete trait methods, in binding order)
+                        let mut trait_bound_order: Vec<Vec<u8>> = Vec::new();
                         let mut prop_from_trait: std::collections::HashMap<Vec<u8>, Vec<u8>> =
                             std::collections::HashMap::new();
                         for trait_name in &trait_names {
@@ -52425,6 +52477,7 @@ impl Vm {
                                             }
                                         }
                                         class.methods.insert(key.clone(), m);
+                                        trait_bound_order.push(key.clone());
                                         method_from_trait.insert(key, trait_def.name.clone());
                                     }
                                 }
@@ -52951,6 +53004,14 @@ impl Vm {
                             }
                         }
 
+                        if !trait_bound_order.is_empty() {
+                            Self::order_trait_methods_before_inherited(
+                                &mut class,
+                                &class_name_lower,
+                                own_method_names,
+                                &trait_bound_order,
+                            );
+                        }
                         // Check class methods (own, inherited or from traits) against the
                         // interface methods they implement.
                         // Methods imported from traits against the parent's
