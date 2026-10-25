@@ -4215,6 +4215,14 @@ fn array_walk_object_entries(
     extra_data: Option<&Value>,
     obj: &Rc<RefCell<goro_core::object::PhpObject>>,
 ) -> Result<Value, VmError> {
+    // (BcMath\Number's properties are virtual: its property table is empty)
+    if obj
+        .borrow()
+        .class_name
+        .eq_ignore_ascii_case(b"BcMath\\Number")
+    {
+        return Ok(Value::True);
+    }
     let (func_name, captured) = match callback {
         Value::String(s) => (s.as_bytes().to_vec(), vec![]),
         Value::Array(cb) => {
@@ -18951,6 +18959,15 @@ fn get_mangled_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
     if let Some(Value::Object(outer)) = args.first() {
         // For initialized lazy proxy, redirect to the real backing object.
         let obj_rc = vm.proxy_redirect(outer);
+        // (BcMath\Number's properties are virtual: zend_std_get_properties()
+        // has none)
+        if obj_rc
+            .borrow()
+            .class_name
+            .eq_ignore_ascii_case(b"BcMath\\Number")
+        {
+            return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+        }
         Ok(Value::Array(Vm::proptable_to_symtable(
             vm.object_props_mangled(&obj_rc),
         )))

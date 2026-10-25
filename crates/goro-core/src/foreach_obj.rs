@@ -177,6 +177,11 @@ impl Vm {
     ) -> Result<Option<ObjIterStep>, String> {
         {
             let cl = obj.borrow().class_name.to_ascii_lowercase();
+            // BcMath\Number's properties are virtual (computed by its
+            // read_property handler): its property table is empty.
+            if cl == b"bcmath\\number" {
+                return Ok(None);
+            }
             if self.class_has_hooked_props(&cl) {
                 return self.foreach_hooked_step(obj, pos, cur, by_ref);
             }

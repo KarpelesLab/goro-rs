@@ -81,6 +81,26 @@ fn key_name(k: &ArrayKey) -> Vec<u8> {
 }
 
 impl Vm {
+    /// Whether objects of the class have a get_properties handler of their
+    /// own (not zend_std_get_properties): spl_array rejects them.
+    #[inline(never)]
+    pub(crate) fn has_overloaded_properties(&self, class_lower: &[u8]) -> bool {
+        self.spl_find_base(
+            class_lower,
+            &[
+                b"splfixedarray",
+                b"simplexmlelement",
+                b"bcmath\\number",
+                b"dateinterval",
+                b"datetime",
+                b"datetimeimmutable",
+                b"datetimezone",
+                b"dateperiod",
+            ],
+        )
+        .is_some()
+    }
+
     /// spl_array_get_hash_table()
     pub(crate) fn ao_table(&self, obj: &Rc<RefCell<PhpObject>>) -> Table {
         let mut cur = obj.clone();
@@ -855,17 +875,7 @@ impl Vm {
                         self.spl_throw(b"InvalidArgumentException", &m);
                         return false;
                     }
-                    let overloaded = self
-                        .spl_find_base(&ocl, &[b"splfixedarray", b"splobjectstorage"])
-                        .is_some()
-                        || matches!(
-                            ocl.as_slice(),
-                            b"dateinterval"
-                                | b"datetime"
-                                | b"datetimeimmutable"
-                                | b"datetimezone"
-                                | b"dateperiod"
-                        );
+                    let overloaded = self.has_overloaded_properties(&ocl);
                     if overloaded {
                         let m = format!(
                             "Overloaded object of type {} is not compatible with {}",

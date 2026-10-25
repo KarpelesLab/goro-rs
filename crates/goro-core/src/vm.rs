@@ -33963,16 +33963,10 @@ impl Vm {
                                                         }
                                                     }
                                                     // Reject objects with overloaded property handlers.
-                                                    let is_overloaded = matches!(
-                                                        wrapped_class_lower.as_slice(),
-                                                        b"splfixedarray"
-                                                            | b"dateinterval"
-                                                            | b"datetime"
-                                                            | b"datetimeimmutable"
-                                                            | b"datetimezone"
-                                                            | b"dateperiod"
-                                                            | b"splobjectstorage"
-                                                    );
+                                                    let is_overloaded = self
+                                                        .has_overloaded_properties(
+                                                            &wrapped_class_lower,
+                                                        );
                                                     if is_overloaded {
                                                         let inner_class_display =
                                                             crate::value::display_class_name(

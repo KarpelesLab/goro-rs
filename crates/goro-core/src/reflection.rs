@@ -14965,7 +14965,16 @@ pub(crate) fn property_string(vm: &Vm, p: &crate::object::PropertyDef, indent: &
     if p.is_readonly {
         s.push_str("readonly ");
     }
-    if p.is_virtual {
+    // (or @virtual in the stub of an internal class implemented in PHP)
+    if p.is_virtual
+        || crate::stubs::find_self_declared_class(&p.declaring_class.to_ascii_lowercase())
+            .is_some_and(|c| {
+                c.props.iter().any(|sp| {
+                    sp.name.as_bytes() == p.name.as_slice()
+                        && sp.flags & crate::stubs::F_VIRTUAL != 0
+                })
+            })
+    {
         s.push_str("virtual ");
     }
     if let Some(t) = &p.property_type {
