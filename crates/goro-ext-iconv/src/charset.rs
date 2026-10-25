@@ -184,6 +184,10 @@ fn table() -> &'static [(&'static str, Kind)] {
         ("EUCCN", Mbfl(EncNo::EucCn)),
         ("CSGB2312", Mbfl(EncNo::EucCn)),
         ("CN-GB", Mbfl(EncNo::EucCn)),
+        ("GB18030", Mbfl(EncNo::Gb18030_2022)),
+        ("EUC-TW", Mbfl(EncNo::EucTw)),
+        ("EUCTW", Mbfl(EncNo::EucTw)),
+        ("OSF0005000A", Mbfl(EncNo::EucTw)),
         ("GBK", Mbfl(EncNo::Cp936)),
         ("GB13000", Mbfl(EncNo::Cp936)),
         ("CP936", Mbfl(EncNo::Cp936)),
@@ -267,6 +271,9 @@ fn mbfl_encode_char(no: EncNo, cp: u32) -> Option<Vec<u8>> {
         (EncNo::Cp932, 0x2212) => return Some(vec![0x81, 0x7C]),
         (EncNo::Cp932, 0x301C) => return Some(vec![0x81, 0x60]),
         (EncNo::EucKr, 0x20A9) => return Some(vec![0xA3, 0xDC]),
+        (EncNo::EucTw, 0x4EA0) => return Some(vec![0xA7, 0xA8]),
+        (EncNo::EucTw, 0x51AB) => return Some(vec![0xA7, 0xAF]),
+        (EncNo::EucTw, 0x52F9) => return Some(vec![0xA7, 0xB4]),
         (EncNo::EucKr, 0x327E) => return Some(vec![0xA2, 0xE8]),
         (EncNo::EucJpWin, 0xA2) => return Some(vec![0xA1, 0xF1]),
         (EncNo::EucJpWin, 0xA3) => return Some(vec![0xA1, 0xF2]),
@@ -302,6 +309,11 @@ fn mbfl_encode_char(no: EncNo, cp: u32) -> Option<Vec<u8>> {
     let enc = mbfl_enc(no)?;
     let (bytes, errors) = enc.encode(&[cp], '?' as u32, mbfl::MBFL_OUTPUTFILTER_ILLEGAL_MODE_NONE);
     if errors > 0 || bytes.is_empty() {
+        return None;
+    }
+    // (glibc's EUC-TW has no CNS 11643 plane 14; libmbfl's has only it
+    // beyond planes 1 and 2)
+    if no == EncNo::EucTw && bytes.len() == 4 && bytes[1] > 0xA2 {
         return None;
     }
     // libmbfl also accepts compatibility characters (e.g. U+FF5E for
@@ -348,6 +360,9 @@ fn mbfl_decode_char_glibc(no: EncNo, bytes: &[u8]) -> Option<u32> {
         (EncNo::EucJp, [0x8F, 0xA2, 0xB7]) => return Some(0xFF5E),
         (EncNo::Big5 | EncNo::Cp950, [0xA3, 0xE1]) => return Some(0x20AC),
         (EncNo::EucKr, [0xA2, 0xE8]) => return Some(0x327E),
+        (EncNo::EucTw, [0xA7, 0xA8]) => return Some(0x4EA0),
+        (EncNo::EucTw, [0xA7, 0xAF]) => return Some(0x51AB),
+        (EncNo::EucTw, [0xA7, 0xB4]) => return Some(0x52F9),
         (EncNo::Big5, _) => {
             if let Some(c) = big5_override(bytes) {
                 return Some(c).filter(|&c| c != 0);
@@ -627,12 +642,15 @@ impl Decoder {
                     Dec::Char(c as u32, 1)
                 }
             }
+            Kind::Mbfl(EncNo::Gb18030_2022) => decode_gb18030(s),
             Kind::Mbfl(no) => {
                 let c = s[0];
                 // The length of a character by its lead byte in glibc's
                 // decoders (a lone lead byte is an incomplete character).
                 let n = match (no, c) {
                     (EncNo::EucJp | EncNo::EucJpWin, 0x8F) => 3,
+                    (EncNo::EucTw, 0x8E) => 4,
+                    (EncNo::EucTw, 0xA1..=0xFE) => 2,
                     (EncNo::EucJp | EncNo::EucJpWin | EncNo::EucCn, 0x8E | 0x8F)
                     | (EncNo::EucJp | EncNo::EucJpWin, 0xA0..=0xFE)
                     | (EncNo::Sjis, 0x81..=0x9F | 0xE0..=0xEA)
@@ -663,6 +681,13 @@ impl Decoder {
                     } else {
                         0xA1..=0xFE
                     };
+                    if no == EncNo::EucTw
+                        && n == 4
+                        && s.len() >= 2
+                        && !(0xA1..=0xB0).contains(&s[1])
+                    {
+                        return Dec::Illegal(1);
+                    }
                     if n == 3 && s.len() == 2 && !rows.contains(&s[1]) {
                         return Dec::Illegal(1);
                     }
@@ -797,6 +822,41 @@ impl Decoder {
                 }
             }
         }
+    }
+}
+
+/// glibc's GB18030 decoder: its lengths and the bytes //IGNORE skips.
+fn decode_gb18030(s: &[u8]) -> Dec {
+    let c = s[0];
+    if c < 0x80 {
+        return Dec::Char(c as u32, 1);
+    }
+    if c == 0x80 || c == 0xFF {
+        return Dec::Illegal(1);
+    }
+    if s.len() < 2 {
+        return Dec::Incomplete;
+    }
+    let c2 = s[1];
+    let n = match c2 {
+        0x30..=0x39 => {
+            if s.len() < 4 {
+                return Dec::Incomplete;
+            }
+            if !(0x81..=0xFE).contains(&s[2]) {
+                return Dec::Illegal(3);
+            }
+            if !(0x30..=0x39).contains(&s[3]) {
+                return Dec::Illegal(4);
+            }
+            4
+        }
+        0x40..=0xFF => 2,
+        _ => return Dec::Illegal(2),
+    };
+    match mbfl_decode_char(EncNo::Gb18030_2022, &s[..n]) {
+        Some(cp) => Dec::Char(cp, n),
+        None => Dec::Illegal(n),
     }
 }
 
@@ -1118,13 +1178,11 @@ impl Encoder {
     /// Back to the initial state (after the reset bytes were written, or
     /// iconv(cd, NULL, NULL, NULL, NULL)).
     pub fn reset(&mut self) {
-        // (the BOM of UTF-16 / UTF-32 is written once per conversion
-        // descriptor)
-        if matches!(self.kind, Kind::Iso2022Jp | Kind::Utf7(_)) {
-            self.state = 0;
-            self.acc = 0;
-            self.nbits = 0;
-        }
+        // (UTF-16 / UTF-32 / UNICODE write their BOM again after it, as
+        // glibc does)
+        self.state = 0;
+        self.acc = 0;
+        self.nbits = 0;
     }
 }
 
