@@ -135,13 +135,20 @@ impl<'a> Lexer<'a> {
             // Accumulate a run of whitespace.
             let ws_start = self.pos;
             let ws_line = self.line;
-            while let Some(ch) = self.peek() {
-                match ch {
-                    b' ' | b'\t' | b'\r' | b'\n' => {
-                        self.advance();
+            {
+                let src = self.source;
+                let mut p = self.pos;
+                let mut nl = 0;
+                while let Some(&ch) = src.get(p) {
+                    match ch {
+                        b' ' | b'\t' | b'\r' => {}
+                        b'\n' => nl += 1,
+                        _ => break,
                     }
-                    _ => break,
+                    p += 1;
                 }
+                self.pos = p;
+                self.line += nl;
             }
             if self.preserve_trivia && self.pos > ws_start {
                 let bytes = self.source[ws_start..self.pos].to_vec();
@@ -157,16 +164,8 @@ impl<'a> Lexer<'a> {
                     let c_line = self.line;
                     self.advance();
                     self.advance();
-                    while let Some(ch) = self.peek() {
-                        if ch == b'\n' {
-                            // Do NOT consume the newline - PHP emits it as T_WHITESPACE
-                            break;
-                        }
-                        if ch == b'?' && self.peek_at(1) == Some(b'>') {
-                            break;
-                        }
-                        self.advance();
-                    }
+                    // (not the newline - PHP emits it as T_WHITESPACE)
+                    self.pos = line_comment_end(self.source, self.pos);
                     if self.preserve_trivia {
                         let bytes = self.source[c_start..self.pos].to_vec();
                         self.trivia_buffer.push(Token::new(
@@ -188,21 +187,17 @@ impl<'a> Lexer<'a> {
                             self.peek_at(1),
                             Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') | Some(b'/')
                         );
-                    loop {
-                        match self.advance() {
-                            Some(b'*') if self.peek() == Some(b'/') => {
-                                self.advance();
-                                break;
-                            }
-                            None => {
-                                crate::push_lexer_error(
-                                    format!("Unterminated comment starting line {}", c_line),
-                                    self.line,
-                                );
-                                break;
-                            }
-                            _ => {}
-                        }
+                    // (up to the first `*/`, the newlines counted in one pass)
+                    let rest = &self.source[self.pos..];
+                    let end = rest.windows(2).position(|w| w == b"*/");
+                    let body = &rest[..end.map_or(rest.len(), |e| e + 2)];
+                    self.line += body.iter().filter(|&&c| c == b'\n').count() as u32;
+                    self.pos += body.len();
+                    if end.is_none() {
+                        crate::push_lexer_error(
+                            format!("Unterminated comment starting line {}", c_line),
+                            self.line,
+                        );
                     }
                     if self.preserve_trivia {
                         let bytes = self.source[c_start..self.pos].to_vec();
@@ -234,16 +229,8 @@ impl<'a> Lexer<'a> {
                     let c_start = self.pos;
                     let c_line = self.line;
                     self.advance();
-                    while let Some(ch) = self.peek() {
-                        if ch == b'\n' {
-                            // Do NOT consume the newline - PHP emits it as T_WHITESPACE
-                            break;
-                        }
-                        if ch == b'?' && self.peek_at(1) == Some(b'>') {
-                            break;
-                        }
-                        self.advance();
-                    }
+                    // (not the newline - PHP emits it as T_WHITESPACE)
+                    self.pos = line_comment_end(self.source, self.pos);
                     if self.preserve_trivia {
                         let bytes = self.source[c_start..self.pos].to_vec();
                         self.trivia_buffer.push(Token::new(
@@ -259,14 +246,17 @@ impl<'a> Lexer<'a> {
 
     fn scan_identifier(&mut self) -> Vec<u8> {
         let start = self.pos;
-        while let Some(ch) = self.peek() {
+        let src = self.source;
+        let mut p = start;
+        while let Some(&ch) = src.get(p) {
             if ch.is_ascii_alphanumeric() || ch == b'_' || ch >= 0x80 {
-                self.advance();
+                p += 1;
             } else {
                 break;
             }
         }
-        self.source[start..self.pos].to_vec()
+        self.pos = p;
+        src[start..p].to_vec()
     }
 
     /// Consume any `("\\"{LABEL})+` continuing the label just scanned;
@@ -909,9 +899,8 @@ impl<'a> Lexer<'a> {
 
     pub fn next_token(&mut self) -> Token {
         // Return pending tokens first
-        if let Some(token) = self.pending.first().cloned() {
-            self.pending.remove(0);
-            return token;
+        if !self.pending.is_empty() {
+            return self.pending.remove(0);
         }
 
         let token = match self.mode() {
@@ -2152,7 +2141,7 @@ impl<'a> Lexer<'a> {
     /// Tokenize the entire source into a vector
     pub fn tokenize(&mut self) -> Vec<Token> {
         let _ = crate::take_lexer_error();
-        let mut tokens = Vec::new();
+        let mut tokens = Vec::with_capacity(self.source.len() / 8 + 16);
         // `__halt_compiler();` at the outermost scope stops the lexer
         // (zend_stop_lexing()): what follows is data, not code.
         let mut depth: i32 = 0;
@@ -2514,4 +2503,16 @@ mod tests {
         assert_eq!(tokens[3].kind, TokenKind::LongNumber(10));
         assert_eq!(tokens[5].kind, TokenKind::LongNumber(63));
     }
+}
+
+/// Where a `//` or `#` comment starting before `p` ends: at the newline
+/// (not included) or at a `?>`, or at the end of `src`.
+fn line_comment_end(src: &[u8], mut p: usize) -> usize {
+    while let Some(&ch) = src.get(p) {
+        if ch == b'\n' || (ch == b'?' && src.get(p + 1) == Some(&b'>')) {
+            break;
+        }
+        p += 1;
+    }
+    p
 }
