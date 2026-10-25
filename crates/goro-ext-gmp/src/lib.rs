@@ -582,6 +582,11 @@ fn parse_bigint_str_strict(s: &str, base: u32) -> Result<Int, String> {
     if start >= bytes.len() {
         return Err("only sign".to_string());
     }
+    // mpz_set_str(): a digit must follow the sign (white space is skipped
+    // only before the sign and between digits).
+    if negative && (bytes[start] as char).is_ascii_whitespace() {
+        return Err("no digit after sign".to_string());
+    }
 
     // Auto-detect prefix when base is 0 or compatible.
     let (actual_base, digit_start, allow_octal_zero_prefix) =
