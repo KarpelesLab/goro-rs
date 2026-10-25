@@ -4178,6 +4178,9 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let entries: Vec<(ArrayKey, Vec<u8>, Value)> = vm
             .object_prop_table(&obj)
             .into_iter()
+            // (php_array_walk() skips IS_UNDEF slots: uninitialized and
+            // virtual properties)
+            .filter(|e| !matches!(e.value, Value::Undef))
             .map(|e| {
                 let storage = match &e.slot {
                     Some(sl) => sl
@@ -6621,6 +6624,20 @@ fn array_column_fetch(vm: &mut Vm, data: &Value, name: &Value) -> Option<Value> 
                     }
                 }
             }
+            // A get hook runs (on a still-lazy object too) when accessible.
+            if let Some(r) = vm.call_get_hook_if_accessible(o, &pname) {
+                return r.ok().map(|v| v.deref());
+            }
+            // has_property() initializes a lazy object.
+            let o = &if Vm::is_uninit_lazy(o) {
+                vm.maybe_run_lazy_init(o);
+                if vm.current_exception.is_some() {
+                    return None;
+                }
+                vm.proxy_redirect(o)
+            } else {
+                o.clone()
+            };
             let class_lower = o.borrow().class_name.to_ascii_lowercase();
             let scope = vm.current_class_scope().map(|c| c.to_ascii_lowercase());
             let (accessible, declared) = match vm.get_class_def(&class_lower).and_then(|c| {
