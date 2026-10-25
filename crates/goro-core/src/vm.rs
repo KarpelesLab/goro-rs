@@ -45358,7 +45358,17 @@ impl Vm {
                         if let Some(f) = native_handlers(obj).and_then(|h| h.has_property) {
                             // empty($o->p): has_property(ZEND_PROPERTY_NOT_EMPTY)
                             let check = Self::is_empty_prop_probe(op_array, ip, &op) as u8;
-                            if let Some(b) = f(self, obj, prop_name.as_bytes(), check) {
+                            // (the handler's diagnostics are not silenced by
+                            // isset()'s own suppression)
+                            let saved_er = self.error_reporting;
+                            if saved_er == crate::errdisplay::ER_SILENT {
+                                if let Some(outer) = self.error_reporting_stack.last() {
+                                    self.error_reporting = *outer;
+                                }
+                            }
+                            let r = f(self, obj, prop_name.as_bytes(), check);
+                            self.error_reporting = saved_er;
+                            if let Some(b) = r {
                                 native_exc_check!(
                                     self,
                                     exception_handlers,
