@@ -1800,6 +1800,10 @@ fn execute_php_inner_impl(
         b"docref_ext".to_vec(),
         Value::String(PhpString::from_bytes(b".html")),
     );
+    vm.constants.insert(
+        b"html_errors".to_vec(),
+        Value::String(PhpString::from_bytes(b"0")),
+    );
     for (k, v) in RUN_TESTS_OPCACHE_INI {
         vm.constants.insert(
             k.as_bytes().to_vec(),
