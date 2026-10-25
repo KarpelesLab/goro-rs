@@ -681,6 +681,38 @@ impl SiteCaches {
     }
 }
 
+/// A map of an op array's sites by opcode index (the caches of
+/// SiteCaches): a slot per opcode, up to the last one written (an
+/// opcode's lookup is an index, not a hash).
+#[derive(Debug, Clone)]
+pub(crate) struct IpMap<T>(Vec<Option<Box<T>>>);
+
+impl<T> Default for IpMap<T> {
+    fn default() -> Self {
+        IpMap(Vec::new())
+    }
+}
+
+impl<T> IpMap<T> {
+    #[inline]
+    pub(crate) fn get(&self, ip: &u32) -> Option<&T> {
+        self.0.get(*ip as usize)?.as_deref()
+    }
+
+    #[inline]
+    pub(crate) fn get_mut(&mut self, ip: &u32) -> Option<&mut T> {
+        self.0.get_mut(*ip as usize)?.as_deref_mut()
+    }
+
+    pub(crate) fn insert(&mut self, ip: u32, v: T) -> Option<T> {
+        let i = ip as usize;
+        if self.0.len() <= i {
+            self.0.resize_with(i + 1, || None);
+        }
+        self.0[i].replace(Box::new(v)).map(|b| *b)
+    }
+}
+
 /// See OpArray::sites; entries are by opcode index.
 #[derive(Debug, Clone)]
 pub(crate) struct SiteCaches {
@@ -688,34 +720,33 @@ pub(crate) struct SiteCaches {
     epoch: u32,
     /// What the plain function calls of the INIT_FCALLs resolved to (see
     /// Vm::plain_call_target).
-    pub(crate) call_targets: crate::fxhash::FxHashMap<u32, crate::vm::CachedCallTarget>,
+    pub(crate) call_targets: IpMap<crate::vm::CachedCallTarget>,
     /// The property accesses by a constant name (see Vm::fast_prop_op): the
     /// index into `prop_slots` of each opcode's site (u16::MAX: none),
     /// made when the first one runs.
     pub(crate) prop_ids: Vec<u16>,
     pub(crate) prop_slots: Vec<PropSlot>,
     /// What the INIT_METHOD_CALLs found (see Vm::init_method_call_fast).
-    pub(crate) method_sites: crate::fxhash::FxHashMap<u32, crate::vm::MethodSite>,
+    pub(crate) method_sites: IpMap<crate::vm::MethodSite>,
     /// What the forwarding calls (self::m(), ...) last resolved to (see
     /// Vm::push_forward_call).
-    pub(crate) forward_sites: crate::fxhash::FxHashMap<u32, crate::vm::ForwardSite>,
+    pub(crate) forward_sites: IpMap<crate::vm::ForwardSite>,
     /// The INIT_METHOD_CALLs that set up a deferred SPL call: the object's
     /// class name, the pending call's name and whether the method takes
     /// no argument by reference (see Vm::init_spl_method_fast).
-    pub(crate) spl_sites: crate::fxhash::FxHashMap<u32, (Vec<u8>, crate::string::PhpString, bool)>,
+    pub(crate) spl_sites: IpMap<(Vec<u8>, crate::string::PhpString, bool)>,
     /// The template the NEWs of a user class last used (see
     /// Vm::new_object_fast).
-    pub(crate) new_sites: crate::fxhash::FxHashMap<u32, std::rc::Rc<crate::object::NewTemplate>>,
+    pub(crate) new_sites: IpMap<std::rc::Rc<crate::object::NewTemplate>>,
     /// The unqualified namespaced function calls / `f(...)` callables that
     /// fell back to the global function: the namespaced (lowercase) name.
     /// Like the runtime cache of INIT_NS_FCALL_BY_NAME, a function of that
     /// name declared later is not seen by the site.
-    pub(crate) ns_fallbacks: crate::fxhash::FxHashMap<u32, Vec<u8>>,
+    pub(crate) ns_fallbacks: IpMap<Vec<u8>>,
     /// What a class constant fetch (`A::C`, `self::C`, `A::class`) found,
     /// for the class scope it ran in (see Vm::fast_class_const).
     /// (and, of `static::C`, the called class)
-    pub(crate) const_sites:
-        crate::fxhash::FxHashMap<u32, (Option<Vec<u8>>, Option<Vec<u8>>, Value)>,
+    pub(crate) const_sites: IpMap<(Option<Vec<u8>>, Option<Vec<u8>>, Value)>,
 }
 
 impl Default for SiteCaches {
