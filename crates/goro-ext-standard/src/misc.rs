@@ -11334,6 +11334,18 @@ fn shutdown_filtered_streams(vm: &mut Vm) {
         goro_core::value::close_resource(fid);
         let saved = vm.current_exception.take();
         flush_write_filters(vm, fid, true);
+        if vm.current_exception.is_some() {
+            // An exception thrown by a filter while the resources are
+            // destroyed is fatal: the remaining filters are freed without
+            // their onClose().
+            let e = VmError {
+                message: "Uncaught exception".into(),
+                line: vm.current_line,
+            };
+            vm.report_uncaught(&e);
+            crate::stream_filters::reset_all();
+            return;
+        }
         crate::stream_filters::remove_stream_filters(vm, fid);
         let fh = FILE_HANDLES.with(|h| h.borrow_mut().remove(&fid));
         // STDIN/STDOUT/STDERR: PHP_STREAM_FLAG_NO_RSCR_DTOR_CLOSE, the
@@ -12830,6 +12842,7 @@ fn fread_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// (or EOF). false == FAILURE.
 fn fill_read_buffer_filtered(vm: &mut Vm, fid: i64, size: usize) -> bool {
     let to_read_now = size.min(STREAM_CHUNK_SIZE);
+    let mut carry = None;
     loop {
         let (eof, buffered) = FILE_HANDLES.with(|h| {
             h.borrow()
@@ -12884,15 +12897,14 @@ fn fill_read_buffer_filtered(vm: &mut Vm, fid: i64, size: usize) -> bool {
         } else {
             None
         };
-        let r = crate::stream_filters::run_read_chain(vm, fid, data, flags);
+        let r = crate::stream_filters::run_read_chain(vm, fid, data, flags, &mut carry);
         match r.status {
             crate::stream_filters::PSFS_PASS_ON => FILE_HANDLES.with(|h| {
                 if let Some(fh) = h.borrow_mut().get_mut(&fid) {
                     fh.filter_read_ready.extend_from_slice(&r.out);
                 }
             }),
-            crate::stream_filters::PSFS_FEED_ME => {}
-            _ => {
+            crate::stream_filters::PSFS_ERR_FATAL => {
                 FILE_HANDLES.with(|h| {
                     if let Some(fh) = h.borrow_mut().get_mut(&fid) {
                         fh.eof = true;
@@ -12901,6 +12913,8 @@ fn fill_read_buffer_filtered(vm: &mut Vm, fid: i64, size: usize) -> bool {
                 });
                 return false;
             }
+            // PSFS_FEED_ME, or a status no case handles: read on.
+            _ => {}
         }
         if justread <= 0 {
             return true;

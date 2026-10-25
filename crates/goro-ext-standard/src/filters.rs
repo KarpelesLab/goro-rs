@@ -634,10 +634,26 @@ fn run_chain(
     vm: &mut Vm,
     chain: &[FilterRef],
     data: Option<&[u8]>,
-    mut consumed: Option<&mut usize>,
+    consumed: Option<&mut usize>,
     flags: i32,
 ) -> ChainResult {
-    let mut inp: BrigadeRef = Rc::new(RefCell::new(Brigade::new()));
+    run_chain_carry(vm, chain, data, consumed, flags, &mut None)
+}
+
+/// run_chain() with the input brigade of the previous round of the same
+/// read (`carry`): buckets a filter left there without passing data on
+/// are handed in again (php_stream_fill_read_buffer()'s brig_in).
+fn run_chain_carry(
+    vm: &mut Vm,
+    chain: &[FilterRef],
+    data: Option<&[u8]>,
+    mut consumed: Option<&mut usize>,
+    flags: i32,
+    carry: &mut Option<BrigadeRef>,
+) -> ChainResult {
+    let mut inp: BrigadeRef = carry
+        .take()
+        .unwrap_or_else(|| Rc::new(RefCell::new(Brigade::new())));
     let mut outp: BrigadeRef = Rc::new(RefCell::new(Brigade::new()));
     if let Some(d) = data {
         inp.borrow_mut().append(new_bucket(d.to_vec()));
@@ -659,6 +675,9 @@ fn run_chain(
     let out = if status == PSFS_PASS_ON {
         inp.borrow_mut().take_all()
     } else {
+        if status != PSFS_ERR_FATAL && !inp.borrow().is_empty() {
+            *carry = Some(inp);
+        }
         Vec::new()
     };
     ChainResult { status, out }
@@ -691,9 +710,22 @@ pub fn run_write_chain(
 /// One iteration of php_stream_fill_read_buffer()'s filtered loop: feed
 /// `data` (a chunk just read, None when nothing was read) through the read
 /// chain.
-pub fn run_read_chain(vm: &mut Vm, stream: i64, data: Option<&[u8]>, flags: i32) -> ChainResult {
+pub fn run_read_chain(
+    vm: &mut Vm,
+    stream: i64,
+    data: Option<&[u8]>,
+    flags: i32,
+    carry: &mut Option<BrigadeRef>,
+) -> ChainResult {
     let chain = chain_of(stream, true);
-    run_chain(vm, &chain, data.filter(|d| !d.is_empty()), None, flags)
+    run_chain_carry(
+        vm,
+        &chain,
+        data.filter(|d| !d.is_empty()),
+        None,
+        flags,
+        carry,
+    )
 }
 
 pub fn chain_has_direction(stream_id: i64, direction: i64) -> bool {

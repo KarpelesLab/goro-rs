@@ -1756,6 +1756,7 @@ fn fill_read_buffer(vm: &mut Vm, fid: i64, us: &Us, size: usize) -> Result<bool,
     if has_read_filters(fid) {
         let chunk = us.borrow().chunk_size;
         let to_read_now = size.min(chunk);
+        let mut carry = None;
         loop {
             {
                 let b = us.borrow();
@@ -1783,20 +1784,21 @@ fn fill_read_buffer(vm: &mut Vm, fid: i64, us: &Us, size: usize) -> Result<bool,
             } else {
                 crate::stream_filters::PSFS_FLAG_FLUSH_INC
             };
-            let r = crate::stream_filters::run_read_chain(vm, fid, Some(&data), flags);
+            let r = crate::stream_filters::run_read_chain(vm, fid, Some(&data), flags, &mut carry);
             match r.status {
                 crate::stream_filters::PSFS_PASS_ON => {
                     let mut b = us.borrow_mut();
                     compact(&mut b);
                     b.readbuf.extend_from_slice(&r.out);
                 }
-                crate::stream_filters::PSFS_FEED_ME => {}
-                _ => {
+                crate::stream_filters::PSFS_ERR_FATAL => {
                     let mut b = us.borrow_mut();
                     b.eof = true;
                     b.fatal_error = true;
                     return Ok(false);
                 }
+                // PSFS_FEED_ME, or a status no case handles: read on.
+                _ => {}
             }
             if justread == 0 {
                 break;
