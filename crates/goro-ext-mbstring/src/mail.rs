@@ -675,6 +675,8 @@ pub fn php_mail(
     }
     data.extend_from_slice(line_sep);
     let cmd_s = String::from_utf8_lossy(&cmd).to_string();
+    // Output written so far reaches stdout before the mailer's.
+    vm.flush_cli_output();
     let child = std::process::Command::new("/bin/sh")
         .arg("-c")
         .arg(&cmd_s)
