@@ -2264,8 +2264,78 @@ impl<'a, S: Sink> Parser<'a, S> {
             return;
         }
         self.skip(4);
+        // xmlParseComment()'s fast path over ASCII content: a "--" is
+        // reported at its first hyphen and both are stepped over
         let mut buf: Vec<u8> = Vec::new();
-        // q, r, cur
+        let mut have_buf = false;
+        loop {
+            let (start, end) = {
+                let i = self.inp();
+                let d = &i.data;
+                let mut j = i.pos;
+                while j < d.len() {
+                    let c = d[j];
+                    if (c > b'-' && c <= 0x7F)
+                        || (0x20..b'-').contains(&c)
+                        || c == 0x09
+                        || c == 0x0A
+                    {
+                        j += 1;
+                    } else {
+                        break;
+                    }
+                }
+                (i.pos, j)
+            };
+            if end > start {
+                let chunk = self.inp().data[start..end].to_vec();
+                buf.extend_from_slice(&chunk);
+                have_buf = true;
+                self.inp_mut().pos = end;
+            }
+            if self.cur() == b'\r' && self.nxt(1) == b'\n' {
+                // (the CR of a CR LF pair is dropped)
+                self.skip(1);
+                continue;
+            }
+            if self.cur() == b'-' {
+                if self.nxt(1) == b'-' {
+                    if self.nxt(2) == b'>' {
+                        self.skip(3);
+                        if self.sax_ok() {
+                            let s = String::from_utf8_lossy(&buf).into_owned();
+                            self.sink.comment(&mut self.st, &s);
+                        }
+                        return;
+                    }
+                    let msg = if have_buf {
+                        let partial = String::from_utf8_lossy(&buf).into_owned();
+                        let p50: String = partial.chars().take(50).collect();
+                        format!("Double hyphen within comment: <!--{}\n", p50)
+                    } else {
+                        "Double hyphen within comment\n".to_string()
+                    };
+                    self.fatal_msg(XML_ERR_HYPHEN_IN_COMMENT, msg);
+                    if self.stopped() {
+                        return;
+                    }
+                    buf.extend_from_slice(b"--");
+                    have_buf = true;
+                    self.skip(2);
+                } else {
+                    buf.push(b'-');
+                    have_buf = true;
+                    self.skip(1);
+                }
+                continue;
+            }
+            break;
+        }
+        self.parse_comment_complex(buf);
+    }
+
+    /// xmlParseCommentComplex
+    fn parse_comment_complex(&mut self, mut buf: Vec<u8>) {
         let (mut q, ql) = self.cur_char();
         if ql == 0 {
             self.fatal_msg(
@@ -2297,41 +2367,6 @@ impl<'a, S: Sink> Parser<'a, S> {
             );
             return;
         }
-        // special-case "<!---->" and "<!--->" handled by the loop
-        if q == b'-' as u32 && r == b'-' as u32 {
-            // "<!---" followed by '-'... check for "-->" immediately: "<!---->"
-            self.skip(rl);
-            let (c, _l) = self.cur_char();
-            if c == b'>' as u32 {
-                self.skip(1);
-                if self.sax_ok() {
-                    self.sink.comment(&mut self.st, "");
-                }
-                return;
-            }
-            self.fatal(XML_ERR_HYPHEN_IN_COMMENT, None);
-            // continue as complex
-            let (mut cur, mut l) = self.cur_char();
-            loop {
-                if l == 0 || !is_char(cur) {
-                    break;
-                }
-                if cur == b'>' as u32 && r == b'-' as u32 && q == b'-' as u32 {
-                    break;
-                }
-                if r == b'-' as u32 && q == b'-' as u32 {
-                    self.fatal(XML_ERR_HYPHEN_IN_COMMENT, None);
-                }
-                push_char(&mut buf, q);
-                q = r;
-                r = cur;
-                self.skip(l);
-                let x = self.cur_char();
-                cur = x.0;
-                l = x.1;
-            }
-            return self.finish_comment(buf, cur, l);
-        }
         self.skip(rl);
         let (mut cur, mut l) = self.cur_char();
         if l == 0 {
@@ -2349,12 +2384,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                 break;
             }
             if r == b'-' as u32 && q == b'-' as u32 {
-                let partial = String::from_utf8_lossy(&buf).into_owned();
-                let p50: String = partial.chars().take(50).collect();
-                self.fatal_msg(
-                    XML_ERR_HYPHEN_IN_COMMENT,
-                    format!("Double hyphen within comment: <!--{}\n", p50),
-                );
+                self.fatal(XML_ERR_HYPHEN_IN_COMMENT, None);
             }
             push_char(&mut buf, q);
             q = r;
