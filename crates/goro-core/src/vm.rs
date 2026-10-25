@@ -22563,6 +22563,8 @@ impl Vm {
                             iter_handles: foreach_iter_handles,
                             cur_key: foreach_cur_key,
                             weakmap: weakmap_iter_keys,
+                            ref_cells: foreach_ref_cells,
+                            handler_depth: exception_handlers.len() as u32,
                         },
                         foreach_iter_handles.is_empty() && foreach_ref_arrays.is_empty(),
                         (bound || globals_cv.is_some()).then_some(globals_cv),

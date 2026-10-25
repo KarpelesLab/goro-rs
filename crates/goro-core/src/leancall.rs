@@ -547,6 +547,7 @@ impl Vm {
                 iter_handles,
                 cur_key,
                 weakmap_iter_keys,
+                ref_cells,
                 ..
             } = &mut *fe;
             let no_release = !self.has_release_work();
@@ -565,6 +566,9 @@ impl Vm {
                     iter_handles,
                     cur_key,
                     weakmap: weakmap_iter_keys,
+                    ref_cells,
+                    // (a lean callee has entered no try block)
+                    handler_depth: 0,
                 },
                 true,
                 None,

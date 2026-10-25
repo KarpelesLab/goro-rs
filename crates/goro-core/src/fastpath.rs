@@ -1209,6 +1209,42 @@ fn fast_foreach_next(
     Fast::Done
 }
 
+/// FE_FREE of the iterator `op` releases (see the general handler of
+/// FREE_LOOP_VAR), when no destructor can be due and the release only frees
+/// memory. False: nothing was done.
+#[inline(never)]
+fn fast_free_loop_var(
+    op: &Op,
+    tmps: &mut [Value],
+    fe: &FeView,
+    globals: &Rc<RefCell<crate::array::PhpArray>>,
+) -> bool {
+    let OperandType::Tmp(t) = op.op1 else {
+        return false;
+    };
+    if (!fe.iter_handles.is_empty() && fe.iter_handles.contains_key(&t))
+        || (!fe.ref_cells.is_empty() && fe.ref_cells.contains_key(&t))
+    {
+        return false;
+    }
+    let Some(slot) = tmps.get_mut(t as usize) else {
+        return false;
+    };
+    match slot {
+        Value::Array(a) if Rc::strong_count(a) == 1 && crate::gc::gc_pending() => return false,
+        Value::Reference(_) | Value::Generator(_) | Value::Resource(_) => return false,
+        _ => {}
+    }
+    if !drops_quietly_deep(slot, &mut 256, globals) {
+        return false;
+    }
+    if matches!(slot, Value::Object(_)) {
+        crate::gc::possible_root(slot);
+    }
+    *slot = Value::Undef;
+    true
+}
+
 /// The end of a foreach loop over an array iterated live (FE_FETCH found
 /// no next element): the general handler's end of it (the iterator's
 /// position forgotten, its temporary released, the jump out of the loop),
@@ -1378,7 +1414,10 @@ impl<'a> LazyFreeMask<'a> {
 /// drop a holder: each is held elsewhere too, and no destructor is due
 /// (`no_release`: the release point that follows does nothing). The fast
 /// path then runs the opcode and releases them itself (release_consumed()).
-/// None: the opcode is left to the dispatch loop.
+/// The value a write stores (`$a[k] = f()`, `$o->p = f()`) may be held by
+/// the temporary alone: the container holds it then, or its release only
+/// frees memory (drops_quietly_deep()). None: the opcode is left to the
+/// dispatch loop.
 #[inline]
 fn consumed_tmps(
     free_mask: &[u8],
@@ -1386,6 +1425,7 @@ fn consumed_tmps(
     op: &Op,
     tmps: &[Value],
     no_release: bool,
+    globals: &Rc<RefCell<crate::array::PhpArray>>,
 ) -> Option<u8> {
     let m = free_mask.get(ip).copied().unwrap_or(0);
     if m & 11 == 0 {
@@ -1408,8 +1448,18 @@ fn consumed_tmps(
             Some(Value::Array(x)) => Rc::strong_count(x) > 1,
             _ => continue,
         };
-        if !shared || !no_release {
+        if !no_release {
             return None;
+        }
+        if !shared {
+            let stored = b == 2
+                && matches!(
+                    op.opcode,
+                    OpCode::ArraySet | OpCode::ArrayAppend | OpCode::PropertySet
+                );
+            if !stored || !drops_quietly_deep(&tmps[*i as usize], &mut 256, globals) {
+                return None;
+            }
         }
         rel |= b;
     }
@@ -1480,6 +1530,9 @@ pub(crate) struct FeView<'a> {
     pub(crate) iter_handles: &'a crate::fxhash::FxHashMap<u32, Value>,
     pub(crate) cur_key: &'a crate::fxhash::FxHashMap<u32, crate::array::ArrayKey>,
     pub(crate) weakmap: &'a crate::fxhash::FxHashMap<u32, Vec<Value>>,
+    pub(crate) ref_cells: &'a crate::fxhash::FxHashMap<u32, Rc<RefCell<Value>>>,
+    /// The depth of the frame's exception handler stack (SaveHandlerDepth).
+    pub(crate) handler_depth: u32,
 }
 
 impl FeView<'_> {
@@ -1646,6 +1699,8 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::BitwiseOr
             | OpCode::BitwiseXor
             | OpCode::ArrayNew
+            | OpCode::SaveHandlerDepth
+            | OpCode::FreeLoopVar
     )
 }
 
@@ -1788,14 +1843,18 @@ impl crate::vm::Vm {
                     if self.isset_get_cache.is_some() {
                         break 'run ip;
                     }
-                    let Some(rel) = consumed_tmps(free_mask.get(), ip, op, tmps, no_release) else {
+                    let Some(rel) =
+                        consumed_tmps(free_mask.get(), ip, op, tmps, no_release, &self.globals)
+                    else {
                         break 'run ip;
                     };
                     let f = self.fast_prop_op(op_array, ip, cvs, tmps);
                     release_consumed(rel, f, op, tmps)
                 }
                 OpCode::ArrayGet | OpCode::ArraySet | OpCode::ArrayAppend => {
-                    let Some(rel) = consumed_tmps(free_mask.get(), ip, op, tmps, no_release) else {
+                    let Some(rel) =
+                        consumed_tmps(free_mask.get(), ip, op, tmps, no_release, &self.globals)
+                    else {
                         break 'run ip;
                     };
                     // (a write into the container the previous opcode fetched)
@@ -1807,7 +1866,9 @@ impl crate::vm::Vm {
                 }
                 // FETCH_DIM_W of an array element (see fast_dim_fetch_w)
                 OpCode::ArrayGetW => {
-                    let Some(rel) = consumed_tmps(free_mask.get(), ip, op, tmps, no_release) else {
+                    let Some(rel) =
+                        consumed_tmps(free_mask.get(), ip, op, tmps, no_release, &self.globals)
+                    else {
                         break 'run ip;
                     };
                     let f = self.fast_dim_fetch_w(op_array, ip, cvs, tmps);
@@ -1815,14 +1876,18 @@ impl crate::vm::Vm {
                 }
                 // (on an array, FETCH_DIM_IS's isset answers as ISSET_ISEMPTY_DIM's)
                 OpCode::ArrayIsset | OpCode::ArrayIssetFetch => {
-                    let Some(rel) = consumed_tmps(free_mask.get(), ip, op, tmps, no_release) else {
+                    let Some(rel) =
+                        consumed_tmps(free_mask.get(), ip, op, tmps, no_release, &self.globals)
+                    else {
                         break 'run ip;
                     };
                     let f = self.fast_dim_isset(op, cvs, tmps, literals);
                     release_consumed(rel, f, op, tmps)
                 }
                 OpCode::IssetCheck => {
-                    let Some(rel) = consumed_tmps(free_mask.get(), ip, op, tmps, no_release) else {
+                    let Some(rel) =
+                        consumed_tmps(free_mask.get(), ip, op, tmps, no_release, &self.globals)
+                    else {
                         break 'run ip;
                     };
                     let f = fast_isset_check(op, cvs, tmps, literals);
@@ -1928,11 +1993,15 @@ impl crate::vm::Vm {
                 OpCode::JmpNz => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::Assign => match fast_op(op, cvs, tmps, literals, refs_ok, no_release) {
                     Fast::No => {
-                        // (a temporary no running loop holds)
+                        // (a temporary no running loop holds; or the iterator
+                        // of a loop left by a `break`, released: FE_FREE)
                         let tmp_free = match op.op1 {
                             OperandType::Tmp(t) => {
                                 !fe.busy().any_in(t, t + 1)
-                                    && (fe.positions.is_empty() || !fe.positions.contains_key(&t))
+                                    && (fe.positions.is_empty()
+                                        || !fe.positions.contains_key(&t)
+                                        || matches!(op.op2, OperandType::Const(c)
+                                            if matches!(literals.get(c as usize), Some(Value::Undef))))
                             }
                             _ => false,
                         };
@@ -1971,6 +2040,24 @@ impl crate::vm::Vm {
                     Fast::Done
                 }
                 OpCode::Nop => Fast::Done,
+                // (the depth of the exception handler stack at a loop's
+                // start, for the release of its iterator on `return`)
+                OpCode::SaveHandlerDepth => match op.result {
+                    OperandType::Tmp(t) if tmp_writable(&op.result, tmps) => {
+                        tmps[t as usize] = Value::Long(i64::from(fe.handler_depth));
+                        Fast::Done
+                    }
+                    _ => break 'run ip,
+                },
+                // The release of a loop's iterator on `break` or `return`
+                // (FE_FREE), when it only frees memory.
+                OpCode::FreeLoopVar if no_release => {
+                    if fast_free_loop_var(op, tmps, fe, &self.globals) {
+                        Fast::Done
+                    } else {
+                        break 'run ip;
+                    }
+                }
                 OpCode::ForeachNext => fast_foreach_next(op, tmps, fe, no_release, &self.globals),
                 OpCode::ForeachKey => fast_foreach_key(op, tmps, fe),
                 // A public method of a user class by a constant name (what
