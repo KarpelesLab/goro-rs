@@ -62335,7 +62335,10 @@ impl Vm {
             }
         };
         self.hrh_cells.retain(|(_, w)| w.strong_count() > 0);
-        self.hrh_cells.push((self.call_depth, Rc::downgrade(&cell)));
+        // (the depth counts the lean calls around the frame: a builtin run
+        // by a lean callee is not this frame's)
+        let depth = self.call_depth + self.lean_depth;
+        self.hrh_cells.push((depth, Rc::downgrade(&cell)));
     }
 
     /// zend_set_local_var_str() for `$http_response_header`: the variable
@@ -62343,11 +62346,12 @@ impl Vm {
     /// its code uses the variable).
     pub fn set_http_response_header(&mut self, value: Value) {
         let name = b"http_response_header";
-        if self.is_global_scope {
+        // (a lean callee of the global scope runs with is_global_scope set)
+        if self.is_global_scope && self.lean_depth == 0 {
             self.global_assign(name, value);
             return;
         }
-        let depth = self.call_depth;
+        let depth = self.call_depth + self.lean_depth;
         self.hrh_cells.retain(|(_, w)| w.strong_count() > 0);
         let cell = self
             .hrh_cells
