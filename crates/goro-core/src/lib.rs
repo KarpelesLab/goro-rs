@@ -8,6 +8,7 @@ pub mod class_table;
 pub mod clone;
 pub mod closure;
 pub mod compiler;
+pub mod const_order;
 pub mod crypto;
 pub mod csv;
 pub mod custom_fiber;

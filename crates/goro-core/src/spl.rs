@@ -235,8 +235,19 @@ impl Vm {
                 return Value::Null;
             }
         }
-        // (ZEND_DO_FCALL: before the arguments are parsed)
+        // (ZEND_DO_FCALL: before the arguments are parsed, but after an
+        // unknown named argument failed at the send)
         if let Some((since, message)) = stub.deprecated {
+            if !stub.variadic {
+                if let Some((n, _)) = named
+                    .iter()
+                    .find(|(n, _)| !stub.params.iter().any(|p| p.as_bytes() == n.as_slice()))
+                {
+                    let msg = format!("Unknown named parameter ${}", crate::string::msg_str(n));
+                    self.spl_throw(b"Error", &msg);
+                    return Value::Null;
+                }
+            }
             let msg = if message.is_empty() {
                 format!(
                     "Method {}::{}() is deprecated since {}",

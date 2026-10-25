@@ -145,7 +145,7 @@ pub fn new_vm(ini: &IniSettings, sapi: &str) -> Vm {
     set_memory_limit(128 * 1024 * 1024);
     set_php_precision(14);
     set_php_serialize_precision(-1);
-    goro_parser::set_short_open_tag(ini_lookup(ini, "short_open_tag").is_some_and(ini_truthy));
+    goro_parser::set_short_open_tag(ini_lookup(ini, "short_open_tag").is_none_or(ini_truthy));
     goro_ext_mbstring::zend_multibyte::install(&|k: &str| {
         ini_lookup(ini, k).map(|v| v.to_string())
     });

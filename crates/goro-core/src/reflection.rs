@@ -10721,6 +10721,10 @@ pub fn reflection_extension_method(
                     result.set(key, v.clone());
                 }
             }
+            if ext_lower != "core" {
+                crate::const_order::add_unlisted_module_constants(vm, &ext_lower, &mut result);
+                crate::const_order::order_module_constants(&ext_lower, &mut result);
+            }
             Some(Value::Array(Rc::new(RefCell::new(result))))
         }
         b"getinientries" => {

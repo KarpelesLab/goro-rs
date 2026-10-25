@@ -15477,33 +15477,7 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
             if vm.constant_files.contains_key(name) {
                 continue;
             }
-            let stub_ext = goro_core::stub_sigs::CONSTANTS
-                .binary_search_by(|c| c.name.as_bytes().cmp(name.as_slice()))
-                .ok()
-                .map(|i| goro_core::stub_sigs::CONSTANTS[i].ext);
-            let target = if name.starts_with(b"LIBXML_") {
-                "libxml"
-            } else if name.starts_with(b"MYSQLI_") {
-                "mysqli"
-            } else if let Some(e) = stub_ext {
-                e
-            } else if name.starts_with(b"STREAM_")
-                || name.starts_with(b"IMAGETYPE_")
-                || name == b"YESEXPR"
-                || name == b"YESSTR"
-            {
-                "standard"
-            } else if name.starts_with(b"ZLIB_") {
-                "zlib"
-            } else if name.starts_with(b"Dom\\") || name.starts_with(b"dom\\") {
-                "dom"
-            } else if name.starts_with(b"MHASH_") {
-                "hash"
-            } else if name.starts_with(b"MB_") {
-                "mbstring"
-            } else {
-                "Core"
-            };
+            let target = goro_core::const_order::fallback_constant_module(name);
             bucket(&mut buckets, target).set(key(name), val.clone());
         }
         // Core first, then the modules in module order.
@@ -15518,6 +15492,11 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
                 .unwrap_or(usize::MAX)
         };
         buckets.sort_by_key(|(m, _)| rank(m));
+        for (module, arr) in buckets.iter_mut() {
+            if module != "Core" {
+                goro_core::const_order::order_module_constants(module, arr);
+            }
+        }
         for (module, arr) in buckets {
             if !arr.is_empty() || module == "Core" {
                 let name = MODULE_ORDER

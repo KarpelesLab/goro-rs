@@ -91,6 +91,7 @@ const CORE_INI_DEFAULTS: &[(&[u8], &[u8])] = &[
     (b"report_zend_debug", b"0"),
     (b"sendmail_from", b""),
     (b"sendmail_path", b"/usr/sbin/sendmail -t -i"),
+    (b"short_open_tag", b"1"),
     (b"sys_temp_dir", b""),
     (b"syslog.facility", b"LOG_USER"),
     (b"syslog.filter", b"no-ctrl"),
