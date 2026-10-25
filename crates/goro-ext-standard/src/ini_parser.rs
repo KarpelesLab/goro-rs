@@ -776,6 +776,9 @@ struct Parser<'a, 'b> {
     /// zend_parse_ini_string() with a callback of its own: the parsed
     /// entries are recorded instead of building an array.
     events: Option<Vec<IniEvent>>,
+    /// CG(ini_parser_unbuffered_errors): the syntax error is kept for the
+    /// caller instead of raising a warning.
+    unbuffered_error: Option<Option<String>>,
 }
 
 /// One callback of zend_parse_ini_string() (ZEND_INI_PARSER_*).
@@ -818,6 +821,10 @@ impl<'a, 'b> Parser<'a, 'b> {
             msg.push_str(&expecting.join(" or "));
         }
         let full = format!("{} in {} on line {}\n", msg, self.filename, self.sc.lineno);
+        if let Some(slot) = &mut self.unbuffered_error {
+            *slot = Some(full);
+            return Err(());
+        }
         self.vm.emit_warning(&full);
         Err(())
     }
@@ -1185,7 +1192,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         Sv::empty()
                     };
                     if *self.peek() != Tok::Ch(b']') {
-                        return self.error(&[]);
+                        return self.error(&["']'"]);
                     }
                     self.next();
                     if let Some(ev) = &mut self.events {
@@ -1211,7 +1218,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         Sv::empty()
                     };
                     if *self.peek() != Tok::Ch(b']') {
-                        return self.error(&[]);
+                        return self.error(&["']'"]);
                     }
                     self.next();
                     if *self.peek() != Tok::Ch(b'=') {
@@ -1256,6 +1263,7 @@ pub fn parse_ini(
         root: PhpArray::new(),
         section: None,
         events: None,
+        unbuffered_error: None,
     };
     if p.parse().is_err() {
         return Value::False;
@@ -1289,8 +1297,40 @@ pub fn parse_ini_events(
         root: PhpArray::new(),
         section: None,
         events: Some(Vec::new()),
+        unbuffered_error: None,
     };
     let r = p.parse();
     let ev = p.events.take().unwrap_or_default();
     if r.is_err() { Err(ev) } else { Ok(ev) }
+}
+
+/// php_init_config() / the -d entries: zend_parse_ini_string() with
+/// unbuffered errors. The callbacks made before a syntax error, and the
+/// error ("syntax error, ... in <file> on line N\n").
+pub fn parse_ini_startup(
+    vm: &mut Vm,
+    data: &[u8],
+    filename: &str,
+) -> (Vec<IniEvent>, Option<String>) {
+    let mut p = Parser {
+        sc: Scanner {
+            d: data,
+            pos: 0,
+            st: St::Initial,
+            stack: Vec::new(),
+            lineno: 1,
+            mode: SCANNER_NORMAL,
+        },
+        la: None,
+        vm,
+        filename: filename.to_string(),
+        process_sections: true,
+        root: PhpArray::new(),
+        section: None,
+        events: Some(Vec::new()),
+        unbuffered_error: Some(None),
+    };
+    let _ = p.parse();
+    let ev = p.events.take().unwrap_or_default();
+    (ev, p.unbuffered_error.flatten())
 }

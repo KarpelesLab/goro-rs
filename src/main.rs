@@ -276,7 +276,7 @@ fn scan_ini_dirs(ini: &mut IniSettings) {
                 continue;
             }
             if let Ok(data) = std::fs::read(p) {
-                engine::parse_ini_text(&data, ini);
+                engine::parse_ini_text_file(&data, ini, &p.to_string_lossy());
                 scanned.push(path);
             }
         }
@@ -304,8 +304,8 @@ fn load_php_ini_file(search: Vec<std::path::PathBuf>, ini: &mut IniSettings, sap
                     let full = std::fs::canonicalize(&c).unwrap_or(c.clone());
                     let opened = full.to_string_lossy().into_owned();
                     goro_ext_standard::misc::set_ini_opened_path(Some(opened.clone()));
-                    INI_OPENED_PATH.with(|o| *o.borrow_mut() = Some(opened));
-                    engine::parse_ini_text(&data, ini);
+                    INI_OPENED_PATH.with(|o| *o.borrow_mut() = Some(opened.clone()));
+                    engine::parse_ini_text_file(&data, ini, &opened);
                     return;
                 }
             }

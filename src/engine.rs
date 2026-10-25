@@ -79,6 +79,11 @@ fn ini_truthy(v: &str) -> bool {
 /// does: entries outside of sections and in ordinary sections apply;
 /// [PATH=...] and [HOST=...] sections are not used by the CLI.
 pub fn parse_ini_text(data: &[u8], out: &mut IniSettings) {
+    parse_ini_text_file(data, out, "Unknown");
+}
+
+/// parse_ini_text() of the INI file `filename` (named in syntax errors).
+pub fn parse_ini_text_file(data: &[u8], out: &mut IniSettings, filename: &str) {
     // A scratch engine resolves constants (E_ALL ...) in the INI values; its
     // diagnostics are not shown.
     let mut vm = Vm::new();
@@ -87,6 +92,28 @@ pub fn parse_ini_text(data: &[u8], out: &mut IniSettings) {
         goro_ext_standard::ini_parser::parse_ini(&mut vm, data, true, 0 /* NORMAL */, "");
     let _ = vm.take_output();
     let Value::Array(arr) = parsed else {
+        // A syntax error: the entries before it still apply, and
+        // (CG(ini_parser_unbuffered_errors)) the error goes to stderr.
+        let (events, err) =
+            goro_ext_standard::ini_parser::parse_ini_startup(&mut vm, data, filename);
+        let _ = vm.take_output();
+        let mut skip = false;
+        for ev in events {
+            match ev {
+                goro_ext_standard::ini_parser::IniEvent::Section(name) => {
+                    let upper = name.to_ascii_uppercase();
+                    skip = upper.starts_with(b"PATH") || upper.starts_with(b"HOST");
+                }
+                goro_ext_standard::ini_parser::IniEvent::Entry(k, v) if !skip => out.push((
+                    String::from_utf8_lossy(&k).into_owned(),
+                    String::from_utf8_lossy(&v).into_owned(),
+                )),
+                _ => {}
+            }
+        }
+        if let Some(msg) = err {
+            eprint!("PHP:  {}", msg);
+        }
         return;
     };
     for (k, v) in arr.borrow().iter() {
