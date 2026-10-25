@@ -446,14 +446,22 @@ fn iconv_strpos_impl(
         .chunks(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
-    let Some((hay, _)) = conv::decode_all(haystack, enc) else {
+    let Some((hay, hay_err)) = conv::decode_all(haystack, enc) else {
         return (None, Err::WrongCharset);
     };
+    // glibc's two-step conversion reports a bad sequence along with the
+    // character before it (the C code checks errno each character).
+    let mut err = Err::Success;
     let mut ret: Option<usize> = None;
     let mut match_ofs: Option<usize> = None;
     let mut np = 0usize; // ndl_buf_p (in characters)
     let mut cnt = 0usize;
     for &c in &hay {
+        if cnt + 1 == hay.len() {
+            if let Some(e) = hay_err {
+                err = e.into();
+            }
+        }
         if cnt >= offset {
             if c == ndl[np] {
                 if match_ofs.is_none() {
@@ -501,6 +509,9 @@ fn iconv_strpos_impl(
     } else {
         cnt
     };
+    if err != Err::Success {
+        return (None, err);
+    }
     if offset > cnt_final {
         return (None, Err::OutByBounds);
     }
