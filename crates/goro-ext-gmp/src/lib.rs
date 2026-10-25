@@ -384,6 +384,21 @@ pub fn gmp_do_operation(
     if !is_gmp_object(a) && !is_gmp_object(b) {
         return None; // Not a GMP operation
     }
+    // Integer operators convert a non-GMP left operand first.
+    if matches!(op, "%" | "<<" | ">>" | "|" | "&" | "^") && !is_gmp_object(a) {
+        let ok = vm.int_op_try_op1_long(a);
+        if vm.current_exception.is_some() {
+            return Some(Err(String::new()));
+        }
+        if !ok {
+            return Some(Err(format!(
+                "Unsupported operand types: {} {} {}",
+                zval_type_name(a),
+                op,
+                zval_type_name(b)
+            )));
+        }
+    }
     if matches!(op, "**" | "<<" | ">>") {
         return Some(shift_operator_helper(vm, op, a, b));
     }

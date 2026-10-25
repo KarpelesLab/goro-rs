@@ -6738,6 +6738,43 @@ impl Vm {
         ))
     }
 
+    /// convert_op1_op2_long()'s first step for an integer operator (`%`,
+    /// `|`, `&`, `^`, `<<`, `>>`) whose left operand is not an
+    /// operator-overloading object: zendi_try_get_long(op1) runs, with its
+    /// diagnostics, before the right operand's do_operation handler is
+    /// tried. false: the conversion failed (the caller reports
+    /// "Unsupported operand types"); an exception thrown by a diagnostic
+    /// handler is left in `current_exception`.
+    #[inline(never)]
+    pub fn int_op_try_op1_long(&mut self, a: &Value) -> bool {
+        match a.deref() {
+            Value::Long(_) | Value::Null | Value::Undef | Value::True | Value::False => true,
+            v @ Value::Double(_) => {
+                self.op_to_long(&v);
+                true
+            }
+            v @ Value::String(_) => {
+                let Value::String(s) = &v else { unreachable!() };
+                match crate::value::parse_numeric_str(s.as_bytes(), true) {
+                    None => false,
+                    Some((_, trailing)) => {
+                        if trailing {
+                            let line = self.current_line;
+                            self.emit_warning_at("A non-numeric value encountered", line);
+                            if self.current_exception.is_some() {
+                                return false;
+                            }
+                        }
+                        self.op_to_long(&v);
+                        true
+                    }
+                }
+            }
+            Value::Object(o) => crate::value::native_cast(&o, 1).is_some(),
+            _ => false,
+        }
+    }
+
     /// zendi_try_get_long() of an integer operator's operand: a
     /// leading-numeric string warns ("A non-numeric value encountered")
     /// before its conversion's own diagnostics, operand by operand.

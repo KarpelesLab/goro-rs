@@ -42,6 +42,7 @@ type IsOperatorType = fn(&Value) -> bool;
 thread_local! {
     static PREV_DO_OPERATION: std::cell::Cell<Option<DoOperation>> = const { std::cell::Cell::new(None) };
     static PREV_IS_TYPE: std::cell::Cell<Option<IsOperatorType>> = const { std::cell::Cell::new(None) };
+    static PREV_COMPARE: std::cell::Cell<Option<ObjectCompare>> = const { std::cell::Cell::new(None) };
 }
 
 pub(crate) fn register(vm: &mut Vm) {
@@ -60,6 +61,49 @@ pub(crate) fn register(vm: &mut Vm) {
     PREV_IS_TYPE.with(|p| p.set(vm.object_is_operator_type));
     vm.object_do_operation = Some(do_operation);
     vm.object_is_operator_type = Some(is_operator_type);
+    PREV_COMPARE.with(|p| p.set(vm.object_compare));
+    vm.object_compare = Some(object_compare);
+}
+
+type ObjectCompare = fn(&mut Vm, &Value, &Value) -> Option<std::cmp::Ordering>;
+
+/// The comparison operators' hook: bcmath_number_compare()'s operand
+/// parsing diagnostics (a float operand is taken as an int, with the
+/// "loses precision" deprecation). The comparison itself is left to the
+/// compare handler (None).
+fn object_compare(vm: &mut Vm, a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    if !is_number(a) && !is_number(b) {
+        return PREV_COMPARE
+            .with(|p| p.get())
+            .and_then(|f| f(vm, a, b));
+    }
+    // op1's own handler compares another object; bools and null never
+    // reach the handler.
+    let skip = |v: &Value| {
+        matches!(
+            v.deref(),
+            Value::Null | Value::Undef | Value::True | Value::False
+        ) || (matches!(v.deref(), Value::Object(_)) && !is_number(v))
+    };
+    if skip(a) || skip(b) {
+        return None;
+    }
+    for v in [a, b] {
+        if !operand_kind(v) {
+            break;
+        }
+        if let Value::Double(d) = v.deref() {
+            if d.fract() != 0.0 {
+                let msg = format!(
+                    "Implicit conversion from float {} to int loses precision",
+                    goro_core::value::format_php_float_repr(d)
+                );
+                let line = vm.current_line;
+                vm.emit_deprecated_at(&msg, line);
+            }
+        }
+    }
+    None
 }
 
 fn compile_prelude() -> Option<(OpArray, Vec<ClassEntry>)> {
@@ -417,6 +461,17 @@ fn do_operation(vm: &mut Vm, opstr: &str, a: &Value, b: &Value) -> Option<Result
             type_name(b)
         )))
     };
+    // mod_function() converts a non-object left operand to int before the
+    // right operand's handler runs.
+    if matches!(op, Op::Mod) && !is_number(a) {
+        let ok = vm.int_op_try_op1_long(a);
+        if vm.current_exception.is_some() {
+            return Some(Err(String::new()));
+        }
+        if !ok {
+            return unsupported();
+        }
+    }
     // Both operands are parsed (deprecations included) before either is
     // converted.
     let pa = operand_kind(a);
