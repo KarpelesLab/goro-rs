@@ -676,6 +676,27 @@ enum FilterArgs<'a> {
     Long(i64),
 }
 
+/// zval_get_long(): objects without a cast handler warn and become 1.
+fn zval_get_long(vm: &mut Vm, v: &Value) -> i64 {
+    match v {
+        Value::Object(o) => {
+            if let Some(c) = goro_core::value::native_cast(o, 1) {
+                return c.to_long();
+            }
+            if let Some(n) = vm.object_to_long.and_then(|f| f(v)) {
+                return n;
+            }
+            let cn = goro_core::value::display_class_name(&o.borrow().class_name);
+            vm.emit_warning(&format!(
+                "Object of class {} could not be converted to int",
+                cn
+            ));
+            1
+        }
+        other => other.to_long(),
+    }
+}
+
 /// php_filter_call()
 fn filter_call(
     vm: &mut Vm,
@@ -700,7 +721,7 @@ fn filter_call(
         }
         FilterArgs::Ht(ht) => {
             if let Some(v) = ht.get_str(b"filter") {
-                filter = v.deref().to_long();
+                filter = zval_get_long(vm, &v.deref());
             }
             if let Some(v) = ht.get_str(b"options") {
                 let v = v.deref();
@@ -714,7 +735,7 @@ fn filter_call(
                 }
             }
             if let Some(v) = ht.get_str(b"flags") {
-                filter_flags = v.deref().to_long();
+                filter_flags = zval_get_long(vm, &v.deref());
                 if filter_flags & (FILTER_REQUIRE_ARRAY | FILTER_FORCE_ARRAY) == 0 {
                     filter_flags |= FILTER_REQUIRE_SCALAR;
                 }
@@ -861,14 +882,16 @@ fn filter_array_handler(
                         let fa = match &elm {
                             Value::Array(_) => None,
                             other => {
-                                let id = other.to_long();
+                                let id = zval_get_long(vm, other);
                                 if !filter_id_exists(id) {
                                     vm.emit_warning(&format!(
                                         "{}(): Unknown filter with ID {}",
                                         fname, id
                                     ));
                                 }
-                                Some(id)
+                                // php_filter_call() is passed a second
+                                // zval_get_long() of the definition.
+                                Some(zval_get_long(vm, other))
                             }
                         };
                         match (&elm, fa) {
@@ -1018,10 +1041,10 @@ fn filter_input(vm: &mut Vm, args: &[Value]) -> R {
     let Some(tmp) = tmp else {
         let filter_flags = match &fa {
             Err(l) => *l,
-            Ok(Some(ht)) => ht
-                .get_str(b"flags")
-                .map(|v| v.deref().to_long())
-                .unwrap_or(0),
+            Ok(Some(ht)) => match ht.get_str(b"flags") {
+                Some(v) => zval_get_long(vm, &v.deref()),
+                None => 0,
+            },
             Ok(None) => 0,
         };
         if filter_flags & FILTER_NULL_ON_FAILURE != 0 && filter_flags & FILTER_THROW_ON_FAILURE != 0
