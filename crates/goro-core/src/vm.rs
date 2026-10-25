@@ -20325,7 +20325,10 @@ impl Vm {
             return false;
         }
         let at = self.pending_calls.len();
-        self.closure_call_objs.retain(|(i, _)| *i < at);
+        // (sorted by pending call: those of the calls above end)
+        while self.closure_call_objs.last().is_some_and(|(i, _)| *i >= at) {
+            self.closure_call_objs.pop();
+        }
         self.closure_call_objs.push((at, Rc::downgrade(o)));
         let mut args = self.take_values(0);
         if let Some(a) = captures {
@@ -27525,7 +27528,10 @@ impl Vm {
                     let from_closure = name_val.is_closure_obj();
                     if let (true, Value::Object(o)) = (from_closure, &name_val) {
                         let at = self.pending_calls.len();
-                        self.closure_call_objs.retain(|(i, _)| *i < at);
+                        // (sorted by pending call: those of the calls above end)
+                        while self.closure_call_objs.last().is_some_and(|(i, _)| *i >= at) {
+                            self.closure_call_objs.pop();
+                        }
                         self.closure_call_objs.push((at, Rc::downgrade(o)));
                         // ZEND_CALL_CLOSURE: the call releases the closure (a
                         // real closure's call does so when it returns).

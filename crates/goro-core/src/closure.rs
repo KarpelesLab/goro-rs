@@ -20,6 +20,7 @@ use crate::value::Value;
 use crate::vm::Vm;
 
 /// Whether `name` is an internal closure function name.
+#[inline]
 pub fn is_closure_fn_name(name: &[u8]) -> bool {
     (name.starts_with(b"__closure_") && !name.starts_with(b"__closure_fcc_"))
         || name.starts_with(b"__arrow_")
