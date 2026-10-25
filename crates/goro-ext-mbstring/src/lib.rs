@@ -48,7 +48,7 @@ pub fn register(vm: &mut Vm) {
         Value::String(PhpString::from_bytes(b"6.9.10")),
     );
 
-    // Default mbstring.* INI keys to empty strings so ini_get() returns "".
+    // The mbstring.* INI defaults ("" for php's NULL ones).
     // Only set if not already configured.
     for key in [
         "mbstring.http_input",
@@ -57,7 +57,6 @@ pub fn register(vm: &mut Vm) {
         "mbstring.encoding_translation",
         "mbstring.detect_order",
         "mbstring.substitute_character",
-        "mbstring.func_overload",
         "mbstring.regex_retry_limit",
         "mbstring.regex_stack_limit",
         "mbstring.strict_detection",
@@ -69,6 +68,10 @@ pub fn register(vm: &mut Vm) {
                 "mbstring.http_output_conv_mimetypes" => {
                     mbstring::DEFAULT_CONV_MIMETYPES.as_bytes()
                 }
+                "mbstring.language" => b"neutral",
+                "mbstring.encoding_translation" | "mbstring.strict_detection" => b"0",
+                "mbstring.regex_retry_limit" => b"1000000",
+                "mbstring.regex_stack_limit" => b"100000",
                 _ => b"",
             };
             vm.constants.insert(
@@ -77,4 +80,5 @@ pub fn register(vm: &mut Vm) {
             );
         }
     }
+    goro_core::reflection::register_ini_access("mbstring.encoding_translation", 6);
 }
