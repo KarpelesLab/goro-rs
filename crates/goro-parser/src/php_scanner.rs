@@ -178,6 +178,10 @@ pub struct ScanToken {
     /// Matched in the ST_IN_SCRIPTING state (where brackets are nesting
     /// checked; `[`/`]` of a `"$a[0]"` offset are not).
     pub scripting: bool,
+    /// The number of "\n" in the token's text, and whether it holds a "\r"
+    /// (the line after the token is then counted from its text).
+    pub newlines: u32,
+    pub has_cr: bool,
 }
 
 /// Whether the scanner hands the token's text to the caller as a semantic
@@ -248,6 +252,9 @@ pub struct Scanner<'a> {
     line_pos: usize,
     /// State the token being scanned was matched in.
     tok_state: St,
+    /// The last token made: its range, its "\n" count, whether it holds a
+    /// "\r" (the line counter's next advance is over it, usually).
+    counted: (usize, usize, u32, bool),
 }
 
 impl<'a> Scanner<'a> {
@@ -265,6 +272,7 @@ impl<'a> Scanner<'a> {
             line: 1,
             line_pos: 0,
             tok_state: St::Initial,
+            counted: (usize::MAX, 0, 0, false),
         };
         if skip_shebang && s.starts_with(b"#!") {
             // <SHEBANG>"#!" .* {NEWLINE}
@@ -312,6 +320,40 @@ impl<'a> Scanner<'a> {
         // Advance the line counter to `start`.
         let mut line = self.line;
         if self.line_pos < start {
+            // (the previous token's text, counted as it was made)
+            let (cs, ce, lf, cr) = self.counted;
+            if cs == self.line_pos && ce == start && !cr {
+                line += lf;
+            } else {
+                line += self.count_lines(start);
+            }
+        }
+        self.line = line;
+        self.line_pos = start;
+        self.pos = end;
+        // (one pass the compiler vectorizes; "\r" are rare)
+        let (mut lf, mut cr) = (0u32, 0u32);
+        for &c in self.s.get(start..end).unwrap_or_default() {
+            lf += u32::from(c == b'\n');
+            cr += u32::from(c == b'\r');
+        }
+        self.counted = (start, end, lf, cr > 0);
+        Some(ScanToken {
+            id,
+            start,
+            end,
+            line,
+            scripting: self.tok_state == St::InScripting,
+            newlines: lf,
+            has_cr: cr > 0,
+        })
+    }
+
+    /// The lines from the line counter's position to `start`.
+    #[cold]
+    fn count_lines(&self, start: usize) -> u32 {
+        let mut line = 0;
+        {
             let seg = &self.s[self.line_pos..start];
             // (one pass the compiler vectorizes; "\r" are rare)
             let (mut lf, mut cr) = (0u32, 0u32);
@@ -331,16 +373,7 @@ impl<'a> Scanner<'a> {
                 }
             }
         }
-        self.line = line;
-        self.line_pos = start;
-        self.pos = end;
-        Some(ScanToken {
-            id,
-            start,
-            end,
-            line,
-            scripting: self.tok_state == St::InScripting,
-        })
+        line
     }
 
     /// {WHITESPACE_OR_COMMENTS}* starting at `i`; returns the end position.

@@ -131,7 +131,7 @@ fn parse(
             let mut close_tag = false;
             let sym = match t.id {
                 ps::T_OPEN_TAG | ps::T_WHITESPACE | ps::T_COMMENT | ps::T_DOC_COMMENT => {
-                    *last_line = t.line + newlines(text);
+                    *last_line = t.line + token_newlines(&t, text);
                     continue;
                 }
                 ps::T_CLOSE_TAG => {
@@ -143,7 +143,7 @@ fn parse(
             };
             // Line after scanning this token (HANDLE_NEWLINES); `?>\n`
             // defers its newline to the next token fetch.
-            let mut line = t.line + newlines(text);
+            let mut line = t.line + token_newlines(&t, text);
             if close_tag && text.last() == Some(&b'\n') {
                 line -= 1;
                 *pending_newline = true;
@@ -190,148 +190,133 @@ fn parse(
         }
     };
 
-    // The bison skeleton (yacc.c), without semantic actions. `vals` holds
-    // the index in `toks` of the first token of each stack entry.
-    let mut states: Vec<i32> = vec![0];
-    let mut vals: Vec<usize> = vec![usize::MAX];
-    let mut toks: Vec<PTok> = Vec::new();
-    let mut lookahead: Option<usize> = None;
+    // The bison skeleton (yacc.c), without semantic actions. Each stack
+    // entry holds its state and the index in `toks` of its first token
+    // (u32::MAX: none).
+    let mut stack: Vec<(i32, u32)> = Vec::with_capacity(256);
+    stack.push((0, u32::MAX));
+    let mut toks: Vec<PTok> = Vec::with_capacity(src.len() / 8 + 16);
+    // The lookahead: its index in `toks` and its symbol (NO_LA: none).
+    const NO_LA: u32 = u32::MAX;
+    let mut la: u32 = NO_LA;
+    let mut la_sym: i32 = 0;
     let mut state: i32 = 0;
-    loop {
+    'parse: loop {
         if state == g::YYFINAL {
             return None;
         }
         let mut yyn = g::YYPACT[state as usize] as i32;
-        let mut do_default = yyn == g::YYPACT_NINF;
-        if !do_default {
-            let la = match lookahead {
-                Some(i) => i,
-                None => {
-                    let t = next(stopped, &mut last_line, &mut pending_newline);
-                    match t {
+        'act: {
+            if yyn != g::YYPACT_NINF {
+                if la == NO_LA {
+                    match next(stopped, &mut last_line, &mut pending_newline) {
                         Ok(t) => {
+                            la_sym = t.sym;
+                            la = toks.len() as u32;
                             toks.push(t);
-                            lookahead = Some(toks.len() - 1);
-                            toks.len() - 1
                         }
                         Err(e) => return Some(e),
                     }
                 }
-            };
-            let tok_sym = toks[la].sym;
-            yyn += tok_sym;
-            if !(0..=g::YYLAST).contains(&yyn) || g::YYCHECK[yyn as usize] as i32 != tok_sym {
-                do_default = true;
-            } else {
-                yyn = g::YYTABLE[yyn as usize] as i32;
-                if yyn <= 0 {
+                yyn += la_sym;
+                if (0..=g::YYLAST).contains(&yyn) && g::YYCHECK[yyn as usize] as i32 == la_sym {
+                    yyn = g::YYTABLE[yyn as usize] as i32;
+                    if yyn > 0 {
+                        // shift
+                        state = yyn;
+                        stack.push((state, la));
+                        la = NO_LA;
+                        continue 'parse;
+                    }
                     if yyn == g::YYTABLE_NINF {
-                        return Some(syntax_error(src, &toks[la], state));
+                        return Some(syntax_error(src, &toks[la as usize], state));
                     }
                     yyn = -yyn;
                     // reduce below
-                } else {
-                    // shift
-                    state = yyn;
-                    states.push(state);
-                    vals.push(la);
-                    lookahead = None;
-                    continue;
+                    break 'act;
                 }
             }
-        }
-        if do_default {
             yyn = g::YYDEFACT[state as usize] as i32;
             if yyn == 0 {
-                let la = match lookahead {
-                    Some(i) => i,
-                    None => {
-                        // A consistent error state without lookahead
-                        // cannot happen in this grammar; report generically.
-                        return Some(SyntaxError {
-                            message: "syntax error".into(),
-                            line: last_line,
-                            offset: src.len(),
-                        });
-                    }
-                };
-                return Some(syntax_error(src, &toks[la], state));
+                if la == NO_LA {
+                    // A consistent error state without lookahead
+                    // cannot happen in this grammar; report generically.
+                    return Some(SyntaxError {
+                        message: "syntax error".into(),
+                        line: last_line,
+                        offset: src.len(),
+                    });
+                }
+                return Some(syntax_error(src, &toks[la as usize], state));
             }
         }
         // reduce by rule yyn
         let len = g::YYR2[yyn as usize] as usize;
-        let base = states.len() - len;
-        let first_val = if len > 0 { vals[base] } else { usize::MAX };
-        match yyn {
-            g::RULE_TOP_HALT_COMPILER => {
-                // zend_stop_lexing()
-                stopped = true;
-                let end = toks[vals[base + 3]].end;
-                *stop = Some((end, last_line));
-            }
-            // zend_throw_exception(): a compile error, not a syntax error;
-            // goro's parser reports it.
-            g::RULE_INNER_HALT_COMPILER => return None,
-            g::RULE_IDENTIFIER_SEMI_RESERVED
-            | g::RULE_CLASS_CONST_SEMI_RESERVED
-            | g::RULE_FUNCTION_NAME_READONLY
-            | g::RULE_CALL_READONLY
-            | g::RULE_TRAIT_ALIAS_RESERVED => {
-                let v = if yyn == g::RULE_TRAIT_ALIAS_RESERVED {
-                    vals[base + 2]
-                } else {
-                    first_val
-                };
-                if let Some(e) = lex_tstring(src, &toks, v, last_line) {
-                    return Some(e);
+        let base = stack.len() - len;
+        let first_val = if len > 0 { stack[base].1 } else { u32::MAX };
+        if SPECIAL_RULE[yyn as usize] {
+            let val = |k: usize| stack[base + k].1 as usize;
+            match yyn {
+                g::RULE_TOP_HALT_COMPILER => {
+                    // zend_stop_lexing()
+                    stopped = true;
+                    let end = toks[val(3)].end;
+                    *stop = Some((end, last_line));
                 }
-                if let Some(t) = toks.get(v) {
-                    feedback.push(t.start);
+                // zend_throw_exception(): a compile error, not a syntax error;
+                // goro's parser reports it.
+                g::RULE_INNER_HALT_COMPILER => return None,
+                g::RULE_IDENTIFIER_SEMI_RESERVED
+                | g::RULE_CLASS_CONST_SEMI_RESERVED
+                | g::RULE_FUNCTION_NAME_READONLY
+                | g::RULE_CALL_READONLY
+                | g::RULE_TRAIT_ALIAS_RESERVED => {
+                    let v = if yyn == g::RULE_TRAIT_ALIAS_RESERVED {
+                        val(2)
+                    } else {
+                        first_val as usize
+                    };
+                    if let Some(e) = lex_tstring(src, &toks, v, last_line) {
+                        return Some(e);
+                    }
+                    if let Some(t) = toks.get(v) {
+                        feedback.push(t.start);
+                    }
                 }
-            }
-            g::RULE_CLASS_MODIFIERS_ADD
-            | g::RULE_ANON_CLASS_MODIFIERS_ONE
-            | g::RULE_ANON_CLASS_MODIFIERS_ADD
-            | g::RULE_CPP_MODIFIERS
-            | g::RULE_PROPERTY_MODIFIERS
-            | g::RULE_METHOD_MODIFIERS
-            | g::RULE_CONST_MODIFIERS
-            | g::RULE_HOOK_MODIFIERS
-            | g::RULE_TRAIT_ALIAS_MODIFIER_NAME
-            | g::RULE_TRAIT_ALIAS_MODIFIER => {
-                let (first, last) = match yyn {
-                    g::RULE_TRAIT_ALIAS_MODIFIER_NAME | g::RULE_TRAIT_ALIAS_MODIFIER => {
-                        (vals[base + 2], vals[base + 2])
-                    }
-                    g::RULE_CLASS_MODIFIERS_ADD | g::RULE_ANON_CLASS_MODIFIERS_ADD => {
-                        (first_val, vals[base + 1])
-                    }
-                    _ => {
-                        // non_empty_member_modifiers: consecutive tokens
-                        let mut last = first_val;
-                        while toks.get(last + 1).is_some_and(|t| is_member_modifier(t.id)) {
-                            last += 1;
+                _ => {
+                    let first_val = first_val as usize;
+                    let (first, last) = match yyn {
+                        g::RULE_TRAIT_ALIAS_MODIFIER_NAME | g::RULE_TRAIT_ALIAS_MODIFIER => {
+                            (val(2), val(2))
                         }
-                        (first_val, last)
+                        g::RULE_CLASS_MODIFIERS_ADD | g::RULE_ANON_CLASS_MODIFIERS_ADD => {
+                            (first_val, val(1))
+                        }
+                        _ => {
+                            // non_empty_member_modifiers: consecutive tokens
+                            let mut last = first_val;
+                            while toks.get(last + 1).is_some_and(|t| is_member_modifier(t.id)) {
+                                last += 1;
+                            }
+                            (first_val, last)
+                        }
+                    };
+                    let ids: Vec<i32> = (first..=last)
+                        .filter_map(|i| toks.get(i))
+                        .map(|t| t.id)
+                        .collect();
+                    if let Some(message) = modifier_error(yyn, &ids) {
+                        return Some(SyntaxError {
+                            message,
+                            line: last_line,
+                            offset: toks.get(first).map_or(0, |t| t.start),
+                        });
                     }
-                };
-                let ids: Vec<i32> = (first..=last)
-                    .filter_map(|i| toks.get(i))
-                    .map(|t| t.id)
-                    .collect();
-                if let Some(message) = modifier_error(yyn, &ids) {
-                    return Some(SyntaxError {
-                        message,
-                        line: last_line,
-                        offset: toks.get(first).map_or(0, |t| t.start),
-                    });
                 }
             }
-            _ => {}
         }
-        states.truncate(base);
-        vals.truncate(base);
-        let top = *states.last().unwrap();
+        stack.truncate(base);
+        let top = stack[base - 1].0;
         let lhs = g::YYR1[yyn as usize] as i32 - g::YYNTOKENS;
         let yyi = g::YYPGOTO[lhs as usize] as i32 + top;
         state = if (0..=g::YYLAST).contains(&yyi) && g::YYCHECK[yyi as usize] as i32 == top {
@@ -339,10 +324,39 @@ fn parse(
         } else {
             g::YYDEFGOTO[lhs as usize] as i32
         };
-        states.push(state);
-        vals.push(first_val);
+        stack.push((state, first_val));
     }
 }
+
+/// The rules whose reduction does something here (see parse()).
+static SPECIAL_RULE: [bool; g::YYR2.len()] = {
+    let mut t = [false; g::YYR2.len()];
+    let rules = [
+        g::RULE_TOP_HALT_COMPILER,
+        g::RULE_INNER_HALT_COMPILER,
+        g::RULE_IDENTIFIER_SEMI_RESERVED,
+        g::RULE_CLASS_CONST_SEMI_RESERVED,
+        g::RULE_FUNCTION_NAME_READONLY,
+        g::RULE_CALL_READONLY,
+        g::RULE_TRAIT_ALIAS_RESERVED,
+        g::RULE_CLASS_MODIFIERS_ADD,
+        g::RULE_ANON_CLASS_MODIFIERS_ONE,
+        g::RULE_ANON_CLASS_MODIFIERS_ADD,
+        g::RULE_CPP_MODIFIERS,
+        g::RULE_PROPERTY_MODIFIERS,
+        g::RULE_METHOD_MODIFIERS,
+        g::RULE_CONST_MODIFIERS,
+        g::RULE_HOOK_MODIFIERS,
+        g::RULE_TRAIT_ALIAS_MODIFIER_NAME,
+        g::RULE_TRAIT_ALIAS_MODIFIER,
+    ];
+    let mut i = 0;
+    while i < rules.len() {
+        t[rules[i] as usize] = true;
+        i += 1;
+    }
+    t
+};
 
 fn is_member_modifier(id: i32) -> bool {
     matches!(
@@ -537,6 +551,12 @@ fn lex_tstring(src: &[u8], toks: &[PTok], idx: usize, line: u32) -> Option<Synta
         });
     }
     None
+}
+
+/// newlines() of a token's text (the scanner counted its "\n").
+#[inline]
+fn token_newlines(t: &ScanToken, text: &[u8]) -> u32 {
+    if t.has_cr { newlines(text) } else { t.newlines }
 }
 
 fn newlines(text: &[u8]) -> u32 {
