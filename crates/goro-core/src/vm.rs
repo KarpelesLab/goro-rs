@@ -15038,7 +15038,8 @@ impl Vm {
             ),
             b"reflectionclassconstant"
             | b"reflectionenumunitcase"
-            | b"reflectionenumbackedcase" => matches!(method, b"getattributes"),
+            | b"reflectionenumbackedcase"
+            | b"reflectionconstant" => matches!(method, b"getattributes"),
             b"reflectionattribute" => matches!(method, b"newinstance"),
             b"simplexmlelement" => matches!(
                 method,
@@ -35822,8 +35823,12 @@ impl Vm {
                                                 } else {
                                                     stripped.as_bytes().to_vec()
                                                 };
-                                                let exists =
-                                                    self.constants.contains_key(&lookup_bytes);
+                                                let exists = self.constants.contains_key(&lookup_bytes)
+                                                    || crate::reflection::reflection_constant_resolve(
+                                                        self,
+                                                        const_name.as_bytes(),
+                                                    )
+                                                    .is_some();
                                                 if !exists {
                                                     drop(obj_mut);
                                                     let msg = format!(

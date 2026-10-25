@@ -2047,6 +2047,15 @@ fn reflection_property_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
             }
         }
     }
+    // `$class` is the declaring class (prop_info->ce), as getProperty() does.
+    let canonical_class = if is_user_class && !is_dynamic_prop {
+        rprop(vm, &class_lower, prop_name.as_bytes())
+            .map(|p| p.declaring_class.to_ascii_lowercase())
+            .and_then(|d| rcls(vm, &d).map(|c| String::from_utf8_lossy(&c.name).to_string()))
+            .unwrap_or(canonical_class)
+    } else {
+        canonical_class
+    };
 
     let mut obj = this.borrow_mut();
     obj.set_property(
@@ -6937,7 +6946,14 @@ pub fn reflection_function_method(
             // when the function hasn't yet been called, in which case the
             // values are the compile-time defaults. Walk the op_array looking
             // for `StaticVarInit` opcodes and merge with any runtime values.
-            let mut result = PhpArray::new();
+            // A closure's `use` variables come first: Zend binds them into
+            // its static_variables table.
+            let closure = obj.borrow().get_property(b"__reflection_closure_obj");
+            let mut result = if matches!(closure, Value::Object(_)) {
+                vm.closure_used_vars(&closure)
+            } else {
+                PhpArray::new()
+            };
             if let Some(op_array) = vm.user_functions.get(func_lower.as_slice()).cloned() {
                 let func_prefix = {
                     let mut p = op_array.name.clone();
@@ -7421,12 +7437,22 @@ pub fn reflection_function_method(
                 Some((_, m)) if is_closure && !display.starts_with("{closure") => m.to_string(),
                 _ => display,
             };
-            let bound: Vec<String> = op
-                .closure_capture_names
-                .iter()
-                .filter(|n| n.as_slice() != b"this")
-                .map(|n| String::from_utf8_lossy(n).into_owned())
-                .collect();
+            // The closure's static_variables: `use` variables, then statics.
+            let mut bound: Vec<String> = if captured.is_empty() {
+                Vec::new()
+            } else {
+                op.closure_capture_names
+                    .iter()
+                    .filter(|n| n.as_slice() != b"this")
+                    .map(|n| String::from_utf8_lossy(n).into_owned())
+                    .collect()
+            };
+            for n in op_static_var_names(op) {
+                let n = String::from_utf8_lossy(&n).into_owned();
+                if !bound.contains(&n) {
+                    bound.push(n);
+                }
+            }
             let ctx = FnStrCtx {
                 op,
                 method: None,
@@ -7440,7 +7466,7 @@ pub fn reflection_function_method(
             };
             let mut out = function_string(vm, &ctx, "");
             // Bound variables (closure `use` vars) go right after the @@ line.
-            if is_closure && !captured.is_empty() && !bound.is_empty() {
+            if is_closure && !bound.is_empty() {
                 let mut bv = format!("\n  - Bound Variables [{}] {{\n", bound.len());
                 for (i, n) in bound.iter().enumerate() {
                     bv.push_str(&format!("      Variable #{} [ ${} ]\n", i, n));
@@ -10192,21 +10218,7 @@ pub fn reflection_constant_method(
                 Some(Value::String(PhpString::from_string(name)))
             }
         }
-        b"getvalue" => {
-            // Look up the constant value
-            let const_lower: Vec<u8> = name
-                .as_bytes()
-                .iter()
-                .map(|b| b.to_ascii_lowercase())
-                .collect();
-            if let Some(val) = vm.constants.get(name.as_bytes()) {
-                Some(val.clone())
-            } else if let Some(val) = vm.constants.get(&const_lower[..]) {
-                Some(val.clone())
-            } else {
-                Some(Value::Null)
-            }
-        }
+        b"getvalue" => Some(reflection_constant_value(vm, name.as_bytes())),
         b"isdefault" => Some(Value::False),
         b"isdeprecated" => {
             let user = constant_attrs_lookup(vm, name.as_bytes())
@@ -10232,11 +10244,22 @@ pub fn reflection_constant_method(
         ),
         b"getextension" | b"getextensionname" => {
             let key = normalize_const_key(name.as_bytes());
+            let canon = reflection_constant_resolve(vm, name.as_bytes()).map(|(n, _)| n);
             let ext = if vm.constant_files.contains_key(key.as_slice()) {
                 None
-            } else if let Some(c) = crate::stubs::find_constant(name.as_bytes()) {
+            } else if let Some(c) = canon.as_ref().and_then(|n| {
+                crate::stubs::find_constant(n.as_bytes()).or_else(|| {
+                    // (the stub table keeps a namespaced constant's short
+                    // name: Dom\INDEX_SIZE_ERR is dom's INDEX_SIZE_ERR)
+                    let (ns, short) = n.rsplit_once('\\')?;
+                    let top = ns.split('\\').next()?;
+                    crate::stub_sigs::CONSTANTS
+                        .iter()
+                        .find(|c| c.name == short && c.ext.eq_ignore_ascii_case(top))
+                })
+            }) {
                 Some(c.ext)
-            } else if vm.constants.contains_key(key.as_slice()) {
+            } else if canon.is_some() {
                 Some("Core")
             } else {
                 None
@@ -10248,20 +10271,14 @@ pub fn reflection_constant_method(
                 (None, _) => Value::False,
             })
         }
-        b"getattributes" => {
-            let attrs = constant_attrs_or_internal(vm, name.as_bytes());
-            Some(create_reflection_attributes(vm, &attrs, None, 0, 64))
-        }
         b"__tostring" => {
             // _const_string()
             let key = normalize_const_key(name.as_bytes());
-            let value = vm
-                .constants
-                .get(name.as_bytes())
-                .or_else(|| vm.constants.get(key.as_slice()))
-                .cloned()
-                .unwrap_or(Value::Null);
+            let value = reflection_constant_value(vm, name.as_bytes());
             let user = vm.constant_files.contains_key(key.as_slice());
+            let name = reflection_constant_resolve(vm, name.as_bytes())
+                .map(|(n, _)| n)
+                .unwrap_or(name);
             let deprecated = constant_attrs_lookup(vm, name.as_bytes())
                 .unwrap_or_default()
                 .iter()
@@ -10299,6 +10316,82 @@ pub fn reflection_constant_method(
             ))))
         }
         _ => None,
+    }
+}
+
+/// Names of the `static` variables an op array declares, in order.
+fn op_static_var_names(op: &OpArray) -> Vec<Vec<u8>> {
+    let mut prefix = op.name.clone();
+    prefix.extend_from_slice(b"::");
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    for o in &op.ops {
+        if !matches!(o.opcode, crate::opcode::OpCode::StaticVarInit) {
+            continue;
+        }
+        if let crate::opcode::OperandType::Const(idx) = o.result {
+            if let Some(Value::String(s)) = op.literals.get(idx as usize) {
+                if let Some(n) = s.as_bytes().strip_prefix(prefix.as_slice()) {
+                    if !out.iter().any(|x| x.as_slice() == n) {
+                        out.push(n.to_vec());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// zend_get_constant_ptr() for ReflectionConstant: `name` with a leading
+/// backslash stripped and the namespace part case-insensitive, then the
+/// special true/false/null. Returns the registered name and the key of the
+/// constant table entry (None for the special constants).
+pub(crate) fn reflection_constant_resolve(
+    vm: &Vm,
+    name: &[u8],
+) -> Option<(String, Option<Vec<u8>>)> {
+    let stripped = name.strip_prefix(b"\\").unwrap_or(name);
+    let key = normalize_const_key(stripped);
+    let disp = String::from_utf8_lossy(stripped).to_string();
+    if vm.constants.contains_key(stripped) {
+        return Some((disp, Some(stripped.to_vec())));
+    }
+    if vm.constants.contains_key(key.as_slice()) {
+        return Some((disp, Some(key)));
+    }
+    if stripped.contains(&b'\\') {
+        // Extension constants registered with their namespace's own case.
+        let found = vm
+            .constants
+            .keys()
+            .find(|k| k.contains(&b'\\') && normalize_const_key(k) == key)
+            .cloned();
+        if let Some(k) = found {
+            return Some((String::from_utf8_lossy(&k).to_string(), Some(k)));
+        }
+        return None;
+    }
+    let special = if stripped.eq_ignore_ascii_case(b"true") {
+        "TRUE"
+    } else if stripped.eq_ignore_ascii_case(b"false") {
+        "FALSE"
+    } else if stripped.eq_ignore_ascii_case(b"null") {
+        "NULL"
+    } else {
+        return None;
+    };
+    Some((special.to_string(), None))
+}
+
+/// The value of a constant resolved by reflection_constant_resolve().
+fn reflection_constant_value(vm: &Vm, name: &[u8]) -> Value {
+    match reflection_constant_resolve(vm, name) {
+        Some((_, Some(k))) => vm.constants.get(&k).cloned().unwrap_or(Value::Null),
+        Some((n, None)) => match n.as_str() {
+            "TRUE" => Value::True,
+            "FALSE" => Value::False,
+            _ => Value::Null,
+        },
+        None => Value::Null,
     }
 }
 
@@ -10396,6 +10489,15 @@ pub fn reflection_constant_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                     }
                 });
                 let filter_flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+                if filter_flags & !2 != 0 {
+                    let exc = vm.create_exception(
+                        b"ValueError",
+                        "ReflectionConstant::getAttributes(): Argument #2 ($flags) must be a valid attribute filter flag",
+                        vm.current_line,
+                    );
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 // TARGET_CONSTANT = 64
                 Some(create_reflection_attributes(
                     vm,
@@ -13038,32 +13140,24 @@ fn find_static_property_value(vm: &Vm, class_lower: &[u8], prop_name: &[u8]) -> 
     vm.static_prop_raw(class_lower, prop_name)
 }
 
-/// Walk a class's parent chain (and interfaces) to find the deepest ancestor
-/// that declares the given constant. Used for ReflectionClassConstant::class
-/// and ::getDeclaringClass() so that inherited constants report their actual
-/// definition site rather than the child class.
+/// The class that declares the constant `const_name` as seen from
+/// `class_lower` (ReflectionClassConstant::$class / getDeclaringClass()):
+/// a redeclaring child is its own declarer, an inherited constant (from a
+/// parent or an interface) reports where it was declared.
 fn find_constant_declaring_class(vm: &Vm, class_lower: &[u8], const_name: &[u8]) -> Option<String> {
-    let mut owner: Option<String> = None;
-    let mut cur: Option<Vec<u8>> = Some(class_lower.to_vec());
-    let mut visited: Vec<Vec<u8>> = Vec::new();
-    while let Some(c) = cur {
-        if visited.contains(&c) {
-            break;
-        }
-        visited.push(c.clone());
-        if let Some(ce) = rcls(vm, c.as_slice()) {
-            if ce.constants.contains_key(const_name) {
-                owner = Some(String::from_utf8_lossy(&ce.name).to_string());
-            }
-            cur = ce
-                .parent
-                .as_ref()
-                .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
-        } else {
-            break;
+    let owner = constant_owner_class(vm, class_lower, const_name)?;
+    let ce = rcls(vm, &owner)?;
+    let decl = ce
+        .constants_meta
+        .get(const_name)
+        .map(|m| m.declaring_class.to_ascii_lowercase())
+        .filter(|d| !d.is_empty() && *d != owner);
+    if let Some(d) = decl {
+        if let Some(dc) = rcls(vm, &d) {
+            return Some(String::from_utf8_lossy(&dc.name).to_string());
         }
     }
-    owner
+    Some(String::from_utf8_lossy(&ce.name).to_string())
 }
 
 /// Create ReflectionParameter objects for a function's parameters
@@ -13514,19 +13608,32 @@ fn attach_type_handle(vm: &mut Vm, v: &Value) -> Value {
     Value::Object(Rc::new(RefCell::new(obj)))
 }
 
+/// The class entry (lowercase name) that a constant lookup on `class_lower`
+/// resolves to: the class itself, else the nearest ancestor declaring it
+/// non-private (private constants are not inherited).
+fn constant_owner_class(vm: &Vm, class_lower: &[u8], const_name: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = class_lower.to_vec();
+    let mut first = true;
+    for _ in 0..64 {
+        let ce = rcls(vm, &cur)?;
+        if ce.constants.contains_key(const_name) {
+            let private = ce
+                .constants_meta
+                .get(const_name)
+                .is_some_and(|m| m.visibility == Visibility::Private);
+            if first || !private {
+                return Some(cur);
+            }
+        }
+        first = false;
+        cur = ce.parent.as_ref()?.to_ascii_lowercase();
+    }
+    None
+}
+
 /// Helper to check if a class has a constant (walks parent chain)
 fn reflection_class_has_constant(vm: &Vm, class_lower: &[u8], const_name: &[u8]) -> bool {
-    if let Some(ce) = rcls(vm, class_lower) {
-        if ce.constants.contains_key(const_name) {
-            return true;
-        }
-        // Check parent chain
-        if let Some(ref parent) = ce.parent {
-            let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
-            return reflection_class_has_constant(vm, &parent_lower, const_name);
-        }
-    }
-    false
+    constant_owner_class(vm, class_lower, const_name).is_some()
 }
 
 /// Helper to get a constant from a class (walks parent chain). For enum
@@ -13537,24 +13644,14 @@ fn reflection_class_get_constant(
     class_lower: &[u8],
     const_name: &[u8],
 ) -> Option<Value> {
-    let raw = {
-        let ce = rcls(vm, class_lower)?;
-        if let Some(val) = ce.constants.get(const_name) {
-            Some(val.clone())
-        } else if let Some(ref parent) = ce.parent {
-            let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
-            return reflection_class_get_constant(vm, &parent_lower, const_name);
-        } else {
-            None
-        }
-    };
-    let raw = raw?;
+    let owner = constant_owner_class(vm, class_lower, const_name)?;
+    let raw = rcls(vm, &owner)?.constants.get(const_name)?.clone();
     // Resolve the enum-case marker to the actual case object.
     if let Value::String(ref s) = raw {
         let sb = s.as_bytes();
         if sb.starts_with(b"__enum_case__::") {
             let case_name = &sb[b"__enum_case__::".len()..];
-            if let Some(case_obj) = vm.get_enum_case(class_lower, case_name) {
+            if let Some(case_obj) = vm.get_enum_case(&owner, case_name) {
                 return Some(case_obj);
             }
         }
