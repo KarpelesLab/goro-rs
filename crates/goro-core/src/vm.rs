@@ -46,6 +46,9 @@ const CORE_INI_DEFAULTS: &[(&[u8], &[u8])] = &[
     (b"auto_append_file", b""),
     (b"auto_prepend_file", b""),
     (b"auto_detect_line_endings", b"0"),
+    (b"arg_separator.input", b"&"),
+    (b"assert.bail", b"0"),
+    (b"assert.warning", b"1"),
     (b"auto_globals_jit", b"1"),
     (b"browscap", b""),
     (b"default_mimetype", b"text/html"),
@@ -89,6 +92,9 @@ const CORE_INI_DEFAULTS: &[(&[u8], &[u8])] = &[
     (b"sendmail_from", b""),
     (b"sendmail_path", b"/usr/sbin/sendmail -t -i"),
     (b"sys_temp_dir", b""),
+    (b"syslog.facility", b"LOG_USER"),
+    (b"syslog.filter", b"no-ctrl"),
+    (b"syslog.ident", b"php"),
     (b"unserialize_callback_func", b""),
     (b"unserialize_max_depth", b"4096"),
     (b"upload_max_filesize", b"2M"),
@@ -2182,6 +2188,15 @@ impl Vm {
                 // php.ini makes $_REQUEST empty, the unset one follows
                 // variables_order.
                 c.entry(b"request_order".to_vec()).or_insert(Value::Null);
+                // Entries registered with a NULL default (ini_get() gives "").
+                for k in [
+                    &b"assert.callback"[..],
+                    b"fiber.stack_size",
+                    b"mail.force_extra_parameters",
+                    b"mail.log",
+                ] {
+                    c.entry(k.to_vec()).or_insert(Value::Null);
+                }
                 // PHP constants
                 c.insert(
                     b"PHP_EOL".to_vec(),

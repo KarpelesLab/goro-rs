@@ -50,6 +50,17 @@ macro_rules! checked {
 /// Register all openssl extension functions and constants
 pub fn register(vm: &mut Vm) {
     vm.register_extension(b"openssl");
+    // PHP_INI_BEGIN(): openssl.cafile / openssl.capath (NULL), openssl.libctx
+    for (k, v) in [
+        (&b"openssl.cafile"[..], Value::Null),
+        (b"openssl.capath", Value::Null),
+        (
+            b"openssl.libctx",
+            Value::String(PhpString::from_bytes(b"custom")),
+        ),
+    ] {
+        vm.constants.entry(k.to_vec()).or_insert(v);
+    }
     xp_ssl::install(vm);
     pkey_fns::register_class(vm);
     let fns: &[(&str, BuiltinFn)] = &[
