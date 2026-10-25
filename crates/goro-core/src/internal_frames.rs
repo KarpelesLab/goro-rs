@@ -112,6 +112,42 @@ impl Vm {
         Ok(())
     }
 
+    /// A deprecated internal method's "Method C::m() is deprecated"
+    /// deprecation, as the call raises it: from the caller's code, without
+    /// the frame of method `method` (its name as called) if one was pushed.
+    /// True when the error handler threw: the method is not run.
+    #[inline(never)]
+    pub fn emit_method_deprecation(&mut self, msg: &str, method: &str) -> bool {
+        let line = self.current_line;
+        let hidden_builtin = match self.builtin_frames.last() {
+            Some(f) if !f.materialized => self.builtin_frames.pop(),
+            _ => None,
+        };
+        let hidden = match self.call_stack.last() {
+            Some(f) => {
+                let n = f.0.as_bytes();
+                let m = method.as_bytes();
+                let is_method = n.len() > m.len() + 2
+                    && n[n.len() - m.len()..].eq_ignore_ascii_case(m)
+                    && matches!(&n[n.len() - m.len() - 2..n.len() - m.len()], b"->" | b"::");
+                if is_method {
+                    self.call_stack.pop()
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        self.emit_deprecated_at(msg, line);
+        if let Some(f) = hidden {
+            self.call_stack.push(f);
+        }
+        if let Some(f) = hidden_builtin {
+            self.builtin_frames.push(f);
+        }
+        self.current_exception.is_some()
+    }
+
     /// End of the builtin call recorded by the last `push_builtin_frame`.
     #[inline]
     pub fn pop_builtin_frame(&mut self) {

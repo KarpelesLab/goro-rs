@@ -5580,12 +5580,6 @@ pub fn reflection_method_method(
             }
             Some(Value::Array(Rc::new(RefCell::new(result))))
         }
-        b"setaccessible" => {
-            vm.emit_deprecated(
-                "Method ReflectionMethod::setAccessible() is deprecated since 8.5, as it has no effect since PHP 8.1",
-            );
-            Some(Value::Null)
-        }
         b"hastentativereturntype" | b"gettentativereturntype" => {
             let rt = rmethod(vm, &class_lower, method_lower.as_bytes())
                 .filter(|m| {
@@ -5754,6 +5748,12 @@ pub fn reflection_method_method(
 
 /// ReflectionMethod methods that need args
 pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Option<Value> {
+    match deprecated_method_call(vm, b"reflectionmethod", method, args) {
+        Some(true) => return Some(Value::Null),
+        // setAccessible(): no effect
+        Some(false) => return Some(Value::Null),
+        None => {}
+    }
     let this = args.first()?;
     if let Value::Object(obj) = this {
         let ob = obj.borrow();
@@ -6973,12 +6973,6 @@ pub fn reflection_function_method(
                 Some(Value::False)
             }
         }
-        b"isdisabled" => {
-            vm.emit_deprecated(
-                "Method ReflectionFunction::isDisabled() is deprecated since 8.0, as ReflectionFunction can no longer be constructed for disabled functions",
-            );
-            Some(Value::False)
-        }
         b"innamespace" => {
             let ob = obj.borrow();
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
@@ -7336,6 +7330,12 @@ pub fn reflection_function_method(
 
 /// ReflectionFunction methods with args
 pub fn reflection_function_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Option<Value> {
+    match deprecated_method_call(vm, b"reflectionfunction", method, args) {
+        Some(true) => return Some(Value::Null),
+        // isDisabled(): a disabled function has no ReflectionFunction
+        Some(false) => return Some(Value::False),
+        None => {}
+    }
     let this = args.first()?;
     if let Value::Object(obj) = this {
         let ob = obj.borrow();
@@ -7760,12 +7760,6 @@ pub fn reflection_property_method(
                 .unwrap_or(false);
             Some(if promoted { Value::True } else { Value::False })
         }
-        b"setaccessible" => {
-            vm.emit_deprecated(
-                "Method ReflectionProperty::setAccessible() is deprecated since 8.5, as it has no effect since PHP 8.1",
-            );
-            Some(Value::Null)
-        }
         b"getmangledname" => {
             // PHP: private properties -> "\0ClassName\0name",
             // protected properties -> "\0*\0name", public -> "name".
@@ -8031,6 +8025,12 @@ pub const LAZY_SKIP_INIT_ON_SERIALIZE: i64 = 1 << 3;
 pub const LAZY_SKIP_DESTRUCTOR: i64 = 1 << 4;
 
 pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Option<Value> {
+    match deprecated_method_call(vm, b"reflectionproperty", method, args) {
+        Some(true) => return Some(Value::Null),
+        // setAccessible(): no effect
+        Some(false) => return Some(Value::Null),
+        None => {}
+    }
     let this = args.first()?;
     if let Value::Object(obj) = this {
         let ob = obj.borrow();
@@ -9015,6 +9015,81 @@ pub fn reflection_parameter_method(
     method: &[u8],
     obj: &Rc<RefCell<PhpObject>>,
 ) -> Option<Value> {
+    // (the deprecated methods check their arguments: reflection_parameter_docall())
+    if deprecated_method(b"reflectionparameter", method).is_some() {
+        return None;
+    }
+    reflection_parameter_method_body(vm, method, obj)
+}
+
+/// Deprecated methods of the Reflection classes: (class, method, message).
+const DEPRECATED_METHODS: &[(&[u8], &[u8], &str)] = &[
+    (
+        b"reflectionmethod",
+        b"setaccessible",
+        "Method ReflectionMethod::setAccessible() is deprecated since 8.5, as it has no effect since PHP 8.1",
+    ),
+    (
+        b"reflectionproperty",
+        b"setaccessible",
+        "Method ReflectionProperty::setAccessible() is deprecated since 8.5, as it has no effect since PHP 8.1",
+    ),
+    (
+        b"reflectionfunction",
+        b"isdisabled",
+        "Method ReflectionFunction::isDisabled() is deprecated since 8.0, as ReflectionFunction can no longer be constructed for disabled functions",
+    ),
+    (
+        b"reflectionparameter",
+        b"getclass",
+        "Method ReflectionParameter::getClass() is deprecated since 8.0, use ReflectionParameter::getType() instead",
+    ),
+    (
+        b"reflectionparameter",
+        b"isarray",
+        "Method ReflectionParameter::isArray() is deprecated since 8.0, use ReflectionParameter::getType() instead",
+    ),
+    (
+        b"reflectionparameter",
+        b"iscallable",
+        "Method ReflectionParameter::isCallable() is deprecated since 8.0, use ReflectionParameter::getType() instead",
+    ),
+];
+
+fn deprecated_method(class_lower: &[u8], method_lower: &[u8]) -> Option<&'static str> {
+    DEPRECATED_METHODS
+        .iter()
+        .find(|(c, m, _)| *c == class_lower && *m == method_lower)
+        .map(|(_, _, msg)| *msg)
+}
+
+/// A call to a deprecated Reflection method (`args`: $this first): the
+/// deprecation (from the call), then the argument checks. None when the
+/// method is not deprecated; Some(false) to run it, Some(true) when the call
+/// failed (exception set).
+fn deprecated_method_call(
+    vm: &mut Vm,
+    class_lower: &[u8],
+    method_lower: &[u8],
+    args: &[Value],
+) -> Option<bool> {
+    let msg = deprecated_method(class_lower, method_lower)?;
+    // "Method Class::name() is deprecated ...": the name as declared
+    let name = msg[7..].split_once("::")?.1.split_once('(')?.0;
+    if vm.emit_method_deprecation(msg, name) {
+        return Some(true);
+    }
+    Some(
+        vm.zpp_method_self_check(class_lower, method_lower, args.get(1..).unwrap_or(&[]))
+            .is_err(),
+    )
+}
+
+fn reflection_parameter_method_body(
+    vm: &mut Vm,
+    method: &[u8],
+    obj: &Rc<RefCell<PhpObject>>,
+) -> Option<Value> {
     let ob = obj.borrow();
     let func_target = ob.get_property(b"__reflection_func").to_php_string();
     let param_idx = ob.get_property(b"__reflection_param_idx").to_long() as usize;
@@ -9483,10 +9558,6 @@ pub fn reflection_parameter_method(
         }
         b"getclass" => {
             // Deprecated since 8.0: returns ReflectionClass if param type hints a class
-            vm.emit_deprecated_raw(
-                "Method ReflectionParameter::getClass() is deprecated since 8.0, use ReflectionParameter::getType() instead",
-                vm.current_line,
-            );
             // Only a single class-name type (optionally nullable) qualifies.
             let class_name_opt = resolved_op_array
                 .as_ref()
@@ -9617,10 +9688,6 @@ pub fn reflection_parameter_method(
         }
         b"isarray" => {
             // Deprecated since 8.0, returns true if param type is array.
-            vm.emit_deprecated_raw(
-                "Method ReflectionParameter::isArray() is deprecated since 8.0, use ReflectionParameter::getType() instead",
-                vm.current_line,
-            );
             let is_array = resolved_op_array
                 .as_ref()
                 .and_then(|op| {
@@ -9643,10 +9710,6 @@ pub fn reflection_parameter_method(
         }
         b"iscallable" => {
             // Deprecated since 8.0, returns true if param type is callable.
-            vm.emit_deprecated_raw(
-                "Method ReflectionParameter::isCallable() is deprecated since 8.0, use ReflectionParameter::getType() instead",
-                vm.current_line,
-            );
             let is_callable = resolved_op_array
                 .as_ref()
                 .and_then(|op| {
@@ -11790,6 +11853,16 @@ pub fn reflection_class_constant_method(
 
 /// ReflectionParameter methods with args
 pub fn reflection_parameter_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Option<Value> {
+    match deprecated_method_call(vm, b"reflectionparameter", method, args) {
+        Some(true) => return Some(Value::Null),
+        Some(false) => {
+            return match args.first() {
+                Some(Value::Object(obj)) => reflection_parameter_method_body(vm, method, obj),
+                _ => None,
+            };
+        }
+        None => {}
+    }
     let this = args.first()?;
     if let Value::Object(obj) = this {
         let ob = obj.borrow();

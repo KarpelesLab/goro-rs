@@ -560,11 +560,11 @@ pub fn call_ext_method(
     if !is_sqlite_handle(this) {
         return None;
     }
-    vm.emit_deprecated(&format!(
+    let msg = format!(
         "Method PDO::{}() is deprecated since 8.5, use Pdo\\Sqlite::{}() instead",
         old, new
-    ));
-    if vm.current_exception.is_some() {
+    );
+    if vm.emit_method_deprecation(&msg, old) {
         return Some(Value::Null);
     }
     let params = goro_core::stubs::find_method(b"PDO_SQLite_Ext", old.as_bytes())

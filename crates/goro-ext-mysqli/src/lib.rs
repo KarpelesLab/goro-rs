@@ -498,8 +498,8 @@ fn call_method(
     let f = Func::method(m.0, m.1, if m.3 { None } else { this_o.clone() });
     vm.flush_cli_output();
     if let Some(d) = deprecation(&f.name) {
-        vm.emit_deprecated(&format!("Method {}() is deprecated since {}", f.name, d));
-        if vm.current_exception.is_some() {
+        let msg = format!("Method {}() is deprecated since {}", f.name, d);
+        if vm.emit_method_deprecation(&msg, m.1) {
             return Value::Null;
         }
     }

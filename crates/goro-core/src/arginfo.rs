@@ -455,6 +455,57 @@ impl Vm {
         Ok(owned)
     }
 
+    /// zpp_self_check() for internal method `class_lower::method_lower`
+    /// (`args`: without $this), run by the method itself (a deprecated one
+    /// raises its deprecation first).
+    pub fn zpp_method_self_check(
+        &mut self,
+        class_lower: &[u8],
+        method_lower: &[u8],
+        args: &[Value],
+    ) -> Result<Vec<Value>, crate::vm::VmError> {
+        let line = self.current_line;
+        let mut owned = args.to_vec();
+        let Some((c, m)) = crate::stubs::find_method(class_lower, method_lower) else {
+            return Ok(owned);
+        };
+        thread_local! {
+            static INFOS: std::cell::RefCell<crate::fxhash::FxHashMap<(usize, usize), &'static FuncInfo>> =
+                Default::default();
+        }
+        // (built and leaked once per method, as the stubs are static)
+        let info: &'static FuncInfo = INFOS.with(|n| {
+            *n.borrow_mut()
+                .entry((c as *const _ as usize, m as *const _ as usize))
+                .or_insert_with(|| {
+                    let mut info = FuncInfo::from_stub(m);
+                    info.name = Box::leak(format!("{}::{}", c.name, m.name).into_boxed_str());
+                    info.module = c.ext;
+                    Box::leak(Box::new(info))
+                })
+        });
+        let mut orig = None;
+        let strict = self.caller_strict_types;
+        if let Err(e) = self.zpp_check(
+            info,
+            CHECK_ARITY | CHECK_TYPES,
+            &mut owned,
+            &mut orig,
+            strict,
+            line,
+        ) {
+            if let ZppError::Throw(cls, msg) = e {
+                let exc = self.create_exception(cls, &msg, line);
+                self.current_exception = Some(exc);
+            }
+            return Err(crate::vm::VmError {
+                message: self.uncaught_exception_message(),
+                line,
+            });
+        }
+        Ok(owned)
+    }
+
     /// Arginfo and verified flags of a registered builtin, if the generic
     /// zpp layer is enabled for it. Cheap: one hash lookup.
     #[inline]

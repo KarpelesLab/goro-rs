@@ -14651,11 +14651,14 @@ impl Vm {
                     | b"implementsinterface"
                     | b"getattributes"
                     | b"getclosure"
+                    | b"setaccessible"
             ),
-            b"reflectionfunction" | b"reflectionfunctionabstract" => matches!(
-                method,
-                b"invoke" | b"invokeargs" | b"getattributes" | b"getclosure"
-            ),
+            b"reflectionfunction" | b"reflectionfunctionabstract" => {
+                matches!(
+                    method,
+                    b"invoke" | b"invokeargs" | b"getattributes" | b"getclosure"
+                ) || (class == b"reflectionfunction" && method == b"isdisabled")
+            }
             b"reflectionproperty" => matches!(
                 method,
                 b"getvalue"
@@ -14669,8 +14672,12 @@ impl Vm {
                     | b"setrawvalue"
                     | b"getrawvalue"
                     | b"isinitialized"
+                    | b"setaccessible"
             ),
-            b"reflectionparameter" => matches!(method, b"getattributes"),
+            b"reflectionparameter" => matches!(
+                method,
+                b"getattributes" | b"getclass" | b"isarray" | b"iscallable"
+            ),
             b"reflectionclassconstant"
             | b"reflectionenumunitcase"
             | b"reflectionenumbackedcase" => matches!(method, b"getattributes"),

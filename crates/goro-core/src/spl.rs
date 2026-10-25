@@ -235,6 +235,24 @@ impl Vm {
                 return Value::Null;
             }
         }
+        // (ZEND_DO_FCALL: before the arguments are parsed)
+        if let Some((since, message)) = stub.deprecated {
+            let msg = if message.is_empty() {
+                format!(
+                    "Method {}::{}() is deprecated since {}",
+                    decl_disp, stub.name, since
+                )
+            } else {
+                format!(
+                    "Method {}::{}() is deprecated since {}, {}",
+                    decl_disp, stub.name, since, message
+                )
+            };
+            self.emit_deprecated_at(&msg, line);
+            if self.current_exception.is_some() {
+                return Value::Null;
+            }
+        }
         let mut call_args: Vec<Value> = self.take_values(0);
         call_args.extend_from_slice(args);
         // Generic zpp (verified stub arginfo of the method)
@@ -293,23 +311,6 @@ impl Vm {
             self.spl_throw(b"ArgumentCountError", &msg);
             self.call_stack.pop();
             return Value::Null;
-        }
-        if let Some((since, message)) = stub.deprecated {
-            let msg = if message.is_empty() {
-                format!(
-                    "Method {}::{}() is deprecated since {}",
-                    decl_disp, stub.name, since
-                )
-            } else {
-                format!(
-                    "Method {}::{}() is deprecated since {}, {}",
-                    decl_disp, stub.name, since, message
-                )
-            };
-            self.emit_deprecated_at(&msg, line);
-            if self.current_exception.is_some() {
-                return Value::Null;
-            }
         }
         // (the frame's buffers are those of finished calls)
         let mut frame = self.string_pool.pop().unwrap_or_default();
@@ -603,22 +604,35 @@ impl Vm {
             self.pending_named_args = named.to_vec();
             return true;
         }
-        let stub = match self.spl_stub_lookup(class_lower, method_lower) {
-            Some(s) => s,
-            None => {
-                // Unknown signature: append in order.
-                for (_, v) in named {
-                    args.push(v.clone());
-                }
-                return true;
+        let spl_params;
+        let stub_params;
+        let params: &[&str] = match self.spl_stub_lookup(class_lower, method_lower) {
+            Some(s) => {
+                spl_params = &s.params;
+                spl_params
             }
+            None => match crate::stubs::find_method(class_lower, method_lower).filter(|(_, m)| {
+                m.args
+                    .iter()
+                    .all(|a| a.flags & crate::stubs::A_VARIADIC == 0)
+            }) {
+                // (the parameters of the method's stub)
+                Some((_, m)) => {
+                    stub_params = m.args.iter().map(|a| a.name).collect::<Vec<_>>();
+                    &stub_params
+                }
+                None => {
+                    // Unknown signature: append in order.
+                    for (_, v) in named {
+                        args.push(v.clone());
+                    }
+                    return true;
+                }
+            },
         };
         let positional = args.len().saturating_sub(1);
         for (name, v) in named {
-            let idx = stub
-                .params
-                .iter()
-                .position(|p| p.as_bytes() == name.as_slice());
+            let idx = params.iter().position(|p| p.as_bytes() == name.as_slice());
             match idx {
                 None => {
                     let msg = format!("Unknown named parameter ${}", crate::string::msg_str(name));

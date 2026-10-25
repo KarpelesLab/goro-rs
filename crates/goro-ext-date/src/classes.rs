@@ -1615,15 +1615,15 @@ fn datetime_method(
             }
         }
         b"__wakeup" => {
-            wakeup_deprecated(
+            if wakeup_deprecated(
                 vm,
                 if immutable {
                     "DateTimeImmutable"
                 } else {
                     "DateTime"
                 },
-            );
-            if vm.current_exception.is_some() {
+                args,
+            ) {
                 return Ok(Value::Null);
             }
             let mut a = PhpArray::new();
@@ -2068,8 +2068,7 @@ fn timezone_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Val
             }
         }
         b"__wakeup" => {
-            wakeup_deprecated(vm, "DateTimeZone");
-            if vm.current_exception.is_some() {
+            if wakeup_deprecated(vm, "DateTimeZone", args) {
                 return Ok(Value::Null);
             }
             let mut a = PhpArray::new();
@@ -2279,8 +2278,7 @@ fn interval_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Val
             Ok(Value::Null)
         }
         b"__wakeup" => {
-            wakeup_deprecated(vm, "DateInterval");
-            if vm.current_exception.is_some() {
+            if wakeup_deprecated(vm, "DateInterval", args) {
                 return Ok(Value::Null);
             }
             let mut a = PhpArray::new();
@@ -2454,8 +2452,7 @@ fn period_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Value
             Ok(Value::Null)
         }
         b"__wakeup" => {
-            wakeup_deprecated(vm, "DatePeriod");
-            if vm.current_exception.is_some() {
+            if wakeup_deprecated(vm, "DatePeriod", args) {
                 return Ok(Value::Null);
             }
             let mut a = PhpArray::new();
@@ -3095,12 +3092,16 @@ pub fn date_interval_format_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     ))))
 }
 
-/// The 8.5 deprecation of the date classes' __wakeup().
-fn wakeup_deprecated(vm: &mut Vm, class: &str) {
-    vm.emit_deprecated(&format!(
+/// The 8.5 deprecation of the date classes' __wakeup() (from the call),
+/// then its argument checks: true when the method is not run (exception
+/// set).
+fn wakeup_deprecated(vm: &mut Vm, class: &str, args: &[Value]) -> bool {
+    let msg = format!(
         "Method {}::__wakeup() is deprecated since 8.5, this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize()",
         class
-    ));
+    );
+    vm.emit_method_deprecation(&msg, "__wakeup")
+        || check_count(vm, &format!("{}::__wakeup", class), args, 0, 0).is_err()
 }
 
 /// An object's real properties (zend_std_get_properties()): not the
