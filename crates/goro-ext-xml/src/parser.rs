@@ -959,6 +959,9 @@ pub struct Input {
     pub base_col: u32,
     /// Bytes dropped from the front of `data` (xmlParserInput.consumed).
     pub consumed: u64,
+    /// Column quirks of libxml2 (position, delta): bytes it walks without
+    /// counting a column, or counts one column each.
+    col_adj: Vec<(usize, i32)>,
 }
 
 impl Input {
@@ -974,6 +977,7 @@ impl Input {
             base_line: 1,
             base_col: 1,
             consumed: 0,
+            col_adj: Vec::new(),
         }
     }
     /// Drop consumed bytes before `pos - keep` (xmlParserShrink).
@@ -986,6 +990,10 @@ impl Input {
         let d = Rc::make_mut(&mut self.data);
         d.drain(..cut);
         self.pos -= cut;
+        self.col_adj.retain(|&(p, _)| p >= cut);
+        for a in self.col_adj.iter_mut() {
+            a.0 -= cut;
+        }
         self.consumed += cut as u64;
         self.base_line = l;
         self.base_col = c;
@@ -1006,13 +1014,26 @@ impl Input {
         // (counted in bulk, which vectorizes: a byte at a time this is the
         // hot loop of parsing long text)
         let chars = |s: &[u8]| s.iter().filter(|&&c| c & 0xC0 != 0x80).count() as u32;
-        let (line, col) = match seg.iter().rposition(|&c| c == b'\n') {
+        let (line, mut col, line_start) = match seg.iter().rposition(|&c| c == b'\n') {
             Some(nl) => {
                 let lines = seg.iter().filter(|&&c| c == b'\n').count() as u32;
-                (self.lc_line + lines, 1 + chars(&seg[nl + 1..]))
+                (
+                    self.lc_line + lines,
+                    1 + chars(&seg[nl + 1..]),
+                    start + nl + 1,
+                )
             }
-            None => (self.lc_line, self.lc_col + chars(seg)),
+            None => (self.lc_line, self.lc_col + chars(seg), start),
         };
+        if !self.col_adj.is_empty() {
+            let d: i32 = self
+                .col_adj
+                .iter()
+                .filter(|&&(p, _)| p >= line_start && p < i)
+                .map(|&(_, d)| d)
+                .sum();
+            col = (col as i64 + d as i64).max(0) as u32;
+        }
         self.lc_pos = i;
         self.lc_line = line;
         self.lc_col = col;
@@ -2717,6 +2738,11 @@ impl<'a, S: Sink> Parser<'a, S> {
             self.fatal(XML_ERR_ENTITY_NOT_STARTED, None);
             return None;
         }
+        // xmlParseEntityValue() steps over the quote with CUR_PTR++ and
+        // walks the value with NEXTL(1): no column for the quote, one per
+        // byte of a multi-byte character
+        let qpos = self.pos();
+        self.inp_mut().col_adj.push((qpos, -1));
         self.skip(1);
         let start = self.pos();
         let base_depth = self.st.inputs.len();
@@ -2733,6 +2759,10 @@ impl<'a, S: Sink> Parser<'a, S> {
                 break;
             }
             push_char(&mut raw, c);
+            if l > 1 && self.st.inputs.len() == base_depth {
+                let p = self.pos();
+                self.inp_mut().col_adj.push((p, l as i32 - 1));
+            }
             self.skip(l);
         }
         if self.cur() != q || self.st.inputs.len() != base_depth {
