@@ -3665,6 +3665,70 @@ impl Vm {
         out
     }
 
+    /// do_inherit_property() for an interface property `ip` implemented by
+    /// the class's property `cp`: the access level, then the type checked
+    /// with prop_get_variance() (a get-only virtual property is covariant, a
+    /// set-only one contravariant).
+    #[inline(never)]
+    fn interface_property_inheritance_error(
+        &self,
+        class: &ClassEntry,
+        iface_display: &str,
+        ip: &crate::object::PropertyDef,
+        cp: &crate::object::PropertyDef,
+    ) -> Option<String> {
+        let cname = crate::string::msg_str(&class.name).to_string();
+        let key = crate::string::msg_str(&cp.name).to_string();
+        if cp.visibility != Visibility::Public && ip.visibility == Visibility::Public {
+            return Some(format!(
+                "Access level to {}::${} must be public (as in class {})",
+                cname, key, iface_display
+            ));
+        }
+        if ip.property_type.is_none() {
+            if cp.property_type.is_some() {
+                return Some(format!(
+                    "Type of {}::${} must be omitted to match the parent definition in class {}",
+                    cname, key, iface_display
+                ));
+            }
+            return None;
+        }
+        let var_kind = if ip.is_virtual && (ip.has_get_hook || ip.has_set_hook) {
+            if !ip.has_set_hook {
+                1
+            } else if !ip.has_get_hook {
+                2
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let (status, parent_type, _) = self.variance_property_types(
+            class,
+            &ip.declaring_class,
+            &ip.property_type,
+            &cp.property_type,
+            var_kind,
+        );
+        if status == variance::Status::Error {
+            return Some(format!(
+                "Type of {}::${} must be {}{} (as in class {})",
+                cname,
+                key,
+                match var_kind {
+                    1 => "subtype of ",
+                    2 => "supertype of ",
+                    _ => "",
+                },
+                parent_type,
+                iface_display
+            ));
+        }
+        None
+    }
+
     /// do_inherit_property() for a trait property replacing an inherited
     /// (non-private) one: traits are bound before the parent is inherited,
     /// so the trait's property is checked like an own redeclaration.
@@ -53944,6 +54008,17 @@ impl Vm {
                                                 line: op.line,
                                             });
                                         }
+                                    }
+                                    if let Some(msg) = self.interface_property_inheritance_error(
+                                        &class,
+                                        &iface_display,
+                                        ip,
+                                        cp,
+                                    ) {
+                                        return Err(VmError {
+                                            message: msg,
+                                            line: op.line,
+                                        });
                                     }
                                     if ip.has_set_hook && !cp.has_set_hook {
                                         if let Some(child_type) = cp.property_type.clone() {
