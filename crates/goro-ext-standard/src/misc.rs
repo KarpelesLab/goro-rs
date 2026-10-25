@@ -15439,9 +15439,16 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if !can_see(prop) {
                     continue;
                 }
-                let val = vm
-                    .static_prop_raw(&name_lower, &prop.name)
-                    .unwrap_or_else(|| prop.default.clone());
+                // The default (default_static_members_table), not the
+                // current value; a constant expression's as evaluated.
+                let deferred = matches!(&prop.default, Value::String(s)
+                    if s.as_bytes().starts_with(b"__deferred"));
+                let val = if deferred {
+                    vm.static_prop_raw(&name_lower, &prop.name)
+                        .unwrap_or_else(|| prop.default.clone())
+                } else {
+                    prop.default.clone()
+                };
                 let val = match val {
                     Value::Undef => Value::Null,
                     other => other,
