@@ -55,6 +55,9 @@ pub enum Kind {
     Unicode,
     /// UTF-7 (true: the IMAP variant, RFC 3501).
     Utf7(bool),
+    /// ISO-2022-KR (RFC 1557): KS X 1001 shifted in with SO after the
+    /// ESC $ ) C header.
+    Iso2022Kr,
     Iso2022Jp,
     Cp1258,
     Mbfl(EncNo),
@@ -140,6 +143,9 @@ fn table() -> &'static [(&'static str, Kind)] {
         ("UTF-7", Utf7(false)),
         ("UTF7", Utf7(false)),
         ("UTF-7-IMAP", Utf7(true)),
+        ("ISO-2022-KR", Iso2022Kr),
+        ("CSISO2022KR", Iso2022Kr),
+        ("ISO2022KR", Iso2022Kr),
         ("UTF-16LE", Utf16(Some(Le))),
         ("ISO-2022-JP", Iso2022Jp),
         ("CSISO2022JP", Iso2022Jp),
@@ -629,6 +635,7 @@ impl Decoder {
                 Dec::Char(c, 2)
             }
             Kind::Utf7(imap) => self.decode_utf7(s, imap),
+            Kind::Iso2022Kr => self.decode_2022kr(s),
             Kind::Sbcs(t) => {
                 let dec = sbcs_tables::TABLES[t as usize].dec;
                 let b = s[0] as usize;
@@ -783,8 +790,54 @@ impl Decoder {
         }
     }
 
+    fn decode_2022kr(&mut self, s: &[u8]) -> Dec {
+        const HEADER: &[u8] = b"\x1b$)C";
+        match s[0] {
+            0x1B => {
+                let n = s.len().min(4);
+                if s[..n] != HEADER[..n] {
+                    // (any other escape is a plain character, or no KS X
+                    // 1001 byte when shifted out)
+                    return if self.state == 0 {
+                        Dec::Char(0x1B, 1)
+                    } else {
+                        Dec::Illegal(1)
+                    };
+                }
+                if n < 4 {
+                    return Dec::Incomplete;
+                }
+                Dec::Shift(4)
+            }
+            0x0E => {
+                self.state = 1;
+                Dec::Shift(1)
+            }
+            0x0F => {
+                self.state = 0;
+                Dec::Shift(1)
+            }
+            0x80..=0xFF => Dec::Illegal(1),
+            c if self.state == 0 => Dec::Char(c as u32, 1),
+            c => {
+                if s.len() < 2 {
+                    return Dec::Incomplete;
+                }
+                if !(0x21..=0x7E).contains(&c) || !(0x21..=0x7E).contains(&s[1]) {
+                    return Dec::Illegal(1);
+                }
+                match mbfl_decode_char_glibc(EncNo::EucKr, &[s[0] | 0x80, s[1] | 0x80]) {
+                    Some(cp) if !no_pua(EncNo::EucKr, cp) => Dec::Char(cp, 2),
+                    _ => Dec::Illegal(1),
+                }
+            }
+        }
+    }
+
     fn decode_2022jp(&mut self, s: &[u8]) -> Dec {
         if s[0] == 0x1B {
+            // (glibc wants the whole escape sequence in the input before
+            // looking at it)
             if s.len() < 3 {
                 return Dec::Incomplete;
             }
@@ -792,7 +845,8 @@ impl Decoder {
                 (b'(', b'B') => self.state = 0,
                 (b'(', b'J') => self.state = 1,
                 (b'$', b'@') | (b'$', b'B') => self.state = 2,
-                _ => return Dec::Illegal(1),
+                // any other escape is a plain character
+                _ => return Dec::Char(0x1B, 1),
             }
             return Dec::Shift(3);
         }
@@ -1051,6 +1105,7 @@ impl Encoder {
                 true
             }
             Kind::Utf7(imap) => self.encode_utf7(cp, out, imap),
+            Kind::Iso2022Kr => self.encode_2022kr(cp, out),
             Kind::Sbcs(t) => match sbcs_encode(&sbcs_tables::TABLES[t as usize], cp) {
                 Some(b) => {
                     out.push(b);
@@ -1126,6 +1181,44 @@ impl Encoder {
         self.nbits = 0;
     }
 
+    /// ISO-2022-KR; `state` bit 0: the header was written, bit 1: shifted
+    /// out (KS X 1001).
+    fn encode_2022kr(&mut self, cp: u32, out: &mut Vec<u8>) -> bool {
+        let kb = if cp < 0x80 {
+            None
+        } else if cp == 0x20A9 {
+            // (KS X 1001:2002's won sign is EUC-KR's only)
+            return false;
+        } else {
+            match mbfl_encode_char(EncNo::EucKr, cp) {
+                Some(b) if b.len() == 2 && b[0] >= 0xA1 && b[1] >= 0xA1 => Some(b),
+                _ => return false,
+            }
+        };
+        if self.state & 1 == 0 {
+            out.extend_from_slice(b"\x1b$)C");
+            self.state |= 1;
+        }
+        match kb {
+            None => {
+                if self.state & 2 != 0 {
+                    out.push(0x0F);
+                    self.state &= !2;
+                }
+                out.push(cp as u8);
+            }
+            Some(b) => {
+                if self.state & 2 == 0 {
+                    out.push(0x0E);
+                    self.state |= 2;
+                }
+                out.push(b[0] & 0x7F);
+                out.push(b[1] & 0x7F);
+            }
+        }
+        true
+    }
+
     fn encode_2022jp(&mut self, cp: u32, out: &mut Vec<u8>) -> bool {
         let set = |st: &mut u8, want: u8, out: &mut Vec<u8>| {
             if *st != want {
@@ -1168,6 +1261,9 @@ impl Encoder {
     pub fn reset_bytes(&self) -> Vec<u8> {
         match self.kind {
             Kind::Iso2022Jp if self.state != 0 => b"\x1b(B".to_vec(),
+            // (the header is written even for an empty conversion)
+            Kind::Iso2022Kr if self.state & 1 == 0 => b"\x1b$)C".to_vec(),
+            Kind::Iso2022Kr if self.state & 2 != 0 => b"\x0f".to_vec(),
             Kind::Utf7(imap) if self.state != 0 => {
                 let mut e = *self;
                 let mut out = Vec::new();
