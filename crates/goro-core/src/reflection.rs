@@ -3101,6 +3101,14 @@ pub fn reflection_class_method(
                 b"dom\\xmldocument",
                 b"uri\\rfc3986\\uri",
                 b"uri\\whatwg\\url",
+                b"gmp",
+                b"bcmath\\number",
+                b"hashcontext",
+                b"random\\randomizer",
+                b"random\\engine\\mt19937",
+                b"random\\engine\\pcgoneseq128xslrr64",
+                b"random\\engine\\xoshiro256starstar",
+                b"random\\engine\\secure",
             ];
             if no_ctorless.contains(&class_lower.as_slice()) {
                 let canonical = rcls(vm, &class_lower)
