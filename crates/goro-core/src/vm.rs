@@ -9352,7 +9352,7 @@ impl Vm {
 
     /// A thrown exception takes the pending one (a finally block entered by
     /// it is running) as its previous exception, when it has none.
-    pub(crate) fn chain_pending_exception(&mut self, exc_val: &Value) {
+    pub fn chain_pending_exception(&mut self, exc_val: &Value) {
         if let Some(prev_exc) = self
             .current_exception
             .take()

@@ -3588,7 +3588,16 @@ fn h_stream_isatty(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError
         Some(x) => x,
         None => return Ok(None),
     };
-    match op_cast(vm, &us, fid, true, false)? {
+    // php_stream_can_cast() then php_stream_cast(), as a descriptor for
+    // select() or else as a plain one.
+    let mut inner = None;
+    for for_select in [true, false] {
+        if op_cast(vm, &us, fid, for_select, false)?.is_some() {
+            inner = op_cast(vm, &us, fid, for_select, false)?;
+            break;
+        }
+    }
+    match inner {
         Some(inner) => Ok(Some(call_orig(
             vm,
             "stream_isatty",
@@ -3678,63 +3687,40 @@ fn h_stream_select(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError
     if !any_user {
         return Ok(None);
     }
-    let mut pfds: Vec<libc::pollfd> = Vec::new();
-    let mut sets = 0;
-    for i in 0..3 {
-        let arr = match args.get(i).map(|v| v.deref()) {
-            Some(Value::Array(a)) => a,
-            _ => continue,
+    // php_stream_cast(PHP_STREAM_AS_FD_FOR_SELECT): a user-space stream
+    // casts to the stream its stream_cast() returns.
+    let mut resolve = |vm: &mut Vm, id: i64| -> Result<Option<Option<i32>>, VmError> {
+        let Some(us) = get_us(id) else {
+            return Ok(None);
         };
-        let vals: Vec<Value> = arr.borrow().values().cloned().collect();
-        let mut cnt = 0;
-        for v in vals {
-            let fid = match fid_of(&v) {
-                Some(f) => f,
-                None => continue,
-            };
-            let real = match get_us(fid) {
-                Some(us) => op_cast(vm, &us, fid, true, true)?,
-                None => Some(fid),
-            };
-            match real.and_then(fd_of) {
-                Some(fd) => {
-                    let events = match i {
-                        0 => libc::POLLIN,
-                        1 => libc::POLLOUT,
-                        _ => libc::POLLPRI,
-                    };
-                    pfds.push(libc::pollfd {
-                        fd,
-                        events,
-                        revents: 0,
-                    });
-                    cnt += 1;
-                }
-                None => {
-                    warn(
-                        vm,
-                        "Cannot represent a stream of type user-space as a select()able descriptor",
-                    );
-                }
-            }
+        // (no user code runs while an exception is pending)
+        let fd = if vm.current_exception.is_some() {
+            None
+        } else {
+            op_cast(vm, &us, id, true, true)?.and_then(fd_of)
+        };
+        if fd.is_none() {
+            warn(
+                vm,
+                "Cannot represent a stream of type user-space as a select()able descriptor",
+            );
         }
-        sets += cnt;
-    }
-    if sets == 0 {
-        return Err(throw(vm, b"ValueError", "No stream arrays were passed"));
-    }
-    let sec = int_arg(args, 3);
-    let usec = int_arg(args, 4).unwrap_or(0);
-    let timeout = match sec {
-        None => -1,
-        Some(sv) => (sv * 1000 + usec / 1000) as i32,
+        Ok(Some(fd))
     };
-    let n = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, timeout) };
-    Ok(Some(if n < 0 {
-        Value::False
-    } else {
-        Value::Long(pfds.iter().filter(|p| p.revents != 0).count() as i64)
-    }))
+    let buffered = |id: i64| match get_us(id) {
+        Some(us) => us.borrow().buffered() > 0,
+        None => FILE_HANDLES.with(|h| {
+            h.borrow()
+                .get(&id)
+                .is_some_and(|fh| !fh.filter_read_ready.is_empty())
+        }),
+    };
+    Ok(Some(super::xp_socket::stream_select_impl(
+        vm,
+        args,
+        &mut resolve,
+        &buffered,
+    )?))
 }
 
 fn h_fgetcsv(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {

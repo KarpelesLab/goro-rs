@@ -150,6 +150,14 @@ fn throw(vm: &mut Vm, class: &[u8], msg: &str) -> VmError {
     }
 }
 
+/// zend_throw_exception() while an exception may be pending: the new one
+/// takes it as its previous exception.
+fn throw_chained(vm: &mut Vm, class: &[u8], msg: &str) {
+    let exc = vm.create_exception(class, msg, vm.current_line);
+    vm.chain_pending_exception(&exc);
+    vm.current_exception = Some(exc);
+}
+
 fn type_error(vm: &mut Vm, func: &str, n: usize, name: &str, ty: &str, v: &Value) -> VmError {
     let msg = format!(
         "{}(): Argument #{} (${}) must be of type {}, {} given",
@@ -2144,9 +2152,11 @@ fn stream_set_timeout_as(vm: &mut Vm, f: &str, args: &[Value]) -> Result<Value, 
 // stream_select()
 // ---------------------------------------------------------------------------
 
-/// Resolves a stream array element to (stream id, descriptor). User
-/// streams and other non-descriptor streams are handled by `resolve`.
-pub(crate) type FdResolver<'a> = dyn FnMut(&mut Vm, i64) -> Result<Option<i32>, VmError> + 'a;
+/// php_stream_cast(PHP_STREAM_AS_FD_FOR_SELECT) of a stream the caller
+/// serves (user-space streams): None when it is not one of its streams,
+/// Some(None) when it has no descriptor.
+pub(crate) type FdResolver<'a> =
+    dyn FnMut(&mut Vm, i64) -> Result<Option<Option<i32>>, VmError> + 'a;
 
 fn element_stream_id(v: &Value) -> Option<i64> {
     match v.deref() {
@@ -2195,15 +2205,30 @@ pub(crate) fn stream_select_impl(
         let Some(a) = a else { continue };
         let vals: Vec<Value> = a.borrow().values().cloned().collect();
         for v in vals {
+            // php_stream_from_zval_no_verify(): a TypeError for what is
+            // not a stream (thrown on, chained to any pending one).
             let Some(id) = element_stream_id(&v) else {
+                throw_chained(
+                    vm,
+                    b"TypeError",
+                    "stream_select(): supplied argument is not a valid stream resource",
+                );
                 continue;
             };
-            if !goro_core::value::is_open_resource(id) {
+            let is_stream = (1..=3).contains(&id)
+                || FILE_HANDLES.with(|h| h.borrow().contains_key(&id))
+                || DIR_HANDLES.with(|h| h.borrow().contains_key(&id));
+            if !goro_core::value::is_open_resource(id) || !is_stream {
+                throw_chained(
+                    vm,
+                    b"TypeError",
+                    "stream_select(): supplied resource is not a valid stream resource",
+                );
                 continue;
             }
-            let fd = match stream_fd_for_select(vm, id)? {
-                Some(fd) => Some(fd),
-                None => resolve(vm, id)?,
+            let fd = match resolve(vm, id)? {
+                Some(fd) => fd,
+                None => stream_fd_for_select(vm, id)?,
             };
             if let Some(fd) = fd {
                 sets[i].push((fd, id));
@@ -2214,8 +2239,13 @@ pub(crate) fn stream_select_impl(
         }
     }
     if total == 0 {
-        return Err(throw(vm, b"ValueError", "No stream arrays were passed"));
+        throw_chained(vm, b"ValueError", "No stream arrays were passed");
+        return Err(VmError {
+            message: "No stream arrays were passed".to_string(),
+            line: vm.current_line,
+        });
     }
+
     if sec.is_none() && usec.is_some() && usec != Some(0) {
         return Err(throw(
             vm,
@@ -2326,15 +2356,36 @@ pub(crate) fn stream_select_impl(
             .collect();
         for (k, v) in entries {
             let Some(id) = element_stream_id(&v) else {
+                throw_chained(
+                    vm,
+                    b"TypeError",
+                    "stream_select(): supplied argument is not a valid stream resource",
+                );
                 continue;
             };
-            if let Some((fd, _)) = sets[i].iter().find(|(_, sid)| *sid == id) {
-                if ready[i].contains(fd) {
-                    out.set(k, v.deref());
-                }
+            // stream_array_from_fd_set() casts each stream again.
+            let fd = match resolve(vm, id)? {
+                Some(Some(fd)) => fd,
+                Some(None) => continue,
+                None => match sets[i].iter().find(|(_, sid)| *sid == id) {
+                    Some(&(fd, _)) => fd,
+                    None => {
+                        let _ = stream_fd_for_select(vm, id)?;
+                        continue;
+                    }
+                },
+            };
+            if ready[i].contains(&fd) {
+                out.set(k, v.deref());
             }
         }
         replace_array(args, i, out);
+    }
+    if vm.current_exception.is_some() {
+        return Err(VmError {
+            message: String::new(),
+            line: vm.current_line,
+        });
     }
     Ok(Value::Long(count))
 }
