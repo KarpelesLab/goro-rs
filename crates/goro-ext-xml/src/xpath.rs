@@ -2,7 +2,6 @@
 //! messages follow libxml2's xpath.c).
 
 use crate::tree::{self, NType, NodeId, Tree};
-use std::cmp::Ordering;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
@@ -1275,11 +1274,8 @@ pub fn namespace_nodes(t: &mut Tree, n: NodeId) -> Vec<NodeId> {
     let xml = t.xml_ns(doc);
     out.push(ns_node(t, n, xml));
     // xmlXPathNextNamespace walks xmlGetNsList() from the end
+    // (xmlGetNsList() keeps an xmlns="" undeclaration too)
     for ns in list.into_iter().rev() {
-        // a default namespace undeclared with xmlns="" is not in scope
-        if t.nss[ns].prefix.is_none() && t.nss[ns].href.is_empty() {
-            continue;
-        }
         out.push(ns_node(t, n, ns));
     }
     out
@@ -1320,7 +1316,9 @@ fn order_key(t: &Tree, n: NodeId) -> Vec<(u8, usize)> {
             }
         };
         let (rank, idx) = match nd.t {
-            NType::NamespaceDecl => (0u8, cur),
+            // (xmlXPathCmpNodes(): the namespace nodes of an element tie;
+            // the stable sort keeps the axis order)
+            NType::NamespaceDecl => (0u8, 0),
             NType::Attribute => {
                 let mut i = 0;
                 let mut p = nd.prev;
@@ -1356,12 +1354,13 @@ pub fn sort_dedup(v: &mut Vec<NodeId>) {
     let keys: Vec<(Vec<(u8, usize)>, NodeId)> =
         tw(|t| v.iter().map(|&n| (order_key(t, n), n)).collect());
     let mut keys = keys;
-    keys.sort_by(|a, b| match a.0.cmp(&b.0) {
-        Ordering::Equal => a.1.cmp(&b.1),
-        o => o,
-    });
-    keys.dedup_by(|a, b| a.1 == b.1);
-    *v = keys.into_iter().map(|(_, n)| n).collect();
+    keys.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut seen = std::collections::HashSet::new();
+    *v = keys
+        .into_iter()
+        .filter(|(_, n)| seen.insert(*n))
+        .map(|(_, n)| n)
+        .collect();
 }
 
 // ---------------------------------------------------------------------------
