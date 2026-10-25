@@ -11835,7 +11835,9 @@ impl Compiler {
     }
 
     fn check_class_ref_scope(&self, name: &[u8], line: u32) -> CompileResult<()> {
-        if self.in_free_function && self.current_class.is_none() {
+        // (a constant expression, like a parameter default, fails when it
+        // is evaluated: zend_compile_const_expr_class_const())
+        if self.in_free_function && self.current_class.is_none() && !self.in_const_expr {
             for kw in ["self", "parent", "static"] {
                 if name.eq_ignore_ascii_case(kw.as_bytes()) {
                     return Err(CompileError {

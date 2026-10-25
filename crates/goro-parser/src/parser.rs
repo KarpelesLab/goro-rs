@@ -4136,9 +4136,11 @@ impl Parser {
             return left;
         }
         match &left.kind {
-            ExprKind::BinaryOp { right, .. } | ExprKind::NullCoalesce { right, .. } => {
-                Self::graft_target(right)
-            }
+            ExprKind::BinaryOp { right, .. }
+            | ExprKind::NullCoalesce { right, .. }
+            | ExprKind::Pipe {
+                callable: right, ..
+            } => Self::graft_target(right),
             ExprKind::UnaryOp {
                 op,
                 operand,
@@ -4226,6 +4228,16 @@ impl Parser {
                 Expr {
                     span: span.merge(operand.span),
                     kind: ExprKind::Suppress(Box::new(operand)),
+                }
+            }
+            ExprKind::Pipe { value, callable } => {
+                let callable = Self::graft_assignment(*callable, build)?;
+                Expr {
+                    span: span.merge(callable.span),
+                    kind: ExprKind::Pipe {
+                        value,
+                        callable: Box::new(callable),
+                    },
                 }
             }
             ExprKind::NullCoalesce { left: l, right } => {
