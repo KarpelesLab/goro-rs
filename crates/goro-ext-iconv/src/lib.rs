@@ -12,7 +12,9 @@ use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
 
 pub mod charset;
+mod cjk;
 pub mod conv;
+mod iso2022;
 mod mime;
 #[rustfmt::skip]
 mod sbcs_tables;
@@ -278,11 +280,15 @@ pub(crate) fn iconv_string(
         return (None, Err::WrongCharset);
     };
     let ignore_ilseq = check_ignore(out_charset);
-    let mut out = Vec::with_capacity(input.len() + 32);
+    // (php's buffer: the input's length + 32 bytes, grown by the input's
+    // length when full; glibc's stateful encoders show where it was full)
+    let mut bsz = input.len() + 32;
+    let mut out = Vec::with_capacity(bsz);
     let mut pos = 0;
     let mut result: Result<(), Errno> = Ok(());
     while pos < input.len() {
-        result = cd.conv(input, &mut pos, &mut out, None);
+        let room = bsz - out.len();
+        result = cd.conv(input, &mut pos, &mut out, Some(room));
         if let Err(Errno::Ilseq) = result {
             if ignore_ilseq {
                 if input.len() - pos <= 1 {
@@ -293,10 +299,22 @@ pub(crate) fn iconv_string(
                 }
             }
         }
+        if result == Err(Errno::TooBig) && pos < input.len() {
+            bsz += input.len();
+            continue;
+        }
         break;
     }
     if result.is_ok() {
-        result = cd.flush(&mut out, None);
+        loop {
+            let room = bsz - out.len();
+            result = cd.flush(&mut out, Some(room));
+            if result == Err(Errno::TooBig) {
+                bsz += 16;
+                continue;
+            }
+            break;
+        }
     }
     match result {
         Ok(()) => (Some(out), Err::Success),
@@ -397,14 +415,23 @@ fn iconv_substr_impl(
     if len == 0 {
         return (Some(Vec::new()), Err::Success);
     }
-    let Some((chars, _)) = conv::decode_all(s, enc) else {
+    let mut second = Vec::new();
+    let Some((chars, _)) = conv::decode_all_marked(s, enc, &mut second) else {
         return (None, Err::WrongCharset);
     };
     let Some(mut encoder) = conv::encoder(enc) else {
         return (None, Err::WrongCharset);
     };
     let mut out = Vec::new();
-    for &cp in chars.iter().skip(offset as usize).take(len as usize) {
+    // (php converts one character at a time: glibc keeps the second
+    // character of a sequence decoding to two for the flush after the last
+    // one taken, which php then takes too)
+    let mut take = len as usize;
+    let end = offset as usize + take;
+    if end < chars.len() && second[end] {
+        take += 1;
+    }
+    for &cp in chars.iter().skip(offset as usize).take(take) {
         if !encoder.encode(cp, &mut out) {
             break;
         }
@@ -821,37 +848,70 @@ impl IconvFilter {
 
     /// php_iconv_stream_filter_append_bucket(): Err(warning) on failure.
     fn append(&mut self, ps: Option<&[u8]>, out: &mut Vec<u8>) -> Result<usize, String> {
-        match ps {
-            Some(data) => {
-                let mut buf = std::mem::take(&mut self.stub);
-                let stub_len = buf.len();
-                buf.extend_from_slice(data);
-                let mut pos = 0;
-                match self.cd.conv(&buf, &mut pos, out, None) {
-                    Ok(()) => Ok(data.len()),
-                    Err(Errno::Ilseq) => Err(self.warning("invalid multibyte sequence")),
+        // (the output buffer starts at the input's size, 64 bytes for the
+        // flush, and doubles whenever iconv() finds it full: glibc's
+        // stateful encoders show where)
+        const STUB: usize = 128;
+        let start = out.len();
+        let mut size = ps.map_or(64, |d| d.len());
+        let room = |out: &Vec<u8>, size: usize| size.saturating_sub(out.len() - start);
+        let mut data = ps.unwrap_or(&[]);
+        if !self.stub.is_empty() {
+            let mut pt = 0;
+            while pt < self.stub.len() {
+                let stub = self.stub.clone();
+                match self.cd.conv(&stub, &mut pt, out, Some(room(out, size))) {
+                    Ok(()) => {}
+                    Err(Errno::Ilseq) => return Err(self.warning("invalid multibyte sequence")),
                     Err(Errno::Inval) => {
-                        let rest = &buf[pos..];
-                        if rest.len() > 128 {
+                        if ps.is_none() {
+                            return Err(self.warning("invalid multibyte sequence"));
+                        }
+                        let Some((&b, rest)) = data.split_first() else {
+                            // (php then drops the stub)
+                            self.stub.clear();
+                            pt = 0;
+                            break;
+                        };
+                        if self.stub.len() >= STUB {
                             return Err(self.warning("insufficient buffer"));
                         }
-                        self.stub = rest.to_vec();
-                        let _ = stub_len;
-                        Ok(data.len())
+                        self.stub.drain(..pt);
+                        self.stub.push(b);
+                        data = rest;
+                        pt = 0;
                     }
-                    Err(Errno::TooBig) => Err(self.warning("unknown error")),
+                    Err(Errno::TooBig) => size *= 2,
                 }
             }
-            None => {
-                if !self.stub.is_empty() {
-                    return Err(self.warning("invalid multibyte sequence"));
+            self.stub.drain(..pt.min(self.stub.len()));
+        }
+        let Some(_) = ps else {
+            loop {
+                match self.cd.flush(out, Some(room(out, size))) {
+                    Ok(()) => return Ok(0),
+                    Err(Errno::TooBig) => size *= 2,
+                    Err(_) => return Err(self.warning("unknown error")),
                 }
-                self.cd
-                    .flush(out, None)
-                    .map_err(|_| self.warning("unknown error"))?;
-                Ok(0)
+            }
+        };
+        let mut pos = 0;
+        while pos < data.len() {
+            match self.cd.conv(data, &mut pos, out, Some(room(out, size))) {
+                Ok(()) => {}
+                Err(Errno::Ilseq) => return Err(self.warning("invalid multibyte sequence")),
+                Err(Errno::Inval) => {
+                    let rest = &data[pos..];
+                    if rest.len() > STUB {
+                        return Err(self.warning("insufficient buffer"));
+                    }
+                    self.stub = rest.to_vec();
+                    break;
+                }
+                Err(Errno::TooBig) => size *= 2,
             }
         }
+        Ok(ps.map_or(0, |d| d.len()))
     }
 }
 

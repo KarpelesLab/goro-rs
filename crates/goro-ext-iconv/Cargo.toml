@@ -11,3 +11,4 @@ workspace = true
 goro-core = { path = "../goro-core" }
 goro-ext-standard = { path = "../goro-ext-standard" }
 goro-ext-mbstring = { path = "../goro-ext-mbstring" }
+goro-zlib = { path = "../goro-zlib" }

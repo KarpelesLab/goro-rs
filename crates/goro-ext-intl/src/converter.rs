@@ -389,7 +389,7 @@ fn decode_step(be: Backend, s: &[u8], st: &mut DecState) -> Result<(Vec<u32>, us
         Backend::Iconv(kind) => {
             let d = st.iconv.get_or_insert_with(|| charset::Decoder::new(kind));
             match d.decode(s) {
-                Dec::Char(c, n) => Ok((vec![c], n)),
+                Dec::Char(c, n) => Ok((std::iter::once(c).chain(d.take_pending()).collect(), n)),
                 Dec::Shift(n) => Ok((vec![], n)),
                 Dec::Illegal(n) => {
                     // a well-formed but unmapped double-byte character
@@ -414,7 +414,7 @@ fn decode_step(be: Backend, s: &[u8], st: &mut DecState) -> Result<(Vec<u32>, us
                             len: 2,
                         });
                     }
-                    Err(ill(n.max(1)))
+                    Err(ill(n.clamp(1, s.len())))
                 }
                 Dec::Incomplete => Err(trunc(s.len())),
             }

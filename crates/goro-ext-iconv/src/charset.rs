@@ -5,7 +5,9 @@
 //! legacy single-byte code tables come from the mbstring extension's libmbfl
 //! port.
 
+use crate::cjk::{self, Comp};
 use crate::comp_tables;
+use crate::iso2022;
 use crate::sbcs_tables;
 use goro_ext_mbstring::mbfl::{self, EncNo, Encoding, MBFL_BAD_INPUT};
 
@@ -60,6 +62,16 @@ pub enum Kind {
     /// ESC $ ) C header.
     Iso2022Kr,
     Iso2022Jp,
+    /// ISO-2022-JP-2 (RFC 1554).
+    Iso2022Jp2,
+    /// ISO-2022-JP-3 (JIS X 0213).
+    Iso2022Jp3,
+    /// ISO-2022-CN, or ISO-2022-CN-EXT (RFC 1922).
+    Iso2022Cn(bool),
+    Johab,
+    /// BIG5-HKSCS, EUC-JISX0213, SHIFT_JISX0213: their encoders hold a
+    /// character back until the next one says whether they combine.
+    Comp(Comp),
     Cp1258,
     Mbfl(EncNo),
     /// A glibc single-byte charset (an index into sbcs_tables::TABLES).
@@ -155,6 +167,14 @@ fn table() -> &'static [(&'static str, Kind)] {
         ("ISO-2022-JP", Iso2022Jp),
         ("CSISO2022JP", Iso2022Jp),
         ("ISO2022JP", Iso2022Jp),
+        ("ISO-2022-JP-2", Iso2022Jp2),
+        ("ISO-2022-JP-3", Iso2022Jp3),
+        ("ISO-2022-CN", Iso2022Cn(false)),
+        ("ISO-2022-CN-EXT", Iso2022Cn(true)),
+        ("JOHAB", Johab),
+        ("BIG5HKSCS", Comp(cjk::Comp::Hkscs)),
+        ("EUC-JISX0213", Comp(cjk::Comp::EucJis)),
+        ("SHIFT_JISX0213", Comp(cjk::Comp::SjisJis)),
         ("CP1258", Cp1258),
         ("WINDOWS-1258", Cp1258),
         ("MS-VIET", Cp1258),
@@ -265,7 +285,7 @@ fn mbfl_enc(no: EncNo) -> Option<&'static Encoding> {
 }
 
 /// One character through an mbfl decoder.
-fn mbfl_decode_char(no: EncNo, bytes: &[u8]) -> Option<u32> {
+pub(crate) fn mbfl_decode_char(no: EncNo, bytes: &[u8]) -> Option<u32> {
     let enc = mbfl_enc(no)?;
     let out = enc.decode(bytes);
     match out.as_slice() {
@@ -275,7 +295,7 @@ fn mbfl_decode_char(no: EncNo, bytes: &[u8]) -> Option<u32> {
 }
 
 /// One character through an mbfl encoder.
-fn mbfl_encode_char(no: EncNo, cp: u32) -> Option<Vec<u8>> {
+pub(crate) fn mbfl_encode_char(no: EncNo, cp: u32) -> Option<Vec<u8>> {
     // glibc's tables where they differ from libmbfl's.
     match (no, cp) {
         (EncNo::EucJp | EncNo::Sjis | EncNo::Cp932, 0xA5) => return Some(vec![0x5C]),
@@ -324,25 +344,44 @@ fn mbfl_encode_char(no: EncNo, cp: u32) -> Option<Vec<u8>> {
     let enc = mbfl_enc(no)?;
     let (bytes, errors) = enc.encode(&[cp], '?' as u32, mbfl::MBFL_OUTPUTFILTER_ILLEGAL_MODE_NONE);
     if errors > 0 || bytes.is_empty() {
-        return None;
+        return if no == EncNo::EucTw {
+            euc_tw_high(cp)
+        } else {
+            None
+        };
     }
     // (glibc's EUC-TW has no CNS 11643 plane 14; libmbfl's has only it
     // beyond planes 1 and 2)
     if no == EncNo::EucTw && bytes.len() == 4 && bytes[1] > 0xA2 {
-        return None;
+        return euc_tw_high(cp);
     }
     // libmbfl also accepts compatibility characters (e.g. U+FF5E for
     // 0xA1C1 in EUC-JP); glibc only converts what decodes back to the same
     // character.
     if cp >= 0x80 && mbfl_decode_char_glibc(no, &bytes) != Some(cp) {
-        return None;
+        return if no == EncNo::EucTw {
+            euc_tw_high(cp)
+        } else {
+            None
+        };
     }
     Some(bytes)
 }
 
+/// A CNS 11643 plane 3-7 character in EUC-TW.
+fn euc_tw_high(cp: u32) -> Option<Vec<u8>> {
+    let c = cjk::cns_high_code(cp)?;
+    Some(vec![
+        0x8E,
+        0xA0 + (c >> 16) as u8,
+        (c >> 8) as u8 | 0x80,
+        c as u8 | 0x80,
+    ])
+}
+
 /// A private-use character glibc's table of the charset lacks (it has
 /// none, or only BIG5's U+F6B1-U+F848).
-fn no_pua(no: EncNo, cp: u32) -> bool {
+pub(crate) fn no_pua(no: EncNo, cp: u32) -> bool {
     (0xE000..0xF900).contains(&cp)
         && match no {
             EncNo::EucJp
@@ -368,7 +407,7 @@ fn big5_override(bytes: &[u8]) -> Option<u32> {
 }
 
 /// mbfl_decode_char() with glibc's mapping differences.
-fn mbfl_decode_char_glibc(no: EncNo, bytes: &[u8]) -> Option<u32> {
+pub(crate) fn mbfl_decode_char_glibc(no: EncNo, bytes: &[u8]) -> Option<u32> {
     match (no, bytes) {
         (EncNo::Sjis, [0x5C]) => return Some(0xA5),
         (EncNo::Sjis, [0x7E]) => return Some(0x203E),
@@ -386,6 +425,31 @@ fn mbfl_decode_char_glibc(no: EncNo, bytes: &[u8]) -> Option<u32> {
         _ => {}
     }
     mbfl_decode_char(no, bytes)
+}
+
+/// A four-byte EUC-TW character (0x8E, the plane, two bytes).
+fn decode_euc_tw4(s: &[u8]) -> Option<u32> {
+    let gr = |b: u8| (0xA1..=0xFE).contains(&b);
+    if !gr(s[2]) || !gr(s[3]) {
+        return None;
+    }
+    match s[1] {
+        // (plane 1 is the two-byte form's)
+        0xA1 => mbfl_decode_char_glibc(EncNo::EucTw, &s[2..]),
+        0xA2 => mbfl_decode_char_glibc(EncNo::EucTw, s),
+        p => Some(cjk::cns_high(p - 0xA0, s[2] - 0x80, s[3] - 0x80)).filter(|&c| c != 0),
+    }
+}
+
+/// The upper half (0x80-0xFF) of a glibc single-byte charset.
+pub(crate) fn sbcs_high(name: &[u8]) -> &'static [u16] {
+    match lookup(name) {
+        Some(Kind::Sbcs(t)) => {
+            let dec = sbcs_tables::TABLES[t as usize].dec;
+            &dec[dec.len() - 128..]
+        }
+        _ => &[],
+    }
 }
 
 /// The byte of `cp` in a single-byte charset.
@@ -487,6 +551,9 @@ pub struct Decoder {
     acc: u32,
     nbits: u8,
     hi: u16,
+    /// The second character of a sequence decoding to two (returned by
+    /// the next call, without input).
+    pend: u32,
 }
 
 impl Decoder {
@@ -497,6 +564,7 @@ impl Decoder {
             acc: 0,
             nbits: 0,
             hi: 0,
+            pend: 0,
         }
     }
 
@@ -505,9 +573,43 @@ impl Decoder {
         self.acc = 0;
         self.nbits = 0;
         self.hi = 0;
+        self.pend = 0;
+    }
+
+    /// Whether the second character of a pair is still to come.
+    pub fn has_pending(&self) -> bool {
+        self.pend != 0
+    }
+
+    /// The second character of a pair just decoded.
+    pub fn take_pending(&mut self) -> Option<u32> {
+        Some(std::mem::take(&mut self.pend)).filter(|&c| c != 0)
+    }
+
+    /// The ISO-2022 decoders' state (designations and shifts).
+    pub(crate) fn iso_state(&mut self) -> &mut u32 {
+        &mut self.acc
     }
 
     pub fn decode(&mut self, s: &[u8]) -> Dec {
+        if self.pend != 0 {
+            return Dec::Char(std::mem::take(&mut self.pend), 0);
+        }
+        let (d, pend) = match self.kind {
+            Kind::Johab => cjk::decode_johab(s),
+            Kind::Comp(Comp::Hkscs) => cjk::decode_hkscs(s),
+            Kind::Comp(Comp::EucJis) => cjk::decode_euc_jisx0213(s),
+            Kind::Comp(Comp::SjisJis) => cjk::decode_sjisx0213(s),
+            Kind::Iso2022Jp2 => iso2022::decode_jp2(self, s),
+            Kind::Iso2022Jp3 => iso2022::decode_jp3(self, s),
+            Kind::Iso2022Cn(ext) => iso2022::decode_cn(self, s, ext),
+            _ => return self.decode1(s),
+        };
+        self.pend = pend;
+        d
+    }
+
+    fn decode1(&mut self, s: &[u8]) -> Dec {
         match self.kind {
             Kind::Utf8 => decode_utf8(s),
             Kind::Ascii => {
@@ -679,6 +781,13 @@ impl Decoder {
                     Dec::Char(c as u32, 1)
                 }
             }
+            Kind::Johab
+            | Kind::Comp(_)
+            | Kind::Iso2022Jp2
+            | Kind::Iso2022Jp3
+            | Kind::Iso2022Cn(_) => {
+                unreachable!()
+            }
             Kind::Mbfl(EncNo::Gb18030_2022) => decode_gb18030(s),
             Kind::Mbfl(no) => {
                 let c = s[0];
@@ -730,7 +839,12 @@ impl Decoder {
                     }
                     return Dec::Incomplete;
                 }
-                match mbfl_decode_char_glibc(no, &s[..n]) {
+                let cp = if no == EncNo::EucTw && n == 4 {
+                    decode_euc_tw4(&s[..4])
+                } else {
+                    mbfl_decode_char_glibc(no, &s[..n])
+                };
+                match cp {
                     Some(cp) if !no_pua(no, cp) => Dec::Char(cp, n),
                     // //IGNORE skips the lead byte, or the pair for some
                     // charsets when the trail byte is in range.
@@ -1044,9 +1158,13 @@ pub struct Encoder {
     /// ISO-2022-JP: designated set; UTF-16 / UTF-32: BOM written;
     /// UTF-7: 1 in base64.
     state: u8,
-    /// UTF-7: the base64 bits not yet written and their count.
+    /// UTF-7: the base64 bits not yet written and their count; ISO-2022:
+    /// the designations.
     acc: u32,
     nbits: u8,
+    /// A character held back to see whether the next one combines with
+    /// it (0: none).
+    last: u32,
 }
 
 impl Encoder {
@@ -1056,7 +1174,89 @@ impl Encoder {
             state: 0,
             acc: 0,
             nbits: 0,
+            last: 0,
         }
+    }
+
+    /// The ISO-2022 encoders' state: the shift / G0 set, the designations,
+    /// the held back character.
+    pub(crate) fn iso_state(&mut self) -> (&mut u8, &mut u32, &mut u32) {
+        (&mut self.state, &mut self.acc, &mut self.last)
+    }
+
+    /// ISO-2022-KR's header, when not written yet (glibc writes it at the
+    /// start of the first conversion call).
+    pub(crate) fn pending_header(&self) -> &'static [u8] {
+        if self.kind == Kind::Iso2022Kr && self.state & 1 == 0 {
+            b"\x1b$)C"
+        } else {
+            b""
+        }
+    }
+
+    /// The header was written.
+    pub(crate) fn header_written(&mut self) {
+        if self.kind == Kind::Iso2022Kr {
+            self.state |= 1;
+        }
+    }
+
+    /// The length of the shortest character (glibc's MIN_NEEDED_OUTPUT).
+    pub fn min_len(&self) -> usize {
+        match self.kind {
+            Kind::Ucs2(_) | Kind::Utf16(_) | Kind::Unicode => 2,
+            Kind::Ucs4(..) | Kind::Utf32Bom => 4,
+            _ => 1,
+        }
+    }
+
+    /// Back to `saved`'s shift (ISO-2022-CN: SO / SS2 / SS3), keeping the
+    /// designations.
+    pub(crate) fn restore_shift(&mut self, saved: &Encoder) {
+        self.state = saved.state;
+    }
+
+    /// Writes the held back character unless `cp` combines with it (the
+    /// conversion commits this before converting `cp`).
+    pub fn flush_pending(&mut self, cp: u32, out: &mut Vec<u8>) {
+        if self.last == 0 {
+            return;
+        }
+        match self.kind {
+            Kind::Comp(c) => {
+                if cjk::comp_enc(c).compose(self.last, cp).is_none() {
+                    let base = std::mem::take(&mut self.last);
+                    if let Some(code) = cjk::comp_code(c, base) {
+                        cjk::encode_code(c, code, out);
+                    }
+                }
+            }
+            Kind::Iso2022Jp3 => iso2022::flush_jp3(self, Some(cp), out),
+            _ => {}
+        }
+    }
+
+    fn encode_comp(&mut self, c: Comp, cp: u32, out: &mut Vec<u8>) -> bool {
+        let e = cjk::comp_enc(c);
+        if self.last != 0 {
+            let base = std::mem::take(&mut self.last);
+            if let Some(code) = e.compose(base, cp) {
+                cjk::encode_code(c, code, out);
+                return true;
+            }
+            if let Some(code) = cjk::comp_code(c, base) {
+                cjk::encode_code(c, code, out);
+            }
+        }
+        let Some(code) = cjk::comp_code(c, cp) else {
+            return false;
+        };
+        if e.is_base(cp) {
+            self.last = cp;
+        } else {
+            cjk::encode_code(c, code, out);
+        }
+        true
     }
 
     /// Bytes of `cp` appended to `out`; false when it cannot be
@@ -1148,6 +1348,11 @@ impl Encoder {
                 }
             }
             Kind::Iso2022Jp => self.encode_2022jp(cp, out),
+            Kind::Iso2022Jp2 => iso2022::encode_jp2(self, cp, out),
+            Kind::Iso2022Jp3 => iso2022::encode_jp3(self, cp, out),
+            Kind::Iso2022Cn(ext) => iso2022::encode_cn(self, cp, out, ext),
+            Kind::Johab => cjk::encode_johab(cp, out),
+            Kind::Comp(c) => self.encode_comp(c, cp, out),
             Kind::Unicode => {
                 if cp >= 0x10000 || (0xD800..0xE000).contains(&cp) {
                     return false;
@@ -1332,6 +1537,19 @@ impl Encoder {
     /// NULL, &out, &outleft)).
     pub fn reset_bytes(&self) -> Vec<u8> {
         match self.kind {
+            Kind::Comp(c) if self.last != 0 => {
+                let mut out = Vec::new();
+                if let Some(code) = cjk::comp_code(c, self.last) {
+                    cjk::encode_code(c, code, &mut out);
+                }
+                out
+            }
+            Kind::Iso2022Jp2 | Kind::Iso2022Jp3 | Kind::Iso2022Cn(_) => {
+                let mut e = *self;
+                let mut out = Vec::new();
+                iso2022::reset(&mut e, &mut out);
+                out
+            }
             Kind::Iso2022Jp if self.state != 0 => b"\x1b(B".to_vec(),
             // (the header is written even for an empty conversion)
             Kind::Iso2022Kr if self.state & 1 == 0 => b"\x1b$)C".to_vec(),
@@ -1355,6 +1573,7 @@ impl Encoder {
         self.state = 0;
         self.acc = 0;
         self.nbits = 0;
+        self.last = 0;
     }
 }
 
