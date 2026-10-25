@@ -1055,6 +1055,33 @@ impl Vm {
         }
     }
 
+    /// `&$weakmap[$obj]`: zend_weakmap_read_dimension(BP_VAR_W) hands out the
+    /// stored zval, which the reference assignment turns into a reference in
+    /// place. None when it threw.
+    #[inline(never)]
+    pub(crate) fn weakmap_fetch_dim_ref(
+        &mut self,
+        obj: &Rc<RefCell<crate::object::PhpObject>>,
+        key: Value,
+    ) -> Option<Value> {
+        self.weakmap_fetch_dim_w(obj, Some(key.clone()), DimFetch::W)?;
+        let Value::Object(key_obj) = key.deref() else {
+            return None;
+        };
+        let wm_id = obj.borrow().object_id;
+        let key_id = key_obj.borrow().object_id;
+        let (_, _, v) = self
+            .weak_map_entries
+            .get_mut(&wm_id)?
+            .iter_mut()
+            .find(|(oid, weak, _)| *oid == key_id && weak.upgrade().is_some())?;
+        if !matches!(v, Value::Reference(_)) {
+            let cur = std::mem::replace(v, Value::Null);
+            *v = Value::Reference(Rc::new(RefCell::new(cur)));
+        }
+        Some(v.clone())
+    }
+
     /// zend_weakmap_read_dimension() for W/RW/UNSET: the stored value itself.
     fn weakmap_fetch_dim_w(
         &mut self,
