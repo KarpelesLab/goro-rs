@@ -1800,7 +1800,7 @@ impl crate::vm::Vm {
                 // (see the SEND_VAL handler).
                 OpCode::SendVal => {
                     let snapshot = send_snapshot(op_array, ip, op, cvs);
-                    if self.send_val_fast(op, cvs, tmps, literals, snapshot) {
+                    if self.send_val_fast(op, cvs, tmps, literals, snapshot, false) {
                         Fast::Done
                     } else {
                         break 'run ip;
@@ -1813,10 +1813,16 @@ impl crate::vm::Vm {
                     // a value that is not an array: the general handler may
                     // separate one passed to an `array &$array`)
                     let fn_gen = self.user_functions.len() + 1;
+                    let mut ucf = false;
                     let by_value_target = self.pending_calls.last().is_some_and(|c| {
                         c.target.fn_gen == fn_gen
                             && match (&c.target.user, &c.target.builtin) {
                                 (Some(_), _) => true,
+                                // (call_user_func(_array)(): by value)
+                                (None, None) if is_direct_ucf(c) => {
+                                    ucf = true;
+                                    true
+                                }
                                 (None, Some((_, Some((fi, _))))) => {
                                     let idx = c.args.len();
                                     fi.params
@@ -1838,6 +1844,7 @@ impl crate::vm::Vm {
                             tmps,
                             literals,
                             send_snapshot(op_array, ip, op, cvs),
+                            ucf,
                         )
                     {
                         Fast::Done
@@ -2319,7 +2326,9 @@ impl crate::vm::Vm {
             // A builtin by a plain name (not a method, not a dynamic call):
             // the general handler finds no by-reference parameter there.
             let name = call.name.as_bytes();
-            return (t.builtin.is_some() && !name.windows(2).any(|w| w == b"::")).then_some(false);
+            return ((t.builtin.is_some() && !name.windows(2).any(|w| w == b"::"))
+                || is_direct_ucf(call))
+            .then_some(false);
         };
         if t.method.is_some() {
             t.method_info.as_ref()?;
@@ -3871,4 +3880,16 @@ mod tests {
         assert!(!s.append_in_place(b"ef"));
         assert_eq!(keep.as_bytes(), b"abcd");
     }
+}
+
+/// Whether `c` is a call of call_user_func() or call_user_func_array() by
+/// that plain name (not a dynamic call, not through a namespace fallback):
+/// its arguments are all sent by value.
+pub(crate) fn is_direct_ucf(c: &crate::vm::PendingCall) -> bool {
+    let t = &c.target;
+    if !t.has_builtin || t.method.is_some() || t.dynamic || t.closure {
+        return false;
+    }
+    let n = c.name.as_bytes();
+    n.eq_ignore_ascii_case(b"call_user_func") || n.eq_ignore_ascii_case(b"call_user_func_array")
 }

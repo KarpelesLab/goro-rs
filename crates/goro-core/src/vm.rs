@@ -21357,6 +21357,7 @@ impl Vm {
         tmps: &mut [Value],
         literals: &[Value],
         snapshot: bool,
+        by_value_builtin: bool,
     ) -> bool {
         let fn_gen = self.user_functions.len() + 1;
         // (a variable's array a write may change before the call: sent as a
@@ -21392,8 +21393,11 @@ impl Vm {
                 Some(Value::Reference(_)) => return false,
                 Some(Value::Array(a)) if Rc::ptr_eq(a, &self.globals) => return false,
                 // (a call's array result sent where a reference may be
-                // taken: the general handler separates it)
-                Some(Value::Array(_)) if matches!(op.result, OperandType::Const(_)) => {
+                // taken: the general handler separates it; not to a builtin
+                // whose parameters are all by value)
+                Some(Value::Array(_))
+                    if matches!(op.result, OperandType::Const(_)) && !by_value_builtin =>
+                {
                     return false;
                 }
                 Some(slot) => match std::mem::replace(slot, Value::Undef) {
