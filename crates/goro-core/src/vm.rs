@@ -710,6 +710,14 @@ pub const OPEN_CTX_EXISTING: u8 = 2;
 /// Type alias for the class map (used by external crates)
 pub type ClassMap = crate::fxhash::FxIndexMap<Vec<u8>, ClassEntry>;
 
+/// What Vm::retire_tables() takes out of an engine (released when dropped).
+pub struct RetiredTables {
+    pub classes: ClassMap,
+    pub functions: crate::fxhash::FxHashMap<Vec<u8>, BuiltinFn>,
+    pub user_functions: crate::fxhash::FxHashMap<Vec<u8>, Rc<OpArray>>,
+    pub internal_function_decls: crate::fxhash::FxHashMap<Vec<u8>, Rc<OpArray>>,
+}
+
 /// A `call_stack` entry: (function, file, line called from, args, is_instance_method).
 pub type CallFrame = (String, crate::rcstr::RcStr, u32, Vec<Value>, bool);
 
@@ -19235,6 +19243,25 @@ impl Vm {
     pub fn module_shutdown(&mut self) {
         for hook in std::mem::take(&mut self.module_shutdown_hooks) {
             hook(self);
+        }
+    }
+
+    /// The engine's class and function tables, taken out of it at the end
+    /// of a request so that a server can release them once the response is
+    /// sent (most of what releasing an engine costs: its internal classes'
+    /// methods and constants). The static properties' values are released
+    /// here, with the rest of the engine (they may hold resources).
+    #[inline(never)]
+    pub fn retire_tables(&mut self) -> RetiredTables {
+        let mut classes = std::mem::take(&mut self.classes);
+        for c in classes.values_mut() {
+            c.static_properties.clear();
+        }
+        RetiredTables {
+            classes,
+            functions: std::mem::take(&mut self.functions),
+            user_functions: std::mem::take(&mut self.user_functions),
+            internal_function_decls: std::mem::take(&mut self.internal_function_decls),
         }
     }
 

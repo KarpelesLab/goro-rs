@@ -248,6 +248,10 @@ fn serve_connection(c: Conn, site: &Arc<Site>, tls: Option<&TlsAcceptor>) {
                 break;
             }
         }
+        // (what is left of the engine of a request answered)
+        if wrote {
+            goro::websapi::release_retired();
+        }
         if failed || session.wants_close() {
             break;
         }

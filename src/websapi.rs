@@ -18,6 +18,17 @@ thread_local! {
     /// The request headers of the request being executed, in their original
     /// case (apache_request_headers()).
     static REQUEST_HEADERS: RefCell<Vec<(Vec<u8>, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
+    /// The tables of the last request's engine, released once its response
+    /// is sent (see release_retired()).
+    static RETIRED: RefCell<Option<goro_core::vm::RetiredTables>> = const { RefCell::new(None) };
+}
+
+/// Release what is left of the last request's engine (see
+/// Vm::retire_tables): called by the server once the response is sent, and
+/// at the next request's startup at the latest.
+pub fn release_retired() {
+    let t = RETIRED.with(|r| r.borrow_mut().take());
+    drop(t);
 }
 
 /// What a SAPI hands over to run a script for a request.
@@ -69,6 +80,7 @@ pub struct PhpRun {
 impl PhpRun {
     #[allow(clippy::field_reassign_with_default)] // fields filled in step by step
     pub fn startup(req: &ScriptRequest) -> PhpRun {
+        release_retired();
         let mut vm = engine::new_vm(req.ini, req.sapi);
         // Module startup errors (an invalid -d session.name ...) happen
         // before the server serves anything: they never reach a response.
@@ -186,6 +198,9 @@ impl PhpRun {
         let status_line = goro_ext_standard::misc::take_status_line();
         let code = goro_ext_standard::misc::take_response_code() as i32;
         goro_ext_standard::request::shutdown();
+        // (the bulk of the engine is released once the response is sent)
+        let tables = self.vm.retire_tables();
+        RETIRED.with(|r| *r.borrow_mut() = Some(tables));
         ScriptOutput {
             status_line,
             code,

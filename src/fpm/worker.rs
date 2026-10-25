@@ -1672,6 +1672,9 @@ fn handle_request() {
     ub_write(&out);
     vm.module_shutdown();
     goro_ext_standard::request::shutdown();
+    // (the engine's class and function tables are released once the
+    // request ended)
+    let tables = vm.retire_tables();
     drop(vm);
     // sapi_cgi_deactivate()
     with_w(|w| {
@@ -1679,6 +1682,7 @@ fn handle_request() {
             // php_handle_aborted_connection()
         }
     });
+    drop(tables);
     // fpm_stdio_flush_child()
     unsafe {
         libc::write(
