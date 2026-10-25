@@ -10580,7 +10580,7 @@ pub fn reflection_extension_method(
         }
         b"getclasses" => {
             let mut result = PhpArray::new();
-            let class_list = get_extension_classes(&ext_lower);
+            let class_list = extension_class_names(&ext_lower);
             for cname in class_list {
                 if vm.is_known_builtin_class(cname.to_ascii_lowercase().as_bytes())
                     || vm
@@ -10598,7 +10598,7 @@ pub fn reflection_extension_method(
         }
         b"getclassnames" => {
             let mut result = PhpArray::new();
-            let class_list = get_extension_classes(&ext_lower);
+            let class_list = extension_class_names(&ext_lower);
             for cname in class_list {
                 if vm.is_known_builtin_class(cname.to_ascii_lowercase().as_bytes())
                     || vm
@@ -10630,6 +10630,19 @@ pub fn reflection_extension_method(
                     ArrayKey::String(PhpString::from_string(cname.to_string())),
                     v,
                 );
+            }
+            // The constants the extension's stubs declare (that are defined).
+            for c in crate::stub_sigs::CONSTANTS {
+                if !c.ext.eq_ignore_ascii_case(&ext_lower) {
+                    continue;
+                }
+                let key = ArrayKey::String(PhpString::from_bytes(c.name.as_bytes()));
+                if result.get(&key).is_some() {
+                    continue;
+                }
+                if let Some(v) = vm.constants.get(c.name.as_bytes()) {
+                    result.set(key, v.clone());
+                }
             }
             Some(Value::Array(Rc::new(RefCell::new(result))))
         }
@@ -10928,6 +10941,18 @@ fn extension_string(vm: &mut Vm, name: &str, ext_lower: &str) -> String {
     }
     s.push_str("}\n");
     s
+}
+
+/// An extension's classes: the hand-kept list (in registration order),
+/// then the other classes its stubs declare (by name).
+fn extension_class_names(ext: &str) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = get_extension_classes(ext).to_vec();
+    for c in crate::stub_sigs::CLASSES {
+        if c.ext.eq_ignore_ascii_case(ext) && !out.iter().any(|o| o.eq_ignore_ascii_case(c.name)) {
+            out.push(c.name);
+        }
+    }
+    out
 }
 
 fn get_extension_classes(ext: &str) -> &'static [&'static str] {
