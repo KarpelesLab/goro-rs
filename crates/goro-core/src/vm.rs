@@ -47054,11 +47054,7 @@ impl Vm {
                                             .unwrap_or_else(|| {
                                                 crate::value::display_class_name(&declaring_class)
                                             });
-                                        let scope_str = if let Some(cs) = caller_scope.as_deref() {
-                                            format!("scope {}", String::from_utf8_lossy(cs))
-                                        } else {
-                                            "global scope".to_string()
-                                        };
+                                        let scope_str = self.aviz_error_scope();
                                         avis_error = Some(format!(
                                             "Cannot unset {} property {}::${} from {}",
                                             vis_str, class_display, prop_name_str, scope_str
@@ -58349,12 +58345,7 @@ impl Vm {
                                                         &declaring_class,
                                                     )
                                                 });
-                                            let scope_str =
-                                                if let Some(cs) = caller_scope.as_deref() {
-                                                    format!("scope {}", String::from_utf8_lossy(cs))
-                                                } else {
-                                                    "global scope".to_string()
-                                                };
+                                            let scope_str = self.aviz_error_scope();
                                             let msg = format!(
                                                 "Cannot modify {} property {}::${} from {}",
                                                 vis_str, class_display, prop_name_str, scope_str
@@ -58632,11 +58623,7 @@ impl Vm {
                                             .unwrap_or_else(|| {
                                                 crate::value::display_class_name(&declaring_class)
                                             });
-                                        let scope_str = if let Some(cs) = caller_scope.as_deref() {
-                                            format!("scope {}", String::from_utf8_lossy(cs))
-                                        } else {
-                                            "global scope".to_string()
-                                        };
+                                        let scope_str = self.aviz_error_scope();
                                         visibility_error = Some(format!(
                                             "Cannot modify {} property {}::${} from {}",
                                             vis_str, class_display, prop_name_str, scope_str

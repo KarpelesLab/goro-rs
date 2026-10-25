@@ -800,20 +800,32 @@ impl Vm {
             .class_name_for_display(&decl_lower)
             .map(|n| crate::value::display_class_name(&n))
             .unwrap_or_else(|| crate::value::display_class_name(declaring_class));
-        let scope_str = match caller_scope.as_deref() {
-            Some(cs) => format!(
-                "scope {}",
-                self.classes
-                    .get(&cs.to_ascii_lowercase())
-                    .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                    .unwrap_or_else(|| String::from_utf8_lossy(cs).to_string())
-            ),
-            None => "global scope".to_string(),
-        };
+        let scope_str = self.aviz_error_scope();
         Some(format!(
             "Cannot {} {} property {}::${} from {}",
             operation, vis_str, class_display, prop_str, scope_str
         ))
+    }
+
+    /// zend_asymmetric_visibility_property_modification_error(): the scope
+    /// named is the called scope (`$this`'s class in a bound closure).
+    #[inline(never)]
+    pub(crate) fn aviz_error_scope(&self) -> String {
+        let Some(scope) = self.current_class_scope() else {
+            return "global scope".to_string();
+        };
+        let called = self
+            .called_class_stack
+            .last()
+            .filter(|c| !c.is_empty())
+            .cloned()
+            .unwrap_or(scope);
+        let name = self
+            .classes
+            .get(&called.to_ascii_lowercase())
+            .map(|c| c.name.clone())
+            .unwrap_or(called);
+        format!("scope {}", crate::value::display_class_name(&name))
     }
 
     /// `$obj[k] = &$v` / `$obj[] = &$v` on an object (ZEND_ASSIGN_REF on a
