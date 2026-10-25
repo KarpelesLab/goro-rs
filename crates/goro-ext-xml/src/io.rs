@@ -71,12 +71,21 @@ pub fn take_transport_charset() -> Option<String> {
 
 /// The charset the response headers of the HTTP(S) URL `url` just read
 /// declare (php_libxml_sniff_charset_from_stream() on its wrapper data).
-pub fn transport_charset(vm: &Vm, url: &str) -> Option<Vec<u8>> {
+pub fn transport_charset(vm: &mut Vm, url: &str) -> Option<Vec<u8>> {
     let lower = url.to_ascii_lowercase();
     if !(lower.starts_with("http://") || lower.starts_with("https://")) {
         return None;
     }
-    let headers: Vec<Vec<u8>> = match vm.get_global(b"http_response_header").map(|v| v.deref()) {
+    // (the wrapper data of the stream, as http_get_last_response_headers()
+    // reports it)
+    let last = match vm
+        .functions
+        .get(b"http_get_last_response_headers".as_slice())
+    {
+        Some(&f) => f(vm, &[]).ok(),
+        None => None,
+    };
+    let headers: Vec<Vec<u8>> = match last.map(|v| v.deref()) {
         Some(Value::Array(a)) => a
             .borrow()
             .iter()

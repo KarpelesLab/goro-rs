@@ -599,6 +599,8 @@ pub(crate) struct CvNameInfo {
     /// No variable is `$GLOBALS` or an auto-global, nor `$this` but the
     /// first (a frame needs none of them set up: see vm::leancall).
     pub(crate) plain_cvs: bool,
+    /// The `$http_response_header` variable (set by the http:// wrapper).
+    pub(crate) hrh: Option<u32>,
     /// How often lately a call of the function ran to its end without a
     /// frame of its own (see vm::leancall): below 0, calls stop trying.
     pub(crate) lean_score: std::cell::Cell<i16>,
@@ -811,7 +813,13 @@ impl OpArray {
                 (i > 0 && n.as_slice() == b"this")
                     || n.as_slice() == b"GLOBALS"
                     || crate::vm::is_auto_global_name(n)
+                    || n.as_slice() == b"http_response_header"
             }),
+            hrh: self
+                .cv_names
+                .iter()
+                .position(|n| n == b"http_response_header")
+                .map(|i| i as u32),
             lean_score: std::cell::Cell::new(0),
         })
     }

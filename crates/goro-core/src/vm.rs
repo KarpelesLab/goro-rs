@@ -1302,6 +1302,9 @@ pub struct Vm {
     /// The next executed op_array runs in a function's scope (include /
     /// eval inside a function): its CVs are bound to this local table.
     pub(crate) bind_next_tab: Option<crate::symtab::SymTab>,
+    /// The `$http_response_header` variables of the running function frames
+    /// that use one, by call depth (see Vm::set_http_response_header).
+    hrh_cells: Vec<(u32, std::rc::Weak<RefCell<Value>>)>,
     /// Call depth of a by-ref function whose result is fetched for writing
     /// (`$x = &f()`): that frame returns the reference itself.
     pub(crate) keep_ref_depth: Option<u32>,
@@ -1985,6 +1988,7 @@ impl Vm {
             global_ref_names: std::collections::HashSet::new(),
             bind_next_frame: false,
             bind_next_tab: None,
+            hrh_cells: Vec::new(),
             keep_ref_depth: None,
             callback_keep_ref: false,
             str_offset_wb: None,
@@ -22315,6 +22319,9 @@ impl Vm {
         } else if self.is_global_scope {
             let tab = self.globals_tab();
             *fsym = Some(self.symtab_attach(&mut cvs, &op_array.cv_names, tab));
+        }
+        if let Some(i) = names.hrh {
+            self.hrh_register(&mut cvs, i as usize);
         }
         if single_step.is_none() && !fsym.as_ref().is_some_and(|f| f.tab.global) {
             // Bind auto-global CVs ($_SERVER, $_GET, ...) to the shared global
@@ -62290,6 +62297,51 @@ impl Vm {
     /// Set a global variable value
     pub fn set_global(&mut self, name: Vec<u8>, value: Value) {
         self.global_assign(&name, value);
+    }
+
+    /// A function frame that has a `$http_response_header` variable makes it
+    /// a reference cell the http:// wrapper can set (see
+    /// set_http_response_header).
+    #[cold]
+    #[inline(never)]
+    fn hrh_register(&mut self, cvs: &mut [Value], i: usize) {
+        if self.is_global_scope || i >= cvs.len() {
+            return;
+        }
+        let cell = match &cvs[i] {
+            Value::Reference(r) => r.clone(),
+            _ => {
+                let v = std::mem::replace(&mut cvs[i], Value::Undef);
+                let r = Rc::new(RefCell::new(v));
+                cvs[i] = Value::Reference(r.clone());
+                r
+            }
+        };
+        self.hrh_cells.retain(|(_, w)| w.strong_count() > 0);
+        self.hrh_cells.push((self.call_depth, Rc::downgrade(&cell)));
+    }
+
+    /// zend_set_local_var_str() for `$http_response_header`: the variable
+    /// of the running user frame (the global scope's, or the function's when
+    /// its code uses the variable).
+    pub fn set_http_response_header(&mut self, value: Value) {
+        let name = b"http_response_header";
+        if self.is_global_scope {
+            self.global_assign(name, value);
+            return;
+        }
+        let depth = self.call_depth;
+        self.hrh_cells.retain(|(_, w)| w.strong_count() > 0);
+        let cell = self
+            .hrh_cells
+            .iter()
+            .rev()
+            .find(|(d, _)| *d == depth)
+            .and_then(|(_, w)| w.upgrade());
+        if let Some(cell) = cell {
+            let old = std::mem::replace(&mut *cell.borrow_mut(), value);
+            drop(old);
+        }
     }
 
     /// Dispatch a Fiber instance method (start, resume, throw)
