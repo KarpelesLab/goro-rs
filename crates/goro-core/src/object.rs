@@ -704,8 +704,12 @@ impl Drop for PhpObject {
         // Release what the object holds before its handle goes back to the
         // free list (zend_objects_store_del: free_obj, then the handle).
         drop(self.native.take());
+        // (SplObjectStorage's state is kept under `__`-prefixed keys)
+        let internal = self.properties.has_internal();
         let mut props = self.properties.take_vec();
-        release_object_storage(&mut props);
+        if internal {
+            release_object_storage(&mut props);
+        }
         drop(props);
         drop(self.closure.take());
         // Don't recycle the sentinel zero id.

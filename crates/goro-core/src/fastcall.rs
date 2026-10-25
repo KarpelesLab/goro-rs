@@ -349,12 +349,12 @@ impl Vm {
         }
         let obj_id = self.alloc_object_id();
         let mut obj = PhpObject::new(t.class_name.clone(), obj_id);
-        // (as init_declared_props() sets them, one by one)
+        // (as init_declared_props() sets them; charged once, for all of them)
         obj.properties.reserve(t.slots.len());
         for (name, v) in &t.slots {
             obj.properties.push((name.clone(), v.clone()));
-            obj.account();
         }
+        obj.account();
         // (an array default is shared copy-on-write; fits() saw it alive)
         for (i, a) in &t.arrays {
             if let (Some(a), Some(slot)) = (a.upgrade(), obj.properties.get_mut(*i)) {

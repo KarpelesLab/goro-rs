@@ -63,8 +63,8 @@ pub(crate) struct ResumeFrame {
 #[inline]
 fn lean_function(f: &OpArray, sep: Option<(usize, bool)>) -> bool {
     match sep {
-        None => f.lean_kind() == 1 && f.scope_class.is_none(),
-        Some((_, this)) => f.lean_kind() == 1 + u8::from(this) && f.scope_class.is_some(),
+        None => f.lean_kind() & 3 == 1 && f.scope_class.is_none(),
+        Some((_, this)) => f.lean_kind() & 3 == 1 + u8::from(this) && f.scope_class.is_some(),
     }
 }
 
@@ -276,7 +276,7 @@ impl Vm {
             return false;
         };
         // (typed parameters: see recv_fast.rs)
-        if f.param_types.iter().any(|t| t.is_some()) {
+        if f.lean_kind() & 4 != 0 {
             let args = &self.pending_calls.last().expect("pending call").args;
             if !self.recv_has_nothing_to_do(f, args) {
                 return false;
@@ -341,7 +341,7 @@ impl Vm {
         let sends = &ops[ip + 1..do_ip];
         // (typed parameters: the arguments must have their types already,
         // see recv_fast.rs)
-        let typed = f.param_types.iter().any(|t| t.is_some());
+        let typed = f.lean_kind() & 4 != 0;
         if typed && !self.pending_callable_deprecations.borrow().is_empty() {
             return None;
         }
@@ -682,8 +682,7 @@ impl Vm {
         };
         // (a declared return type: the value must have it already, see
         // recv_fast.rs)
-        let implicit = r.line == 0;
-        if !crate::recv_fast::return_matches_exactly(f, &v, implicit) {
+        if f.lean_kind() & 8 != 0 && !crate::recv_fast::return_matches_exactly(f, &v, r.line == 0) {
             return None;
         }
         if (unused && !is_plain_scalar(&v))

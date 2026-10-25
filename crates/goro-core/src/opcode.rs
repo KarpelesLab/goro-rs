@@ -737,9 +737,10 @@ impl OpArray {
     /// Whether calls of this code may run without a frame of their own (see
     /// vm::leancall): 1 for a function, 2 for an instance method (its first
     /// variable is `$this`), 0 when its frame has to check or set up
-    /// something (typed parameters, a return type, a by-reference return, a
-    /// generator, variadics, attributes, static variables, `$GLOBALS` or
-    /// auto-globals, internal code, a closure).
+    /// something (a by-reference return, a generator, variadics,
+    /// attributes, static variables, `$GLOBALS` or auto-globals, internal
+    /// code, a closure); plus 4 when it has typed parameters, 8 a return
+    /// type (checked per call, see vm::leancall).
     #[inline]
     pub(crate) fn lean_kind(&self) -> u8 {
         match self.lean_kind.0.get() {
@@ -764,10 +765,12 @@ impl OpArray {
                 && !self.name.is_empty()
                 && !crate::closure::is_closure_fn_name(&self.name)
                 && self.cv_name_info().plain_cvs;
+            let typed = 4 * u8::from(self.param_types.iter().any(|t| t.is_some()))
+                + 8 * u8::from(self.return_type.is_some());
             match (plain, self.cv_names.first().map(|n| n.as_slice())) {
                 (false, _) => 0,
-                (true, Some(b"this")) => 2,
-                (true, _) => 1,
+                (true, Some(b"this")) => 2 | typed,
+                (true, _) => 1 | typed,
             }
         })
     }
