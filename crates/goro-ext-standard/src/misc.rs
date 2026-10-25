@@ -1279,6 +1279,7 @@ fn func_get_args(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
         for arg in args.iter() {
             arr.push(arg.clone());
         }
+        vm.release_synced_frame_args();
         Ok(Value::Array(Rc::new(RefCell::new(arr))))
     } else {
         // PHP 8.4: calling from global scope throws Error
@@ -1315,7 +1316,9 @@ fn func_get_arg(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 line: vm.current_line,
             })
         } else {
-            Ok(caller_args[index as usize].clone())
+            let v = caller_args[index as usize].clone();
+            vm.release_synced_frame_args();
+            Ok(v)
         }
     } else {
         // PHP 8.4: calling from global scope throws Error

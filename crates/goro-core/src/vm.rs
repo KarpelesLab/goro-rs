@@ -7814,6 +7814,12 @@ impl Vm {
     }
 
     pub fn build_exception_trace(&mut self) -> Value {
+        let trace = self.build_exception_trace_synced();
+        self.release_synced_frame_args();
+        trace
+    }
+
+    fn build_exception_trace_synced(&mut self) -> Value {
         self.sync_builtin_frames();
         self.sync_frame_args();
         let mut trace_arr = PhpArray::new();

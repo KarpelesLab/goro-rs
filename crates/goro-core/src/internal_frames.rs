@@ -823,6 +823,32 @@ impl Vm {
         }
     }
 
+    /// The copies sync_frame_args() made of the parameters of the running
+    /// frames are dropped again once the backtrace is built: the CVs stay
+    /// their only holders (see release_cv_frame_arg_copies), so a parameter
+    /// a function reassigns or unsets is released then, as php-src's frames
+    /// (whose arguments are their CVs) release it.
+    #[inline(never)]
+    pub fn release_synced_frame_args(&mut self) {
+        for k in 0..self.cv_frames.len() {
+            let f = &self.cv_frames[k];
+            if f.cvs.is_null() || f.nfixed == 0 {
+                continue;
+            }
+            let nfixed = f.nfixed as usize;
+            let Some(at) = self.cv_frame_index(f) else {
+                continue;
+            };
+            let args = &mut self.call_stack[at].3;
+            let n = args.len().min(nfixed);
+            for a in args.iter_mut().take(n) {
+                if matches!(a, Value::Object(_) | Value::Array(_) | Value::Reference(_)) {
+                    *a = Value::Null;
+                }
+            }
+        }
+    }
+
     /// The call_stack index of the frame `f` was registered for.
     fn cv_frame_index(&self, f: &CvFrame) -> Option<usize> {
         if self
@@ -972,6 +998,17 @@ impl Vm {
     /// (debug_backtrace(), debug_print_backtrace()), or the frames of call_stack
     /// range `range` (ReflectionFiber::getTrace()).
     pub fn debug_backtrace_array(
+        &mut self,
+        options: i64,
+        limit: i64,
+        range: Option<(usize, usize)>,
+    ) -> PhpArray {
+        let out = self.debug_backtrace_array_synced(options, limit, range);
+        self.release_synced_frame_args();
+        out
+    }
+
+    fn debug_backtrace_array_synced(
         &mut self,
         options: i64,
         limit: i64,
