@@ -529,6 +529,19 @@ fn check_active_and_output(vm: &mut Vm, stage: Stage) -> bool {
 }
 
 /// The PHP_INI_MH handlers. Returns whether the new value is accepted.
+/// zend_ini_parse_quantity_warn(): the quantity, warning about a malformed one.
+fn parse_quantity_warn(vm: &mut Vm, name: &str, value: &[u8]) -> i64 {
+    let (v, warn) = goro_core::ini_quantity::parse_quantity(value, true);
+    if let Some(w) = warn {
+        err_plain(
+            vm,
+            E_WARNING,
+            &format!("Invalid \"{}\" setting. {}", name, w),
+        );
+    }
+    v as i64
+}
+
 fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
     let key = &name["session.".len()..];
     match key {
@@ -627,18 +640,7 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             if !check_active_and_output(vm, stage) {
                 return false;
             }
-            let (v, warn) = goro_core::ini_quantity::parse_quantity(value, true);
-            if let Some(w) = warn {
-                err_plain(
-                    vm,
-                    E_WARNING,
-                    &w.replace(
-                        "Invalid quantity",
-                        &format!("Invalid \"{}\" setting.", name),
-                    ),
-                );
-            }
-            let v = v as i64;
+            let v = parse_quantity_warn(vm, name, value);
             if key == "gc_probability" {
                 if v < 0 {
                     err(
@@ -662,7 +664,7 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             if !check_active_and_output(vm, stage) {
                 return false;
             }
-            let v = atol(value);
+            let v = parse_quantity_warn(vm, name, value);
             ps(|p| {
                 if key == "gc_maxlifetime" {
                     p.gc_maxlifetime = v
@@ -709,6 +711,11 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
                 return false;
             } else if v > maxcookie {
                 return true;
+            }
+            // OnUpdateLongGEZero
+            let v = parse_quantity_warn(vm, name, value);
+            if v < 0 {
+                return false;
             }
             ps(|p| p.cookie_lifetime = v);
             true
