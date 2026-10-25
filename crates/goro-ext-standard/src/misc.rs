@@ -5632,6 +5632,11 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .constants
         .get(&key)
         .map(|v| Value::String(v.to_php_string()));
+    // zend_alter_ini_entry_ex(): an entry no extension registered (or one
+    // that was removed, like session.hash_function) cannot be set.
+    if old.is_none() {
+        return Ok(Value::False);
+    }
     // OnUpdateDefaultCharset / OnUpdateDefaultMimeTye: no header injection
     if key == b"default_charset" || key == b"default_mimetype" {
         let v = value.to_php_string();
@@ -17784,6 +17789,17 @@ pub fn apply_startup_ini(vm: &mut Vm, ini: &[(String, String)]) -> Vec<u8> {
                 if let Ok(n) = value.trim().parse::<i64>() {
                     set_execution_timeout(n);
                 }
+            }
+            // OnUpdateStringUnempty / OnUpdateStrNotEmpty: an empty value
+            // fails, the default stays.
+            "variables_order"
+            | "arg_separator.input"
+            | "arg_separator.output"
+            | "include_path"
+            | "extension_dir"
+                if value.is_empty() =>
+            {
+                continue;
             }
             _ => {}
         }

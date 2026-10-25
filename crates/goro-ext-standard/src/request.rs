@@ -1584,7 +1584,10 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
     // SG(sapi_headers).http_response_code: 200 for a web request, none for
     // the CLI.
     crate::misc::RESPONSE_CODE.with(|c| c.set(if req.cgi { 200 } else { 0 }));
-    let variables_order = ini("variables_order").unwrap_or_else(|| "EGPCS".to_string());
+    // OnUpdateStringUnempty: an empty variables_order keeps the default.
+    let variables_order = ini("variables_order")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "EGPCS".to_string());
     let has = |c: char| variables_order.chars().any(|x| x.eq_ignore_ascii_case(&c));
     let max_vars = ini("max_input_vars")
         .map(|v| parse_quantity(&v))
@@ -1875,9 +1878,10 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
     }
     // $_REQUEST
     let request = new_arr();
-    let order = ini("request_order")
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| variables_order.clone());
+    let order = match vm.constants.get(b"request_order".as_slice()) {
+        Some(v) if !matches!(v, Value::Null) => v.to_php_string().to_string_lossy(),
+        _ => variables_order.clone(),
+    };
     let mut done = [false; 3];
     for c in order.chars() {
         let (i, src) = match c.to_ascii_uppercase() {

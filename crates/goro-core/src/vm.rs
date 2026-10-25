@@ -80,7 +80,6 @@ const CORE_INI_DEFAULTS: &[(&[u8], &[u8])] = &[
     (b"register_argc_argv", b"0"),
     (b"realpath_cache_ttl", b"120"),
     (b"report_zend_debug", b"0"),
-    (b"request_order", b""),
     (b"sendmail_from", b""),
     (b"sendmail_path", b"/usr/sbin/sendmail -t -i"),
     (b"sys_temp_dir", b""),
@@ -2173,6 +2172,10 @@ impl Vm {
                     c.entry(k.to_vec())
                         .or_insert_with(|| Value::String(PhpString::from_bytes(v)));
                 }
+                // request_order defaults to NULL: an empty one set in
+                // php.ini makes $_REQUEST empty, the unset one follows
+                // variables_order.
+                c.entry(b"request_order".to_vec()).or_insert(Value::Null);
                 // PHP constants
                 c.insert(
                     b"PHP_EOL".to_vec(),
