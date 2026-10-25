@@ -21263,8 +21263,14 @@ impl Vm {
         cvs: &[Value],
         tmps: &mut [Value],
         literals: &[Value],
+        snapshot: bool,
     ) -> bool {
         let fn_gen = self.user_functions.len() + 1;
+        // (a variable's array a write may change before the call: sent as a
+        // copy of its own to a by-value parameter, see send_needs_snapshot)
+        if snapshot && !self.next_arg_by_value() {
+            return false;
+        }
         let Some(call) = self.pending_calls.last_mut() else {
             return false;
         };
@@ -21310,6 +21316,7 @@ impl Vm {
         if matches!(&v, Value::Array(a) if Rc::ptr_eq(a, &self.globals)) {
             return false;
         }
+        let v = if snapshot { self.dup_array_value(v) } else { v };
         let Some(call) = self.pending_calls.last_mut() else {
             return false;
         };

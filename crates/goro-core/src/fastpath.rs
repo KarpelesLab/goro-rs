@@ -1679,9 +1679,8 @@ impl crate::vm::Vm {
                 // A by-value argument of a call resolved when it was set up
                 // (see the SEND_VAL handler).
                 OpCode::SendVal => {
-                    if !send_snapshot(op_array, ip, op, cvs)
-                        && self.send_val_fast(op, cvs, tmps, literals)
-                    {
+                    let snapshot = send_snapshot(op_array, ip, op, cvs);
+                    if self.send_val_fast(op, cvs, tmps, literals, snapshot) {
                         Fast::Done
                     } else {
                         break 'run ip;
@@ -1713,8 +1712,13 @@ impl crate::vm::Vm {
                             }
                     });
                     if by_value_target
-                        && !send_snapshot(op_array, ip, op, cvs)
-                        && self.send_val_fast(op, cvs, tmps, literals)
+                        && self.send_val_fast(
+                            op,
+                            cvs,
+                            tmps,
+                            literals,
+                            send_snapshot(op_array, ip, op, cvs),
+                        )
                     {
                         Fast::Done
                     } else {
