@@ -1920,9 +1920,10 @@ fn h_unset_property(vm: &mut Vm, o: &Obj, name: &[u8]) -> bool {
 
 fn h_read_dimension(vm: &mut Vm, o: &Obj, key: Option<&Value>, mode: u8) -> Option<Value> {
     sxe_of(o)?;
-    let bp = match mode {
-        1 => Bp::W,
-        2 => Bp::Is,
+    // (an unset() container fetch, BP_VAR_UNSET, creates nothing)
+    let bp = match vm.dim_fetch_type(mode) {
+        goro_core::vm::BP_VAR_W | goro_core::vm::BP_VAR_RW => Bp::W,
+        goro_core::vm::BP_VAR_IS => Bp::Is,
         _ => Bp::R,
     };
     Some(prop_dim_read(vm, o, key, Access::Attribs, bp))
