@@ -350,6 +350,11 @@ pub(crate) fn throw(vm: &mut Vm, class: &[u8], msg: &str) {
     if pushed {
         vm.call_stack.pop();
     }
+    // zend_throw_exception_internal(): a pending exception becomes the
+    // new one's previous.
+    if let Some(prev) = vm.current_exception.take() {
+        Vm::exception_set_previous(&exc, prev);
+    }
     vm.current_exception = Some(exc);
 }
 
@@ -1575,10 +1580,14 @@ pub(crate) fn mod_create_sid(vm: &mut Vm, m: Module) -> R<Option<Vec<u8>>> {
             if f.is_some() {
                 let r = call_handler(vm, &f, &[])?;
                 return Ok(match r {
+                    // With an exception pending zend_call_function() runs
+                    // nothing and ps_call_handler() turns that into NULL.
+                    None if pending(vm) => {
+                        throw(vm, b"Error", "Session id must be a string");
+                        None
+                    }
                     None => {
-                        if !pending(vm) {
-                            throw(vm, b"Error", "No session id returned by function");
-                        }
+                        throw(vm, b"Error", "No session id returned by function");
                         None
                     }
                     Some(Value::String(s)) => Some(s.as_bytes().to_vec()),
