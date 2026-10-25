@@ -866,6 +866,9 @@ impl Decoder {
                                     c == 0xA3 && (0xC0..=0xFE).contains(&t)
                                 }
                                 EncNo::Sjis => (0x40..=0xFC).contains(&t),
+                                EncNo::EucTw => {
+                                    (0xA1..=0xFE).contains(&c) && (0xA1..=0xFE).contains(&t)
+                                }
                                 // (within the blocks of glibc's tables)
                                 EncNo::Cp932 => {
                                     matches!(c, 0x81..=0x9F | 0xE0..=0xEE)
@@ -1045,7 +1048,7 @@ impl Decoder {
                 }
                 match mbfl_decode_char(EncNo::EucJp, &[s[0] | 0x80, s[1] | 0x80]) {
                     Some(cp) => Dec::Char(cp, 2),
-                    None => Dec::Illegal(2),
+                    None => Dec::Illegal(1),
                 }
             }
         }
@@ -1508,8 +1511,9 @@ impl Encoder {
             }
         };
         if cp < 0x80 {
-            // JIS X 0201 Roman has the same characters except \ and ~.
-            if self.state == 1 && cp != 0x5C && cp != 0x7E {
+            // glibc stays in JIS X 0201 Roman for its graphic characters
+            // but \ and ~ (not for controls or the space).
+            if self.state == 1 && (0x21..=0x7D).contains(&cp) && cp != 0x5C {
                 out.push(cp as u8);
             } else {
                 set(&mut self.state, 0, out);

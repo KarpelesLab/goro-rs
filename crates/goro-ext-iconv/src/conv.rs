@@ -24,6 +24,8 @@ pub struct Iconv {
     translit: bool,
     /// //IGNORE skipped something in this call.
     skipped: bool,
+    /// ... and a character the target charset lacks among it.
+    skipped_char: bool,
     /// iconv() calls made (glibc's invocation counter).
     calls: u32,
 }
@@ -61,6 +63,7 @@ impl Iconv {
             ignore: to_sfx.iter().any(|s| s == b"IGNORE"),
             translit: to_sfx.iter().any(|s| s == b"TRANSLIT"),
             skipped: false,
+            skipped_char: false,
             calls: 0,
         })
     }
@@ -90,6 +93,7 @@ impl Iconv {
         self.calls = self.calls.saturating_add(1);
         // (what //IGNORE skips counts per call)
         self.skipped = false;
+        self.skipped_char = false;
         // (glibc wants room for the smallest character before looking at
         // the next one, even one it then skips)
         let min_out = self.enc.min_len();
@@ -97,7 +101,15 @@ impl Iconv {
             let dsaved = self.dec;
             match self.dec.decode(&input[*pos..]) {
                 Dec::Shift(n) => *pos += n,
-                Dec::Incomplete => return Err(Errno::Inval),
+                Dec::Incomplete => {
+                    // (glibc reports an unconvertible character //IGNORE
+                    // skipped first, not an illegal sequence)
+                    self.skipped = false;
+                    if std::mem::take(&mut self.skipped_char) {
+                        return Err(Errno::Ilseq);
+                    }
+                    return Err(Errno::Inval);
+                }
                 Dec::Illegal(n) => {
                     if self.ignore {
                         if *pos + n > input.len() {
@@ -159,6 +171,7 @@ impl Iconv {
                         } else if self.ignore {
                             *pos += n;
                             self.skipped = true;
+                            self.skipped_char = true;
                             continue;
                         } else {
                             return Err(Errno::Ilseq);
@@ -179,6 +192,7 @@ impl Iconv {
         }
         if self.skipped {
             self.skipped = false;
+            self.skipped_char = false;
             return Err(Errno::Ilseq);
         }
         Ok(())

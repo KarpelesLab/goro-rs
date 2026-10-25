@@ -491,7 +491,7 @@ fn iconv_strpos_impl(
                 err = e.into();
             }
         }
-        if cnt >= offset {
+        if cnt >= offset && !ndl.is_empty() {
             if c == ndl[np] {
                 if match_ofs.is_none() {
                     match_ofs = Some(cnt);
