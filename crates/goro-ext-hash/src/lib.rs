@@ -282,11 +282,17 @@ fn open_stream(
     }
 }
 
-/// php_stream_read() of up to `n` bytes: None at EOF / on error.
-fn stream_read(vm: &mut Vm, stream: &Value, n: usize) -> Result<Option<Vec<u8>>, VmError> {
+/// php_stream_read() of up to `n` bytes: None at EOF, Err(None) when the
+/// read failed.
+fn stream_read(
+    vm: &mut Vm,
+    stream: &Value,
+    n: usize,
+) -> Result<Option<Vec<u8>>, Option<VmError>> {
     match call_builtin(vm, b"fread", &[stream.clone(), Value::Long(n as i64)]) {
         Some(Ok(Value::String(s))) if !s.as_bytes().is_empty() => Ok(Some(s.as_bytes().to_vec())),
-        Some(Err(e)) => Err(e),
+        Some(Ok(Value::False)) => Err(None),
+        Some(Err(e)) => Err(Some(e)),
         _ => Ok(None),
     }
 }
@@ -296,19 +302,25 @@ fn stream_close(vm: &mut Vm, stream: &Value) {
 }
 
 /// Feed a whole stream to `ctx` in 1024-byte reads, then close it.
-fn pump_stream(vm: &mut Vm, stream: &Value, ctx: &mut dyn Ctx) -> Result<(), VmError> {
+/// false: a read failed (the callers return false).
+fn pump_stream(vm: &mut Vm, stream: &Value, ctx: &mut dyn Ctx) -> Result<bool, VmError> {
+    let mut ok = true;
     loop {
         match stream_read(vm, stream, 1024) {
             Ok(Some(buf)) => ctx.update(&buf),
             Ok(None) => break,
-            Err(e) => {
+            Err(None) => {
+                ok = false;
+                break;
+            }
+            Err(Some(e)) => {
                 stream_close(vm, stream);
                 return Err(e);
             }
         }
     }
     stream_close(vm, stream);
-    Ok(())
+    Ok(ok)
 }
 
 // ===========================================================================
@@ -356,6 +368,7 @@ fn file_digest(
         return Ok(Value::False);
     };
     let mut ctx = ops.new_ctx(None);
+    // (md5_file() / sha1_file() hash what was read even when a read failed)
     pump_stream(vm, &stream, ctx.as_mut())?;
     Ok(digest_value(finish(ops, ctx), arg_bool(args, 1)))
 }
@@ -388,6 +401,9 @@ fn do_hash(vm: &mut Vm, args: &[Value], fname: &str, is_file: bool) -> Result<Va
     };
     let mut stream = None;
     if is_file {
+        if data.as_bytes().is_empty() {
+            return throw(vm, b"ValueError", "Path must not be empty");
+        }
         if data.as_bytes().contains(&0) {
             return throw(
                 vm,
@@ -405,7 +421,9 @@ fn do_hash(vm: &mut Vm, args: &[Value], fname: &str, is_file: bool) -> Result<Va
     }
     let mut ctx = new_ctx(vm, ops, options.as_ref(), fname);
     if let Some(s) = stream {
-        pump_stream(vm, &s, ctx.as_mut())?;
+        if !pump_stream(vm, &s, ctx.as_mut())? {
+            return Ok(Value::False);
+        }
     } else {
         ctx.update(data.as_bytes());
     }
@@ -473,6 +491,9 @@ fn do_hash_hmac(vm: &mut Vm, args: &[Value], fname: &str, is_file: bool) -> Resu
     };
     let mut stream = None;
     if is_file {
+        if data.as_bytes().is_empty() {
+            return throw(vm, b"ValueError", "Path must not be empty");
+        }
         if data.as_bytes().contains(&0) {
             return throw(
                 vm,
@@ -492,7 +513,9 @@ fn do_hash_hmac(vm: &mut Vm, args: &[Value], fname: &str, is_file: bool) -> Resu
     let digest = if let Some(s) = stream {
         let mut c = ops.new_ctx(None);
         c.update(&k);
-        pump_stream(vm, &s, c.as_mut())?;
+        if !pump_stream(vm, &s, c.as_mut())? {
+            return Ok(Value::False);
+        }
         finish(ops, c)
     } else {
         hmac_round(ops, &k, data.as_bytes())
@@ -1141,7 +1164,7 @@ fn hash_update_stream_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
         if length > 0 && toread > length {
             toread = length;
         }
-        let Some(buf) = stream_read(vm, &stream, toread as usize)? else {
+        let Some(buf) = stream_read(vm, &stream, toread as usize).or_else(|e| e.map_or(Ok(None), Err))? else {
             break;
         };
         if let Some(c) = st.borrow_mut().ctx.as_mut() {
@@ -1178,11 +1201,10 @@ fn hash_update_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut ctx = st.borrow_mut().ctx.take();
     let r = match ctx.as_mut() {
         Some(c) => pump_stream(vm, &stream, c.as_mut()),
-        None => Ok(()),
+        None => Ok(true),
     };
     st.borrow_mut().ctx = ctx;
-    r?;
-    Ok(Value::True)
+    Ok(if r? { Value::True } else { Value::False })
 }
 
 fn hash_final_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
