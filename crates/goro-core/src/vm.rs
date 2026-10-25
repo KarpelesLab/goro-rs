@@ -28598,6 +28598,13 @@ impl Vm {
                             } else {
                                 Vec::new()
                             };
+                            // (zend_handle_named_arg(): a name the function
+                                            // has no parameter of fails at once)
+                                            let known_params = if pairs.iter().any(|p| p.0) {
+                                                self.unpack_known_params()
+                                            } else {
+                                                None
+                                            };
                             let r = if let Some(call) = self.pending_calls.last_mut() {
                                 let mut had_named = false;
                                 let mut result = Ok(());
@@ -28605,6 +28612,16 @@ impl Vm {
                                 for (is_named, name_bytes, v) in pairs {
                                     if is_named {
                                         had_named = true;
+                                        if known_params
+                                            .as_ref()
+                                            .is_some_and(|p| !p.contains(&name_bytes))
+                                        {
+                                            result = Err(format!(
+                                                "Unknown named parameter ${}",
+                                                crate::string::msg_str(&name_bytes)
+                                            ));
+                                            break;
+                                        }
                                         if call.named_args.iter().any(|(n, _)| *n == name_bytes) {
                                             result = Err(format!(
                                                 "Named parameter ${} overwrites previous argument",
