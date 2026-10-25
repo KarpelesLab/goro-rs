@@ -258,8 +258,14 @@ pub fn convert_case(
     let mut title_mode = false;
     let total = all.len();
     let mut pos = 0usize;
-    if total == 0 {
+    if src.is_empty() {
         return Vec::new();
+    }
+    if total == 0 {
+        // (input decoding to nothing still reaches the encoder once, which
+        // writes e.g. UUENCODE's header)
+        from_wchar(&[], &mut buf, true);
+        return buf.out;
     }
     // Emulate C's processing in chunks of 64 codepoints (the special
     // casing rule for final sigma only looks back within that window).
