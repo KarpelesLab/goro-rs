@@ -540,6 +540,9 @@ fn emit_startup(vm: &mut Vm, level: &str, msg: &str) {
         "Deprecated" => 8192,
         _ => 8,
     };
+    // php_error_cb() records the error for error_get_last() whether or not
+    // it is reported.
+    vm.last_error = Some((bit, msg.to_string(), "Unknown".to_string(), 0));
     if vm.error_reporting & bit != 0 {
         let html = vm
             .constants
@@ -1700,7 +1703,9 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
             }
         }
         // $_POST
-        if has('P') && is_post {
+        // php_auto_globals_create_post(): not once a startup error was
+        // displayed (the headers went out with it).
+        if has('P') && is_post && !ctx.vm.headers_sent {
             match post_entry {
                 Some("std") if buffered => {
                     if !ctx
