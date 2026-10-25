@@ -1695,7 +1695,7 @@ impl Tree {
         }
         if (src.t == NType::Element && extended == 1)
             || src.t == NType::Attribute
-            || src.t == NType::DocumentFrag
+            || (src.t == NType::DocumentFrag && extended == 1)
         {
             let mut c = src.children;
             while let Some(x) = c {
