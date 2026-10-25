@@ -14,6 +14,10 @@ use goro_core::vm::{Vm, VmError};
 pub mod charset;
 pub mod conv;
 mod mime;
+#[rustfmt::skip]
+mod sbcs_tables;
+#[rustfmt::skip]
+mod big5_glibc;
 
 use conv::{Errno, Iconv};
 
@@ -401,7 +405,7 @@ fn iconv_substr_impl(
             break;
         }
     }
-    out.extend_from_slice(encoder.reset_bytes());
+    out.extend_from_slice(&encoder.reset_bytes());
     (Some(out), Err::Success)
 }
 

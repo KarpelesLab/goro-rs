@@ -52,7 +52,7 @@ enum Backend {
 
 /// The backend of an ICU converter, by canonical name.
 fn backend(name: &str, typ: i64, sbcs: i32) -> Option<Backend> {
-    use charset::{Endian, Family, Kind};
+    use charset::{Endian, Kind};
     use goro_ext_mbstring::mbfl::EncNo;
     if sbcs >= 0 {
         return Some(Backend::Sbcs(sbcs as usize));
@@ -71,23 +71,23 @@ fn backend(name: &str, typ: i64, sbcs: i32) -> Option<Backend> {
         "UTF-7" => Backend::Utf7,
         "US-ASCII" => Backend::Ascii,
         "ISO-8859-1" => Backend::Latin1,
-        "ibm-943_P15A-2003" => Backend::Iconv(Kind::Mbfl(EncNo::Cp932, Family::Sjis)),
-        "ibm-943_P130-1999" => Backend::Iconv(Kind::Mbfl(EncNo::Sjis, Family::Sjis)),
+        "ibm-943_P15A-2003" => Backend::Iconv(Kind::Mbfl(EncNo::Cp932)),
+        "ibm-943_P130-1999" => Backend::Iconv(Kind::Mbfl(EncNo::Sjis)),
         "ibm-33722_P12A_P12A-2009_U2" | "ibm-33722_P120-1999" | "ibm-954_P101-2007"
-        | "euc-jp-2007" => Backend::Iconv(Kind::Mbfl(EncNo::EucJp, Family::EucJp)),
+        | "euc-jp-2007" => Backend::Iconv(Kind::Mbfl(EncNo::EucJp)),
         "windows-936-2000" | "ibm-1386_P100-2001" => {
-            Backend::Iconv(Kind::Mbfl(EncNo::Cp936, Family::Dbcs))
+            Backend::Iconv(Kind::Mbfl(EncNo::Cp936))
         }
-        "ibm-1383_P110-1999" => Backend::Iconv(Kind::Mbfl(EncNo::EucCn, Family::Dbcs)),
-        "windows-950-2000" => Backend::Iconv(Kind::Mbfl(EncNo::Cp950, Family::Dbcs)),
+        "ibm-1383_P110-1999" => Backend::Iconv(Kind::Mbfl(EncNo::EucCn)),
+        "windows-950-2000" => Backend::Iconv(Kind::Mbfl(EncNo::Cp950)),
         "ibm-1373_P100-2002" | "ibm-950_P110-1999" => {
-            Backend::Iconv(Kind::Mbfl(EncNo::Big5, Family::Dbcs))
+            Backend::Iconv(Kind::Mbfl(EncNo::Big5))
         }
         "ibm-949_P110-1999" | "ibm-949_P11A-1999" | "windows-949-2000" => {
-            Backend::Iconv(Kind::Mbfl(EncNo::Uhc, Family::Dbcs))
+            Backend::Iconv(Kind::Mbfl(EncNo::Uhc))
         }
         "ibm-970_P110_P110-2006_U2" | "ibm-971_P100-1995" => {
-            Backend::Iconv(Kind::Mbfl(EncNo::EucKr, Family::Dbcs))
+            Backend::Iconv(Kind::Mbfl(EncNo::EucKr))
         }
         "ISO_2022,locale=ja,version=0" => Backend::Iconv(Kind::Iso2022Jp),
         "ibm-1258_P100-1997" => Backend::Iconv(Kind::Cp1258),
@@ -395,14 +395,14 @@ fn decode_step(be: Backend, s: &[u8], st: &mut DecState) -> Result<(Vec<u32>, us
                     // a well-formed but unmapped double-byte character
                     let two = s.len() >= 2
                         && match kind {
-                            charset::Kind::Mbfl(_, charset::Family::Sjis) => {
+                            charset::Kind::Mbfl(no) if charset::family(no) == charset::Family::Sjis => {
                                 matches!(s[0], 0x81..=0x9F | 0xE0..=0xFC)
                                     && matches!(s[1], 0x40..=0x7E | 0x80..=0xFC)
                             }
-                            charset::Kind::Mbfl(_, charset::Family::EucJp) => {
+                            charset::Kind::Mbfl(no) if charset::family(no) == charset::Family::EucJp => {
                                 matches!(s[0], 0xA1..=0xFE) && matches!(s[1], 0xA1..=0xFE)
                             }
-                            charset::Kind::Mbfl(_, charset::Family::Dbcs) => {
+                            charset::Kind::Mbfl(no) if charset::family(no) == charset::Family::Dbcs => {
                                 matches!(s[0], 0x81..=0xFE) && matches!(s[1], 0x40..=0xFE)
                             }
                             _ => false,
@@ -1157,7 +1157,7 @@ fn from_unicode(
                 None => {
                     // a stateful encoding shifts back to its initial state
                     if let Some(e) = enc.as_mut() {
-                        out.extend_from_slice(e.reset_bytes());
+                        out.extend_from_slice(&e.reset_bytes());
                         e.reset();
                     }
                     out.extend_from_slice(&cnv.subst)
@@ -1166,7 +1166,7 @@ fn from_unicode(
         }
     }
     if let Some(e) = &enc {
-        out.extend_from_slice(e.reset_bytes());
+        out.extend_from_slice(&e.reset_bytes());
     }
     Ok(out)
 }

@@ -146,7 +146,7 @@ impl Iconv {
         if limit.is_some_and(|l| b.len() > l) {
             return Err(Errno::TooBig);
         }
-        out.extend_from_slice(b);
+        out.extend_from_slice(&b);
         self.enc.reset();
         self.dec.reset();
         Ok(())

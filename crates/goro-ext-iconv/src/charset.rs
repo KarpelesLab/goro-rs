@@ -5,6 +5,7 @@
 //! legacy single-byte code tables come from the mbstring extension's libmbfl
 //! port.
 
+use crate::sbcs_tables;
 use goro_ext_mbstring::mbfl::{self, EncNo, Encoding, MBFL_BAD_INPUT};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -13,17 +14,25 @@ pub enum Endian {
     Le,
 }
 
-/// How a multi-byte character set delimits its characters.
+/// How a multi-byte character set's characters are shaped (for callers
+/// classifying an undecodable sequence).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Family {
-    /// One byte per character.
-    Sbcs,
     /// 0x8E: 2 bytes, 0x8F: 3 bytes, 0xA1-0xFE: 2 bytes.
     EucJp,
     /// 0x81-0x9F, 0xE0-0xFC: 2 bytes.
     Sjis,
     /// 0x81-0xFE: 2 bytes.
     Dbcs,
+}
+
+/// The family of an mbfl-backed charset.
+pub fn family(no: EncNo) -> Family {
+    match no {
+        EncNo::EucJp | EncNo::EucJpWin => Family::EucJp,
+        EncNo::Sjis | EncNo::Cp932 => Family::Sjis,
+        _ => Family::Dbcs,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -41,22 +50,30 @@ pub enum Kind {
     Utf16(Option<Endian>),
     /// UTF-32 with a BOM.
     Utf32Bom,
+    /// glibc's UNICODE: UCS-2 with a BOM (decode: detected, default
+    /// little endian; encode: BOM + little endian).
+    Unicode,
+    /// UTF-7 (true: the IMAP variant, RFC 3501).
+    Utf7(bool),
     Iso2022Jp,
     Cp1258,
-    Mbfl(EncNo, Family),
+    Mbfl(EncNo),
+    /// A glibc single-byte charset (an index into sbcs_tables::TABLES).
+    Sbcs(u16),
 }
 
 /// glibc charset names (and common aliases) to charsets. Names are
 /// compared case-insensitively.
 fn table() -> &'static [(&'static str, Kind)] {
     use Endian::*;
-    use Family::*;
     use Kind::*;
     &[
         ("UTF-8", Utf8),
         ("UTF8", Utf8),
         ("ISO-10646/UTF8", Utf8),
         ("ISO-10646/UTF-8", Utf8),
+        ("ISO-IR-193", Utf8),
+        ("OSF05010001", Utf8),
         ("ASCII", Ascii),
         ("US-ASCII", Ascii),
         ("ANSI_X3.4-1968", Ascii),
@@ -67,6 +84,9 @@ fn table() -> &'static [(&'static str, Kind)] {
         ("IBM367", Ascii),
         ("CP367", Ascii),
         ("CSASCII", Ascii),
+        ("ISO-IR-6", Ascii),
+        ("ANSI_X3.4", Ascii),
+        ("OSF00010020", Ascii),
         ("646", Ascii),
         ("ISO-8859-1", Latin1),
         ("ISO8859-1", Latin1),
@@ -81,6 +101,11 @@ fn table() -> &'static [(&'static str, Kind)] {
         ("UCS-2", Ucs2(Le)),
         ("ISO-10646-UCS-2", Ucs2(Le)),
         ("CSUNICODE", Ucs2(Le)),
+        ("UCS2", Ucs2(Le)),
+        ("ISO-10646/UCS2", Ucs2(Le)),
+        ("OSF00010100", Ucs2(Le)),
+        ("OSF00010101", Ucs2(Le)),
+        ("OSF00010102", Ucs2(Le)),
         ("UCS-2BE", Ucs2(Be)),
         ("UNICODEBIG", Ucs2(Be)),
         ("UCS-2LE", Ucs2(Le)),
@@ -90,6 +115,12 @@ fn table() -> &'static [(&'static str, Kind)] {
         ("ISO-10646", Ucs4(Be, false)),
         ("ISO-10646-UCS-4", Ucs4(Be, false)),
         ("CSUCS4", Ucs4(Be, false)),
+        ("ISO-10646/UCS4", Ucs4(Be, false)),
+        ("10646-1:1993", Ucs4(Be, false)),
+        ("10646-1:1993/UCS4", Ucs4(Be, false)),
+        ("OSF00010104", Ucs4(Be, false)),
+        ("OSF00010105", Ucs4(Be, false)),
+        ("OSF00010106", Ucs4(Be, false)),
         ("UCS-4BE", Ucs4(Be, false)),
         ("UCS-4LE", Ucs4(Le, false)),
         ("WCHAR_T", Ucs4(Le, false)),
@@ -101,6 +132,14 @@ fn table() -> &'static [(&'static str, Kind)] {
         ("UTF-16", Utf16(None)),
         ("UTF16", Utf16(None)),
         ("UTF-16BE", Utf16(Some(Be))),
+        ("UTF16BE", Utf16(Some(Be))),
+        ("UTF16LE", Utf16(Some(Le))),
+        ("UTF32LE", Ucs4(Le, true)),
+        ("UTF32BE", Ucs4(Be, true)),
+        ("UNICODE", Unicode),
+        ("UTF-7", Utf7(false)),
+        ("UTF7", Utf7(false)),
+        ("UTF-7-IMAP", Utf7(true)),
         ("UTF-16LE", Utf16(Some(Le))),
         ("ISO-2022-JP", Iso2022Jp),
         ("CSISO2022JP", Iso2022Jp),
@@ -108,89 +147,48 @@ fn table() -> &'static [(&'static str, Kind)] {
         ("CP1258", Cp1258),
         ("WINDOWS-1258", Cp1258),
         ("MS-VIET", Cp1258),
-        ("EUC-JP", Mbfl(EncNo::EucJp, EucJp)),
-        ("EUCJP", Mbfl(EncNo::EucJp, EucJp)),
-        ("UJIS", Mbfl(EncNo::EucJp, EucJp)),
-        ("CSEUCPKDFMTJAPANESE", Mbfl(EncNo::EucJp, EucJp)),
-        ("EUC-JP-MS", Mbfl(EncNo::EucJpWin, EucJp)),
-        ("EUCJP-MS", Mbfl(EncNo::EucJpWin, EucJp)),
-        ("EUCJP-WIN", Mbfl(EncNo::EucJpWin, EucJp)),
-        ("SJIS", Mbfl(EncNo::Sjis, Sjis)),
-        ("SHIFT_JIS", Mbfl(EncNo::Sjis, Sjis)),
-        ("SHIFT-JIS", Mbfl(EncNo::Sjis, Sjis)),
-        ("MS_KANJI", Mbfl(EncNo::Sjis, Sjis)),
-        ("CSSHIFTJIS", Mbfl(EncNo::Sjis, Sjis)),
-        ("CP932", Mbfl(EncNo::Cp932, Sjis)),
-        ("WINDOWS-31J", Mbfl(EncNo::Cp932, Sjis)),
-        ("MS932", Mbfl(EncNo::Cp932, Sjis)),
-        ("IBM-943", Mbfl(EncNo::Cp932, Sjis)),
-        ("EUC-KR", Mbfl(EncNo::EucKr, Dbcs)),
-        ("EUCKR", Mbfl(EncNo::EucKr, Dbcs)),
-        ("CSEUCKR", Mbfl(EncNo::EucKr, Dbcs)),
-        ("UHC", Mbfl(EncNo::Uhc, Dbcs)),
-        ("CP949", Mbfl(EncNo::Uhc, Dbcs)),
-        ("BIG5", Mbfl(EncNo::Big5, Dbcs)),
-        ("BIG-5", Mbfl(EncNo::Big5, Dbcs)),
-        ("BIG-FIVE", Mbfl(EncNo::Big5, Dbcs)),
-        ("CN-BIG5", Mbfl(EncNo::Big5, Dbcs)),
-        ("CSBIG5", Mbfl(EncNo::Big5, Dbcs)),
-        ("CP950", Mbfl(EncNo::Cp950, Dbcs)),
-        ("GB2312", Mbfl(EncNo::EucCn, Dbcs)),
-        ("EUC-CN", Mbfl(EncNo::EucCn, Dbcs)),
-        ("EUCCN", Mbfl(EncNo::EucCn, Dbcs)),
-        ("CSGB2312", Mbfl(EncNo::EucCn, Dbcs)),
-        ("GBK", Mbfl(EncNo::Cp936, Dbcs)),
-        ("CP936", Mbfl(EncNo::Cp936, Dbcs)),
-        ("MS936", Mbfl(EncNo::Cp936, Dbcs)),
-        ("WINDOWS-936", Mbfl(EncNo::Cp936, Dbcs)),
-        ("CP1252", Mbfl(EncNo::Cp1252, Sbcs)),
-        ("WINDOWS-1252", Mbfl(EncNo::Cp1252, Sbcs)),
-        ("MS-ANSI", Mbfl(EncNo::Cp1252, Sbcs)),
-        ("CP1254", Mbfl(EncNo::Cp1254, Sbcs)),
-        ("WINDOWS-1254", Mbfl(EncNo::Cp1254, Sbcs)),
-        ("MS-TURK", Mbfl(EncNo::Cp1254, Sbcs)),
-        ("CP1251", Mbfl(EncNo::Cp1251, Sbcs)),
-        ("WINDOWS-1251", Mbfl(EncNo::Cp1251, Sbcs)),
-        ("MS-CYRL", Mbfl(EncNo::Cp1251, Sbcs)),
-        ("CP866", Mbfl(EncNo::Cp866, Sbcs)),
-        ("IBM866", Mbfl(EncNo::Cp866, Sbcs)),
-        ("866", Mbfl(EncNo::Cp866, Sbcs)),
-        ("CSIBM866", Mbfl(EncNo::Cp866, Sbcs)),
-        ("CP850", Mbfl(EncNo::Cp850, Sbcs)),
-        ("IBM850", Mbfl(EncNo::Cp850, Sbcs)),
-        ("850", Mbfl(EncNo::Cp850, Sbcs)),
-        ("CSPC850MULTILINGUAL", Mbfl(EncNo::Cp850, Sbcs)),
-        ("KOI8-R", Mbfl(EncNo::Koi8r, Sbcs)),
-        ("CSKOI8R", Mbfl(EncNo::Koi8r, Sbcs)),
-        ("KOI8-U", Mbfl(EncNo::Koi8u, Sbcs)),
-        ("ARMSCII-8", Mbfl(EncNo::Armscii8, Sbcs)),
-        ("ISO-8859-2", Mbfl(EncNo::Iso8859_2, Sbcs)),
-        ("ISO-8859-3", Mbfl(EncNo::Iso8859_3, Sbcs)),
-        ("ISO-8859-4", Mbfl(EncNo::Iso8859_4, Sbcs)),
-        ("ISO-8859-5", Mbfl(EncNo::Iso8859_5, Sbcs)),
-        ("ISO-8859-6", Mbfl(EncNo::Iso8859_6, Sbcs)),
-        ("ISO-8859-7", Mbfl(EncNo::Iso8859_7, Sbcs)),
-        ("ISO-8859-8", Mbfl(EncNo::Iso8859_8, Sbcs)),
-        ("ISO-8859-9", Mbfl(EncNo::Iso8859_9, Sbcs)),
-        ("ISO-8859-10", Mbfl(EncNo::Iso8859_10, Sbcs)),
-        ("ISO-8859-13", Mbfl(EncNo::Iso8859_13, Sbcs)),
-        ("ISO-8859-14", Mbfl(EncNo::Iso8859_14, Sbcs)),
-        ("ISO-8859-15", Mbfl(EncNo::Iso8859_15, Sbcs)),
-        ("ISO-8859-16", Mbfl(EncNo::Iso8859_16, Sbcs)),
-        ("LATIN2", Mbfl(EncNo::Iso8859_2, Sbcs)),
-        ("LATIN3", Mbfl(EncNo::Iso8859_3, Sbcs)),
-        ("LATIN4", Mbfl(EncNo::Iso8859_4, Sbcs)),
-        ("CYRILLIC", Mbfl(EncNo::Iso8859_5, Sbcs)),
-        ("ARABIC", Mbfl(EncNo::Iso8859_6, Sbcs)),
-        ("GREEK", Mbfl(EncNo::Iso8859_7, Sbcs)),
-        ("HEBREW", Mbfl(EncNo::Iso8859_8, Sbcs)),
-        ("LATIN5", Mbfl(EncNo::Iso8859_9, Sbcs)),
-        ("LATIN6", Mbfl(EncNo::Iso8859_10, Sbcs)),
-        ("LATIN7", Mbfl(EncNo::Iso8859_13, Sbcs)),
-        ("LATIN8", Mbfl(EncNo::Iso8859_14, Sbcs)),
-        ("LATIN-9", Mbfl(EncNo::Iso8859_15, Sbcs)),
-        ("LATIN9", Mbfl(EncNo::Iso8859_15, Sbcs)),
-        ("LATIN10", Mbfl(EncNo::Iso8859_16, Sbcs)),
+        ("EUC-JP", Mbfl(EncNo::EucJp)),
+        ("EUCJP", Mbfl(EncNo::EucJp)),
+        ("UJIS", Mbfl(EncNo::EucJp)),
+        ("CSEUCPKDFMTJAPANESE", Mbfl(EncNo::EucJp)),
+        ("EUC-JP-MS", Mbfl(EncNo::EucJpWin)),
+        ("EUCJP-MS", Mbfl(EncNo::EucJpWin)),
+        ("EUCJP-WIN", Mbfl(EncNo::EucJpWin)),
+        ("EUCJP-OPEN", Mbfl(EncNo::EucJpWin)),
+        ("SJIS", Mbfl(EncNo::Sjis)),
+        ("SHIFT_JIS", Mbfl(EncNo::Sjis)),
+        ("SHIFT-JIS", Mbfl(EncNo::Sjis)),
+        ("MS_KANJI", Mbfl(EncNo::Sjis)),
+        ("CSSHIFTJIS", Mbfl(EncNo::Sjis)),
+        ("CP932", Mbfl(EncNo::Cp932)),
+        ("WINDOWS-31J", Mbfl(EncNo::Cp932)),
+        ("MS932", Mbfl(EncNo::Cp932)),
+        ("SJIS-OPEN", Mbfl(EncNo::Cp932)),
+        ("SJIS-WIN", Mbfl(EncNo::Cp932)),
+        ("CSWINDOWS31J", Mbfl(EncNo::Cp932)),
+        ("IBM-943", Mbfl(EncNo::Cp932)),
+        ("EUC-KR", Mbfl(EncNo::EucKr)),
+        ("EUCKR", Mbfl(EncNo::EucKr)),
+        ("CSEUCKR", Mbfl(EncNo::EucKr)),
+        ("UHC", Mbfl(EncNo::Uhc)),
+        ("CP949", Mbfl(EncNo::Uhc)),
+        ("MSCP949", Mbfl(EncNo::Uhc)),
+        ("BIG5", Mbfl(EncNo::Big5)),
+        ("BIG-5", Mbfl(EncNo::Big5)),
+        ("BIG-FIVE", Mbfl(EncNo::Big5)),
+        ("CN-BIG5", Mbfl(EncNo::Big5)),
+        ("CSBIG5", Mbfl(EncNo::Big5)),
+        ("CP950", Mbfl(EncNo::Cp950)),
+        ("GB2312", Mbfl(EncNo::EucCn)),
+        ("EUC-CN", Mbfl(EncNo::EucCn)),
+        ("EUCCN", Mbfl(EncNo::EucCn)),
+        ("CSGB2312", Mbfl(EncNo::EucCn)),
+        ("CN-GB", Mbfl(EncNo::EucCn)),
+        ("GBK", Mbfl(EncNo::Cp936)),
+        ("GB13000", Mbfl(EncNo::Cp936)),
+        ("CP936", Mbfl(EncNo::Cp936)),
+        ("MS936", Mbfl(EncNo::Cp936)),
+        ("WINDOWS-936", Mbfl(EncNo::Cp936)),
     ]
 }
 
@@ -201,11 +199,14 @@ pub fn lookup(name: &[u8]) -> Option<Kind> {
     // name is the locale's charset (UTF-8 for php's C.UTF-8 LC_CTYPE).
     let up: Vec<u8> = name
         .iter()
-        .filter(|c| c.is_ascii_alphanumeric() || b"_-.,:".contains(c))
+        .filter(|c| c.is_ascii_alphanumeric() || b"_-.,:/".contains(c))
         .map(|c| c.to_ascii_uppercase())
         .collect();
     if up.is_empty() {
         return Some(Kind::Utf8);
+    }
+    if let Ok(i) = sbcs_tables::NAMES.binary_search_by(|(n, _)| n.as_bytes().cmp(up.as_slice())) {
+        return Some(Kind::Sbcs(sbcs_tables::NAMES[i].1));
     }
     for &(n, k) in table() {
         if n.as_bytes() == up.as_slice() {
@@ -262,11 +263,41 @@ fn mbfl_encode_char(no: EncNo, cp: u32) -> Option<Vec<u8>> {
         (EncNo::EucJp | EncNo::Sjis | EncNo::Cp932, 0x203E) => return Some(vec![0x7E]),
         (EncNo::EucJp, 0xFF5E) => return Some(vec![0x8F, 0xA2, 0xB7]),
         (EncNo::Cp932, 0x2014) => return Some(vec![0x81, 0x5C]),
+        (EncNo::Cp932, 0x2016) => return Some(vec![0x81, 0x61]),
+        (EncNo::Cp932, 0x2212) => return Some(vec![0x81, 0x7C]),
+        (EncNo::Cp932, 0x301C) => return Some(vec![0x81, 0x60]),
+        (EncNo::EucKr, 0x20A9) => return Some(vec![0xA3, 0xDC]),
+        (EncNo::EucKr, 0x327E) => return Some(vec![0xA2, 0xE8]),
+        (EncNo::EucJpWin, 0xA2) => return Some(vec![0xA1, 0xF1]),
+        (EncNo::EucJpWin, 0xA3) => return Some(vec![0xA1, 0xF2]),
+        (EncNo::EucJpWin, 0xA5) => return Some(vec![0x5C]),
+        (EncNo::EucJpWin, 0xA6) => return Some(vec![0x8F, 0xA2, 0xC3]),
+        (EncNo::EucJpWin, 0xAC) => return Some(vec![0xA2, 0xCC]),
+        (EncNo::EucJpWin, 0x2014) => return Some(vec![0xA1, 0xBD]),
+        (EncNo::EucJpWin, 0x2016) => return Some(vec![0xA1, 0xC2]),
+        (EncNo::EucJpWin, 0x203E) => return Some(vec![0x7E]),
+        (EncNo::EucJpWin, 0x2212) => return Some(vec![0xA1, 0xDD]),
+        (EncNo::EucJpWin, 0x301C) => return Some(vec![0xA1, 0xC1]),
+        (EncNo::Sjis, 0xFFE0) | (EncNo::Cp932, 0xA2) => return Some(vec![0x81, 0x91]),
+        (EncNo::Sjis, 0xFFE1) | (EncNo::Cp932, 0xA3) => return Some(vec![0x81, 0x92]),
+        (EncNo::Sjis, 0xFFE2) | (EncNo::Cp932, 0xAC) => return Some(vec![0x81, 0xCA]),
         (EncNo::Big5 | EncNo::Cp950, 0x20AC) => return Some(vec![0xA3, 0xE1]),
-        (EncNo::EucJp, 0x80..=0x8D | 0x90..=0x9F) | (EncNo::EucKr, 0x80..=0x9F) => {
+        (EncNo::EucJp | EncNo::EucJpWin, 0x80..=0x8D | 0x90..=0x9F)
+        | (EncNo::EucKr, 0x80..=0x9F)
+        | (EncNo::Big5 | EncNo::Cp950, 0x80) => {
             return Some(vec![cp as u8]);
         }
         _ => {}
+    }
+    if no == EncNo::Big5 {
+        use crate::big5_glibc::BIG5_ENC;
+        if let Ok(i) = BIG5_ENC.binary_search_by_key(&cp, |&(c, _)| c) {
+            let b = BIG5_ENC[i].1;
+            return (b != 0).then(|| vec![(b >> 8) as u8, b as u8]);
+        }
+    }
+    if no_pua(no, cp) {
+        return None;
     }
     let enc = mbfl_enc(no)?;
     let (bytes, errors) = enc.encode(&[cp], '?' as u32, mbfl::MBFL_OUTPUTFILTER_ILLEGAL_MODE_NONE);
@@ -282,6 +313,33 @@ fn mbfl_encode_char(no: EncNo, cp: u32) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// A private-use character glibc's table of the charset lacks (it has
+/// none, or only BIG5's U+F6B1-U+F848).
+fn no_pua(no: EncNo, cp: u32) -> bool {
+    (0xE000..0xF900).contains(&cp)
+        && match no {
+            EncNo::EucJp
+            | EncNo::Sjis
+            | EncNo::EucKr
+            | EncNo::Uhc
+            | EncNo::EucCn
+            | EncNo::Cp936 => true,
+            EncNo::Big5 | EncNo::Cp950 => !(0xF6B1..=0xF848).contains(&cp),
+            _ => false,
+        }
+}
+
+/// glibc's BIG5 where it differs from libmbfl's: Some(0) is undefined.
+fn big5_override(bytes: &[u8]) -> Option<u32> {
+    use crate::big5_glibc::BIG5_DEC;
+    let &[b1, b2] = bytes else { return None };
+    let k = (b1 as u16) << 8 | b2 as u16;
+    BIG5_DEC
+        .binary_search_by_key(&k, |&(b, _)| b)
+        .ok()
+        .map(|i| BIG5_DEC[i].1)
+}
+
 /// mbfl_decode_char() with glibc's mapping differences.
 fn mbfl_decode_char_glibc(no: EncNo, bytes: &[u8]) -> Option<u32> {
     match (no, bytes) {
@@ -289,9 +347,86 @@ fn mbfl_decode_char_glibc(no: EncNo, bytes: &[u8]) -> Option<u32> {
         (EncNo::Sjis, [0x7E]) => return Some(0x203E),
         (EncNo::EucJp, [0x8F, 0xA2, 0xB7]) => return Some(0xFF5E),
         (EncNo::Big5 | EncNo::Cp950, [0xA3, 0xE1]) => return Some(0x20AC),
+        (EncNo::EucKr, [0xA2, 0xE8]) => return Some(0x327E),
+        (EncNo::Big5, _) => {
+            if let Some(c) = big5_override(bytes) {
+                return Some(c).filter(|&c| c != 0);
+            }
+        }
         _ => {}
     }
     mbfl_decode_char(no, bytes)
+}
+
+/// The byte of `cp` in a single-byte charset.
+fn sbcs_encode(t: &sbcs_tables::Sbcs, cp: u32) -> Option<u8> {
+    if cp >= 0xFFFF {
+        return None;
+    }
+    if let Ok(i) = t.extra.binary_search_by_key(&(cp as u16), |&(c, _)| c) {
+        return Some(t.extra[i].1);
+    }
+    let base = if t.dec.len() == 128 {
+        if cp < 0x80 {
+            return Some(cp as u8);
+        }
+        0x80
+    } else {
+        0
+    };
+    t.dec
+        .iter()
+        .position(|&c| c as u32 == cp)
+        .map(|i| (base + i) as u8)
+}
+
+/// UTF-7 characters written as themselves.
+fn utf7_direct(c: u32, imap: bool) -> bool {
+    if imap {
+        return (0x20..=0x7E).contains(&c) && c != b'&' as u32;
+    }
+    c < 0x80 && (c as u8).is_ascii_alphanumeric()
+        || c < 0x80 && b"'(),-./:? \t\n\r".contains(&(c as u8))
+}
+
+/// UTF-7 characters accepted as themselves when decoding.
+fn utf7_xdirect(c: u32, imap: bool) -> bool {
+    if imap {
+        return (0x20..=0x7E).contains(&c) && c != b'&' as u32;
+    }
+    c == 9
+        || c == 10
+        || c == 13
+        || ((0x20..=0x7D).contains(&c) && c != b'+' as u32 && c != b'\\' as u32)
+}
+
+fn utf7_b64_value(c: u8, imap: bool) -> Option<u8> {
+    match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' => Some(62),
+        b'/' if !imap => Some(63),
+        b',' if imap => Some(63),
+        _ => None,
+    }
+}
+
+fn utf7_b64_char(v: u32, imap: bool) -> u8 {
+    let v = (v & 0x3F) as u8;
+    match v {
+        0..=25 => b'A' + v,
+        26..=51 => b'a' + v - 26,
+        52..=61 => b'0' + v - 52,
+        62 => b'+',
+        _ => {
+            if imap {
+                b','
+            } else {
+                b'/'
+            }
+        }
+    }
 }
 
 /// CP1258 0x80-0xFF (0 = undefined).
@@ -314,17 +449,32 @@ const CP1258_HIGH: [u16; 128] = [
 pub struct Decoder {
     pub kind: Kind,
     /// ISO-2022-JP: the designated set (0 ASCII, 1 JIS X 0201 Roman,
-    /// 2 JIS X 0208); UTF-16 / UTF-32: 0 = BOM not seen, 1 = BE, 2 = LE.
+    /// 2 JIS X 0208); UTF-16 / UTF-32: 0 = BOM not seen, 1 = BE, 2 = LE;
+    /// UTF-7: 1 in base64.
     state: u8,
+    /// UTF-7: the base64 bits not yet decoded, their count and a high
+    /// surrogate waiting for its low one.
+    acc: u32,
+    nbits: u8,
+    hi: u16,
 }
 
 impl Decoder {
     pub fn new(kind: Kind) -> Decoder {
-        Decoder { kind, state: 0 }
+        Decoder {
+            kind,
+            state: 0,
+            acc: 0,
+            nbits: 0,
+            hi: 0,
+        }
     }
 
     pub fn reset(&mut self) {
         self.state = 0;
+        self.acc = 0;
+        self.nbits = 0;
+        self.hi = 0;
     }
 
     pub fn decode(&mut self, s: &[u8]) -> Dec {
@@ -434,53 +584,92 @@ impl Decoder {
                 }
             }
             Kind::Iso2022Jp => self.decode_2022jp(s),
-            Kind::Mbfl(no, fam) => {
-                let c = s[0];
-                let n = match fam {
-                    Family::Sbcs => 1,
-                    Family::EucJp => match c {
-                        0x8E => 2,
-                        0x8F => 3,
-                        0xA1..=0xFE => 2,
-                        _ => 1,
-                    },
-                    Family::Sjis => match c {
-                        0x81..=0x9F | 0xE0..=0xFC => 2,
-                        _ => 1,
-                    },
-                    Family::Dbcs => match c {
-                        0x81..=0xFE => 2,
-                        _ => 1,
-                    },
+            Kind::Unicode => {
+                if s.len() < 2 {
+                    return Dec::Incomplete;
+                }
+                if self.state == 0 {
+                    self.state = 2;
+                    if s[0] == 0xFE && s[1] == 0xFF {
+                        self.state = 1;
+                        return Dec::Shift(2);
+                    }
+                    if s[0] == 0xFF && s[1] == 0xFE {
+                        return Dec::Shift(2);
+                    }
+                }
+                let e = if self.state == 1 {
+                    Endian::Be
+                } else {
+                    Endian::Le
                 };
-                // glibc's EUC-JP and EUC-KR pass the C1 controls through.
+                let c = u16_at(s, e) as u32;
+                if (0xD800..0xE000).contains(&c) {
+                    return Dec::Illegal(2);
+                }
+                Dec::Char(c, 2)
+            }
+            Kind::Utf7(imap) => self.decode_utf7(s, imap),
+            Kind::Sbcs(t) => {
+                let dec = sbcs_tables::TABLES[t as usize].dec;
+                let b = s[0] as usize;
+                let c = if dec.len() == 128 {
+                    if b < 0x80 {
+                        return Dec::Char(b as u32, 1);
+                    }
+                    dec[b - 0x80]
+                } else {
+                    dec[b]
+                };
+                if c == 0xFFFF {
+                    Dec::Illegal(1)
+                } else {
+                    Dec::Char(c as u32, 1)
+                }
+            }
+            Kind::Mbfl(no) => {
+                let c = s[0];
+                // The length of a character by its lead byte in glibc's
+                // decoders (a lone lead byte is an incomplete character).
+                let n = match (no, c) {
+                    (EncNo::EucJp | EncNo::EucJpWin, 0x8F) => 3,
+                    (EncNo::EucJp | EncNo::EucJpWin | EncNo::EucCn, 0x8E | 0x8F)
+                    | (EncNo::EucJp | EncNo::EucJpWin, 0xA0..=0xFE)
+                    | (EncNo::Sjis, 0x81..=0x9F | 0xE0..=0xEA)
+                    | (EncNo::Cp932, 0x81..=0x9F | 0xE0..=0xFC)
+                    | (EncNo::EucKr, 0xA1..=0xFF)
+                    | (EncNo::Uhc, 0x81..=0xC8 | 0xCA..=0xFD)
+                    | (EncNo::Big5 | EncNo::Cp950, 0xA1..=0xF9)
+                    | (EncNo::EucCn, 0xA1..=0xFE)
+                    | (EncNo::Cp936, 0x81..=0xFE) => 2,
+                    _ => 1,
+                };
+                // glibc's EUC-JP and EUC-KR pass the C1 controls through,
+                // BIG5 0x80.
                 if (0x80..=0x9F).contains(&c)
-                    && ((fam == Family::EucJp && c != 0x8E && c != 0x8F) || no == EncNo::EucKr)
+                    && (((no == EncNo::EucJp || no == EncNo::EucJpWin) && c != 0x8E && c != 0x8F)
+                        || no == EncNo::EucKr)
+                    || (c == 0x80 && matches!(no, EncNo::Big5 | EncNo::Cp950))
                 {
                     return Dec::Char(c as u32, 1);
                 }
+                if n == 1 && c >= 0x80 && mbfl_decode_char_glibc(no, &s[..1]).is_none() {
+                    return Dec::Illegal(1);
+                }
                 if s.len() < n {
+                    // (EUC-JP's 0x8F checks the second byte first)
+                    let rows = if no == EncNo::EucJp {
+                        0xA2..=0xED
+                    } else {
+                        0xA1..=0xFE
+                    };
+                    if n == 3 && s.len() == 2 && !rows.contains(&s[1]) {
+                        return Dec::Illegal(1);
+                    }
                     return Dec::Incomplete;
                 }
-                let pua = |cp: u32| (0xE000..0xF900).contains(&cp);
                 match mbfl_decode_char_glibc(no, &s[..n]) {
-                    // glibc's tables of these charsets have no
-                    // private-use mappings.
-                    Some(cp)
-                        if pua(cp)
-                            && matches!(
-                                no,
-                                EncNo::EucJp
-                                    | EncNo::Sjis
-                                    | EncNo::EucKr
-                                    | EncNo::Uhc
-                                    | EncNo::EucCn
-                                    | EncNo::Cp936
-                                    | EncNo::Big5
-                            ) =>
-                    {
-                        Dec::Illegal(1)
-                    }
+                    Some(cp) if no_pua(no, cp) => Dec::Illegal(1),
                     Some(cp) => Dec::Char(cp, n),
                     // //IGNORE skips the lead byte, or the pair for some
                     // charsets when the trail byte is in range.
@@ -501,6 +690,67 @@ impl Decoder {
                     }
                 }
             }
+        }
+    }
+
+    fn decode_utf7(&mut self, s: &[u8], imap: bool) -> Dec {
+        let c = s[0];
+        if self.state == 0 {
+            if c == if imap { b'&' } else { b'+' } {
+                if s.len() < 2 {
+                    return Dec::Incomplete;
+                }
+                if s[1] == b'-' {
+                    return Dec::Char(c as u32, 2);
+                }
+                self.state = 1;
+                self.acc = 0;
+                self.nbits = 0;
+                self.hi = 0;
+                return Dec::Shift(1);
+            }
+            return if utf7_xdirect(c as u32, imap) {
+                Dec::Char(c as u32, 1)
+            } else {
+                Dec::Illegal(1)
+            };
+        }
+        let Some(v) = utf7_b64_value(c, imap) else {
+            // The end of the base64 run: leftover bits must be padding.
+            // (IMAP ends it with "-" only)
+            let bad = self.nbits > 6 || self.acc != 0 || self.hi != 0 || (imap && c != b'-');
+            self.reset();
+            if bad {
+                return Dec::Illegal(1);
+            }
+            if c == b'-' {
+                return Dec::Shift(1);
+            }
+            return self.decode_utf7(s, imap);
+        };
+        self.acc = (self.acc << 6) | v as u32;
+        self.nbits += 6;
+        if self.nbits < 16 {
+            return Dec::Shift(1);
+        }
+        self.nbits -= 16;
+        let u = (self.acc >> self.nbits) as u16;
+        self.acc &= (1 << self.nbits) - 1;
+        match u {
+            0xD800..=0xDBFF if self.hi == 0 => {
+                self.hi = u;
+                Dec::Shift(1)
+            }
+            0xDC00..=0xDFFF if self.hi != 0 => {
+                let cp = 0x10000 + (((self.hi as u32) - 0xD800) << 10) + (u as u32 - 0xDC00);
+                self.hi = 0;
+                Dec::Char(cp, 1)
+            }
+            _ if self.hi != 0 || (0xD800..0xE000).contains(&u) => {
+                self.hi = 0;
+                Dec::Illegal(1)
+            }
+            _ => Dec::Char(u as u32, 1),
         }
     }
 
@@ -618,13 +868,22 @@ fn decode_utf8(s: &[u8]) -> Dec {
 #[derive(Clone, Copy, Debug)]
 pub struct Encoder {
     pub kind: Kind,
-    /// ISO-2022-JP: designated set; UTF-16 / UTF-32: BOM written.
+    /// ISO-2022-JP: designated set; UTF-16 / UTF-32: BOM written;
+    /// UTF-7: 1 in base64.
     state: u8,
+    /// UTF-7: the base64 bits not yet written and their count.
+    acc: u32,
+    nbits: u8,
 }
 
 impl Encoder {
     pub fn new(kind: Kind) -> Encoder {
-        Encoder { kind, state: 0 }
+        Encoder {
+            kind,
+            state: 0,
+            acc: 0,
+            nbits: 0,
+        }
     }
 
     /// Bytes of `cp` appended to `out`; false when it cannot be
@@ -716,7 +975,26 @@ impl Encoder {
                 }
             }
             Kind::Iso2022Jp => self.encode_2022jp(cp, out),
-            Kind::Mbfl(no, _) => match mbfl_encode_char(no, cp) {
+            Kind::Unicode => {
+                if cp >= 0x10000 || (0xD800..0xE000).contains(&cp) {
+                    return false;
+                }
+                if self.state == 0 {
+                    self.state = 1;
+                    push_u16(out, 0xFEFF, Endian::Le);
+                }
+                push_u16(out, cp as u16, Endian::Le);
+                true
+            }
+            Kind::Utf7(imap) => self.encode_utf7(cp, out, imap),
+            Kind::Sbcs(t) => match sbcs_encode(&sbcs_tables::TABLES[t as usize], cp) {
+                Some(b) => {
+                    out.push(b);
+                    true
+                }
+                None => false,
+            },
+            Kind::Mbfl(no) => match mbfl_encode_char(no, cp) {
                 Some(b) => {
                     out.extend_from_slice(&b);
                     true
@@ -724,6 +1002,64 @@ impl Encoder {
                 None => false,
             },
         }
+    }
+
+    fn encode_utf7(&mut self, cp: u32, out: &mut Vec<u8>, imap: bool) -> bool {
+        if cp > 0x10FFFF || (0xD800..0xE000).contains(&cp) {
+            return false;
+        }
+        let shift = if imap { b'&' } else { b'+' };
+        if utf7_direct(cp, imap) || (imap && cp == b'&' as u32 && self.state == 1) {
+            if self.state == 1 {
+                self.flush_utf7(out, imap);
+                // (UTF-7 only needs the '-' before a base64 character)
+                if imap || (cp as u8).is_ascii_alphanumeric() || b"+/-".contains(&(cp as u8)) {
+                    out.push(b'-');
+                }
+            }
+            out.push(cp as u8);
+            if imap && cp == b'&' as u32 {
+                out.push(b'-');
+            }
+            return true;
+        }
+        if self.state == 0 {
+            if cp == shift as u32 {
+                out.push(shift);
+                out.push(b'-');
+                return true;
+            }
+            out.push(shift);
+            self.state = 1;
+        }
+        let mut units = [cp as u16, 0];
+        let mut n = 1;
+        if cp >= 0x10000 {
+            let v = cp - 0x10000;
+            units = [0xD800 + (v >> 10) as u16, 0xDC00 + (v & 0x3FF) as u16];
+            n = 2;
+        }
+        for &u in &units[..n] {
+            self.acc = (self.acc << 16) | u as u32;
+            self.nbits += 16;
+            while self.nbits >= 6 {
+                self.nbits -= 6;
+                out.push(utf7_b64_char(self.acc >> self.nbits, imap));
+            }
+            self.acc &= (1 << self.nbits) - 1;
+        }
+        true
+    }
+
+    /// Writes the pending base64 bits of UTF-7 (zero padded) and leaves
+    /// base64.
+    fn flush_utf7(&mut self, out: &mut Vec<u8>, imap: bool) {
+        if self.nbits > 0 {
+            out.push(utf7_b64_char(self.acc << (6 - self.nbits), imap));
+        }
+        self.state = 0;
+        self.acc = 0;
+        self.nbits = 0;
     }
 
     fn encode_2022jp(&mut self, cp: u32, out: &mut Vec<u8>) -> bool {
@@ -765,10 +1101,17 @@ impl Encoder {
 
     /// The bytes returning to the initial shift state (iconv(cd, NULL,
     /// NULL, &out, &outleft)).
-    pub fn reset_bytes(&self) -> &'static [u8] {
+    pub fn reset_bytes(&self) -> Vec<u8> {
         match self.kind {
-            Kind::Iso2022Jp if self.state != 0 => b"\x1b(B",
-            _ => b"",
+            Kind::Iso2022Jp if self.state != 0 => b"\x1b(B".to_vec(),
+            Kind::Utf7(imap) if self.state != 0 => {
+                let mut e = *self;
+                let mut out = Vec::new();
+                e.flush_utf7(&mut out, imap);
+                out.push(b'-');
+                out
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -777,8 +1120,10 @@ impl Encoder {
     pub fn reset(&mut self) {
         // (the BOM of UTF-16 / UTF-32 is written once per conversion
         // descriptor)
-        if self.kind == Kind::Iso2022Jp {
+        if matches!(self.kind, Kind::Iso2022Jp | Kind::Utf7(_)) {
             self.state = 0;
+            self.acc = 0;
+            self.nbits = 0;
         }
     }
 }
