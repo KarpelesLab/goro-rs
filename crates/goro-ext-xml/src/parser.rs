@@ -4600,6 +4600,9 @@ impl<'a, S: Sink> Parser<'a, S> {
             .map(|i| self.ns[i].uri.clone());
         let uri = if prefix.is_none() {
             uri.filter(|u| !u.is_empty())
+        } else if uri.is_none() && prefix.as_deref() == Some("xml") {
+            // xmlGetNamespace(): the xml prefix is always bound
+            Some(NS_XML.to_string())
         } else {
             uri
         };
