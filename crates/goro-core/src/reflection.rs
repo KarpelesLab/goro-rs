@@ -1351,8 +1351,9 @@ fn reflection_method_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> b
     if args.get(1).map(|a| a.is_closure_obj()).unwrap_or(false) {
         let mut a = args.to_vec();
         a[1] = closure_legacy_arg(&args[1]);
-        // The __invoke() of a closure of a method reflects that method
-        // (zend_get_closure_invoke_method() proxies it).
+        // The __invoke() of a closure of a function or method is
+        // zend_get_closure_invoke_method(): an internal Closure::__invoke
+        // with that function's signature.
         if let (Value::String(f), Some(m)) = (a[1].clone(), args.get(2)) {
             let fb = f.as_bytes();
             if m.to_php_string()
@@ -1360,14 +1361,11 @@ fn reflection_method_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> b
                 .eq_ignore_ascii_case(b"__invoke")
                 && !fb.starts_with(b"__")
             {
-                if let Some(p) = fb.windows(2).position(|w| w == b"::") {
-                    a[1] = Value::String(PhpString::from_vec(fb[..p].to_vec()));
-                    a[2] = Value::String(PhpString::from_vec(fb[p + 2..].to_vec()));
-                } else {
-                    // A closure of a plain function: Closure::__invoke with
-                    // that function's signature.
+                {
                     a[1] = Value::String(PhpString::from_bytes(b"Closure"));
+                    CLOSURE_INVOKE_CTOR.with(|c| c.set(true));
                     let ok = reflection_method_construct(vm, &a, line);
+                    CLOSURE_INVOKE_CTOR.with(|c| c.set(false));
                     if ok {
                         this.borrow_mut().set_property(
                             b"__reflection_closure_fn".to_vec(),
@@ -1544,7 +1542,11 @@ fn reflection_method_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> b
     });
     // Internal classes without stub data accept any method name.
     let has_info = is_user_class || rcls(vm, &class_lower).is_some();
-    if found.is_none() && has_info && !(class_lower == b"closure" && method_lower == b"__invoke") {
+    // (Closure::__invoke exists only for a closure object)
+    let closure_invoke = class_lower == b"closure"
+        && method_lower == b"__invoke"
+        && (closure_fn.is_some() || CLOSURE_INVOKE_CTOR.with(|c| c.get()));
+    if found.is_none() && has_info && !closure_invoke {
         let canonical_class = rcls(vm, &class_lower)
             .map(|c| String::from_utf8_lossy(&c.name).to_string())
             .unwrap_or(class_name.clone());
@@ -1602,6 +1604,11 @@ fn reflection_method_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> b
         obj.set_property(b"__reflection_closure_fn".to_vec(), Value::String(fn_str));
     }
     true
+}
+
+thread_local! {
+    /// Set while constructing the Closure::__invoke of a closure object.
+    static CLOSURE_INVOKE_CTOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The internal-callable form of a Closure object used by the reflection
@@ -5203,7 +5210,10 @@ pub fn reflection_method_method(
         match method {
             b"getnumberofparameters" => {
                 let count = rfunc(vm, fn_lower.as_slice())
-                    .map(|op| op.param_count as i64)
+                    .map(|op| {
+                        (op.param_count as usize).saturating_sub(method_this_hidden(fn_lower, op))
+                            as i64
+                    })
                     .unwrap_or(0);
                 return Some(Value::Long(count));
             }
@@ -5215,7 +5225,11 @@ pub fn reflection_method_method(
             }
             b"getparameters" => {
                 if let Some(op_array) = rfunc(vm, fn_lower.as_slice()).cloned() {
-                    let params = create_reflection_parameters(vm, &op_array);
+                    let params = if method_this_hidden(fn_lower, &op_array) > 0 {
+                        create_reflection_parameters_method(vm, &op_array, false)
+                    } else {
+                        create_reflection_parameters(vm, &op_array)
+                    };
                     // Closure::__invoke is an internal trampoline with
                     // userland arginfo: defaults are not retrievable.
                     if let Value::Array(a) = &params {
