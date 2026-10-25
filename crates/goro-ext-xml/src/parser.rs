@@ -5061,8 +5061,11 @@ impl<'a, S: Sink> Parser<'a, S> {
                 }
                 if at(inp) == b']' {
                     if at(inp + 1) == b']' && at(inp + 2) == b'>' {
+                        // (reported at the ']'; the text before it stays)
+                        let st = self.pos();
                         self.inp_mut().pos = inp;
                         self.fatal(XML_ERR_MISPLACED_CDATA_END, None);
+                        self.inp_mut().pos = st;
                     }
                     inp += 1;
                     continue;
