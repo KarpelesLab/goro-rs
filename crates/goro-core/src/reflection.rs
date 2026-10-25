@@ -6897,7 +6897,11 @@ pub fn reflection_function_method(
                             || n.eq_ignore_ascii_case("\\deprecated")
                     })
                 })
-                .unwrap_or(false);
+                .unwrap_or(false)
+                // An internal function: ZEND_ACC_DEPRECATED from its stub.
+                || (vm.functions.contains_key(fl.as_slice())
+                    && crate::stubs::find_function(&fl)
+                        .is_some_and(|f| f.flags & crate::stubs::F_DEPRECATED != 0));
             Some(if has_dep { Value::True } else { Value::False })
         }
         b"isgenerator" => {

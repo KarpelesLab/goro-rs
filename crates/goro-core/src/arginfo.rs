@@ -409,6 +409,49 @@ impl Vm {
         }
     }
 
+    /// The generic zpp checks (argument count and types, from the stub) of
+    /// builtin `lname`, run by the builtin itself: a deprecated function
+    /// raises its deprecation first. The coerced arguments, or Err with the
+    /// exception set.
+    pub fn zpp_self_check(
+        &mut self,
+        lname: &[u8],
+        args: &[Value],
+    ) -> Result<Vec<Value>, crate::vm::VmError> {
+        let line = self.current_line;
+        let mut owned = args.to_vec();
+        // (the error handler threw on the deprecation: the function is not run)
+        if self.current_exception.is_some() {
+            return Err(crate::vm::VmError {
+                message: self.uncaught_exception_message(),
+                line,
+            });
+        }
+        let Some(info) = lookup(lname) else {
+            return Ok(owned);
+        };
+        let mut orig = None;
+        let strict = self.caller_strict_types;
+        if let Err(e) = self.zpp_check(
+            info,
+            CHECK_ARITY | CHECK_TYPES,
+            &mut owned,
+            &mut orig,
+            strict,
+            line,
+        ) {
+            if let ZppError::Throw(cls, msg) = e {
+                let exc = self.create_exception(cls, &msg, line);
+                self.current_exception = Some(exc);
+            }
+            return Err(crate::vm::VmError {
+                message: self.uncaught_exception_message(),
+                line,
+            });
+        }
+        Ok(owned)
+    }
+
     /// Arginfo and verified flags of a registered builtin, if the generic
     /// zpp layer is enabled for it. Cheap: one hash lookup.
     #[inline]

@@ -3478,9 +3478,10 @@ fn assoc(pairs: Vec<(&str, Value)>) -> PhpArray {
 
 /// PHP_FUNCTION(strptime) (ext/standard/datetime.c)
 fn strptime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated(
+    vm.emit_function_deprecation(
         "Function strptime() is deprecated since 8.2, use date_parse_from_format() (for locale-independent parsing), or IntlDateFormatter::parse() (for locale-dependent parsing) instead",
     );
+    let args = &vm.zpp_self_check(b"strptime", args)?[..];
     let ts = args
         .first()
         .map(|v| v.to_php_string().as_bytes().to_vec())

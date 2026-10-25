@@ -5304,23 +5304,26 @@ fn quotemeta_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn utf8_decode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated_at("Function utf8_decode() is deprecated since 8.2, visit the php.net documentation for various alternatives", vm.current_line);
-    // Convert UTF-8 to ISO-8859-1 (simplified: just keep bytes < 256)
+    vm.emit_function_deprecation("Function utf8_decode() is deprecated since 8.2, visit the php.net documentation for various alternatives");
+    let args = &vm.zpp_self_check(b"utf8_decode", args)?[..];
+    // UTF-8 to ISO-8859-1: '?' for an illegal sequence or a code point
+    // above U+00FF.
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let utf8 = s.to_string_lossy();
-    let mut result = Vec::new();
-    for ch in utf8.chars() {
-        if ch as u32 <= 255 {
-            result.push(ch as u8);
-        } else {
-            result.push(b'?');
+    let bytes = s.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut pos = 0;
+    while pos < bytes.len() {
+        match crate::html::php_next_utf8_char(bytes, &mut pos) {
+            Some(c) if c <= 0xFF => result.push(c as u8),
+            _ => result.push(b'?'),
         }
     }
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
 fn utf8_encode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated_at("Function utf8_encode() is deprecated since 8.2, visit the php.net documentation for various alternatives", vm.current_line);
+    vm.emit_function_deprecation("Function utf8_encode() is deprecated since 8.2, visit the php.net documentation for various alternatives");
+    let args = &vm.zpp_self_check(b"utf8_encode", args)?[..];
     // Convert ISO-8859-1 to UTF-8
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let bytes = s.as_bytes();

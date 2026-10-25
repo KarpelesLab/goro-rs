@@ -87,6 +87,22 @@ impl Vm {
         }
     }
 
+    /// A deprecated builtin's "Function f() is deprecated" deprecation, as
+    /// the call raises it (zend_deprecated_function(), before the function
+    /// is entered): from the caller's code, not under the builtin's frame.
+    #[inline(never)]
+    pub fn emit_function_deprecation(&mut self, msg: &str) {
+        let line = self.current_line;
+        let hidden = match self.builtin_frames.last() {
+            Some(f) if !f.materialized => self.builtin_frames.pop(),
+            _ => None,
+        };
+        self.emit_deprecated_at(msg, line);
+        if let Some(f) = hidden {
+            self.builtin_frames.push(f);
+        }
+    }
+
     /// End of the builtin call recorded by the last `push_builtin_frame`.
     #[inline]
     pub fn pop_builtin_frame(&mut self) {

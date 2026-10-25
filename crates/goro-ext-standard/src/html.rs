@@ -252,6 +252,12 @@ fn utf8_trail(c: u8) -> bool {
     (0x80..=0xBF).contains(&c)
 }
 
+/// php_next_utf8_char(): the code point at `*pos`, or None (with `*pos`
+/// past the illegal bytes).
+pub(crate) fn php_next_utf8_char(s: &[u8], pos: &mut usize) -> Option<u32> {
+    get_next_char(Charset::Utf8, s, pos)
+}
+
 /// get_next_char(): the code unit sequence at `*pos` (a Unicode code point
 /// for UTF-8, the raw byte for single-byte charsets, the bytes packed
 /// big-endian for the other multi-byte ones). On an invalid sequence, None
