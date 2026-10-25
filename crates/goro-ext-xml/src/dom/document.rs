@@ -648,6 +648,7 @@ fn m_adopt_node(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
                         .into_iter()
                         .filter(|x| t.nodes[*x].t == NType::Element),
                 );
+                let mut stored: Vec<(usize, usize)> = Vec::new();
                 for x in nodes {
                     let mut targets = vec![x];
                     targets.extend(t.attrs_of(x));
@@ -664,11 +665,19 @@ fn m_adopt_node(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
                                 let found = t
                                     .search_ns(y, pr.as_deref())
                                     .filter(|f| t.nss[*f].href == href);
+                                // xmlDOMWrapAdoptNode() without a destination
+                                // parent keeps such references in the new
+                                // document's oldNs list (no declaration): an
+                                // insertion reconciles them later
                                 let newns = match found {
                                     Some(f) => f,
-                                    None => match t.new_ns(Some(n), &href, pr.as_deref()) {
-                                        Some(nn) => nn,
-                                        None => ns,
+                                    None => match stored.iter().find(|(o, _)| *o == ns) {
+                                        Some(&(_, s)) => s,
+                                        None => {
+                                            let s = t.new_ns_raw(&href, pr.as_deref(), None);
+                                            stored.push((ns, s));
+                                            s
+                                        }
                                     },
                                 };
                                 t.nodes[y].ns = Some(newns);
