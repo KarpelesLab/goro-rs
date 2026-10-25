@@ -265,10 +265,6 @@ pub fn checkdate_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
 }
 
 fn php_strftime(vm: &mut Vm, args: &[Value], fname: &str, gmt: bool) -> R<Value> {
-    vm.emit_deprecated(&format!(
-        "Function {}() is deprecated since 8.1, use IntlDateFormatter::format() instead",
-        fname
-    ));
     check_count(vm, fname, args, 1, 2)?;
     let format = str_arg(vm, fname, args, 0, "format", false)?.unwrap_or_default();
     let ts = long_arg(vm, fname, args, 1, "timestamp", true)?.unwrap_or_else(php_time);
@@ -762,10 +758,6 @@ fn ini_float(vm: &Vm, name: &[u8], default: f64) -> f64 {
 }
 
 fn sunrise_sunset(vm: &mut Vm, args: &[Value], fname: &str, calc_sunset: bool) -> R<Value> {
-    vm.emit_deprecated(&format!(
-        "Function {}() is deprecated since 8.1, use date_sun_info() instead",
-        fname
-    ));
     check_count(vm, fname, args, 1, 6)?;
     let time = long_arg(vm, fname, args, 0, "timestamp", false)?.unwrap_or(0);
     let retformat = long_arg(vm, fname, args, 1, "returnFormat", false)?.unwrap_or(1);

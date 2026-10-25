@@ -217,9 +217,21 @@ fn throw(vm: &mut Vm, class: &[u8], msg: &str) -> R {
     Ok(Value::Null)
 }
 
-fn deprecated(vm: &mut Vm, msg: &str) {
+fn docref_deprecated(vm: &mut Vm, msg: &str) {
     let line = vm.current_line;
     vm.emit_deprecated_at(msg, line);
+}
+
+/// A deprecated function's deprecation, from the call (Err when the error
+/// handler threw: the function is not run).
+fn deprecated(vm: &mut Vm, msg: &str, args: &[Value]) -> Result<(), VmError> {
+    vm.emit_function_deprecation(msg)?;
+    // "Function name() is deprecated"
+    let name = msg[9..]
+        .split_once('(')
+        .map_or("", |n| n.0)
+        .to_ascii_lowercase();
+    vm.zpp_self_check(name.as_bytes(), args).map(|_| ())
 }
 
 /// "zend_string_or_stdclass(): Argument #1 ($param) must be of type ..."
@@ -276,8 +288,8 @@ fn zend_trigger_bailout(vm: &mut Vm, _args: &[Value]) -> R {
     Err(vm.emit_fatal_at("Bailout", line))
 }
 
-fn zend_test_deprecated(vm: &mut Vm, _args: &[Value]) -> R {
-    deprecated(vm, "Function zend_test_deprecated() is deprecated");
+fn zend_test_deprecated(vm: &mut Vm, args: &[Value]) -> R {
+    deprecated(vm, "Function zend_test_deprecated() is deprecated", args)?;
     Ok(Value::Null)
 }
 
@@ -287,40 +299,48 @@ fn zend_test_deprecated_nodiscard(_vm: &mut Vm, _args: &[Value]) -> R {
     Ok(Value::Long(1))
 }
 
-fn zend_test_deprecated_aliased(vm: &mut Vm, _args: &[Value]) -> R {
-    deprecated(vm, "Function zend_test_deprecated_aliased() is deprecated");
+fn zend_test_deprecated_aliased(vm: &mut Vm, args: &[Value]) -> R {
+    deprecated(
+        vm,
+        "Function zend_test_deprecated_aliased() is deprecated",
+        args,
+    )?;
     Ok(Value::Null)
 }
 
-fn ns2_deprecated_func(vm: &mut Vm, _args: &[Value]) -> R {
+fn ns2_deprecated_func(vm: &mut Vm, args: &[Value]) -> R {
     deprecated(
         vm,
         "Function ZendTestNS2\\namespaced_deprecated_func() is deprecated",
-    );
+        args,
+    )?;
     Ok(Value::Null)
 }
 
-fn ns2_deprecated_aliased_func(vm: &mut Vm, _args: &[Value]) -> R {
+fn ns2_deprecated_aliased_func(vm: &mut Vm, args: &[Value]) -> R {
     deprecated(
         vm,
         "Function ZendTestNS2\\namespaced_deprecated_aliased_func() is deprecated",
-    );
+        args,
+    )?;
     Ok(Value::Null)
 }
 
-fn subns_deprecated_func(vm: &mut Vm, _args: &[Value]) -> R {
+fn subns_deprecated_func(vm: &mut Vm, args: &[Value]) -> R {
     deprecated(
         vm,
         "Function ZendTestNS2\\ZendSubNS\\namespaced_deprecated_func() is deprecated",
-    );
+        args,
+    )?;
     Ok(Value::Null)
 }
 
-fn subns_deprecated_aliased_func(vm: &mut Vm, _args: &[Value]) -> R {
+fn subns_deprecated_aliased_func(vm: &mut Vm, args: &[Value]) -> R {
     deprecated(
         vm,
         "Function ZendTestNS2\\ZendSubNS\\namespaced_deprecated_aliased_func() is deprecated",
-    );
+        args,
+    )?;
     Ok(Value::Null)
 }
 
@@ -467,7 +487,7 @@ fn str_param_ex(
             type_error(vm, func, 1, "param", ty, v)?;
             return Ok(None);
         }
-        deprecated(
+        docref_deprecated(
             vm,
             &format!(
                 "{}(): Passing null to parameter #1 ($param) of type {} is deprecated",
@@ -551,7 +571,7 @@ fn number_or_str(vm: &mut Vm, args: &[Value], func: &str, nullable: bool) -> R {
         return type_error(vm, func, 1, "param", ty, &v);
     }
     if matches!(v, Value::Null | Value::Undef) {
-        deprecated(
+        docref_deprecated(
             vm,
             &format!(
                 "{}(): Passing null to parameter #1 ($param) of type {} is deprecated",

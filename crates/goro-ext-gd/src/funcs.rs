@@ -446,12 +446,9 @@ fn imagesetbrush(vm: &mut Vm, a: &[Value]) -> R {
 }
 
 fn imagedestroy(vm: &mut Vm, a: &[Value]) -> R {
-    vm.emit_deprecated(
+    vm.emit_function_deprecation(
         "Function imagedestroy() is deprecated since 8.5, as it has no effect since PHP 8.0",
-    );
-    if vm.current_exception.is_some() {
-        return Err(err(vm));
-    }
+    )?;
     args(vm, "imagedestroy", "O", a)?;
     Ok(Value::True)
 }

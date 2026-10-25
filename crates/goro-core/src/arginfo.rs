@@ -418,6 +418,16 @@ impl Vm {
         lname: &[u8],
         args: &[Value],
     ) -> Result<Vec<Value>, crate::vm::VmError> {
+        self.zpp_self_check_flags(lname, args, CHECK_ARITY | CHECK_TYPES)
+    }
+
+    /// zpp_self_check() with only the `flags` (CHECK_*) checks.
+    pub fn zpp_self_check_flags(
+        &mut self,
+        lname: &[u8],
+        args: &[Value],
+        flags: u8,
+    ) -> Result<Vec<Value>, crate::vm::VmError> {
         let line = self.current_line;
         let mut owned = args.to_vec();
         // (the error handler threw on the deprecation: the function is not run)
@@ -432,14 +442,7 @@ impl Vm {
         };
         let mut orig = None;
         let strict = self.caller_strict_types;
-        if let Err(e) = self.zpp_check(
-            info,
-            CHECK_ARITY | CHECK_TYPES,
-            &mut owned,
-            &mut orig,
-            strict,
-            line,
-        ) {
+        if let Err(e) = self.zpp_check(info, flags, &mut owned, &mut orig, strict, line) {
             if let ZppError::Throw(cls, msg) = e {
                 let exc = self.create_exception(cls, &msg, line);
                 self.current_exception = Some(exc);
@@ -823,7 +826,11 @@ impl Vm {
             let flags =
                 verified_flags(name) | self.zpp_extension_verified.get(name).copied().unwrap_or(0);
             if flags != 0 {
-                if let Some(info) = lookup(name) {
+                // (a deprecated function checks its arguments itself, after
+                // its deprecation: zpp_self_check())
+                if let Some(info) =
+                    lookup(name).filter(|i| i.stub.flags & crate::stubs::F_DEPRECATED == 0)
+                {
                     self.zpp_map.insert(name.clone(), (info, flags));
                 }
             }

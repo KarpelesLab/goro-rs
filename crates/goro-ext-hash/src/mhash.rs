@@ -86,8 +86,11 @@ pub fn register(vm: &mut Vm) {
     vm.module_constants.push((b"hash".to_vec(), names));
 }
 
-fn deprecated(vm: &mut Vm, f: &str) {
-    vm.emit_deprecated(&format!("Function {}() is deprecated since 8.1", f));
+/// The function's deprecation (from the call), then its argument checks:
+/// the coerced arguments.
+fn deprecated(vm: &mut Vm, f: &str, args: &[Value]) -> Result<Vec<Value>, VmError> {
+    vm.emit_function_deprecation(&format!("Function {}() is deprecated since 8.1", f))?;
+    vm.zpp_self_check(f.as_bytes(), args)
 }
 
 fn long_arg(args: &[Value], i: usize) -> i64 {
@@ -102,7 +105,7 @@ fn bytes_arg(args: &[Value], i: usize) -> Vec<u8> {
 
 /// PHP_FUNCTION(mhash)
 fn mhash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    deprecated(vm, "mhash");
+    let args = &deprecated(vm, "mhash", args)?[..];
     let Some((_, algo)) = lookup(long_arg(args, 0)) else {
         return Ok(Value::False);
     };
@@ -135,7 +138,7 @@ fn mhash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// PHP_FUNCTION(mhash_get_hash_name)
 fn mhash_get_hash_name_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    deprecated(vm, "mhash_get_hash_name");
+    let args = &deprecated(vm, "mhash_get_hash_name", args)?[..];
     Ok(match lookup(long_arg(args, 0)) {
         Some((name, _)) => Value::String(PhpString::from_bytes(name.as_bytes())),
         None => Value::False,
@@ -143,14 +146,14 @@ fn mhash_get_hash_name_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
 }
 
 /// PHP_FUNCTION(mhash_count)
-fn mhash_count_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    deprecated(vm, "mhash_count");
+fn mhash_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    deprecated(vm, "mhash_count", args)?;
     Ok(Value::Long(MHASH_TO_HASH.len() as i64 - 1))
 }
 
 /// PHP_FUNCTION(mhash_get_block_size)
 fn mhash_get_block_size_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    deprecated(vm, "mhash_get_block_size");
+    let args = &deprecated(vm, "mhash_get_block_size", args)?[..];
     Ok(lookup(long_arg(args, 0))
         .and_then(|(_, algo)| fetch_ops(algo.as_bytes()))
         .map(|ops| Value::Long(ops.digest_size as i64))
@@ -159,7 +162,7 @@ fn mhash_get_block_size_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
 
 /// PHP_FUNCTION(mhash_keygen_s2k)
 fn mhash_keygen_s2k_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    deprecated(vm, "mhash_keygen_s2k");
+    let args = &deprecated(vm, "mhash_keygen_s2k", args)?[..];
     let algo = long_arg(args, 0);
     let password = bytes_arg(args, 1);
     let salt = bytes_arg(args, 2);

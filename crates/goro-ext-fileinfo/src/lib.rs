@@ -616,12 +616,9 @@ fn done(vm: &Vm, r: Value) -> Result<Value, VmError> {
 }
 
 fn finfo_close(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated(
+    vm.emit_function_deprecation(
         "Function finfo_close() is deprecated since 8.5, as finfo objects are freed automatically",
-    );
-    if vm.current_exception.is_some() {
-        return Err(verr(vm));
-    }
+    )?;
     let f = Func::function("finfo_close");
     if zpp::arity_check(vm, &f, "O", args).is_err() {
         return Err(verr(vm));

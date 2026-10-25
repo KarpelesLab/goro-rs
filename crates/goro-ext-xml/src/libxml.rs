@@ -387,7 +387,8 @@ fn libxml_set_streams_context(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
 }
 
 fn libxml_disable_entity_loader(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated("Function libxml_disable_entity_loader() is deprecated since 8.0, as external entity loading is disabled by default");
+    vm.emit_function_deprecation("Function libxml_disable_entity_loader() is deprecated since 8.0, as external entity loading is disabled by default")?;
+    let args = &vm.zpp_self_check(b"libxml_disable_entity_loader", args)?[..];
     let disable = args.first().map(|v| v.deref().is_truthy()).unwrap_or(true);
     // php_libxml_disable_entity_loader()
     let old =

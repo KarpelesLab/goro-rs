@@ -715,9 +715,10 @@ pub fn openssl_x509_read(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 
 pub fn openssl_x509_free(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let f = "openssl_x509_free";
-    vm.emit_deprecated(
+    vm.emit_function_deprecation(
         "Function openssl_x509_free() is deprecated since 8.0, as OpenSSLCertificate objects are freed automatically",
-    );
+    )?;
+    let args = &vm.zpp_self_check(b"openssl_x509_free", args)?[..];
     let v = args.first().cloned().unwrap_or(Value::Null);
     if !class_is(&v, "OpenSSLCertificate") {
         return Err(zpp::arg_type_error(

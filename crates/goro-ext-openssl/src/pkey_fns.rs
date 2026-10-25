@@ -855,17 +855,19 @@ pub fn openssl_pkey_get_details(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
 }
 
 pub fn openssl_pkey_free(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated(
+    vm.emit_function_deprecation(
         "Function openssl_pkey_free() is deprecated since 8.0, as OpenSSLAsymmetricKey objects are freed automatically",
-    );
+    )?;
+    let args = &vm.zpp_self_check(b"openssl_pkey_free", args)?[..];
     need_key_object(vm, args, 0, "openssl_pkey_free", "key")?;
     Ok(Value::Null)
 }
 
 pub fn openssl_free_key(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated(
+    vm.emit_function_deprecation(
         "Function openssl_free_key() is deprecated since 8.0, as OpenSSLAsymmetricKey objects are freed automatically",
-    );
+    )?;
+    let args = &vm.zpp_self_check(b"openssl_free_key", args)?[..];
     need_key_object(vm, args, 0, "openssl_free_key", "key")?;
     Ok(Value::Null)
 }

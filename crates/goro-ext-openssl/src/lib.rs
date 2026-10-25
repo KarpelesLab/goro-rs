@@ -47,6 +47,18 @@ macro_rules! checked {
     }};
 }
 
+/// A deprecated function: its deprecation comes before the argument
+/// checks, which it runs itself.
+macro_rules! deprecated {
+    ($name:literal, $f:path) => {{
+        fn w(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+            zpp::enter($name, &vm.builtin_named_skipped);
+            $f(vm, args)
+        }
+        ($name, w as BuiltinFn)
+    }};
+}
+
 /// Register all openssl extension functions and constants
 pub fn register(vm: &mut Vm) {
     vm.register_extension(b"openssl");
@@ -83,7 +95,7 @@ pub fn register(vm: &mut Vm) {
             "openssl_x509_export_to_file",
             x509::openssl_x509_export_to_file
         ),
-        checked!("openssl_x509_free", x509::openssl_x509_free),
+        deprecated!("openssl_x509_free", x509::openssl_x509_free),
         checked!("openssl_x509_checkpurpose", x509::openssl_x509_checkpurpose),
         checked!(
             "openssl_x509_check_private_key",
@@ -109,8 +121,8 @@ pub fn register(vm: &mut Vm) {
             "openssl_pkey_export_to_file",
             pkey_fns::openssl_pkey_export_to_file
         ),
-        checked!("openssl_pkey_free", pkey_fns::openssl_pkey_free),
-        checked!("openssl_free_key", pkey_fns::openssl_free_key),
+        deprecated!("openssl_pkey_free", pkey_fns::openssl_pkey_free),
+        deprecated!("openssl_free_key", pkey_fns::openssl_free_key),
         checked!("openssl_public_encrypt", pkey_fns::openssl_public_encrypt),
         checked!("openssl_private_encrypt", pkey_fns::openssl_private_encrypt),
         checked!("openssl_public_decrypt", pkey_fns::openssl_public_decrypt),

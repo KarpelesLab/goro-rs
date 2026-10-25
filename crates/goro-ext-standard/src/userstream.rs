@@ -3484,6 +3484,15 @@ fn h_stream_set_timeout(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, Vm
     )? == OPT_OK)))
 }
 
+/// (the deprecation of a call on a non-user stream comes from the function)
+fn h_socket_set_timeout(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
+    if us_arg(args, 0).is_none() {
+        return Ok(None);
+    }
+    vm.emit_function_deprecation(crate::misc::xp_socket::SOCKET_SET_TIMEOUT_DEPRECATION)?;
+    h_stream_set_timeout(vm, args)
+}
+
 fn set_buffer(vm: &mut Vm, args: &[Value], option: i64) -> Result<Option<Value>, VmError> {
     let (_, us) = match us_arg(args, 0) {
         Some(x) => x,
@@ -5614,7 +5623,7 @@ intercepts! {
     w_stream_set_blocking => ("stream_set_blocking", h_stream_set_blocking),
     w_socket_set_blocking => ("socket_set_blocking", h_stream_set_blocking),
     w_stream_set_timeout => ("stream_set_timeout", h_stream_set_timeout),
-    w_socket_set_timeout => ("socket_set_timeout", h_stream_set_timeout),
+    w_socket_set_timeout => ("socket_set_timeout", h_socket_set_timeout),
     w_stream_set_write_buffer => ("stream_set_write_buffer", h_stream_set_write_buffer),
     w_set_file_buffer => ("set_file_buffer", h_stream_set_write_buffer),
     w_stream_set_read_buffer => ("stream_set_read_buffer", h_stream_set_read_buffer),

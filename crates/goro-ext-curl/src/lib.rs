@@ -1932,10 +1932,12 @@ fn curl_errno(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
 }
 
 fn curl_close(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
-    vm.emit_deprecated(
-        "Function curl_close() is deprecated since 8.5, as it has no effect since PHP 8.0",
-    );
-    if vm.current_exception.is_some() {
+    if vm
+        .emit_function_deprecation(
+            "Function curl_close() is deprecated since 8.5, as it has no effect since PHP 8.0",
+        )
+        .is_err()
+    {
         return Value::Null;
     }
     let a = match zpp::parse(vm, f, "C", args) {

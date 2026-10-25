@@ -610,7 +610,7 @@ final class StreamBucket {
     vm.register_function(b"stream_set_blocking", xp_socket::stream_set_blocking);
     vm.register_function(b"socket_set_blocking", xp_socket::stream_set_blocking);
     vm.register_function(b"stream_set_timeout", xp_socket::stream_set_timeout);
-    vm.register_function(b"socket_set_timeout", xp_socket::stream_set_timeout);
+    vm.register_function(b"socket_set_timeout", xp_socket::socket_set_timeout);
     vm.register_function(b"stream_set_write_buffer", stream_set_write_buffer_fn);
     vm.register_function(b"stream_set_read_buffer", stream_set_read_buffer_fn);
     vm.register_function(b"stream_copy_to_stream", stream_copy_to_stream_fn);
@@ -3485,7 +3485,7 @@ fn assoc(pairs: Vec<(&str, Value)>) -> PhpArray {
 fn strptime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     vm.emit_function_deprecation(
         "Function strptime() is deprecated since 8.2, use date_parse_from_format() (for locale-independent parsing), or IntlDateFormatter::parse() (for locale-dependent parsing) instead",
-    );
+    )?;
     let args = &vm.zpp_self_check(b"strptime", args)?[..];
     let ts = args
         .first()
@@ -17093,25 +17093,10 @@ fn parse_ini_string_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn assert_options_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    vm.emit_function_deprecation("Function assert_options() is deprecated since 8.3")?;
+    let args = &vm.zpp_self_check(b"assert_options", args)?[..];
     let option = args.first().map(|v| v.to_long()).unwrap_or(0);
     let new_value = args.get(1).map(|v| v.deref());
-
-    // The ASSERT_* constant access happens before the call itself.
-    let const_name = match option {
-        1 => Some("ASSERT_ACTIVE"),
-        2 => Some("ASSERT_CALLBACK"),
-        3 => Some("ASSERT_BAIL"),
-        4 => Some("ASSERT_WARNING"),
-        5 => Some("ASSERT_EXCEPTION"),
-        _ => None,
-    };
-    if let Some(name) = const_name {
-        vm.emit_deprecated(&format!(
-            "Constant {} is deprecated since 8.3, as assert_options() is deprecated",
-            name
-        ));
-    }
-    vm.emit_deprecated("Function assert_options() is deprecated since 8.3");
 
     let (key, default): (&[u8], bool) = match option {
         1 => (b"assert.active", true),

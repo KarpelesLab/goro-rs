@@ -171,6 +171,10 @@ fn shmop_read(vm: &mut Vm, args: &[Value]) -> R {
 }
 
 fn shmop_close(vm: &mut Vm, args: &[Value]) -> R {
+    vm.emit_function_deprecation(
+        "Function shmop_close() is deprecated since 8.0, as Shmop objects are freed automatically",
+    )?;
+    let args = &vm.zpp_self_check_flags(b"shmop_close", args, goro_core::arginfo::CHECK_ARITY)?[..];
     let _ = seg_arg(vm, "shmop_close", "O", args);
     Ok(Value::Null)
 }

@@ -2070,13 +2070,25 @@ pub(crate) fn stream_set_blocking(vm: &mut Vm, args: &[Value]) -> Result<Value, 
 
 /// PHP_FUNCTION(stream_set_timeout)
 pub(crate) fn stream_set_timeout(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    const F: &str = "stream_set_timeout";
-    check_arity(vm, F, args, 2, 3)?;
-    let fid = require_open_stream(vm, &args[0], F)?;
-    let mut sec = zpp_long(vm, F, 2, "seconds", &args[1], false)?.unwrap_or(0);
+    stream_set_timeout_as(vm, "stream_set_timeout", args)
+}
+
+pub(crate) const SOCKET_SET_TIMEOUT_DEPRECATION: &str =
+    "Function socket_set_timeout() is deprecated since 8.5, use stream_set_timeout() instead";
+
+/// socket_set_timeout(), the deprecated alias of stream_set_timeout()
+pub(crate) fn socket_set_timeout(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    vm.emit_function_deprecation(SOCKET_SET_TIMEOUT_DEPRECATION)?;
+    stream_set_timeout_as(vm, "socket_set_timeout", args)
+}
+
+fn stream_set_timeout_as(vm: &mut Vm, f: &str, args: &[Value]) -> Result<Value, VmError> {
+    check_arity(vm, f, args, 2, 3)?;
+    let fid = require_open_stream(vm, &args[0], f)?;
+    let mut sec = zpp_long(vm, f, 2, "seconds", &args[1], false)?.unwrap_or(0);
     let mut usec = 0;
     if let Some(v) = args.get(2) {
-        let u = zpp_long(vm, F, 3, "microseconds", v, false)?.unwrap_or(0);
+        let u = zpp_long(vm, f, 3, "microseconds", v, false)?.unwrap_or(0);
         usec = u % 1_000_000;
         sec += u / 1_000_000;
     }

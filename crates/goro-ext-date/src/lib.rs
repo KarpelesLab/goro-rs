@@ -37,6 +37,22 @@ macro_rules! wrap {
     };
 }
 
+/// A deprecated function: the deprecation comes from the call, before the
+/// function's frame.
+macro_rules! wrap_deprecated {
+    ($w:ident, $name:literal, $msg:literal, $f:path) => {
+        pub fn $w(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+            vm.emit_function_deprecation(concat!(
+                "Function ",
+                $name,
+                "() is deprecated since 8.1, ",
+                $msg
+            ))?;
+            framed(vm, $name, args, $f)
+        }
+    };
+}
+
 mod wrapped {
     use super::*;
     use crate::classes::*;
@@ -48,8 +64,18 @@ mod wrapped {
     wrap!(w_mktime, "mktime", mktime_fn);
     wrap!(w_gmmktime, "gmmktime", gmmktime_fn);
     wrap!(w_checkdate, "checkdate", checkdate_fn);
-    wrap!(w_strftime, "strftime", strftime_fn);
-    wrap!(w_gmstrftime, "gmstrftime", gmstrftime_fn);
+    wrap_deprecated!(
+        w_strftime,
+        "strftime",
+        "use IntlDateFormatter::format() instead",
+        strftime_fn
+    );
+    wrap_deprecated!(
+        w_gmstrftime,
+        "gmstrftime",
+        "use IntlDateFormatter::format() instead",
+        gmstrftime_fn
+    );
     wrap!(w_time, "time", time_fn);
     wrap!(w_localtime, "localtime", localtime_fn);
     wrap!(w_getdate, "getdate", getdate_fn);
@@ -172,8 +198,18 @@ mod wrapped {
         "date_default_timezone_get",
         date_default_timezone_get_fn
     );
-    wrap!(w_date_sunrise, "date_sunrise", date_sunrise_fn);
-    wrap!(w_date_sunset, "date_sunset", date_sunset_fn);
+    wrap_deprecated!(
+        w_date_sunrise,
+        "date_sunrise",
+        "use date_sun_info() instead",
+        date_sunrise_fn
+    );
+    wrap_deprecated!(
+        w_date_sunset,
+        "date_sunset",
+        "use date_sun_info() instead",
+        date_sunset_fn
+    );
     wrap!(w_date_sun_info, "date_sun_info", date_sun_info_fn);
 }
 

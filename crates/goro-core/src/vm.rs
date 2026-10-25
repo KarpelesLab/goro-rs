@@ -518,6 +518,11 @@ pub fn builtin_constant_deprecation(name: &[u8]) -> Option<String> {
         b"DATE_RFC7231" => "Constant DATE_RFC7231 is deprecated since 8.5, as this format ignores the associated timezone and always uses GMT".into(),
         b"FILE_BINARY" => "Constant FILE_BINARY is deprecated since 8.1, as the constant has no effect".into(),
         b"FILE_TEXT" => "Constant FILE_TEXT is deprecated since 8.1, as the constant has no effect".into(),
+        b"ASSERT_ACTIVE" | b"ASSERT_CALLBACK" | b"ASSERT_BAIL" | b"ASSERT_WARNING"
+        | b"ASSERT_EXCEPTION" => format!(
+            "Constant {} is deprecated since 8.3, as assert_options() is deprecated",
+            crate::string::msg_str(name)
+        ),
         _ => return None,
     })
 }

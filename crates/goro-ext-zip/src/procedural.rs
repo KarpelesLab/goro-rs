@@ -110,14 +110,10 @@ fn free_entry(_vm: &mut Vm, id: i64) {
 /// The #[\Deprecated] attribute of the function: Err when the handler threw.
 fn deprecated(vm: &mut Vm, name: &str) -> Result<(), VmError> {
     let suffix = FUNCTIONS.iter().find(|f| f.0 == name).map_or("", |f| f.2);
-    vm.emit_deprecated(&format!(
+    vm.emit_function_deprecation(&format!(
         "Function {}() is deprecated since 8.0{}",
         name, suffix
-    ));
-    if vm.current_exception.is_some() {
-        return Err(err(vm));
-    }
-    Ok(())
+    ))
 }
 
 fn args_or_throw(

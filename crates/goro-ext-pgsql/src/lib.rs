@@ -159,12 +159,12 @@ fn deprecation(name: &str) -> Option<&'static str> {
 /// notices libpq reported meanwhile.
 fn run(vm: &mut Vm, name: &'static str, args: &[Value], imp: Impl) -> R {
     if let Some(d) = deprecation(name) {
-        vm.emit_deprecated(&format!(
+        vm.emit_function_deprecation(&format!(
             "Function {}() is deprecated since 8.0, use {}() instead",
             name, d
-        ));
-        if vm.current_exception.is_some() {
-            return Ok(Value::Null);
+        ))?;
+        if !own_arity(name) {
+            vm.zpp_self_check_flags(name.as_bytes(), args, goro_core::arginfo::CHECK_ARITY)?;
         }
     }
     handles::push_active(name);

@@ -90,8 +90,10 @@ impl Vm {
     /// A deprecated builtin's "Function f() is deprecated" deprecation, as
     /// the call raises it (zend_deprecated_function(), before the function
     /// is entered): from the caller's code, not under the builtin's frame.
+    /// Err (with the exception set) when the error handler threw: the
+    /// function is not run.
     #[inline(never)]
-    pub fn emit_function_deprecation(&mut self, msg: &str) {
+    pub fn emit_function_deprecation(&mut self, msg: &str) -> Result<(), crate::vm::VmError> {
         let line = self.current_line;
         let hidden = match self.builtin_frames.last() {
             Some(f) if !f.materialized => self.builtin_frames.pop(),
@@ -101,6 +103,13 @@ impl Vm {
         if let Some(f) = hidden {
             self.builtin_frames.push(f);
         }
+        if self.current_exception.is_some() {
+            return Err(crate::vm::VmError {
+                message: self.uncaught_exception_message(),
+                line,
+            });
+        }
+        Ok(())
     }
 
     /// End of the builtin call recorded by the last `push_builtin_frame`.

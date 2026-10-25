@@ -5304,7 +5304,7 @@ fn quotemeta_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn utf8_decode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_function_deprecation("Function utf8_decode() is deprecated since 8.2, visit the php.net documentation for various alternatives");
+    vm.emit_function_deprecation("Function utf8_decode() is deprecated since 8.2, visit the php.net documentation for various alternatives")?;
     let args = &vm.zpp_self_check(b"utf8_decode", args)?[..];
     // UTF-8 to ISO-8859-1: '?' for an illegal sequence or a code point
     // above U+00FF.
@@ -5322,7 +5322,7 @@ fn utf8_decode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn utf8_encode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_function_deprecation("Function utf8_encode() is deprecated since 8.2, visit the php.net documentation for various alternatives");
+    vm.emit_function_deprecation("Function utf8_encode() is deprecated since 8.2, visit the php.net documentation for various alternatives")?;
     let args = &vm.zpp_self_check(b"utf8_encode", args)?[..];
     // Convert ISO-8859-1 to UTF-8
     let s = args.first().unwrap_or(&Value::Null).to_php_string();

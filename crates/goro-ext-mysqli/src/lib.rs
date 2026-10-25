@@ -597,10 +597,7 @@ macro_rules! wrap {
                 // call blocks on the server)
                 vm.flush_cli_output();
                 if let Some(d) = deprecation(fname) {
-                    vm.emit_deprecated(&format!("Function {}() is deprecated since {}", fname, d));
-                    if vm.current_exception.is_some() {
-                        return Ok(Value::Null);
-                    }
+                    vm.emit_function_deprecation(&format!("Function {}() is deprecated since {}", fname, d))?;
                 }
                 Ok($imp(vm, &f, args))
             }

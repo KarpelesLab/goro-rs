@@ -518,12 +518,9 @@ fn equals(vm: &mut Vm, c: &mut Call) -> Value {
 }
 
 fn intlcal_set_wrapper(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated(
+    vm.emit_function_deprecation(
         "Function intlcal_set() is deprecated since 8.4, use IntlCalendar::set(), IntlCalendar::setDate(), or IntlCalendar::setDateTime() instead",
-    );
-    if vm.current_exception.is_some() {
-        return Ok(Value::Null);
-    }
+    )?;
     crate::call_function(vm, "intlcal_set", set, args)
 }
 
@@ -1110,12 +1107,9 @@ fn gregorian_from_fields(vm: &mut Vm, v: &[i32]) -> Calendar {
 }
 
 fn gregcal_create_instance_wrapper(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated(
+    vm.emit_function_deprecation(
         "Function intlgregcal_create_instance() is deprecated since 8.4, use IntlGregorianCalendar::__construct(), IntlGregorianCalendar::createFromDate(), or IntlGregorianCalendar::createFromDateTime() instead",
-    );
-    if vm.current_exception.is_some() {
-        return Ok(Value::Null);
-    }
+    )?;
     let mut given = args.len();
     while given > 0 && matches!(args[given - 1], Value::Undef) {
         given -= 1;

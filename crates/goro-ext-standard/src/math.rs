@@ -1830,20 +1830,10 @@ fn srand_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn lcg_value_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated_at(
+    vm.emit_function_deprecation(
         "Function lcg_value() is deprecated since 8.4, use \\Random\\Randomizer::getFloat() instead",
-        vm.current_line,
-    );
-    if !args.is_empty() && vm.current_exception.is_none() {
-        return throw_err(
-            vm,
-            b"ArgumentCountError",
-            format!(
-                "lcg_value() expects exactly 0 arguments, {} given",
-                args.len()
-            ),
-        );
-    }
+    )?;
+    vm.zpp_self_check(b"lcg_value", args)?;
     Ok(Value::Double(goro_core::random::combined_lcg()))
 }
 

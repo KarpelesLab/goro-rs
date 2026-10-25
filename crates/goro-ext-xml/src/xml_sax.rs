@@ -1497,6 +1497,8 @@ fn same_object(a: &Value, b: &Value) -> bool {
 
 fn xml_set_object(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let f = "xml_set_object";
+    vm.emit_function_deprecation("Function xml_set_object() is deprecated since 8.4, provide a proper method callable to xml_set_*_handler() functions")?;
+    let args = &vm.zpp_self_check(b"xml_set_object", args)?[..];
     let (_o, st) = get_parser(vm, f, args)?;
     let new_this = arg(args, 1);
     if !matches!(new_this, Value::Object(_)) {
@@ -1510,7 +1512,6 @@ fn xml_set_object(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             ),
         ));
     }
-    vm.emit_deprecated("Function xml_set_object() is deprecated since 8.4, provide a proper method callable to xml_set_*_handler() functions");
     let cur = st.borrow().object.clone();
     if let Some(cur) = cur {
         for (i, (_slot, setter)) in ALL_SLOTS.iter().enumerate() {
@@ -1702,9 +1703,10 @@ fn xml_get_current_byte_index(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
 }
 
 fn xml_parser_free(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated(
+    vm.emit_function_deprecation(
         "Function xml_parser_free() is deprecated since 8.5, as it has no effect since PHP 8.0",
-    );
+    )?;
+    let args = &vm.zpp_self_check(b"xml_parser_free", args)?[..];
     let (_o, st) = get_parser(vm, "xml_parser_free", args)?;
     if st.borrow().isparsing {
         vm.emit_warning("xml_parser_free(): Parser cannot be freed while it is parsing");
