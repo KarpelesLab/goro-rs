@@ -103,8 +103,19 @@ impl Iconv {
                             return Err(Errno::Ilseq);
                         }
                     }
-                    if limit.is_some_and(|l| out.len() - start_len + tmp.len() > l) {
-                        self.enc = saved;
+                    if let Some(l) = limit.filter(|&l| out.len() - start_len + tmp.len() > l) {
+                        // glibc's ISO-2022-JP writes (and switches to) the
+                        // escape sequence of a character that then has no
+                        // room
+                        if self.enc.kind == charset::Kind::Iso2022Jp
+                            && tmp.len() > 3
+                            && tmp[0] == 0x1B
+                            && out.len() - start_len + 3 <= l
+                        {
+                            out.extend_from_slice(&tmp[..3]);
+                        } else {
+                            self.enc = saved;
+                        }
                         return Err(Errno::TooBig);
                     }
                     out.extend_from_slice(&tmp);
