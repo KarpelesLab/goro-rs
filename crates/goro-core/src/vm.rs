@@ -19884,7 +19884,9 @@ impl Vm {
         if !call.named_args.is_empty() || name.is_empty() || name.len() > 128 {
             return false;
         }
-        if name[0] == b'_' {
+        // (a name with one leading underscore is a plain one: the engine's
+        // own names start with two)
+        if name[0] == b'_' && name.get(1) == Some(&b'_') {
             // A closure without a scope or $this, called through its object.
             if !crate::closure::is_closure_fn_name(name) {
                 return false;
@@ -21767,7 +21769,11 @@ impl Vm {
             self.keep_ref_depth.take() == Some(self.call_depth) && op_array.returns_by_ref;
         // User code called from an engine-silenced region (offsetExists()
         // or __isset() under isset(), __get() under ??) reports its errors.
-        let unsilenced = self.error_reporting == crate::errdisplay::ER_SILENT;
+        // (a resumed lean call silenced by its own code, the `@` or isset()
+        // it ran before it was handed over: no lean call is made from a
+        // silenced region, see Vm::lean_ready)
+        let unsilenced =
+            self.error_reporting == crate::errdisplay::ER_SILENT && self.resume_frame.is_none();
         if unsilenced {
             self.error_reporting = self
                 .error_reporting_stack

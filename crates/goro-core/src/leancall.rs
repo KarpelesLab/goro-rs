@@ -146,14 +146,16 @@ impl Vm {
     /// function name, or of an instance method INIT_METHOD_CALL's fast path
     /// resolved: see lean_function()), with no argument sent yet (`fresh`:
     /// but a method's `$this`) or with enough arguments; and for a method,
-    /// where "::" is in the call's name.
+    /// where "::" is in the call's name. A forwarding call (`self::m()`,
+    /// `static::m()`, `parent::m()`, resolved when it was set up: see
+    /// push_forward_call) is one when fast_fcall_target() takes it: "::" is
+    /// then where it is in the name it resolved to, which the call takes.
     #[inline]
     fn lean_target(&self, fresh: bool) -> Option<(&Rc<OpArray>, Option<(usize, bool)>)> {
         let call = self.pending_calls.last()?;
         let t = &call.target;
         let f = t.user.as_ref()?;
         if t.has_builtin
-            || t.forward.is_some()
             || t.closure
             || t.fn_gen != self.user_functions.len() + 1
             || !call.named_args.is_empty()
@@ -164,45 +166,64 @@ impl Vm {
         if name.is_empty() || name.len() > 128 {
             return None;
         }
-        let sep = match t.method {
-            None => {
-                if name[0] == b'_' {
-                    return None;
-                }
-                None
-            }
-            // (on an object: its `$this` leads the arguments; with the
-            // frame name and scope its call site resolved, see
-            // MethodCallInfo; not a constructor, whose object's destructor
-            // the call arms)
-            Some((sep, false)) => {
+        let sep =
+            if let Some(fwd) = &t.forward {
+                let (sep, is_static) = t.method?;
                 let sep = sep as usize;
-                if !matches!(call.args.first(), Some(Value::Object(_)))
-                    || !t
-                        .method_info
-                        .as_ref()
-                        .is_some_and(|i| i.name.ptr_eq(&call.name) || i.name.as_bytes() == name)
-                    || name.get(sep + 2..).is_none_or(|m| m.starts_with(b"__"))
+                let has_this = matches!(call.args.first(), Some(Value::Object(_)));
+                if has_this != t.forward_this
+                    || is_static == has_this
+                    || fwd.as_bytes().get(sep + 2..).is_none_or(|m| {
+                        m.starts_with(b"__") && !m.eq_ignore_ascii_case(b"__construct")
+                    })
                 {
                     return None;
                 }
-                Some((sep, true))
-            }
-            // A static method, named by its class (late static binding:
-            // that class).
-            Some((sep, true)) => {
-                let sep = sep as usize;
-                if !t
-                    .method_info
-                    .as_ref()
-                    .is_some_and(|i| i.name.ptr_eq(&call.name) || i.name.as_bytes() == name)
-                    || name.get(sep + 2..).is_none_or(|m| m.starts_with(b"__"))
-                {
-                    return None;
+                Some((sep, has_this))
+            } else {
+                match t.method {
+                    // (the engine's own names start with two underscores)
+                    None => {
+                        if name[0] == b'_' && name.get(1) == Some(&b'_') {
+                            return None;
+                        }
+                        None
+                    }
+                    // (on an object: its `$this` leads the arguments; with the
+                    // frame name and scope its call site resolved, see
+                    // MethodCallInfo; a constructor too: the call would arm the
+                    // destructor of its object, but a lean call is only made while
+                    // no object has one, see lean_ready())
+                    Some((sep, false)) => {
+                        let sep = sep as usize;
+                        if !matches!(call.args.first(), Some(Value::Object(_)))
+                            || !t.method_info.as_ref().is_some_and(|i| {
+                                i.name.ptr_eq(&call.name) || i.name.as_bytes() == name
+                            })
+                            || name.get(sep + 2..).is_none_or(|m| {
+                                m.starts_with(b"__") && !m.eq_ignore_ascii_case(b"__construct")
+                            })
+                        {
+                            return None;
+                        }
+                        Some((sep, true))
+                    }
+                    // A static method, named by its class (late static binding:
+                    // that class).
+                    Some((sep, true)) => {
+                        let sep = sep as usize;
+                        if !t
+                            .method_info
+                            .as_ref()
+                            .is_some_and(|i| i.name.ptr_eq(&call.name) || i.name.as_bytes() == name)
+                            || name.get(sep + 2..).is_none_or(|m| m.starts_with(b"__"))
+                        {
+                            return None;
+                        }
+                        Some((sep, false))
+                    }
                 }
-                Some((sep, false))
-            }
-        };
+            };
         if !lean_function(f, sep) {
             return None;
         }
@@ -235,7 +256,7 @@ impl Vm {
         let Some(f) = t.user.as_ref() else {
             return false;
         };
-        if t.closure || t.forward.is_some() {
+        if t.closure {
             return false;
         }
         if f.lean_kind() == 0 {
@@ -270,7 +291,13 @@ impl Vm {
     /// was done, or the call was handed over to DO_FCALL's general handler
     /// (a LeanResume): the run stops at the DO_FCALL either way.
     #[inline(never)]
-    pub(crate) fn lean_call(&mut self, op_array: &OpArray, ip: usize, tmps: &mut [Value]) -> bool {
+    pub(crate) fn lean_call(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        cvs: &[Value],
+        tmps: &mut [Value],
+    ) -> bool {
         let op = &op_array.ops[ip];
         let Some((f, sep)) = self.lean_target(false) else {
             return false;
@@ -298,7 +325,7 @@ impl Vm {
         for (d, s) in slots[keep..].iter_mut().zip(call.args[keep..].iter_mut()) {
             std::mem::swap(d, s);
         }
-        self.lean_run(op_array, ip, f, sep, slots, nargs, call, tmps)
+        self.lean_run(op_array, ip, f, sep, slots, nargs, call, cvs, tmps)
     }
 
     /// The INIT_FCALL at `ip` of `op_array` just set up a call (the top
@@ -415,7 +442,7 @@ impl Vm {
                 _ => Value::Null,
             };
         }
-        let done = self.lean_run(op_array, do_ip, f, sep, slots, nargs, call, tmps);
+        let done = self.lean_run(op_array, do_ip, f, sep, slots, nargs, call, cvs, tmps);
         Some(if done { do_ip + 1 } else { do_ip })
     }
 
@@ -433,11 +460,21 @@ impl Vm {
         mut slots: Vec<Value>,
         nargs: usize,
         mut call: PendingCall,
+        caller_cvs: &[Value],
         tmps: &mut [Value],
     ) -> bool {
         let op = &op_array.ops[ip];
         // (what DO_FCALL's fast path does with the call)
         self.last_call_by_ref = false;
+        // A forwarding call takes the name it resolved to, and keeps the
+        // called class (fast_fcall_target()).
+        let forward = match &call.target.forward {
+            Some(fwd) => {
+                call.name = fwd.clone();
+                true
+            }
+            None => false,
+        };
         // By-value array parameters get their own copy (nothing of the call
         // holds one any more: the frame's copy of the arguments is not made).
         let base = lead(sep);
@@ -466,14 +503,28 @@ impl Vm {
             match sep {
                 // (a method runs in its class's scope, called on its object's
                 // class: DO_FCALL's fast path)
-                Some((sep, this)) => self.push_fast_method_scopes(
-                    &call,
-                    sep,
-                    this,
-                    false,
-                    None,
-                    call.target.method_info.as_ref().map(|i| i.scope.as_slice()),
-                ),
+                Some((sep, this)) => {
+                    // (a forwarding call's called class: the caller's
+                    // `$this`'s, as DO_FCALL's fast path finds it)
+                    let caller_this = match caller_cvs.first() {
+                        Some(Value::Object(o))
+                            if forward
+                                && op_array.cv_names.first().map(|n| n.as_slice())
+                                    == Some(b"this") =>
+                        {
+                            Some(o)
+                        }
+                        _ => None,
+                    };
+                    self.push_fast_method_scopes(
+                        &call,
+                        sep,
+                        this,
+                        forward,
+                        caller_this,
+                        call.target.method_info.as_ref().map(|i| i.scope.as_slice()),
+                    )
+                }
                 // (a function outside any class runs without a class scope)
                 None => self.class_scope_stack.push(Vec::new()),
             }
@@ -727,11 +778,12 @@ impl Vm {
         let Some(r) = self.lean_resume.pop() else {
             return false;
         };
+        // (a forwarding call, renamed already: see lean_run())
+        self.fast_fcall_forward = r.call.target.forward.is_some();
         self.pending_calls.push(r.call);
         self.fast_fcall_fn = Some(r.user_fn);
         self.fast_fcall_sep = r.sep;
         self.fast_fcall_captures = None;
-        self.fast_fcall_forward = false;
         self.lean_resumed = Some((r.cvs, r.frame));
         true
     }

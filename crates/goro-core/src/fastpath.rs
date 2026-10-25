@@ -2011,7 +2011,7 @@ impl crate::vm::Vm {
                         break 'run ip;
                     }
                     if no_release && self.lean_candidate() {
-                        if self.lean_call(op_array, ip, tmps) {
+                        if self.lean_call(op_array, ip, cvs, tmps) {
                             Fast::Done
                         } else {
                             break 'run ip;
