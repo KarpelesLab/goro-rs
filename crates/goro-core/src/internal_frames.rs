@@ -70,6 +70,11 @@ impl Vm {
     /// Name of the innermost builtin call in progress (for
     /// php_error_docref()-style "func(): " message prefixes).
     pub fn current_builtin_name(&self) -> Option<String> {
+        if let Some((name, depth)) = &self.spl_active_fn {
+            if *depth == self.builtin_frames.len() {
+                return Some(name.clone());
+            }
+        }
         self.builtin_frames.last().map(|f| {
             // SAFETY: the name is borrowed for as long as the frame is live.
             let name = unsafe { std::slice::from_raw_parts(f.name, f.name_len) };

@@ -12511,6 +12511,10 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// zend_argument_*_error() name the active function.
 pub(crate) fn called_as(vm: &Vm, name: &str) -> String {
     if let Some(cur) = vm.current_builtin_name() {
+        // (a stream function an SplFileObject method runs)
+        if cur.starts_with("SplFileObject::") {
+            return cur;
+        }
         let alias_of = match cur.as_str() {
             "gzread" => "fread",
             "gzwrite" | "gzputs" => "fwrite",
@@ -13112,7 +13116,8 @@ fn fwrite_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let line = vm.current_line;
                 vm.emit_notice_at(
                     &format!(
-                        "fwrite(): Write of {} bytes failed with errno=9 Bad file descriptor",
+                        "{}(): Write of {} bytes failed with errno=9 Bad file descriptor",
+                        called_as(vm, "fwrite"),
                         original_len
                     ),
                     line,
@@ -13533,6 +13538,10 @@ fn rewind_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, &called_as(vm, "rewind"))?;
     flush_write_filters(vm, fid, false);
+    // php_stream_rewind() of a pipe or socket
+    if let Some(r) = seek_unseekable(vm, fid, 0, 0)? {
+        return Ok(if r == 0 { Value::True } else { Value::False });
+    }
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {

@@ -1806,6 +1806,10 @@ pub struct Vm {
         crate::fxhash::FxHashMap<Vec<u8>, crate::fxhash::FxHashMap<Vec<u8>, PhpString>>,
     /// Builtin calls in progress (see internal_frames.rs)
     pub(crate) builtin_frames: Vec<crate::internal_frames::BuiltinFrame>,
+    /// The SplFileObject method running (its display name) and the
+    /// builtin frame depth it runs at: the stream functions it calls report
+    /// as that method (get_active_function_name()).
+    pub(crate) spl_active_fn: Option<(String, usize)>,
     /// Parameter CVs of running user functions (see internal_frames.rs)
     pub(crate) cv_frames: Vec<crate::internal_frames::CvFrame>,
     /// `$this` of running internal method calls (see internal_frames.rs)
@@ -3171,6 +3175,7 @@ impl Vm {
             zpp_internal_class_cache: Default::default(),
             zpp_return_names: Default::default(),
             builtin_frames: Vec::new(),
+            spl_active_fn: None,
             cv_frames: Vec::new(),
             frame_this: Vec::new(),
             gc_frames: Vec::new(),

@@ -894,6 +894,37 @@ impl Vm {
         obj: &Rc<RefCell<PhpObject>>,
         args: Option<&[Value]>,
     ) -> Option<Value> {
+        // (the stream functions called report as the method)
+        let name = format!(
+            "SplFileObject::{}",
+            match method {
+                b"getcsvcontrol" => "getCsvControl",
+                b"setcsvcontrol" => "setCsvControl",
+                b"getflags" => "getFlags",
+                b"setflags" => "setFlags",
+                b"getmaxlinelen" => "getMaxLineLen",
+                b"setmaxlinelen" => "setMaxLineLen",
+                b"getcurrentline" => "getCurrentLine",
+                b"haschildren" => "hasChildren",
+                b"getchildren" => "getChildren",
+                b"__tostring" => "__toString",
+                m => std::str::from_utf8(m).unwrap_or(""),
+            }
+        );
+        let saved = self
+            .spl_active_fn
+            .replace((name, self.builtin_frames.len()));
+        let r = self.spl_file_object_call_inner(method, obj, args);
+        self.spl_active_fn = saved;
+        r
+    }
+
+    fn spl_file_object_call_inner(
+        &mut self,
+        method: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+        args: Option<&[Value]>,
+    ) -> Option<Value> {
         let needs_args = matches!(
             method,
             b"setflags"
