@@ -21106,6 +21106,10 @@ fn stream_socket_enable_crypto_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, 
 }
 fn headers_list_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut arr = PhpArray::new();
+    // sapi_cli_header_handler() keeps no header: the CLI's list stays empty.
+    if !crate::info::is_web_sapi() {
+        return Ok(Value::Array(Rc::new(RefCell::new(arr))));
+    }
     SENT_HEADERS.with(|h| {
         for (k, v) in h.borrow().iter() {
             let mut s = Vec::with_capacity(k.len() + 2 + v.len());
