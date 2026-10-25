@@ -3388,6 +3388,25 @@ impl Parser {
 
     /// Parse property hooks: { get { ... } set($value) { ... } }
     /// Returns (get_hook, set_hook)
+    /// zend_compile_property_hooks(): a `set(...)` list without exactly
+    /// one parameter.
+    #[inline(never)]
+    fn set_hook_param_count_error(&self, prop_name: &[u8]) -> ParseError {
+        let class_name = self
+            .class_name_stack
+            .last()
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .unwrap_or_else(|| "?".to_string());
+        ParseError {
+            message: format!(
+                "set hook of property {}::${} must accept exactly one parameters",
+                class_name,
+                String::from_utf8_lossy(prop_name),
+            ),
+            span: self.span(),
+        }
+    }
+
     fn parse_property_hooks(
         &mut self,
         prop_name: &[u8],
@@ -3563,6 +3582,24 @@ impl Parser {
                     set_hook_final = true;
                 }
                 self.last_hook_attrs.set = std::mem::take(&mut hook_attrs);
+                if hook_is_by_ref {
+                    // zend_compile_params(): a set hook returns void.
+                    let span = self.span();
+                    let class_name = self
+                        .class_name_stack
+                        .last()
+                        .map(|n| String::from_utf8_lossy(n).into_owned())
+                        .unwrap_or_else(|| "?".to_string());
+                    crate::push_compile_deprecated_at(
+                        format!(
+                            "{}::${}::set(): Returning by reference from a void function is deprecated",
+                            class_name,
+                            String::from_utf8_lossy(prop_name)
+                        ),
+                        span.line,
+                        span.start,
+                    );
+                }
                 self.advance(); // consume 'set'
                 // Optional parameter: set(Type $value) or set($value) or just set
                 let had_paren = matches!(self.peek(), TokenKind::OpenParen);
@@ -3605,7 +3642,11 @@ impl Parser {
                             self.advance();
                             name
                         }
-                        TokenKind::CloseParen => b"value".to_vec(),
+                        TokenKind::CloseParen
+                            if type_hint.is_none() && !got_by_ref && !got_variadic =>
+                        {
+                            return Err(self.set_hook_param_count_error(prop_name));
+                        }
                         _ => {
                             return Err(ParseError {
                                 message: "expected parameter name in set hook".into(),
@@ -3613,6 +3654,9 @@ impl Parser {
                             });
                         }
                     };
+                    if matches!(self.peek(), TokenKind::Comma) {
+                        return Err(self.set_hook_param_count_error(prop_name));
+                    }
                     if got_by_ref || got_variadic {
                         let class_name = self
                             .class_name_stack

@@ -52324,8 +52324,9 @@ impl Vm {
                                     if parent_prop.visibility == Visibility::Private {
                                         continue;
                                     }
-                                    // Abstract or virtual parent properties don't impose readonly invariance.
-                                    if parent_prop.is_abstract || parent_prop.is_virtual {
+                                    // (do_inherit_property(): an abstract parent
+                                    // property imposes no readonly invariance)
+                                    if parent_prop.is_abstract {
                                         continue;
                                     }
                                     if let Some(child_prop) =

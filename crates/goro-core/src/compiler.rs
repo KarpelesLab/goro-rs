@@ -7650,6 +7650,17 @@ impl Compiler {
                                     line: stmt.span.line,
                                 });
                             }
+                            if let Some(message) = Self::hook_body_presence_error(
+                                modifiers.is_interface,
+                                *prop_is_abstract,
+                                get_hook.is_some().then_some(*get_hook_abstract),
+                                set_hook.is_some().then_some(*set_hook_abstract),
+                            ) {
+                                return Err(CompileError {
+                                    message: message.to_string(),
+                                    line: stmt.span.line,
+                                });
+                            }
                             if (*get_hook_final && *get_hook_abstract)
                                 || (*set_hook_final && *set_hook_abstract)
                             {
@@ -11850,6 +11861,24 @@ impl Compiler {
         Ok(())
     }
 
+    /// zend_compile_static_prop(): zend_ensure_valid_class_fetch_type()
+    /// rejects `parent::$p` in a class without a parent.
+    #[inline(never)]
+    fn check_static_prop_parent(&self, name: &[u8], line: u32) -> CompileResult<()> {
+        if name.eq_ignore_ascii_case(b"parent")
+            && !self.in_const_expr
+            && self.current_class.is_some()
+            && self.current_parent_class.is_none()
+            && self.is_scope_known()
+        {
+            return Err(CompileError {
+                message: "Cannot use \"parent\" when current class scope has no parent".into(),
+                line,
+            });
+        }
+        Ok(())
+    }
+
     /// In a by-reference function, returning anything other than a variable
     /// (or nothing) raises "Only variable references should be returned by
     /// reference" at runtime. Call results are checked at runtime by PHP and
@@ -12934,6 +12963,27 @@ impl Compiler {
         }
     }
 
+    /// zend_compile_property_hooks(): an interface's hooks are abstract and
+    /// cannot have a body; outside an abstract property, a hook needs one.
+    /// `get` / `set` are Some(declared without a body) for each hook present.
+    #[inline(never)]
+    fn hook_body_presence_error(
+        in_interface: bool,
+        prop_abstract: bool,
+        get: Option<bool>,
+        set: Option<bool>,
+    ) -> Option<&'static str> {
+        for bodyless in [get, set].into_iter().flatten() {
+            if in_interface && !bodyless {
+                return Some("Abstract property hook cannot have body");
+            }
+            if !in_interface && !prop_abstract && bodyless {
+                return Some("Non-abstract property hook must have a body");
+            }
+        }
+        None
+    }
+
     /// `self` / `parent` in a property type declared by a class (not a
     /// trait) name the classes.
     #[inline(never)]
@@ -13122,6 +13172,9 @@ impl Compiler {
     ) -> CompileResult<(OperandType, OperandType)> {
         match &expr.kind {
             ExprKind::StaticPropertyAccess { class, property } => {
+                if let ExprKind::Identifier(n) = &class.kind {
+                    self.check_static_prop_parent(n, class.span.line)?;
+                }
                 let class_op = self.compile_static_class_operand(class)?;
                 let idx = self
                     .op_array
@@ -18604,6 +18657,8 @@ impl Compiler {
                 let chain_nullsafe = expr_is_in_nullsafe_chain(class);
                 let (class_operand, prop_str) = match &class.kind {
                     ExprKind::Identifier(name) => {
+                        self.check_class_ref_scope(name, class.span.line)?;
+                        self.check_static_prop_parent(name, class.span.line)?;
                         let resolved = self.resolve_class_name(name);
                         // Resolve self/parent, keep static as literal for LSB
                         let is_self = resolved.eq_ignore_ascii_case(b"self");
