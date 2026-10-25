@@ -511,7 +511,7 @@ fn m_get_elements_by_tag_name_ns(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> 
 
 /// dom_get_attribute_ns (legacy)
 fn get_attribute_ns(t: &Tree, elem: NodeId, uri: Option<&str>, name: &str) -> Option<String> {
-    let uri = uri.filter(|u| !u.is_empty());
+    // (xmlGetNsProp(): "" is a namespace no attribute is in)
     if let Some(at) = t.has_ns_prop(elem, name, uri) {
         return Some(attr_value(t, at));
     }
@@ -673,10 +673,10 @@ fn m_remove_attribute_ns(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let name = a.str(vm, 1, "localName")?;
     let n = need_node(vm, o)?;
     tree::with(|t| {
-        let u = uri.as_deref().filter(|u| !u.is_empty());
-        let at = t.has_ns_prop(n, &name, u);
+        // (legacy: "" stays a namespace name, as in xmlHasNsProp())
+        let at = t.has_ns_prop(n, &name, uri.as_deref());
         if let Some(ns) = get_nsdecl(t, n, Some(&name)) {
-            if uri.as_deref().unwrap_or("") == t.nss[ns].href {
+            if uri.as_deref() == Some(t.nss[ns].href.as_str()) {
                 eliminate_ns(t, n, ns);
             } else {
                 return;
