@@ -10633,12 +10633,34 @@ pub fn reflection_generator_method(
                 _ => None,
             }
         };
+    // getTrace($options) runs with its arguments (reflection_trace_docall).
+    let method: &[u8] = match method {
+        b"gettrace" => return None,
+        b"__gettrace" => b"gettrace",
+        m => m,
+    };
 
     // A generator that is executing right now (ReflectionGenerator used from
     // inside it): its state is in use, its frames are the running ones.
     if let Some(g) = get_gen(obj) {
         if g.try_borrow_mut().is_err() {
             return Some(reflection_running_generator(vm, method, &g));
+        }
+        // REFLECTION_CHECK_VALID_GENERATOR
+        if matches!(method, b"getthis" | b"getexecutinggenerator") {
+            let closed = {
+                let gb = g.borrow();
+                gb.state == crate::generator::GeneratorState::Completed && !gb.is_running
+            };
+            if closed {
+                let exc = vm.create_exception(
+                    b"ReflectionException",
+                    "Cannot fetch information from a closed Generator",
+                    vm.current_line,
+                );
+                vm.current_exception = Some(exc);
+                return Some(Value::Null);
+            }
         }
     }
     match method {
@@ -10861,6 +10883,48 @@ pub fn reflection_generator_method(
     }
 }
 
+/// ReflectionGenerator::getTrace() / ReflectionFiber::getTrace() with
+/// their `$options` (DEBUG_BACKTRACE_PROVIDE_OBJECT by default).
+pub fn reflection_trace_docall(vm: &mut Vm, class: &[u8], args: &[Value]) -> Option<Value> {
+    let Some(Value::Object(obj)) = args.first() else {
+        return None;
+    };
+    let options = args.get(1).map(|v| v.to_long()).unwrap_or(1);
+    let trace = if class == b"reflectionfiber" {
+        reflection_fiber_method(vm, b"__gettrace", obj)
+    } else {
+        reflection_generator_method(vm, b"__gettrace", obj)
+    }?;
+    let Value::Array(t) = &trace else {
+        return Some(trace);
+    };
+    if options & 3 == 1 {
+        return Some(trace);
+    }
+    let mut out = PhpArray::new();
+    for (k, fv) in t.borrow().iter() {
+        let Value::Array(fa) = fv else {
+            out.set(k.clone(), fv.clone());
+            continue;
+        };
+        let mut nf = PhpArray::new();
+        for (fk, v) in fa.borrow().iter() {
+            let drop_it = match fk {
+                ArrayKey::String(s) => {
+                    (s.as_bytes() == b"args" && options & 2 != 0)
+                        || (s.as_bytes() == b"object" && options & 1 == 0)
+                }
+                _ => false,
+            };
+            if !drop_it {
+                nf.set(fk.clone(), v.clone());
+            }
+        }
+        out.set(k.clone(), Value::Array(Rc::new(RefCell::new(nf))));
+    }
+    Some(Value::Array(Rc::new(RefCell::new(out))))
+}
+
 /// ReflectionFiber method dispatch (no args). `__reflection_target` is the
 /// Fiber object.
 pub fn reflection_fiber_method(
@@ -10869,6 +10933,12 @@ pub fn reflection_fiber_method(
     obj: &Rc<RefCell<PhpObject>>,
 ) -> Option<Value> {
     use crate::fiber::FiberState;
+    // getTrace($options) runs with its arguments (reflection_trace_docall).
+    let method: &[u8] = match method {
+        b"gettrace" => return None,
+        b"__gettrace" => b"gettrace",
+        m => m,
+    };
     let fib = obj.borrow().get_property(b"__reflection_target");
     let fib_obj = match &fib {
         Value::Object(f) => Some(f.clone()),

@@ -15040,6 +15040,7 @@ impl Vm {
             | b"reflectionenumunitcase"
             | b"reflectionenumbackedcase"
             | b"reflectionconstant" => matches!(method, b"getattributes"),
+            b"reflectiongenerator" | b"reflectionfiber" => method == b"gettrace",
             b"reflectionattribute" => matches!(method, b"newinstance"),
             b"simplexmlelement" => matches!(
                 method,
@@ -16242,6 +16243,9 @@ impl Vm {
                 }
                 b"reflectionconstant" => {
                     crate::reflection::reflection_constant_docall(self, method, args)
+                }
+                b"reflectiongenerator" | b"reflectionfiber" if method == b"gettrace" => {
+                    crate::reflection::reflection_trace_docall(self, class, args)
                 }
                 b"reflectionattribute" => {
                     crate::reflection::reflection_attribute_docall(self, method, args)
