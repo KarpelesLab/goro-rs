@@ -927,15 +927,55 @@ fn throw_err(vm: &mut Vm, class: &[u8], msg: String) -> Result<Value, VmError> {
 /// mt_rand()/rand(): no arguments or exactly two.
 fn rand_args(vm: &mut Vm, fname: &str, args: &[Value]) -> Result<Option<(i64, i64)>, VmError> {
     match args.len() {
-        0 => Ok(None),
-        1 => throw_err(
-            vm,
-            b"ArgumentCountError",
-            format!("{}() expects exactly 2 arguments, 1 given", fname),
-        )
-        .map(|_| None),
-        _ => Ok(Some((args[0].to_long(), args[1].to_long()))),
+        0 => return Ok(None),
+        2 => {}
+        n => {
+            return throw_err(
+                vm,
+                b"ArgumentCountError",
+                format!("{}() expects exactly 2 arguments, {} given", fname, n),
+            )
+            .map(|_| None);
+        }
     }
+    // Z_PARAM_LONG(min) / Z_PARAM_LONG(max): the diagnostics of the
+    // accepted conversions (null, fractional floats) are emitted by the
+    // builtin parameter types already.
+    let fits = |d: f64| !d.is_nan() && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d);
+    let mut out = [0i64; 2];
+    for (i, name) in ["min", "max"].iter().enumerate() {
+        let v = args[i].deref();
+        let n = match &v {
+            Value::Null | Value::Undef | Value::False => Some(0),
+            Value::True => Some(1),
+            Value::Long(n) => Some(*n),
+            Value::Double(d) if fits(*d) => Some(*d as i64),
+            Value::String(s) => match goro_core::value::parse_numeric_str(s.as_bytes(), false) {
+                Some((goro_core::value::NumStr::Long(n), _)) => Some(n),
+                Some((goro_core::value::NumStr::Double(d), _)) if fits(d) => Some(d as i64),
+                _ => None,
+            },
+            _ => None,
+        };
+        match n {
+            Some(n) => out[i] = n,
+            None => {
+                return throw_err(
+                    vm,
+                    b"TypeError",
+                    format!(
+                        "{}(): Argument #{} (${}) must be of type int, {} given",
+                        fname,
+                        i + 1,
+                        name,
+                        Vm::value_type_name(&v)
+                    ),
+                )
+                .map(|_| None);
+            }
+        }
+    }
+    Ok(Some((out[0], out[1])))
 }
 
 fn rand_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1788,11 +1828,21 @@ fn srand_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
 }
 
-fn lcg_value_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn lcg_value_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     vm.emit_deprecated_at(
         "Function lcg_value() is deprecated since 8.4, use \\Random\\Randomizer::getFloat() instead",
         vm.current_line,
     );
+    if !args.is_empty() && vm.current_exception.is_none() {
+        return throw_err(
+            vm,
+            b"ArgumentCountError",
+            format!(
+                "lcg_value() expects exactly 0 arguments, {} given",
+                args.len()
+            ),
+        );
+    }
     Ok(Value::Double(goro_core::random::combined_lcg()))
 }
 
