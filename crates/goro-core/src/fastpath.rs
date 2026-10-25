@@ -1418,7 +1418,7 @@ impl<'a> LazyFreeMask<'a> {
 /// the temporary alone: the container holds it then, or its release only
 /// frees memory (drops_quietly_deep()). None: the opcode is left to the
 /// dispatch loop.
-#[inline]
+#[inline(always)]
 fn consumed_tmps(
     free_mask: &[u8],
     ip: usize,
@@ -1431,6 +1431,18 @@ fn consumed_tmps(
     if m & 11 == 0 {
         return Some(0);
     }
+    consumed_tmps_of(m, op, tmps, no_release, globals)
+}
+
+/// consumed_tmps() of an opcode consuming temporaries (free mask `m`).
+#[inline(never)]
+fn consumed_tmps_of(
+    m: u8,
+    op: &Op,
+    tmps: &[Value],
+    no_release: bool,
+    globals: &Rc<RefCell<crate::array::PhpArray>>,
+) -> Option<u8> {
     // (bit 3: a compound assignment's operand, released after its write)
     if m & 8 != 0 {
         return None;
