@@ -1868,6 +1868,9 @@ pub struct Vm {
     /// WeakMap entries: keyed by (weakmap_object_id, target_object_id) -> (Weak<RefCell<PhpObject>>, Value)
     /// The Weak is used to detect when the key object has been freed
     pub weak_map_entries: HashMap<u64, Vec<(u64, Weak<RefCell<PhpObject>>, Value)>>,
+    /// A declaration bound at compile time (early binding) is running: a
+    /// fatal error it raises happens before an eval() frame exists.
+    pub compile_time_binding: bool,
     /// The write-back op of a read-modify-write dimension whose key the
     /// read already converted: (op array, op index).
     pub rw_dim_set: Option<(usize, usize)>,
@@ -3104,6 +3107,7 @@ impl Vm {
             weak_ref_cache: HashMap::new(),
             sensitive_cache: std::cell::Cell::new((usize::MAX, 0, false)),
             weak_map_entries: HashMap::new(),
+            compile_time_binding: false,
             rw_dim_set: None,
             class_aliases: Default::default(),
             disabled_functions: std::collections::HashSet::new(),
@@ -42190,6 +42194,10 @@ impl Vm {
                     Flow::Return(v) => return Ok(v),
                 },
                 OpCode::DeclareFunction => match outlined(|| -> Result<Flow, VmError> {
+                    // (a hoisted declaration is bound at compile time: a fatal
+                    // error it raises has no eval() frame)
+                    self.compile_time_binding = matches!(op.result, OperandType::Const(_));
+                    let r = (|| -> Result<Flow, VmError> {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let func_idx_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let func_idx = func_idx_val.to_long() as usize;
@@ -42238,6 +42246,11 @@ impl Vm {
                         }
                     }
                     Ok(Flow::Next)
+                    })();
+                    if r.is_ok() {
+                        self.compile_time_binding = false;
+                    }
+                    r
                 })? {
                     Flow::Next => {}
                     Flow::Continue => continue 'exec,
@@ -44801,8 +44814,17 @@ impl Vm {
                                             self.observe_code = true;
                                             self.execute_op_array_vm(&eval_op_array, eval_cvs)
                                         };
-                                        // (with the frames of the calls an exception left)
-                                        self.call_stack.truncate(eval_depth);
+                                        // (with the frames of the calls an exception left;
+                                        // a fatal error still to be reported keeps its
+                                        // eval() frame for the backtrace)
+                                        if exec_r.is_ok()
+                                            || self.current_exception.is_some()
+                                            || self.exit_requested
+                                            || self.fatal_emitted
+                                            || std::mem::take(&mut self.compile_time_binding)
+                                        {
+                                            self.call_stack.truncate(eval_depth);
+                                        }
                                         let eval_result = match exec_r {
                                             Ok(v) => v,
                                             Err(e) => {
@@ -44894,15 +44916,8 @@ impl Vm {
                                         } else {
                                             crate::errdisplay::E_COMPILE_ERROR
                                         };
-                                        self.call_stack.push((
-                                            "eval".to_string(),
-                                            self.current_file.clone(),
-                                            op.line,
-                                            Vec::new(),
-                                            false,
-                                        ));
+                                        // (compiled before its eval() frame exists)
                                         self.fatal_error_cb(ty, &e.message, &eval_file, e.line);
-                                        self.call_stack.pop();
                                         // E_COMPILE_ERROR is fatal: the script stops (bailout).
                                         self.fatal_emitted = true;
                                         return Err(VmError {
@@ -49927,6 +49942,10 @@ impl Vm {
                 }
 
                 OpCode::DeclareClass => match outlined(|| -> Result<Flow, VmError> {
+                    // (a hoisted declaration is bound at compile time: a fatal
+                    // error it raises has no eval() frame)
+                    self.compile_time_binding = matches!(op.result, OperandType::Const(_));
+                    let r = (|| -> Result<Flow, VmError> {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let class_idx_raw = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
@@ -55159,6 +55178,11 @@ impl Vm {
                         }
                     }
                     Ok(Flow::Next)
+                    })();
+                    if r.is_ok() {
+                        self.compile_time_binding = false;
+                    }
+                    r
                 })? {
                     Flow::Next => {}
                     Flow::Continue => continue 'exec,

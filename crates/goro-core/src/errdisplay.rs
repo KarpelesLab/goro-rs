@@ -362,7 +362,20 @@ impl Vm {
             && ini_bool(self, b"fatal_error_backtraces")
             && !msg.starts_with("Uncaught ")
         {
-            Some(self.build_exception_trace())
+            // A declaration bound at compile time fails before the eval()
+            // frame of the code being compiled exists.
+            let hidden = if self.compile_time_binding
+                && self.call_stack.last().is_some_and(|f| f.0 == "eval")
+            {
+                self.call_stack.pop()
+            } else {
+                None
+            };
+            let t = self.build_exception_trace();
+            if let Some(f) = hidden {
+                self.call_stack.push(f);
+            }
+            Some(t)
         } else if backtrace {
             None
         } else {
