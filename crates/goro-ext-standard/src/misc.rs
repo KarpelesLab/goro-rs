@@ -15136,6 +15136,12 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     };
     let mut result = PhpArray::new();
+    for p in enum_declared_props(vm, &name_lower) {
+        result.set(
+            goro_core::array::ArrayKey::String(PhpString::from_bytes(p)),
+            Value::Null,
+        );
+    }
     if let Some(class) = internal {
         for statics in [false, true] {
             for prop in &class.properties {
@@ -18795,6 +18801,16 @@ fn get_included_files_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError>
 
 // iterator_apply moved to goro-ext-spl
 
+/// The readonly properties zend_enum_register_props() declares on an enum:
+/// `name`, and `value` for a backed enum.
+fn enum_declared_props(vm: &Vm, class_lower: &[u8]) -> &'static [&'static [u8]] {
+    match vm.classes.get(class_lower) {
+        Some(c) if c.is_enum && c.enum_backing_type.is_some() => &[b"name", b"value"],
+        Some(c) if c.is_enum => &[b"name"],
+        _ => &[],
+    }
+}
+
 fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let obj_or_class = args.first().unwrap_or(&Value::Null);
     let prop_name = args
@@ -18813,6 +18829,7 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // declared on an ancestor with non-private visibility.
     fn class_has_visible_prop(vm: &Vm, class_lower: &[u8], pname: &[u8]) -> bool {
         vm.class_view_prop(class_lower, pname).is_some()
+            || enum_declared_props(vm, class_lower).contains(&pname)
     }
 
     // Extension-provided property handlers (has_property with ZEND_PROPERTY_EXISTS)
