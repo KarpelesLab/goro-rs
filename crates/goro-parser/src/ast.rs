@@ -48,8 +48,8 @@ pub enum StmtKind {
     },
     Foreach {
         expr: Expr,
-        key: Option<Expr>,
-        value: Expr,
+        key: Option<Box<Expr>>,
+        value: Box<Expr>,
         by_ref: bool,
         body: Vec<Statement>,
     },
@@ -199,29 +199,9 @@ pub enum ExprKind {
         subject: Box<Expr>,
         arms: Vec<MatchArm>,
     },
-    Closure {
-        is_static: bool,
-        params: Vec<Param>,
-        use_vars: Vec<ClosureUse>,
-        return_type: Option<TypeHint>,
-        body: Vec<Statement>,
-        attributes: Vec<Attribute>,
-        end_line: u32,
-        doc_comment: Option<Vec<u8>>,
-        returns_by_ref: bool,
-    },
-    ArrowFunction {
-        is_static: bool,
-        params: Vec<Param>,
-        return_type: Option<TypeHint>,
-        body: Box<Expr>,
-        attributes: Vec<Attribute>,
-        end_line: u32,
-        doc_comment: Option<Vec<u8>>,
-        returns_by_ref: bool,
-        /// Written in parentheses (ZEND_PARENTHESIZED_ARROW_FUNC).
-        parenthesized: bool,
-    },
+    /// (boxed: the largest expressions, kept out of every Expr)
+    Closure(Box<ClosureExpr>),
+    ArrowFunction(Box<ArrowFnExpr>),
     New {
         class: Box<Expr>,
         args: Vec<Argument>,
@@ -532,4 +512,33 @@ pub enum UseKind {
     Normal,
     Function,
     Constant,
+}
+
+/// A closure expression's declaration (ExprKind::Closure).
+#[derive(Debug, Clone)]
+pub struct ClosureExpr {
+    pub is_static: bool,
+    pub params: Vec<Param>,
+    pub use_vars: Vec<ClosureUse>,
+    pub return_type: Option<TypeHint>,
+    pub body: Vec<Statement>,
+    pub attributes: Vec<Attribute>,
+    pub end_line: u32,
+    pub doc_comment: Option<Vec<u8>>,
+    pub returns_by_ref: bool,
+}
+
+/// An arrow function's declaration (ExprKind::ArrowFunction).
+#[derive(Debug, Clone)]
+pub struct ArrowFnExpr {
+    pub is_static: bool,
+    pub params: Vec<Param>,
+    pub return_type: Option<TypeHint>,
+    pub body: Box<Expr>,
+    pub attributes: Vec<Attribute>,
+    pub end_line: u32,
+    pub doc_comment: Option<Vec<u8>>,
+    pub returns_by_ref: bool,
+    /// Written in parentheses (ZEND_PARENTHESIZED_ARROW_FUNC).
+    pub parenthesized: bool,
 }

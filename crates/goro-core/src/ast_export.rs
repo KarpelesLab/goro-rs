@@ -552,10 +552,7 @@ fn ex(s: &mut String, e: &Expr, prio: i32, indent: usize) {
             s.push(']');
         }
         ExprKind::FunctionCall { name, args } => {
-            if matches!(
-                name.kind,
-                ExprKind::Closure { .. } | ExprKind::ArrowFunction { .. }
-            ) {
+            if matches!(name.kind, ExprKind::Closure(_) | ExprKind::ArrowFunction(_)) {
                 s.push('(');
                 ex(s, name, 0, indent);
                 s.push(')');
@@ -610,16 +607,17 @@ fn ex(s: &mut String, e: &Expr, prio: i32, indent: usize) {
             indent_to(s, indent);
             s.push('}');
         }
-        ExprKind::Closure {
-            is_static,
-            params,
-            use_vars,
-            return_type,
-            body,
-            attributes,
-            returns_by_ref,
-            ..
-        } => {
+        ExprKind::Closure(decl) => {
+            let ClosureExpr {
+                is_static,
+                params,
+                use_vars,
+                return_type,
+                body,
+                attributes,
+                returns_by_ref,
+                ..
+            } = &**decl;
             export_attributes(s, attributes, indent, false);
             if *is_static {
                 s.push_str("static ");
@@ -654,16 +652,17 @@ fn ex(s: &mut String, e: &Expr, prio: i32, indent: usize) {
             indent_to(s, indent);
             s.push('}');
         }
-        ExprKind::ArrowFunction {
-            is_static,
-            params,
-            return_type,
-            body,
-            attributes,
-            returns_by_ref,
-            parenthesized,
-            ..
-        } => {
+        ExprKind::ArrowFunction(decl) => {
+            let ArrowFnExpr {
+                is_static,
+                params,
+                return_type,
+                body,
+                attributes,
+                returns_by_ref,
+                parenthesized,
+                ..
+            } = &**decl;
             if *parenthesized {
                 s.push('(');
             }

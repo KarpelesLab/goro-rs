@@ -984,14 +984,12 @@ impl Compiler {
     /// it), so `(function () {\n})->bindTo($x)` reports $x there.
     #[inline(never)]
     fn line_after_object(object: &Expr, line: u32) -> u32 {
-        match &object.kind {
-            ExprKind::Closure { end_line, .. } | ExprKind::ArrowFunction { end_line, .. }
-                if *end_line > line =>
-            {
-                *end_line
-            }
-            _ => line,
-        }
+        let end_line = match &object.kind {
+            ExprKind::Closure(c) => c.end_line,
+            ExprKind::ArrowFunction(f) => f.end_line,
+            _ => return line,
+        };
+        if end_line > line { end_line } else { line }
     }
 
     /// Compute the canonical PHP closure display name `{closure:<context>:<line>}`
@@ -4335,7 +4333,7 @@ impl Compiler {
                     return Err(CompileError { message: "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax".to_string(), line: stmt.span.line });
                 }
                 if expr_is_in_nullsafe_chain(value)
-                    || key.as_ref().is_some_and(expr_is_in_nullsafe_chain)
+                    || key.as_deref().is_some_and(expr_is_in_nullsafe_chain)
                 {
                     return Err(CompileError {
                         message: "Can't use nullsafe operator in write context".into(),
@@ -7306,13 +7304,14 @@ impl Compiler {
                                             v
                                         }
                                     }
-                                    ExprKind::Closure {
-                                        params: closure_params,
-                                        body: closure_body,
-                                        is_static: closure_is_static,
-                                        attributes: closure_attrs,
-                                        ..
-                                    } => {
+                                    ExprKind::Closure(decl) => {
+                                        let ClosureExpr {
+                                            params: closure_params,
+                                            body: closure_body,
+                                            is_static: closure_is_static,
+                                            attributes: closure_attrs,
+                                            ..
+                                        } = &**decl;
                                         // Closure in property default
                                         let global_id = next_closure_id();
                                         let closure_name =
@@ -9861,14 +9860,15 @@ impl Compiler {
                                             )?,
                                         }
                                     }
-                                    ExprKind::Closure {
-                                        params: closure_params,
-                                        body: closure_body,
-                                        use_vars: _closure_use_vars,
-                                        is_static: closure_is_static,
-                                        attributes: closure_attrs,
-                                        ..
-                                    } => {
+                                    ExprKind::Closure(decl) => {
+                                        let ClosureExpr {
+                                            params: closure_params,
+                                            body: closure_body,
+                                            use_vars: _closure_use_vars,
+                                            is_static: closure_is_static,
+                                            attributes: closure_attrs,
+                                            ..
+                                        } = &**decl;
                                         // Compile closure for const expression
                                         let global_id = next_closure_id();
                                         let closure_name =
@@ -13086,13 +13086,7 @@ impl Compiler {
         value: &Expr,
         callable: &Expr,
     ) -> CompileResult<OperandType> {
-        if matches!(
-            callable.kind,
-            ExprKind::ArrowFunction {
-                parenthesized: false,
-                ..
-            }
-        ) {
+        if matches!(&callable.kind, ExprKind::ArrowFunction(f) if !f.parenthesized) {
             return Err(CompileError {
                 message: "Arrow functions on the right hand side of |> must be parenthesized"
                     .into(),
@@ -17167,18 +17161,19 @@ impl Compiler {
                 Ok(OperandType::Tmp(tmp))
             }
 
-            ExprKind::Closure {
-                params,
-                body,
-                use_vars,
-                is_static,
-                return_type: closure_return_type,
-                attributes: closure_attributes,
-                end_line: closure_end_line,
-                doc_comment: closure_doc_comment,
-                returns_by_ref: closure_returns_by_ref,
-                ..
-            } => {
+            ExprKind::Closure(decl) => {
+                let ClosureExpr {
+                    params,
+                    body,
+                    use_vars,
+                    is_static,
+                    return_type: closure_return_type,
+                    attributes: closure_attributes,
+                    end_line: closure_end_line,
+                    doc_comment: closure_doc_comment,
+                    returns_by_ref: closure_returns_by_ref,
+                    ..
+                } = &**decl;
                 check_duplicate_params(params, expr.span.line)?;
                 self.push_signature_deprecations(
                     params,
@@ -17581,17 +17576,18 @@ impl Compiler {
                 }
             }
 
-            ExprKind::ArrowFunction {
-                params,
-                body,
-                attributes,
-                end_line: arrow_end_line,
-                doc_comment: arrow_doc_comment,
-                return_type: arrow_return_type,
-                returns_by_ref: arrow_returns_by_ref,
-                is_static: arrow_is_static,
-                ..
-            } => {
+            ExprKind::ArrowFunction(decl) => {
+                let ArrowFnExpr {
+                    params,
+                    body,
+                    attributes,
+                    end_line: arrow_end_line,
+                    doc_comment: arrow_doc_comment,
+                    return_type: arrow_return_type,
+                    returns_by_ref: arrow_returns_by_ref,
+                    is_static: arrow_is_static,
+                    ..
+                } = &**decl;
                 check_duplicate_params(params, expr.span.line)?;
                 self.push_signature_deprecations(
                     params,
@@ -19960,11 +19956,12 @@ impl Compiler {
                 }
                 args.iter().find_map(|a| rec(&a.value))
             }
-            E::Closure {
-                is_static,
-                use_vars,
-                ..
-            } => {
+            E::Closure(decl) => {
+                let ClosureExpr {
+                    is_static,
+                    use_vars,
+                    ..
+                } = &**decl;
                 if !*is_static {
                     Some("Closures in constant expressions must be static".into())
                 } else if !use_vars.is_empty() {
@@ -22298,8 +22295,9 @@ fn collect_expr_variables(expr: &Expr, vars: &mut Vec<Vec<u8>>) {
             }
             CallableTarget::StaticMethod { class, .. } => collect_expr_variables(class, vars),
         },
-        ExprKind::ArrowFunction { body, .. } => collect_expr_variables(body, vars),
-        ExprKind::Closure { use_vars, .. } => {
+        ExprKind::ArrowFunction(f) => collect_expr_variables(&f.body, vars),
+        ExprKind::Closure(decl) => {
+            let ClosureExpr { use_vars, .. } = &**decl;
             // Don't recurse into closures body, but DO collect use vars
             // so that enclosing arrow functions know to capture them
             for uv in use_vars {
@@ -23409,7 +23407,7 @@ impl Compiler {
                 format!("new {}({})", cls, parts.join(", "))
             }
             // ZEND_AST_OP_ARRAY: the closure's function name.
-            ExprKind::Closure { .. } => format!(
+            ExprKind::Closure(_) => format!(
                 "Closure({})",
                 String::from_utf8_lossy(&self.closure_display_name(expr.span.line))
             ),

@@ -1709,8 +1709,8 @@ impl Parser {
         Ok(Statement {
             kind: StmtKind::Foreach {
                 expr,
-                key,
-                value,
+                key: key.map(Box::new),
+                value: Box::new(value),
                 by_ref,
                 body,
             },
@@ -5676,7 +5676,7 @@ impl Parser {
                         let (body, end_line) = self.parse_block_with_end()?;
                         Ok(Expr {
                             span,
-                            kind: ExprKind::Closure {
+                            kind: ExprKind::Closure(Box::new(ClosureExpr {
                                 is_static,
                                 params,
                                 use_vars,
@@ -5686,7 +5686,7 @@ impl Parser {
                                 end_line,
                                 doc_comment: attr_doc,
                                 returns_by_ref: by_ref_return,
-                            },
+                            })),
                         })
                     }
                     TokenKind::Fn => {
@@ -5705,7 +5705,7 @@ impl Parser {
                         let end_line = body.span.line;
                         Ok(Expr {
                             span,
-                            kind: ExprKind::ArrowFunction {
+                            kind: ExprKind::ArrowFunction(Box::new(ArrowFnExpr {
                                 is_static,
                                 params,
                                 return_type,
@@ -5715,7 +5715,7 @@ impl Parser {
                                 doc_comment: attr_doc,
                                 parenthesized: false,
                                 returns_by_ref: by_ref_return,
-                            },
+                            })),
                         })
                     }
                     _ => Err(ParseError {
@@ -6001,9 +6001,9 @@ impl Parser {
                 self.last_group_close = self.pos - 1;
                 // `(fn() => ...)` keeps its parentheses in AST exports
                 // (not as a callee: `(fn() => ...)()`).
-                if let ExprKind::ArrowFunction { parenthesized, .. } = &mut expr.kind {
+                if let ExprKind::ArrowFunction(f) = &mut expr.kind {
                     if !matches!(self.peek(), TokenKind::OpenParen) {
-                        *parenthesized = true;
+                        f.parenthesized = true;
                     }
                 }
                 // `(NAME)(...)` calls the value of constant NAME, not a
@@ -6469,7 +6469,7 @@ impl Parser {
 
                 Ok(Expr {
                     span,
-                    kind: ExprKind::Closure {
+                    kind: ExprKind::Closure(Box::new(ClosureExpr {
                         is_static: false,
                         params,
                         use_vars,
@@ -6479,7 +6479,7 @@ impl Parser {
                         end_line,
                         doc_comment: closure_doc,
                         returns_by_ref: by_ref_return,
-                    },
+                    })),
                 })
             }
             TokenKind::Fn => {
@@ -6503,7 +6503,7 @@ impl Parser {
                 let end_line = body.span.line;
                 Ok(Expr {
                     span,
-                    kind: ExprKind::ArrowFunction {
+                    kind: ExprKind::ArrowFunction(Box::new(ArrowFnExpr {
                         is_static: false,
                         params,
                         return_type,
@@ -6513,7 +6513,7 @@ impl Parser {
                         doc_comment: arrow_doc,
                         parenthesized: false,
                         returns_by_ref: by_ref_return,
-                    },
+                    })),
                 })
             }
             TokenKind::Static
@@ -6543,7 +6543,7 @@ impl Parser {
                     let end_line = body.span.line;
                     Ok(Expr {
                         span,
-                        kind: ExprKind::ArrowFunction {
+                        kind: ExprKind::ArrowFunction(Box::new(ArrowFnExpr {
                             is_static: true,
                             params,
                             return_type,
@@ -6553,7 +6553,7 @@ impl Parser {
                             doc_comment: static_doc,
                             parenthesized: false,
                             returns_by_ref: by_ref_return,
-                        },
+                        })),
                     })
                 } else {
                     self.advance(); // function
@@ -6597,7 +6597,7 @@ impl Parser {
                     let (body, end_line) = self.parse_block_with_end()?;
                     Ok(Expr {
                         span,
-                        kind: ExprKind::Closure {
+                        kind: ExprKind::Closure(Box::new(ClosureExpr {
                             is_static: true,
                             params,
                             use_vars,
@@ -6607,7 +6607,7 @@ impl Parser {
                             end_line,
                             doc_comment: static_doc,
                             returns_by_ref: by_ref_return,
-                        },
+                        })),
                     })
                 }
             }
