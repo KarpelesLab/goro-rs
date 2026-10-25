@@ -461,6 +461,9 @@ pub struct Compiler {
     assign_result_discarded: bool,
     /// CG(context).has_assigned_to_http_response_header
     hrh_assigned: bool,
+    /// Address of the variable node fetched BP_VAR_IS (the base of an
+    /// isset() / empty() / `??` operand): reading it does not deprecate.
+    hrh_is_base: usize,
     /// True when compiling inside a function/method/closure body (reserved for future use).
     pub is_in_function_body: bool,
     /// True when compiling inside the body of a *class method* (not a plain function or
@@ -780,6 +783,7 @@ impl Compiler {
             in_const_expr: false,
             assign_result_discarded: false,
             hrh_assigned: false,
+            hrh_is_base: 0,
             is_in_function_body: false,
             is_in_class_method: false,
             this_always_bound: false,
@@ -13040,6 +13044,24 @@ impl Compiler {
         }
     }
 
+    /// Remembers the variable at the base of an isset() / empty() / `??`
+    /// operand: php-src fetches it BP_VAR_IS, so reading
+    /// `$http_response_header` there is not deprecated.
+    #[inline(never)]
+    fn mark_is_fetch_base(&mut self, e: &Expr) {
+        let mut base = e;
+        loop {
+            match &base.kind {
+                ExprKind::ArrayAccess { array, .. } => base = array,
+                ExprKind::PropertyAccess { object, .. } => base = object,
+                _ => break,
+            }
+        }
+        if matches!(&base.kind, ExprKind::Variable(_)) {
+            self.hrh_is_base = base as *const Expr as usize;
+        }
+    }
+
     /// Operand of isset() / empty(): `$this` itself is checked quietly
     /// (ZEND_ISSET_ISEMPTY_THIS).
     fn compile_isset_operand(&mut self, e: &Expr) -> CompileResult<OperandType> {
@@ -13658,6 +13680,7 @@ impl Compiler {
                 if name == b"http_response_header"
                     && !self.hrh_assigned
                     && cv >= self.op_array.param_count
+                    && self.hrh_is_base != expr as *const Expr as usize
                 {
                     push_compile_deprecated(
                         "The predefined locally scoped $http_response_header variable is deprecated, call http_get_last_response_headers() instead".to_string(),
@@ -15212,6 +15235,7 @@ impl Compiler {
             ExprKind::ShellExec(call) => self.compile_expr(call),
 
             ExprKind::NullCoalesce { left, right } => {
+                self.mark_is_fetch_base(left);
                 // $a ?? $b: if $a is not null, use $a, else use $b
                 // Suppress warnings for the left side (undefined keys, undefined vars, etc.)
                 // when it is a variable (fetched BP_VAR_IS); any other
@@ -16454,6 +16478,7 @@ impl Compiler {
                     }
                     return self.compile_expr(&chain);
                 }
+                self.mark_is_fetch_base(&exprs[0]);
                 // Uses IssetCheck opcode that checks for both Undef and Null
                 // Suppress warnings during isset check (e.g., Undefined array key)
                 self.op_array.emit(Op {
@@ -16874,6 +16899,7 @@ impl Compiler {
             }
 
             ExprKind::Empty(inner) => {
+                self.mark_is_fetch_base(inner);
                 self.op_array.emit(Op {
                     opcode: OpCode::ErrorSuppress,
                     op1: OperandType::Unused,
