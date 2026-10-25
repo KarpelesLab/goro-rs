@@ -789,18 +789,13 @@ enum Adj {
 fn insert_adjacent(vm: &mut Vm, wh: &str, thisp: NodeId, other: NodeId) -> Adj {
     let w = wh.to_ascii_lowercase();
     let st = strict(doc_of_node(thisp));
-    let (parent, next, first, doc) = tree::with(|t| {
-        (
-            t.nodes[thisp].parent,
-            t.nodes[thisp].next,
-            t.nodes[thisp].children,
-            t.nodes[thisp].doc,
-        )
-    });
+    let (parent, doc) = tree::with(|t| (t.nodes[thisp].parent, t.nodes[thisp].doc));
+    // php_dom_adopt_node() unlinks the node even within its document,
+    // before the insertion is validated (a failed one leaves it detached)
     let adopt = |other: NodeId| {
         tree::with(|t| {
+            t.unlink(other);
             if t.nodes[other].doc != doc {
-                t.unlink(other);
                 t.set_tree_doc(other, doc);
             }
         })
@@ -808,20 +803,31 @@ fn insert_adjacent(vm: &mut Vm, wh: &str, thisp: NodeId, other: NodeId) -> Adj {
     let (p, ip) = match w.as_str() {
         "beforebegin" => match parent {
             None => return Adj::Null,
-            Some(p) => (p, Some(thisp)),
+            Some(p) => {
+                adopt(other);
+                (p, Some(thisp))
+            }
         },
-        "afterbegin" => (thisp, first),
-        "beforeend" => (thisp, None),
+        "afterbegin" => {
+            adopt(other);
+            (thisp, tree::with(|t| t.nodes[thisp].children))
+        }
+        "beforeend" => {
+            adopt(other);
+            (thisp, None)
+        }
         "afterend" => match parent {
             None => return Adj::Null,
-            Some(p) => (p, next),
+            Some(p) => {
+                adopt(other);
+                (p, tree::with(|t| t.nodes[thisp].next))
+            }
         },
         _ => {
             throw_dom(vm, SYNTAX_ERR, st);
             return Adj::Failed;
         }
     };
-    adopt(other);
     if !super::node::pre_insert(vm, other, p, ip, st) {
         return Adj::Failed;
     }
