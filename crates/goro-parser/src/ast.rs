@@ -370,6 +370,19 @@ pub struct HookAttrs {
     /// `get => expr;` / `set => expr;` (short bodies, expanded by the parser).
     pub get_short: bool,
     pub set_short: bool,
+    /// The hooks' doc comments (get, set), boxed: rarely present.
+    pub docs: Option<Box<[Option<Vec<u8>>; 2]>>,
+}
+impl HookAttrs {
+    /// The doc comment of the get (`set` false) or set hook.
+    pub fn doc(&self, set: bool) -> Option<&Vec<u8>> {
+        self.docs.as_ref().and_then(|d| d[set as usize].as_ref())
+    }
+    pub fn set_doc(&mut self, set: bool, doc: Option<Vec<u8>>) {
+        if doc.is_some() {
+            self.docs.get_or_insert_with(Default::default)[set as usize] = doc;
+        }
+    }
 }
 #[derive(Debug, Clone)]
 pub enum TypeHint {
@@ -441,7 +454,7 @@ pub enum ClassMember {
         set_hook_type: Option<TypeHint>,
         /// `&get { ... }`: the get hook returns by reference.
         get_hook_by_ref: bool,
-        hook_attrs: HookAttrs,
+        hook_attrs: Box<HookAttrs>,
         /// Declared after a comma in the previous member's declaration
         /// (`public $a, $b;`).
         group_continues: bool,

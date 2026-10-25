@@ -7650,8 +7650,8 @@ pub fn reflection_property_method(
         }
         b"isabstract" => {
             let is_abstract = rcls(vm, &class_lower)
-                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).map(|p| p.is_abstract))
-                .unwrap_or(false);
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
+                .is_some_and(|p| reflection_property_modifiers(vm, p) & 0x40 != 0);
             Some(if is_abstract {
                 Value::True
             } else {
@@ -7693,7 +7693,7 @@ pub fn reflection_property_method(
                 .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).cloned());
             let (default_val, has_default, has_type) = match &prop_info {
                 Some(p) => {
-                    let has = !matches!(p.default, Value::Undef);
+                    let has = !p.is_virtual && !matches!(p.default, Value::Undef);
                     // A virtual property has no default either.
                     (
                         p.default.clone(),
@@ -7729,7 +7729,8 @@ pub fn reflection_property_method(
         b"getmodifiers" => {
             let mods = rcls(vm, &class_lower)
                 .and_then(|_c| {
-                    rprop(vm, &class_lower, prop_name.as_bytes()).map(reflection_property_modifiers)
+                    rprop(vm, &class_lower, prop_name.as_bytes())
+                        .map(|p| reflection_property_modifiers(vm, p))
                 })
                 .unwrap_or(1);
             Some(Value::Long(mods))
@@ -7808,9 +7809,7 @@ pub fn reflection_property_method(
         b"isprivateset" => {
             let is_priv_set = rcls(vm, &class_lower)
                 .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
-                .and_then(|p| p.set_visibility)
-                .map(|v| v == Visibility::Private)
-                .unwrap_or(false);
+                .is_some_and(|p| reflection_property_modifiers(vm, p) & 0x1000 != 0);
             Some(if is_priv_set {
                 Value::True
             } else {
@@ -7818,11 +7817,10 @@ pub fn reflection_property_method(
             })
         }
         b"isprotectedset" => {
+            // (a public readonly property is implicitly protected(set))
             let is_prot_set = rcls(vm, &class_lower)
                 .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
-                .and_then(|p| p.set_visibility)
-                .map(|v| v == Visibility::Protected)
-                .unwrap_or(false);
+                .is_some_and(|p| reflection_property_modifiers(vm, p) & 0x800 != 0);
             Some(if is_prot_set {
                 Value::True
             } else {
@@ -8514,6 +8512,48 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                 let target = args.get(1).cloned().unwrap_or(Value::Null);
                 let value = args.get(2).cloned().unwrap_or(Value::Null);
                 if let Some(d) = find_prop_decl(vm, &class_lower, prop_name.as_bytes()) {
+                    // reflection_property_set_raw_value(): without a set
+                    // hook on the effective property (the object class's,
+                    // reflection_property_get_effective_prop()),
+                    // write_property() in the reflected class's scope.
+                    // (a set hook may be inherited by a redeclaration)
+                    let mut set_m = b"__property_set_".to_vec();
+                    set_m.extend(prop_name.bytes().map(|b| b.to_ascii_lowercase()));
+                    let has_set = |vm: &Vm, cl: &[u8]| {
+                        rprop(vm, cl, prop_name.as_bytes())
+                            .filter(|p| !p.is_static)
+                            .is_some_and(|p| p.has_set_hook)
+                            || rcls(vm, cl).is_some_and(|c| c.get_method(&set_m).is_some())
+                    };
+                    let effective_set_hook = has_set(vm, &class_lower)
+                        || match &target {
+                            Value::Object(o) => {
+                                let ocl = o.borrow().class_name.to_ascii_lowercase();
+                                has_set(vm, &ocl)
+                            }
+                            _ => false,
+                        };
+                    if !is_static
+                        && d.visibility != Visibility::Private
+                        && !d.has_set_hook
+                        && !effective_set_hook
+                        && matches!(target, Value::Object(_))
+                    {
+                        let _ = run_snippet_in_scope(
+                            vm,
+                            "$__o->{$__n} = $__v;",
+                            &[
+                                ("__o", target.clone()),
+                                (
+                                    "__n",
+                                    Value::String(PhpString::from_string(prop_name.clone())),
+                                ),
+                                ("__v", value),
+                            ],
+                            &class_lower,
+                        );
+                        return Some(Value::Null);
+                    }
                     if d.is_virtual && (d.has_get_hook || d.has_set_hook) {
                         let msg = format!(
                             "Must not write to virtual property {}::${}",
@@ -13330,8 +13370,15 @@ fn reflection_method_modifiers_static(method: &crate::object::MethodDef) -> i64 
 }
 
 /// Get modifier flags for a property
-fn reflection_property_modifiers(prop: &crate::object::PropertyDef) -> i64 {
-    reflection_property_modifiers_static(prop)
+fn reflection_property_modifiers(vm: &Vm, prop: &crate::object::PropertyDef) -> i64 {
+    let mut mods = reflection_property_modifiers_static(prop);
+    // An interface's hooked property is abstract (zend_compile_prop_decl).
+    if (prop.has_get_hook || prop.has_set_hook)
+        && rcls(vm, &prop.declaring_class.to_ascii_lowercase()).is_some_and(|c| c.is_interface)
+    {
+        mods |= 0x40;
+    }
+    mods
 }
 
 /// Get modifier flags for a property (static version for use in closures)

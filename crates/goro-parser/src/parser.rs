@@ -3130,7 +3130,7 @@ impl Parser {
                                 attributes: member_attributes.clone(),
                                 doc_comment: extra_doc,
                                 set_hook_type: None,
-                                hook_attrs: HookAttrs::default(),
+                                hook_attrs: Box::default(),
                                 get_hook_by_ref: false,
                                 group_continues: true,
                             });
@@ -3218,7 +3218,7 @@ impl Parser {
                     attributes: member_attributes.clone(),
                     doc_comment: member_doc_comment,
                     set_hook_type: self.last_set_hook_type.take(),
-                    hook_attrs: std::mem::take(&mut self.last_hook_attrs),
+                    hook_attrs: Box::new(std::mem::take(&mut self.last_hook_attrs)),
                     get_hook_by_ref: std::mem::take(&mut self.last_get_hook_by_ref),
                     group_continues: false,
                 })
@@ -3290,7 +3290,7 @@ impl Parser {
                                 attributes: member_attributes.clone(),
                                 doc_comment: extra_doc,
                                 set_hook_type: None,
-                                hook_attrs: HookAttrs::default(),
+                                hook_attrs: Box::default(),
                                 get_hook_by_ref: false,
                                 group_continues: true,
                             });
@@ -3378,7 +3378,7 @@ impl Parser {
                     attributes: member_attributes,
                     doc_comment: member_doc_comment,
                     set_hook_type: self.last_set_hook_type.take(),
-                    hook_attrs: std::mem::take(&mut self.last_hook_attrs),
+                    hook_attrs: Box::new(std::mem::take(&mut self.last_hook_attrs)),
                     get_hook_by_ref: std::mem::take(&mut self.last_get_hook_by_ref),
                     group_continues: false,
                 })
@@ -3431,6 +3431,7 @@ impl Parser {
 
         while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
             // Skip optional attributes and modifiers: #[...] final, public, protected, private, &
+            let mut hook_doc = self.take_doc_comment();
             let mut hook_attrs = Vec::new();
             let attr_span = self.span();
             while matches!(self.peek(), TokenKind::AttributeOpen) {
@@ -3503,6 +3504,9 @@ impl Parser {
                 });
             }
             let _ = hook_is_private;
+            if hook_doc.is_none() {
+                hook_doc = self.take_doc_comment();
+            }
             if hook_is_by_ref
                 && matches!(self.peek(), TokenKind::Identifier(n) if n.eq_ignore_ascii_case(b"get"))
             {
@@ -3530,6 +3534,7 @@ impl Parser {
                     get_hook_final = true;
                 }
                 self.last_hook_attrs.get = std::mem::take(&mut hook_attrs);
+                self.last_hook_attrs.set_doc(false, hook_doc.take());
                 self.advance(); // consume 'get'
                 if matches!(self.peek(), TokenKind::OpenParen) {
                     let class_name = self
@@ -3582,6 +3587,7 @@ impl Parser {
                     set_hook_final = true;
                 }
                 self.last_hook_attrs.set = std::mem::take(&mut hook_attrs);
+                self.last_hook_attrs.set_doc(true, hook_doc.take());
                 if hook_is_by_ref {
                     // zend_compile_params(): a set hook returns void.
                     let span = self.span();

@@ -268,6 +268,11 @@ fn push_pending_compile_deprecated(msg: String, line: u32) {
     PENDING_COMPILE_DIAGNOSTICS.with(|w| w.borrow_mut().push(("Deprecated", msg, line)));
 }
 
+/// A property hook's doc comment as stored on its MethodDef.
+fn hook_doc_string(doc: Option<&Vec<u8>>) -> Option<String> {
+    doc.map(|d| String::from_utf8_lossy(d).into_owned())
+}
+
 /// A deprecation raised while compiling a signature: reported with the
 /// compile warnings, or before the compile error that ends the file.
 fn push_signature_deprecated(msg: String, line: u32) {
@@ -7819,7 +7824,7 @@ impl Compiler {
                                         is_final: *get_hook_final,
                                         visibility: ObjVisibility::Public,
                                         declaring_class: declaring_class_lower.clone(),
-                                        doc_comment: None,
+                                        doc_comment: hook_doc_string(hook_attrs.doc(false)),
                                         attributes: get_attrs,
                                     },
                                 );
@@ -7927,7 +7932,7 @@ impl Compiler {
                                         is_final: *set_hook_final,
                                         visibility: ObjVisibility::Public,
                                         declaring_class: declaring_class_lower,
-                                        doc_comment: None,
+                                        doc_comment: hook_doc_string(hook_attrs.doc(true)),
                                         attributes: set_attrs,
                                     },
                                 );
@@ -8810,7 +8815,9 @@ impl Compiler {
                                                         visibility: ObjVisibility::Public,
                                                         declaring_class: declaring_class_lower
                                                             .clone(),
-                                                        doc_comment: None,
+                                                        doc_comment: hook_doc_string(
+                                                            param.hook_attrs.doc(false),
+                                                        ),
                                                         attributes: get_attrs,
                                                     },
                                                 );
@@ -8898,7 +8905,9 @@ impl Compiler {
                                                         visibility: ObjVisibility::Public,
                                                         declaring_class: declaring_class_lower
                                                             .clone(),
-                                                        doc_comment: None,
+                                                        doc_comment: hook_doc_string(
+                                                            param.hook_attrs.doc(true),
+                                                        ),
                                                         attributes: set_attrs,
                                                     },
                                                 );
