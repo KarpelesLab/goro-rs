@@ -5,6 +5,7 @@
 //! legacy single-byte code tables come from the mbstring extension's libmbfl
 //! port.
 
+use crate::comp_tables;
 use crate::sbcs_tables;
 use goro_ext_mbstring::mbfl::{self, EncNo, Encoding, MBFL_BAD_INPUT};
 
@@ -63,6 +64,10 @@ pub enum Kind {
     Mbfl(EncNo),
     /// A glibc single-byte charset (an index into sbcs_tables::TABLES).
     Sbcs(u16),
+    /// A glibc single-byte charset with combining characters, composed
+    /// when decoding and decomposed when encoding (an index into
+    /// comp_tables::TABLES).
+    CompSbcs(u8),
 }
 
 /// glibc charset names (and common aliases) to charsets. Names are
@@ -218,6 +223,9 @@ pub fn lookup(name: &[u8]) -> Option<Kind> {
     }
     if up.is_empty() {
         return Some(Kind::Utf8);
+    }
+    if let Ok(i) = comp_tables::NAMES.binary_search_by(|(n, _)| n.as_bytes().cmp(up.as_slice())) {
+        return Some(Kind::CompSbcs(comp_tables::NAMES[i].1));
     }
     if let Ok(i) = sbcs_tables::NAMES.binary_search_by(|(n, _)| n.as_bytes().cmp(up.as_slice())) {
         return Some(Kind::Sbcs(sbcs_tables::NAMES[i].1));
@@ -636,6 +644,27 @@ impl Decoder {
             }
             Kind::Utf7(imap) => self.decode_utf7(s, imap),
             Kind::Iso2022Kr => self.decode_2022kr(s),
+            Kind::CompSbcs(t) => {
+                let t = comp_tables::TABLES[t as usize];
+                let mut cp = t.dec[s[0] as usize];
+                if cp == 0xFFFF {
+                    return Dec::Illegal(1);
+                }
+                // (a base character takes the combining ones that follow
+                // and compose with it)
+                let mut n = 1;
+                while n < s.len() {
+                    let c2 = t.dec[s[n] as usize];
+                    match t.comp.binary_search_by(|&(b, c, _)| (b, c).cmp(&(cp, c2))) {
+                        Ok(i) if c2 != 0xFFFF => {
+                            cp = t.comp[i].2;
+                            n += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                Dec::Char(cp as u32, n)
+            }
             Kind::Sbcs(t) => {
                 let dec = sbcs_tables::TABLES[t as usize].dec;
                 let b = s[0] as usize;
@@ -1135,6 +1164,23 @@ impl Encoder {
             }
             Kind::Utf7(imap) => self.encode_utf7(cp, out, imap),
             Kind::Iso2022Kr => self.encode_2022kr(cp, out),
+            Kind::CompSbcs(t) => {
+                let t = comp_tables::TABLES[t as usize];
+                if cp >= 0xFFFF {
+                    return false;
+                }
+                if let Ok(i) = t.decomp.binary_search_by_key(&(cp as u16), |&(c, _)| c) {
+                    out.extend_from_slice(t.decomp[i].1);
+                    return true;
+                }
+                match t.dec.iter().position(|&c| c as u32 == cp) {
+                    Some(b) => {
+                        out.push(b as u8);
+                        true
+                    }
+                    None => false,
+                }
+            }
             Kind::Sbcs(t) => match sbcs_encode(&sbcs_tables::TABLES[t as usize], cp) {
                 Some(b) => {
                     out.push(b);

@@ -17,6 +17,8 @@ mod mime;
 #[rustfmt::skip]
 mod sbcs_tables;
 #[rustfmt::skip]
+mod comp_tables;
+#[rustfmt::skip]
 mod big5_glibc;
 #[rustfmt::skip]
 mod translit_table;
