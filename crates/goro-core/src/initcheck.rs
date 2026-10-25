@@ -327,4 +327,108 @@ impl Vm {
         }
         true
     }
+
+    /// INSTANCEOF of a constant class name at `ip` of `op_array` answered
+    /// `result` for an object of `o`'s class: the site remembers it, when
+    /// the class named exists (an object's ancestors and interfaces do not
+    /// change, nor does whether a declared class is one of them).
+    #[inline(never)]
+    pub(crate) fn note_instanceof(
+        &self,
+        op_array: &crate::opcode::OpArray,
+        ip: usize,
+        o: &std::rc::Rc<std::cell::RefCell<crate::object::PhpObject>>,
+        class_lower: &[u8],
+        result: &Value,
+    ) {
+        // (`instanceof static` & co. depend on the scope or called class)
+        let named = match op_array.ops.get(ip).map(|o| o.op2) {
+            Some(crate::opcode::OperandType::Const(c)) => op_array.literals.get(c as usize),
+            _ => None,
+        };
+        let Some(Value::String(named)) = named else {
+            return;
+        };
+        let named = named.as_bytes();
+        if named.eq_ignore_ascii_case(b"self")
+            || named.eq_ignore_ascii_case(b"parent")
+            || named.eq_ignore_ascii_case(b"static")
+            || !(self.classes.contains_key(class_lower)
+                || self.class_aliases.contains_key(class_lower))
+        {
+            return;
+        }
+        let Ok(ob) = o.try_borrow() else {
+            return;
+        };
+        if ob.native.is_some() {
+            return;
+        }
+        let mut sites = op_array.sites().borrow_mut();
+        if let Some(c) = sites
+            .get_or_insert_with(Default::default)
+            .prop_slot(&op_array.ops, ip)
+        {
+            c.class.clear();
+            c.class.extend_from_slice(&ob.class_name);
+            c.scope = None;
+            c.plain = u8::from(matches!(result, Value::True));
+            c.slot = 0;
+            c.set = true;
+        }
+    }
+
+    /// What the INSTANCEOF at `ip` of `op_array` answered for an object
+    /// of the class of the one `op1` holds (see note_instanceof).
+    #[inline(never)]
+    pub(crate) fn cached_instanceof(
+        &self,
+        op_array: &crate::opcode::OpArray,
+        ip: usize,
+        cvs: &[Value],
+        tmps: &mut [Value],
+    ) -> crate::fastpath::Fast {
+        use crate::fastpath::Fast;
+        use crate::opcode::OperandType;
+        let op = &op_array.ops[ip];
+        if !matches!(op.op2, OperandType::Const(_))
+            || !crate::fastpath::tmp_writable(&op.result, tmps)
+        {
+            return Fast::No;
+        }
+        let o = match op.op1 {
+            OperandType::Cv(i) => match cvs.get(i as usize) {
+                Some(Value::Object(o)) => o.clone(),
+                Some(Value::Reference(r)) => match r.try_borrow().as_deref() {
+                    Ok(Value::Object(o)) => o.clone(),
+                    _ => return Fast::No,
+                },
+                _ => return Fast::No,
+            },
+            OperandType::Tmp(i) => match tmps.get(i as usize) {
+                Some(Value::Object(o)) => o.clone(),
+                _ => return Fast::No,
+            },
+            _ => return Fast::No,
+        };
+        let Ok(ob) = o.try_borrow() else {
+            return Fast::No;
+        };
+        let r = {
+            let Ok(mut sites) = op_array.sites().try_borrow_mut() else {
+                return Fast::No;
+            };
+            match sites.as_mut().and_then(|s| s.prop_slot(&op_array.ops, ip)) {
+                Some(c) if c.set && c.class == ob.class_name => c.plain != 0,
+                _ => return Fast::No,
+            }
+        };
+        drop(ob);
+        let v = if r { Value::True } else { Value::False };
+        if crate::fastpath::store_tmp(&op.result, v, tmps) {
+            Fast::Done
+        } else {
+            Fast::No
+        }
+    }
 }

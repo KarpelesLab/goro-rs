@@ -662,7 +662,9 @@ impl SiteCaches {
         self.prop_ids = ops
             .iter()
             .map(|o| {
-                if is_fast_prop_op(o.opcode) && n < u16::MAX as usize {
+                if (is_fast_prop_op(o.opcode) || o.opcode == OpCode::TypeCheck)
+                    && n < u16::MAX as usize
+                {
                     n += 1;
                     (n - 1) as u16
                 } else {
@@ -709,7 +711,9 @@ pub(crate) struct SiteCaches {
     pub(crate) ns_fallbacks: crate::fxhash::FxHashMap<u32, Vec<u8>>,
     /// What a class constant fetch (`A::C`, `self::C`, `A::class`) found,
     /// for the class scope it ran in (see Vm::fast_class_const).
-    pub(crate) const_sites: crate::fxhash::FxHashMap<u32, (Option<Vec<u8>>, Value)>,
+    /// (and, of `static::C`, the called class)
+    pub(crate) const_sites:
+        crate::fxhash::FxHashMap<u32, (Option<Vec<u8>>, Option<Vec<u8>>, Value)>,
 }
 
 impl Default for SiteCaches {

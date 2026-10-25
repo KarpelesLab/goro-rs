@@ -19658,18 +19658,40 @@ impl Vm {
             return;
         };
         let cls = cls.as_bytes();
-        if cls.eq_ignore_ascii_case(b"static") || cls.eq_ignore_ascii_case(b"parent") {
-            return;
-        }
+        // (`parent::` is a function of the scope, which the site keys on;
+        // `static::`, of the called class, which it keys on too)
+        let called = if cls.eq_ignore_ascii_case(b"static") {
+            match self.called_class_stack.last() {
+                Some(c) => Some(c.clone()),
+                None => return,
+            }
+        } else {
+            None
+        };
         let OperandType::Const(n) = op.op2 else {
             return;
         };
         if !matches!(op_array.literals.get(n as usize), Some(Value::String(_))) {
             return;
         }
-        let Some(ce) = self.classes.get(class_lower) else {
+        let Some(mut ce) = self.classes.get(class_lower) else {
             return;
         };
+        // (an inherited constant: the class declaring it)
+        if name.as_bytes() != b"class" {
+            for _ in 0..64 {
+                if ce.constants.contains_key(name.as_bytes()) {
+                    break;
+                }
+                let Some(p) = ce.parent.as_ref() else {
+                    return;
+                };
+                let Some(pc) = self.classes.get(p.to_ascii_lowercase().as_slice()) else {
+                    return;
+                };
+                ce = pc;
+            }
+        }
         if ce.filename.is_none() || ce.is_trait {
             return;
         }
@@ -19695,7 +19717,7 @@ impl Vm {
             .borrow_mut()
             .get_or_insert_with(Default::default)
             .const_sites
-            .insert(ip as u32, (scope, val.clone()));
+            .insert(ip as u32, (scope, called, val.clone()));
     }
 
     /// A class constant fetch its site already resolved (see
@@ -19703,8 +19725,12 @@ impl Vm {
     #[inline]
     pub(crate) fn fast_class_const(&self, op_array: &OpArray, ip: usize) -> Option<Value> {
         let sites = op_array.sites().borrow();
-        let (scope, v) = sites.as_ref()?.const_sites.get(&(ip as u32))?;
-        (scope.as_deref() == self.class_scope_ref()).then(|| v.clone())
+        let (scope, called, v) = sites.as_ref()?.const_sites.get(&(ip as u32))?;
+        (scope.as_deref() == self.class_scope_ref()
+            && called
+                .as_ref()
+                .is_none_or(|c| self.called_class_stack.last() == Some(c)))
+        .then(|| v.clone())
     }
 
     /// A freshly compiled included file, as it runs (and as the script
@@ -42640,6 +42666,11 @@ impl Vm {
                     } else {
                         Value::False
                     };
+                    // (what the site's later checks of objects of the same
+                    // class answer, see Vm::cached_instanceof)
+                    if let (OperandType::Const(_), Value::Object(o)) = (&op.op2, &val) {
+                        self.note_instanceof(op_array, ip - 1, o, &class_lower, &result);
+                    }
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     Ok(Flow::Next)
                 })? {

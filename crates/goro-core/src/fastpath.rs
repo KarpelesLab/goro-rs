@@ -1934,7 +1934,10 @@ impl crate::vm::Vm {
                     }
                 }
                 OpCode::Concat => fast_concat(op, cvs, tmps, literals),
-                OpCode::TypeCheck => fast_instanceof(op, cvs, tmps, literals),
+                OpCode::TypeCheck => match fast_instanceof(op, cvs, tmps, literals) {
+                    Fast::No => self.cached_instanceof(op_array, ip, cvs, tmps),
+                    f => f,
+                },
                 OpCode::ForeachInit => self.fast_foreach_init(op, cvs, tmps, literals, fe),
                 OpCode::NewObject => match self.fast_new_object(op_array, ip, tmps) {
                     Some(next) => Fast::Jump(next),
