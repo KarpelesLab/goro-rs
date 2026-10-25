@@ -555,6 +555,7 @@ final class StreamBucket {
     vm.register_function(b"is_writable", is_writable_fn);
     vm.register_function(b"getcwd", getcwd_fn);
     vm.register_function(b"chdir", chdir_fn);
+    vm.register_function(b"chroot", chroot_fn);
     vm.register_function(b"filesize", filesize_fn);
     vm.register_function(b"touch", touch_fn);
     vm.register_function(b"realpath_cache_size", realpath_cache_size_fn);
@@ -9263,6 +9264,34 @@ fn chdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(Value::False)
         }
     }
+}
+/// chroot(string $directory): bool (CLI): chroot() then chdir("/").
+fn chroot_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), "chroot", 1, "directory") {
+        return Err(e);
+    }
+    let Ok(c) = std::ffi::CString::new(path.as_bytes().to_vec()) else {
+        return Ok(Value::False);
+    };
+    let fail = |vm: &mut Vm| {
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        vm.emit_warning(&format!(
+            "chroot(): {} (errno {})",
+            xp_socket::strerror(errno),
+            errno
+        ));
+        Ok(Value::False)
+    };
+    // SAFETY: c is a valid NUL-terminated path.
+    if unsafe { libc::chroot(c.as_ptr()) } != 0 {
+        return fail(vm);
+    }
+    let _ = clearstatcache_fn(vm, &[Value::True]);
+    if std::env::set_current_dir("/").is_err() {
+        return fail(vm);
+    }
+    Ok(Value::True)
 }
 fn filesize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();

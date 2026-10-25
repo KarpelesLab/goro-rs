@@ -2332,6 +2332,25 @@ pub static FUNCTIONS: &[StubFunc] = &[
         ext: "standard",
     },
     StubFunc {
+        name: "cli_set_process_title",
+        flags: 0x0,
+        args: &[StubArg {
+            name: "title",
+            ty: "string",
+            default: None,
+            flags: 0,
+        }],
+        ret: "bool",
+        ext: "standard",
+    },
+    StubFunc {
+        name: "cli_get_process_title",
+        flags: 0x0,
+        args: &[],
+        ret: "?string",
+        ext: "standard",
+    },
+    StubFunc {
         name: "chroot",
         flags: 0x0,
         args: &[StubArg {
