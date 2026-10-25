@@ -3442,6 +3442,79 @@ impl Vm {
     /// Check if `caller_class` (lowercase) has access to a member with the given visibility
     /// declared in `declaring_class` (lowercase), where the member belongs to `target_class` (lowercase).
     /// Returns None if access is allowed, or Some(error_message) if denied.
+    /// The abstract methods of the internal interfaces `class` (or a user
+    /// ancestor) implements that neither it nor an internal ancestor
+    /// implements ("Countable::count"): internal interfaces' methods are
+    /// not copied into the class's method table.
+    #[inline(never)]
+    fn internal_interface_unimplemented(&self, class: &ClassEntry) -> Vec<String> {
+        let mut ifaces: Vec<Vec<u8>> = class.interfaces.clone();
+        // The ancestors, and whether one is an internal class goro does not
+        // declare as a user class.
+        let mut ancestors: Vec<Vec<u8>> = Vec::new();
+        let mut cur = class.parent.as_ref().map(|p| p.to_ascii_lowercase());
+        for _ in 0..64 {
+            let Some(p) = cur else { break };
+            ancestors.push(p.clone());
+            match self.classes.get(&p) {
+                Some(pc) => {
+                    ifaces.extend(pc.interfaces.iter().cloned());
+                    cur = pc.parent.as_ref().map(|p| p.to_ascii_lowercase());
+                }
+                None => break,
+            }
+        }
+        // An ancestor implemented natively (an extension's class) provides
+        // the methods of the interfaces it implements.
+        let native_ancestor = ancestors.iter().any(|a| {
+            self.native_class_handlers.contains_key(a.as_slice())
+                || (!self.classes.contains_key(a) && crate::stubs::find_class(a).is_none())
+                || self
+                    .classes
+                    .get(a)
+                    // (an extension's class registered as a class entry:
+                    // no file declared it)
+                    .is_some_and(|c| c.filename.is_none())
+        });
+        let mut out: Vec<String> = Vec::new();
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        for i in &ifaces {
+            let il = i.strip_prefix(b"\\").unwrap_or(i).to_ascii_lowercase();
+            if seen.contains(&il)
+                || self.classes.contains_key(&il)
+                || matches!(il.as_slice(), b"unitenum" | b"backedenum" | b"stringable")
+            {
+                continue;
+            }
+            seen.push(il.clone());
+            for (sc, m) in crate::stubs::class_methods(&il) {
+                if sc.kind != crate::stubs::K_INTERFACE {
+                    continue;
+                }
+                let ml = m.name.to_ascii_lowercase();
+                let implemented = match class.methods.get(ml.as_bytes()) {
+                    Some(cm) => !cm.is_abstract,
+                    None => {
+                        native_ancestor
+                            || ancestors.iter().any(|a| {
+                                crate::stubs::find_method(a, ml.as_bytes()).is_some_and(
+                                    |(ac, am)| {
+                                        ac.kind != crate::stubs::K_INTERFACE
+                                            && am.flags & crate::stubs::F_ABSTRACT == 0
+                                    },
+                                )
+                            })
+                    }
+                };
+                let entry = format!("{}::{}", sc.name, m.name);
+                if !implemented && !out.contains(&entry) {
+                    out.push(entry);
+                }
+            }
+        }
+        out
+    }
+
     /// do_inherit_property() for a trait property replacing an inherited
     /// (non-private) one: traits are bound before the parent is inherited,
     /// so the trait's property is checked like an own redeclaration.
@@ -53620,6 +53693,7 @@ impl Vm {
                         // Check for unimplemented abstract methods (interface enforcement)
                         if !class.is_abstract && !class.is_interface && !class.is_trait {
                             let mut abstract_methods: Vec<String> = Vec::new();
+                            let internal_abstract = self.internal_interface_unimplemented(&class);
                             let _class_name_lower_for_check: Vec<u8> =
                                 class.name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             for (_, method) in &class.methods {
@@ -53678,6 +53752,7 @@ impl Vm {
                                         .push(format!("{}::{}", iface_origin, method_name_str));
                                 }
                             }
+                            abstract_methods.extend(internal_abstract);
                             if !abstract_methods.is_empty() {
                                 let class_name_raw = name_val.to_php_string().as_bytes().to_vec();
                                 // Use display name (strips NUL suffix for anonymous classes)
@@ -53689,8 +53764,17 @@ impl Vm {
                                     .collect();
                                 let is_anonymous = class_name_raw.contains(&b'\x00');
                                 let count = abstract_methods.len();
-                                abstract_methods.sort();
-                                let methods_list = abstract_methods.join(", ");
+                                // zend_verify_abstract_class(): function-table
+                                // order, at most MAX_ABSTRACT_INFO_CNT (3) named.
+                                let mut methods_list = abstract_methods
+                                    .iter()
+                                    .take(3)
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                if count > 3 {
+                                    methods_list.push_str(", ...");
+                                }
                                 let method_word = if count == 1 { "method" } else { "methods" };
                                 // Check if the abstract method was declared by this class itself
                                 // (not inherited from parent/interface/trait)
