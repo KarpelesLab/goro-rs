@@ -366,6 +366,17 @@ fn ctx_sapi_warning(ctx: &mut Ctx, msg: &str) {
     }
 }
 
+/// php_error_docref(E_NOTICE) while parsing the request body.
+fn ctx_notice(ctx: &mut Ctx, msg: &str) {
+    if ctx.parse_body {
+        let line = ctx.vm.current_line;
+        ctx.vm
+            .emit_notice_at(&format!("request_parse_body(): {}", msg), line);
+    } else {
+        emit_startup(ctx.vm, "Notice", &format!("PHP Request Startup: {}", msg));
+    }
+}
+
 /// php_error_docref(E_WARNING) while parsing the request body.
 fn ctx_docref_warning(ctx: &mut Ctx, msg: &str) {
     if ctx.parse_body {
@@ -1133,6 +1144,9 @@ fn rfc1867_handler(
     let mut protected: Vec<Vec<u8>> = Vec::new();
     let mut upload_cnt = cfg.max_file_uploads;
     let mut anonymous_index = 0u32;
+    // Function-wide in rfc1867_post_handler(): once a file part is skipped
+    // (a malformed name ...), every later one is too.
+    let mut skip_upload = false;
     let mut max_file_size: i64 = 0;
     let mut count: i64 = 0;
 
@@ -1276,7 +1290,6 @@ fn rfc1867_handler(
                 continue;
             }
         }
-        let mut skip_upload = false;
         if !cfg.file_uploads {
             skip_upload = true;
         } else if upload_cnt <= 0 {
@@ -1350,14 +1363,21 @@ fn rfc1867_handler(
         let mut blen_data = Vec::new();
         if cancel_upload == 0 {
             blen_data = mb.read(FILLUNIT, &mut end);
-            let dir = cfg
-                .upload_tmp_dir
-                .clone()
-                .filter(|d| !d.is_empty())
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(std::env::temp_dir);
             upload_cnt -= 1;
-            match tempfile::Builder::new().prefix("php").tempfile_in(&dir) {
+            // php_open_temporary_fd_ex(): upload_tmp_dir, else (with a
+            // notice when that one failed) the system's temporary directory.
+            let open =
+                |dir: &std::path::Path| tempfile::Builder::new().prefix("php").tempfile_in(dir);
+            let explicit = cfg.upload_tmp_dir.clone().filter(|d| !d.is_empty());
+            let mut created = explicit.as_ref().map(|d| open(std::path::Path::new(d)));
+            if !matches!(created, Some(Ok(_))) {
+                if created.is_some() {
+                    ctx_notice(ctx, "file created in the system's temporary directory");
+                }
+                let sys = crate::misc::php_get_temporary_directory(ctx.vm);
+                created = Some(open(std::path::Path::new(&sys)));
+            }
+            match created.expect("set above") {
                 Ok(t) => match t.keep() {
                     Ok((f, p)) => temp = Some((p, f)),
                     Err(_) => cancel_upload = 6,
