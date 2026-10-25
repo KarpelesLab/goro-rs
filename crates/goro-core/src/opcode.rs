@@ -615,6 +615,68 @@ pub fn new_site_epoch() {
     SITE_EPOCH.with(|e| e.set(e.get().wrapping_add(1)));
 }
 
+/// What a property access by a constant name found last (see
+/// Vm::fast_prop_op): the object's class and the class scope it ran in,
+/// whether the property is a plain one of that class there, and the slot
+/// the object held it in (the declared properties of a class keep their
+/// slots; a hint, checked against the slot's key).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PropSlot {
+    pub(crate) class: Vec<u8>,
+    pub(crate) scope: Option<Vec<u8>>,
+    pub(crate) plain: u8,
+    pub(crate) slot: u32,
+    pub(crate) set: bool,
+}
+
+/// The opcodes fast_prop_op() handles.
+#[inline]
+pub(crate) fn is_fast_prop_op(o: OpCode) -> bool {
+    matches!(
+        o,
+        OpCode::PropertyGet
+            | OpCode::PropertySet
+            | OpCode::PropertyGetW
+            | OpCode::PropertyGetIncDec
+            | OpCode::PropertyIsset
+            | OpCode::PropertyIssetFetch
+    )
+}
+
+impl SiteCaches {
+    /// The PropSlot of the property access at `ip` of `ops` (made with
+    /// the others of the code on first use).
+    #[inline(always)]
+    pub(crate) fn prop_slot(&mut self, ops: &[Op], ip: usize) -> Option<&mut PropSlot> {
+        if self.prop_ids.is_empty() {
+            self.init_prop_ids(ops);
+        }
+        let id = *self.prop_ids.get(ip)?;
+        self.prop_slots.get_mut(id as usize)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn init_prop_ids(&mut self, ops: &[Op]) {
+        let mut n = 0usize;
+        self.prop_ids = ops
+            .iter()
+            .map(|o| {
+                if is_fast_prop_op(o.opcode) && n < u16::MAX as usize {
+                    n += 1;
+                    (n - 1) as u16
+                } else {
+                    u16::MAX
+                }
+            })
+            .collect();
+        if self.prop_ids.is_empty() {
+            self.prop_ids.push(u16::MAX);
+        }
+        self.prop_slots = vec![PropSlot::default(); n];
+    }
+}
+
 /// See OpArray::sites; entries are by opcode index.
 #[derive(Debug, Clone)]
 pub(crate) struct SiteCaches {
@@ -623,9 +685,11 @@ pub(crate) struct SiteCaches {
     /// What the plain function calls of the INIT_FCALLs resolved to (see
     /// Vm::plain_call_target).
     pub(crate) call_targets: crate::fxhash::FxHashMap<u32, crate::vm::CachedCallTarget>,
-    /// The plain property accesses' last class and scope, and whether the
-    /// property is a plain one of it there (see Vm::fast_prop_op).
-    pub(crate) prop_sites: crate::fxhash::FxHashMap<u32, (Vec<u8>, Option<Vec<u8>>, u8)>,
+    /// The property accesses by a constant name (see Vm::fast_prop_op): the
+    /// index into `prop_slots` of each opcode's site (u16::MAX: none),
+    /// made when the first one runs.
+    pub(crate) prop_ids: Vec<u16>,
+    pub(crate) prop_slots: Vec<PropSlot>,
     /// What the INIT_METHOD_CALLs found (see Vm::init_method_call_fast).
     pub(crate) method_sites: crate::fxhash::FxHashMap<u32, crate::vm::MethodSite>,
     /// What the forwarding calls (self::m(), ...) last resolved to (see
@@ -653,7 +717,8 @@ impl Default for SiteCaches {
         SiteCaches {
             epoch: SITE_EPOCH.with(|e| e.get()),
             call_targets: Default::default(),
-            prop_sites: Default::default(),
+            prop_ids: Vec::new(),
+            prop_slots: Vec::new(),
             method_sites: Default::default(),
             forward_sites: Default::default(),
             spl_sites: Default::default(),
@@ -830,7 +895,7 @@ impl OpArray {
     }
 
     /// What this code's call sites found in the current request.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn sites(&self) -> &std::cell::RefCell<Option<Box<SiteCaches>>> {
         let stale = match self.sites.try_borrow() {
             Ok(s) => s

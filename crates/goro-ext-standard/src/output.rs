@@ -2570,7 +2570,7 @@ pub fn materialize_print_r(
             if keep {
                 // Rendered by print_r itself: materialize what it holds.
                 memo.insert(key, None);
-                let props: Vec<(Vec<u8>, Value)> = o.borrow().properties.clone();
+                let props: Vec<(Vec<u8>, Value)> = o.borrow().properties.to_vec();
                 let mut changed = false;
                 let mut newp = Vec::with_capacity(props.len());
                 for (k, pv) in props {
@@ -2589,7 +2589,7 @@ pub fn materialize_print_r(
                 let b = o.borrow();
                 let mut shadow = goro_core::object::PhpObject::new(b.class_name.clone(), 0);
                 shadow.closure = b.closure.clone();
-                shadow.properties = newp;
+                shadow.properties = newp.into();
                 return Some(Value::Object(Rc::new(RefCell::new(shadow))));
             }
             let mut shadow = goro_core::object::PhpObject::new(cn, 0);
@@ -2642,7 +2642,7 @@ pub fn materialize_print_r(
                 let nv = materialize_print_r(vm, &pv, memo).unwrap_or(pv);
                 props.push((k, nv));
             }
-            shadow.borrow_mut().properties = props;
+            shadow.borrow_mut().properties = props.into();
             Some(shadow_val)
         }
         // zend_generator_get_debug_info(): the generator's function.
@@ -2656,7 +2656,8 @@ pub fn materialize_print_r(
             shadow.properties = vec![(
                 b"function".to_vec(),
                 Value::String(PhpString::from_string(name.to_string())),
-            )];
+            )]
+            .into();
             Some(Value::Object(Rc::new(RefCell::new(shadow))))
         }
         _ => None,
@@ -2818,7 +2819,7 @@ pub fn materialize_native(
                 }
                 Some(Value::Object(Rc::new(RefCell::new(shadow))))
             } else {
-                let props: Vec<(Vec<u8>, Value)> = o.borrow().properties.clone();
+                let props: Vec<(Vec<u8>, Value)> = o.borrow().properties.to_vec();
                 let mut changed = false;
                 let mut newp = Vec::with_capacity(props.len());
                 for (k, pv) in props {
@@ -2833,7 +2834,7 @@ pub fn materialize_native(
                 if changed {
                     let b = o.borrow();
                     let mut shadow = goro_core::object::PhpObject::new(b.class_name.clone(), 0);
-                    shadow.properties = newp;
+                    shadow.properties = newp.into();
                     Some(Value::Object(Rc::new(RefCell::new(shadow))))
                 } else {
                     None

@@ -262,12 +262,260 @@ std::thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// An object's property slots, in order (declared ones first, in
+/// declaration order, then dynamic ones), with what the fast property
+/// paths need to know without scanning them: whether a key is an internal
+/// state marker (`__`-prefixed: lazy, cloning, destructed, an internal
+/// class's state...) or a NUL-mangled private one. The flags only ever go
+/// up while slots are added (they are recomputed when the table is
+/// replaced or cleared): a key changed in place through `iter_mut()` /
+/// indexing must not become one of those.
+#[derive(Debug, Clone, Default)]
+pub struct PropTable {
+    items: Vec<(Vec<u8>, Value)>,
+    internal: bool,
+    mangled: bool,
+}
+
+impl PropTable {
+    #[inline]
+    pub const fn new() -> Self {
+        PropTable {
+            items: Vec::new(),
+            internal: false,
+            mangled: false,
+        }
+    }
+
+    #[inline]
+    pub fn with_capacity(n: usize) -> Self {
+        PropTable {
+            items: Vec::with_capacity(n),
+            internal: false,
+            mangled: false,
+        }
+    }
+
+    #[inline]
+    fn note(&mut self, k: &[u8]) {
+        match k.first() {
+            Some(0) => self.mangled = true,
+            Some(b'_') if k.get(1) == Some(&b'_') => self.internal = true,
+            _ => {}
+        }
+    }
+
+    fn renote(&mut self) {
+        self.internal = false;
+        self.mangled = false;
+        for i in 0..self.items.len() {
+            let k = std::mem::take(&mut self.items[i].0);
+            self.note(&k);
+            self.items[i].0 = k;
+        }
+    }
+
+    /// Some key may be an internal state marker (`__`-prefixed).
+    #[inline]
+    pub fn has_internal(&self) -> bool {
+        self.internal
+    }
+
+    /// Some key may be a NUL-mangled private property's.
+    #[inline]
+    pub fn has_mangled(&self) -> bool {
+        self.mangled
+    }
+
+    #[inline]
+    pub fn push(&mut self, slot: (Vec<u8>, Value)) {
+        self.note(&slot.0);
+        self.items.push(slot);
+    }
+
+    #[inline]
+    pub fn insert(&mut self, at: usize, slot: (Vec<u8>, Value)) {
+        self.note(&slot.0);
+        self.items.insert(at, slot);
+    }
+
+    #[inline]
+    pub fn remove(&mut self, at: usize) -> (Vec<u8>, Value) {
+        self.items.remove(at)
+    }
+
+    #[inline]
+    pub fn pop(&mut self) -> Option<(Vec<u8>, Value)> {
+        self.items.pop()
+    }
+
+    #[inline]
+    pub fn retain<F: FnMut(&(Vec<u8>, Value)) -> bool>(&mut self, f: F) {
+        self.items.retain(f)
+    }
+
+    #[inline]
+    pub fn retain_mut<F: FnMut(&mut (Vec<u8>, Value)) -> bool>(&mut self, f: F) {
+        self.items.retain_mut(f)
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.items.clear();
+        self.internal = false;
+        self.mangled = false;
+    }
+
+    #[inline]
+    pub fn truncate(&mut self, n: usize) {
+        self.items.truncate(n)
+    }
+
+    #[inline]
+    pub fn reserve(&mut self, n: usize) {
+        self.items.reserve(n)
+    }
+
+    #[inline]
+    pub fn drain<R: std::ops::RangeBounds<usize>>(
+        &mut self,
+        r: R,
+    ) -> std::vec::Drain<'_, (Vec<u8>, Value)> {
+        self.items.drain(r)
+    }
+
+    #[inline]
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, (Vec<u8>, Value)> {
+        self.items.iter_mut()
+    }
+
+    #[inline]
+    pub fn get_mut(&mut self, i: usize) -> Option<&mut (Vec<u8>, Value)> {
+        self.items.get_mut(i)
+    }
+
+    #[inline]
+    pub fn last_mut(&mut self) -> Option<&mut (Vec<u8>, Value)> {
+        self.items.last_mut()
+    }
+
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [(Vec<u8>, Value)] {
+        &mut self.items
+    }
+
+    /// Reorder the slots (their keys stay the same).
+    #[inline]
+    pub fn sort_by<F: FnMut(&(Vec<u8>, Value), &(Vec<u8>, Value)) -> std::cmp::Ordering>(
+        &mut self,
+        f: F,
+    ) {
+        self.items.sort_by(f)
+    }
+
+    /// The slots, the table left empty.
+    #[inline]
+    pub fn take_vec(&mut self) -> Vec<(Vec<u8>, Value)> {
+        self.internal = false;
+        self.mangled = false;
+        std::mem::take(&mut self.items)
+    }
+
+    #[inline]
+    pub fn into_vec(self) -> Vec<(Vec<u8>, Value)> {
+        self.items
+    }
+
+    /// Rename slot `i` (its value stays).
+    #[inline]
+    pub fn rename(&mut self, i: usize, k: Vec<u8>) {
+        self.note(&k);
+        self.items[i].0 = k;
+    }
+}
+
+impl std::ops::Deref for PropTable {
+    type Target = Vec<(Vec<u8>, Value)>;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.items
+    }
+}
+
+impl std::ops::Index<usize> for PropTable {
+    type Output = (Vec<u8>, Value);
+    #[inline]
+    fn index(&self, i: usize) -> &Self::Output {
+        &self.items[i]
+    }
+}
+
+impl std::ops::IndexMut<usize> for PropTable {
+    #[inline]
+    fn index_mut(&mut self, i: usize) -> &mut Self::Output {
+        &mut self.items[i]
+    }
+}
+
+impl From<Vec<(Vec<u8>, Value)>> for PropTable {
+    fn from(items: Vec<(Vec<u8>, Value)>) -> Self {
+        let mut t = PropTable {
+            items,
+            internal: false,
+            mangled: false,
+        };
+        t.renote();
+        t
+    }
+}
+
+impl FromIterator<(Vec<u8>, Value)> for PropTable {
+    fn from_iter<I: IntoIterator<Item = (Vec<u8>, Value)>>(it: I) -> Self {
+        PropTable::from(it.into_iter().collect::<Vec<_>>())
+    }
+}
+
+impl Extend<(Vec<u8>, Value)> for PropTable {
+    fn extend<I: IntoIterator<Item = (Vec<u8>, Value)>>(&mut self, it: I) {
+        for s in it {
+            self.push(s);
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a PropTable {
+    type Item = &'a (Vec<u8>, Value);
+    type IntoIter = std::slice::Iter<'a, (Vec<u8>, Value)>;
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut PropTable {
+    type Item = &'a mut (Vec<u8>, Value);
+    type IntoIter = std::slice::IterMut<'a, (Vec<u8>, Value)>;
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.iter_mut()
+    }
+}
+
+impl IntoIterator for PropTable {
+    type Item = (Vec<u8>, Value);
+    type IntoIter = std::vec::IntoIter<(Vec<u8>, Value)>;
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.into_iter()
+    }
+}
+
 /// A PHP object instance
 #[derive(Debug, Clone)]
 pub struct PhpObject {
     pub class_name: Vec<u8>,
     /// Properties stored as ordered Vec to preserve declaration order
-    pub properties: Vec<(Vec<u8>, Value)>,
+    pub properties: PropTable,
     pub object_id: u64,
     /// Registered with the cycle collector (see gc.rs).
     pub gc_tracked: GcFlag,
@@ -456,7 +704,7 @@ impl Drop for PhpObject {
         // Release what the object holds before its handle goes back to the
         // free list (zend_objects_store_del: free_obj, then the handle).
         drop(self.native.take());
-        let mut props = std::mem::take(&mut self.properties);
+        let mut props = self.properties.take_vec();
         release_object_storage(&mut props);
         drop(props);
         drop(self.closure.take());
@@ -474,7 +722,7 @@ impl PhpObject {
     pub fn new(class_name: Vec<u8>, object_id: u64) -> Self {
         let o = Self {
             class_name,
-            properties: Vec::new(),
+            properties: PropTable::new(),
             object_id,
             gc_tracked: GcFlag::default(),
             dtor_listed: GcFlag::default(),

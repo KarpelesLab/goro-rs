@@ -136,7 +136,7 @@ impl Vm {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
             Table::Obj(o) => {
-                let props: Vec<(Vec<u8>, Value)> = o.borrow().properties.clone();
+                let props: Vec<(Vec<u8>, Value)> = o.borrow().properties.to_vec();
                 props
                     .into_iter()
                     .filter(|(n, v)| self.ao_prop_visible(o, n, v))
@@ -1133,7 +1133,7 @@ impl Vm {
                     if !props.iter().any(|(k, _)| k == crate::proptable::OWN_ORDER) {
                         props.push((crate::proptable::OWN_ORDER.to_vec(), Value::True));
                     }
-                    o.borrow_mut().properties = props;
+                    o.borrow_mut().properties = props.into();
                 }
             }
         }

@@ -623,7 +623,7 @@ pub fn new_soap_fault(vm: &mut Vm) -> Obj {
                 None => b.properties.push((k, d)),
             }
         }
-        b.properties.append(&mut old);
+        b.properties.extend(old);
     }
     goro_core::gc::track_object(&o);
     o

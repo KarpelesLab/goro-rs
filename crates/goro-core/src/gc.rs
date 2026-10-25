@@ -1859,7 +1859,7 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
                 match node {
                     Node::Obj(o) => {
                         if let Ok(mut b) = o.try_borrow_mut() {
-                            dead_props.push(std::mem::take(&mut b.properties));
+                            dead_props.push(b.properties.take_vec());
                             if let Some(c) = b.closure.take() {
                                 dead_vals.push(*c);
                             }

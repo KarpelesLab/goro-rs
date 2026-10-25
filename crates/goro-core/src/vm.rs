@@ -10331,7 +10331,7 @@ impl Vm {
         }
         self.lazy_init_in_progress.insert(object_id);
         // Snapshot properties so we can roll back if the initializer throws.
-        let snapshot: Vec<(Vec<u8>, Value)> = obj.borrow().properties.clone();
+        let snapshot: Vec<(Vec<u8>, Value)> = obj.borrow().properties.to_vec();
         if state_bytes == b"ghost" {
             let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
             let defaults: Vec<(Vec<u8>, Value)> = self
@@ -10388,7 +10388,7 @@ impl Vm {
             let returned_value = !matches!(result, None | Some(Value::Null) | Some(Value::Undef));
             if threw || returned_value {
                 // zend_lazy_object_revert_init(): the object stays lazy.
-                obj.borrow_mut().properties = snapshot;
+                obj.borrow_mut().properties = snapshot.into();
                 if !threw {
                     let exc = self.create_exception(
                         b"TypeError",
@@ -12299,6 +12299,7 @@ impl Vm {
 
     /// The scope current_class_scope() names, without copying it (case as
     /// stored).
+    #[inline]
     pub(crate) fn class_scope_ref(&self) -> Option<&[u8]> {
         if self.class_scope_stack.last().is_some_and(|s| s.is_empty()) {
             return None;

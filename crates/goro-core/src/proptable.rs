@@ -742,8 +742,8 @@ impl Vm {
                 return moved.then(|| mk.clone());
             }
             if !moved {
-                match b.properties.iter_mut().find(|(k, _)| k.as_slice() == name) {
-                    Some(e) => e.0 = mk.clone(),
+                match b.properties.iter().position(|(k, _)| k.as_slice() == name) {
+                    Some(i) => b.properties.rename(i, mk.clone()),
                     // (an internal slot the object kept no value for has
                     // its default: Exception::$string)
                     None => b.properties.push((mk.clone(), slot_unset_value(slot))),
@@ -771,8 +771,8 @@ impl Vm {
                     if b.has_property(mk) {
                         continue;
                     }
-                    match b.properties.iter_mut().find(|(k, _)| k.as_slice() == name) {
-                        Some(e) => e.0 = mk.clone(),
+                    match b.properties.iter().position(|(k, _)| k.as_slice() == name) {
+                        Some(i) => b.properties.rename(i, mk.clone()),
                         None => b.properties.push((mk.clone(), slot_unset_value(s))),
                     }
                 }

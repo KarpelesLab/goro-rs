@@ -2427,8 +2427,8 @@ impl<'a> Parser<'a> {
             if b.has_property(mk) {
                 continue;
             }
-            match b.properties.iter_mut().find(|(k, _)| k.as_slice() == key) {
-                Some(e) => e.0 = mk.clone(),
+            match b.properties.iter().position(|(k, _)| k.as_slice() == key) {
+                Some(i) => b.properties.rename(i, mk.clone()),
                 None => b.properties.push((mk.clone(), Value::Undef)),
             }
         }
