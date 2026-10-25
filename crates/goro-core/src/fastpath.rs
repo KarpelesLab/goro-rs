@@ -373,6 +373,10 @@ pub(crate) fn drops_quietly_deep(
             let Ok(arr) = a.try_borrow() else {
                 return false;
             };
+            // (a copy sharing its storage with another: the elements stay)
+            if arr.shared_store().is_some_and(|s| Rc::strong_count(s) > 1) {
+                return true;
+            }
             if arr.len() as u32 > *budget {
                 return false;
             }
@@ -1161,10 +1165,17 @@ fn fast_isset_check(op: &Op, cvs: &[Value], tmps: &mut [Value], literals: &[Valu
 }
 
 /// FE_FETCH of the next element of an array a foreach loop iterates live
-/// (see FeView::live_array): what the general handler does then, but for
-/// the end of the loop.
+/// (see FeView::live_array): what the general handler does then. At the
+/// end of the loop, the iterator is released (when that only frees memory:
+/// `no_release`, see drops_quietly_deep()) and the loop left.
 #[inline(never)]
-fn fast_foreach_next(op: &Op, tmps: &mut [Value], fe: &mut FeView) -> Fast {
+fn fast_foreach_next(
+    op: &Op,
+    tmps: &mut [Value],
+    fe: &mut FeView,
+    no_release: bool,
+    globals: &Rc<RefCell<crate::array::PhpArray>>,
+) -> Fast {
     let OperandType::Tmp(it) = op.op1 else {
         return Fast::No;
     };
@@ -1181,7 +1192,11 @@ fn fast_foreach_next(op: &Op, tmps: &mut [Value], fe: &mut FeView) -> Fast {
         };
         match a.entry_at(pos) {
             Some((_, v)) => v.deref(),
-            None => return Fast::No,
+            None => {
+                drop(a);
+                drop(arr);
+                return foreach_live_end(op, it, tmps, fe, no_release, globals);
+            }
         }
     };
     match &v {
@@ -1192,6 +1207,44 @@ fn fast_foreach_next(op: &Op, tmps: &mut [Value], fe: &mut FeView) -> Fast {
     store_tmp(&op.result, v, tmps);
     fe.positions.insert(it, pos + 1);
     Fast::Done
+}
+
+/// The end of a foreach loop over an array iterated live (FE_FETCH found
+/// no next element): the general handler's end of it (the iterator's
+/// position forgotten, its temporary released, the jump out of the loop),
+/// when the release of the iterator's array only frees memory.
+#[cold]
+#[inline(never)]
+fn foreach_live_end(
+    op: &Op,
+    it: u32,
+    tmps: &mut [Value],
+    fe: &mut FeView,
+    no_release: bool,
+    globals: &Rc<RefCell<crate::array::PhpArray>>,
+) -> Fast {
+    let OperandType::JmpTarget(target) = op.op2 else {
+        return Fast::No;
+    };
+    if !no_release || (!fe.cur_key.is_empty() && fe.cur_key.contains_key(&it)) {
+        return Fast::No;
+    }
+    let Some(slot) = tmps.get_mut(it as usize) else {
+        return Fast::No;
+    };
+    // (an array held here alone may free containers: not while the cycle
+    // collector is due, as FreeTmps)
+    if let Value::Array(a) = slot {
+        if Rc::strong_count(a) == 1 && crate::gc::gc_pending() {
+            return Fast::No;
+        }
+    }
+    if !drops_quietly_deep(slot, &mut 256, globals) {
+        return Fast::No;
+    }
+    *slot = Value::Undef;
+    fe.positions.remove(&it);
+    Fast::Jump(target as usize)
 }
 
 /// The key of the element FE_FETCH fetched last from an array a foreach
@@ -1918,7 +1971,7 @@ impl crate::vm::Vm {
                     Fast::Done
                 }
                 OpCode::Nop => Fast::Done,
-                OpCode::ForeachNext => fast_foreach_next(op, tmps, fe),
+                OpCode::ForeachNext => fast_foreach_next(op, tmps, fe, no_release, &self.globals),
                 OpCode::ForeachKey => fast_foreach_key(op, tmps, fe),
                 // A public method of a user class by a constant name (what
                 // the INIT_METHOD_CALL arm does first)
@@ -2416,7 +2469,8 @@ impl crate::vm::Vm {
                 Ok(mut a) => a.cow_clone(),
                 Err(_) => return Fast::No,
             };
-            if view.shared_store().is_none() {
+            // (an empty array is iterated live too: its copy is its own)
+            if view.shared_store().is_none() && !view.is_empty() {
                 return Fast::No;
             }
             Rc::new(RefCell::new(view))
