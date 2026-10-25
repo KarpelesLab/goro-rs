@@ -58324,7 +58324,20 @@ impl Vm {
                             self.class_scope_stack.push(hook_declaring);
                             self.called_class_stack.push(class_name_orig.clone());
                             self.push_hook_frame(&method, &fn_cvs);
-                            let hook_result = self.execute_op_array(&method, fn_cvs);
+                            let hook_result = if fn_cvs.len() > 1
+                                && !self.set_hook_recv(
+                                    &method,
+                                    &mut fn_cvs[1],
+                                    op_array.strict_types,
+                                    Some(op.line),
+                                ) {
+                                Err(VmError {
+                                    message: "Uncaught exception".into(),
+                                    line: op.line,
+                                })
+                            } else {
+                                self.execute_op_array(&method, fn_cvs)
+                            };
                             self.call_stack.pop();
                             self.called_class_stack.pop();
                             self.class_scope_stack.pop();
@@ -63420,13 +63433,132 @@ impl Vm {
         }
         let argc = (hook.param_count as usize).saturating_sub(1);
         let args: Vec<Value> = cvs.iter().skip(1).take(argc).cloned().collect();
-        self.call_stack.push((
-            name,
-            self.current_file.clone(),
-            self.current_line,
-            args,
-            true,
-        ));
+        // (a hook an internal function runs, var_export()'s say, is called
+        // from "[internal function]")
+        let (file, line) = if self.in_builtin_frame() {
+            self.materialize_builtin_frames(false);
+            (crate::rcstr::RcStr::new(), 0)
+        } else {
+            (self.current_file.clone(), self.current_line)
+        };
+        self.call_stack.push((name, file, line, args, true));
+    }
+
+    /// ReflectionMethod::invoke() of a property hook `m` on `obj`: the hook
+    /// runs as such (its accesses to the property use the backing value),
+    /// called from internal code.
+    #[inline(never)]
+    pub(crate) fn invoke_property_hook(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        m: &crate::object::MethodDef,
+        args: &[Value],
+    ) -> Value {
+        let (prop, is_set) = if let Some(p) = m.name.strip_prefix(b"__property_set_") {
+            (p.to_vec(), true)
+        } else if let Some(p) = m.name.strip_prefix(b"__property_get_") {
+            (p.to_vec(), false)
+        } else {
+            return Value::Null;
+        };
+        let op = m.op_array.clone();
+        let mut cvs = vec![Value::Undef; op.cv_names.len()];
+        if !cvs.is_empty() {
+            cvs[0] = Value::Object(obj.clone());
+        }
+        if is_set && cvs.len() > 1 {
+            if let Some(v) = args.first() {
+                cvs[1] = v.clone();
+            }
+        }
+        let class_name = obj.borrow().class_name.clone();
+        let mut key = class_name.to_ascii_lowercase();
+        key.extend_from_slice(b"::");
+        key.extend_from_slice(&prop);
+        key.extend_from_slice(if is_set { b"::set" } else { b"::get" });
+        let key = Self::prop_hook_key(key, &Value::Object(obj.clone()));
+        self.property_hook_stack.push(key);
+        self.class_scope_stack.push(m.declaring_class.clone());
+        self.called_class_stack.push(class_name);
+        self.push_hook_frame(&op, &cvs);
+        let r = if is_set && cvs.len() > 1 && !self.set_hook_recv(&op, &mut cvs[1], false, None) {
+            Err(VmError {
+                message: "Uncaught exception".into(),
+                line: self.current_line,
+            })
+        } else {
+            self.execute_op_array(&op, cvs)
+        };
+        self.call_stack.pop();
+        self.called_class_stack.pop();
+        self.class_scope_stack.pop();
+        self.property_hook_stack.pop();
+        r.unwrap_or(Value::Null)
+    }
+
+    /// The set hook's RECV of its `$value` parameter, run after
+    /// push_hook_frame(): the value passes the parameter's type as a
+    /// function argument does (the assigning code's strict_types; weak mode
+    /// coerces `value` in place). On a mismatch the TypeError is thrown
+    /// (current_exception) and false returned. `called_in` is the line of
+    /// the assignment, None when the hook is invoked by an internal function
+    /// (reflection).
+    #[inline(never)]
+    pub(crate) fn set_hook_recv(
+        &mut self,
+        hook: &OpArray,
+        value: &mut Value,
+        caller_strict: bool,
+        called_in: Option<u32>,
+    ) -> bool {
+        let Some(Some(info)) = hook.param_types.get(1) else {
+            return true;
+        };
+        let v = value.deref();
+        if matches!(v, Value::Undef) {
+            return true;
+        }
+        let def_line = if hook.decl_line > 0 {
+            hook.decl_line
+        } else {
+            self.current_line
+        };
+        let strict = caller_strict;
+        if self.value_matches_type_mode(&v, &info.param_type, strict) {
+            if !strict {
+                self.emit_implicit_float_to_int_if_needed(&v, &info.param_type, def_line);
+            }
+            let mut c = v;
+            Self::coerce_value_to_type(&mut c, &info.param_type, strict);
+            *value = c;
+            return true;
+        }
+        let name = self
+            .call_stack
+            .last()
+            .map(|f| f.0.clone())
+            .unwrap_or_default();
+        let mut msg = format!(
+            "{}(): Argument #1 (${}) must be of type {}, {} given",
+            name.split('\0').next().unwrap_or_default(),
+            String::from_utf8_lossy(&info.param_name),
+            self.param_type_display(&info.param_type),
+            Self::value_type_name(&v)
+        );
+        if let Some(line) = called_in {
+            msg = format!("{}, called in {} on line {}", msg, self.current_file, line);
+        }
+        let exc = self.create_exception(b"TypeError", &msg, def_line);
+        if !hook.filename.is_empty() {
+            if let Value::Object(ref o) = exc {
+                o.borrow_mut().set_property(
+                    b"file".to_vec(),
+                    Value::String(PhpString::from_vec(hook.filename.clone())),
+                );
+            }
+        }
+        self.current_exception = Some(exc);
+        false
     }
 
     /// The attributes of the hook method named `$prop::get` / `$prop::set`

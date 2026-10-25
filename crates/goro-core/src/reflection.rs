@@ -5958,7 +5958,7 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                             let msg = format!(
                                 "Too few arguments to function {}::{}(), {} passed and {} {} expected",
                                 canonical,
-                                crate::string::msg_str(&m.name),
+                                hook_method_display(&m.name),
                                 invoke_args.len(),
                                 descriptor,
                                 req
@@ -5979,6 +5979,11 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                             vm.call_stack.pop();
                             vm.current_exception = Some(exc);
                             return Some(Value::Null);
+                        }
+                        if let Value::Object(o) = &target_obj {
+                            if m.name.starts_with(b"__property_") && invoke_named.is_empty() {
+                                return Some(vm.invoke_property_hook(o, &m, &invoke_args));
+                            }
                         }
                         let mut arr = PhpArray::new();
                         for a in &invoke_args {
@@ -6324,6 +6329,18 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
 /// call (argument checks, coercion, frames) made from the declaring class's
 /// scope, with the reflected class as the called scope of static calls.
 /// None when the class can't be named in source (anonymous classes).
+/// A method's name as PHP shows it: a property hook's is `$prop::get` /
+/// `$prop::set`.
+fn hook_method_display(name: &[u8]) -> String {
+    if let Some(p) = name.strip_prefix(b"__property_get_") {
+        format!("${}::get", crate::string::msg_str(p))
+    } else if let Some(p) = name.strip_prefix(b"__property_set_") {
+        format!("${}::set", crate::string::msg_str(p))
+    } else {
+        crate::string::msg_str(name).to_string()
+    }
+}
+
 fn invoke_user_method(
     vm: &mut Vm,
     m: &crate::object::MethodDef,
