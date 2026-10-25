@@ -721,6 +721,13 @@ struct XportErr {
     code: i32,
 }
 
+/// The transport's stream was created before its connect / bind failed
+/// (and is freed): its resource id is used up.
+fn xport_failed(e: XportErr) -> XportErr {
+    goro_core::value::alloc_resource_id();
+    e
+}
+
 fn alloc_socket_stream(fd: i32, sd: SockData, uri: Option<&[u8]>, ctx: Option<i64>) -> i64 {
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
     let fid = alloc_file_handle(file, "r+");
@@ -729,6 +736,8 @@ fn alloc_socket_stream(fd: i32, sd: SockData, uri: Option<&[u8]>, ctx: Option<i6
             fh.wrapper_type = String::new();
             fh.stream_type = sd.kind.label().to_string();
             fh.seekable = false;
+            // stream->position counts what is read and written.
+            fh.pipe_pos = Some(0);
             fh.uri = uri
                 .map(|u| String::from_utf8_lossy(u).into_owned())
                 .unwrap_or_default();
@@ -879,26 +888,27 @@ fn xport_create(
                     }
                     fd
                 }
-                Err(e) => return Err(e),
+                Err(e) => return Err(xport_failed(e)),
             }
         }
         XportOp::Server { flags } if flags & STREAM_XPORT_BIND == 0 => unconnected_fd(),
         XportOp::Server { flags } => {
             let fd = if kind.is_unix() {
-                bind_unix(vm, func, kind, name)?
+                bind_unix(vm, func, kind, name)
             } else {
-                bind_ip(vm, func, kind, name, ctx)?
-            };
+                bind_ip(vm, func, kind, name, ctx)
+            }
+            .map_err(xport_failed)?;
             if flags & STREAM_XPORT_LISTEN != 0 {
                 let backlog = ctx_socket_opt(ctx, b"backlog")
                     .map(|v| v.to_long() as i32)
                     .unwrap_or(32);
                 if unsafe { libc::listen(fd, backlog) } != 0 {
                     unsafe { libc::close(fd) };
-                    return Err(XportErr {
+                    return Err(xport_failed(XportErr {
                         text: None,
                         code: 0,
-                    });
+                    }));
                 }
             }
             sd.no_io = true;
@@ -1339,6 +1349,16 @@ pub(crate) fn sock_write(vm: &mut Vm, func: &str, fid: i64, data: &[u8]) -> isiz
         if n <= 0 {
             return if done == 0 { n } else { done as isize };
         }
+        // php_sockop_write(): a progress notification; the position
+        // advances.
+        if let Some(ctx) = stream_ctx_src(fid) {
+            notify_progress_increment(Some(ctx), n as i64);
+        }
+        with_sock(fid, |fh| {
+            if let Some(p) = fh.pipe_pos.as_mut() {
+                *p += n as i64;
+            }
+        });
         done += n as usize;
     }
     done as isize
@@ -1758,6 +1778,21 @@ pub(crate) fn stream_socket_pair(vm: &mut Vm, args: &[Value]) -> Result<Value, V
 pub(crate) fn stream_from_socket(vm: &Vm, fd: i32) -> i64 {
     let t = default_socket_timeout(vm);
     alloc_socket_stream(fd, SockData::new(SockKind::Generic, t), None, None)
+}
+
+/// php_stream_url_wrap_php() for php://stdin, php://stdout or php://stderr
+/// whose descriptor is a socket: php_stream_sock_open_from_socket() with
+/// php_stream_socket_ops.
+pub(crate) fn stdio_stream_from_socket(vm: &Vm, fd: i32, uri: &str) -> i64 {
+    let fid = stream_from_socket(vm, fd);
+    FILE_HANDLES.with(|h| {
+        if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+            fh.wrapper_type = "PHP".to_string();
+            fh.stream_type = "tcp_socket".to_string();
+            fh.uri = uri.to_string();
+        }
+    });
+    fid
 }
 
 /// php_network_parse_network_address_with_port()
@@ -2847,135 +2882,6 @@ fn crypto_write(vm: &mut Vm, func: &str, fid: i64, data: &[u8]) -> Option<isize>
     })
 }
 
-/// The https:// transport of the http wrapper: connect to ssl://`addr`
-/// with the given "ssl" context options, send `request` and read the
-/// response until the server closes. None after the warnings on failure.
-pub(crate) fn tls_roundtrip(
-    vm: &mut Vm,
-    func: &str,
-    addr: &[u8],
-    ssl_opts: Option<PhpArray>,
-    request: &[u8],
-    tunnel: Option<(&[u8], &[u8])>,
-) -> Result<Vec<u8>, Option<&'static str>> {
-    thread_local! {
-        static NEXT_TMP_CTX: std::cell::Cell<i64> = const { std::cell::Cell::new(-1_000_000) };
-    }
-    let ctx_id = NEXT_TMP_CTX.with(|c| {
-        let v = c.get();
-        c.set(v - 1);
-        v
-    });
-    let mut ctx = StreamContext::default();
-    {
-        let m = ctx.options.entry(b"ssl".to_vec()).or_default();
-        if let Some(o) = ssl_opts {
-            for (k, v) in o.iter() {
-                let k = match k {
-                    ArrayKey::String(s) => s.as_bytes().to_vec(),
-                    ArrayKey::Int(i) => i.to_string().into_bytes(),
-                };
-                m.insert(k, v.clone());
-            }
-        }
-        // Through a proxy, set peer_name or name verification would try
-        // to use the proxy server name.
-        if let Some((_, target)) = tunnel {
-            m.entry(b"peer_name".to_vec())
-                .or_insert_with(|| Value::String(PhpString::from_bytes(target)));
-        }
-    }
-    STREAM_CONTEXTS.with(|c| c.borrow_mut().insert(ctx_id, ctx));
-    let mut name = if tunnel.is_some() {
-        b"tcp://".to_vec()
-    } else {
-        b"ssl://".to_vec()
-    };
-    name.extend_from_slice(addr);
-    let timeout = default_socket_timeout(vm);
-    let r = xport_create(
-        vm,
-        func,
-        &name,
-        XportOp::Connect {
-            asynchronous: false,
-        },
-        timeout_from_double(timeout as f64),
-        Some(ctx_id),
-    );
-    let Ok(fid) = r else {
-        STREAM_CONTEXTS.with(|c| c.borrow_mut().remove(&ctx_id));
-        return Err(None);
-    };
-    let discard = |fid: i64| {
-        FILE_HANDLES.with(|h| h.borrow_mut().remove(&fid));
-        STREAM_CONTEXTS.with(|c| c.borrow_mut().remove(&fid));
-        goro_core::value::close_resource(fid);
-    };
-    if let Some((connect, _)) = tunnel {
-        let mut ok = sock_write(vm, func, fid, connect) == connect.len() as isize;
-        if ok {
-            // Read and discard the response header up to a blank line.
-            let mut line = Vec::new();
-            loop {
-                let mut b = [0u8; 1];
-                let n = FILE_HANDLES.with(|h| {
-                    h.borrow_mut()
-                        .get_mut(&fid)
-                        .map(|fh| fh.read_raw(&mut b, false))
-                });
-                match n {
-                    Some(Ok(1)) => {
-                        if b[0] == b'\n' {
-                            if line.is_empty() || line == b"\r" {
-                                break;
-                            }
-                            line.clear();
-                        } else {
-                            line.push(b[0]);
-                        }
-                    }
-                    Some(Err(e)) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-                    _ => break,
-                }
-            }
-            const STREAM_CRYPTO_METHOD_SSLV23_CLIENT: i64 = 57;
-            ok = crypto_setup(vm, func, fid, STREAM_CRYPTO_METHOD_SSLV23_CLIENT, None) >= 0
-                && crypto_enable(vm, func, fid, true) >= 0;
-        }
-        STREAM_CONTEXTS.with(|c| c.borrow_mut().remove(&ctx_id));
-        if !ok {
-            flush_crypto_warnings(vm, func);
-            discard(fid);
-            return Err(Some("Cannot connect to HTTPS server through proxy"));
-        }
-    } else {
-        STREAM_CONTEXTS.with(|c| c.borrow_mut().remove(&ctx_id));
-    }
-    let mut out = Err(None);
-    if sock_write(vm, func, fid, request) == request.len() as isize {
-        let mut buf = Vec::new();
-        loop {
-            let mut chunk = vec![0u8; STREAM_CHUNK_SIZE];
-            let n = FILE_HANDLES.with(|h| {
-                h.borrow_mut()
-                    .get_mut(&fid)
-                    .map(|fh| fh.read_raw(&mut chunk, false))
-            });
-            match n {
-                Some(Ok(0)) | None => break,
-                Some(Ok(k)) => buf.extend_from_slice(&chunk[..k]),
-                Some(Err(e)) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-                Some(Err(_)) => break,
-            }
-        }
-        out = Ok(buf);
-    }
-    flush_crypto_warnings(vm, func);
-    discard(fid);
-    out
-}
-
 // ---------------------------------------------------------------------------
 // More stream services for ext/sockets (see crate::sockets_streams)
 // ---------------------------------------------------------------------------
@@ -3098,4 +3004,211 @@ pub(crate) fn enable_client_crypto(vm: &mut Vm, func: &str, fid: i64) -> bool {
         && crypto_enable(vm, func, fid, true) >= 0;
     flush_crypto_warnings(vm, func);
     ok
+}
+
+// ---------------------------------------------------------------------------
+// Transport services for the http:// wrapper
+// ---------------------------------------------------------------------------
+
+/// php_stream_xport_create(`name`, options, CLIENT | CONNECT, timeout,
+/// context) followed by PHP_STREAM_OPTION_READ_TIMEOUT: the stream, or
+/// Err(the error text, if any).
+pub(crate) fn http_connect(
+    vm: &mut Vm,
+    func: &str,
+    name: &[u8],
+    timeout: f64,
+    ctx: Option<i64>,
+) -> Result<i64, Option<String>> {
+    let fid = xport_create(
+        vm,
+        func,
+        name,
+        XportOp::Connect {
+            asynchronous: false,
+        },
+        timeout_from_double(timeout),
+        ctx,
+    )
+    .map_err(|e| e.text)?;
+    // (a negative timeout waits forever)
+    let (sec, usec) = if timeout < 0.0 {
+        (-1, 0)
+    } else {
+        let sec = timeout.trunc();
+        (sec as i64, ((timeout - sec) * 1_000_000.0) as i64)
+    };
+    with_sock(fid, |fh| {
+        if let Some(sd) = fh.sock.as_mut() {
+            sd.tv_sec = sec;
+            sd.tv_usec = usec;
+        }
+    });
+    Ok(fid)
+}
+
+/// The CONNECT tunnel of an https:// request through a proxy, then the TLS
+/// layer: false ("Cannot connect to HTTPS server through proxy").
+pub(crate) fn http_proxy_tunnel(
+    vm: &mut Vm,
+    func: &str,
+    fid: i64,
+    connect: &[u8],
+    peer_name: Option<&[u8]>,
+) -> bool {
+    if sock_write(vm, func, fid, connect) != connect.len() as isize {
+        return false;
+    }
+    // php_stream_gets(stream, header_line, HTTP_HEADER_BLOCK_SIZE - 1)
+    // until an empty line.
+    while let Some(line) = super::stream_get_line_raw(fid, 1022) {
+        if matches!(line.first(), None | Some(b'\n' | b'\r' | 0)) {
+            break;
+        }
+    }
+    // Set peer_name or name verification would try to use the proxy
+    // server name.
+    if let Some(p) = peer_name {
+        STREAM_CONTEXTS.with(|c| {
+            let mut c = c.borrow_mut();
+            let ctx = c.entry(fid).or_default();
+            ctx.options
+                .entry(b"ssl".to_vec())
+                .or_default()
+                .entry(b"peer_name".to_vec())
+                .or_insert_with(|| Value::String(PhpString::from_bytes(p)));
+        });
+    }
+    let ok = enable_client_crypto(vm, func, fid);
+    if peer_name.is_some() {
+        STREAM_CONTEXTS.with(|c| {
+            if let Some(o) = c
+                .borrow_mut()
+                .get_mut(&fid)
+                .and_then(|ctx| ctx.options.get_mut(b"ssl".as_slice()))
+            {
+                o.shift_remove(b"peer_name".as_slice());
+            }
+        });
+    }
+    ok
+}
+
+/// Close a stream the http:// wrapper opened (php_stream_close()).
+pub(crate) fn http_close(fid: i64) {
+    FILE_HANDLES.with(|h| h.borrow_mut().remove(&fid));
+    STREAM_CONTEXTS.with(|c| c.borrow_mut().remove(&fid));
+    release_stream_ctx(fid);
+    goro_core::value::close_resource(fid);
+}
+
+thread_local! {
+    /// Notifications of socket I/O waiting to be delivered (the stream layer
+    /// cannot call user code while a stream is borrowed): (context, code,
+    /// bytes so far, max).
+    static PENDING_NOTIFY: RefCell<Vec<(i64, i64, i64, i64)>> = const { RefCell::new(Vec::new()) };
+}
+
+const NOTIFY_PROGRESS: i64 = 7;
+const NOTIFY_COMPLETED: i64 = 8;
+
+/// php_stream_notify_progress_increment(context, delta, 0)
+pub(crate) fn notify_progress_increment(ctx: Option<i64>, delta: i64) {
+    let Some(id) = ctx else {
+        return;
+    };
+    let ev = STREAM_CONTEXTS.with(|c| {
+        let mut c = c.borrow_mut();
+        let ctx = c.get_mut(&id)?;
+        if ctx.notification.is_none() || !ctx.progress_mask {
+            return None;
+        }
+        ctx.progress += delta;
+        Some((id, NOTIFY_PROGRESS, ctx.progress, ctx.progress_max))
+    });
+    if let Some(e) = ev {
+        PENDING_NOTIFY.with(|p| p.borrow_mut().push(e));
+    }
+}
+
+/// php_stream_notify_completed(context)
+pub(crate) fn notify_completed(ctx: Option<i64>) {
+    let Some(id) = ctx else {
+        return;
+    };
+    let ev = STREAM_CONTEXTS.with(|c| {
+        let c = c.borrow();
+        let ctx = c.get(&id)?;
+        ctx.notification.as_ref()?;
+        Some((id, NOTIFY_COMPLETED, ctx.progress, ctx.progress_max))
+    });
+    if let Some(e) = ev {
+        PENDING_NOTIFY.with(|p| p.borrow_mut().push(e));
+    }
+}
+
+/// php_stream_notify_progress_init(context, 0, max)
+pub(crate) fn notify_progress_init(ctx: Option<i64>, max: i64) {
+    let Some(id) = ctx else {
+        return;
+    };
+    let ev = STREAM_CONTEXTS.with(|c| {
+        let mut c = c.borrow_mut();
+        let ctx = c.get_mut(&id)?;
+        ctx.notification.as_ref()?;
+        ctx.progress = 0;
+        ctx.progress_max = max;
+        ctx.progress_mask = true;
+        Some((id, NOTIFY_PROGRESS, 0, max))
+    });
+    if let Some(e) = ev {
+        PENDING_NOTIFY.with(|p| p.borrow_mut().push(e));
+    }
+}
+
+/// The context a socket stream was created with (stream->ctx).
+pub(crate) fn stream_ctx_src(fid: i64) -> Option<i64> {
+    FILE_HANDLES.with(|h| {
+        h.borrow()
+            .get(&fid)
+            .and_then(|fh| fh.sock.as_ref())
+            .and_then(|sd| sd.ctx_src)
+    })
+}
+
+/// Deliver the queued notifications (php_stream_notification_notify()).
+pub(crate) fn flush_notifications(vm: &mut Vm) {
+    while let Some((id, code, sofar, max)) = PENDING_NOTIFY.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.is_empty() {
+            None
+        } else {
+            Some(p.remove(0))
+        }
+    }) {
+        if vm.current_exception.is_some() {
+            PENDING_NOTIFY.with(|p| p.borrow_mut().clear());
+            return;
+        }
+        let Some(cb) =
+            STREAM_CONTEXTS.with(|c| c.borrow().get(&id).and_then(|c| c.notification.clone()))
+        else {
+            continue;
+        };
+        let args = [
+            cb,
+            Value::Long(code),
+            Value::Long(0),
+            Value::Null,
+            Value::Long(0),
+            Value::Long(sofar),
+            Value::Long(max),
+        ];
+        let _ = super::call_user_func(vm, &args);
+    }
+}
+
+/// Whether notifications are waiting (a cheap check for the stream layer).
+pub(crate) fn notifications_pending() -> bool {
+    PENDING_NOTIFY.with(|p| !p.borrow().is_empty())
 }

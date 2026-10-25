@@ -177,15 +177,19 @@ pub(crate) fn gzopen(
             return Ok(None);
         }
     }
+    // (options | STREAM_WILL_CAST)
+    let was_cast = crate::misc::STREAM_WILL_CAST.with(|c| c.replace(true));
     let inner = if options & REPORT_ERRORS != 0 {
-        any_open(vm, path, mode, options, context)?
+        any_open(vm, path, mode, options, context)
     } else {
         // Without REPORT_ERRORS the plain wrapper does not complain.
         let saved = vm.warning_capture.replace(Vec::new());
         let r = any_open(vm, path, mode, options, context);
         vm.warning_capture = saved;
-        r?
+        r
     };
+    crate::misc::STREAM_WILL_CAST.with(|c| c.set(was_cast));
+    let inner = inner?;
     let Some(inner) = inner else {
         return Ok(None);
     };

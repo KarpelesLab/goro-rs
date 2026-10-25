@@ -1,7 +1,8 @@
 //! The http:// and https:// stream wrapper (ext/standard/http_fopen_wrapper.c):
 //! request building from the "http" context options, response status and
-//! header handling, redirects and chunked bodies. The whole body is read
-//! (the server closes the connection: "Connection: close" is sent).
+//! header handling, redirects and chunked bodies. The stream opened is the
+//! socket stream of the transport, positioned at the body (with a dechunk
+//! read filter for chunked responses).
 
 use goro_core::array::{ArrayKey, PhpArray};
 use goro_core::string::PhpString;
@@ -92,7 +93,8 @@ fn parse_url(url: &str) -> Option<Url> {
     let (host, port) = if let Some(h) = hostport.strip_prefix('[') {
         let e = h.find(']')?;
         let port = h[e + 1..].strip_prefix(':').and_then(|p| p.parse().ok());
-        (h[..e].to_string(), port)
+        // (the brackets are kept: "[::1]")
+        (format!("[{}]", &h[..e]), port)
     } else {
         match hostport.rfind(':') {
             Some(i) => (hostport[..i].to_string(), hostport[i + 1..].parse().ok()),
@@ -215,8 +217,6 @@ const NOTIFY_AUTH_REQUIRED: i64 = 3;
 const NOTIFY_MIME_TYPE_IS: i64 = 4;
 const NOTIFY_FILE_SIZE_IS: i64 = 5;
 const NOTIFY_REDIRECTED: i64 = 6;
-const NOTIFY_PROGRESS: i64 = 7;
-const NOTIFY_COMPLETED: i64 = 8;
 const NOTIFY_FAILURE: i64 = 9;
 const NOTIFY_AUTH_RESULT: i64 = 10;
 const SEVERITY_INFO: i64 = 0;
@@ -234,13 +234,12 @@ fn notify(
     sofar: i64,
     max: i64,
 ) {
+    // (after what the socket I/O queued)
+    xp_socket::flush_notifications(vm);
     if vm.current_exception.is_some() {
         return;
     }
-    let Some(id) = ctx.map(|c| c.deref()).and_then(|c| match c {
-        v @ Value::Resource(_) => resolve_context_id(&v),
-        _ => None,
-    }) else {
+    let Some(id) = context_id(ctx) else {
         return;
     };
     let Some(cb) =
@@ -261,35 +260,6 @@ fn notify(
         Value::Long(max),
     ];
     let _ = super::call_user_func(vm, &args);
-}
-
-/// An in-memory php_stream over the received response.
-struct Resp<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl Resp<'_> {
-    fn eof(&self) -> bool {
-        self.pos >= self.data.len()
-    }
-
-    /// php_stream_get_line(): up to `max` bytes, ending after a '\n'.
-    fn get_line(&mut self, max: usize) -> Option<Vec<u8>> {
-        if self.eof() {
-            return None;
-        }
-        let rest = &self.data[self.pos..];
-        let mut n = match rest.iter().position(|&c| c == b'\n') {
-            Some(p) => p + 1,
-            None => rest.len(),
-        };
-        if max > 0 {
-            n = n.min(max);
-        }
-        self.pos += n;
-        Some(rest[..n].to_vec())
-    }
 }
 
 /// php_stream_http_response_header_trim(): strip the line ending and
@@ -447,96 +417,6 @@ fn fail(vm: &mut Vm, func: &str, url: &str, msg: &str) {
     ));
 }
 
-/// Connect to `addr` ("host:port") and exchange `req`.
-fn exchange(
-    vm: &mut Vm,
-    func: &str,
-    orig_url: &str,
-    host: &str,
-    port: u16,
-    tls: bool,
-    ssl: Option<PhpArray>,
-    req: &[u8],
-    timeout: f64,
-    tunnel: Option<(Vec<u8>, String)>,
-) -> Option<Vec<u8>> {
-    let addr = format!("{}:{}", host, port);
-    if tls || tunnel.is_some() {
-        return match xp_socket::tls_roundtrip(
-            vm,
-            func,
-            addr.as_bytes(),
-            ssl,
-            req,
-            tunnel.as_ref().map(|(c, t)| (c.as_slice(), t.as_bytes())),
-        ) {
-            Ok(r) => Some(r),
-            Err(Some(msg)) => {
-                fail(vm, func, orig_url, msg);
-                None
-            }
-            Err(None) => None,
-        };
-    }
-    use std::io::{Read, Write};
-    use std::net::ToSocketAddrs;
-    let addrs: Vec<std::net::SocketAddr> = match (host, port).to_socket_addrs() {
-        Ok(a) => a.collect(),
-        Err(_) => {
-            vm.emit_warning(&format!(
-                "{}(): php_network_getaddresses: getaddrinfo for {} failed: Name or service not known",
-                func, host
-            ));
-            fail(
-                vm,
-                func,
-                orig_url,
-                "php_network_getaddresses: getaddrinfo for host failed",
-            );
-            return None;
-        }
-    };
-    let to = if timeout > 0.0 {
-        Some(std::time::Duration::from_secs_f64(timeout))
-    } else {
-        None
-    };
-    let mut last_err = String::from("Connection refused");
-    let mut stream = None;
-    for a in addrs {
-        let r = match to {
-            Some(t) => std::net::TcpStream::connect_timeout(&a, t),
-            None => std::net::TcpStream::connect(a),
-        };
-        match r {
-            Ok(s) => {
-                stream = Some(s);
-                break;
-            }
-            Err(e) => {
-                last_err = super::strip_os_error(&e.to_string());
-            }
-        }
-    }
-    let Some(mut s) = stream else {
-        fail(vm, func, orig_url, &last_err);
-        return None;
-    };
-    let _ = s.set_read_timeout(to);
-    let _ = s.write_all(req);
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        match s.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
-        }
-    }
-    Some(buf)
-}
-
 /// php_stream_handle_proxy_authorization_header(): the
 /// "Proxy-Authorization: ..." line of user headers `s`, if any.
 fn proxy_authorization_header(s: &[u8]) -> Option<Vec<u8>> {
@@ -590,65 +470,27 @@ fn strip_header(user_headers: &mut String, header: &str) {
     }
 }
 
-/// The dechunk filter.
-fn dechunk(body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < body.len() {
-        let line_end = match body[i..].iter().position(|&c| c == b'\n') {
-            Some(p) => i + p,
-            None => break,
-        };
-        let size_s = String::from_utf8_lossy(&body[i..line_end]);
-        let size_s = size_s.split(';').next().unwrap_or("").trim().to_string();
-        let Ok(size) = usize::from_str_radix(&size_s, 16) else {
-            break;
-        };
-        i = line_end + 1;
-        if size == 0 {
-            break;
-        }
-        let end = (i + size).min(body.len());
-        out.extend_from_slice(&body[i..end]);
-        i = end;
-        // CRLF / LF after the chunk data
-        if body.get(i) == Some(&b'\r') {
-            i += 1;
-        }
-        if body.get(i) == Some(&b'\n') {
-            i += 1;
-        }
-    }
-    out
-}
-
-/// Open an http(s):// URL: Some(body) on success, None after the
-/// warnings. `$http_response_header` is set.
-pub(super) fn http_open(
+/// php_stream_url_wrap_http(): open an http(s):// URL. The socket stream
+/// is returned positioned at the body (`headers_only` =
+/// STREAM_ONLY_GET_HEADERS); `$http_response_header` and the last response
+/// headers are set.
+pub(super) fn http_open_stream(
     vm: &mut Vm,
     func: &str,
     orig_url: &str,
     ctx: Option<&Value>,
-) -> Option<Vec<u8>> {
-    http_open_ex(vm, func, orig_url, ctx, false).map(|(b, _)| b)
-}
-
-/// php_stream_url_wrap_http(): `headers_only` = STREAM_ONLY_GET_HEADERS.
-pub(super) fn http_open_ex(
-    vm: &mut Vm,
-    func: &str,
-    orig_url: &str,
-    ctx: Option<&Value>,
+    mode: &str,
     headers_only: bool,
-) -> Option<(Vec<u8>, PhpArray)> {
+) -> Option<(i64, PhpArray)> {
     clear_last_response_headers();
     let mut headers: Option<PhpArray> = None;
-    let r = http_wrap_ex(vm, func, orig_url, ctx, headers_only, &mut headers);
+    let r = http_wrap_ex(vm, func, orig_url, ctx, mode, headers_only, &mut headers);
+    xp_socket::flush_notifications(vm);
     if let Some(h) = &headers {
         LAST_HTTP_HEADERS.with(|l| *l.borrow_mut() = Some(h.clone()));
         set_response_header(vm, h.clone());
     }
-    r.map(|b| (b, headers.unwrap_or_default()))
+    r.map(|fid| (fid, headers.unwrap_or_default()))
 }
 
 /// php_stream_context_get_uri_parser("http") + php_uri_parse_to_struct():
@@ -695,22 +537,51 @@ fn uri_parser_accepts(vm: &mut Vm, func: &str, http: &PhpArray, path: &str) -> b
     ok
 }
 
-/// php_stream_url_wrap_http_ex(), redirects included.
+/// The context resource of a context argument (FG(default_context) when
+/// none is given).
+fn context_id(ctx: Option<&Value>) -> Option<i64> {
+    match ctx.map(|c| c.deref()) {
+        None | Some(Value::Null) | Some(Value::Undef) => {
+            crate::misc::DEFAULT_STREAM_CTX.with(|d| d.get())
+        }
+        Some(v @ Value::Resource(_)) => resolve_context_id(&v),
+        _ => None,
+    }
+}
+
+/// php_url_decode() in place on a string whose length is kept: the decoded
+/// bytes, the terminating NUL, then what is left of the original.
+fn url_decode_keep_len(s: &str) -> Vec<u8> {
+    let mut d = url_decode(s);
+    if d.len() < s.len() {
+        d.push(0);
+        d.extend_from_slice(&s.as_bytes()[d.len()..]);
+    }
+    d
+}
+
+/// php_stream_url_wrap_http_ex(), redirects included: the open stream.
+#[allow(clippy::too_many_arguments)]
 fn http_wrap_ex(
     vm: &mut Vm,
     func: &str,
     orig_url: &str,
     ctx: Option<&Value>,
+    mode: &str,
     headers_only: bool,
     response_header: &mut Option<PhpArray>,
-) -> Option<Vec<u8>> {
-    let (http, ssl) = context_options(ctx);
+) -> Option<i64> {
+    let (http, _ssl) = context_options(ctx);
+    let ctx_id = context_id(ctx);
     let mut path = orig_url.to_string();
     let mut redirect_max: i64 = 20; // PHP_URL_REDIRECT_MAX
     let mut header_init = true;
     let mut redirected = false;
     let mut keep_method = false;
-    loop {
+    // The declared size of each response followed: the `out:` path of
+    // every (recursive) call runs once the innermost one returns.
+    let mut levels: Vec<i64> = Vec::new();
+    let (fid, chunked) = loop {
         if redirect_max < 1 {
             fail(vm, func, orig_url, "Redirection limit reached, aborting");
             return None;
@@ -722,10 +593,29 @@ fn http_wrap_ex(
             fail(vm, func, orig_url, "HTTP request failed!");
             return None;
         };
+        if mode.contains(['a', 'w', 'x', '+']) {
+            fail(
+                vm,
+                func,
+                orig_url,
+                "HTTP wrapper does not support writeable connections",
+            );
+            return None;
+        }
         let request_fulluri = opt(&http, "request_fulluri").is_some_and(|v| v.is_truthy());
+        let port = url.port.unwrap_or(if url.https { 443 } else { 80 });
         let proxy = match opt(&http, "proxy").map(|v| v.deref()) {
             Some(Value::String(s)) if !s.as_bytes().is_empty() => Some(s.to_string_lossy()),
             _ => None,
+        };
+        let transport = match &proxy {
+            Some(p) => p.clone(),
+            None => format!(
+                "{}://{}:{}",
+                if url.https { "ssl" } else { "tcp" },
+                url.host,
+                port
+            ),
         };
         if request_fulluri && (path.contains('\n') || path.contains('\r')) {
             fail(
@@ -755,25 +645,64 @@ fn http_wrap_ex(
             None => vm
                 .constants
                 .get(b"default_socket_timeout".as_slice())
-                .map(|v| v.to_double())
+                .map(|v| v.to_double().trunc())
                 .unwrap_or(60.0),
         };
-        let port = url.port.unwrap_or(if url.https { 443 } else { 80 });
-        // The transport: the proxy ("tcp://host:port") or the server.
-        let (conn_host, conn_port, conn_tls) = match &proxy {
-            Some(p) => {
-                let rest = p.split_once("://").map(|(_, r)| r).unwrap_or(p);
-                match rest.rsplit_once(':') {
-                    Some((h, pt)) => (
-                        h.trim_matches(['[', ']']).to_string(),
-                        pt.parse().unwrap_or(80),
-                        false,
-                    ),
-                    None => (rest.to_string(), 80, false),
-                }
+        let fid = match xp_socket::http_connect(vm, func, transport.as_bytes(), timeout, ctx_id) {
+            Ok(f) => f,
+            Err(text) => {
+                xp_socket::flush_notifications(vm);
+                fail(
+                    vm,
+                    func,
+                    orig_url,
+                    text.as_deref().unwrap_or("operation failed"),
+                );
+                return None;
             }
-            None => (url.host.clone(), port, url.https),
         };
+        // https through a proxy: a CONNECT tunnel, then TLS to the server.
+        if proxy.is_some() && url.https {
+            let mut connect = format!("CONNECT {}:{} HTTP/1.0\r\n", url.host, port).into_bytes();
+            let auth = match opt(&http, "header").map(|v| v.deref()) {
+                Some(Value::Array(a)) => a.borrow().values().find_map(|v| match v.deref() {
+                    Value::String(s) => proxy_authorization_header(s.as_bytes()),
+                    _ => None,
+                }),
+                Some(Value::String(s)) => proxy_authorization_header(s.as_bytes()),
+                _ => None,
+            };
+            if let Some(a) = auth {
+                connect.extend_from_slice(&a);
+                connect.extend_from_slice(b"\r\n");
+            }
+            connect.extend_from_slice(b"\r\n");
+            let has_peer = ctx_id.is_some_and(|id| {
+                STREAM_CONTEXTS.with(|c| {
+                    c.borrow()
+                        .get(&id)
+                        .and_then(|c| c.options.get(b"ssl".as_slice()))
+                        .is_some_and(|o| o.contains_key(b"peer_name".as_slice()))
+                })
+            });
+            let peer = if has_peer {
+                None
+            } else {
+                Some(url.host.as_bytes())
+            };
+            if !xp_socket::http_proxy_tunnel(vm, func, fid, &connect, peer) {
+                xp_socket::http_close(fid);
+                xp_socket::flush_notifications(vm);
+                fail(
+                    vm,
+                    func,
+                    orig_url,
+                    "Cannot connect to HTTPS server through proxy",
+                );
+                return None;
+            }
+        }
+        xp_socket::flush_notifications(vm);
         notify(vm, ctx, NOTIFY_CONNECT, SEVERITY_INFO, None, 0, 0, 0);
         if header_init {
             if let Some(v) = opt(&http, "max_redirects") {
@@ -844,10 +773,10 @@ fn http_wrap_ex(
         let have_conn = have("connection:");
         if !have_auth {
             if let Some(u) = &url.user {
-                let mut scratch = url_decode(u);
+                let mut scratch = url_decode_keep_len(u);
                 scratch.push(b':');
                 if let Some(p) = &url.pass {
-                    scratch.extend_from_slice(&url_decode(p));
+                    scratch.extend_from_slice(&url_decode_keep_len(p));
                 }
                 req.push_str(&format!("Authorization: Basic {}\r\n", base64(&scratch)));
                 notify(vm, ctx, NOTIFY_AUTH_REQUIRED, SEVERITY_INFO, None, 0, 0, 0);
@@ -929,52 +858,25 @@ fn http_wrap_ex(
                 out.extend_from_slice(req.as_bytes());
             }
         }
-        // https through a proxy: a CONNECT tunnel, then TLS to the server.
-        let tunnel = if proxy.is_some() && url.https {
-            let mut connect = format!("CONNECT {}:{} HTTP/1.0\r\n", url.host, port).into_bytes();
-            let auth = match opt(&http, "header").map(|v| v.deref()) {
-                Some(Value::Array(a)) => a.borrow().values().find_map(|v| match v.deref() {
-                    Value::String(s) => proxy_authorization_header(s.as_bytes()),
-                    _ => None,
-                }),
-                Some(Value::String(s)) => proxy_authorization_header(s.as_bytes()),
-                _ => None,
-            };
-            if let Some(a) = auth {
-                connect.extend_from_slice(&a);
-                connect.extend_from_slice(b"\r\n");
-            }
-            connect.extend_from_slice(b"\r\n");
-            Some((connect, url.host.clone()))
-        } else {
-            None
-        };
-        let raw = exchange(
-            vm,
-            func,
-            orig_url,
-            &conn_host,
-            conn_port,
-            conn_tls,
-            ssl.clone(),
-            &out,
-            timeout,
-            tunnel,
-        )?;
+        // send it
+        xp_socket::sock_write(vm, func, fid, &out);
+        xp_socket::flush_notifications(vm);
         let headers = response_header.get_or_insert_with(PhpArray::new);
-        let mut resp = Resp { data: &raw, pos: 0 };
 
         // Status line.
         let mut reqok = false;
         let status_line: Vec<u8>;
         let ignore_errors;
-        let response_code = match resp.get_line(126) {
+        let first = crate::misc::stream_get_line_raw(fid, 126);
+        xp_socket::flush_notifications(vm);
+        let response_code = match first {
             Some(mut line) => {
                 let code_of = |l: &[u8]| -> i64 {
                     if l.len() > 9 {
                         let d: Vec<u8> = l[9..]
                             .iter()
                             .copied()
+                            .skip_while(|c| matches!(c, b' ' | b'\t'))
                             .take_while(|c| c.is_ascii_digit())
                             .collect();
                         String::from_utf8_lossy(&d).parse().unwrap_or(0)
@@ -989,13 +891,14 @@ fn http_wrap_ex(
                 }
                 if (100..200).contains(&code) && code != 101 {
                     // skip to the real status line
-                    while let Some(l) = resp.get_line(126) {
+                    while let Some(l) = crate::misc::stream_get_line_raw(fid, 126) {
                         let is_status = l.len() >= 6 && l[..6].eq_ignore_ascii_case(b"HTTP/1");
                         line = l;
                         if is_status {
                             break;
                         }
                     }
+                    xp_socket::flush_notifications(vm);
                     code = code_of(&line);
                 }
                 if (200..400).contains(&code) {
@@ -1017,12 +920,14 @@ fn http_wrap_ex(
                     }
                 } else {
                     // read and discard the rest of the status line
-                    let _ = resp.get_line(0);
+                    let _ = crate::misc::stream_get_line_raw(fid, 0);
+                    xp_socket::flush_notifications(vm);
                 }
                 headers.push(Value::String(PhpString::from_vec(t)));
                 code
             }
             None => {
+                xp_socket::http_close(fid);
                 fail(vm, func, orig_url, "HTTP request failed!");
                 return None;
             }
@@ -1037,13 +942,16 @@ fn http_wrap_ex(
             location: None,
         };
         let mut last: Option<Vec<u8>> = None;
-        while !resp.eof() {
-            let Some(mut line) = resp.get_line(0) else {
+        loop {
+            let line = crate::misc::stream_get_line_raw(fid, 0);
+            xp_socket::flush_notifications(vm);
+            let Some(mut line) = line else {
                 break;
             };
             let last_line = match line.first() {
                 Some(b'\r') => {
                     if line.get(1) != Some(&b'\n') {
+                        xp_socket::http_close(fid);
                         fail(
                             vm,
                             func,
@@ -1071,6 +979,7 @@ fn http_wrap_ex(
                 );
                 if last.is_none() {
                     if let Some(e) = info.error.take() {
+                        xp_socket::http_close(fid);
                         fail(vm, func, orig_url, &e);
                         return None;
                     }
@@ -1080,6 +989,7 @@ fn http_wrap_ex(
                 }
             } else if !last_line {
                 if matches!(line.first(), Some(b' ') | Some(b'\t')) {
+                    xp_socket::http_close(fid);
                     fail(
                         vm,
                         func,
@@ -1111,11 +1021,11 @@ fn http_wrap_ex(
             // without the wrapper's error being displayed)
             info.error = None;
         }
-        let body = &raw[resp.pos.min(raw.len())..];
+        levels.push(info.file_size);
 
         if !reqok || (info.location.is_some() && info.follow_location) {
             if !info.follow_location || ((headers_only || ignore_errors) && redirect_max <= 1) {
-                return finish(vm, ctx, &info, body);
+                break (fid, info.chunked);
             }
             if let Some(loc) = &info.location {
                 notify(
@@ -1129,6 +1039,7 @@ fn http_wrap_ex(
                     0,
                 );
             }
+            xp_socket::http_close(fid);
             let Some(loc) = info.location.take() else {
                 fail(
                     vm,
@@ -1210,55 +1121,26 @@ fn http_wrap_ex(
             path = new_path;
             continue;
         }
-        return finish(vm, ctx, &info, body);
-    }
-}
-
-/// The `out:` path of php_stream_url_wrap_http_ex() with an open stream:
-/// it is returned whatever the status (a redirect not followed, or
-/// ignore_errors).
-fn finish(vm: &mut Vm, ctx: Option<&Value>, info: &HeaderInfo, body: &[u8]) -> Option<Vec<u8>> {
-    // php_stream_notify_progress_init()
-    notify(
-        vm,
-        ctx,
-        NOTIFY_PROGRESS,
-        SEVERITY_INFO,
-        None,
-        0,
-        0,
-        info.file_size,
-    );
-    let body = if info.chunked {
-        dechunk(body)
-    } else {
-        body.to_vec()
+        break (fid, info.chunked);
     };
-    // Reading the body to its end: php_stream_notify_progress_increment()
-    // as the socket delivers it, then php_stream_notify_completed() at EOF.
-    if !body.is_empty() {
-        notify(
-            vm,
-            ctx,
-            NOTIFY_PROGRESS,
-            SEVERITY_INFO,
-            None,
-            0,
-            body.len() as i64,
-            info.file_size,
-        );
+    // The `out:` path of each call, the innermost first: the progress is
+    // started over with that response's size, and what the stream already
+    // holds of the body counts.
+    for (i, size) in levels.iter().enumerate().rev() {
+        xp_socket::notify_progress_init(ctx_id, *size);
+        if i + 1 == levels.len() && chunked {
+            crate::misc::attach_read_filter(vm, fid, b"dechunk");
+        }
+        // as far as streams are concerned, we are now at the start of
+        // the stream
+        crate::misc::stream_reset_position(fid);
+        let buffered = crate::misc::stream_buffered_len(fid);
+        if buffered > 0 {
+            xp_socket::notify_progress_increment(ctx_id, buffered as i64);
+        }
     }
-    notify(
-        vm,
-        ctx,
-        NOTIFY_COMPLETED,
-        SEVERITY_INFO,
-        None,
-        0,
-        body.len() as i64,
-        info.file_size,
-    );
-    Some(body)
+    xp_socket::flush_notifications(vm);
+    Some(fid)
 }
 
 /// get_headers()
@@ -1268,9 +1150,11 @@ pub(super) fn get_headers(vm: &mut Vm, args: &[Value]) -> Value {
         .map(|v| v.to_php_string().to_string_lossy())
         .unwrap_or_default();
     let assoc = args.get(1).is_some_and(|v| v.is_truthy());
-    let Some((_, headers)) = http_open_ex(vm, "get_headers", &url, args.get(2), true) else {
+    let Some((fid, headers)) = http_open_stream(vm, "get_headers", &url, args.get(2), "r", true)
+    else {
         return Value::False;
     };
+    xp_socket::http_close(fid);
     if !assoc {
         return Value::Array(Rc::new(RefCell::new(headers)));
     }
@@ -1301,8 +1185,5 @@ pub(super) fn get_headers(vm: &mut Vm, args: &[Value]) -> Value {
 }
 
 fn set_response_header(vm: &mut Vm, headers: PhpArray) {
-    vm.set_global(
-        b"http_response_header".to_vec(),
-        Value::Array(Rc::new(RefCell::new(headers))),
-    );
+    vm.set_http_response_header(Value::Array(Rc::new(RefCell::new(headers))));
 }

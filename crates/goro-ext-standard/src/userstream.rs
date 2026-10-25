@@ -770,13 +770,36 @@ thread_local! {
     static IN_USER_INCLUDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// The http:// wrapper (php_stream_http_wrapper) for operations other than
+/// opening a stream, which it does not implement (label "http").
+fn http_wrapper_ref(path: &[u8]) -> Option<UserWrapperRef> {
+    let n = scheme_len(path)?;
+    let lower: Vec<u8> = path[..n].iter().map(|b| b.to_ascii_lowercase()).collect();
+    if !matches!(lower.as_slice(), b"http" | b"https")
+        || builtin_disabled(&lower)
+        || user_wrapper(&lower).is_some()
+    {
+        return None;
+    }
+    Some(UserWrapperRef {
+        scheme: lower,
+        class_name: Vec::new(),
+        is_url: true,
+        native: Some("http"),
+        ext: None,
+    })
+}
+
 /// Cheap check: could this path be served by a user wrapper (or need the
 /// wrapper-lookup diagnostics)? Avoids any work for ordinary paths.
 fn needs_locate(path: &[u8]) -> bool {
     match scheme_len(path) {
         Some(n) => {
             let lower: Vec<u8> = path[..n].iter().map(|b| b.to_ascii_lowercase()).collect();
-            !is_builtin(&lower) || builtin_disabled(&lower) || user_wrapper(&lower).is_some()
+            !is_builtin(&lower)
+                || builtin_disabled(&lower)
+                || user_wrapper(&lower).is_some()
+                || matches!(lower.as_slice(), b"http" | b"https")
         }
         None => builtin_disabled(b"file") || user_wrapper(b"file").is_some(),
     }
@@ -3054,8 +3077,19 @@ fn run(vm: &mut Vm, name: &'static str, args: &[Value], h: Handler) -> Result<Va
     FN_STACK.with(|s| {
         s.borrow_mut().pop();
     });
+    let r = match r {
+        Ok(None) => Ok(None),
+        r => {
+            flush_notifications(vm);
+            r
+        }
+    };
     match r {
-        Ok(None) => call_orig(vm, name, args),
+        Ok(None) => {
+            let r = call_orig(vm, name, args);
+            flush_notifications(vm);
+            r
+        }
         Ok(Some(v)) => {
             if vm.current_exception.is_some() {
                 Err(exc_err(vm))
@@ -3064,6 +3098,13 @@ fn run(vm: &mut Vm, name: &'static str, args: &[Value], h: Handler) -> Result<Va
             }
         }
         Err(e) => Err(e),
+    }
+}
+
+/// Deliver the notifications the socket I/O of the call queued.
+fn flush_notifications(vm: &mut Vm) {
+    if super::xp_socket::notifications_pending() {
+        super::xp_socket::flush_notifications(vm);
     }
 }
 
@@ -3833,6 +3874,9 @@ fn user_path(vm: &mut Vm, path: &[u8], options: i64) -> Result<UserWrapperRef, O
     if !needs_locate(path) {
         return Err(Some(path.to_vec()));
     }
+    if let Some(u) = http_wrapper_ref(path) {
+        return Ok(u);
+    }
     match locate(vm, path, options) {
         Loc::User(u) => Ok(u),
         Loc::Builtin { path: p } => Err(Some(p)),
@@ -4340,6 +4384,10 @@ fn h_rename(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     if !needs_locate(&from) && !needs_locate(&to) {
         return Ok(None);
     }
+    if http_wrapper_ref(&from).is_some() {
+        warn(vm, "http wrapper does not support renaming");
+        return Ok(Some(Value::False));
+    }
     let lf = locate(vm, &from, 0);
     let uw = match lf {
         Loc::None => {
@@ -4417,6 +4465,15 @@ fn metadata(
         // wops->stream_metadata is NULL
         let times_given = matches!(&value, Value::Array(a) if !a.borrow().is_empty());
         if option == PHP_STREAM_META_TOUCH && !times_given {
+            if uw.native == Some("http") {
+                // (an http:// "touch" is a GET request)
+                let r = call_orig(vm, "fopen", &[s(p), s(b"c")])?;
+                if matches!(r, Value::Resource(_)) {
+                    call_orig(vm, "fclose", &[r])?;
+                    return Ok(Some(Value::True));
+                }
+                return Ok(Some(Value::False));
+            }
             return Ok(Some(match open_located(vm, p, "c", REPORT_ERRORS, None)? {
                 Opened::Stream(fid, us) => {
                     stream_free(vm, fid, &us)?;
@@ -4796,6 +4853,7 @@ fn opendir_wrapper_located(
 ) -> Result<Option<(i64, Us)>, VmError> {
     let uw = match scheme_len(path)
         .and_then(|n| user_wrapper(&path[..n].to_ascii_lowercase()))
+        .or_else(|| http_wrapper_ref(path))
         .or_else(|| user_wrapper(b"file"))
     {
         Some(u) => u,
