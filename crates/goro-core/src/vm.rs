@@ -28890,8 +28890,11 @@ impl Vm {
                             }
                         }
                         // Check parameter types before executing
-                        // (untyped parameters: nothing to check or coerce)
-                        if user_fn.param_types.iter().any(|t| t.is_some()) {
+                        // (untyped parameters, or arguments of their types
+                        // already: nothing to check or coerce)
+                        if user_fn.param_types.iter().any(|t| t.is_some())
+                            && !self.recv_has_nothing_to_do(&user_fn, &call.args)
+                        {
                             match self.fast_recv_typed_params(
                                 &user_fn,
                                 &mut call,
@@ -32779,7 +32782,9 @@ impl Vm {
                         }
 
                         // Check parameter types before executing
-                        if !user_fn.param_types.is_empty() {
+                        if !user_fn.param_types.is_empty()
+                            && !self.recv_has_nothing_to_do(&user_fn, &call.args)
+                        {
                             match self.recv_typed_params(
                                 &user_fn,
                                 &mut call,
