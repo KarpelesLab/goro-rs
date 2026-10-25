@@ -13842,6 +13842,7 @@ thread_local! {
     pub(crate) static RESPONSE_CODE: std::cell::Cell<i64> = const { std::cell::Cell::new(200) };
     // Request body for php://input
     pub(crate) static REQUEST_BODY: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    static SAPI_BODY: std::cell::RefCell<(Vec<u8>, usize)> = const { std::cell::RefCell::new((Vec::new(), 0)) };
     // SG(sapi_headers).http_status_line: set by header("HTTP/...")
     pub(crate) static STATUS_LINE: std::cell::RefCell<Option<Vec<u8>>> = const { std::cell::RefCell::new(None) };
 }
@@ -13878,11 +13879,52 @@ pub fn set_status_line(line: &[u8]) {
 pub fn take_status_line() -> Option<Vec<u8>> {
     STATUS_LINE.with(|s| s.borrow_mut().take())
 }
+/// SG(request_info).request_body: the buffered request body.
 pub fn set_request_body(body: Vec<u8>) {
     REQUEST_BODY.with(|b| *b.borrow_mut() = body);
 }
-pub fn get_request_body() -> Vec<u8> {
+/// SG(request_info).request_body as buffered so far.
+pub fn buffered_request_body() -> Vec<u8> {
     REQUEST_BODY.with(|b| b.borrow().clone())
+}
+/// The SAPI's request body and how much of it was read
+/// (SG(read_post_bytes)).
+pub fn set_sapi_body(body: Vec<u8>, read: usize) {
+    SAPI_BODY.with(|b| *b.borrow_mut() = (body, read));
+}
+/// sapi_read_post_block() of everything left unread.
+pub fn read_sapi_body() -> Vec<u8> {
+    SAPI_BODY.with(|b| {
+        let mut b = b.borrow_mut();
+        let pos = b.1.min(b.0.len());
+        let rest = b.0[pos..].to_vec();
+        b.1 = b.0.len();
+        rest
+    })
+}
+/// Records that `n` more bytes of the SAPI body were read.
+pub fn advance_sapi_body(n: usize) {
+    SAPI_BODY.with(|b| {
+        let mut b = b.borrow_mut();
+        b.1 = (b.1 + n).min(b.0.len());
+    });
+}
+/// The unread part of the SAPI body, without consuming it.
+pub fn peek_sapi_body() -> Vec<u8> {
+    SAPI_BODY.with(|b| {
+        let b = b.borrow();
+        b.0[b.1.min(b.0.len())..].to_vec()
+    })
+}
+/// php://input: the buffered body, plus whatever the SAPI has not
+/// delivered yet (php_stream_input_read() reads it on demand).
+pub fn get_request_body() -> Vec<u8> {
+    let rest = read_sapi_body();
+    REQUEST_BODY.with(|b| {
+        let mut b = b.borrow_mut();
+        b.extend_from_slice(&rest);
+        b.clone()
+    })
 }
 /// SG(sapi_headers).headers, as (name, value) pairs.
 pub fn peek_sent_headers() -> Vec<(Vec<u8>, Vec<u8>)> {

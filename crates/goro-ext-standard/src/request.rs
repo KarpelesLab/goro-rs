@@ -201,30 +201,46 @@ pub fn request_parse_body(
         parse_body: true,
         exception: None,
     };
-    if base == b"application/x-www-form-urlencoded" {
-        // sapi_read_standard_form_data()
+    let is_post = req.request_method.as_deref() == Some(b"POST".as_slice());
+    // sapi_read_standard_form_data(): a new request_body stream with what
+    // the SAPI still has (nothing once the body was read); over
+    // post_max_size the current one stays.
+    let read_form_data = |ctx: &mut Ctx| {
         if post_max_size > 0 && req.content_length > post_max_size {
             ctx_docref_warning(
-                &mut ctx,
+                ctx,
                 &format!(
                     "POST Content-Length of {} bytes exceeds the limit of {} bytes",
                     req.content_length, post_max_size
                 ),
             );
         } else {
-            std_post_handler(&mut ctx, &req.body, max_vars, &post);
+            crate::misc::set_request_body(crate::misc::read_sapi_body());
         }
+    };
+    if base == b"application/x-www-form-urlencoded" {
+        read_form_data(&mut ctx);
+        // php_std_post_handler() parses SG(request_info).request_body.
+        let data = crate::misc::buffered_request_body();
+        std_post_handler(&mut ctx, &data, max_vars, &post);
     } else if base == b"multipart/form-data" {
-        rfc1867_handler(
+        // rfc1867 reads the SAPI body directly.
+        let data = crate::misc::peek_sapi_body();
+        let used = rfc1867_handler(
             &mut ctx,
             &ct,
-            &req.body,
+            &data,
             req.content_length,
             &cfg,
             &post,
             &files,
         );
+        crate::misc::advance_sapi_body(used);
     } else {
+        // php_default_post_reader() swallows a POST body of an unknown type.
+        if is_post {
+            read_form_data(&mut ctx);
+        }
         return Err(format!(
             "Content-Type \"{}\" is not supported",
             goro_core::string::msg_str(&ct)
@@ -1621,6 +1637,8 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
     let cookie = new_arr();
     let files = new_arr();
     let mut input_body: Vec<u8> = Vec::new();
+    // SG(read_post_bytes): how much of the body the SAPI delivered.
+    let mut sapi_read = 0usize;
     let body_discarded = std::cell::Cell::new(false);
 
     {
@@ -1635,7 +1653,6 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
         // sapi_activate: read POST data
         let is_post = req.request_method.as_deref().is_some_and(|m| m == b"POST");
         let mut post_entry: Option<&str> = None;
-        let mut consumed_all = false; // whether the body is unavailable to php://input
         let mut buffered = false;
         if req.cgi {
             if enable_post && is_post && req.content_type.is_some() {
@@ -1752,17 +1769,19 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
                         &post,
                         &files,
                     );
-                    if used >= req.body.len() {
-                        consumed_all = true;
-                    } else {
-                        input_body = req.body[used..].to_vec();
-                    }
+                    // rfc1867 reads the SAPI body itself: php://input only
+                    // gets what it left unread.
+                    sapi_read = used.min(req.body.len());
                 }
                 _ => {}
             }
         }
-        if !consumed_all && input_body.is_empty() && !body_discarded.get() {
+        if buffered {
+            // sapi_read_standard_form_data() buffered the whole body.
             input_body = req.body.clone();
+            sapi_read = req.body.len();
+        } else if body_discarded.get() {
+            sapi_read = req.body.len();
         }
         // $_COOKIE
         if has('C') {
@@ -1917,6 +1936,7 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
     vm.set_global(b"_ENV".to_vec(), Value::Array(env));
     vm.set_global(b"_REQUEST".to_vec(), Value::Array(request));
     crate::misc::set_request_body(input_body);
+    crate::misc::set_sapi_body(req.body.clone(), sapi_read);
 }
 
 fn import_env(env: &[(Vec<u8>, Vec<u8>)], arr: &Rc<RefCell<PhpArray>>) {
