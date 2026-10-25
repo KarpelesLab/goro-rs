@@ -38,6 +38,9 @@ pub struct Sxe {
     /// sxe->properties: the last non-debug property table (it keeps the
     /// child objects alive until the next fetch or the object dies)
     pub properties: RefCell<Option<PhpArray>>,
+    /// sxe->tmp: the element sxe_property_get_adr() last created (alive
+    /// until the next one or the object's end)
+    pub tmp: RefCell<Option<Value>>,
 }
 
 impl Sxe {
@@ -53,6 +56,7 @@ impl Sxe {
             xpath_ns: RefCell::new(Vec::new()),
             fptr_count: Cell::new(false),
             properties: RefCell::new(None),
+            tmp: RefCell::new(None),
         }
     }
 }
@@ -1188,7 +1192,7 @@ fn property_get_adr(vm: &mut Vm, obj: &Obj, name: &str) -> Option<Value> {
         return Some(Value::Null);
     }
     let nsp = s.nsp();
-    Some(node_as_zval(
+    let v = node_as_zval(
         vm,
         obj,
         &s,
@@ -1197,7 +1201,11 @@ fn property_get_adr(vm: &mut Vm, obj: &Obj, name: &str) -> Option<Value> {
         None,
         nsp.as_deref(),
         s.isprefix.get(),
-    ))
+    );
+    // (created first, then the previous sxe->tmp is released)
+    let old = s.tmp.replace(Some(v.clone()));
+    drop(old);
+    Some(v)
 }
 
 fn prop_dim_exists(
