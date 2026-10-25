@@ -34,6 +34,10 @@ pub struct RequestInfo {
     /// The SAPI registers $_SERVER itself (the built-in web server):
     /// entries added after the environment import.
     pub server_vars: Option<Vec<(Vec<u8>, Vec<u8>)>>,
+    /// Which of `server_vars` the SAPI passes through the input filter
+    /// (PARSE_SERVER): ext/filter keeps them for INPUT_SERVER and applies
+    /// filter.default.
+    pub server_var_filtered: Option<fn(&[u8]) -> bool>,
 }
 
 thread_local! {
@@ -1830,8 +1834,25 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
         }
         let mut s = server.borrow_mut();
         if let Some(vars) = &req.server_vars {
+            let filter = INPUT_FILTER.with(|c| c.get());
             for (k, v) in vars {
-                s.set(sym_key(k), sval(v));
+                let fv = match (filter, req.server_var_filtered) {
+                    (Some(f), Some(filtered)) if filtered(k) => {
+                        RAW_INPUT.with(|r| {
+                            r.borrow_mut()[PARSE_SERVER as usize]
+                                .get_or_insert_with(new_arr)
+                                .borrow_mut()
+                                .set(sym_key(k), sval(v))
+                        });
+                        if v.is_empty() {
+                            sval(b"")
+                        } else {
+                            f(vm, PARSE_SERVER, v)
+                        }
+                    }
+                    _ => sval(v),
+                };
+                s.set(sym_key(k), fv);
             }
         } else if !req.cgi {
             // sapi_cli_register_variables(): these go through the input

@@ -94,6 +94,16 @@ impl PhpRun {
             .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
             .collect();
         info.server_vars = Some(req.server_vars.clone());
+        if req.sapi == "cli-server" {
+            // sapi_cli_server_register_variable(): the query string and the
+            // request headers go through the input filter.
+            info.server_var_filtered = Some(|k: &[u8]| {
+                k == b"QUERY_STRING"
+                    || k == b"CONTENT_TYPE"
+                    || k == b"CONTENT_LENGTH"
+                    || k.starts_with(b"HTTP_")
+            });
+        }
         goro_ext_standard::misc::set_translated_path(
             req.path_translated
                 .map(|p| String::from_utf8_lossy(cstr(p)).into_owned()),
