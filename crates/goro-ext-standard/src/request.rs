@@ -1973,11 +1973,29 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
     vm.set_global(b"_POST".to_vec(), Value::Array(post));
     vm.set_global(b"_COOKIE".to_vec(), Value::Array(cookie));
     vm.set_global(b"_FILES".to_vec(), Value::Array(files));
+    check_http_proxy(&server);
+    check_http_proxy(&env);
     vm.set_global(b"_SERVER".to_vec(), Value::Array(server));
     vm.set_global(b"_ENV".to_vec(), Value::Array(env));
     vm.set_global(b"_REQUEST".to_vec(), Value::Array(request));
     crate::misc::set_request_body(input_body);
     crate::misc::set_sapi_body(req.body.clone(), sapi_read);
+}
+
+/// check_http_proxy() (bug #72573, httpoxy): HTTP_PROXY only ever comes
+/// from the process environment, never from a "Proxy:" request header.
+fn check_http_proxy(arr: &Rc<RefCell<PhpArray>>) {
+    let key = sym_key(b"HTTP_PROXY");
+    let mut a = arr.borrow_mut();
+    if !a.contains_key(&key) {
+        return;
+    }
+    match std::env::var_os("HTTP_PROXY") {
+        Some(v) => a.set(key, sval(v.as_encoded_bytes())),
+        None => {
+            a.remove(&key);
+        }
+    }
 }
 
 fn import_env(env: &[(Vec<u8>, Vec<u8>)], arr: &Rc<RefCell<PhpArray>>) {
