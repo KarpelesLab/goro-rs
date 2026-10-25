@@ -9939,6 +9939,11 @@ fn enum_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// exit()/die() called as a function (named or unpacked arguments,
 /// `exit(...)`, or a callable string); the bare construct compiles to ExitOp.
 fn exit_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // (the unwind exit of an earlier call is under way: an internal
+    // function calling it again, like array_map(), stops at once)
+    if vm.exit_requested {
+        return Ok(Value::Null);
+    }
     if args.len() > 1 {
         let msg = format!("exit() expects at most 1 argument, {} given", args.len());
         let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
@@ -9950,7 +9955,8 @@ fn exit_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let val = args.first().cloned().unwrap_or(Value::Long(0));
     let line = vm.current_line;
-    match vm.exit_status_of(&val, line) {
+    let strict = vm.caller_strict_types;
+    match vm.exit_status_of(&val, line, strict) {
         Ok(code) => {
             vm.exit_code = code;
             vm.exit_requested = true;

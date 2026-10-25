@@ -7264,7 +7264,23 @@ impl Vm {
 
     /// exit(string|int $status): prints a string status and returns the
     /// exit code, or the TypeError message for an invalid status.
-    pub fn exit_status_of(&mut self, val: &Value, line: u32) -> Result<i64, String> {
+    pub fn exit_status_of(&mut self, val: &Value, line: u32, strict: bool) -> Result<i64, String> {
+        // (strict_types: only string|int)
+        if strict {
+            let given = match val {
+                Value::Double(_) => Some("float"),
+                Value::True => Some("true"),
+                Value::False => Some("false"),
+                Value::Null | Value::Undef => Some("null"),
+                _ => None,
+            };
+            if let Some(g) = given {
+                return Err(format!(
+                    "exit(): Argument #1 ($status) must be of type string|int, {} given",
+                    g
+                ));
+            }
+        }
         let mut type_err: Option<String> = None;
         let code: i64 = match val {
             Value::Long(n) => *n,
@@ -39416,7 +39432,8 @@ impl Vm {
                         op_array,
                         op.line,
                     );
-                    let (code, type_err) = match self.exit_status_of(&val, op.line) {
+                    let (code, type_err) =
+                        match self.exit_status_of(&val, op.line, op_array.strict_types) {
                         Ok(c) => (c, None),
                         Err(m) => (0, Some(m)),
                     };
