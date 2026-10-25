@@ -46801,7 +46801,32 @@ impl Vm {
                         }
                         let raw = Self::read_operand_raw(&cvs, &op.op1);
                         if matches!(raw, Value::Undef) {
-                            Value::Null
+                            // The value is copied out (QM_ASSIGN) before the
+                            // finally code runs: an undefined variable warns
+                            // there, and an exception the error handler throws
+                            // goes through the finally block.
+                            let unwinding = self.current_exception.is_some();
+                            let v = self.read_operand_warn(
+                                &op.op1,
+                                &cvs,
+                                &tmps,
+                                &op_array.literals,
+                                op_array,
+                                op.line,
+                            );
+                            if !unwinding {
+                                native_exc_check!(
+                                    self,
+                                    exception_handlers,
+                                    pending_calls_catch_depth,
+                                    ip,
+                                    op.line
+                                );
+                            }
+                            match v {
+                                Value::Undef => Value::Null,
+                                v => v,
+                            }
                         } else {
                             raw
                         }
