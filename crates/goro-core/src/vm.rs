@@ -2413,6 +2413,7 @@ impl Vm {
                 c.insert(b"FILE_APPEND".to_vec(), Value::Long(8));
                 c.insert(b"FILE_IGNORE_NEW_LINES".to_vec(), Value::Long(2));
                 c.insert(b"FILE_SKIP_EMPTY_LINES".to_vec(), Value::Long(4));
+                c.insert(b"FILE_NO_DEFAULT_CONTEXT".to_vec(), Value::Long(16));
                 c.insert(b"LOCK_EX".to_vec(), Value::Long(2));
                 c.insert(b"LOCK_SH".to_vec(), Value::Long(1));
                 c.insert(b"LOCK_UN".to_vec(), Value::Long(3));
@@ -2420,6 +2421,7 @@ impl Vm {
                 c.insert(b"SEEK_SET".to_vec(), Value::Long(0));
                 c.insert(b"SEEK_CUR".to_vec(), Value::Long(1));
                 c.insert(b"SEEK_END".to_vec(), Value::Long(2));
+                // (the bundled php_glob()'s values: main/php_glob.h)
                 c.insert(b"GLOB_MARK".to_vec(), Value::Long(8));
                 c.insert(b"GLOB_NOSORT".to_vec(), Value::Long(32));
                 c.insert(b"GLOB_NOCHECK".to_vec(), Value::Long(16));
@@ -2883,6 +2885,7 @@ impl Vm {
                 c.insert(b"STREAM_SHUT_WR".to_vec(), Value::Long(1));
                 c.insert(b"STREAM_SHUT_RDWR".to_vec(), Value::Long(2));
                 c.insert(b"STREAM_PF_INET".to_vec(), Value::Long(2));
+                c.insert(b"STREAM_PF_INET6".to_vec(), Value::Long(10));
                 c.insert(b"STREAM_PF_UNIX".to_vec(), Value::Long(1));
                 c.insert(b"STREAM_IPPROTO_TCP".to_vec(), Value::Long(6));
                 c.insert(b"STREAM_IPPROTO_UDP".to_vec(), Value::Long(17));
@@ -2890,10 +2893,14 @@ impl Vm {
                 c.insert(b"STREAM_SOCK_STREAM".to_vec(), Value::Long(1));
                 c.insert(b"STREAM_SOCK_DGRAM".to_vec(), Value::Long(2));
                 c.insert(b"STREAM_SOCK_RAW".to_vec(), Value::Long(3));
+                c.insert(b"STREAM_SOCK_RDM".to_vec(), Value::Long(4));
+                c.insert(b"STREAM_SOCK_SEQPACKET".to_vec(), Value::Long(5));
                 c.insert(b"STREAM_PEEK".to_vec(), Value::Long(2));
                 c.insert(b"STREAM_OOB".to_vec(), Value::Long(1));
                 c.insert(b"STREAM_USE_PATH".to_vec(), Value::Long(1));
+                c.insert(b"STREAM_IGNORE_URL".to_vec(), Value::Long(2));
                 c.insert(b"STREAM_REPORT_ERRORS".to_vec(), Value::Long(8));
+                c.insert(b"STREAM_MUST_SEEK".to_vec(), Value::Long(16));
                 // php_stream_xport_crypt_method_t (main/streams/php_stream_transport.h)
                 for (name, v) in [
                     (&b"STREAM_CRYPTO_METHOD_SSLv2_CLIENT"[..], 3),
