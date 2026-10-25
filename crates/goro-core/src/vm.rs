@@ -46769,7 +46769,21 @@ impl Vm {
                                 }
                                 found
                             };
-                            if is_hooked_in_ancestor {
+                            if is_hooked_in_ancestor
+                                && self.hook_runs_for_scope(
+                                    &class_lower_hk,
+                                    &obj.borrow().class_name.clone(),
+                                    prop_name.as_bytes(),
+                                    &self
+                                        .find_property_def_for_scope(
+                                            &class_lower_hk,
+                                            prop_name.as_bytes(),
+                                            caller_scope_hk.as_deref(),
+                                        )
+                                        .map(|d| d.1)
+                                        .unwrap_or_default(),
+                                )
+                            {
                                 let class_display =
                                     crate::value::display_class_name(&obj.borrow().class_name);
                                 let prop_str =
@@ -52603,8 +52617,11 @@ impl Vm {
                                         // (a backed parent property, hooked or
                                         // not: zend_do_inheritance() drops
                                         // ZEND_ACC_VIRTUAL)
-                                        let parent_has_backing =
-                                            !parent_prop.is_virtual && !parent_prop.is_static;
+                                        // (a parent's private property is not
+                                        // inherited: do_inherit_property() leaves it be)
+                                        let parent_has_backing = !parent_prop.is_virtual
+                                            && !parent_prop.is_static
+                                            && parent_prop.visibility != Visibility::Private;
                                         if parent_has_backing {
                                             child_prop.is_virtual = false;
                                         }
@@ -56684,7 +56701,13 @@ impl Vm {
                                 .get(&hook_cls)
                                 .and_then(|c| c.get_method(&hook_method_lower))
                                 .is_some_and(|md| {
-                                    hook_cls == class_lower || md.declaring_class == hook_cls
+                                    (hook_cls == class_lower || md.declaring_class == hook_cls)
+                                        && self.hook_runs_for_scope(
+                                            &class_lower,
+                                            &class_name_orig,
+                                            prop_name_bytes,
+                                            &md.declaring_class,
+                                        )
                                 });
                         let hook_key = if !has_get_hook {
                             Vec::new()
@@ -56710,8 +56733,17 @@ impl Vm {
                                 .and_then(|c| {
                                     c.properties.iter().find(|p| p.name == prop_name_bytes)
                                 })
-                                .map(|p| p.has_set_hook && !p.has_get_hook && p.is_virtual)
-                                .unwrap_or(false);
+                                .is_some_and(|p| {
+                                    p.has_set_hook
+                                        && !p.has_get_hook
+                                        && p.is_virtual
+                                        && self.hook_runs_for_scope(
+                                            &class_lower,
+                                            &class_name_orig,
+                                            prop_name_bytes,
+                                            &p.declaring_class,
+                                        )
+                                });
                             if is_virtual_write_only {
                                 let class_display =
                                     crate::value::display_class_name(&class_name_orig);
@@ -58119,7 +58151,14 @@ impl Vm {
                                 .get(&set_hook_cls)
                                 .and_then(|c| c.get_method(&set_hook_method_lower))
                                 .is_some_and(|md| {
-                                    set_hook_cls == class_lower || md.declaring_class == set_hook_cls
+                                    (set_hook_cls == class_lower
+                                        || md.declaring_class == set_hook_cls)
+                                        && self.hook_runs_for_scope(
+                                            &class_lower,
+                                            &class_name_orig,
+                                            prop_name_bytes_set,
+                                            &md.declaring_class,
+                                        )
                                 });
                         let set_hook_key = if !has_set_hook {
                             Vec::new()
@@ -58145,8 +58184,17 @@ impl Vm {
                                 .and_then(|c| {
                                     c.properties.iter().find(|p| p.name == prop_name_bytes_set)
                                 })
-                                .map(|p| p.has_get_hook && !p.has_set_hook && p.is_virtual)
-                                .unwrap_or(false);
+                                .is_some_and(|p| {
+                                    p.has_get_hook
+                                        && !p.has_set_hook
+                                        && p.is_virtual
+                                        && self.hook_runs_for_scope(
+                                            &class_lower,
+                                            &class_name_orig,
+                                            prop_name_bytes_set,
+                                            &p.declaring_class,
+                                        )
+                                });
                             if is_virtual_read_only {
                                 let class_display =
                                     crate::value::display_class_name(&class_name_orig);
@@ -63239,6 +63287,56 @@ impl Vm {
         scope.is_some_and(|s| s.as_slice() != class_lower && !s.is_empty() && has(&s))
     }
 
+    /// zend_std_read_property() / write_property(): whether the hook of
+    /// `$obj->pn` declared by `hook_decl` runs for an access from the current
+    /// scope. It does not when the property this scope resolves to is a
+    /// redeclaration the (private) hook doesn't belong to, nor when that
+    /// property is inaccessible (the plain access path then reports the
+    /// visibility error, calls __get/__set, or uses the dynamic property).
+    #[inline(never)]
+    pub(crate) fn hook_runs_for_scope(
+        &self,
+        class_lower: &[u8],
+        class_name_orig: &[u8],
+        pn: &[u8],
+        hook_decl: &[u8],
+    ) -> bool {
+        let scope = self.current_class_scope();
+        let scope_l = scope.as_ref().map(|s| s.to_ascii_lowercase());
+        let Some((vis, decl, ..)) =
+            self.find_property_def_for_scope(class_lower, pn, scope_l.as_deref())
+        else {
+            return false;
+        };
+        if !decl.eq_ignore_ascii_case(hook_decl) {
+            // A hook inherited from `hook_decl` belongs to this property
+            // unless it is a private property of that class.
+            let hook_decl_l = hook_decl.to_ascii_lowercase();
+            let private_there = self.classes.get(&hook_decl_l).is_some_and(|c| {
+                c.properties.iter().any(|p| {
+                    p.name == pn
+                        && !p.is_static
+                        && p.visibility == Visibility::Private
+                        && p.declaring_class.eq_ignore_ascii_case(&hook_decl_l)
+                })
+            });
+            if private_there {
+                return false;
+            }
+        }
+        vis == Visibility::Public
+            || self
+                .check_visibility(
+                    vis,
+                    &decl,
+                    class_name_orig,
+                    &String::from_utf8_lossy(pn),
+                    true,
+                    scope.as_deref(),
+                )
+                .is_none()
+    }
+
     fn hook_owner_class(&self, class_lower: &[u8], pn: &[u8]) -> Vec<u8> {
         if let Some(scope) = self.current_class_scope() {
             let scope_lower: Vec<u8> = scope.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -63487,6 +63585,9 @@ impl Vm {
                 })?;
             (md.op_array.clone(), md.declaring_class.clone())
         };
+        if !self.hook_runs_for_scope(&class_lower, &class_name_orig, pn, &hook_declaring) {
+            return None;
+        }
         let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
         if !fn_cvs.is_empty() {
             fn_cvs[0] = Value::Object(obj.clone());

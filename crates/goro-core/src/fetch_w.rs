@@ -395,12 +395,17 @@ impl Vm {
         class_lower: &[u8],
         prop: &[u8],
     ) -> Option<(bool, bool)> {
-        let (g, st) = self
-            .classes
-            .get(class_lower)
-            .and_then(|c| c.properties.iter().find(|p| p.name == prop && !p.is_static))
-            .map(|p| (p.has_get_hook, p.has_set_hook))?;
+        let c = self.classes.get(class_lower)?;
+        let p = c
+            .properties
+            .iter()
+            .find(|p| p.name == prop && !p.is_static)?;
+        let (g, st) = (p.has_get_hook, p.has_set_hook);
         if !g && !st {
+            return None;
+        }
+        // (an inaccessible hooked property takes the plain path's error)
+        if !self.hook_runs_for_scope(class_lower, &c.name, prop, &p.declaring_class) {
             return None;
         }
         let mut base = class_lower.to_vec();
