@@ -215,6 +215,7 @@ impl Vm {
         let op = &op_array.ops[ip];
         let mask = free_mask.get(ip).copied().unwrap_or(0);
         mask & !4 == 0
+            && !self.has_release_work()
             && matches!(op.result, OperandType::Tmp(_) | OperandType::Unused)
             && tmp_writable(&op.result, tmps)
             && self.internal_function_decls.is_empty()

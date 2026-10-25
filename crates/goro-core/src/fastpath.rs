@@ -337,8 +337,58 @@ fn plain_truthy(v: &Value) -> Option<bool> {
             !(b.is_empty() || b == b"0")
         }
         Value::Array(a) => !a.try_borrow().ok()?.is_empty(),
+        // (an object without extension state casts to true: no
+        // cast_object handler of its own)
+        Value::Object(o) => {
+            let b = o.try_borrow().ok()?;
+            if b.native.is_some() || b.properties.has_internal() {
+                return None;
+            }
+            true
+        }
         _ => return None,
     })
+}
+
+/// Whether the last holder of `v` letting it go only frees memory, when no
+/// destructor can be due (`no_release`: no object with a destructor
+/// exists, no generator has a finally block to run, no resource waits for
+/// its destructor): plain values, containers held elsewhere too, and
+/// containers (arrays, objects without state of their own, references)
+/// of such values, within `budget` elements; not $GLOBALS, a resource or a
+/// generator this holder is the last of.
+pub(crate) fn drops_quietly_deep(
+    v: &Value,
+    budget: &mut u32,
+    globals: &Rc<RefCell<crate::array::PhpArray>>,
+) -> bool {
+    match v {
+        Value::Array(a) => {
+            if Rc::ptr_eq(a, globals) {
+                return false;
+            }
+            if Rc::strong_count(a) > 1 {
+                return true;
+            }
+            let Ok(arr) = a.try_borrow() else {
+                return false;
+            };
+            if arr.len() as u32 > *budget {
+                return false;
+            }
+            *budget -= arr.len() as u32;
+            arr.values().all(|v| drops_quietly_deep(v, budget, globals))
+        }
+        Value::Object(o) => Rc::strong_count(o) > 1 || object_release_quiet(o),
+        Value::Reference(r) => {
+            Rc::strong_count(r) > 1
+                || r.try_borrow()
+                    .is_ok_and(|b| drops_quietly_deep(&b, budget, globals))
+        }
+        Value::Generator(g) => Rc::strong_count(g) > 1,
+        Value::Resource(_) => false,
+        v => is_plain_scalar(v),
+    }
 }
 
 #[inline(always)]
@@ -1646,12 +1696,9 @@ impl crate::vm::Vm {
                     // with a destructor exists: `no_release`; the cycle
                     // collector is not due.)
                     let releasable = |v: &Value| match v {
-                        Value::Array(a) => {
-                            Rc::strong_count(a) > 1
-                                || a.try_borrow()
-                                    .is_ok_and(|a| a.len() <= 16 && a.values().all(is_plain_scalar))
+                        Value::Array(_) | Value::Object(_) => {
+                            drops_quietly_deep(v, &mut 256, &self.globals)
                         }
-                        Value::Object(o) => Rc::strong_count(o) > 1 || object_release_quiet(o),
                         Value::Reference(_) | Value::Resource(_) | Value::Generator(_) => false,
                         _ => true,
                     };
@@ -1691,7 +1738,16 @@ impl crate::vm::Vm {
                 OpCode::JmpNz => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::Assign => match fast_op(op, cvs, tmps, literals, refs_ok, no_release) {
                     Fast::No => {
-                        self.fast_assign(op, cvs, tmps, literals, refs_ok, no_release, fe_quiet)
+                        // (a temporary no running loop holds)
+                        let tmp_free = match op.op1 {
+                            OperandType::Tmp(t) => {
+                                !fe.busy().any_in(t, t + 1) && !fe.positions.contains_key(&t)
+                            }
+                            _ => false,
+                        };
+                        self.fast_assign(
+                            op, cvs, tmps, literals, refs_ok, no_release, fe_quiet, tmp_free,
+                        )
                     }
                     f => f,
                 },
@@ -2058,6 +2114,7 @@ impl crate::vm::Vm {
         refs_ok: bool,
         no_release: bool,
         fe_quiet: bool,
+        tmp_free: bool,
     ) -> Fast {
         // (the general handler is a release point: it is only bypassed when
         // no destructor can be due)
@@ -2066,13 +2123,7 @@ impl crate::vm::Vm {
         }
         // (an overwritten array or object loses this holder)
         let releasable = |v: &Value| match v {
-            Value::Array(a) => {
-                !Rc::ptr_eq(a, &self.globals)
-                    && (Rc::strong_count(a) > 1
-                        || a.try_borrow()
-                            .is_ok_and(|a| a.len() <= 64 && a.values().all(is_plain_scalar)))
-            }
-            Value::Object(o) => Rc::strong_count(o) > 1 || object_release_quiet(o),
+            Value::Array(_) | Value::Object(_) => drops_quietly_deep(v, &mut 256, &self.globals),
             v => is_plain_scalar(v),
         };
         let to_tmp = match op.op1 {
@@ -2089,9 +2140,13 @@ impl crate::vm::Vm {
                 }
                 None
             }
-            // (a temporary holding a plain value, not an iterator's)
+            // (a temporary holding a plain value, not an iterator's; or a
+            // container released quietly, held by no running loop)
             OperandType::Tmp(ti) if fe_quiet => match tmps.get(ti as usize) {
                 Some(v) if is_plain_scalar(v) => Some(ti as usize),
+                Some(v @ (Value::Array(_) | Value::Object(_))) if tmp_free && releasable(v) => {
+                    Some(ti as usize)
+                }
                 _ => return Fast::No,
             },
             _ => return Fast::No,
@@ -2470,8 +2525,17 @@ impl crate::vm::Vm {
             // temporary's is shared with it until it is freed): not the
             // container itself (`$a[] = $a`, a reference to it), nor into a
             // container held elsewhere too (see unshare_container).
+            // (the container's holders: its variable or temporary and the
+            // clone here; a fetched container's also its own container)
+            let holders = if tmp_container && matches!(op.op1, OperandType::Tmp(_)) {
+                3
+            } else {
+                2
+            };
             let container_ok = |a: &Rc<RefCell<crate::array::PhpArray>>| {
-                !Rc::ptr_eq(a, &arr) && !Rc::ptr_eq(a, &self.globals) && Rc::strong_count(&arr) <= 2
+                !Rc::ptr_eq(a, &arr)
+                    && !Rc::ptr_eq(a, &self.globals)
+                    && Rc::strong_count(&arr) <= holders
             };
             match val {
                 Some(v) if is_plain_scalar(v) && !matches!(v, Value::Undef) => Some(v.clone()),
