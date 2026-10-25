@@ -721,13 +721,21 @@ pub fn sync(vm: &mut Vm) {
         st.initialized = true;
         // MINIT: register INI entries in order (with their default values)
         let lang = ini_raw(vm, "mbstring.language").filter(|v| !v.is_empty());
-        let _ = apply_ini(
+        if !apply_ini(
             vm,
             &mut st,
             "mbstring.language",
             Some(lang.as_deref().unwrap_or(b"neutral")),
             true,
-        );
+        ) {
+            // zend_register_ini_entries(): a configured value the handler
+            // refuses gives way to the default one.
+            vm.constants.insert(
+                b"mbstring.language".to_vec(),
+                Value::String(goro_core::string::PhpString::from_bytes(b"neutral")),
+            );
+            let _ = apply_ini(vm, &mut st, "mbstring.language", Some(b"neutral"), true);
+        }
         for key in [
             "mbstring.detect_order",
             "mbstring.http_input",
@@ -741,9 +749,17 @@ pub fn sync(vm: &mut Vm) {
             // Settings with an empty value behave like their NULL default
             match key {
                 "mbstring.http_input" | "mbstring.http_output" | "mbstring.internal_encoding" => {
-                    if raw.is_some() {
-                        let _ = apply_ini(vm, &mut st, key, raw.as_deref(), true);
-                    } else {
+                    let refused = raw.is_some()
+                        && !apply_ini(vm, &mut st, key, raw.as_deref(), true)
+                        && key != "mbstring.internal_encoding";
+                    if refused {
+                        // The refused value gives way to the NULL default.
+                        vm.constants.insert(
+                            key.as_bytes().to_vec(),
+                            Value::String(goro_core::string::PhpString::empty()),
+                        );
+                    }
+                    if raw.is_none() || refused {
                         // NULL default: no deprecation, fall back to core settings
                         match key {
                             "mbstring.http_input" => {
@@ -762,8 +778,15 @@ pub fn sync(vm: &mut Vm) {
                     }
                 }
                 _ => {
-                    if raw.is_some() {
-                        let _ = apply_ini(vm, &mut st, key, raw.as_deref(), true);
+                    if raw.is_some() && !apply_ini(vm, &mut st, key, raw.as_deref(), true) {
+                        // The refused value gives way to the default one.
+                        if key == "mbstring.detect_order" {
+                            vm.constants.insert(
+                                key.as_bytes().to_vec(),
+                                Value::String(goro_core::string::PhpString::empty()),
+                            );
+                            st.detect_order_list.clear();
+                        }
                     }
                 }
             }
