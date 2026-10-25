@@ -489,6 +489,20 @@ pub(crate) fn fast_op(
             };
             store!(bool_val(same == (op.opcode == OpCode::Identical)))
         }
+        // (of ints: the general handler's int case)
+        OpCode::BitwiseAnd | OpCode::BitwiseOr | OpCode::BitwiseXor => {
+            let (Some(Value::Long(a)), Some(Value::Long(b))) = (
+                defined_operand(&op.op1, cvs, tmps, literals),
+                defined_operand(&op.op2, cvs, tmps, literals),
+            ) else {
+                return Fast::No;
+            };
+            store!(Value::Long(match op.opcode {
+                OpCode::BitwiseAnd => a & b,
+                OpCode::BitwiseOr => a | b,
+                _ => a ^ b,
+            }))
+        }
         OpCode::BooleanNot | OpCode::CastBool => {
             let Some(v) = defined_operand(&op.op1, cvs, tmps, literals) else {
                 return Fast::No;
@@ -783,6 +797,151 @@ fn fast_instanceof(op: &Op, cvs: &[Value], tmps: &mut [Value], literals: &[Value
         Some(b) if store_tmp(&op.result, bool_val(b), tmps) => Fast::Done,
         _ => Fast::No,
     }
+}
+
+/// Whether the temporary the ARRAY_SET / ARRAY_APPEND at `ip` writes into
+/// (its op1) holds the very element the opcode before it, the write fetch
+/// of `$a[k][...] = v` / `$o->p[...] = v` (FETCH_DIM_W / FETCH_OBJ_W),
+/// fetched into it: an array element of an array variable / temporary, or
+/// a property slot of a plain object (not what an offsetGet() / __get()
+/// returned).
+#[inline(never)]
+fn fetched_container(
+    op_array: &crate::opcode::OpArray,
+    ip: usize,
+    cvs: &[Value],
+    tmps: &[Value],
+    literals: &[Value],
+) -> bool {
+    let Some(prev) = ip.checked_sub(1).and_then(|p| op_array.ops.get(p)) else {
+        return false;
+    };
+    let op = &op_array.ops[ip];
+    if prev.result != op.op1 || prev.op1 == prev.result {
+        return false;
+    }
+    let OperandType::Tmp(t) = op.op1 else {
+        return false;
+    };
+    let Some(Value::Array(fetched)) = tmps.get(t as usize) else {
+        return false;
+    };
+    let is_it = |v: &Value| match v {
+        Value::Array(a) => Rc::ptr_eq(a, fetched),
+        Value::Reference(r) => {
+            matches!(r.try_borrow().as_deref(), Ok(Value::Array(a)) if Rc::ptr_eq(a, fetched))
+        }
+        _ => false,
+    };
+    match prev.opcode {
+        OpCode::ArrayGetW => {
+            let container = match prev.op1 {
+                OperandType::Cv(i) => cvs.get(i as usize),
+                OperandType::Tmp(i) => tmps.get(i as usize),
+                _ => None,
+            };
+            let arr = match container {
+                Some(Value::Array(a)) => a.clone(),
+                Some(Value::Reference(r)) => match r.try_borrow().as_deref() {
+                    Ok(Value::Array(a)) => a.clone(),
+                    _ => return false,
+                },
+                _ => return false,
+            };
+            let Ok(a) = arr.try_borrow() else {
+                return false;
+            };
+            match prev.op2 {
+                // (`$a[][k] = v`: the element appended last)
+                OperandType::Unused => a.values().last().is_some_and(is_it),
+                _ => match dim_key(&prev.op2, cvs, tmps, literals) {
+                    Some(k) => a.get(&k).is_some_and(is_it),
+                    None => false,
+                },
+            }
+        }
+        OpCode::PropertyGetW => {
+            let obj = match prev.op1 {
+                OperandType::Cv(i) => cvs.get(i as usize),
+                _ => None,
+            };
+            let obj = match obj {
+                Some(Value::Object(o)) => o.clone(),
+                Some(Value::Reference(r)) => match r.try_borrow().as_deref() {
+                    Ok(Value::Object(o)) => o.clone(),
+                    _ => return false,
+                },
+                _ => return false,
+            };
+            let OperandType::Const(n) = prev.op2 else {
+                return false;
+            };
+            let Some(Value::String(name)) = literals.get(n as usize) else {
+                return false;
+            };
+            let Ok(ob) = obj.try_borrow() else {
+                return false;
+            };
+            ob.native.is_none()
+                && !ob.properties.has_internal()
+                && ob
+                    .properties
+                    .iter()
+                    .find(|(k, _)| key_eq(k, name.as_bytes()))
+                    .is_some_and(|(_, v)| is_it(v))
+        }
+        _ => false,
+    }
+}
+
+/// FETCH_OBJ_W of a plain property (slot `idx` of `obj`) holding an array
+/// (see fast_prop_op): the array, separated from its other holders, is left
+/// in the result temporary for the write into it that follows.
+fn prop_fetch_w(
+    obj: &Rc<RefCell<crate::object::PhpObject>>,
+    idx: usize,
+    op: &Op,
+    tmps: &mut [Value],
+) -> Fast {
+    let OperandType::Tmp(t) = op.result else {
+        return Fast::No;
+    };
+    // (the previous fetch's holder, in a loop, goes first)
+    let stale_ok = match tmps.get(t as usize) {
+        Some(v) if is_plain_scalar(v) => true,
+        Some(Value::Array(a)) => Rc::strong_count(a) > 1,
+        _ => false,
+    };
+    if !stale_ok {
+        return Fast::No;
+    }
+    if let Some(v) = tmps.get_mut(t as usize) {
+        if matches!(v, Value::Array(_)) {
+            *v = Value::Undef;
+        }
+    }
+    let Ok(mut ob) = obj.try_borrow_mut() else {
+        return Fast::No;
+    };
+    let arr = match ob.properties.get(idx) {
+        Some((_, Value::Array(a))) => a.clone(),
+        _ => return Fast::No,
+    };
+    // (the slot holds one count, `arr` the other)
+    let arr = if Rc::strong_count(&arr) > 2 {
+        let sep = Rc::new(RefCell::new(arr.borrow().clone()));
+        let slot = &mut ob.properties[idx].1;
+        let old = std::mem::replace(slot, Value::Array(sep.clone()));
+        crate::gc::on_value_replaced(&old, slot);
+        sep
+    } else {
+        arr
+    };
+    drop(ob);
+    if let Some(slot) = tmps.get_mut(t as usize) {
+        *slot = Value::Array(arr);
+    }
+    Fast::Done
 }
 
 /// Whether property name `k` is `name` (short names compared inline, not
@@ -1267,6 +1426,11 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::ForeachInit
             | OpCode::NewObject
             | OpCode::BindGlobal
+            | OpCode::ArrayGetW
+            | OpCode::BitwiseAnd
+            | OpCode::BitwiseOr
+            | OpCode::BitwiseXor
+            | OpCode::ArrayNew
     )
 }
 
@@ -1410,7 +1574,19 @@ impl crate::vm::Vm {
                     let Some(rel) = consumed_tmps(free_mask.get(), ip, op, tmps, no_release) else {
                         break 'run ip;
                     };
-                    let f = self.fast_dim_op(op, cvs, tmps, literals);
+                    // (a write into the container the previous opcode fetched)
+                    let tmp_container = op.opcode != OpCode::ArrayGet
+                        && matches!(op.op1, OperandType::Tmp(_))
+                        && fetched_container(op_array, ip, cvs, tmps, literals);
+                    let f = self.fast_dim_op(op, cvs, tmps, literals, tmp_container);
+                    release_consumed(rel, f, op, tmps)
+                }
+                // FETCH_DIM_W of an array element (see fast_dim_fetch_w)
+                OpCode::ArrayGetW => {
+                    let Some(rel) = consumed_tmps(free_mask.get(), ip, op, tmps, no_release) else {
+                        break 'run ip;
+                    };
+                    let f = self.fast_dim_fetch_w(op_array, ip, cvs, tmps);
                     release_consumed(rel, f, op, tmps)
                 }
                 // (on an array, FETCH_DIM_IS's isset answers as ISSET_ISEMPTY_DIM's)
@@ -1525,6 +1701,19 @@ impl crate::vm::Vm {
                 },
                 OpCode::AssignConcat => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::BooleanNot => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::BitwiseAnd => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::BitwiseOr => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::BitwiseXor => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                // `[]` (the start of an array literal) into a temporary
+                OpCode::ArrayNew => {
+                    if matches!(op.result, OperandType::Tmp(_)) && tmp_writable(&op.result, tmps) {
+                        let a = Rc::new(RefCell::new(crate::array::PhpArray::new()));
+                        store_tmp(&op.result, Value::Array(a), tmps);
+                        Fast::Done
+                    } else {
+                        break 'run ip;
+                    }
+                }
                 OpCode::CastBool => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 // (the silence of isset() / empty() / `??` / `@`)
                 OpCode::ErrorSuppress => {
@@ -2219,6 +2408,7 @@ impl crate::vm::Vm {
         cvs: &mut [Value],
         tmps: &mut [Value],
         literals: &[Value],
+        tmp_container: bool,
     ) -> Fast {
         let append = op.opcode == OpCode::ArrayAppend;
         let write = append || op.opcode == OpCode::ArraySet;
@@ -2239,6 +2429,21 @@ impl crate::vm::Vm {
             OperandType::Cv(i) => cvs.get(i as usize).and_then(arr_of),
             OperandType::Tmp(i) if !write => match tmps.get(i as usize) {
                 Some(Value::Array(a)) => Some(a.clone()),
+                _ => None,
+            },
+            // The container a write fetch (`$a[k][j] = v`, `$o->p[k] = v`)
+            // left in its temporary, found to be the element it fetched (see
+            // fetched_container): separated already, held by its container
+            // and the temporary only, it is written in place as the general
+            // handler writes it.
+            OperandType::Tmp(i) if tmp_container => match tmps.get(i as usize) {
+                Some(Value::Array(a)) if Rc::strong_count(a) == 2 => Some(a.clone()),
+                _ => None,
+            },
+            // (an array only the temporary holds, an array literal being
+            // built: nothing else sees the write)
+            OperandType::Tmp(i) => match tmps.get(i as usize) {
+                Some(Value::Array(a)) if Rc::strong_count(a) == 1 => Some(a.clone()),
                 _ => None,
             },
             _ => None,
@@ -2369,6 +2574,120 @@ impl crate::vm::Vm {
         } else {
             Fast::No
         }
+    }
+
+    /// FETCH_DIM_W (the container fetch of `$a[k][...] = v`, `$a[][...] =
+    /// v`) of an array variable's element, or of the element of the container
+    /// the previous fetch left in a temporary (see fetched_container), when
+    /// the element is an array, null or missing: what the general handler
+    /// (fetch_dim_from_array()) does then: the element is separated from
+    /// its other holders, or made a new array, and left in the result.
+    pub(crate) fn fast_dim_fetch_w(
+        &mut self,
+        op_array: &crate::opcode::OpArray,
+        ip: usize,
+        cvs: &mut [Value],
+        tmps: &mut [Value],
+    ) -> Fast {
+        let op = &op_array.ops[ip];
+        let literals = &op_array.literals;
+        if self.dim_rw_abort.is_some() || self.dim_rw_key.is_some() {
+            return Fast::No;
+        }
+        let OperandType::Tmp(rt) = op.result else {
+            return Fast::No;
+        };
+        let arr = match op.op1 {
+            OperandType::Cv(i) => match cvs.get(i as usize) {
+                Some(Value::Array(a)) => a.clone(),
+                _ => return Fast::No,
+            },
+            OperandType::Tmp(i) if op.op1 != op.result => {
+                if !fetched_container(op_array, ip, cvs, tmps, literals) {
+                    return Fast::No;
+                }
+                match tmps.get(i as usize) {
+                    Some(Value::Array(a)) if Rc::strong_count(a) == 2 => a.clone(),
+                    _ => return Fast::No,
+                }
+            }
+            _ => return Fast::No,
+        };
+        if Rc::ptr_eq(&arr, &self.globals) {
+            return Fast::No;
+        }
+        let key = match op.op2 {
+            OperandType::Unused => None,
+            _ => match dim_key(&op.op2, cvs, tmps, literals) {
+                Some(k) => Some(k),
+                None => return Fast::No,
+            },
+        };
+        // The result's stale holder (the previous fetch's, in a loop) goes
+        // first, as the general handler drops it: when it only loses a
+        // holder.
+        let stale_ok = match tmps.get(rt as usize) {
+            Some(v) if is_plain_scalar(v) => true,
+            Some(Value::Array(a)) => Rc::strong_count(a) > 1,
+            _ => false,
+        };
+        if !stale_ok {
+            return Fast::No;
+        }
+        if let Some(v) = tmps.get_mut(rt as usize) {
+            if matches!(v, Value::Array(_)) {
+                *v = Value::Undef;
+            }
+        }
+        let Ok(mut a) = arr.try_borrow_mut() else {
+            return Fast::No;
+        };
+        // (the general handler's error / deprecation cases first: nothing
+        // is changed for them)
+        if let Some(k) = &key {
+            match a.get(k) {
+                Some(Value::Array(_)) | None | Some(Value::Null) | Some(Value::Undef) => {}
+                _ => return Fast::No,
+            }
+        }
+        // An element is fetched for writing: the array's storage is its own
+        // first (fetch_dim_from_array()).
+        a.make_unique();
+        let elem = match &key {
+            None => {
+                let rc = Rc::new(RefCell::new(crate::array::PhpArray::new()));
+                // (a full array: the general handler's Error)
+                if a.try_push(Value::Array(rc.clone())).is_err() {
+                    return Fast::No;
+                }
+                rc
+            }
+            Some(k) => match a.get(k) {
+                Some(Value::Array(e)) => {
+                    let e = e.clone();
+                    // (the container holds one count, `e` the other)
+                    if Rc::strong_count(&e) > 2 {
+                        let sep = Rc::new(RefCell::new(e.borrow().clone()));
+                        a.set(k.clone(), Value::Array(sep.clone()));
+                        sep
+                    } else {
+                        e
+                    }
+                }
+                _ => {
+                    let rc = Rc::new(RefCell::new(crate::array::PhpArray::new()));
+                    a.set(k.clone(), Value::Array(rc.clone()));
+                    rc
+                }
+            },
+        };
+        drop(a);
+        self.str_wb_pending = None;
+        self.str_offset_wb = None;
+        if let Some(slot) = tmps.get_mut(rt as usize) {
+            *slot = Value::Array(elem);
+        }
+        Fast::Done
     }
 
     /// Whether `$obj->prop` on an instance of `class_name` is a plain slot
@@ -2842,7 +3161,10 @@ impl crate::vm::Vm {
         }
         if w_fetch {
             drop(ob);
-            return self.prop_dim_write(op_array, ip, obj, idx, cvs, tmps);
+            return match self.prop_dim_write(op_array, ip, obj, idx, cvs, tmps) {
+                Fast::No => prop_fetch_w(obj, idx, op, tmps),
+                f => f,
+            };
         }
         if let Some(v) = new_val {
             drop(ob);

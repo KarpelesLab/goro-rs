@@ -22549,6 +22549,7 @@ impl Vm {
                         cvs.as_mut_slice(),
                         tmps.as_mut_slice(),
                         &op_array.literals,
+                        false,
                     )
                 } else {
                     let refs_ok = !typed_ref::any();
