@@ -3777,7 +3777,8 @@ impl<'a, S: Sink> Parser<'a, S> {
                     XML_ERR_ATTRIBUTE_NOT_STARTED,
                     "Attribute default value declaration error\n".into(),
                 );
-                (0, None)
+                // (the declaration goes on without a value)
+                (val, None)
             }
         }
     }
