@@ -50297,6 +50297,20 @@ impl Vm {
                         // Record own property names before parent inheritance
                         let own_prop_names_pre_inherit: std::collections::HashSet<Vec<u8>> =
                             class.properties.iter().map(|p| p.name.clone()).collect();
+                        // Trait properties are bound before the parent's are inherited.
+                        let prebound_trait_props = if class.traits.is_empty() {
+                            None
+                        } else {
+                            match self.prebind_trait_properties(&mut class) {
+                                Ok(m) => m,
+                                Err(message) => {
+                                    return Err(VmError {
+                                        message,
+                                        line: op.line,
+                                    })
+                                }
+                            }
+                        };
 
                         // Resolve inheritance: copy parent methods/properties
                         if let Some(parent_name) = &class.parent.clone() {
@@ -50593,6 +50607,9 @@ impl Vm {
                                         });
                                     }
                                 }
+                                // zend_do_inheritance_ex() checks the inherited properties and
+                                // constants before the methods: a method error waits for them.
+                                let inherit_method_err: Option<VmError> = 'inh_methods: {
                                 // Inherit methods (child overrides take precedence)
                                 for (method_name, method) in &parent.methods {
                                     // Check if parent method is final and child overrides it
@@ -50650,7 +50667,7 @@ impl Vm {
                                                     .filter(|l| *l > 0)
                                                     .unwrap_or(op.line)
                                             };
-                                            return Err(VmError {
+                                            break 'inh_methods Some(VmError {
                                                 message: msg,
                                                 line: report_line,
                                             });
@@ -50695,7 +50712,7 @@ impl Vm {
                                                     } else {
                                                         op.line
                                                     };
-                                                    return Err(VmError {
+                                                    break 'inh_methods Some(VmError {
                                                         message: msg,
                                                         line: report_line,
                                                     });
@@ -50713,7 +50730,13 @@ impl Vm {
                                         };
                                         let (proto_vis, proto_class) = match &ctor_proto {
                                             Some((v, c)) => (*v, c.clone()),
-                                            None => (method.visibility, parent_name.to_vec()),
+                                            None => (
+                                                method.visibility,
+                                                self.declaring_class_name(
+                                                    &method.declaring_class,
+                                                    parent_name,
+                                                ),
+                                            ),
                                         };
                                         if (mn_lower != b"__construct" || ctor_proto.is_some())
                                             && proto_vis != Visibility::Private
@@ -50756,7 +50779,7 @@ impl Vm {
                                                     } else {
                                                         op.line
                                                     };
-                                                return Err(VmError {
+                                                break 'inh_methods Some(VmError {
                                                     message: format!(
                                                         "Access level to {}::{}() must be {} (as in class {}){}",
                                                         child_display,
@@ -50819,7 +50842,7 @@ impl Vm {
                                                 } else {
                                                     op.line
                                                 };
-                                                return Err(VmError {
+                                                break 'inh_methods Some(VmError {
                                                     message: err_msg,
                                                     line: l,
                                                 });
@@ -50849,7 +50872,7 @@ impl Vm {
                                                 } else {
                                                     op.line
                                                 };
-                                                return Err(VmError {
+                                                break 'inh_methods Some(VmError {
                                                     message: err_msg,
                                                     line: l,
                                                 });
@@ -50868,7 +50891,7 @@ impl Vm {
                                     if let Err((message, l)) =
                                         self.variance_resolve_dependency(&class, &parent)
                                     {
-                                        return Err(VmError {
+                                        break 'inh_methods Some(VmError {
                                             message,
                                             line: if l > 0 { l } else { op.line },
                                         });
@@ -51027,7 +51050,7 @@ impl Vm {
                                         } else {
                                             ("methods", "remaining methods")
                                         };
-                                        return Err(VmError {
+                                        break 'inh_methods Some(VmError {
                                             message: format!(
                                                 "Class {} contains {} abstract {} and must therefore be declared abstract or implement the {} ({})",
                                                 crate::string::msg_str(&class.name),
@@ -51040,6 +51063,8 @@ impl Vm {
                                         });
                                     }
                                 }
+                                None
+                                };
                                 // do_inherit_property(): each parent property in turn,
                                 // checked for final, static, readonly, set visibility,
                                 // visibility, then type.
@@ -51084,9 +51109,13 @@ impl Vm {
                                                 let child_display =
                                                     crate::string::msg_str(&class.name)
                                                         .to_string();
-                                                let parent_display =
-                                                    crate::string::msg_str(parent_name)
-                                                        .to_string();
+                                                let parent_display = crate::string::msg_str(
+                                                    &self.declaring_class_name(
+                                                        &parent_prop.declaring_class,
+                                                        parent_name,
+                                                    ),
+                                                )
+                                                .to_string();
                                                 let prop_display =
                                                     crate::string::msg_str(&parent_prop.name)
                                                         .to_string();
@@ -51432,12 +51461,17 @@ impl Vm {
                                         }
                                         let child_display =
                                             crate::string::msg_str(&class.name).to_string();
-                                        let parent_display =
-                                            crate::string::msg_str(parent_name).to_string();
                                         let prop_display =
                                             crate::string::msg_str(&parent_prop.name).to_string();
                                         let expected_type = parent_type_str;
                                         if parent_prop.property_type.is_none() {
+                                            let parent_display = crate::string::msg_str(
+                                                &self.declaring_class_name(
+                                                    &parent_prop.declaring_class,
+                                                    parent_name,
+                                                ),
+                                            )
+                                            .to_string();
                                             return Err(VmError {
                                                 message: format!(
                                                     "Type of {}::${} must be omitted to match the parent definition in class {}",
@@ -51634,6 +51668,9 @@ impl Vm {
                                 // Static properties are not copied: a child shares the
                                 // parent's slot unless it redeclares the property
                                 // (see static_props::locate_static_prop).
+                                if let Some(e) = inherit_method_err {
+                                    return Err(e);
+                                }
                             } else if let Some(stub_parent) =
                                 crate::stubs::class_entry(self, &parent_lower)
                             {
@@ -52677,8 +52714,9 @@ impl Vm {
                             std::collections::HashMap::new();
                         // (the concrete trait methods, in binding order)
                         let mut trait_bound_order: Vec<Vec<u8>> = Vec::new();
+                        let props_prebound = prebound_trait_props.is_some();
                         let mut prop_from_trait: std::collections::HashMap<Vec<u8>, Vec<u8>> =
-                            std::collections::HashMap::new();
+                            prebound_trait_props.unwrap_or_default();
                         for trait_name in &trait_names {
                             let trait_lower: Vec<u8> =
                                 trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -53020,93 +53058,24 @@ impl Vm {
                                 // be compatible; inherited private ones are shadowed, other
                                 // inherited ones replaced.
                                 for prop in &trait_def.properties {
+                                    if props_prebound {
+                                        break;
+                                    }
                                     let prev_trait = prop_from_trait.get(&prop.name).cloned();
                                     if own_prop_names.contains(&prop.name) || prev_trait.is_some() {
                                         let first_def = prev_trait
                                             .clone()
                                             .unwrap_or_else(|| class.name.clone());
-                                        let class_display =
-                                            crate::string::msg_str(&class.name).to_string();
-                                        let first_display =
-                                            crate::string::msg_str(&first_def).to_string();
-                                        let trait_display =
-                                            crate::string::msg_str(&trait_def.name).to_string();
-                                        let prop_display =
-                                            crate::string::msg_str(&prop.name).to_string();
-                                        if let Some(class_prop) =
-                                            class.properties.iter().find(|p| {
-                                                p.name == prop.name
-                                                    && p.declaring_class == class_name_lower
-                                            })
-                                        {
-                                            // Hooked properties cannot be merged with trait hooked properties
-                                            let trait_has_hooks =
-                                                prop.has_get_hook || prop.has_set_hook;
-                                            let class_has_hooks =
-                                                class_prop.has_get_hook || class_prop.has_set_hook;
-                                            if trait_has_hooks || class_has_hooks {
-                                                return Err(VmError {
-                                                    message: format!(
-                                                        "{} and {} define the same hooked property (${}) in the composition of {}. Conflict resolution between hooked properties is currently not supported. Class was composed",
-                                                        first_display,
-                                                        trait_display,
-                                                        prop_display,
-                                                        class_display
-                                                    ),
-                                                    line: op.line,
-                                                });
-                                            }
-                                            let types_ok = match (
-                                                &prop.property_type,
-                                                &class_prop.property_type,
-                                            ) {
-                                                (None, None) => true,
-                                                (Some(_), Some(_)) => {
-                                                    self.variance_property_types(
-                                                        &class,
-                                                        &class_name_lower,
-                                                        &class_prop.property_type,
-                                                        &prop.property_type,
-                                                        0,
-                                                    )
-                                                    .0 == variance::Status::Success
-                                                }
-                                                _ => false,
-                                            };
-                                            // Two constant expressions (self:: of the class
-                                            // being composed) compare by their source.
-                                            let (d1, d2) = match (
-                                                self.const_thunk_source(&prop.default),
-                                                self.const_thunk_source(&class_prop.default),
-                                            ) {
-                                                (Some(a), Some(b)) => (
-                                                    Value::String(PhpString::from_vec(a)),
-                                                    Value::String(PhpString::from_vec(b)),
-                                                ),
-                                                _ => (
-                                                    self.resolve_deferred_value(&prop.default),
-                                                    self.resolve_deferred_value(
-                                                        &class_prop.default,
-                                                    ),
-                                                ),
-                                            };
-                                            if prop.is_static != class_prop.is_static
-                                                || prop.visibility != class_prop.visibility
-                                                || prop.is_readonly != class_prop.is_readonly
-                                                || !types_ok
-                                                || !Self::values_identical(&d1, &d2)
-                                            {
-                                                return Err(VmError {
-                                                    message: format!(
-                                                        "{} and {} define the same property (${}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
-                                                        first_display,
-                                                        trait_display,
-                                                        prop_display,
-                                                        class_display
-                                                    ),
-                                                    line: op.line,
-                                                });
-                                            }
+                                        if let Some(message) = self.trait_prop_composition_error(
+                                            &class,
+                                            &first_def,
+                                            &trait_def.name,
+                                            prop,
+                                        ) {
+                                            return Err(VmError {
+                                                message,
+                                                line: op.line,
+                                            });
                                         }
                                         continue;
                                     }
@@ -60986,7 +60955,149 @@ impl Vm {
         }
     }
 
-    /// Read an operand, emitting "Undefined variable" warning for undef CVs
+    /// zend_do_traits_property_binding(): a trait property also declared by
+    /// the class (or an earlier trait, `first_def`) must be compatible.
+    #[inline(never)]
+    fn trait_prop_composition_error(
+        &mut self,
+        class: &ClassEntry,
+        first_def: &[u8],
+        trait_name: &[u8],
+        prop: &crate::object::PropertyDef,
+    ) -> Option<String> {
+        let class_name_lower = class.name.to_ascii_lowercase();
+        let class_prop = class
+            .properties
+            .iter()
+            .find(|p| p.name == prop.name && p.declaring_class == class_name_lower)?;
+        let class_display = crate::string::msg_str(&class.name).to_string();
+        let first_display = crate::string::msg_str(first_def).to_string();
+        let trait_display = crate::string::msg_str(trait_name).to_string();
+        let prop_display = crate::string::msg_str(&prop.name).to_string();
+        // Hooked properties cannot be merged with trait hooked properties
+        let trait_has_hooks = prop.has_get_hook || prop.has_set_hook;
+        let class_has_hooks = class_prop.has_get_hook || class_prop.has_set_hook;
+        if trait_has_hooks || class_has_hooks {
+            return Some(format!(
+                "{} and {} define the same hooked property (${}) in the composition of {}. Conflict resolution between hooked properties is currently not supported. Class was composed",
+                first_display, trait_display, prop_display, class_display
+            ));
+        }
+        let types_ok = match (&prop.property_type, &class_prop.property_type) {
+            (None, None) => true,
+            (Some(_), Some(_)) => {
+                self.variance_property_types(
+                    class,
+                    &class_name_lower,
+                    &class_prop.property_type,
+                    &prop.property_type,
+                    0,
+                )
+                .0 == variance::Status::Success
+            }
+            _ => false,
+        };
+        // Two constant expressions (self:: of the class
+        // being composed) compare by their source.
+        let (d1, d2) = match (
+            self.const_thunk_source(&prop.default),
+            self.const_thunk_source(&class_prop.default),
+        ) {
+            (Some(a), Some(b)) => (
+                Value::String(PhpString::from_vec(a)),
+                Value::String(PhpString::from_vec(b)),
+            ),
+            _ => (
+                self.resolve_deferred_value(&prop.default),
+                self.resolve_deferred_value(&class_prop.default),
+            ),
+        };
+        if prop.is_static != class_prop.is_static
+            || prop.visibility != class_prop.visibility
+            || prop.is_readonly != class_prop.is_readonly
+            || !types_ok
+            || !Self::values_identical(&d1, &d2)
+        {
+            return Some(format!(
+                "{} and {} define the same property (${}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
+                first_display, trait_display, prop_display, class_display
+            ));
+        }
+        None
+    }
+
+    /// Bind the trait properties before the parent's are inherited, as
+    /// zend_do_link_class() does (so those are checked against the parent's
+    /// like the class's own). Only when every used trait is already loaded
+    /// (and not deprecated): returns which trait each bound or matching
+    /// property came from; None leaves it to the trait binding below.
+    #[inline(never)]
+    fn prebind_trait_properties(
+        &mut self,
+        class: &mut ClassEntry,
+    ) -> Result<Option<std::collections::HashMap<Vec<u8>, Vec<u8>>>, String> {
+        let mut defs = Vec::with_capacity(class.traits.len());
+        for t in &class.traits {
+            match self.classes.get(&t.to_ascii_lowercase()).cloned() {
+                Some(d) if d.is_trait && self.get_deprecated_message(&d.attributes).is_none() => {
+                    defs.push(d)
+                }
+                _ => return Ok(None),
+            }
+        }
+        let class_name_lower = class.name.to_ascii_lowercase();
+        let own: std::collections::HashSet<Vec<u8>> =
+            class.properties.iter().map(|p| p.name.clone()).collect();
+        let mut from: std::collections::HashMap<Vec<u8>, Vec<u8>> =
+            std::collections::HashMap::new();
+        for trait_def in &defs {
+            for prop in &trait_def.properties {
+                let prev_trait = from.get(&prop.name).cloned();
+                if own.contains(&prop.name) || prev_trait.is_some() {
+                    let first_def = prev_trait.unwrap_or_else(|| class.name.clone());
+                    if let Some(msg) =
+                        self.trait_prop_composition_error(class, &first_def, &trait_def.name, prop)
+                    {
+                        return Err(msg);
+                    }
+                    continue;
+                }
+                if class.is_readonly && !prop.is_readonly {
+                    return Err(format!(
+                        "Readonly class {} cannot use trait with a non-readonly property {}::${}",
+                        crate::string::msg_str(&class.name),
+                        crate::string::msg_str(&trait_def.name),
+                        crate::string::msg_str(&prop.name)
+                    ));
+                }
+                if class.is_enum {
+                    return Err(format!(
+                        "Enum {} cannot include properties",
+                        crate::string::msg_str(&class.name)
+                    ));
+                }
+                let mut p = prop.clone();
+                p.declaring_class = class_name_lower.clone();
+                class.properties.push(p);
+                from.insert(prop.name.clone(), trait_def.name.clone());
+            }
+        }
+        Ok(Some(from))
+    }
+
+    /// The name of the class that declared an inherited member (its
+    /// scope, as error messages show it), or `fallback`.
+    #[inline(never)]
+    fn declaring_class_name(&self, declaring: &[u8], fallback: &[u8]) -> Vec<u8> {
+        if declaring.is_empty() {
+            return fallback.to_vec();
+        }
+        self.classes
+            .get(&declaring.to_ascii_lowercase())
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| fallback.to_vec())
+    }
+
     /// The pending exception leaves the frame unhandled (as an uncaught
     /// one does): the caller dispatches it at its call site.
     #[inline(never)]
@@ -61003,6 +61114,7 @@ impl Vm {
         VmError { message, line }
     }
 
+    /// Read an operand, emitting "Undefined variable" warning for undef CVs
     fn read_operand_warn(
         &mut self,
         operand: &OperandType,
