@@ -2664,7 +2664,13 @@ impl<'a, S: Sink> Parser<'a, S> {
                 }
                 b'A' => self.parse_attribute_list_decl(),
                 b'N' => self.parse_notation_decl(),
-                b'-' => self.parse_comment(),
+                b'-' => {
+                    if self.cmp(b"<!--") {
+                        self.parse_comment();
+                    } else {
+                        self.skip(2);
+                    }
+                }
                 _ => {
                     let code = if self.st.in_subset == 2 {
                         60
@@ -2882,6 +2888,10 @@ impl<'a, S: Sink> Parser<'a, S> {
 
     fn parse_entity_decl(&mut self) {
         if !self.cmp(b"<!ENTITY") {
+            // (SKIP(2) comes before the keyword test: always progress)
+            if self.cur() == b'<' && self.nxt(1) == b'!' {
+                self.skip(2);
+            }
             return;
         }
         self.skip(8);
@@ -3149,6 +3159,10 @@ impl<'a, S: Sink> Parser<'a, S> {
 
     fn parse_notation_decl(&mut self) {
         if !self.cmp(b"<!NOTATION") {
+            // (SKIP(2) comes before the keyword test: always progress)
+            if self.cur() == b'<' && self.nxt(1) == b'!' {
+                self.skip(2);
+            }
             return;
         }
         self.skip(10);
@@ -3188,6 +3202,10 @@ impl<'a, S: Sink> Parser<'a, S> {
 
     fn parse_element_decl(&mut self) {
         if !self.cmp(b"<!ELEMENT") {
+            // (SKIP(2) comes before the keyword test: always progress)
+            if self.cur() == b'<' && self.nxt(1) == b'!' {
+                self.skip(2);
+            }
             return;
         }
         self.skip(9);
@@ -3525,6 +3543,10 @@ impl<'a, S: Sink> Parser<'a, S> {
 
     fn parse_attribute_list_decl(&mut self) {
         if !self.cmp(b"<!ATTLIST") {
+            // (SKIP(2) comes before the keyword test: always progress)
+            if self.cur() == b'<' && self.nxt(1) == b'!' {
+                self.skip(2);
+            }
             return;
         }
         self.skip(9);
