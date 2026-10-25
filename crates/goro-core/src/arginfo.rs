@@ -1148,6 +1148,11 @@ impl Vm {
                 if !ok && !(!strict && m & T_STRING != 0 && self.zpp_object_has_tostring(&v)) {
                     return Err(self.zpp_type_error_n(info, i, p, &v, number));
                 }
+                // An instance is fully checked: the next parameters are
+                // parsed too (hash_final($ctx, []) is a TypeError).
+                if ok {
+                    continue;
+                }
                 break;
             }
             // An object given to an `object` / `array|object` parameter

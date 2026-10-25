@@ -1195,6 +1195,9 @@ fn hash_update_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         );
         return throw(vm, b"TypeError", &msg);
     }
+    if filename.as_bytes().is_empty() {
+        return throw(vm, b"ValueError", "Path must not be empty");
+    }
     let Some(stream) = open_stream(vm, "hash_update_file", &filename, &context)? else {
         return Ok(Value::False);
     };

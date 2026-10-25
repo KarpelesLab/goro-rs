@@ -188,6 +188,19 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"gmp_random_range", gmp_random_range);
     vm.register_function(b"gmp_random_seed", gmp_random_seed);
 
+    // The stub arginfo gives every function's argument count (the GMP
+    // arguments themselves are parsed here).
+    let names: Vec<Vec<u8>> = vm
+        .functions
+        .keys()
+        .filter(|k| k.starts_with(b"gmp_"))
+        .cloned()
+        .collect();
+    for name in names {
+        vm.zpp_extension_verified
+            .insert(name, goro_core::arginfo::CHECK_ARITY);
+    }
+
     // Register operator overloading handlers
     vm.object_do_operation = Some(gmp_do_operation);
     vm.object_do_unary = Some(gmp_do_unary);
