@@ -170,7 +170,14 @@ pub fn set_errno(e: i32) {
 
 unsafe extern "C" {
     fn __h_errno_location() -> *mut libc::c_int;
-    fn gethostbyname(name: *const libc::c_char) -> *mut libc::hostent;
+    fn gethostbyname_r(
+        name: *const libc::c_char,
+        ret: *mut libc::hostent,
+        buf: *mut libc::c_char,
+        buflen: libc::size_t,
+        result: *mut *mut libc::hostent,
+        h_errnop: *mut libc::c_int,
+    ) -> libc::c_int;
     fn sockatmark(fd: libc::c_int) -> libc::c_int;
     fn inet_pton(af: libc::c_int, src: *const libc::c_char, dst: *mut libc::c_void) -> libc::c_int;
     fn inet_ntop(
@@ -247,9 +254,32 @@ pub fn cstring(s: &[u8]) -> CString {
 }
 
 /// php_network_gethostbyname(): the first IPv4 address of `name`.
+/// (gethostname_re(): gethostbyname_r() with its own error variable, so
+/// the h_errno a failure reports is whatever it was before.)
 pub(crate) fn gethostbyname4(name: &[u8]) -> Result<Option<[u8; 4]>, ()> {
     let c = cstring(name);
-    let he = unsafe { gethostbyname(c.as_ptr()) };
+    let mut hostbuf: libc::hostent = unsafe { std::mem::zeroed() };
+    let mut buf: Vec<libc::c_char> = vec![0; 1024];
+    let mut he: *mut libc::hostent = std::ptr::null_mut();
+    let mut herr: libc::c_int = 0;
+    loop {
+        let r = unsafe {
+            gethostbyname_r(
+                c.as_ptr(),
+                &mut hostbuf,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut he,
+                &mut herr,
+            )
+        };
+        if r == libc::ERANGE {
+            let n = buf.len() * 2;
+            buf.resize(n, 0);
+            continue;
+        }
+        break;
+    }
     if he.is_null() {
         return Err(());
     }
