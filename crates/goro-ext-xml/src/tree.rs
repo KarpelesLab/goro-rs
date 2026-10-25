@@ -1456,6 +1456,32 @@ impl Tree {
 
     /// xmlDocCopyNode(node, doc, extended): 1 = recursive, 2 = shallow with
     /// attributes and namespaces.
+    /// xmlNewReconciledNs: an in-scope declaration of `ns`'s namespace name,
+    /// else a new one on `tree_root` under a free prefix (a, a1, a2...).
+    pub fn new_reconciled_ns(&mut self, tree_root: NodeId, ns: NsId) -> Option<NsId> {
+        if self.nodes[tree_root].t != NType::Element {
+            return None;
+        }
+        let href = self.nss[ns].href.clone();
+        if let Some(d) = self.search_ns_by_href(tree_root, &href) {
+            return Some(d);
+        }
+        let base = self.nss[ns]
+            .prefix
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        let mut prefix = base.clone();
+        let mut counter = 1;
+        while self.search_ns(tree_root, Some(&prefix)).is_some() {
+            if counter > 1000 {
+                return None;
+            }
+            prefix = format!("{}{}", base, counter);
+            counter += 1;
+        }
+        self.new_ns(Some(tree_root), &href, Some(&prefix))
+    }
+
     pub fn copy_node(
         &mut self,
         id: NodeId,
@@ -1569,16 +1595,64 @@ impl Tree {
         }
         // xmlCopyProp without a target element drops the namespace
         let keep_ns = !(src.t == NType::Attribute && parent.is_none());
-        if let Some(ns) = src.ns.filter(|_| keep_ns) {
+        if let Some(ns) = src.ns.filter(|_| keep_ns && src.t == NType::Attribute) {
+            // xmlCopyPropInternal() with the copied element as target
+            let target = parent.unwrap();
             let prefix = self.nss[ns].prefix.clone();
             let href = self.nss[ns].href.clone();
+            let ns_new = match self.search_ns(target, prefix.as_deref()) {
+                Some(f) if self.nss[f].href == href => Some(f),
+                Some(_) => self.new_reconciled_ns(target, ns),
+                None => {
+                    // out of the new tree's scope: look it up in the
+                    // original and declare it at the top of the new tree
+                    match src
+                        .parent
+                        .and_then(|p| self.search_ns(p, prefix.as_deref()))
+                    {
+                        Some(orig) => {
+                            let ohref = self.nss[orig].href.clone();
+                            let mut root = target;
+                            while let Some(p) = self.nodes[root].parent {
+                                if p == root || self.nodes[p].t != NType::Element {
+                                    break;
+                                }
+                                root = p;
+                            }
+                            Some(
+                                self.new_ns(Some(root), &ohref, prefix.as_deref())
+                                    .unwrap_or_else(|| {
+                                        self.new_ns_raw(&ohref, prefix.as_deref(), None)
+                                    }),
+                            )
+                        }
+                        None => None,
+                    }
+                }
+            };
+            self.nodes[nid].ns = ns_new;
+        } else if let Some(ns) = src.ns.filter(|_| keep_ns) {
+            let prefix = self.nss[ns].prefix.clone();
+            let href = self.nss[ns].href.clone();
+            // xmlStaticCopyNode(): a prefix in scope of the copy is used
+            // whatever its namespace name
             let found = self.search_ns(nid, prefix.as_deref());
             let found = match found {
+                Some(f) if src.t == NType::Element => Some(f),
                 Some(f) if self.nss[f].href == href => Some(f),
                 _ => None,
             };
             let ns_new = match found {
                 Some(f) => f,
+                None if src.t == NType::Element
+                    && prefix.as_deref() != Some("xml")
+                    && self.search_ns(id, prefix.as_deref()).is_none() =>
+                {
+                    match self.new_reconciled_ns(nid, ns) {
+                        Some(x) => x,
+                        None => self.new_ns_raw(&href, prefix.as_deref(), None),
+                    }
+                }
                 None => {
                     // declare on the root of the copy
                     let mut root = nid;

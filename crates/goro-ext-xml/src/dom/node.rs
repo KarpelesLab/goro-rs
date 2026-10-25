@@ -75,27 +75,7 @@ pub fn next_in_tree(t: &Tree, node: NodeId, base: NodeId) -> Option<NodeId> {
 
 /// xmlNewReconciledNs
 fn new_reconciled_ns(t: &mut Tree, tree_root: NodeId, ns: NsId) -> Option<NsId> {
-    if t.nodes[tree_root].t != NType::Element {
-        return None;
-    }
-    let href = t.nss[ns].href.clone();
-    if let Some(d) = t.search_ns_by_href(tree_root, &href) {
-        return Some(d);
-    }
-    let base = t.nss[ns]
-        .prefix
-        .clone()
-        .unwrap_or_else(|| "default".to_string());
-    let mut prefix = base.clone();
-    let mut counter = 1;
-    while t.search_ns(tree_root, Some(&prefix)).is_some() {
-        if counter > 1000 {
-            return None;
-        }
-        prefix = format!("{}{}", base, counter);
-        counter += 1;
-    }
-    t.new_ns(Some(tree_root), &href, Some(&prefix))
+    t.new_reconciled_ns(tree_root, ns)
 }
 
 /// xmlReconciliateNs
