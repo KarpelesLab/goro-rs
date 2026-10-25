@@ -479,14 +479,7 @@ fn mb_substitute_character(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
                 Value::String(s) => s.as_bytes().to_vec(),
                 _ => unreachable!(),
             };
-            // Z_PARAM_STR_OR_LONG: numeric strings are treated as integers
-            if let Ok(t) = std::str::from_utf8(&s) {
-                if let Ok(n) = t.trim().parse::<i64>() {
-                    if !t.is_empty() && !t.ends_with(|c: char| c.is_whitespace()) {
-                        return set_subst_codepoint(vm, n);
-                    }
-                }
-            }
+            // (Z_PARAM_STR_OR_LONG keeps a string a string, numeric or not)
             let mode = if s.eq_ignore_ascii_case(b"none") {
                 MBFL_OUTPUTFILTER_ILLEGAL_MODE_NONE
             } else if s.eq_ignore_ascii_case(b"long") {

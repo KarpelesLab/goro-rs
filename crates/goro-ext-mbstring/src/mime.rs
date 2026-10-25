@@ -348,10 +348,30 @@ fn mb_encode_mimeheader(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         given
     };
+    // (all the arguments are parsed before the charset is looked up)
     let charset_null = null_given(vm, 1, "charset");
+    let charset_name = if present(args, 1) || charset_null {
+        Some(str_arg(vm, f, args, 1, "charset")?)
+    } else {
+        None
+    };
     let transenc_null = null_given(vm, 2, "transfer_encoding");
-    if present(args, 1) || charset_null {
-        let name = str_arg(vm, f, args, 1, "charset")?;
+    let transenc = if present(args, 2) || transenc_null {
+        Some(str_arg(vm, f, args, 2, "transfer_encoding")?)
+    } else {
+        None
+    };
+    let linefeed = if present(args, 3) {
+        str_arg(vm, f, args, 3, "newline")?
+    } else {
+        b"\r\n".to_vec()
+    };
+    let indent = if present(args, 4) {
+        long_arg(vm, f, args, 4, "indent")?
+    } else {
+        0
+    };
+    if let Some(name) = charset_name {
         charset = get_encoding(vm, f, Some(&name), 2, "charset")?;
         if charset.mime_name.map(|m| m.is_empty()).unwrap_or(true) || charset.no == EncNo::Qprint {
             return Err(arg_value_error(
@@ -377,22 +397,11 @@ fn mb_encode_mimeheader(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
     }
-    if present(args, 2) || transenc_null {
-        let t = str_arg(vm, f, args, 2, "transfer_encoding")?;
+    if let Some(t) = transenc {
         if !t.is_empty() && (t[0] == b'Q' || t[0] == b'q') {
             base64 = false;
         }
     }
-    let linefeed = if present(args, 3) {
-        str_arg(vm, f, args, 3, "newline")?
-    } else {
-        b"\r\n".to_vec()
-    };
-    let indent = if present(args, 4) {
-        long_arg(vm, f, args, 4, "indent")?
-    } else {
-        0
-    };
     if charset.from_wchar.is_none() || charset.mime_name.is_none() {
         // pass (no language charset found): output unchanged
         return Ok(pstring(s));
