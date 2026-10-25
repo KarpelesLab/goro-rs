@@ -90,6 +90,16 @@ pub fn error_type_label(ty: i64) -> &'static str {
     }
 }
 
+/// A compile error the parser raises as a thrown CompileError
+/// (zend_add_member_modifier() and friends): zend_exception_error() reports
+/// it as a fatal error without a backtrace.
+fn compile_error_exception_message(msg: &str) -> bool {
+    (msg.starts_with("Cannot use the ") && msg.contains(" modifier on a"))
+        || (msg.starts_with("Multiple ") && msg.ends_with(" modifiers are not allowed"))
+        || msg == "Encoding must be a literal"
+        || msg == "__HALT_COMPILER() can only be used from the outermost scope"
+}
+
 fn ini_str(vm: &Vm, key: &[u8]) -> Option<String> {
     vm.constants
         .get(key)
@@ -537,6 +547,7 @@ impl Vm {
         // which print their own trace).
         let trace = if kind == "Fatal error"
             && !msg.starts_with("Uncaught ")
+            && !compile_error_exception_message(msg)
             && ini_bool(self, b"fatal_error_backtraces")
         {
             // The backtrace taken when the error was raised (fatal_error_cb).
