@@ -20,6 +20,12 @@ const MODE_CONTINUE_ON_ERROR: i64 = 2;
 /// _php_iconv_appendl(): convert all of `s` (None: the shift-back
 /// sequence) appending to `d`.
 fn appendl(d: &mut Vec<u8>, s: Option<&[u8]>, cd: &mut Iconv) -> Err {
+    // (smart_str_alloc() happens before the conversion: the buffer exists
+    // even when it fails, which iconv_mime_decode_headers() tests through
+    // the capacity)
+    if s.is_none_or(|s| !s.is_empty()) {
+        d.reserve(1);
+    }
     match s {
         Some(s) => {
             // The output of the iconv() call that fails is not kept (the
@@ -853,7 +859,8 @@ pub(crate) fn iconv_mime_decode_headers(vm: &mut Vm, args: &[Value]) -> R {
             err = e;
             break;
         }
-        if decoded.is_empty() {
+        // (decoded_header.s == NULL: nothing was ever appended)
+        if decoded.capacity() == 0 {
             break;
         }
         if let Some(colon) = decoded.iter().position(|&c| c == b':') {

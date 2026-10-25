@@ -199,13 +199,17 @@ fn table() -> &'static [(&'static str, Kind)] {
 /// The charset named `name` (glibc's normalization: case-insensitive;
 /// ISO_8859-N, ISO8859-N, ISO88591... spellings).
 pub fn lookup(name: &[u8]) -> Option<Kind> {
-    // glibc's strip(): only alphanumerics and "_-.,:" are kept; an empty
+    // glibc's strip(): only alphanumerics and "_-.,:/" are kept; an empty
     // name is the locale's charset (UTF-8 for php's C.UTF-8 LC_CTYPE).
-    let up: Vec<u8> = name
+    let mut up: Vec<u8> = name
         .iter()
         .filter(|c| c.is_ascii_alphanumeric() || b"_-.,:/".contains(c))
         .map(|c| c.to_ascii_uppercase())
         .collect();
+    // (gconv_parse_code() drops trailing separators: "," is the default)
+    while up.last().is_some_and(|c| *c == b',' || *c == b'/') {
+        up.pop();
+    }
     if up.is_empty() {
         return Some(Kind::Utf8);
     }
