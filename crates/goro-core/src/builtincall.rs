@@ -232,67 +232,77 @@ impl Vm {
         tmps: &mut [Value],
         free_mask: &[u8],
     ) -> Option<bool> {
-        let lf = *self.lean_frames.last()?;
-        if !std::ptr::eq(lf.f, op_array) || !self.builtin_dofcall_ok(op_array, ip, tmps, free_mask)
+        let n = self.lean_frames.len();
+        if n == 0
+            || n != self.lean_depth as usize
+            || !std::ptr::eq(self.lean_frames[n - 1].f, op_array)
+            || !self.builtin_dofcall_ok(op_array, ip, tmps, free_mask)
         {
             return None;
         }
+        // (a method's frame is named after what its call site resolved)
         // SAFETY: see LeanFrame (lean_run() keeps them while the run runs).
-        let call = unsafe { &*lf.call };
-        let slots = unsafe { &*lf.slots };
-        // The frame's name, as DO_FCALL's fast path makes it.
-        let mut display = self.string_pool.pop().unwrap_or_default();
-        display.clear();
-        match lf.sep {
-            Some(_) => match &call.target.method_info {
-                Some(i) => display.push_str(&i.display),
-                None => {
-                    self.string_pool.push(display);
-                    return None;
-                }
-            },
-            None if !op_array.display_name.is_empty() => {
-                push_lossy(&mut display, &op_array.display_name)
-            }
-            None => push_lossy(&mut display, call.name.as_bytes()),
-        }
-        let base = usize::from(lf.sep.is_some());
-        let frame_this = lf.sep.is_some() && matches!(slots.first(), Some(Value::Object(_)));
-        let mut args = self.value_pool.pop().unwrap_or_default();
-        args.clear();
-        if let Some(a) = slots.get(base..lf.nargs.min(slots.len())) {
-            args.extend_from_slice(a);
+        if self
+            .lean_frames
+            .iter()
+            .any(|lf| lf.sep.is_some() && unsafe { &*lf.call }.target.method_info.is_none())
+        {
+            return None;
         }
         let depth = self.call_stack.len();
         let cv_depth = self.cv_frames.len();
-        let file = self.current_file.clone();
-        self.call_stack
-            .push((display, file, lf.line, args, frame_this));
-        if self.register_cv_frame_hinted(op_array, true) {
-            self.set_cv_frame_vars(slots);
+        let gc_depth = self.gc_frames.len();
+        let no_sym = None;
+        let no_fin = Vec::new();
+        // Each running lean callee, outermost first, gets the frame DO_FCALL's
+        // fast path would have given it.
+        for k in 0..n {
+            let lf = self.lean_frames[k];
+            // SAFETY: see LeanFrame.
+            let (f, call, slots) = unsafe { (&*lf.f, &*lf.call, &*lf.slots) };
+            let mut display = self.string_pool.pop().unwrap_or_default();
+            display.clear();
+            match (lf.sep, &call.target.method_info) {
+                (Some(_), Some(i)) => display.push_str(&i.display),
+                _ if !f.display_name.is_empty() => push_lossy(&mut display, &f.display_name),
+                _ => push_lossy(&mut display, call.name.as_bytes()),
+            }
+            let base = usize::from(lf.sep.is_some());
+            let frame_this = lf.sep.is_some() && matches!(slots.first(), Some(Value::Object(_)));
+            let mut args = self.value_pool.pop().unwrap_or_default();
+            args.clear();
+            if let Some(a) = slots.get(base..lf.nargs.min(slots.len())) {
+                args.extend_from_slice(a);
+            }
+            // (the file the call was made in: the caller's)
+            let file = match k {
+                0 => self.current_file.clone(),
+                _ => unsafe { &*self.lean_frames[k - 1].f }.file_name(),
+            };
+            self.call_stack
+                .push((display, file, lf.line, args, frame_this));
+            if self.register_cv_frame_hinted(f, true) {
+                self.set_cv_frame_vars(slots);
+            }
+            self.gc_frames.push(crate::gc::GcFrame::new(
+                slots,
+                unsafe { &*lf.tmps },
+                &no_sym,
+                unsafe { &*lf.fe },
+                &no_fin,
+                &call.args,
+                frame_this,
+            ));
         }
         let outer_exec = std::mem::replace(&mut self.exec_frame_len, self.call_stack.len());
         let saved_file = self.enter_op_array_file(op_array);
         let was_global = std::mem::replace(&mut self.is_global_scope, false);
-        // (the call runs as from a frame of its own, one level down)
+        // (the call runs as from frames of their own, as many levels down)
         let lean_depth = std::mem::replace(&mut self.lean_depth, 0);
-        self.call_depth += 1;
-        let no_sym = None;
-        let no_fin = Vec::new();
-        // SAFETY: see LeanFrame.
-        self.gc_frames.push(crate::gc::GcFrame::new(
-            slots,
-            unsafe { &*lf.tmps },
-            &no_sym,
-            unsafe { &*lf.fe },
-            &no_fin,
-            &call.args,
-            frame_this,
-        ));
-        let gc_depth = self.gc_frames.len();
+        self.call_depth += n as u32;
         let r = self.fast_builtin_dofcall(op_array, ip, tmps, false, free_mask);
-        self.gc_frames.truncate(gc_depth - 1);
-        self.call_depth -= 1;
+        self.gc_frames.truncate(gc_depth);
+        self.call_depth -= n as u32;
         self.lean_depth = lean_depth;
         self.is_global_scope = was_global;
         self.leave_op_array_file(saved_file);
@@ -305,7 +315,6 @@ impl Vm {
         }
         r
     }
-
     /// The builtin call made by the DO_FCALL at `ip` of `op_array` failed
     /// (see fast_builtin_dofcall): what the dispatch loop's DO_FCALL takes.
     #[cold]

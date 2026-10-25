@@ -1935,7 +1935,7 @@ impl crate::vm::Vm {
                             None => return ip,
                         }
                     } else if no_release
-                        && self.lean_depth == 1
+                        && self.lean_depth >= 1
                         && self.lean_resume.is_empty()
                         && self.fast_builtin_target()
                     {
