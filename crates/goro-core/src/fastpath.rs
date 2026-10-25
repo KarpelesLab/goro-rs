@@ -1809,9 +1809,10 @@ impl crate::vm::Vm {
                 // A non-variable argument of a user function's by-value
                 // parameter (SEND_VAL_EX / SEND_VAR_NO_REF_EX): sent as is.
                 OpCode::SendValChecked => {
-                    // (or of an internal function's by-value parameter, for
-                    // a value that is not an array: the general handler may
-                    // separate one passed to an `array &$array`)
+                    // (or of an internal function's by-value parameter; an
+                    // array not as the first argument of the builtins taking
+                    // an `array &$array` there: the general handler separates
+                    // one)
                     let fn_gen = self.user_functions.len() + 1;
                     let mut ucf = false;
                     let by_value_target = self.pending_calls.last().is_some_and(|c| {
@@ -1829,10 +1830,17 @@ impl crate::vm::Vm {
                                         .get(idx)
                                         .or_else(|| fi.params.last().filter(|p| p.variadic))
                                         .is_none_or(|p| p.by_ref == 0)
-                                        && !matches!(
-                                            defined_operand(&op.op1, cvs, tmps, literals),
-                                            Some(Value::Array(_)) | None
-                                        )
+                                        && match defined_operand(&op.op1, cvs, tmps, literals) {
+                                            None => false,
+                                            Some(Value::Array(_)) => {
+                                                ucf = idx != 0
+                                                    || !crate::compiler::Compiler::is_array_ref_builtin(
+                                                        Some(c.name.as_bytes()),
+                                                    );
+                                                ucf
+                                            }
+                                            Some(_) => true,
+                                        }
                                 }
                                 _ => false,
                             }
