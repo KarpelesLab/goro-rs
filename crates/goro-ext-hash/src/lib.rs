@@ -360,7 +360,11 @@ fn file_digest(
             ),
         );
     }
-    let Some(stream) = open_stream(vm, fname, &filename, &Value::Null)? else {
+    // php_stream_open_wrapper(arg, "rb", REPORT_ERRORS, NULL): no context
+    let saved = std::mem::replace(&mut vm.open_context_mode, goro_core::vm::OPEN_CTX_NONE);
+    let stream = open_stream(vm, fname, &filename, &Value::Null);
+    vm.open_context_mode = saved;
+    let Some(stream) = stream? else {
         return Ok(Value::False);
     };
     let mut ctx = ops.new_ctx(None);
@@ -410,7 +414,11 @@ fn do_hash(vm: &mut Vm, args: &[Value], fname: &str, is_file: bool) -> Result<Va
                 ),
             );
         }
-        match open_stream(vm, fname, &data, &Value::Null)? {
+        // php_stream_open_wrapper_ex(..., FG(default_context)): as it is
+        let saved = std::mem::replace(&mut vm.open_context_mode, goro_core::vm::OPEN_CTX_EXISTING);
+        let opened = open_stream(vm, fname, &data, &Value::Null);
+        vm.open_context_mode = saved;
+        match opened? {
             Some(s) => stream = Some(s),
             None => return Ok(Value::False),
         }
@@ -500,7 +508,11 @@ fn do_hash_hmac(vm: &mut Vm, args: &[Value], fname: &str, is_file: bool) -> Resu
                 ),
             );
         }
-        match open_stream(vm, fname, &data, &Value::Null)? {
+        // php_stream_open_wrapper_ex(..., FG(default_context)): as it is
+        let saved = std::mem::replace(&mut vm.open_context_mode, goro_core::vm::OPEN_CTX_EXISTING);
+        let opened = open_stream(vm, fname, &data, &Value::Null);
+        vm.open_context_mode = saved;
+        match opened? {
             Some(s) => stream = Some(s),
             None => return Ok(Value::False),
         }

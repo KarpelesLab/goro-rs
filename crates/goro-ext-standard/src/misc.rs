@@ -8509,6 +8509,14 @@ impl MetaTokenizer<'_> {
 
 /// get_meta_tags(): the content attributes of the <meta> tags of a file.
 fn get_meta_tags_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // php_stream_open_wrapper(..., NULL): the stream gets no context
+    let saved = std::mem::replace(&mut vm.open_context_mode, goro_core::vm::OPEN_CTX_NONE);
+    let r = get_meta_tags_inner(vm, args);
+    vm.open_context_mode = saved;
+    r
+}
+
+fn get_meta_tags_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let filename = args.first().cloned().unwrap_or(Value::Null);
     let use_include_path = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     let contents = file_get_contents_fn(

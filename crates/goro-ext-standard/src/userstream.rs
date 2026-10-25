@@ -975,8 +975,10 @@ fn context_from_arg(
             Ok(Some(id.id()))
         }
         Some(Value::Null) | Some(Value::Undef) | None => {
-            if no_default {
+            if no_default || vm.open_context_mode == goro_core::vm::OPEN_CTX_NONE {
                 Ok(None)
+            } else if vm.open_context_mode == goro_core::vm::OPEN_CTX_EXISTING {
+                Ok(crate::misc::DEFAULT_STREAM_CTX.with(|d| d.get()))
             } else {
                 Ok(Some(default_context()))
             }
@@ -3730,13 +3732,19 @@ fn h_fgetcsv(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
         Some(x) => x,
         None => return Ok(None),
     };
+    // (php_csv_handle_escape_argument() before the length is checked)
+    let escape = match args.get(4).map(|v| v.deref()) {
+        None | Some(Value::Null) | Some(Value::Undef) => None,
+        Some(v) => Some(v.to_php_string()),
+    };
+    let escape = crate::csv::csv_handle_escape_argument(vm, "fgetcsv", escape, 5)?;
     let maxlen = match int_arg(args, 1) {
         None | Some(0) => None,
         Some(n) if n < 0 => {
             return Err(throw(
                 vm,
                 b"ValueError",
-                "fgetcsv(): Argument #2 ($length) must be between 0 and 2147483647",
+                "fgetcsv(): Argument #2 ($length) must be between 0 and 9223372036854775806",
             ));
         }
         Some(n) => Some(n as usize + 1),
@@ -3765,7 +3773,11 @@ fn h_fgetcsv(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
         return Ok(Some(arr_val(a)));
     }
     let mut a = vec![s(&line)];
-    a.extend(args.iter().skip(2).cloned());
+    a.extend(args.iter().skip(2).take(2).cloned());
+    while a.len() < 3 {
+        a.push(s(if a.len() == 1 { b"," } else { b"\"" }));
+    }
+    a.push(s(escape.as_slice()));
     Ok(Some(call_orig(vm, "str_getcsv", &a)?))
 }
 

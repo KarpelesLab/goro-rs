@@ -702,6 +702,11 @@ impl Vm {
         true
     }
 }
+/// Vm::open_context_mode values.
+pub const OPEN_CTX_DEFAULT: u8 = 0;
+pub const OPEN_CTX_NONE: u8 = 1;
+pub const OPEN_CTX_EXISTING: u8 = 2;
+
 /// Type alias for the class map (used by external crates)
 pub type ClassMap = crate::fxhash::FxIndexMap<Vec<u8>, ClassEntry>;
 
@@ -1810,6 +1815,12 @@ pub struct Vm {
     /// builtin frame depth it runs at: the stream functions it calls report
     /// as that method (get_active_function_name()).
     pub(crate) spl_active_fn: Option<(String, usize)>,
+    /// How the stream being opened gets its context when none is given:
+    /// OPEN_CTX_DEFAULT (FG(default_context), created if need be),
+    /// OPEN_CTX_NONE (php_stream_open_wrapper(): md5_file(), ...) or
+    /// OPEN_CTX_EXISTING (FG(default_context) as it is, possibly NULL:
+    /// hash_file()).
+    pub open_context_mode: u8,
     /// Parameter CVs of running user functions (see internal_frames.rs)
     pub(crate) cv_frames: Vec<crate::internal_frames::CvFrame>,
     /// `$this` of running internal method calls (see internal_frames.rs)
@@ -3176,6 +3187,7 @@ impl Vm {
             zpp_return_names: Default::default(),
             builtin_frames: Vec::new(),
             spl_active_fn: None,
+            open_context_mode: OPEN_CTX_DEFAULT,
             cv_frames: Vec::new(),
             frame_this: Vec::new(),
             gc_frames: Vec::new(),

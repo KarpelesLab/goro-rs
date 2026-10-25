@@ -1992,7 +1992,11 @@ fn getimagesize_from_any(vm: &mut Vm, args: &[Value], from_path: bool) -> Result
 }
 
 fn getimagesize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    getimagesize_from_any(vm, args, true)
+    // php_stream_open_wrapper(..., NULL): the stream gets no context
+    let saved = std::mem::replace(&mut vm.open_context_mode, goro_core::vm::OPEN_CTX_NONE);
+    let r = getimagesize_from_any(vm, args, true);
+    vm.open_context_mode = saved;
+    r
 }
 
 fn getimagesizefromstring_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
