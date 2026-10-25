@@ -1435,7 +1435,9 @@ pub struct Vm {
     lean_resumed: Option<(Vec<Value>, leancall::ResumeFrame)>,
     /// A builtin call run_fast_ops() made failed (see builtincall.rs): the
     /// DO_FCALL it stopped at dispatches what it raised.
-    fast_call_failed: Option<VmError>,
+    pub(crate) fast_call_failed: Option<VmError>,
+    /// The running lean calls' callees (see builtincall::LeanFrame).
+    pub(crate) lean_frames: Vec<builtincall::LeanFrame>,
     /// Lean calls running (their callees' opcodes in run_fast_ops()).
     pub(crate) lean_depth: u32,
     /// Emptied buffers of finished calls (locals, temporaries, backtrace
@@ -2024,6 +2026,7 @@ impl Vm {
             resume_frame: None,
             lean_resumed: None,
             fast_call_failed: None,
+            lean_frames: Vec::new(),
             lean_depth: 0,
             value_pool: Vec::new(),
             foreach_pool: Vec::new(),

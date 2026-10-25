@@ -1574,6 +1574,11 @@ impl crate::vm::Vm {
                 // A call of a plain user function: its callee's opcodes run
                 // here too, without a frame (see leancall.rs).
                 OpCode::DoFCall => {
+                    // (a lean call that failed in its callee, see
+                    // builtincall.rs: the dispatch loop's DO_FCALL takes it)
+                    if self.fast_call_failed.is_some() {
+                        break 'run ip;
+                    }
                     if no_release && self.lean_candidate() {
                         if self.lean_call(op_array, ip, tmps) {
                             Fast::Done
@@ -1596,6 +1601,27 @@ impl crate::vm::Vm {
                             internal_code,
                             free_mask.get(),
                         ) {
+                            // (an object with a destructor came to be: the
+                            // run's release-free assumption no longer holds)
+                            Some(true) if self.has_release_work() => {
+                                line = Some(op.line);
+                                break 'run ip + 1;
+                            }
+                            Some(true) => Fast::Done,
+                            Some(false) => break 'run ip,
+                            None => return ip,
+                        }
+                    } else if no_release
+                        && self.lean_depth == 1
+                        && self.lean_resume.is_empty()
+                        && self.fast_builtin_target()
+                    {
+                        // The callee of a lean call (see builtincall.rs).
+                        match self.lean_builtin_dofcall(op_array, ip, tmps, free_mask.get()) {
+                            Some(true) if self.has_release_work() => {
+                                line = Some(op.line);
+                                break 'run ip + 1;
+                            }
                             Some(true) => Fast::Done,
                             Some(false) => break 'run ip,
                             None => return ip,

@@ -11,11 +11,35 @@
 //! run stops at the DO_FCALL, recording the failure, and the dispatch
 //! loop's DO_FCALL arm takes it from there as the builtin fast path would
 //! have (Vm::fast_call_failed), without calling again.
+//!
+//! The callee of a lean call (see leancall.rs) makes such calls too: it has
+//! no frame of its own, so for the call it gets the one DO_FCALL's fast
+//! path would have pushed for it (its backtrace frame, its parameters
+//! registered for backtraces, its file, its variables as cycle collector
+//! roots, see LeanFrame), and loses it right after. A failure there ends
+//! the lean call itself: the caller's DO_FCALL dispatches it.
 
-use super::{OpArray, Vm, VmError};
+use super::{ForeachState, OpArray, PendingCall, Vm, VmError, push_lossy};
 use crate::fastpath::{store_tmp, tmp_writable};
 use crate::opcode::OperandType;
 use crate::value::Value;
+
+/// A running lean call's callee (see leancall.rs: Vm::lean_run's state, alive
+/// while its run of fast opcodes runs), for the builtin calls it makes.
+#[derive(Clone, Copy)]
+pub(crate) struct LeanFrame {
+    pub(crate) f: *const OpArray,
+    pub(crate) slots: *const Vec<Value>,
+    pub(crate) tmps: *const Vec<Value>,
+    pub(crate) fe: *const ForeachState,
+    pub(crate) call: *const PendingCall,
+    /// (of a method: where "::" is in the call's name)
+    pub(crate) sep: Option<usize>,
+    /// The line of the DO_FCALL that made the call.
+    pub(crate) line: u32,
+    /// The number of arguments the call passed (`$this` included).
+    pub(crate) nargs: usize,
+}
 
 impl Vm {
     /// The DO_FCALL at `ip` of `op_array` (run by run_fast_ops(), the top
@@ -34,15 +58,11 @@ impl Vm {
         internal_code: bool,
         free_mask: &[u8],
     ) -> Option<bool> {
-        let op = &op_array.ops[ip];
-        let mask = free_mask.get(ip).copied().unwrap_or(0);
-        if mask & !4 != 0
-            || !matches!(op.result, OperandType::Tmp(_) | OperandType::Unused)
-            || !tmp_writable(&op.result, tmps)
-            || !self.internal_function_decls.is_empty()
-        {
+        if !self.builtin_dofcall_ok(op_array, ip, tmps, free_mask) {
             return None;
         }
+        let op = &op_array.ops[ip];
+        let mask = free_mask.get(ip).copied().unwrap_or(0);
         self.last_call_by_ref = false;
         let mut call = self.pending_calls.pop()?;
         while matches!(self.closure_pending_calls.last(), Some(&i) if i > self.pending_calls.len())
@@ -180,6 +200,109 @@ impl Vm {
         }
         self.recycle_args(&mut call);
         Some(true)
+    }
+
+    /// What fast_builtin_dofcall() needs of the DO_FCALL at `ip` (before it
+    /// takes the call).
+    #[inline]
+    fn builtin_dofcall_ok(
+        &self,
+        op_array: &OpArray,
+        ip: usize,
+        tmps: &[Value],
+        free_mask: &[u8],
+    ) -> bool {
+        let op = &op_array.ops[ip];
+        let mask = free_mask.get(ip).copied().unwrap_or(0);
+        mask & !4 == 0
+            && matches!(op.result, OperandType::Tmp(_) | OperandType::Unused)
+            && tmp_writable(&op.result, tmps)
+            && self.internal_function_decls.is_empty()
+    }
+
+    /// fast_builtin_dofcall() for the callee of a lean call (the running
+    /// LeanFrame's function, `op_array`): with, for the call, the frame
+    /// DO_FCALL's fast path would have set up for the callee.
+    #[inline(never)]
+    pub(crate) fn lean_builtin_dofcall(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        tmps: &mut [Value],
+        free_mask: &[u8],
+    ) -> Option<bool> {
+        let lf = *self.lean_frames.last()?;
+        if !std::ptr::eq(lf.f, op_array) || !self.builtin_dofcall_ok(op_array, ip, tmps, free_mask)
+        {
+            return None;
+        }
+        // SAFETY: see LeanFrame (lean_run() keeps them while the run runs).
+        let call = unsafe { &*lf.call };
+        let slots = unsafe { &*lf.slots };
+        // The frame's name, as DO_FCALL's fast path makes it.
+        let mut display = self.string_pool.pop().unwrap_or_default();
+        display.clear();
+        match lf.sep {
+            Some(_) => match &call.target.method_info {
+                Some(i) => display.push_str(&i.display),
+                None => {
+                    self.string_pool.push(display);
+                    return None;
+                }
+            },
+            None if !op_array.display_name.is_empty() => {
+                push_lossy(&mut display, &op_array.display_name)
+            }
+            None => push_lossy(&mut display, call.name.as_bytes()),
+        }
+        let base = usize::from(lf.sep.is_some());
+        let frame_this = lf.sep.is_some() && matches!(slots.first(), Some(Value::Object(_)));
+        let mut args = self.value_pool.pop().unwrap_or_default();
+        args.clear();
+        if let Some(a) = slots.get(base..lf.nargs.min(slots.len())) {
+            args.extend_from_slice(a);
+        }
+        let depth = self.call_stack.len();
+        let cv_depth = self.cv_frames.len();
+        let file = self.current_file.clone();
+        self.call_stack
+            .push((display, file, lf.line, args, frame_this));
+        if self.register_cv_frame_hinted(op_array, true) {
+            self.set_cv_frame_vars(slots);
+        }
+        let outer_exec = std::mem::replace(&mut self.exec_frame_len, self.call_stack.len());
+        let saved_file = self.enter_op_array_file(op_array);
+        let was_global = std::mem::replace(&mut self.is_global_scope, false);
+        // (the call runs as from a frame of its own, one level down)
+        let lean_depth = std::mem::replace(&mut self.lean_depth, 0);
+        self.call_depth += 1;
+        let no_sym = None;
+        let no_fin = Vec::new();
+        // SAFETY: see LeanFrame.
+        self.gc_frames.push(crate::gc::GcFrame::new(
+            slots,
+            unsafe { &*lf.tmps },
+            &no_sym,
+            unsafe { &*lf.fe },
+            &no_fin,
+            &call.args,
+            frame_this,
+        ));
+        let gc_depth = self.gc_frames.len();
+        let r = self.fast_builtin_dofcall(op_array, ip, tmps, false, free_mask);
+        self.gc_frames.truncate(gc_depth - 1);
+        self.call_depth -= 1;
+        self.lean_depth = lean_depth;
+        self.is_global_scope = was_global;
+        self.leave_op_array_file(saved_file);
+        self.exec_frame_len = outer_exec;
+        self.cv_frames.truncate(cv_depth);
+        while self.call_stack.len() > depth {
+            if let Some(frame) = self.call_stack.pop() {
+                self.recycle_frame(frame);
+            }
+        }
+        r
     }
 
     /// The builtin call made by the DO_FCALL at `ip` of `op_array` failed

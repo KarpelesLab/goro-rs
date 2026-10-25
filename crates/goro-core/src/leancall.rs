@@ -23,6 +23,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use super::builtincall::LeanFrame;
 use super::{ForeachState, PendingCall, Vm, arg_by_ref, new_foreach_state};
 use crate::fastpath::{FeView, is_plain_scalar, object_release_quiet, store_tmp, tmp_writable};
 use crate::opcode::{Op, OpArray, OpCode, OperandType};
@@ -400,6 +401,7 @@ impl Vm {
             Err(_) => None,
         };
         let depth = self.call_depth + self.lean_depth;
+        let calls_base = self.pending_calls.len();
         let mut fe = self.foreach_pool.pop().unwrap_or_else(new_foreach_state);
         let mut ctmps = self.take_values(f.temp_count as usize);
         let stop = if vm_frame.is_none() {
@@ -420,6 +422,17 @@ impl Vm {
                 None => self.class_scope_stack.push(Vec::new()),
             }
             self.lean_depth += 1;
+            // (for the builtin calls the callee makes, see builtincall.rs)
+            self.lean_frames.push(LeanFrame {
+                f: &*f,
+                slots: &slots,
+                tmps: &ctmps,
+                fe: &*fe,
+                call: &call,
+                sep,
+                line: op.line,
+                nargs,
+            });
             let ForeachState {
                 positions,
                 snap,
@@ -449,6 +462,7 @@ impl Vm {
                 true,
                 None,
             );
+            self.lean_frames.pop();
             self.lean_depth -= 1;
             if sep.is_some() {
                 for v in [self.called_class_stack.pop(), self.class_scope_stack.pop()]
@@ -462,6 +476,12 @@ impl Vm {
             }
             stop
         };
+        // A builtin call of the callee failed (see builtincall.rs): the call
+        // ends with what it raised, the caller's DO_FCALL dispatches it.
+        if self.fast_call_failed.is_some() {
+            self.lean_failed(fe, slots, ctmps, calls_base, vm_frame, call);
+            return false;
+        }
         // (a result the DO_FCALL is the last user of is released right after
         // it, see OpArray::free_mask(): as an unused one)
         let unused = matches!(op.result, OperandType::Unused)
@@ -528,6 +548,41 @@ impl Vm {
         let info = f.cv_name_info();
         info.lean_score.set((info.lean_score.get() + 1).min(64));
         true
+    }
+
+    /// The end of a lean call whose callee's builtin call failed (see
+    /// builtincall.rs): what execute_op_array_inner() does for a frame an
+    /// exception leaves (the calls it interrupted are dropped, its
+    /// temporaries and variables released, their destructors run).
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn lean_failed(
+        &mut self,
+        mut fe: Box<ForeachState>,
+        mut slots: Vec<Value>,
+        mut ctmps: Vec<Value>,
+        calls_base: usize,
+        vm_frame: Option<crate::stack::VmFrameGuard>,
+        mut call: PendingCall,
+    ) {
+        if self.pending_calls.len() > calls_base {
+            self.pending_calls.truncate(calls_base);
+        }
+        fe.clear();
+        if self.foreach_pool.len() < 16 {
+            self.foreach_pool.push(fe);
+        }
+        crate::gc::release_frame(&slots);
+        release_slots(&mut ctmps);
+        release_slots(&mut slots);
+        self.recycle_values(ctmps);
+        self.recycle_values(slots);
+        if !crate::gc::release_quiet() {
+            self.run_pending_destructors();
+        }
+        drop(vm_frame);
+        self.recycle_args(&mut call);
     }
 
     /// The RETURN at `ip` of a lean call's callee (stopped there), when it
