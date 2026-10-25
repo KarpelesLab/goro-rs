@@ -1545,7 +1545,7 @@ impl PhpGenerator {
                                     || vm.class_implements_interface(&class_lower, b"traversable"))
                             {
                                 let had = vm.current_exception.is_some();
-                                let it = vm.call_object_method(&iterable, b"getIterator", &[]);
+                                let it = vm.aggregate_get_iterator_chain(&iterable);
                                 if !had && vm.current_exception.is_some() {
                                     if let Some(t) = self.dispatch_exception() {
                                         ip = t;

@@ -327,8 +327,17 @@ impl Vm {
     /// Throws LogicException like spl_get_iterator_from_aggregate when the
     /// result is not Traversable.
     pub fn spl_resolve_traversable(&mut self, v: &Value) -> Value {
+        // Each nested aggregate recurses in C (zend_user_it_get_new_iterator):
+        // a getIterator() chain that never ends runs out of stack.
+        let mut nested = 0usize;
+        let r = self.spl_resolve_traversable_charged(v, &mut nested);
+        crate::stack::leave_native(nested * crate::stack::REENTRY_COST);
+        r
+    }
+
+    fn spl_resolve_traversable_charged(&mut self, v: &Value, nested: &mut usize) -> Value {
         let mut cur = v.clone();
-        for _ in 0..32 {
+        loop {
             if !matches!(cur, Value::Object(_)) {
                 return cur;
             }
@@ -337,6 +346,12 @@ impl Vm {
             {
                 return cur;
             }
+            if !crate::stack::enter_native(crate::stack::REENTRY_COST) {
+                let size = crate::stack::emulated_size();
+                let _ = self.stack_size_error(size);
+                return Value::Null;
+            }
+            *nested += 1;
             let cls = match &cur {
                 Value::Object(o) => {
                     crate::value::display_class_name(&o.borrow().class_name).to_string()
@@ -359,7 +374,6 @@ impl Vm {
             }
             cur = r;
         }
-        cur
     }
 
     /// zval_get_string() with the array warning.

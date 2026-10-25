@@ -21272,6 +21272,36 @@ impl Vm {
         }
     }
 
+    /// zend_user_it_get_new_iterator(): getIterator() of `agg`, asking an
+    /// aggregate it returns in turn (a recursion in C, so a chain that never
+    /// ends runs out of stack). None when getIterator() threw.
+    #[inline(never)]
+    pub(crate) fn aggregate_get_iterator_chain(&mut self, agg: &Value) -> Option<Value> {
+        let cost = crate::stack::REENTRY_COST;
+        let mut nested = 0usize;
+        let mut it = self.call_object_method(agg, b"getIterator", &[]);
+        while self.current_exception.is_none() {
+            let Some(Value::Object(o)) = &it else { break };
+            let cl = o.borrow().class_name.to_ascii_lowercase();
+            let is = |vm: &Self, i: &[u8]| {
+                vm.class_implements_interface(&cl, i) || vm.builtin_implements_interface(&cl, i)
+            };
+            if is(self, b"iterator") || !is(self, b"iteratoraggregate") {
+                break;
+            }
+            if !crate::stack::enter_native(cost) {
+                let size = crate::stack::emulated_size();
+                let _ = self.stack_size_error(size);
+                break;
+            }
+            nested += 1;
+            let cur = Value::Object(o.clone());
+            it = self.call_object_method(&cur, b"getIterator", &[]);
+        }
+        crate::stack::leave_native(nested * cost);
+        it
+    }
+
     /// zend_call_stack_size_error(): the (emulated) C stack is used up.
     #[cold]
     pub(crate) fn stack_size_error(&mut self, size: usize) -> VmError {
@@ -40063,6 +40093,8 @@ impl Vm {
                             // turn).
                             if !had_exc && self.current_exception.is_none() {
                                 let mut agg = obj.clone();
+                                // (each nested aggregate recurses in C)
+                                let mut nested = 0usize;
                                 loop {
                                     let bad = match &iter_obj {
                                         Some(Value::Generator(_)) => break,
@@ -40078,6 +40110,14 @@ impl Vm {
                                                 break;
                                             } else if is(self, b"iteratoraggregate") {
                                                 agg = o.clone();
+                                                if !crate::stack::enter_native(
+                                                    crate::stack::REENTRY_COST,
+                                                ) {
+                                                    let size = crate::stack::emulated_size();
+                                                    let _ = self.stack_size_error(size);
+                                                    break;
+                                                }
+                                                nested += 1;
                                                 let inner = Value::Object(o.clone());
                                                 iter_obj = self.spl_call_method(
                                                     &inner,
@@ -40110,6 +40150,7 @@ impl Vm {
                                     }
                                     break;
                                 }
+                                crate::stack::leave_native(nested * crate::stack::REENTRY_COST);
                             }
                             // An exception from getIterator() (or the rewind of what
                             // it returns) leaves the foreach.
