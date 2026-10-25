@@ -1754,6 +1754,16 @@ fn reflection_function_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
                 let mut obj = this.borrow_mut();
                 if let Some(d) = display {
                     obj.set_property(b"name".to_vec(), Value::String(PhpString::from_vec(d)));
+                } else if let Value::String(n) = obj.get_property(b"name") {
+                    // A method's closure is named after the bare method.
+                    let b = n.as_bytes();
+                    if let Some(p) = b.windows(2).rposition(|w| w == b"::") {
+                        let short = b[p + 2..].to_vec();
+                        obj.set_property(
+                            b"name".to_vec(),
+                            Value::String(PhpString::from_vec(short)),
+                        );
+                    }
                 }
                 if let Some((target, name)) = magic {
                     // A closure of a __call()/__callStatic() trampoline: named

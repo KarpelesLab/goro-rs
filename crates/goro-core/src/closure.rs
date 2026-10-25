@@ -1249,11 +1249,6 @@ impl Vm {
             b"static" => "static",
             _ => return Ok(cls.strip_prefix(b"\\").unwrap_or(cls).to_vec()),
         };
-        let line = self.current_line;
-        self.emit_deprecated_at(
-            &format!("Use of \"{}\" in callables is deprecated", kw),
-            line,
-        );
         let scope = match scope {
             Some(s) => s.to_vec(),
             None => {
@@ -1297,15 +1292,16 @@ impl Vm {
         if self.current_exception.is_some() {
             return Err(String::new());
         }
+        // The check's deprecations ("self"/"parent"/"static", ["A",
+        // "B::m"] forms) are raised before its error or the closure.
+        let line = self.current_line;
+        for d in self.is_callable_pure(&callable, 0).deprecations {
+            self.emit_deprecated_at(&d, line);
+        }
+        if self.current_exception.is_some() {
+            return Err(String::new());
+        }
         if !check.ok {
-            // The check's deprecations are raised before its error.
-            let line = self.current_line;
-            for d in self.is_callable_pure(&callable, 0).deprecations {
-                self.emit_deprecated_at(&d, line);
-            }
-            if self.current_exception.is_some() {
-                return Err(String::new());
-            }
             return Err(check.error.unwrap_or_default());
         }
         match &callable {

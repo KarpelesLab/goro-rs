@@ -3424,6 +3424,26 @@ impl Vm {
     /// Check if `caller_class` (lowercase) has access to a member with the given visibility
     /// declared in `declaring_class` (lowercase), where the member belongs to `target_class` (lowercase).
     /// Returns None if access is allowed, or Some(error_message) if denied.
+    /// zend_init_dynamic_call_array(): `[$obj, 'm']()` naming a method the
+    /// calling scope cannot access (and no __call() to fall back on).
+    #[inline(never)]
+    fn dyn_array_call_visibility_error(&self, cl: &[u8], ml: &[u8]) -> Option<String> {
+        let c = self.classes.get(cl)?;
+        let m = c.get_method(ml)?;
+        if m.visibility == Visibility::Public || c.get_method(b"__call").is_some() {
+            return None;
+        }
+        let scope = self.current_class_scope();
+        self.check_visibility(
+            m.visibility,
+            &m.declaring_class,
+            &c.name,
+            &String::from_utf8_lossy(&m.name),
+            false,
+            scope.as_deref(),
+        )
+    }
+
     pub(crate) fn check_visibility(
         &self,
         visibility: Visibility,
@@ -3436,6 +3456,16 @@ impl Vm {
         match visibility {
             Visibility::Public => None,
             Visibility::Protected => {
+                // zend_bad_method_call() names the method's declaring class;
+                // property errors name the accessed class.
+                let decl_display;
+                let target_class_display = if is_property {
+                    target_class_display
+                } else {
+                    decl_display =
+                        self.class_name_for_display(&declaring_class.to_ascii_lowercase());
+                    decl_display.as_deref().unwrap_or(declaring_class)
+                };
                 if let Some(caller) = caller_scope {
                     let caller_lower: Vec<u8> =
                         caller.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -27066,16 +27096,19 @@ impl Vm {
                                             }
                                             None => cl == b"stdclass",
                                         };
-                                        missing.then(|| {
-                                            (
+                                        if missing {
+                                            Some((
                                                 b"Error".as_slice(),
                                                 format!(
                                                     "Call to undefined method {}::{}()",
                                                     crate::value::display_class_name(&cname),
                                                     String::from_utf8_lossy(m.as_bytes())
                                                 ),
-                                            )
-                                        })
+                                            ))
+                                        } else {
+                                            self.dyn_array_call_visibility_error(&cl, &ml)
+                                                .map(|e| (b"Error".as_slice(), e))
+                                        }
                                     }
                                     (Value::Object(_), _) => None,
                                     (Value::String(cn), Value::String(m)) => {
