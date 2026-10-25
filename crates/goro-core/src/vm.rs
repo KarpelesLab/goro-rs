@@ -21842,15 +21842,18 @@ impl Vm {
         let v = result?;
         // Detect implicit return: the compiler emits `Return Null` with
         // line=0 for implicit returns (nothing else returns then).
+        // (the RETURN run last: the implicit one at the end, of line 0, even
+        // when the function has explicit ones elsewhere)
         let implicit_return = matches!(v, Value::Undef | Value::Null)
             && op_array
                 .ops
                 .last()
                 .is_some_and(|op| op.opcode == OpCode::Return && op.line == 0)
-            && !op_array
-                .ops
-                .iter()
-                .any(|op| op.opcode == OpCode::Return && op.line != 0);
+            && (self.last_return_line == 0
+                || !op_array
+                    .ops
+                    .iter()
+                    .any(|op| op.opcode == OpCode::Return && op.line != 0));
         match v {
             Value::Reference(r) => {
                 let mut val = match &*r.borrow() {
