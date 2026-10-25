@@ -476,6 +476,7 @@ impl Vm {
             log(msg);
         } else {
             use std::io::Write;
+            self.flush_cli_output();
             let _ = std::io::stderr().write_all(&raw_error_bytes(&format!("{}\n", msg)));
         }
         self.in_error_log = false;
@@ -608,6 +609,9 @@ impl Vm {
         if mode == 2 {
             use std::io::Write;
             let start = raw.iter().position(|&b| b != b'\n').unwrap_or(raw.len());
+            // (the CLI writes its output unbuffered: what was output so far
+            // comes before the error)
+            self.flush_cli_output();
             let _ = std::io::stderr().write_all(&raw[start..]);
         } else {
             self.write_output(&raw);
