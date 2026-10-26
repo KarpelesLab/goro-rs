@@ -109,6 +109,7 @@ fn register_param_names(vm: &mut Vm) {
 
 fn spl_classes_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     // Returns an array of all available SPL classes
+    // The order of spl_classes() in php-src (SPL_LIST_CLASSES), interfaces included.
     let spl_class_names = [
         "AppendIterator",
         "ArrayIterator",
@@ -131,6 +132,7 @@ fn spl_classes_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
         "LogicException",
         "MultipleIterator",
         "NoRewindIterator",
+        "OuterIterator",
         "OutOfBoundsException",
         "OutOfRangeException",
         "OverflowException",
@@ -141,22 +143,26 @@ fn spl_classes_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
         "RecursiveCallbackFilterIterator",
         "RecursiveDirectoryIterator",
         "RecursiveFilterIterator",
+        "RecursiveIterator",
         "RecursiveIteratorIterator",
         "RecursiveRegexIterator",
         "RecursiveTreeIterator",
         "RegexIterator",
         "RuntimeException",
+        "SeekableIterator",
         "SplDoublyLinkedList",
         "SplFileInfo",
         "SplFileObject",
         "SplFixedArray",
         "SplHeap",
-        "SplMaxHeap",
         "SplMinHeap",
+        "SplMaxHeap",
         "SplObjectStorage",
+        "SplObserver",
         "SplPriorityQueue",
         "SplQueue",
         "SplStack",
+        "SplSubject",
         "SplTempFileObject",
         "UnderflowException",
         "UnexpectedValueException",
