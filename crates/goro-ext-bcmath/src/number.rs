@@ -774,19 +774,60 @@ fn strict(vm: &Vm) -> bool {
 /// Z_PARAM_STR_OR_LONG / BCMATH_PARAM_NUMBER_OR_STR_OR_LONG for argument
 /// `i`, then bc_num_from_obj_or_str_or_long_with_err(). Ok(None): an
 /// exception was thrown.
-fn num_arg(
+/// A number argument after zpp: a Number's value, or the int / string
+/// still to parse (bc_num_from_obj_or_str_or_long_with_err()).
+enum NumArg {
+    Ready(Num, usize),
+    Raw(Value),
+}
+
+fn num_arg_finish(
+    vm: &mut Vm,
+    m: &Method,
+    i: usize,
+    a: NumArg,
+) -> Result<Option<(Num, usize)>, VmError> {
+    let c = match a {
+        NumArg::Ready(n, s) => return Ok(Some((n, s))),
+        NumArg::Raw(c) => c,
+    };
+    match c {
+        Value::Long(l) => Ok(Some((num::long2num(l), 0))),
+        other => {
+            let s = other.to_php_string();
+            match num::str2num(s.as_bytes(), 0, true) {
+                (Some(n), fs) => {
+                    if fs as i64 > INT_MAX {
+                        let msg = format!("{} must be between 0 and {}", m.prefix(i), INT_MAX);
+                        throw(vm, b"ValueError", &msg)?;
+                        return Ok(None);
+                    }
+                    Ok(Some((n, fs)))
+                }
+                _ => {
+                    let msg = format!("{} is not well-formed", m.prefix(i));
+                    throw(vm, b"ValueError", &msg)?;
+                    Ok(None)
+                }
+            }
+        }
+    }
+}
+
+fn num_arg_zpp(
     vm: &mut Vm,
     m: &Method,
     list: &[Value],
     i: usize,
     allow_number: bool,
-) -> Result<Option<(Num, usize)>, VmError> {
+) -> Result<Option<NumArg>, VmError> {
     use goro_core::arginfo::{T_INT, T_STRING};
     let v = list.get(i).cloned().unwrap_or(Value::Null);
     if allow_number {
         if let Value::Object(o) = &v {
             if is_number(&v) {
-                return Ok(Some(obj_num(o)));
+                let (n, s) = obj_num(o);
+                return Ok(Some(NumArg::Ready(n, s)));
             }
         }
     }
@@ -837,27 +878,7 @@ fn num_arg(
     if vm.current_exception.is_some() {
         return Ok(None);
     }
-    match c {
-        Value::Long(l) => Ok(Some((num::long2num(l), 0))),
-        other => {
-            let s = other.to_php_string();
-            match num::str2num(s.as_bytes(), 0, true) {
-                (Some(n), fs) => {
-                    if fs as i64 > INT_MAX {
-                        let msg = format!("{} must be between 0 and {}", m.prefix(i), INT_MAX);
-                        throw(vm, b"ValueError", &msg)?;
-                        return Ok(None);
-                    }
-                    Ok(Some((n, fs)))
-                }
-                _ => {
-                    let msg = format!("{} is not well-formed", m.prefix(i));
-                    throw(vm, b"ValueError", &msg)?;
-                    Ok(None)
-                }
-            }
-        }
-    }
+    Ok(Some(NumArg::Raw(c)))
 }
 
 /// Z_PARAM_LONG_OR_NULL for argument `i`: Ok(Some(None)) for null.
@@ -978,15 +999,22 @@ fn construct(vm: &mut Vm, m: &Method, obj: &Rc<RefCell<PhpObject>>, list: &[Valu
 }
 
 fn calc_method(vm: &mut Vm, m: &Method, obj: &Rc<RefCell<PhpObject>>, list: &[Value], op: Op) -> R {
-    let (n2, s2) = tri!(num_arg(vm, m, list, 0, true));
+    // (zpp of both arguments, then the number is parsed)
+    let a2 = tri!(num_arg_zpp(vm, m, list, 0, true));
     let scale = tri!(long_or_null_arg(vm, m, list, 1));
+    let (n2, s2) = tri!(num_arg_finish(vm, m, 0, a2));
     if !check_scale(vm, m, 1, scale.unwrap_or(0))? {
         return Ok(Value::Null);
     }
     let (n1, s1) = obj_num(obj);
     let prefix = m.prefix(0);
     if matches!(op, Op::Pow) && n2.scale == 0 {
-        crate::raise_alloc_check(vm, &n1, num::num2long(&n2))?;
+        // bcmath_number_pow_internal(): the result's scale first
+        let exponent = num::num2long(&n2);
+        if scale.is_none() && exponent > 0 && (s1 as i128) * (exponent as i128) > INT_MAX as i128 {
+            return throw(vm, b"ValueError", "scale of the result is too large");
+        }
+        crate::raise_alloc_check(vm, &n1, exponent)?;
     }
     match calc(
         op,
@@ -1004,8 +1032,9 @@ fn calc_method(vm: &mut Vm, m: &Method, obj: &Rc<RefCell<PhpObject>>, list: &[Va
 }
 
 fn divmod_method(vm: &mut Vm, m: &Method, obj: &Rc<RefCell<PhpObject>>, list: &[Value]) -> R {
-    let (n2, s2) = tri!(num_arg(vm, m, list, 0, true));
+    let a2 = tri!(num_arg_zpp(vm, m, list, 0, true));
     let scale = tri!(long_or_null_arg(vm, m, list, 1));
+    let (n2, s2) = tri!(num_arg_finish(vm, m, 0, a2));
     if !check_scale(vm, m, 1, scale.unwrap_or(0))? {
         return Ok(Value::Null);
     }
@@ -1028,9 +1057,11 @@ fn divmod_method(vm: &mut Vm, m: &Method, obj: &Rc<RefCell<PhpObject>>, list: &[
 }
 
 fn powmod_method(vm: &mut Vm, m: &Method, obj: &Rc<RefCell<PhpObject>>, list: &[Value]) -> R {
-    let (e, _) = tri!(num_arg(vm, m, list, 0, true));
-    let (md, _) = tri!(num_arg(vm, m, list, 1, true));
+    let ae = tri!(num_arg_zpp(vm, m, list, 0, true));
+    let amd = tri!(num_arg_zpp(vm, m, list, 1, true));
     let scale = tri!(long_or_null_arg(vm, m, list, 2));
+    let (e, _) = tri!(num_arg_finish(vm, m, 0, ae));
+    let (md, _) = tri!(num_arg_finish(vm, m, 1, amd));
     let scale = scale.unwrap_or(0);
     if !check_scale(vm, m, 2, scale)? {
         return Ok(Value::Null);
@@ -1165,8 +1196,9 @@ fn round_method(vm: &mut Vm, m: &Method, obj: &Rc<RefCell<PhpObject>>, list: &[V
 }
 
 fn compare_method(vm: &mut Vm, m: &Method, obj: &Rc<RefCell<PhpObject>>, list: &[Value]) -> R {
-    let (n2, _) = tri!(num_arg(vm, m, list, 0, true));
+    let a2 = tri!(num_arg_zpp(vm, m, list, 0, true));
     let scale = tri!(long_or_null_arg(vm, m, list, 1));
+    let (n2, _) = tri!(num_arg_finish(vm, m, 0, a2));
     if !check_scale(vm, m, 1, scale.unwrap_or(0))? {
         return Ok(Value::Null);
     }

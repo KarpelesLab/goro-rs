@@ -42,7 +42,7 @@ final readonly class Number implements \Stringable
 
     public function compare(...$args) { return \__bcmath_number('compare', $this, $args); }
 
-    public function __toString(): string { return $this->value; }
+    public function __toString(): string { return \func_num_args() ? \__bcmath_number('__toString', $this, \func_get_args()) : $this->value; }
 
     public function __serialize(): array { return \__bcmath_number('__serialize', $this, []); }
 
