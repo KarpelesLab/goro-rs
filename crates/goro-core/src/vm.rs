@@ -1698,6 +1698,9 @@ pub struct Vm {
     /// yielded last (None before their first yield): what valid() /
     /// current() / key() see while they run.
     pub(crate) running_gen_values: Vec<(usize, Option<(Value, Value)>)>,
+    /// report_uncaught() is reporting the exception an uncaught one's
+    /// __toString() threw.
+    pub(crate) uncaught_tostring_nested: bool,
     /// Closure objects being called: (pending_calls index of the call, the
     /// Closure) until the call's frame is pushed.
     pub(crate) closure_call_objs: Vec<(usize, std::rc::Weak<RefCell<PhpObject>>)>,
@@ -2401,6 +2404,7 @@ impl Vm {
             forced_close_generators: Vec::new(),
             running_generators: Vec::new(),
             running_gen_values: Vec::new(),
+            uncaught_tostring_nested: false,
             closure_call_objs: Vec::new(),
             closure_frames: Vec::new(),
             callback_closure: None,

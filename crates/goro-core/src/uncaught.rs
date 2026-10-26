@@ -200,7 +200,10 @@ impl Vm {
                     })
                 });
                 if user_tostring {
+                    // (called from no frame: the stack has been unwound)
+                    let saved_stack = std::mem::take(&mut self.call_stack);
                     let r = self.call_object_method(&exc, b"__tostring", &[]);
+                    self.call_stack = saved_stack;
                     if self.current_exception.is_none() {
                         if let Some(s) = r.map(|v| v.deref()).and_then(|v| match v {
                             Value::String(s) => Some(s.to_string_lossy()),
@@ -218,6 +221,17 @@ impl Vm {
                             self.fatal_emitted = true;
                             return;
                         }
+                    }
+                    // __toString() threw, with no frame to catch it
+                    // (zend_throw_exception_internal()): that exception is
+                    // the one reported.
+                    if self.current_exception.as_ref().is_some_and(|x| !x.identical(&exc))
+                        && !self.uncaught_tostring_nested
+                    {
+                        self.uncaught_tostring_nested = true;
+                        self.report_uncaught(e);
+                        self.uncaught_tostring_nested = false;
+                        return;
                     }
                     self.current_exception = None;
                 }
