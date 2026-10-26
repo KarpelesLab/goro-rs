@@ -54,6 +54,8 @@ pub struct Iconv {
     skipped_char: bool,
     /// iconv() calls made (glibc's invocation counter).
     calls: u32,
+    /// glibc's direct module for the pair, if it has one.
+    direct: Option<crate::direct::Direct>,
 }
 
 /// The charset name of a "CHARSET//SUFFIX,SUFFIX" specification and its
@@ -91,6 +93,7 @@ impl Iconv {
         let (from_name, _) = split_spec(from);
         let to_kind = charset::lookup(to_name)?;
         let from_kind = charset::lookup(from_name)?;
+        let direct = crate::direct::Direct::of(from_kind, to_kind);
         Some(Iconv {
             dec: Decoder::new(from_kind),
             enc: Encoder::new(to_kind),
@@ -99,6 +102,7 @@ impl Iconv {
             skipped: false,
             skipped_char: false,
             calls: 0,
+            direct,
         })
     }
 
@@ -125,6 +129,14 @@ impl Iconv {
         out: &mut Vec<u8>,
         limit: Option<usize>,
     ) -> Result<(), Errno> {
+        if let Some(d) = self.direct {
+            self.calls = self.calls.saturating_add(1);
+            // (//IGNORE having skipped something ends with EILSEQ)
+            return match crate::direct::conv(d, self.ignore, input, pos, out, limit)? {
+                true => Err(Errno::Ilseq),
+                false => Ok(()),
+            };
+        }
         let start_len = out.len();
         let mut tmp = Vec::with_capacity(8);
         let first = self.calls == 0;
@@ -145,6 +157,19 @@ impl Iconv {
         // (glibc wants room for the smallest character before looking at
         // the next one, even one it then skips)
         let min_out = self.enc.min_len();
+        // (glibc converts to UCS-4 first without a limit, then reruns that
+        // step up to the characters the output took: the bytes a
+        // combining-aware decoder held after the last of them go back)
+        let rerun = matches!(self.dec.kind, charset::Kind::CompSbcs(_));
+        let mut after_char = (*pos, self.dec);
+        macro_rules! too_big {
+            () => {{
+                if rerun {
+                    (*pos, self.dec) = after_char;
+                }
+                return Err(Errno::TooBig);
+            }};
+        }
         while *pos < input.len() || self.dec.has_pending() {
             let dsaved = self.dec;
             match self.dec.decode(&input[*pos..]) {
@@ -174,7 +199,7 @@ impl Iconv {
                     if limit.is_some_and(|l| out.len() - start_len + min_out > l) {
                         // (the decoder takes the character again)
                         self.dec = dsaved;
-                        return Err(Errno::TooBig);
+                        too_big!();
                     }
                     tmp.clear();
                     // (a character held back for a composition goes out
@@ -186,7 +211,7 @@ impl Iconv {
                             self.enc = held;
                             // (the decoder takes the character again)
                             self.dec = dsaved;
-                            return Err(Errno::TooBig);
+                            too_big!();
                         }
                         out.extend_from_slice(&tmp);
                         tmp.clear();
@@ -212,7 +237,7 @@ impl Iconv {
                             out.extend_from_slice(&tmp);
                             // (the decoder takes the character again)
                             self.dec = dsaved;
-                            return Err(Errno::TooBig);
+                            too_big!();
                         }
                         if t == Ok(true) {
                             // transliterated
@@ -220,6 +245,7 @@ impl Iconv {
                             *pos += n;
                             self.skipped = true;
                             self.skipped_char = true;
+                            after_char = (*pos, self.dec);
                             continue;
                         } else {
                             return Err(Errno::Ilseq);
@@ -231,10 +257,11 @@ impl Iconv {
                         out.extend_from_slice(&tmp[..n]);
                         // (the decoder takes the character again)
                         self.dec = dsaved;
-                        return Err(Errno::TooBig);
+                        too_big!();
                     }
                     out.extend_from_slice(&tmp);
                     *pos += n;
+                    after_char = (*pos, self.dec);
                 }
             }
         }
@@ -310,6 +337,22 @@ impl Iconv {
     /// iconv(cd, NULL, NULL, &out, &outleft): back to the initial shift
     /// state, writing the sequence that does it.
     pub fn flush(&mut self, out: &mut Vec<u8>, limit: Option<usize>) -> Result<(), Errno> {
+        // (EMIT_SHIFT_TO_INIT: a decoder's held character goes through the
+        // rest of the conversion first)
+        if let Some(c) = self.dec.take_held() {
+            self.dec.set_pending(c);
+        }
+        if self.direct.is_none() && self.dec.has_pending() {
+            let mut p = 0;
+            let start = out.len();
+            self.conv(&[], &mut p, out, limit)?;
+            let limit = limit.map(|l| l - (out.len() - start));
+            return self.flush_shift(out, limit);
+        }
+        self.flush_shift(out, limit)
+    }
+
+    fn flush_shift(&mut self, out: &mut Vec<u8>, limit: Option<usize>) -> Result<(), Errno> {
         let b = self.enc.reset_bytes();
         if limit.is_some_and(|l| b.len() > l) {
             set_errno(7);

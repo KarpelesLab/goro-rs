@@ -14,7 +14,10 @@ use goro_core::vm::{Vm, VmError};
 pub mod charset;
 mod cjk;
 pub mod conv;
+mod direct;
 mod iso2022;
+#[rustfmt::skip]
+mod direct_tables;
 mod mime;
 #[rustfmt::skip]
 mod sbcs_tables;
@@ -359,12 +362,53 @@ fn sval(v: Vec<u8>) -> Value {
     Value::String(PhpString::from_vec(v))
 }
 
-/// _php_iconv_strlen()
+/// One iconv(cd, ...) call of php's character loops: the input from
+/// `pos` while `more`, else the flush (iconv(cd, NULL, NULL, ...)), into
+/// a buffer of `size` bytes; the errno it leaves (0 when it succeeds).
+fn loop_call(
+    cd: &mut Iconv,
+    s: &[u8],
+    pos: &mut usize,
+    more: bool,
+    out: &mut Vec<u8>,
+    size: usize,
+) -> Option<Errno> {
+    out.clear();
+    let r = if more {
+        cd.conv(s, pos, out, Some(size))
+    } else {
+        cd.flush(out, Some(size))
+    };
+    r.err()
+}
+
+/// _php_iconv_strlen(): converts to UCS-4 eight bytes at a time, stopping
+/// at the first call without output (glibc keeps a character a
+/// combining-aware decoder holds back for the flush, which an input that
+/// is just that character never reaches).
 fn iconv_strlen_impl(s: &[u8], enc: &[u8]) -> (Option<usize>, Err) {
-    match conv::decode_all(s, enc) {
-        None => (None, Err::WrongCharset),
-        Some((chars, None)) => (Some(chars.len()), Err::Success),
-        Some((_, Some(e))) => (None, e.into()),
+    let Some(mut cd) = Iconv::open(UCS4, enc) else {
+        return (None, Err::WrongCharset);
+    };
+    let mut errno: Option<Errno> = None;
+    let mut cnt = 0usize;
+    let mut pos = 0usize;
+    let mut more = !s.is_empty();
+    let mut buf = Vec::with_capacity(8);
+    while more {
+        more = pos < s.len();
+        if let Some(e) = loop_call(&mut cd, s, &mut pos, more, &mut buf, 8) {
+            errno = Some(e);
+        }
+        if buf.is_empty() {
+            break;
+        }
+        cnt += buf.len() / 4;
+    }
+    match errno {
+        Some(Errno::Inval) => (None, Err::IllegalChar),
+        Some(Errno::Ilseq) => (None, Err::IllegalSeq),
+        _ => (Some(cnt), Err::Success),
     }
 }
 
@@ -381,7 +425,10 @@ fn iconv_strlen(vm: &mut Vm, args: &[Value]) -> R {
     })
 }
 
-/// _php_iconv_substr()
+/// _php_iconv_substr(): converts to UCS-4 a character at a time, each
+/// one taken converted back on its own; the flush after the last one
+/// taken still writes what glibc held back (the second character of a
+/// sequence decoding to two, a character waiting for a combining one).
 fn iconv_substr_impl(
     s: &[u8],
     mut offset: i64,
@@ -415,29 +462,85 @@ fn iconv_substr_impl(
     if len == 0 {
         return (Some(Vec::new()), Err::Success);
     }
-    let mut second = Vec::new();
-    let Some((chars, _)) = conv::decode_all_marked(s, enc, &mut second) else {
+    let Some(mut cd1) = Iconv::open(UCS4, enc) else {
         return (None, Err::WrongCharset);
     };
-    let Some(mut encoder) = conv::encoder(enc) else {
-        return (None, Err::WrongCharset);
-    };
+    let mut cd2: Option<Iconv> = None;
     let mut out = Vec::new();
-    // (php converts one character at a time: glibc keeps the second
-    // character of a sequence decoding to two for the flush after the last
-    // one taken, which php then takes too)
-    let mut take = len as usize;
-    let end = offset as usize + take;
-    if end < chars.len() && second[end] {
-        take += 1;
-    }
-    for &cp in chars.iter().skip(offset as usize).take(take) {
-        if !encoder.encode(cp, &mut out) {
+    let mut errno: Option<Errno> = None;
+    let mut err = Err::Success;
+    let mut pos = 0usize;
+    let mut more = !s.is_empty() && len > 0;
+    let mut buf = Vec::with_capacity(4);
+    let mut cnt = 0i64;
+    while more {
+        more = pos < s.len() && len > 0;
+        if let Some(e) = loop_call(&mut cd1, s, &mut pos, more, &mut buf, 4) {
+            errno = Some(e);
+        }
+        if buf.is_empty() {
             break;
         }
+        if cnt >= offset {
+            if cd2.is_none() {
+                match Iconv::open(enc, UCS4) {
+                    Some(c) => cd2 = Some(c),
+                    None => {
+                        err = Err::WrongCharset;
+                        break;
+                    }
+                }
+            }
+            let c2 = cd2.as_mut().unwrap();
+            if let Some(e) = appendl_errno(&mut out, Some(&buf), c2) {
+                errno = Some(e);
+                break;
+            }
+            len -= 1;
+        }
+        cnt += 1;
     }
-    out.extend_from_slice(&encoder.reset_bytes());
-    (Some(out), Err::Success)
+    match errno {
+        Some(Errno::Inval) => err = Err::IllegalChar,
+        Some(Errno::Ilseq) => err = Err::IllegalSeq,
+        _ => {}
+    }
+    if err == Err::Success {
+        if let Some(c2) = cd2.as_mut() {
+            let _ = appendl_errno(&mut out, None, c2);
+        }
+        return (Some(out), Err::Success);
+    }
+    (None, err)
+}
+
+/// _php_iconv_appendl(): converts all of `s` (None: the flush) appending
+/// to `d`, growing the buffer on E2BIG; the errno of a failure.
+fn appendl_errno(d: &mut Vec<u8>, s: Option<&[u8]>, cd: &mut Iconv) -> Option<Errno> {
+    match s {
+        Some(s) => {
+            let mut pos = 0;
+            let mut growth = 128usize;
+            while pos < s.len() {
+                match cd.conv(s, &mut pos, d, Some(growth)) {
+                    Ok(()) | Err(Errno::TooBig) => {}
+                    Err(e) => return Some(e),
+                }
+                growth <<= 1;
+            }
+            None
+        }
+        None => {
+            let mut room = 128usize;
+            loop {
+                match cd.flush(d, Some(room)) {
+                    Ok(()) => return None,
+                    Err(Errno::TooBig) => room <<= 1,
+                    Err(e) => return Some(e),
+                }
+            }
+        }
+    }
 }
 
 fn iconv_substr(vm: &mut Vm, args: &[Value]) -> R {
@@ -458,7 +561,10 @@ fn iconv_substr(vm: &mut Vm, args: &[Value]) -> R {
     })
 }
 
-/// _php_iconv_strpos(): the position of the (first or last) match.
+/// _php_iconv_strpos(): the position of the (first or last) match,
+/// converting the haystack to UCS-4 a character at a time (an error
+/// stops at the first call without output, the character before it
+/// counted).
 fn iconv_strpos_impl(
     haystack: &[u8],
     needle: &[u8],
@@ -475,22 +581,29 @@ fn iconv_strpos_impl(
         .chunks(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
-    let Some((hay, hay_err)) = conv::decode_all(haystack, enc) else {
+    let Some(mut cd) = Iconv::open(UCS4, enc) else {
         return (None, Err::WrongCharset);
     };
-    // glibc's two-step conversion reports a bad sequence along with the
-    // character before it (the C code checks errno each character).
     let mut err = Err::Success;
     let mut ret: Option<usize> = None;
     let mut match_ofs: Option<usize> = None;
     let mut np = 0usize; // ndl_buf_p (in characters)
     let mut cnt = 0usize;
-    for &c in &hay {
-        if cnt + 1 == hay.len() {
-            if let Some(e) = hay_err {
-                err = e.into();
-            }
+    let mut pos = 0usize;
+    let mut more = !haystack.is_empty();
+    let mut buf = Vec::with_capacity(4);
+    while more {
+        more = pos < haystack.len();
+        let e = loop_call(&mut cd, haystack, &mut pos, more, &mut buf, 4);
+        if buf.is_empty() {
+            break;
         }
+        match e {
+            Some(Errno::Inval) => err = Err::IllegalChar,
+            Some(Errno::Ilseq) => err = Err::IllegalSeq,
+            _ => {}
+        }
+        let c = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
         if cnt >= offset && !ndl.is_empty() {
             if c == ndl[np] {
                 if match_ofs.is_none() {
@@ -532,16 +645,10 @@ fn iconv_strpos_impl(
         }
         cnt += 1;
     }
-    // (searching forward, cnt stops at the end of the match)
-    let cnt_final = if !reverse {
-        ret.map(|r| r + ndl.len() - 1).unwrap_or(cnt)
-    } else {
-        cnt
-    };
     if err != Err::Success {
         return (None, err);
     }
-    if offset > cnt_final {
+    if offset > cnt {
         return (None, Err::OutByBounds);
     }
     (ret, Err::Success)

@@ -554,6 +554,10 @@ pub struct Decoder {
     /// The second character of a sequence decoding to two (returned by
     /// the next call, without input).
     pend: u32,
+    /// CP1255 / CP1258 / TCVN: the character held back until the next
+    /// byte says whether a combining character follows (glibc's lasttwo
+    /// state; written by the flush when nothing follows).
+    hold: u32,
 }
 
 impl Decoder {
@@ -565,6 +569,7 @@ impl Decoder {
             nbits: 0,
             hi: 0,
             pend: 0,
+            hold: 0,
         }
     }
 
@@ -574,6 +579,66 @@ impl Decoder {
         self.nbits = 0;
         self.hi = 0;
         self.pend = 0;
+        self.hold = 0;
+    }
+
+    /// The character held back for a possible combining one (the flush
+    /// writes it).
+    pub fn take_held(&mut self) -> Option<u32> {
+        Some(std::mem::take(&mut self.hold)).filter(|&c| c != 0)
+    }
+
+    /// Make `c` the character the next decode() call returns.
+    pub fn set_pending(&mut self, c: u32) {
+        self.pend = c;
+    }
+
+    /// glibc's CP1255 / CP1258 / TCVN5712-1 decoders, a byte at a time:
+    /// a character that may take a combining one (a Hebrew letter; a
+    /// character in U+0041..U+01B0) is held until the next byte; a
+    /// combining character composing with it gives the composition, held
+    /// again when it composes further; anything else writes the held
+    /// character first (without taking the byte: Char(_, 0)).
+    fn decode_comp(&mut self, t: &comp_tables::CompSbcs, hebrew: bool, b: u8) -> Dec {
+        let ch = t.dec[b as usize];
+        if ch == 0xFFFF {
+            return Dec::Illegal(1);
+        }
+        let ch = ch as u32;
+        let may_combine = |c: u32| {
+            if hebrew {
+                (0x05D0..=0x05F2).contains(&c)
+            } else {
+                (0x0041..0x01B1).contains(&c)
+            }
+        };
+        if self.hold != 0 {
+            let last = self.hold;
+            if let Ok(i) = t
+                .comp
+                .binary_search_by(|&(b, c, _)| (b as u32, c as u32).cmp(&(last, ch)))
+            {
+                let composed = t.comp[i].2 as u32;
+                // (a composition that is the base of another one waits)
+                if t.comp.iter().any(|&(b, _, _)| b as u32 == composed) {
+                    self.hold = composed;
+                    return Dec::Shift(1);
+                }
+                self.hold = 0;
+                return Dec::Char(composed, 1);
+            }
+            if may_combine(ch) {
+                self.hold = ch;
+                return Dec::Char(last, 1);
+            }
+            self.hold = 0;
+            return Dec::Char(last, 0);
+        }
+        if may_combine(ch) {
+            self.hold = ch;
+            return Dec::Shift(1);
+        }
+        Dec::Char(ch, 1)
     }
 
     /// Whether the second character of a pair is still to come.
@@ -744,25 +809,8 @@ impl Decoder {
             Kind::Utf7(imap) => self.decode_utf7(s, imap),
             Kind::Iso2022Kr => self.decode_2022kr(s),
             Kind::CompSbcs(t) => {
-                let t = comp_tables::TABLES[t as usize];
-                let mut cp = t.dec[s[0] as usize];
-                if cp == 0xFFFF {
-                    return Dec::Illegal(1);
-                }
-                // (a base character takes the combining ones that follow
-                // and compose with it)
-                let mut n = 1;
-                while n < s.len() {
-                    let c2 = t.dec[s[n] as usize];
-                    match t.comp.binary_search_by(|&(b, c, _)| (b, c).cmp(&(cp, c2))) {
-                        Ok(i) if c2 != 0xFFFF => {
-                            cp = t.comp[i].2;
-                            n += 1;
-                        }
-                        _ => break,
-                    }
-                }
-                Dec::Char(cp as u32, n)
+                let tab = comp_tables::TABLES[t as usize];
+                self.decode_comp(tab, t == 0, s[0])
             }
             Kind::Sbcs(t) => {
                 let dec = sbcs_tables::TABLES[t as usize].dec;
