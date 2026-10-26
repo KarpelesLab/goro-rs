@@ -840,6 +840,9 @@ impl Serializer {
                         _ => return,
                     }
                 } else {
+                    if matches!(name_val, Value::Array(_)) {
+                        vm.emit_warning_at("Array to string conversion", saved_line);
+                    }
                     name_val.to_php_string().as_bytes().to_vec()
                 };
                 let candidates = [name.clone(), mangle(&display, &name), mangle(b"*", &name)];
