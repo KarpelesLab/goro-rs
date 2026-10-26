@@ -135,8 +135,7 @@ fn clone_obj(vm: &mut Vm, o: &Obj) -> R<Obj> {
             .iter()
             .map(|(k, _)| k.clone())
             .filter(|k| {
-                k.starts_with(b"__timestamp")
-                    || goro_core::foreach_obj::is_date_view_prop(&n, k)
+                k.starts_with(b"__timestamp") || goro_core::foreach_obj::is_date_view_prop(&n, k)
             })
             .collect();
         keys.into_iter()

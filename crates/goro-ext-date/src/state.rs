@@ -580,7 +580,8 @@ fn interval_get_properties(
     _purpose: u8,
 ) -> Option<PhpArray> {
     if o.borrow().has_property(P_IVAL) {
-        o.borrow_mut().set_property(P_IVAL_SEEN.to_vec(), Value::True);
+        o.borrow_mut()
+            .set_property(P_IVAL_SEEN.to_vec(), Value::True);
     }
     None
 }
@@ -726,8 +727,20 @@ pub fn period_prop(vm: &mut Vm, p: &PeriodObj, name: &[u8]) -> Value {
         b"end" => make_date_obj(vm, &p.end, &ce()),
         b"interval" => make_interval_obj(vm, &p.interval, 0),
         b"recurrences" => Value::Long(p.recurrences),
-        b"include_start_date" => if p.include_start_date { Value::True } else { Value::False },
-        _ => if p.include_end_date { Value::True } else { Value::False },
+        b"include_start_date" => {
+            if p.include_start_date {
+                Value::True
+            } else {
+                Value::False
+            }
+        }
+        _ => {
+            if p.include_end_date {
+                Value::True
+            } else {
+                Value::False
+            }
+        }
     }
 }
 
@@ -779,7 +792,11 @@ static PERIOD_HANDLERS: goro_core::vm::NativeObjectHandlers = goro_core::vm::Nat
     ..goro_core::vm::NativeObjectHandlers::EMPTY
 };
 
-fn period_get_properties(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, _purpose: u8) -> Option<PhpArray> {
+fn period_get_properties(
+    vm: &mut Vm,
+    o: &Rc<RefCell<PhpObject>>,
+    _purpose: u8,
+) -> Option<PhpArray> {
     let mut a = vm.object_to_array(o).borrow().clone();
     if let Some(p) = period_get(o).filter(|p| p.initialized) {
         for (k, v) in period_props(vm, &p) {
@@ -788,7 +805,6 @@ fn period_get_properties(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, _purpose: u8) 
     }
     Some(a)
 }
-
 
 // ---------------------------------------------------------------------------
 // Misc helpers

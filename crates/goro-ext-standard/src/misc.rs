@@ -4394,7 +4394,8 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .filter(|e| !matches!(e.value, Value::Undef))
             // (nor the date objects' view fields: no properties of theirs)
             .filter(|e| {
-                e.slot.is_some() || !goro_core::foreach_obj::is_date_view_prop(&obj.borrow(), &e.key)
+                e.slot.is_some()
+                    || !goro_core::foreach_obj::is_date_view_prop(&obj.borrow(), &e.key)
             })
             .map(|e| {
                 let storage = match &e.slot {
@@ -20414,7 +20415,9 @@ fn hrtime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let (secs, nsecs) = (ts.tv_sec as i64, ts.tv_nsec as i64);
     if as_number {
-        Ok(Value::Long(secs.wrapping_mul(1_000_000_000).wrapping_add(nsecs)))
+        Ok(Value::Long(
+            secs.wrapping_mul(1_000_000_000).wrapping_add(nsecs),
+        ))
     } else {
         let mut arr = PhpArray::new();
         arr.push(Value::Long(secs));

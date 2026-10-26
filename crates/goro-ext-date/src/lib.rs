@@ -439,7 +439,6 @@ pub fn register(vm: &mut Vm) {
         b"dateinterval",
         b"dateperiod",
     ] {
-        vm.clone_hold_handlers
-            .insert(c.to_vec(), state::clone_hold);
+        vm.clone_hold_handlers.insert(c.to_vec(), state::clone_hold);
     }
 }

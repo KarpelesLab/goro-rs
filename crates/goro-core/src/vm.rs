@@ -625,7 +625,12 @@ impl Vm {
             if let Some(h) = self.clone_hold_handlers.get(&cur) {
                 return Some(*h);
             }
-            cur = self.classes.get(&cur)?.parent.as_ref()?.to_ascii_lowercase();
+            cur = self
+                .classes
+                .get(&cur)?
+                .parent
+                .as_ref()?
+                .to_ascii_lowercase();
         }
         None
     }
@@ -662,10 +667,7 @@ impl Vm {
     /// the trace must not show the method.
     #[inline(never)]
     pub(crate) fn unknown_named_param_outside_frame(&mut self, name: &[u8], line: u32) {
-        let msg = format!(
-            "Unknown named parameter ${}",
-            crate::string::msg_str(name)
-        );
+        let msg = format!("Unknown named parameter ${}", crate::string::msg_str(name));
         let frame = self.call_stack.pop();
         let exc = self.create_exception(b"Error", &msg, line);
         if let Some(f) = frame {
@@ -6126,7 +6128,13 @@ impl Vm {
     /// (zend_hash_compare() stops there, and compares nothing when the
     /// counts differ). Returns whether the containers compare equal.
     #[inline(never)]
-    fn nested_compare_effects(&mut self, a: &Value, b: &Value, line: u32, budget: &mut usize) -> bool {
+    fn nested_compare_effects(
+        &mut self,
+        a: &Value,
+        b: &Value,
+        line: u32,
+        budget: &mut usize,
+    ) -> bool {
         let nested = |v: &Value| matches!(v.deref(), Value::Object(_) | Value::Array(_));
         let (ea, eb): (Vec<(ArrayKey, Value)>, PhpArray) = match (a, b) {
             (Value::Array(x), Value::Array(y)) => {
