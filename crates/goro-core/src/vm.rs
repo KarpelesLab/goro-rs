@@ -34079,8 +34079,19 @@ impl Vm {
                                 // For magic __call/__callStatic dispatch, the deprecation banner
                                 // should name the originally-invoked method, not __call itself.
                                 // The dispatcher places the requested method name in args[1] (for __call)
-                                // or args[0] (for __callStatic).
-                                if func_name_lower.ends_with(b"::__call") {
+                                // or args[0] (for __callStatic). Its class is the
+                                // magic method's declaring class (the trampoline's scope).
+                                // (forwarded by a call trampoline closure, which
+                                // reported the called method: __call() itself)
+                                let from_trampoline =
+                                    op_array.name.starts_with(b"__closure_fcc_tramp_");
+                                if func_name_lower.ends_with(b"::__call")
+                                    || func_name_lower.ends_with(b"::__callstatic")
+                                {
+                                    fn_display = self.method_declaring_display(fn_display);
+                                }
+                                if from_trampoline {
+                                } else if func_name_lower.ends_with(b"::__call") {
                                     if let Some(Value::String(s)) = call.args.get(1) {
                                         if let Some(sep) = fn_display.rfind("::") {
                                             fn_display = format!(
@@ -39040,10 +39051,19 @@ impl Vm {
                                             if let Some((call_op, declaring_class)) = magic_call
                                             {
                                                 // Deprecation message uses the original called method name
+                                                // (of the magic method's declaring class)
                                                 let display_fallback = format!(
                                                     "{}::{}",
-                                                    String::from_utf8_lossy(class_part),
-                                                    String::from_utf8_lossy(method_part)
+                                                    self.classes
+                                                        .get(&declaring_class)
+                                                        .map(|c| crate::value::display_class_name(&c.name))
+                                                        .unwrap_or_else(|| String::from_utf8_lossy(class_part).into_owned()),
+                                                    // (forwarded by a call trampoline: the magic method)
+                                                    if op_array.name.starts_with(b"__closure_fcc_tramp_") {
+                                                        std::borrow::Cow::Borrowed("__call")
+                                                    } else {
+                                                        String::from_utf8_lossy(method_part)
+                                                    }
                                                 );
                                                 self.check_user_function_deprecation_named(
                                                     &call_op,
@@ -39199,10 +39219,19 @@ impl Vm {
                                                 magic_callstatic
                                             {
                                                 // Deprecation message uses the original called method name
+                                                // (of the magic method's declaring class)
                                                 let display_fallback = format!(
                                                     "{}::{}",
-                                                    String::from_utf8_lossy(class_part),
-                                                    String::from_utf8_lossy(method_part)
+                                                    self.classes
+                                                        .get(&declaring_class)
+                                                        .map(|c| crate::value::display_class_name(&c.name))
+                                                        .unwrap_or_else(|| String::from_utf8_lossy(class_part).into_owned()),
+                                                    // (forwarded by a call trampoline: the magic method)
+                                                    if op_array.name.starts_with(b"__closure_fcc_tramp_") {
+                                                        std::borrow::Cow::Borrowed("__callStatic")
+                                                    } else {
+                                                        String::from_utf8_lossy(method_part)
+                                                    }
                                                 );
                                                 self.check_user_function_deprecation_named(
                                                     &call_static_op,

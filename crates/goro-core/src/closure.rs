@@ -603,6 +603,15 @@ impl Vm {
         let inner = closure.closure_inner()?;
         let (name, _) = closure_parts(&inner);
         let l = lower(&name);
+        // (a static call trampoline: the class it was called on)
+        if let Some(c) = self
+            .user_functions
+            .get(&l)
+            .filter(|_| name.starts_with(b"__closure_fcc_tramp_"))
+            .and_then(|o| o.closure_called_class.clone())
+        {
+            return Some(c);
+        }
         let target = if name.starts_with(b"__closure_fcc_") {
             self.user_functions
                 .get(&l)
@@ -1439,14 +1448,44 @@ impl Vm {
             "__closure_fcc_tramp_{}{}_{}",
             if obj.is_some() { "i" } else { "s" },
             if fcc { "p" } else { "" },
-            String::from_utf8_lossy(&lower(&target))
+            // (no "::": the name must not read as a "Class::method" callable)
+            String::from_utf8_lossy(&lower(&target)).replace("::", ":")
         )
         .into_bytes();
+        let has_obj = obj.is_some();
+        // The trampoline is a method of the magic method's declaring class,
+        // with its attributes (#[\Deprecated], #[\NoDiscard]).
+        let magic: &[u8] = if has_obj { b"__call" } else { b"__callStatic" };
+        let (decl_canon, magic_attrs) = self
+            .classes
+            .get(&lower(class_canon))
+            .and_then(|c| c.get_method(&lower(magic)))
+            .map(|m| {
+                let decl = self
+                    .classes
+                    .get(&m.declaring_class)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_else(|| class_canon.to_vec());
+                let attrs = if m.attributes.is_empty() {
+                    m.op_array.attributes.clone()
+                } else {
+                    m.attributes.clone()
+                };
+                (decl, attrs)
+            })
+            .unwrap_or_else(|| (class_canon.to_vec(), Vec::new()));
+        let mut display = decl_canon.clone();
+        display.extend_from_slice(b"::");
+        display.extend_from_slice(method);
         let mut op = OpArray::new();
         op.name = name.clone();
-        op.fcc_target_name = Some(target.clone());
-        op.scope_class = Some(lower(class_canon));
-        let has_obj = obj.is_some();
+        op.fcc_target_name = Some(display.clone());
+        op.display_name = display;
+        op.attributes = magic_attrs;
+        op.scope_class = Some(lower(&decl_canon));
+        if !has_obj {
+            op.closure_called_class = Some(class_canon.to_vec());
+        }
         if has_obj {
             op.get_or_create_cv(b"__fcc_captured");
         }
