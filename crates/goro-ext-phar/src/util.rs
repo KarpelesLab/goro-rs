@@ -1102,6 +1102,21 @@ fn openssl_signverify(
     }
 }
 
+/// Whether PEM_read_bio_PrivateKey() reads `key` (a PEM private key, not
+/// a file:// path; no passphrase), without the warnings openssl_*() give.
+fn private_key_reads(vm: &mut Vm, key: &[u8]) -> bool {
+    if key.starts_with(b"file://") {
+        return false;
+    }
+    let Some(f) = vm.functions.get(b"openssl_pkey_get_private".as_slice()).copied() else {
+        return false;
+    };
+    let saved = vm.warning_capture.replace(Vec::new());
+    let r = f(vm, &[Value::String(PhpString::from_bytes(key))]);
+    vm.warning_capture = saved;
+    matches!(r, Ok(Value::Object(_)))
+}
+
 /// phar_verify_signature(): the hex signature, or the error.
 pub fn verify_signature(
     vm: &mut Vm,
@@ -1154,7 +1169,23 @@ pub fn create_signature(vm: &mut Vm, phar: &ArcRef, data: &[u8]) -> Res<Vec<u8>>
     let sig = match sig_flags {
         PHAR_SIG_SHA512 => hash(vm, "sha512", data),
         PHAR_SIG_OPENSSL_SHA512 | PHAR_SIG_OPENSSL_SHA256 | PHAR_SIG_OPENSSL => {
-            let key = g(|g| g.openssl_privatekey.clone()).unwrap_or_default();
+            // (php-src links libssl itself when ext/openssl is there: no
+            // key at all fails making the BIO, a key
+            // PEM_read_bio_PrivateKey() cannot read fails quietly, before
+            // signing; without it, openssl_sign() is called)
+            let key = g(|g| g.openssl_privatekey.clone());
+            if vm.loaded_extensions.contains(b"openssl".as_slice()) {
+                let Some(k) = &key else {
+                    return fail(format!(
+                        "unable to write to phar \"{}\" with requested openssl signature",
+                        l(&phar.borrow().fname)
+                    ));
+                };
+                if !private_key_reads(vm, k) {
+                    return fail("unable to process private key".to_string());
+                }
+            }
+            let key = key.unwrap_or_default();
             match openssl_signverify(vm, true, data, &key, b"", sig_flags) {
                 Ok(s) => s,
                 Err(_) => {
