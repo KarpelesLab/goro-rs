@@ -85,6 +85,10 @@ struct Bin {
 
 struct Cache {
     bins: [Bin; NCLASS],
+    /// The rest of the thread's current chunk of the region (see
+    /// region): new blocks are carved from it.
+    cur: usize,
+    end: usize,
 }
 
 thread_local! {
@@ -96,8 +100,115 @@ thread_local! {
                     len: 0,
                 }
             }; NCLASS],
+            cur: 0,
+            end: 0,
         })
     };
+}
+
+/// The chunks the threads carve new small blocks from, as zend_alloc.c
+/// carves its bins' runs from its chunks: one system allocation per chunk
+/// rather than one per block. A block carved from a chunk never goes back
+/// to the system: once freed it stays cached (past its class's cap), for
+/// the next allocations of its class. Past a number of chunks, blocks come
+/// from the system one by one again.
+mod region {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// What a thread takes at a time (and its alignment).
+    pub(super) const CHUNK: usize = 1 << 20;
+    /// The table of the chunks made (their addresses, by hash): twice as
+    /// many slots as chunks may be made.
+    const SLOTS: usize = 4096;
+    const MAX_CHUNKS: usize = SLOTS / 2;
+    static TABLE: [AtomicUsize; SLOTS] = [const { AtomicUsize::new(0) }; SLOTS];
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    #[inline]
+    fn slot_of(base: usize) -> usize {
+        ((base >> 20).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 52) & (SLOTS - 1)
+    }
+
+    /// A new chunk (readable and writable), or None.
+    #[cold]
+    pub(super) fn chunk() -> Option<usize> {
+        if COUNT.fetch_add(1, Ordering::Relaxed) >= MAX_CHUNKS {
+            COUNT.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+        // SAFETY: a valid non-zero layout (a power of two alignment).
+        let p = unsafe { System.alloc(Layout::from_size_align_unchecked(CHUNK, CHUNK)) };
+        if p.is_null() {
+            COUNT.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+        let base = p as usize;
+        let mut i = slot_of(base);
+        // (a free slot exists: at most half of them are used)
+        while TABLE[i]
+            .compare_exchange(0, base, Ordering::Release, Ordering::Relaxed)
+            .is_err()
+        {
+            i = (i + 1) & (SLOTS - 1);
+        }
+        Some(base)
+    }
+
+    /// Whether `p` was carved from a chunk.
+    #[inline]
+    pub(super) fn contains(p: *mut u8) -> bool {
+        let base = p as usize & !(CHUNK - 1);
+        let mut i = slot_of(base);
+        loop {
+            match TABLE[i].load(Ordering::Acquire) {
+                0 => return false,
+                b if b == base => return true,
+                _ => i = (i + 1) & (SLOTS - 1),
+            }
+        }
+    }
+}
+
+/// A new block of class `c` carved from the thread's chunk of the region
+/// (a new chunk taken when it is used up), or null.
+#[inline(never)]
+fn carve(c: usize) -> *mut u8 {
+    let size = class_size(c);
+    CACHE
+        .try_with(|cache| {
+            // SAFETY: as in take().
+            let cache = unsafe { &mut *cache.get() };
+            if cache.end - cache.cur < size {
+                match region::chunk() {
+                    Some(at) => {
+                        cache.cur = at;
+                        cache.end = at + region::CHUNK;
+                    }
+                    None => return std::ptr::null_mut(),
+                }
+            }
+            let p = cache.cur;
+            cache.cur += size;
+            p as *mut u8
+        })
+        .unwrap_or(std::ptr::null_mut())
+}
+
+/// Cache block `p` of class `c` whatever the bin holds (a block of the
+/// region, which never goes back to the system).
+#[inline(never)]
+fn put_always(c: usize, p: *mut u8) -> bool {
+    CACHE
+        .try_with(|cache| {
+            // SAFETY: as in take().
+            let bin = unsafe { &mut (*cache.get()).bins[c] };
+            // SAFETY: as in put().
+            unsafe { (p as *mut *mut u8).write(bin.head) };
+            bin.head = p;
+            bin.len += 1;
+        })
+        .is_ok()
 }
 
 #[inline]
@@ -189,7 +300,12 @@ unsafe impl GlobalAlloc for SmallCache {
     #[inline(never)]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if small(&layout) {
-            let p = take(class_of(layout.size()));
+            let c = class_of(layout.size());
+            let p = take(c);
+            if !p.is_null() {
+                return p;
+            }
+            let p = carve(c);
             if !p.is_null() {
                 return p;
             }
@@ -200,8 +316,16 @@ unsafe impl GlobalAlloc for SmallCache {
 
     #[inline(never)]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if small(&layout) && put(class_of(layout.size()), ptr) {
-            return;
+        if small(&layout) {
+            let c = class_of(layout.size());
+            if put(c, ptr) {
+                return;
+            }
+            if region::contains(ptr) {
+                // (a thread whose cache is gone: the block is lost)
+                put_always(c, ptr);
+                return;
+            }
         }
         // SAFETY: the caller's contract.
         unsafe { dealloc_system(ptr, layout) }
