@@ -482,6 +482,7 @@ pub fn node_obj_detached_modern(vm: &mut Vm, n: NodeId) -> Value {
 // Handler tables
 
 pub static NODE_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    no_property_ptr: false,
     read_property: Some(h_read_property_pub),
     write_property: Some(h_write_property_pub),
     has_property: Some(h_has_property_pub),
@@ -498,6 +499,7 @@ pub static NODE_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
 };
 
 pub static UNCLONEABLE_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    no_property_ptr: false,
     read_property: Some(h_read_property_pub),
     write_property: Some(h_write_property_pub),
     has_property: Some(h_has_property_pub),

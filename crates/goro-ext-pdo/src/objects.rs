@@ -89,6 +89,7 @@ pub fn dbh_free(dbh: &DbhRef, free_persistent: bool) {
 }
 
 static DBH_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    no_property_ptr: false,
     read_property: None,
     write_property: None,
     has_property: None,
@@ -190,6 +191,7 @@ pub fn stmt_handlers() -> &'static NativeObjectHandlers {
 }
 
 static STMT_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    no_property_ptr: false,
     read_property: None,
     write_property: Some(stmt_prop_write),
     has_property: None,
@@ -270,6 +272,7 @@ impl Drop for RowData {
 }
 
 static ROW_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    no_property_ptr: false,
     read_property: Some(row_prop_read),
     write_property: Some(row_prop_write),
     has_property: Some(row_prop_exists),

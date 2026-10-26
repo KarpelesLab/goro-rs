@@ -488,10 +488,14 @@ pub struct NativeObjectHandlers {
     pub compare: Option<fn(&Value, &Value) -> Option<i64>>,
     /// Called after `clone` copied the properties: (source, clone).
     pub clone_obj: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>, &Rc<RefCell<PhpObject>>)>,
+    /// get_property_ptr_ptr() always returns NULL (BcMath\Number): write
+    /// fetches go through read_property (mode 1), never creating a property.
+    pub no_property_ptr: bool,
 }
 
 impl NativeObjectHandlers {
     pub const EMPTY: NativeObjectHandlers = NativeObjectHandlers {
+        no_property_ptr: false,
         read_property: None,
         write_property: None,
         has_property: None,
@@ -7395,6 +7399,17 @@ impl Vm {
             return Some(self.ao_fetch_dim_ref(obj, &key).unwrap_or(Value::Null));
         }
         Some(self.ao_fetch_dim_w(obj, Some(&key), mode).unwrap_or(Value::Null))
+    }
+
+    /// A by-reference fetch of a property of an object whose
+    /// get_property_ptr_ptr() is NULL: read_property()'s value, a temporary.
+    #[inline(never)]
+    fn no_ptr_prop_fetch(&mut self, obj_val: &Value, name: &[u8]) -> Option<Value> {
+        let Value::Object(obj) = obj_val else {
+            return None;
+        };
+        let h = native_handlers(obj).filter(|h| h.no_property_ptr)?;
+        (h.read_property?)(self, obj, name, 1)
     }
 
     /// An extension's get_property_ptr_ptr for a by-reference fetch of
@@ -50705,6 +50720,7 @@ impl Vm {
                     if let Some(v) = self
                         .native_prop_ptr(&obj_val, prop_name.as_bytes())
                         .or_else(|| self.ao_props_ptr(&obj_val, prop_name.as_bytes(), b'&'))
+                        .or_else(|| self.no_ptr_prop_fetch(&obj_val, prop_name.as_bytes()))
                     {
                         native_exc_check!(
                             self,
@@ -62678,6 +62694,9 @@ impl Vm {
         let Value::Object(o) = obj else {
             return None;
         };
+        if native_handlers(o).is_some_and(|h| h.no_property_ptr) {
+            return None;
+        }
         // An internal class's get_property_ptr_ptr may refuse (DatePeriod's
         // readonly properties): the Error it throws.
         if !self.native_class_handlers.is_empty()

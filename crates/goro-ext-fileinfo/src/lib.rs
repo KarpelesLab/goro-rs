@@ -37,6 +37,7 @@ struct FinfoData {
 }
 
 static HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    no_property_ptr: false,
     read_property: None,
     write_property: None,
     has_property: None,

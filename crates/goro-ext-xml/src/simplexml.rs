@@ -64,6 +64,7 @@ impl Sxe {
 type Obj = Rc<RefCell<PhpObject>>;
 
 static HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    no_property_ptr: false,
     read_property: Some(h_read_property),
     write_property: Some(h_write_property),
     has_property: Some(h_has_property),

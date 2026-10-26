@@ -248,6 +248,7 @@ fn free_detached_one(t: &mut Tree, n: NodeId) {
 }
 
 static HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    no_property_ptr: false,
     read_property: Some(h_read_property),
     write_property: Some(h_write_property),
     has_property: Some(h_has_property),

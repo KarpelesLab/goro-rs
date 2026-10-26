@@ -33,6 +33,7 @@ static HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
     cast: Some(cast),
     compare: Some(compare_handler),
     clone_obj: Some(clone_obj),
+    no_property_ptr: true,
     ..NativeObjectHandlers::EMPTY
 };
 
@@ -220,9 +221,20 @@ fn new_number(vm: &mut Vm, n: &Num, scale: usize) -> Value {
 
 /// bcmath_number_get_property_ptr_ptr() returns NULL: `&$num->value`
 /// gets a copy of the value instead of the readonly error.
-fn read_property(_vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8], mode: u8) -> Option<Value> {
-    if mode == 3 && (name == b"value" || name == b"scale") {
+/// A write fetch (`$num->p[] = 1`, `$num->p .= x`) reads the property
+/// (zend_std_read_property(BP_VAR_W) warns for another name) into a
+/// temporary.
+fn read_property(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8], mode: u8) -> Option<Value> {
+    if (mode == 3 || mode == 1) && (name == b"value" || name == b"scale") {
         return Some(o.borrow().get_property(name));
+    }
+    if mode == 1 {
+        vm.emit_warning(&format!(
+            "Undefined property: {}::${}",
+            CLASS_DISPLAY,
+            String::from_utf8_lossy(name)
+        ));
+        return Some(Value::Null);
     }
     None
 }

@@ -322,6 +322,7 @@ pub fn map_named_item(o: &Obj, name: &str, ns: Option<&str>) -> Option<NodeId> {
 }
 
 pub static LIST_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    no_property_ptr: false,
     read_property: Some(h_read_property_pub),
     write_property: Some(h_write_property_pub),
     has_property: Some(h_has_property_pub),
@@ -338,6 +339,7 @@ pub static LIST_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
 };
 
 pub static MAP_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    no_property_ptr: false,
     read_property: Some(h_read_property_pub),
     write_property: Some(h_write_property_pub),
     has_property: Some(h_has_property_pub),
