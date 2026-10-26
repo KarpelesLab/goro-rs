@@ -1407,7 +1407,7 @@ impl Vm {
                 let msg = format!(
                     "Creation of dynamic property {}::${} is deprecated",
                     crate::value::display_class_name(&obj.borrow().class_name),
-                    crate::string::msg_str(&name)
+                    crate::string::msg_cstr(&name)
                 );
                 let had_exc = self.current_exception.is_some();
                 self.emit_deprecated(&msg);

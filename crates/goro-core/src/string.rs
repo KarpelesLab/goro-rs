@@ -349,6 +349,11 @@ impl std::fmt::Display for PhpString {
 /// plane-16 private-use characters U+10FF00 + byte, which the error display,
 /// error handlers and exception messages turn back into the raw bytes
 /// (`errdisplay::raw_error_bytes`), as php's messages carry them unchanged.
+/// `%s` of a zend_string: the text stops at its first NUL byte.
+pub fn msg_cstr(b: &[u8]) -> std::borrow::Cow<'_, str> {
+    msg_str(b.split(|c| *c == 0).next().unwrap_or_default())
+}
+
 pub fn msg_str(b: &[u8]) -> std::borrow::Cow<'_, str> {
     let mut rest = match std::str::from_utf8(b) {
         Ok(s) => return std::borrow::Cow::Borrowed(s),

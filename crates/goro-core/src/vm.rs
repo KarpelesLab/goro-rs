@@ -6394,7 +6394,7 @@ impl Vm {
             self.emit_deprecated(&format!(
                 "Creation of dynamic property {}::${} is deprecated",
                 class_display,
-                name.to_msg_string()
+                crate::string::msg_cstr(name.as_bytes())
             ));
         }
         obj.borrow_mut()
@@ -7605,7 +7605,7 @@ impl Vm {
         let msg = format!(
             "Creation of dynamic property {}::${} is deprecated",
             crate::value::display_class_name(&obj.borrow().class_name),
-            String::from_utf8_lossy(key)
+            crate::string::msg_cstr(key)
         );
         self.emit_deprecated(&msg);
     }
@@ -7729,7 +7729,7 @@ impl Vm {
         self.emit_deprecated(&format!(
             "Creation of dynamic property {}::${} is deprecated",
             class_display,
-            name.to_msg_string()
+            crate::string::msg_cstr(name.as_bytes())
         ));
         if Rc::strong_count(obj) < before && Rc::strong_count(obj) <= 1 {
             return Some(Some(format!(
@@ -52120,6 +52120,26 @@ impl Vm {
                     if let Value::Object(obj) = &obj_val {
                         // The slot this scope's access refers to (privates by scope).
                         let pkey = self.prop_key_for(&obj_val, prop_name.as_bytes());
+                        // zend_std_get_property_ptr_ptr() creating the slot.
+                        if let Some(msg) = self.forbidden_dynamic_prop_w(&obj_val, &pkey) {
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, saved_pc)) =
+                                exception_handlers.pop()
+                            {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
+                        if !obj.borrow().has_property(&pkey) {
+                            let cl = obj.borrow().class_name.to_ascii_lowercase();
+                            self.guarded_set_dynamic_deprecation(obj, &cl, &pkey);
+                        }
                         match value {
                             Value::Reference(r) => {
                                 let src = self.typed_ref_source_for(obj, prop_name.as_bytes());
@@ -56728,39 +56748,53 @@ impl Vm {
                             }
                         }
 
-                        // Check for private abstract trait methods (must be implemented even in abstract classes)
-                        if !class.is_interface && !class.is_trait {
+                        // zend_verify_abstract_class(): an explicitly abstract
+                        // class still has to implement private abstract
+                        // (trait) methods (a concrete one reports them below).
+                        if class.is_abstract && !class.is_interface && !class.is_trait {
+                            let mut missing: Vec<String> = Vec::new();
                             for (method_name, method) in &class.methods {
                                 if method.is_abstract && method.visibility == Visibility::Private {
-                                    // Check if this abstract private method came from a trait
                                     let came_from_trait = trait_names.iter().any(|tn| {
                                         let tn_lower: Vec<u8> =
                                             tn.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        if let Some(tc) = self.classes.get(&tn_lower) {
-                                            if let Some(tm) = tc.methods.get(method_name) {
+                                        self.classes.get(&tn_lower).is_some_and(|tc| {
+                                            tc.methods.get(method_name).is_some_and(|tm| {
                                                 tm.is_abstract
                                                     && tm.visibility == Visibility::Private
-                                            } else {
-                                                false
-                                            }
-                                        } else {
-                                            false
-                                        }
+                                            })
+                                        })
                                     });
                                     if came_from_trait {
-                                        let class_display =
-                                            crate::string::msg_str(&class.name).to_string();
-                                        let method_display =
-                                            crate::string::msg_str(&method.name).to_string();
-                                        return Err(VmError {
-                                            message: format!(
-                                                "Class {} must implement 1 abstract method ({}::{})",
-                                                class_display, class_display, method_display
-                                            ),
-                                            line: op.line,
-                                        });
+                                        missing.push(format!(
+                                            "{}::{}",
+                                            crate::string::msg_cstr(&class.name),
+                                            crate::string::msg_str(&method.name)
+                                        ));
                                     }
                                 }
+                            }
+                            if !missing.is_empty() {
+                                let n = missing.len();
+                                let mut list = missing
+                                    .iter()
+                                    .take(3)
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                if n > 3 {
+                                    list.push_str(", ...");
+                                }
+                                return Err(VmError {
+                                    message: format!(
+                                        "Class {} must implement {} abstract method{} ({})",
+                                        crate::string::msg_cstr(&class.name),
+                                        n,
+                                        if n > 1 { "s" } else { "" },
+                                        list
+                                    ),
+                                    line: op.line,
+                                });
                             }
                         }
 
@@ -60230,7 +60264,7 @@ impl Vm {
                                         {
                                             let class_display =
                                                 crate::value::display_class_name(&class_name_orig);
-                                            self.emit_deprecated(&format!("Creation of dynamic property {}::${} is deprecated", class_display, prop_name.to_msg_string()));
+                                            self.emit_deprecated(&format!("Creation of dynamic property {}::${} is deprecated", class_display, crate::string::msg_cstr(prop_name.as_bytes())));
                                         }
                                     }
                                     let arr = if unset_fetch || array_ref_send {
@@ -60559,7 +60593,7 @@ impl Vm {
                                                 &format!(
                                                     "Creation of dynamic property {}::${} is deprecated",
                                                     class_display,
-                                                    prop_name.to_msg_string()
+                                                    crate::string::msg_cstr(prop_name.as_bytes())
                                                 ),
                                                 op.line,
                                             );
@@ -62088,7 +62122,7 @@ impl Vm {
                                             let class_display =
                                                 crate::value::display_class_name(&class_name_orig);
                                             let prop_str =
-                                                String::from_utf8_lossy(prop_name.as_bytes());
+                                                crate::string::msg_cstr(prop_name.as_bytes());
                                             self.emit_deprecated(&format!("Creation of dynamic property {}::${} is deprecated", class_display, prop_str));
                                         }
                                     }
@@ -63628,6 +63662,21 @@ impl Vm {
         }
         let ob = o.borrow();
         let cl = ob.class_name.to_ascii_lowercase();
+        // A readonly class is ZEND_ACC_NO_DYNAMIC_PROPERTIES too (unless
+        // __get() serves the missing property).
+        if let Some(c) = self.classes.get(&cl) {
+            if c.is_readonly
+                && !ob.has_property(prop)
+                && c.get_method(b"__get").is_none()
+                && self.find_property_def(&cl, prop).is_none()
+            {
+                return Some(format!(
+                    "Cannot create dynamic property {}::${}",
+                    crate::value::display_class_name(&ob.class_name),
+                    crate::string::msg_cstr(prop)
+                ));
+            }
+        }
         if !Self::no_dynamic_properties(&cl)
             || ob.has_property(prop)
             || crate::stubs::find_class_lower(&cl)
