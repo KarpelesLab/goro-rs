@@ -1251,7 +1251,7 @@ fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bo
     let rc_lower = reflector_class_name.to_ascii_lowercase();
     if (rc_lower == "reflectionobject"
         || vm.class_extends(rc_lower.as_bytes(), b"reflectionobject"))
-        && !matches!(arg.deref(), Value::Object(_))
+        && !matches!(arg.deref(), Value::Object(_) | Value::Generator(_))
     {
         let err_msg = format!(
             "ReflectionObject::__construct(): Argument #1 ($object) must be of type object, {} given",
@@ -1300,6 +1300,7 @@ fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bo
                 name
             }
         }
+        Value::Generator(_) => "Generator".to_string(),
         _ => arg.to_php_string().to_msg_string(),
     };
 
@@ -1378,6 +1379,8 @@ fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bo
                 Value::String(PhpString::from_vec(fname)),
             );
         }
+        obj.set_property(b"__reflection_object".to_vec(), arg);
+    } else if let Value::Generator(_) = &arg {
         obj.set_property(b"__reflection_object".to_vec(), arg);
     } else if let Value::String(s) = &arg {
         // Closure represented as a string: remember the underlying function.
