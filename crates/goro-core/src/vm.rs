@@ -11120,6 +11120,14 @@ impl Vm {
                     let mut fname = String::from_utf8_lossy(op_array.effective_name()).to_string();
                     if via_invoke {
                         fname = "Closure::__invoke".to_string();
+                    } else if let Some(sc) = op_array.scope_class.as_ref().filter(|_| {
+                        crate::closure::is_closure_fn_name(&op_array.name)
+                            && op_array.display_name.starts_with(b"{closure")
+                    }) {
+                        // (a closure is named by its scope too)
+                        let mut q = String::new();
+                        self.push_scope_class_display(&mut q, sc);
+                        fname = format!("{}::{}", q, fname);
                     } else if op_array.display_name.is_empty() && !fname.contains("::") {
                         if let Some(sc) = &op_array.scope_class {
                             let cname = self
@@ -11161,6 +11169,15 @@ impl Vm {
         // (in the buffer of a finished call's frame)
         let mut frame_display = self.string_pool.pop().unwrap_or_default();
         if !op_array.display_name.is_empty() {
+            // A closure's frame is qualified by its scope (Class::{closure:...},
+            // shown Class->... with $this), as for a direct call.
+            if let Some(sc) = op_array.scope_class.as_ref().filter(|_| {
+                crate::closure::is_closure_fn_name(&op_array.name)
+                    && op_array.display_name.starts_with(b"{closure")
+            }) {
+                self.push_scope_class_display(&mut frame_display, sc);
+                frame_display.push_str("::");
+            }
             push_lossy(&mut frame_display, &op_array.display_name);
         } else if let Some(fcc) = &op_array.fcc_target_name {
             push_lossy(&mut frame_display, fcc);
@@ -18143,6 +18160,15 @@ pub(crate) fn is_known_builtin_class_name(class_lower: &[u8]) -> bool {
 
 impl Vm {
     /// Get canonical (properly cased) name for built-in class
+    /// The display name of scope class `scope` (lowercase) appended to `dst`.
+    #[inline(never)]
+    fn push_scope_class_display(&self, dst: &mut String, scope: &[u8]) {
+        match self.classes.get(scope) {
+            Some(c) => dst.push_str(&crate::string::msg_str(&c.name)),
+            None => dst.push_str(&self.builtin_canonical_name(scope)),
+        }
+    }
+
     pub fn builtin_canonical_name(&self, class_lower: &[u8]) -> String {
         if let Some(c) = crate::stubs::find_class_lower(class_lower) {
             return c.name.to_string();
