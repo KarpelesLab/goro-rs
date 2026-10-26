@@ -4055,11 +4055,11 @@ fn h_file_put_contents(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
     let data = args.get(1).map(|v| v.deref()).unwrap_or(Value::Null);
     let src_fid = fid_of(&data);
     let src_is_user = src_fid.and_then(get_us).is_some();
-    let ctx_is_stream = matches!(args.get(3).map(|v| v.deref()), Some(Value::Resource(id))
-        if goro_core::value::resource_type_of(id.id()).as_deref() != Some(b"stream-context".as_slice()));
     let p = arg_str(args, 0).unwrap_or_default();
     let user = !p.is_empty() && needs_locate(&p);
-    if !user && !src_is_user && !ctx_is_stream {
+    // (a resource that is no context: the plain implementation writes,
+    // then throws)
+    if !user && !src_is_user {
         return Ok(None);
     }
     let flags = int_arg(args, 2).unwrap_or(0);

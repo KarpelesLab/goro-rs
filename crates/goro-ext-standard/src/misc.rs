@@ -8675,6 +8675,60 @@ impl MetaTokenizer<'_> {
 }
 
 /// get_meta_tags(): the content attributes of the <meta> tags of a file.
+/// Z_PARAM_RESOURCE_OR_NULL(zcontext) + php_stream_context_from_zval() for
+/// the `$context` argument at `idx`: a non-resource is a parameter type
+/// error; a resource that is no stream context throws a TypeError the
+/// function does not check, so it runs on (without a context) and the
+/// exception is thrown once it returns.  None: the context is fine.
+#[inline(never)]
+fn context_param_check(
+    vm: &mut Vm,
+    func: &str,
+    args: &[Value],
+    idx: usize,
+    f: fn(&mut Vm, &[Value]) -> Result<Value, VmError>,
+) -> Option<Result<Value, VmError>> {
+    let v = args.get(idx)?.deref();
+    let (msg, run) = match &v {
+        Value::Null | Value::Undef => return None,
+        Value::Resource(r) => {
+            if goro_core::value::resource_type_of(r.id()).as_deref()
+                == Some(b"stream-context".as_ref())
+                && goro_core::value::is_open_resource(r.id())
+            {
+                return None;
+            }
+            (
+                format!("{}(): supplied resource is not a valid Stream-Context resource", func),
+                true,
+            )
+        }
+        other => (
+            format!(
+                "{}(): Argument #{} ($context) must be of type resource or null, {} given",
+                func,
+                idx + 1,
+                Vm::value_type_name(other)
+            ),
+            false,
+        ),
+    };
+    if run {
+        let mut a = args.to_vec();
+        a[idx] = Value::Null;
+        let r = f(vm, &a);
+        if r.is_err() || vm.current_exception.is_some() {
+            return Some(r);
+        }
+    }
+    let exc = vm.throw_type_error(msg.clone());
+    vm.current_exception = Some(exc);
+    Some(Err(VmError {
+        message: msg,
+        line: vm.current_line,
+    }))
+}
+
 fn get_meta_tags_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // php_stream_open_wrapper(..., NULL): the stream gets no context
     let saved = std::mem::replace(&mut vm.open_context_mode, goro_core::vm::OPEN_CTX_NONE);
@@ -8685,7 +8739,19 @@ fn get_meta_tags_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn get_meta_tags_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let filename = args.first().cloned().unwrap_or(Value::Null);
+    if let Some(e) = path_arg_nul_error(
+        vm,
+        filename.to_php_string().as_bytes(),
+        "get_meta_tags",
+        1,
+        "filename",
+    ) {
+        return Err(e);
+    }
     let use_include_path = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    // (the stream is opened and read by get_meta_tags() itself: its
+    // diagnostics name it)
+    let saved = vm.warning_capture.replace(Vec::new());
     let contents = file_get_contents_fn(
         vm,
         &[
@@ -8696,7 +8762,15 @@ fn get_meta_tags_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Value::False
             },
         ],
-    )?;
+    );
+    let captured = std::mem::replace(&mut vm.warning_capture, saved).unwrap_or_default();
+    for w in captured {
+        match w.strip_prefix("file_get_contents(") {
+            Some(rest) => vm.emit_warning(&format!("get_meta_tags({}", rest)),
+            None => vm.emit_warning(&w),
+        }
+    }
+    let contents = contents?;
     let Value::String(contents) = contents else {
         return Ok(Value::False);
     };
@@ -8850,6 +8924,9 @@ pub(crate) fn path_arg_nul_error(
 }
 
 fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = context_param_check(vm, "file_get_contents", args, 2, file_get_contents_fn) {
+        return r;
+    }
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), "file_get_contents", 1, "filename") {
         return Err(e);
@@ -9117,6 +9194,9 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 line: vm.current_line,
             });
         }
+    }
+    if let Some(r) = context_param_check(vm, "file_put_contents", args, 3, file_put_contents_fn) {
+        return r;
     }
     // If $context (arg 3) is a resource, it should be a valid Stream-Context.
     if let Some(Value::Resource(rid)) = args.get(3) {
@@ -12269,6 +12349,9 @@ fn call_registered(
 }
 
 pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = context_param_check(vm, "fopen", args, 3, fopen_fn) {
+        return r;
+    }
     // php_error_docref() names the active function (file_get_contents(),
     // highlight_file(), ...) when fopen's implementation is reached from it.
     let fopen_caller = vm
@@ -14290,6 +14373,9 @@ fn fdatasync_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn mkdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = context_param_check(vm, "mkdir", args, 3, mkdir_fn) {
+        return r;
+    }
     let path_v = args.first().unwrap_or(&Value::Null).to_php_string();
     // Null byte check (PHP raises ValueError as TypeError message)
     if path_v.as_bytes().contains(&0) {
@@ -14331,6 +14417,9 @@ fn mkdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn rmdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = context_param_check(vm, "rmdir", args, 1, rmdir_fn) {
+        return r;
+    }
     // php_clear_stat_cache(1, ...): the realpath cache is dropped.
     REALPATH_CACHE.with(|c| c.borrow_mut().clear());
     let path_v = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -14468,6 +14557,9 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 fn scandir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = context_param_check(vm, "scandir", args, 2, scandir_fn) {
+        return r;
+    }
     let dir = args.first().unwrap_or(&Value::Null).to_php_string();
     if let Some(e) = path_arg_nul_error(vm, dir.as_bytes(), "scandir", 1, "directory") {
         return Err(e);
@@ -16167,6 +16259,11 @@ fn opendir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// opendir() / dir(): php_stream_opendir() of the path.
 fn opendir_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError> {
+    let reopen: fn(&mut Vm, &[Value]) -> Result<Value, VmError> =
+        if fname == "dir" { dir_fn } else { opendir_fn };
+    if let Some(r) = context_param_check(vm, fname, args, 1, reopen) {
+        return r;
+    }
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), fname, 1, "directory") {
         return Err(e);
@@ -16891,6 +16988,9 @@ fn link_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn unlink_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = context_param_check(vm, "unlink", args, 1, unlink_fn2) {
+        return r;
+    }
     // php_clear_stat_cache(1, ...): the realpath cache is dropped.
     REALPATH_CACHE.with(|c| c.borrow_mut().clear());
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -16915,6 +17015,9 @@ fn unlink_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn rename_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = context_param_check(vm, "rename", args, 2, rename_fn2) {
+        return r;
+    }
     // php_clear_stat_cache(1, ...): the realpath cache is dropped.
     REALPATH_CACHE.with(|c| c.borrow_mut().clear());
     let from = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -16932,6 +17035,9 @@ fn rename_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = context_param_check(vm, "copy", args, 2, copy_fn2) {
+        return r;
+    }
     let from = args.first().unwrap_or(&Value::Null).to_php_string();
     let to = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let from_str = from.to_string_lossy();
@@ -17067,6 +17173,9 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = context_param_check(vm, "readfile", args, 2, readfile_fn) {
+        return r;
+    }
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), "readfile", 1, "filename") {
         return Err(e);
@@ -17172,6 +17281,9 @@ pub(crate) fn resolve_with_include_path(vm: &Vm, filename: &str, use_include_pat
 }
 
 fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = context_param_check(vm, "file", args, 2, file_fn) {
+        return r;
+    }
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     // Valid flags for file(): FILE_USE_INCLUDE_PATH (1) | FILE_IGNORE_NEW_LINES (2)
