@@ -239,6 +239,25 @@ impl Vm {
         }
     }
 
+    /// get_current_data() of an iterator: an ArrayIterator's (with no
+    /// overriding current()) is the storage's element as it is, a reference
+    /// staying one (spl_array_it_get_current_data()).
+    pub fn it_current_data(&mut self, it: &Value) -> Value {
+        if let Value::Object(o) = it {
+            let cl = o.borrow().class_name.to_ascii_lowercase();
+            if self
+                .spl_find_base(&cl, &[b"arrayiterator", b"recursivearrayiterator"])
+                .is_some()
+                && !self.ao_user_has(o, b"current")
+            {
+                if let Some((_, _, v)) = self.ao_current(o) {
+                    return v;
+                }
+            }
+        }
+        self.it_current(it)
+    }
+
     pub fn it_key(&mut self, it: &Value) -> Value {
         if self.sxe_iterator_exhausted(it) {
             return Value::Null;

@@ -364,7 +364,7 @@ fn iterator_to_array_iterate(vm: &mut Vm, it: &Value, use_keys: bool) -> Result<
         if vm.current_exception.is_some() {
             break;
         }
-        let value = vm.it_current(it);
+        let value = vm.it_current_data(it);
         if vm.current_exception.is_some() {
             break;
         }
