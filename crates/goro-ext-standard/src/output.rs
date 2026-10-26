@@ -2193,6 +2193,14 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
                 buf.extend_from_slice(b"))");
                 return;
             }
+            // (php_addcslashes()'s 4 * len buffer: over memory_limit the
+            // fatal error is raised once the call returns)
+            if !b.is_empty() && goro_core::value::memory_get_limit() > 0 {
+                let size = b.len().saturating_mul(4).saturating_add(32);
+                if goro_core::value::memory_alloc(size) {
+                    goro_core::value::memory_free(size);
+                }
+            }
             buf.push(b'\'');
             var_export_escape(buf, b, true);
             buf.push(b'\'');

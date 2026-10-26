@@ -1452,6 +1452,19 @@ fn php_conv_fp(format: u8, num: f64, precision: usize, dec_point: u8) -> (Vec<u8
     (s, is_negative)
 }
 
+/// zend_string_safe_alloc(n, m, l)'s block: n * m bytes plus the aligned
+/// zend_string of l bytes; the memory limit may refuse it (a fatal error).
+#[inline(never)]
+pub(crate) fn zstr_safe_alloc_check(vm: &mut Vm, n: usize, m: usize, l: usize) -> Result<(), VmError> {
+    if goro_core::value::memory_get_limit() == 0 {
+        return Ok(());
+    }
+    let size = n
+        .saturating_mul(m)
+        .saturating_add(l.saturating_add(25).next_multiple_of(8));
+    vm.memory_check(size)
+}
+
 /// php_sprintf_appendstring().
 #[allow(clippy::too_many_arguments)]
 fn sprintf_append_string(
@@ -2445,6 +2458,9 @@ fn addcslashes(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut char_set = [false; 256];
     for c in expand_charlist_warn(charlist.as_bytes(), vm, "addcslashes") {
         char_set[c as usize] = true;
+    }
+    if !s.is_empty() && !charlist.is_empty() {
+        zstr_safe_alloc_check(vm, 4, s.len(), 0)?;
     }
     let mut result = Vec::new();
     for &b in s.as_bytes() {
@@ -5603,6 +5619,8 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    // (php_strip_tags_ex() works in a copy of the string)
+    crate::strings::zstr_safe_alloc_check(_vm, 0, 0, s.len())?;
     // The allow string: given as is, or "<tag>" per element of the array
     // form (an empty array means none).
     let allow: Option<Vec<u8>> = match args.get(1).map(|v| v.deref()) {

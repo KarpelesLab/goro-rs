@@ -7612,6 +7612,7 @@ fn base64_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn urlencode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    crate::strings::zstr_safe_alloc_check(_vm, 3, s.len(), 0)?;
     let mut result = Vec::new();
     for &b in s.as_bytes() {
         match b {
@@ -7662,6 +7663,7 @@ fn hex_val_misc(b: u8) -> u8 {
 }
 fn rawurlencode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    crate::strings::zstr_safe_alloc_check(_vm, 3, s.len(), 0)?;
     let mut result = Vec::new();
     for &b in s.as_bytes() {
         match b {
