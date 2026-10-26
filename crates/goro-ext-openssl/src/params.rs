@@ -181,7 +181,7 @@ pub const PARAMS: &[(&str, usize, &[&str])] = &[
     ("openssl_pkcs7_read", 2, &["data", "certificates"]),
     (
         "openssl_cms_verify",
-        1,
+        2, // (zpp: "pl|p!ap!p!p!p!l", though $flags has a default)
         &[
             "input_filename",
             "flags",

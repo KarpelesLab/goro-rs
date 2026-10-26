@@ -29,6 +29,29 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"inflate_add", codec::inflate_add);
     vm.register_function(b"inflate_get_read_len", codec::inflate_get_read_len);
     vm.register_function(b"inflate_get_status", codec::inflate_get_status);
+    // (zpp's argument count errors come first)
+    for name in [
+        "gzcompress",
+        "gzuncompress",
+        "gzdeflate",
+        "gzinflate",
+        "gzencode",
+        "gzdecode",
+        "zlib_encode",
+        "zlib_decode",
+        "zlib_get_coding_type",
+        "ob_gzhandler",
+        "deflate_init",
+        "deflate_add",
+        "inflate_init",
+        "inflate_add",
+        "inflate_get_read_len",
+        "inflate_get_status",
+    ] {
+        *vm.zpp_extension_verified
+            .entry(name.as_bytes().to_vec())
+            .or_insert(0) |= goro_core::arginfo::CHECK_ARITY;
+    }
 
     vm.builtin_param_names.insert(
         b"gzcompress".to_vec(),

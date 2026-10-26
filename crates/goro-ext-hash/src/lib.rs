@@ -54,6 +54,28 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"hash_equals", hash_equals_fn);
     vm.register_function(b"hash_hkdf", hash_hkdf_fn);
     mhash::register(vm);
+    // (zpp's argument count errors come first)
+    for name in [
+        "hash",
+        "hash_file",
+        "hash_hmac",
+        "hash_hmac_file",
+        "hash_init",
+        "hash_update",
+        "hash_update_stream",
+        "hash_update_file",
+        "hash_final",
+        "hash_copy",
+        "hash_algos",
+        "hash_hmac_algos",
+        "hash_pbkdf2",
+        "hash_equals",
+        "hash_hkdf",
+    ] {
+        *vm.zpp_extension_verified
+            .entry(name.as_bytes().to_vec())
+            .or_insert(0) |= goro_core::arginfo::CHECK_ARITY;
+    }
 
     // Register parameter types for strict_types enforcement + null-deprecation
     use goro_core::opcode::ParamType;

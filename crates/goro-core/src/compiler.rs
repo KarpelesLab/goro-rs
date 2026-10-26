@@ -2734,11 +2734,25 @@ impl Compiler {
                     ) && !self.is_special_builtin_call(&arg.value))
                         || Self::is_var_result_expr(&arg.value);
                     let info = func_name.and_then(|f| {
-                        crate::arginfo::lookup(&f.to_ascii_lowercase())
-                            .and_then(|fi| fi.params.get(i).map(|p| (fi.name, p.name)))
+                        crate::arginfo::lookup(&f.to_ascii_lowercase()).and_then(|fi| {
+                            fi.params
+                                .get(i)
+                                .or_else(|| fi.params.last().filter(|p| p.variadic))
+                                .map(|p| (fi.name, p.name, p.variadic))
+                        })
                     });
                     let (opcode, msg) = match (is_call, info) {
-                        (false, Some((f, p))) => (
+                        // (a variadic parameter's arguments have no name)
+                        (false, Some((f, _, true))) => (
+                            OpCode::ThrowErrorMsg,
+                            format!(
+                                "{}(): Argument #{} could not be passed by reference",
+                                f,
+                                i + 1
+                            )
+                            .into_bytes(),
+                        ),
+                        (false, Some((f, p, false))) => (
                             OpCode::ThrowErrorMsg,
                             format!(
                                 "{}(): Argument #{} (${}) could not be passed by reference",

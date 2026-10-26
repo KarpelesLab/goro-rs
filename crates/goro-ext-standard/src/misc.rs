@@ -16882,6 +16882,25 @@ fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         ));
     }
 
+    // A call of the function (key_exists(), a dynamic call: it has a
+    // frame) reports zpp's error; ZEND_ARRAY_KEY_EXISTS the offset one.
+    if matches!(&key_deref, Value::Array(_) | Value::Object(_)) {
+        if let Some(f) = vm
+            .current_builtin_name()
+            .filter(|n| n == "key_exists" || n == "array_key_exists")
+        {
+            let msg = format!(
+                "{}(): Argument #1 ($key) must be a valid array offset type",
+                f
+            );
+            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
+        }
+    }
     // Check for invalid key types (array, object)
     match &key_deref {
         Value::Array(_) => {

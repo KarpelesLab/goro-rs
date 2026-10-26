@@ -1933,6 +1933,8 @@ pub fn register(vm: &mut Vm) {
     ];
     for (name, f, params) in fns {
         vm.register_function_with_params(name, *f, params);
+        vm.zpp_extension_verified
+            .insert(name.to_vec(), goro_core::arginfo::CHECK_ARITY);
     }
 
     let errors: [&[u8]; 22] = [

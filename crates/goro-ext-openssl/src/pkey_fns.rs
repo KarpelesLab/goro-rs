@@ -177,16 +177,11 @@ pub fn from_zval(
         }
         let s = match &val {
             Value::String(s) => s.clone(),
-            other => {
-                let s = vm.value_to_string(other);
-                if vm.current_exception.is_some() {
-                    return Err(VmError {
-                        message: "exception".into(),
-                        line: vm.current_line,
-                    });
-                }
-                s
-            }
+            // (zval_try_get_string(): a non-Stringable object throws)
+            other => match vm.value_to_string_checked(other) {
+                Ok(s) => s,
+                Err(e) => return Err(e),
+            },
         };
         let bytes = s.as_bytes();
         let is_file = bytes.len() > 7 && &bytes[..7] == b"file://";

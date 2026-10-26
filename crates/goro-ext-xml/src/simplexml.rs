@@ -2111,10 +2111,22 @@ fn arg_str(vm: &mut Vm, v: Option<&Value>) -> Vec<u8> {
 /// Resolve the class name argument (`$class_name`); returns None after
 /// throwing for invalid classes.
 fn resolve_class_arg(vm: &mut Vm, fname: &str, argn: usize, v: Option<&Value>) -> Option<Vec<u8>> {
-    match v {
+    match v.map(|v| v.deref()) {
         None | Some(Value::Null) | Some(Value::Undef) => Some(b"SimpleXMLElement".to_vec()),
         Some(v) => {
-            let name = vm.value_to_string(v).as_bytes().to_vec();
+            // zpp "C!": try_convert_to_string()
+            let name = match &v {
+                Value::Array(_) => {
+                    let line = vm.current_line;
+                    vm.emit_warning_at("Array to string conversion", line);
+                    b"Array".to_vec()
+                }
+                Value::Object(_) => match vm.value_to_string_checked(&v) {
+                    Ok(s) => s.as_bytes().to_vec(),
+                    Err(_) => return None,
+                },
+                _ => vm.value_to_string(&v).as_bytes().to_vec(),
+            };
             let name = if name.starts_with(b"\\") {
                 name[1..].to_vec()
             } else {
@@ -2123,7 +2135,7 @@ fn resolve_class_arg(vm: &mut Vm, fname: &str, argn: usize, v: Option<&Value>) -
             let lower = name.to_ascii_lowercase();
             if !is_sxe_class(vm, &lower) && lower != b"simplexmlelement" {
                 let msg = format!(
-                    "{}(): Argument #{} ($class_name) must be a class name derived from SimpleXMLElement, {} given",
+                    "{}(): Argument #{} ($class_name) must be a class name derived from SimpleXMLElement or null, {} given",
                     fname,
                     argn,
                     String::from_utf8_lossy(&name)
@@ -2138,12 +2150,37 @@ fn resolve_class_arg(vm: &mut Vm, fname: &str, argn: usize, v: Option<&Value>) -
     }
 }
 
-fn simplexml_load_string(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let data = arg_str(vm, args.first());
-    let class = match resolve_class_arg(vm, "simplexml_load_string", 2, args.get(1)) {
-        Some(c) => c,
-        None => return Ok(Value::Null),
+/// zpp of simplexml_load_string() / _load_file() / import_dom(): the
+/// arguments in order, the class name (argument #2, "C!") by its own rule.
+/// The coerced arguments and the class, None when one threw.
+fn sxe_zpp(
+    vm: &mut Vm,
+    fname: &str,
+    args: &[Value],
+) -> Result<Option<(Vec<Value>, Vec<u8>)>, VmError> {
+    let lname = fname.as_bytes();
+    let flags = goro_core::arginfo::CHECK_TYPES;
+    let mut all = vm.zpp_self_check_flags(lname, &args[..args.len().min(1)], flags)?;
+    let Some(class) = resolve_class_arg(vm, fname, 2, args.get(1)) else {
+        return Ok(None);
     };
+    if args.len() > 1 {
+        all.push(Value::Null);
+        all.extend_from_slice(&args[2..]);
+    }
+    let mut all = vm.zpp_self_check_flags(lname, &all, flags)?;
+    if let Some(c) = all.get_mut(1) {
+        *c = args[1].clone();
+    }
+    Ok(Some((all, class)))
+}
+
+fn simplexml_load_string(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let Some((args, class)) = sxe_zpp(vm, "simplexml_load_string", args)? else {
+        return Ok(Value::Null);
+    };
+    let args = &args[..];
+    let data = arg_str(vm, args.first());
     let options = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     let ns = args
         .get(3)
@@ -2177,6 +2214,10 @@ fn make_root(vm: &mut Vm, class: &[u8], doc: NodeId, ns: &str, isprefix: bool) -
 }
 
 fn simplexml_load_file(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let Some((args, class)) = sxe_zpp(vm, "simplexml_load_file", args)? else {
+        return Ok(Value::Null);
+    };
+    let args = &args[..];
     let filename = arg_str(vm, args.first());
     if filename.contains(&0) {
         throw_error(
@@ -2186,10 +2227,6 @@ fn simplexml_load_file(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         );
         return Ok(Value::Null);
     }
-    let class = match resolve_class_arg(vm, "simplexml_load_file", 2, args.get(1)) {
-        Some(c) => c,
-        None => return Ok(Value::Null),
-    };
     let options = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     let ns = args
         .get(3)
@@ -2205,13 +2242,12 @@ fn simplexml_load_file(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn simplexml_import_dom(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let Some((args, class)) = sxe_zpp(vm, "simplexml_import_dom", args)? else {
+        return Ok(Value::Null);
+    };
     let node = match args.first() {
         Some(Value::Object(o)) => crate::dom_node_of(o),
         _ => None,
-    };
-    let class = match resolve_class_arg(vm, "simplexml_import_dom", 2, args.get(1)) {
-        Some(c) => c,
-        None => return Ok(Value::Null),
     };
     let nodep = match node {
         Some(n) => n,
@@ -2987,6 +3023,17 @@ fn call_method(
 // Registration
 
 pub fn register(vm: &mut Vm) {
+    // (zpp's argument count errors come first)
+    for name in [
+        &b"simplexml_load_string"[..],
+        b"simplexml_load_file",
+        b"simplexml_import_dom",
+        b"dom_import_simplexml",
+        b"dom\\import_simplexml",
+    ] {
+        *vm.zpp_extension_verified.entry(name.to_vec()).or_insert(0) |=
+            goro_core::arginfo::CHECK_ARITY;
+    }
     vm.register_function_with_params(
         b"simplexml_load_string",
         simplexml_load_string,
