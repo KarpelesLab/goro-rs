@@ -1688,7 +1688,17 @@ impl Vm {
                     }
                     Some(Value::String(c)) => {
                         let cls = self.callable_class_relative(c.as_bytes(), scope.as_deref())?;
-                        self.resolve_callable_method(&cls, &m, None, this, scope)
+                        // ["C", "self::m"] / ["C", "A::m"] (deprecated forms):
+                        // the scoped class is relative to C
+                        // (zend_is_callable_check_func()'s ce_org).
+                        let (cls, meth) = match m.windows(2).position(|w| w == b"::") {
+                            Some(p) => (
+                                self.callable_class_relative(&m[..p], Some(&lower(&cls)))?,
+                                m[p + 2..].to_vec(),
+                            ),
+                            None => (cls, m.clone()),
+                        };
+                        self.resolve_callable_method(&cls, &meth, None, this, scope)
                     }
                     _ => Err("first array member is not a valid class name or object".to_string()),
                 }
@@ -1701,12 +1711,14 @@ impl Vm {
                     .map(|c| c.get_method(b"__invoke").is_some())
                     .unwrap_or(false);
                 if has_invoke {
+                    // (the object's get_closure() handler: __invoke() whatever
+                    // its visibility)
                     self.resolve_callable_method(
                         &cn,
                         b"__invoke",
                         Some(callable.clone()),
                         None,
-                        scope,
+                        Some(lower(&cn)),
                     )
                 } else {
                     Err("no array or string given".to_string())
