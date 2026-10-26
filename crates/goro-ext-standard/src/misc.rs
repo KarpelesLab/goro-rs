@@ -20384,16 +20384,22 @@ fn get_resource_id_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn hrtime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let as_number = args.first().map(|v| v.is_truthy()).unwrap_or(false);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let nanos = now.as_nanos() as i64;
+    // (the monotonic clock: zend_hrtime())
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime() only writes the timespec it is given.
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+    }
+    let (secs, nsecs) = (ts.tv_sec as i64, ts.tv_nsec as i64);
     if as_number {
-        Ok(Value::Long(nanos))
+        Ok(Value::Long(secs.wrapping_mul(1_000_000_000).wrapping_add(nsecs)))
     } else {
         let mut arr = PhpArray::new();
-        arr.push(Value::Long(now.as_secs() as i64));
-        arr.push(Value::Long(now.subsec_nanos() as i64));
+        arr.push(Value::Long(secs));
+        arr.push(Value::Long(nsecs));
         Ok(Value::Array(Rc::new(RefCell::new(arr))))
     }
 }
