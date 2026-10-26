@@ -421,9 +421,7 @@ fn php_openssl_cipher(
     } else {
         "openssl_decrypt"
     };
-    let Some(spec) = cipher::by_name(method) else {
-        // EVP_CIPHER_fetch() failure.
-        err::push(err::LIB_EVP, err::R_UNSUPPORTED, "unsupported");
+    let Some(spec) = cipher::fetch(method) else {
         vm.emit_warning(&format!("{}(): Unknown cipher algorithm", fname));
         return None;
     };
@@ -810,7 +808,14 @@ fn openssl_digest(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         false
     };
-    match digest::Md::by_name(&algo.to_string_lossy()) {
+    let algo = algo.to_string_lossy();
+    if algo.eq_ignore_ascii_case("null") {
+        // EVP_md_null(): a zero-length digest.
+        return Ok(Value::String(PhpString::empty()));
+    }
+    match digest::fetch(&algo) {
+        // EVP_DigestFinal() refuses an XOF.
+        Some(md) if md.is_xof() => Ok(Value::False),
         Some(md) => {
             let d = md.digest(data.as_bytes());
             if binary {
@@ -854,7 +859,7 @@ fn cipher_len_fn(vm: &mut Vm, args: &[Value], f: &str, key: bool) -> Result<Valu
     if method.is_empty() {
         return Err(zpp::must_not_be_empty(vm, f, 1, "cipher_algo"));
     }
-    match cipher::by_name(&method.to_string_lossy()) {
+    match cipher::fetch(&method.to_string_lossy()) {
         Some(spec) => Ok(Value::Long(
             if key { spec.key_len } else { spec.iv_len } as i64
         )),

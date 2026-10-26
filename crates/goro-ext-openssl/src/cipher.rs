@@ -869,6 +869,16 @@ pub fn by_name(name: &str) -> Option<&'static CipherSpec> {
         .find(|s| s.name == n || s.aliases.contains(&n))
 }
 
+/// php_openssl_get_evp_cipher_by_name(): a failed EVP_CIPHER_fetch() leaves
+/// "unsupported" on the error queue.
+pub fn fetch(name: &str) -> Option<&'static CipherSpec> {
+    let r = by_name(name);
+    if r.is_none() {
+        err::push(err::LIB_EVP, err::R_UNSUPPORTED, "unsupported");
+    }
+    r
+}
+
 /// Look up a cipher by its ASN.1 object identifier (first table entry).
 pub fn by_oid(oid: &str) -> Option<&'static CipherSpec> {
     table().iter().find(|s| s.oid == Some(oid))

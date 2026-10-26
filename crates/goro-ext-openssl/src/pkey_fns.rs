@@ -1468,11 +1468,23 @@ pub fn openssl_pbkdf2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let salt = zpp::str(vm, args, 1, f, "salt")?;
     let key_length = zpp::long(vm, args, 2, f, "key_length")?;
     let iterations = zpp::long(vm, args, 3, f, "iterations")?;
-    let algo = if zpp::is_passed(args, 4) {
+    let mut algo = if zpp::is_passed(args, 4) {
         zpp::str(vm, args, 4, f, "digest_algo")?.to_string_lossy()
     } else {
-        "sha1".into()
+        String::new()
     };
+    if algo.is_empty() {
+        algo = "sha1".into();
+    }
+    // PHP_OPENSSL_CHECK_LONG_TO_INT()
+    for (v, n, pname, what) in [
+        (key_length, 3, "key_length", "key is too long"),
+        (iterations, 4, "iterations", "iterations is too long"),
+    ] {
+        if i32::try_from(v).is_err() {
+            return Err(zpp::arg_value_error(vm, f, n, pname, what));
+        }
+    }
     if key_length <= 0 {
         return Err(zpp::arg_value_error(
             vm,
@@ -1482,19 +1494,27 @@ pub fn openssl_pbkdf2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "must be greater than 0",
         ));
     }
-    if iterations <= 0 {
-        return Err(zpp::arg_value_error(
-            vm,
-            f,
-            4,
-            "iterations",
-            "must be greater than 0",
-        ));
-    }
-    let Some(md) = Md::by_name(&algo) else {
+    let Some(md) = crate::digest::fetch(&algo) else {
         vm.emit_warning(&format!("{}(): Unknown digest algorithm", f));
         return Ok(Value::False);
     };
+    // PKCS5_PBKDF2_HMAC() through the PBKDF2 KDF provider.
+    if iterations < 0 {
+        crate::err::push(
+            crate::err::LIB_CRYPTO,
+            125,
+            "param unsigned integer negative value unsupported",
+        );
+        return Ok(Value::False);
+    }
+    if iterations == 0 {
+        crate::err::push(crate::err::LIB_PROV, 123, "invalid iteration count");
+        return Ok(Value::False);
+    }
+    if md.is_xof() {
+        crate::err::push(crate::err::LIB_PROV, 183, "xof digests not allowed");
+        return Ok(Value::False);
+    }
     Ok(zpp::bytes(crate::digest::pbkdf2(
         md,
         password.as_bytes(),

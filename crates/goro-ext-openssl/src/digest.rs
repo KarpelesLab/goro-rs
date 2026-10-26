@@ -207,6 +207,11 @@ impl Md {
         })
     }
 
+    /// Extendable-output function (EVP_MD_FLAG_XOF).
+    pub fn is_xof(self) -> bool {
+        matches!(self, Md::Shake128 | Md::Shake256)
+    }
+
     /// Digest OID (DER content bytes, dotted form).
     pub fn oid(self) -> Option<&'static str> {
         Some(match self {
@@ -425,6 +430,16 @@ impl Mdc2 {
 }
 
 /// HMAC over any non-XOF digest.
+/// php_openssl_get_evp_md_by_name(): a failed EVP_MD_fetch() leaves
+/// "unsupported" on the error queue.
+pub fn fetch(name: &str) -> Option<Md> {
+    let r = Md::by_name(name);
+    if r.is_none() {
+        crate::err::push(crate::err::LIB_EVP, crate::err::R_UNSUPPORTED, "unsupported");
+    }
+    r
+}
+
 pub fn hmac(md: Md, key: &[u8], data: &[u8]) -> Vec<u8> {
     let bs = md.block_size();
     let mut k = if key.len() > bs {
