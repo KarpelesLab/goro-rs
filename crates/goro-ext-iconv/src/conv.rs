@@ -433,54 +433,6 @@ fn no_room(enc: &mut Encoder, saved: &Encoder, cp: u32, bytes: &[u8], room: usiz
     }
 }
 
-/// Decode a whole string to code points: the characters before the first
-/// error, and the error.
-pub fn decode_all(input: &[u8], enc: &[u8]) -> Option<(Vec<u32>, Option<Errno>)> {
-    decode_all_marked(input, enc, &mut Vec::new())
-}
-
-/// decode_all(), also telling (in `second`) which characters are the
-/// second of a sequence decoding to two.
-pub fn decode_all_marked(
-    input: &[u8],
-    enc: &[u8],
-    second: &mut Vec<bool>,
-) -> Option<(Vec<u32>, Option<Errno>)> {
-    let (name, _) = split_spec(enc);
-    let Some(kind) = charset::lookup(name) else {
-        set_errno(22);
-        return None;
-    };
-    let mut dec = Decoder::new(kind);
-    let mut out = Vec::with_capacity(input.len());
-    let mut pos = 0;
-    while pos < input.len() || dec.has_pending() {
-        match dec.decode(&input[pos..]) {
-            Dec::Char(cp, n) => {
-                out.push(cp);
-                second.push(n == 0);
-                pos += n;
-            }
-            Dec::Shift(n) => pos += n,
-            Dec::Illegal(_) => {
-                set_errno(84);
-                return Some((out, Some(Errno::Ilseq)));
-            }
-            Dec::Incomplete => {
-                set_errno(22);
-                return Some((out, Some(Errno::Inval)));
-            }
-        }
-    }
-    Some((out, None))
-}
-
-/// An encoder for `enc` (UCS-4 → enc conversions of the string functions).
-pub fn encoder(enc: &[u8]) -> Option<Encoder> {
-    let (name, _) = split_spec(enc);
-    Some(Encoder::new(charset::lookup(name)?))
-}
-
 /// glibc's transliteration alternatives of a character in the C.UTF-8
 /// locale, separated by NUL.
 fn translit(cp: u32) -> Option<&'static str> {
