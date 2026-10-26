@@ -6258,9 +6258,21 @@ impl Vm {
 
     /// Release the TMP operands of an instruction that hold objects; true
     /// when one was released.
-    fn release_tmp_objects(op: &crate::opcode::Op, tmps: &mut [Value]) -> bool {
+    fn release_tmp_objects(
+        op_array: &OpArray,
+        p: usize,
+        op: &crate::opcode::Op,
+        tmps: &mut [Value],
+    ) -> bool {
+        // Only the temporaries the opcode is the last user of: a switch
+        // subject is compared again by the next case (see
+        // OpArray::free_mask(); all of them when it is not known).
+        let mask = op_array.free_mask().get(p).copied().unwrap_or(3);
         let mut released = false;
-        for o in [&op.op1, &op.op2] {
+        for (o, bit) in [(&op.op1, 1u8), (&op.op2, 2)] {
+            if mask & bit == 0 {
+                continue;
+            }
             if let OperandType::Tmp(i) = o {
                 if let Some(slot) = tmps.get_mut(*i as usize) {
                     if matches!(slot, Value::Object(_)) {
@@ -27229,7 +27241,7 @@ impl Vm {
                     };
                     drop((a, b, a_raw, b_raw));
                     // A temporary object operand is freed by the comparison.
-                    if Self::release_tmp_objects(op, &mut tmps) {
+                    if Self::release_tmp_objects(op_array, ip - 1, op, &mut tmps) {
                         release_point!(outlined);
                     }
                     self.write_operand(&op.result, r, &mut cvs, &mut tmps, &static_cv_keys);
@@ -27339,7 +27351,7 @@ impl Vm {
                     };
                     drop((a, b, a_raw, b_raw));
                     // A temporary object operand is freed by the comparison.
-                    if Self::release_tmp_objects(op, &mut tmps) {
+                    if Self::release_tmp_objects(op_array, ip - 1, op, &mut tmps) {
                         release_point!(outlined);
                     }
                     self.write_operand(&op.result, r, &mut cvs, &mut tmps, &static_cv_keys);
