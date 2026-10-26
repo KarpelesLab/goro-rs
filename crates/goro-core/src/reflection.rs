@@ -982,8 +982,10 @@ fn reflection_new_instance(
     let required = op.required_param_count as usize;
     if named.is_empty() && positional.len() < required {
         let implicit = usize::from(op.cv_names.first().map(|n| n.as_slice()) == Some(b"this"));
-        let total = (op.param_count as usize).saturating_sub(implicit);
-        let q = if op.variadic_param.is_some() || total > required {
+        let total = (op.param_count as usize)
+            .saturating_sub(implicit)
+            .saturating_sub(usize::from(op.variadic_param.is_some()));
+        let q = if total > required {
             "at least"
         } else {
             "exactly"
@@ -6640,9 +6642,10 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                                     String::from_utf8_lossy(&class_lower).to_string()
                                 });
                             let skip = if !m.is_static { 1usize } else { 0usize };
-                            let total = (m.op_array.param_count as usize).saturating_sub(skip);
-                            let descriptor = if total == req && m.op_array.variadic_param.is_none()
-                            {
+                            let total = (m.op_array.param_count as usize)
+                                .saturating_sub(skip)
+                                .saturating_sub(usize::from(m.op_array.variadic_param.is_some()));
+                            let descriptor = if total == req {
                                 "exactly"
                             } else {
                                 "at least"
@@ -6869,7 +6872,9 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                         let method_disp = String::from_utf8_lossy(&m.name).to_string();
                         // Determine `exactly` vs `at least`.
                         let skip = if !m.is_static { 1usize } else { 0usize };
-                        let total = (m.op_array.param_count as usize).saturating_sub(skip);
+                        let total = (m.op_array.param_count as usize)
+                            .saturating_sub(skip)
+                            .saturating_sub(usize::from(m.op_array.variadic_param.is_some()));
                         let descriptor = if total == req { "exactly" } else { "at least" };
                         let plural = if req == 1 { "" } else { "s" };
                         let msg = format!(

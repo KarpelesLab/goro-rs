@@ -11408,8 +11408,12 @@ impl Vm {
                         fname = format!("{}::{}", cname, fname);
                     }
                 }
-                let total = op_array.param_count.saturating_sub(implicit_args as u32);
-                let qualifier = if op_array.variadic_param.is_some() || total > required {
+                // (num_args: the variadic parameter is not counted)
+                let total = op_array
+                    .param_count
+                    .saturating_sub(implicit_args as u32)
+                    .saturating_sub(u32::from(op_array.variadic_param.is_some()));
+                let qualifier = if total > required {
                     "at least"
                 } else {
                     "exactly"
@@ -35198,7 +35202,8 @@ impl Vm {
                                 let total_params = user_fn
                                     .param_count
                                     .saturating_sub(this_param)
-                                    .saturating_sub(captures);
+                                    .saturating_sub(captures)
+                                    .saturating_sub(u32::from(user_fn.variadic_param.is_some()));
                                 let has_optional = total_params > required;
                                 let qualifier =
                                     if has_optional { "at least" } else { "exactly" };
