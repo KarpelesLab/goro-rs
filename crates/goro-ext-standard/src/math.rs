@@ -26,7 +26,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"atan2", atan2_fn);
     vm.register_function(b"log", log_fn);
     vm.register_function(b"log10", log10_fn);
-    vm.register_function(b"log2", log2_fn);
     vm.register_function(b"exp", exp_fn);
     vm.register_function(b"pi", pi_fn);
     vm.register_function(b"hypot", hypot);
@@ -90,7 +89,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_builtin_param_types(b"atan2", vec![f(), f()]);
     vm.register_builtin_param_types(b"log", vec![f(), f()]);
     vm.register_builtin_param_types(b"log10", vec![f()]);
-    vm.register_builtin_param_types(b"log2", vec![f()]);
     vm.register_builtin_param_types(b"exp", vec![f()]);
     vm.register_builtin_param_types(b"hypot", vec![f(), f()]);
     vm.register_builtin_param_types(b"deg2rad", vec![f()]);
@@ -1107,11 +1105,6 @@ fn log_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn log10_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Double(
         args.first().unwrap_or(&Value::Null).to_double().log10(),
-    ))
-}
-fn log2_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Double(
-        args.first().unwrap_or(&Value::Null).to_double().log2(),
     ))
 }
 fn exp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

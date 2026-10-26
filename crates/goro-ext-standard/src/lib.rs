@@ -468,7 +468,6 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"pow", b"base", b"exp");
     params!(b"sqrt", b"num");
     params!(b"log", b"num", b"base");
-    params!(b"log2", b"num");
     params!(b"log10", b"num");
     params!(b"intdiv", b"num1", b"num2");
     params!(b"fmod", b"num1", b"num2");
