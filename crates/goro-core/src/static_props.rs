@@ -1971,6 +1971,48 @@ impl Vm {
     }
 }
 
+impl Vm {
+    /// The CONST_LOOKUP at `ip` of `op_array` found global constant `name`
+    /// (`val`, not deprecated): by an unqualified name in the global
+    /// namespace, its site remembers the value (FETCH_CONSTANT's runtime
+    /// cache: a constant is never redefined).
+    #[inline(never)]
+    pub(crate) fn note_const_site(&self, op_array: &OpArray, ip: usize, name: &[u8], val: &Value) {
+        let op = &op_array.ops[ip];
+        if !matches!(op.op2, crate::opcode::OperandType::Unused)
+            || !matches!(op.op1, crate::opcode::OperandType::Const(_))
+            || !matches!(op.result, crate::opcode::OperandType::Tmp(_))
+            || name.contains(&b'\\')
+            || self.internal_deprecated_constants.contains_key(name)
+            || !matches!(
+                val,
+                Value::Null
+                    | Value::False
+                    | Value::True
+                    | Value::Long(_)
+                    | Value::Double(_)
+                    | Value::String(_)
+                    | Value::Array(_)
+            )
+        {
+            return;
+        }
+        if let Ok(mut s) = op_array.sites().try_borrow_mut() {
+            s.get_or_insert_with(Default::default)
+                .gconst_sites
+                .insert(ip as u32, val.clone());
+        }
+    }
+
+    /// CONST_LOOKUP at `ip` of `op_array`: the value its site remembers
+    /// (see note_const_site).
+    #[inline(never)]
+    pub(crate) fn fast_const_lookup(&self, op_array: &OpArray, ip: usize) -> Option<Value> {
+        let sites = op_array.sites().borrow();
+        sites.as_ref()?.gconst_sites.get(&(ip as u32)).cloned()
+    }
+}
+
 /// The literal operand `o` of `op_array`.
 fn const_operand<'a>(op_array: &'a OpArray, o: &crate::opcode::OperandType) -> Option<&'a Value> {
     match o {

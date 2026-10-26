@@ -889,6 +889,10 @@ pub(crate) struct SiteCaches {
     /// class holding its slot and the slot's index in its
     /// static_properties (see Vm::fast_static_prop_fetch).
     pub(crate) sprop_sites: IpMap<(usize, usize, Option<Vec<u8>>)>,
+    /// The value a global constant fetch by an unqualified name (not
+    /// deprecated) found: constants do not change once defined (see
+    /// Vm::fast_const_lookup).
+    pub(crate) gconst_sites: IpMap<Value>,
 }
 
 impl Default for SiteCaches {
@@ -905,6 +909,7 @@ impl Default for SiteCaches {
             ns_fallbacks: Default::default(),
             const_sites: Default::default(),
             sprop_sites: Default::default(),
+            gconst_sites: Default::default(),
         }
     }
 }

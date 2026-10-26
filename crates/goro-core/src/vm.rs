@@ -46062,6 +46062,7 @@ impl Vm {
                             } else {
                                 None
                             };
+                        let had_attrs = attr_key.is_some();
                         if let Some(key) = attr_key {
                             let attrs = self
                                 .constant_attributes
@@ -46124,6 +46125,8 @@ impl Vm {
                         }
                         if let Some(m) = builtin_constant_deprecation(name_bytes) {
                             self.emit_deprecated_at(&m, op.line);
+                        } else if !had_attrs {
+                            self.note_const_site(op_array, ip - 1, name_bytes, &val);
                         }
                         self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     } else {
