@@ -11739,6 +11739,10 @@ impl Vm {
                         new_op.param_types.insert(0, None);
                         new_op.param_types.truncate(new_op.cv_names.len());
                     }
+                    // (indexed by CV, like param_types)
+                    if !new_op.param_default_repr.is_empty() {
+                        new_op.param_default_repr.insert(0, None);
+                    }
                     if let Some(v) = new_op.variadic_param.as_mut() {
                         if *v < pos_u32 {
                             *v += 1;
@@ -11761,6 +11765,9 @@ impl Vm {
                 }
                 if !new_op.param_types.is_empty() {
                     new_op.param_types.insert(0, None);
+                }
+                if !new_op.param_default_repr.is_empty() {
+                    new_op.param_default_repr.insert(0, None);
                 }
                 if let Some(v) = new_op.variadic_param.as_mut() {
                     *v += 1;
@@ -33277,6 +33284,13 @@ impl Vm {
                         {
                             let file = String::from_utf8_lossy(&user_fn.filename).to_string();
                             format!("{{closure:{}:{}}}", file, user_fn.decl_line)
+                        } else if let Some(t) = user_fn
+                            .fcc_target_name
+                            .as_ref()
+                            .filter(|_| raw_display.starts_with("__bound_closure_"))
+                        {
+                            // (a function given a $this: "Closure::f")
+                            String::from_utf8_lossy(t).into_owned()
                         } else if let Some(ref scope) = user_fn.scope_class {
                             // Use the method's declaring class (scope_class) for the stack trace
                             // instead of the runtime class, matching PHP behavior

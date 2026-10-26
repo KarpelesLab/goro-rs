@@ -2042,14 +2042,21 @@ fn reflection_function_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
             let legacy = closure_legacy_arg(&closure);
             let ok = reflection_function_construct(vm, &[args[0].clone(), legacy], line);
             if ok {
-                let display = vm
-                    .closure_op_array(&closure)
-                    .filter(|op| {
-                        crate::closure::is_closure_fn_name(&op.name)
-                            && op.fcc_target_name.is_none()
-                            && !op.display_name.is_empty()
-                    })
-                    .map(|op| op.display_name.clone());
+                let display = vm.closure_op_array(&closure).and_then(|op| {
+                    if crate::closure::is_closure_fn_name(&op.name)
+                        && op.fcc_target_name.is_none()
+                        && !op.display_name.is_empty()
+                    {
+                        return Some(op.display_name.clone());
+                    }
+                    // A function given a $this ("Closure::f"): named after it.
+                    let t = op
+                        .fcc_target_name
+                        .as_ref()
+                        .filter(|_| op.name.starts_with(b"__bound_closure_"))?;
+                    let p = t.windows(2).position(|w| w == b"::")?;
+                    Some(t[p + 2..].to_vec())
+                });
                 let magic = magic_call_trampoline(vm, &closure);
                 let mut obj = this.borrow_mut();
                 if let Some(d) = display {

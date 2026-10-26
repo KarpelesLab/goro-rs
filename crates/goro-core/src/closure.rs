@@ -447,6 +447,26 @@ impl Vm {
                     .collect();
             } else if let Some(top) = &target_op {
                 params = Self::closure_param_entries(top);
+            } else if let Some(o) = op.filter(|o| o.name.starts_with(b"__bound_closure_")) {
+                // (a function bound to a $this, see function_closure_with_this)
+                params = o
+                    .closure_params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (n, by_ref))| {
+                        let mut d = if *by_ref {
+                            b"&$".to_vec()
+                        } else {
+                            b"$".to_vec()
+                        };
+                        d.extend_from_slice(n);
+                        (
+                            d,
+                            i as u32 >= o.required_param_count
+                                || o.variadic_param == Some(i as u32 + 1),
+                        )
+                    })
+                    .collect();
             } else if let Some(fi) = crate::arginfo::lookup(&tl) {
                 // zend_closure_get_debug_info() for an internal function.
                 params = fi
@@ -1732,11 +1752,20 @@ impl Vm {
     ) -> Option<Value> {
         let (name, caps) = closure_parts(inner);
         let is_tramp = name.starts_with(b"__closure_fcc_tramp_");
-        if is_closure_fn_name(&name) || (name.starts_with(b"__closure_fcc_") && !is_tramp) {
+        // A function given a $this (function_closure_with_this): a method
+        // of the dummy Closure scope now.
+        let fn_this = name.starts_with(b"__bound_closure_")
+            && self
+                .user_functions
+                .get(&lower(&name))
+                .is_some_and(|o| o.fcc_target_name.is_some());
+        if !fn_this
+            && (is_closure_fn_name(&name) || (name.starts_with(b"__closure_fcc_") && !is_tramp))
+        {
             return None;
         }
         // __call/__callStatic trampolines: the target is "Class::method".
-        let target: Vec<u8> = if is_tramp {
+        let target: Vec<u8> = if is_tramp || fn_this {
             self.user_functions
                 .get(&lower(&name))
                 .and_then(|o| o.fcc_target_name.clone())?
@@ -1868,6 +1897,10 @@ impl Vm {
                 .map(|s| self.classes.contains_key(s))
                 .unwrap_or(false);
         let new_inner = match new_this {
+            Value::Object(_) if fn_this => {
+                let f = target[b"Closure::".len()..].to_vec();
+                self.function_closure_with_this(&f, new_this)
+            }
             Value::Object(_) if func_scope.is_some() && !user_class => {
                 // Builtin class method: keep the [$obj, 'method'] form.
                 let mut arr = PhpArray::new();
@@ -1881,9 +1914,46 @@ impl Vm {
                 arr.push(new_this.clone());
                 Value::Array(Rc::new(RefCell::new(arr)))
             }
+            // A user function given a `$this`: it runs with it, in the dummy
+            // Closure scope (zend_create_closure_ex()).
+            Value::Object(_) if self.user_functions.contains_key(&lname) && !is_tramp => {
+                self.function_closure_with_this(&name, new_this)
+            }
             _ => str_val(&name),
         };
         Some(self.make_closure_object(new_inner))
+    }
+}
+
+impl Vm {
+    /// The closure of the user function `name` bound to `this` (bindTo()
+    /// of `f(...)`): a copy of the function taking `$this` (a bound
+    /// closure's layout), still showing as the fake closure of
+    /// "Closure::f" (the dummy scope).
+    #[inline(never)]
+    fn function_closure_with_this(&mut self, name: &[u8], this: &Value) -> Value {
+        let r = self.bind_closure_raw(&str_val(name), this.clone(), Value::Null, false);
+        let (bound, _) = closure_parts(&r);
+        if let Some(op) = self.user_functions.get_mut(&lower(&bound)) {
+            let mut t = b"Closure::".to_vec();
+            t.extend_from_slice(name);
+            let op = Rc::make_mut(op);
+            op.fcc_target_name = Some(t);
+            // (its parameters follow the $this it receives: see arg_cv_bound())
+            // (one entry per declared parameter: the leading $this is hidden,
+            // see closure_hidden_params())
+            op.param_attributes
+                .resize((op.param_count as usize).saturating_sub(1), Vec::new());
+            if op.closure_params.is_empty() {
+                op.closure_params = (1..op.param_count as usize)
+                    .filter_map(|i| {
+                        let n = op.cv_names.get(i)?.clone();
+                        Some((n, op.by_ref_params.get(i).copied().unwrap_or(false)))
+                    })
+                    .collect();
+            }
+        }
+        r
     }
 }
 
