@@ -334,16 +334,18 @@ fn sorted_diff(
             warned: false,
         },
     };
+    // Each array is sorted as soon as it is validated, so the comparisons
+    // of the earlier ones run before a later argument's TypeError.
+    let mut lists = Vec::with_capacity(arrs.len());
     for (i, a) in arrs.iter().enumerate() {
         if !matches!(a, Value::Array(_)) {
             return array_type_error(vm, fname, i, a);
         }
+        let mut l = build_lists(std::slice::from_ref(a)).pop().unwrap_or_default();
+        sort_list(vm, &mut l, &mut f, behavior == NORMAL);
+        lists.push(l);
     }
     let mut result = arr_of(&arrs[0]).borrow().clone();
-    let mut lists = build_lists(&arrs);
-    for l in lists.iter_mut() {
-        sort_list(vm, l, &mut f, behavior == NORMAL);
-    }
     let n = lists.len();
     let mut ptrs = vec![0usize; n];
     'outer: while ptrs[0] < lists[0].len() {
@@ -458,16 +460,18 @@ fn sorted_intersect(
             warned: false,
         },
     };
+    // Each array is sorted as soon as it is validated, so the comparisons
+    // of the earlier ones run before a later argument's TypeError.
+    let mut lists = Vec::with_capacity(arrs.len());
     for (i, a) in arrs.iter().enumerate() {
         if !matches!(a, Value::Array(_)) {
             return array_type_error(vm, fname, i, a);
         }
+        let mut l = build_lists(std::slice::from_ref(a)).pop().unwrap_or_default();
+        sort_list(vm, &mut l, &mut f, behavior == NORMAL);
+        lists.push(l);
     }
     let mut result = arr_of(&arrs[0]).borrow().clone();
-    let mut lists = build_lists(&arrs);
-    for l in lists.iter_mut() {
-        sort_list(vm, l, &mut f, behavior == NORMAL);
-    }
     let n = lists.len();
     let mut ptrs = vec![0usize; n];
     let mut c: i32 = 0;
