@@ -489,7 +489,7 @@ fn php_openssl_cipher(
         let ok = if is_ocb {
             sz <= 16
         } else {
-            sz % 2 == 0 && (4..=16).contains(&sz)
+            sz.is_multiple_of(2) && (4..=16).contains(&sz)
         };
         if !ok {
             prov_invalid_tag_length();

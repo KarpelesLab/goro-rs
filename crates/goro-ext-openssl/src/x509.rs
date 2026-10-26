@@ -569,7 +569,6 @@ fn print_pubkey(k: Option<PKey>, spki: &[u8], indent: usize) -> String {
     s
 }
 
-
 /// Two's-complement big-endian INTEGER content as (negative, magnitude).
 fn signed_int(b: &[u8]) -> (bool, Bn) {
     if b.first().is_some_and(|&c| c & 0x80 != 0) {
@@ -668,7 +667,9 @@ fn serial_text(serial: &[u8]) -> String {
     }
     let (neg, mag) = signed_int(serial);
     let mb = mag.be();
-    let fits = mb.len() < 8 || (mb.len() == 8 && (mb[0] & 0x80 == 0 || (neg && mb[0] == 0x80 && mb[1..].iter().all(|&b| b == 0))));
+    let fits = mb.len() < 8
+        || (mb.len() == 8
+            && (mb[0] & 0x80 == 0 || (neg && mb[0] == 0x80 && mb[1..].iter().all(|&b| b == 0))));
     if fits {
         let mut v: u64 = 0;
         for &b in mb {
@@ -745,9 +746,15 @@ fn signature_print(alg: &[u8], sig: Option<&[u8]>) -> String {
     let Some(sig) = sig else { return s };
     let is_dsa = matches!(
         oid.as_str(),
-        "1.2.840.10040.4.3" | "2.16.840.1.101.3.4.3.1" | "2.16.840.1.101.3.4.3.2"
-            | "2.16.840.1.101.3.4.3.3" | "2.16.840.1.101.3.4.3.4" | "2.16.840.1.101.3.4.3.5"
-            | "2.16.840.1.101.3.4.3.6" | "2.16.840.1.101.3.4.3.7" | "2.16.840.1.101.3.4.3.8"
+        "1.2.840.10040.4.3"
+            | "2.16.840.1.101.3.4.3.1"
+            | "2.16.840.1.101.3.4.3.2"
+            | "2.16.840.1.101.3.4.3.3"
+            | "2.16.840.1.101.3.4.3.4"
+            | "2.16.840.1.101.3.4.3.5"
+            | "2.16.840.1.101.3.4.3.6"
+            | "2.16.840.1.101.3.4.3.7"
+            | "2.16.840.1.101.3.4.3.8"
             | "1.3.14.3.2.27"
     );
     if is_dsa {
@@ -779,7 +786,10 @@ pub fn x509_print(c: &Cert) -> String {
     } else {
         s.push_str(&format!("        Version: Unknown ({})\n", c.version));
     }
-    s.push_str(&format!("        Serial Number:{}\n", serial_text(&c.serial)));
+    s.push_str(&format!(
+        "        Serial Number:{}\n",
+        serial_text(&c.serial)
+    ));
     s.push_str("    ");
     s.push_str(&signature_print(&c.tbs_sig_alg, None));
     s.push_str(&format!(
@@ -2060,7 +2070,10 @@ pub fn openssl_csr_get_public_key(vm: &mut Vm, args: &[Value]) -> Result<Value, 
 /// a2i_ASN1_INTEGER() on the first line; Err(reason) as it raises.
 fn parse_hex_serial(s: &[u8]) -> Result<Vec<u8>, (u32, &'static str)> {
     const SHORT: (u32, &str) = (150, "short line");
-    let line = &s[..s.iter().position(|&c| c == b'\n').map_or(s.len(), |p| p + 1)];
+    let line = &s[..s
+        .iter()
+        .position(|&c| c == b'\n')
+        .map_or(s.len(), |p| p + 1)];
     let mut i = line.len();
     if i > 0 && line[i - 1] == b'\n' {
         i -= 1;
@@ -2075,7 +2088,10 @@ fn parse_hex_serial(s: &[u8]) -> Result<Vec<u8>, (u32, &'static str)> {
         return Err(SHORT);
     }
     let again = line[i - 1] == b'\\';
-    let j = line[..i].iter().take_while(|c| c.is_ascii_hexdigit()).count();
+    let j = line[..i]
+        .iter()
+        .take_while(|c| c.is_ascii_hexdigit())
+        .count();
     let mut buf = &line[..j];
     if buf.len() < 2 {
         return Err(SHORT);
@@ -2294,7 +2310,7 @@ fn evp_decode_block(f: &[u8]) -> Option<Vec<u8>> {
     while n > 3 && (val(f[n - 1]) | 0x13) == 0xF3 {
         n -= 1;
     }
-    if n % 4 != 0 {
+    if !n.is_multiple_of(4) {
         return None;
     }
     let mut out = Vec::with_capacity(n / 4 * 3);

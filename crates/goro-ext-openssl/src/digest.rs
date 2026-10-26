@@ -435,7 +435,11 @@ impl Mdc2 {
 pub fn fetch(name: &str) -> Option<Md> {
     let r = Md::by_name(name);
     if r.is_none() {
-        crate::err::push(crate::err::LIB_EVP, crate::err::R_UNSUPPORTED, "unsupported");
+        crate::err::push(
+            crate::err::LIB_EVP,
+            crate::err::R_UNSUPPORTED,
+            "unsupported",
+        );
     }
     r
 }

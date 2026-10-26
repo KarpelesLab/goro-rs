@@ -101,7 +101,10 @@ impl Cert {
         if validity.len() != 2 {
             return None;
         }
-        if validity.iter().any(|t| time_too_short(t.tag, t.content.len())) {
+        if validity
+            .iter()
+            .any(|t| time_too_short(t.tag, t.content.len()))
+        {
             return None;
         }
         let subject = Name::parse(tc.get(i + 4)?)?;
@@ -418,7 +421,11 @@ pub fn verify_signed(tbs: &[u8], sig_alg: &[u8], sig: &[u8], key: &PKey) -> i64 
         1
     } else {
         // ASN1_item_verify_ctx() after EVP_DigestVerify() fails.
-        crate::err::push(crate::err::LIB_ASN1, crate::err::RFLAG_COMMON | 6, "EVP lib");
+        crate::err::push(
+            crate::err::LIB_ASN1,
+            crate::err::RFLAG_COMMON | 6,
+            "EVP lib",
+        );
         0
     }
 }
@@ -498,7 +505,11 @@ pub fn push_short_time_errors(der: &[u8]) -> bool {
             let i = usize::from(tc.first()?.context() == Some(0));
             tc.get(i + 3)?.children()
         })
-        .and_then(|v| v.iter().find(|t| time_too_short(t.tag, t.content.len())).map(|t| t.tag));
+        .and_then(|v| {
+            v.iter()
+                .find(|t| time_too_short(t.tag, t.content.len()))
+                .map(|t| t.tag)
+        });
     let Some(tag) = short else { return false };
     if tag == asn1::UTC_TIME {
         crate::err::push(crate::err::LIB_ASN1, 233, "utctime is too short");
@@ -506,7 +517,11 @@ pub fn push_short_time_errors(der: &[u8]) -> bool {
         crate::err::push(crate::err::LIB_ASN1, 232, "generalizedtime is too short");
     }
     for _ in 0..3 {
-        crate::err::push(crate::err::LIB_ASN1, crate::err::RFLAG_COMMON | 266, "nested asn1 error");
+        crate::err::push(
+            crate::err::LIB_ASN1,
+            crate::err::RFLAG_COMMON | 266,
+            "nested asn1 error",
+        );
     }
     true
 }
@@ -540,7 +555,10 @@ pub fn asn1_time_to_unix(tag: u8, v: &[u8]) -> Option<i64> {
     };
     // GeneralizedTime fractional seconds
     if tag != asn1::UTC_TIME && s.as_bytes().get(idx) == Some(&b'.') {
-        let n = s.as_bytes()[idx + 1..].iter().take_while(|b| b.is_ascii_digit()).count();
+        let n = s.as_bytes()[idx + 1..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
         if n == 0 {
             return None;
         }

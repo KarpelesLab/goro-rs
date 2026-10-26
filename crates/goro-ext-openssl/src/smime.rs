@@ -950,7 +950,10 @@ fn cms_shared_info(wrap_alg: &[u8], ukm: Option<&[u8]>, kek_len: usize) -> Vec<u
     if let Some(u) = ukm {
         items.push(asn1::explicit(0, &asn1::octet(u)));
     }
-    items.push(asn1::explicit(2, &asn1::octet(&((kek_len * 8) as u32).to_be_bytes())));
+    items.push(asn1::explicit(
+        2,
+        &asn1::octet(&((kek_len * 8) as u32).to_be_bytes()),
+    ));
     asn1::seq(&items)
 }
 
@@ -967,7 +970,12 @@ fn kari_recipient(c: &Cert, e: &crate::pkey::EcKey, cek: &[u8]) -> Option<Vec<u8
         _ => ("2.16.840.1.101.3.4.1.45", 32),
     };
     let wrap_alg = asn1::seq(&[asn1::oid(woid)]);
-    let kek = x963_kdf(Md::Sha1, &z, &cms_shared_info(&wrap_alg, None, kek_len), kek_len);
+    let kek = x963_kdf(
+        Md::Sha1,
+        &z,
+        &cms_shared_info(&wrap_alg, None, kek_len),
+        kek_len,
+    );
     let ek = aes_key_wrap(&kek, cek, true)?;
     let orig_key = asn1::tlv(
         0xa1,
@@ -1029,7 +1037,12 @@ fn kari_decrypt(kari: &Tlv, e: &crate::pkey::EcKey, cert: &Cert) -> Option<Optio
             continue;
         }
         let z = e.group.ecdh(e.priv_key.as_ref()?, &peer)?;
-        let kek = x963_kdf(md, &z, &cms_shared_info(wrap_alg.raw, ukm.as_deref(), kek_len), kek_len);
+        let kek = x963_kdf(
+            md,
+            &z,
+            &cms_shared_info(wrap_alg.raw, ukm.as_deref(), kek_len),
+            kek_len,
+        );
         return Some(aes_key_wrap(&kek, f.get(1)?.content, false));
     }
     None
@@ -1127,7 +1140,11 @@ fn encrypt(
     let alg = asn1::algid(coid, Some(cipher_params(spec, &iv)));
     let eci = asn1::seq(&[asn1::oid(OID_DATA), alg, asn1::implicit(0, &ct)]);
     // cms_env_set_version(): 2 once a recipient is not a version 0 ktri
-    let ed = asn1::seq(&[asn1::int_i64(if has_kari { 2 } else { 0 }), asn1::set_of(&ris), eci]);
+    let ed = asn1::seq(&[
+        asn1::int_i64(if has_kari { 2 } else { 0 }),
+        asn1::set_of(&ris),
+        eci,
+    ]);
     Some(asn1::seq(&[
         asn1::oid(OID_ENVELOPED),
         asn1::explicit(0, &ed),
@@ -1208,7 +1225,11 @@ fn decrypt(der: &[u8], key: &PKey, cert: &Cert, cms: bool) -> Option<Vec<u8>> {
             err::push(lib, 154, "unsupported recipient type");
         } else {
             // EVP_PKEY_decrypt_init() on a key that cannot decrypt
-            err::push(err::LIB_EVP, 150, "operation not supported for this keytype");
+            err::push(
+                err::LIB_EVP,
+                150,
+                "operation not supported for this keytype",
+            );
             err::push(lib, 119, "decrypt error");
         }
         return None;
@@ -1263,7 +1284,14 @@ fn decrypt(der: &[u8], key: &PKey, cert: &Cert, cms: bool) -> Option<Vec<u8>> {
 }
 
 /// EncryptedContentInfo / AuthEnvelopedData content decryption.
-fn decrypt_content(c: &[Tlv], i: usize, eci: &[Tlv], cek: &[u8], auth: bool, cms: bool) -> Option<Vec<u8>> {
+fn decrypt_content(
+    c: &[Tlv],
+    i: usize,
+    eci: &[Tlv],
+    cek: &[u8],
+    auth: bool,
+    cms: bool,
+) -> Option<Vec<u8>> {
     let lib = if cms { err::LIB_CMS } else { err::LIB_PKCS7 };
     let alg = eci.get(1)?.children()?;
     let coid = alg.first()?.oid()?;
@@ -1287,7 +1315,7 @@ fn decrypt_content(c: &[Tlv], i: usize, eci: &[Tlv], cek: &[u8], auth: bool, cms
         })?;
         let op = cipher::Op {
             spec,
-            key: &cek,
+            key: cek,
             iv: &nonce,
             enc: false,
             padding: true,
@@ -1304,7 +1332,7 @@ fn decrypt_content(c: &[Tlv], i: usize, eci: &[Tlv], cek: &[u8], auth: bool, cms
         };
     }
     let (spec, iv) = cipher_by_oid(&coid, alg.get(1))?;
-    let out = cipher::simple(&spec.name, &enc, &cek, &iv, false);
+    let out = cipher::simple(&spec.name, &enc, cek, &iv, false);
     if out.is_none() {
         err::push(lib, r(cms, 119, 112), "decrypt error");
     }
@@ -1479,7 +1507,15 @@ pub fn openssl_pkcs7_verify(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         }
     }
     let mut written = None;
-    let res = verify(&sd, &others, &store, datain.as_deref(), flags, false, &mut written);
+    let res = verify(
+        &sd,
+        &others,
+        &store,
+        datain.as_deref(),
+        flags,
+        false,
+        &mut written,
+    );
     if res.is_none() {
         // the content went out before the signatures were checked
         if let (Some(p), Some(w)) = (&dataout, &written) {
@@ -1717,11 +1753,19 @@ fn sign_common(vm: &mut Vm, args: &[Value], f: &str, cms: bool) -> Result<Value,
             err::push(err::LIB_CMS, 136, "private key does not match certificate");
             err::push(err::LIB_CMS, 99, "add signer error");
         } else {
-            err::push(err::LIB_PKCS7, 127, "private key does not match certificate");
+            err::push(
+                err::LIB_PKCS7,
+                127,
+                "private key does not match certificate",
+            );
             err::push(err::LIB_PKCS7, 153, "pkcs7 add signer error");
         }
     }
-    let signed = if key_ok { sign(&cert, &key, &others, &input, flags) } else { None };
+    let signed = if key_ok {
+        sign(&cert, &key, &others, &input, flags)
+    } else {
+        None
+    };
     let Some((ci, md)) = signed else {
         let kind = if cms { "CMS" } else { "PKCS7" };
         vm.emit_warning(&format!("{}(): Error creating {} structure!", f, kind));
@@ -2028,7 +2072,15 @@ pub fn openssl_cms_verify(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
         err::push(err::LIB_CMS, 108, "content type not signed data");
         return Ok(Value::False);
     };
-    match verify(&sd, &others, &store, datain.as_deref(), flags, true, &mut None) {
+    match verify(
+        &sd,
+        &others,
+        &store,
+        datain.as_deref(),
+        flags,
+        true,
+        &mut None,
+    ) {
         Some((content, signers)) => {
             let mut ret = Value::True;
             if let Some(p) = &dataout {

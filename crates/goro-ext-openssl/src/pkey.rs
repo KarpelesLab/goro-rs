@@ -248,7 +248,12 @@ impl PKey {
         if let PKey::Rsa(r) = self {
             // An RSA key built from n/e/d alone has no CRT components;
             // i2d_RSAPrivateKey() cannot encode the missing INTEGERs.
-            if r.p.is_none() || r.q.is_none() || r.dmp1.is_none() || r.dmq1.is_none() || r.iqmp.is_none() {
+            if r.p.is_none()
+                || r.q.is_none()
+                || r.dmp1.is_none()
+                || r.dmq1.is_none()
+                || r.iqmp.is_none()
+            {
                 err::push(err::LIB_ASN1, 222, "illegal zero content");
                 err::push(err::LIB_PROV, err::RFLAG_COMMON | 13, "ASN1 lib");
                 return None;
@@ -1396,7 +1401,10 @@ impl Rsa {
             return None;
         }
         let em = self.private_op(&bn(data))?;
-        let zero = em.get(2..).and_then(|r| r.iter().position(|&b| b == 0)).map(|z| z + 2);
+        let zero = em
+            .get(2..)
+            .and_then(|r| r.iter().position(|&b| b == 0))
+            .map(|z| z + 2);
         match zero {
             Some(z) if em[0] == 0 && em[1] == 2 && z >= 10 => Some(em[z + 1..].to_vec()),
             _ => {
@@ -1691,7 +1699,11 @@ impl Rsa {
                 rsa_err(133, "first octet invalid");
                 return false;
             }
-            let em = if msbits == 0 { &em_full[1..] } else { &em_full[..] };
+            let em = if msbits == 0 {
+                &em_full[1..]
+            } else {
+                &em_full[..]
+            };
             let emlen = em.len();
             if emlen < hlen + 2 {
                 rsa_err(109, "data too large");
@@ -2021,7 +2033,11 @@ impl PKey {
                 ecx::derive(a.kind, a.priv_key.as_deref()?, &b.pub_key)
             }
             _ => {
-                err::push(err::LIB_EVP, 150, "operation not supported for this keytype");
+                err::push(
+                    err::LIB_EVP,
+                    150,
+                    "operation not supported for this keytype",
+                );
                 None
             }
         }
