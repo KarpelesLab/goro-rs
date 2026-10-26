@@ -414,7 +414,7 @@ fn node_dump(t: &Tree, ctx: &mut DumpCtx, root: NodeId) {
             NType::Pi => {
                 ctx.out.push_str("<?");
                 ctx.out.push_str(&n.name);
-                if !n.content.is_empty() {
+                if n.flags & crate::tree::F_NULL_CONTENT == 0 || !n.content.is_empty() {
                     ctx.out.push(' ');
                     ctx.out.push_str(&n.content);
                 }

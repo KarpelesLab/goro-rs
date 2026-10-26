@@ -50,6 +50,15 @@ fn check_chars(s: &[u8], extra: &[u8]) -> bool {
     true
 }
 
+/// xmlParseURI without cleanup flags (no XML_URI_ALLOW_UCSCHAR): bytes
+/// outside ASCII make the reference invalid, as for namespace names.
+pub fn parse_uri_strict(s: &str) -> Option<Uri> {
+    if !s.is_ascii() {
+        return None;
+    }
+    parse_uri(s)
+}
+
 /// Parse a URI reference. Returns None when invalid.
 pub fn parse_uri(s: &str) -> Option<Uri> {
     let b = s.as_bytes();

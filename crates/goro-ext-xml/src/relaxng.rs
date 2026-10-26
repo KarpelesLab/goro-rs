@@ -546,9 +546,23 @@ fn get_line_no(t: &Tree, n: NodeId, depth: u32) -> i64 {
 /// An error as __xmlRaiseError builds it from a node (xmlVUpdateError):
 /// the file and line come from the closest element ancestor.
 fn node_error(domain: i32, code: i32, level: i32, node: Option<NodeId>, msg: String) -> XmlError {
-    let (file, line) = match node {
-        None => (None, 0),
-        Some(n) => tree::with(|t| {
+    match node {
+        None => node_error_in(None, domain, code, level, None, msg),
+        Some(_) => tree::with(|t| node_error_in(Some(t), domain, code, level, node, msg)),
+    }
+}
+
+/// node_error over an already borrowed tree.
+pub(crate) fn node_error_in(
+    t: Option<&Tree>,
+    domain: i32,
+    code: i32,
+    level: i32,
+    node: Option<NodeId>,
+    msg: String,
+) -> XmlError {
+    let (file, line) = match (t, node) {
+        (Some(t), Some(n)) => {
             let mut n = n;
             for _ in 0..10 {
                 if t.nodes[n].t == NType::Element || t.nodes[n].parent.is_none() {
@@ -565,7 +579,8 @@ fn node_error(domain: i32, code: i32, level: i32, node: Option<NodeId>, msg: Str
                 line = get_line_no(t, n, 0);
             }
             (file, line as i32)
-        }),
+        }
+        _ => (None, 0),
     };
     let formatted = vec![msg.trim_end_matches('\n').to_string()];
     XmlError {

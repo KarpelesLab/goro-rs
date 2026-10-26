@@ -327,7 +327,7 @@ pub fn dump_node(t: &Tree, ctx: &mut SaveCtx, id: NodeId) {
         NType::Pi => {
             ctx.out.push_str("<?");
             ctx.out.push_str(&n.name);
-            if !n.content.is_empty() {
+            if n.flags & crate::tree::F_NULL_CONTENT == 0 || !n.content.is_empty() {
                 ctx.out.push(' ');
                 ctx.out.push_str(&n.content);
             }

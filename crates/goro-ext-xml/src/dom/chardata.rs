@@ -715,11 +715,18 @@ pub fn construct(vm: &mut Vm, this: &Obj, base: Base, a: &[Value]) -> R<()> {
             a.count(vm, 1, 2)?;
             let name = a.str(vm, 0, "name")?;
             let v = super::node::cstr(&a.str(vm, 1, "value")?).to_string();
+            let null = a.raw(1).is_none();
             if !is_valid_name(&name) {
                 throw_dom(vm, INVALID_CHARACTER_ERR, true);
                 return Err(());
             }
-            tree::with(|t| t.new_pi(None, &name, &v))
+            tree::with(|t| {
+                let n = t.new_pi(None, &name, &v);
+                if null {
+                    t.nodes[n].flags |= tree::F_NULL_CONTENT;
+                }
+                n
+            })
         }
         Base::EntityReference => {
             a.count(vm, 1, 1)?;

@@ -233,6 +233,11 @@ impl XmlError {
 // ---------------------------------------------------------------------------
 // Character classes
 
+/// IS_BYTE_CHAR
+fn is_byte_char(c: u8) -> bool {
+    c >= 0x20 || c == 0x09 || c == 0x0A || c == 0x0D
+}
+
 pub fn is_char(c: u32) -> bool {
     c == 0x9
         || c == 0xA
@@ -1151,6 +1156,8 @@ pub struct PEntity {
     pub notation: Option<String>,
     pub parsed: bool,
     pub expanding: bool,
+    /// XML_ENT_CHECKED: xmlCheckEntityInAttValue ran on it (outside the DTD).
+    pub checked_att: bool,
     /// Resolved URI of an external entity (ent->URI).
     pub uri: Option<String>,
     /// Offset of the replacement text in `content` (an external entity's
@@ -1737,8 +1744,11 @@ impl<'a, S: Sink> Parser<'a, S> {
     fn cur_char_raw(&mut self) -> (u32, usize) {
         let c = self.cur();
         if c < 0x80 {
-            if c == 0 && self.at_end() {
-                return (0, 0);
+            if c == 0 {
+                if self.at_end() {
+                    return (0, 0);
+                }
+                self.nul_char();
             }
             return (c as u32, 1);
         }
@@ -1809,6 +1819,12 @@ impl<'a, S: Sink> Parser<'a, S> {
             self.conv_enc = Some(CONV_UTF8_INVALID.into());
         }
         false
+    }
+
+    /// xmlCurrentChar on a NUL byte inside the input.
+    #[inline(never)]
+    fn nul_char(&mut self) {
+        self.fatal(XML_ERR_INVALID_CHAR, Some("Char 0x0 out of allowed range"));
     }
 
     /// Whether the current character replaced an invalid byte.
@@ -2079,7 +2095,7 @@ impl<'a, S: Sink> Parser<'a, S> {
 
     pub fn parse_document(&mut self) -> bool {
         self.detect_encoding();
-        if self.at_end() {
+        if self.cur() == 0 {
             self.fatal(XML_ERR_DOCUMENT_EMPTY, None);
             return false;
         }
@@ -2243,7 +2259,8 @@ impl<'a, S: Sink> Parser<'a, S> {
             self.skip(1);
         } else {
             self.fatal(XML_ERR_XMLDECL_NOT_FINISHED, None);
-            while !self.stopped() && !self.at_end() {
+            // while ((c = CUR) != 0): a NUL byte ends the skip
+            while !self.stopped() && self.cur() != 0 {
                 let c = self.cur();
                 self.skip(1);
                 if c == b'>' {
@@ -2476,7 +2493,7 @@ impl<'a, S: Sink> Parser<'a, S> {
     /// xmlParseCommentComplex
     fn parse_comment_complex(&mut self, mut buf: Vec<u8>) {
         let (mut q, ql) = self.cur_char();
-        if ql == 0 {
+        if q == 0 {
             self.fatal_msg(
                 XML_ERR_COMMENT_NOT_FINISHED,
                 "Comment not terminated\n".into(),
@@ -2492,7 +2509,7 @@ impl<'a, S: Sink> Parser<'a, S> {
         }
         self.skip(ql);
         let (mut r, rl) = self.cur_char();
-        if rl == 0 {
+        if r == 0 {
             self.fatal_msg(
                 XML_ERR_COMMENT_NOT_FINISHED,
                 "Comment not terminated\n".into(),
@@ -2508,7 +2525,7 @@ impl<'a, S: Sink> Parser<'a, S> {
         }
         self.skip(rl);
         let (mut cur, mut l) = self.cur_char();
-        if l == 0 {
+        if cur == 0 {
             self.fatal_msg(
                 XML_ERR_COMMENT_NOT_FINISHED,
                 "Comment not terminated\n".into(),
@@ -2516,7 +2533,7 @@ impl<'a, S: Sink> Parser<'a, S> {
             return;
         }
         loop {
-            if l == 0 || !is_char(cur) {
+            if cur == 0 || !is_char(cur) {
                 break;
             }
             if cur == b'>' as u32 && r == b'-' as u32 && q == b'-' as u32 {
@@ -2533,12 +2550,12 @@ impl<'a, S: Sink> Parser<'a, S> {
             cur = x.0;
             l = x.1;
         }
-        self.finish_comment(buf, cur, l);
+        self.finish_comment(buf, cur);
     }
 
-    fn finish_comment(&mut self, buf: Vec<u8>, cur: u32, l: usize) {
+    fn finish_comment(&mut self, buf: Vec<u8>, cur: u32) {
         let s = String::from_utf8_lossy(&buf).into_owned();
-        if l == 0 {
+        if cur == 0 {
             let p50: String = s.chars().take(50).collect();
             self.fatal_msg(
                 XML_ERR_COMMENT_NOT_FINISHED,
@@ -3114,6 +3131,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                         notation: None,
                         parsed: false,
                         expanding: false,
+                        checked_att: false,
                         uri: None,
                         content_start: 0,
                         content_base: (1, 1),
@@ -3138,6 +3156,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                             notation: None,
                             parsed: false,
                             expanding: false,
+                            checked_att: false,
                             uri: None,
                             content_start: 0,
                             content_base: (1, 1),
@@ -3157,6 +3176,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                     notation: None,
                     parsed: false,
                     expanding: false,
+                    checked_att: false,
                     uri: None,
                     content_start: 0,
                     content_base: (1, 1),
@@ -3197,6 +3217,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                     notation: ndata,
                     parsed: false,
                     expanding: false,
+                    checked_att: false,
                     uri: None,
                     content_start: 0,
                     content_base: (1, 1),
@@ -3212,6 +3233,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                     notation: None,
                     parsed: false,
                     expanding: false,
+                    checked_att: false,
                     uri: None,
                     content_start: 0,
                     content_base: (1, 1),
@@ -4013,6 +4035,81 @@ impl<'a, S: Sink> Parser<'a, S> {
     // ------------------------------------------------------------------
     // Attribute values
 
+    /// xmlCheckEntityInAttValue: every '<' in the (recursive) replacement
+    /// text of an entity referenced from an attribute value is an error.
+    #[inline(never)]
+    fn check_entity_in_att_value(&mut self, name: &str, depth: u32) {
+        let max_depth = if self.st.options & XML_PARSE_HUGE != 0 {
+            40
+        } else {
+            20
+        };
+        let depth = depth + 1;
+        if depth > max_depth {
+            self.fatal_msg(
+                XML_ERR_RESOURCE_LIMIT,
+                "Maximum entity nesting depth exceeded".into(),
+            );
+            return;
+        }
+        let (content, expanding) = match self.entities.get(name) {
+            Some(e) => (
+                e.content[e.content_start.min(e.content.len())..].to_string(),
+                e.expanding,
+            ),
+            None => return,
+        };
+        if expanding {
+            self.fatal(XML_ERR_ENTITY_LOOP, None);
+            return;
+        }
+        let b = content.as_bytes();
+        let mut i = 0;
+        while i < b.len() && !self.stopped() {
+            let c = b[i];
+            if c != b'&' {
+                if c == b'<' {
+                    self.fatal_msg(
+                        XML_ERR_LT_IN_ATTRIBUTE,
+                        format!(
+                            "'<' in entity '{}' is not allowed in attributes values\n",
+                            name
+                        ),
+                    );
+                }
+                i += 1;
+                continue;
+            }
+            // a reference: character references need nothing here
+            let end = match b[i..].iter().position(|&x| x == b';') {
+                Some(e) => i + e,
+                None => break,
+            };
+            if b.get(i + 1) != Some(&b'#') {
+                let sub = String::from_utf8_lossy(&b[i + 1..end]).into_owned();
+                let check = match self.entities.get(&sub) {
+                    Some(e) => e.kind != EntKind::Predefined && !e.checked_att,
+                    None => false,
+                };
+                if check {
+                    if let Some(e) = self.entities.get_mut(name) {
+                        e.expanding = true;
+                    }
+                    self.check_entity_in_att_value(&sub, depth);
+                    if let Some(e) = self.entities.get_mut(name) {
+                        e.expanding = false;
+                    }
+                }
+            }
+            i = end + 1;
+        }
+        if self.st.in_subset == 0 {
+            if let Some(e) = self.entities.get_mut(name) {
+                e.checked_att = true;
+            }
+        }
+    }
+
     fn lookup_general_entity(&mut self, name: &str, in_attr: bool) -> Option<PEntity> {
         let predef = match name {
             "lt" => Some("<"),
@@ -4032,6 +4129,7 @@ impl<'a, S: Sink> Parser<'a, S> {
             notation: None,
             parsed: true,
             expanding: false,
+            checked_att: false,
             uri: None,
             content_start: 0,
             content_base: (1, 1),
@@ -4426,15 +4524,9 @@ impl<'a, S: Sink> Parser<'a, S> {
                         0,
                     );
                 } else {
-                    // check the entity content for '<'
-                    if ent.content.contains('<') {
-                        self.fatal_msg(
-                            XML_ERR_LT_IN_ATTRIBUTE,
-                            format!(
-                                "'<' in entity '{}' is not allowed in attributes values\n",
-                                name
-                            ),
-                        );
+                    // check the entity content for '<' (once per entity)
+                    if !ent.checked_att {
+                        self.check_entity_in_att_value(&name, 0);
                     }
                     buf.push(b'&');
                     buf.extend_from_slice(name.as_bytes());
@@ -4537,7 +4629,7 @@ impl<'a, S: Sink> Parser<'a, S> {
         let mut atts: Vec<(String, Option<String>, String)> = Vec::new();
         while self.cur() != b'>'
             && !(self.cur() == b'/' && self.nxt(1) == b'>')
-            && !self.at_end()
+            && is_byte_char(self.cur())
             && !self.stopped()
         {
             let r = self.parse_attribute2(&elem_qname);
@@ -4550,7 +4642,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                     let uri = value;
                     let mut skip = false;
                     if !uri.is_empty() {
-                        match crate::uri::parse_uri(&uri) {
+                        match crate::uri::parse_uri_strict(&uri) {
                             None => self.ns_err(
                                 XML_WAR_NS_URI,
                                 format!("xmlns: '{}' is not a valid URI\n", uri),
@@ -4611,7 +4703,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                             format!("xmlns:{}: Empty XML namespace is not allowed\n", attname),
                         );
                     } else {
-                        match crate::uri::parse_uri(&uri) {
+                        match crate::uri::parse_uri_strict(&uri) {
                             None => self.ns_err(
                                 XML_WAR_NS_URI,
                                 format!("xmlns:{}: '{}' is not a valid URI\n", attname, uri),
@@ -6490,7 +6582,8 @@ impl<'a, S: Sink> Parser<'a, S> {
             self.skip(1);
         } else {
             self.fatal(XML_ERR_XMLDECL_NOT_FINISHED, None);
-            while !self.stopped() && !self.at_end() {
+            // while ((c = CUR) != 0): a NUL byte ends the skip
+            while !self.stopped() && self.cur() != 0 {
                 let c = self.cur();
                 self.skip(1);
                 if c == b'>' {

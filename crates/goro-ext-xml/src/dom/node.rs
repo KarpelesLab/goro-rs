@@ -299,6 +299,10 @@ pub fn get_content_value(t: &Tree, n: NodeId, null_on_failure: bool) -> Value {
     let nd = &t.nodes[n];
     match nd.t {
         NType::Text | NType::CData | NType::Pi | NType::Comment => {
+            if null_on_failure && nd.flags & tree::F_NULL_CONTENT != 0 && nd.content.is_empty() {
+                // xmlNodeGetContent() of a NULL content
+                return Value::Null;
+            }
             Value::String(PhpString::from_string(nd.content.clone()))
         }
         NType::Attribute => Value::String(PhpString::from_string(t.node_get_content(n))),

@@ -822,6 +822,10 @@ impl Sink for TreeBuilder {
         let doc = self.doc;
         tree::with(|t| {
             let n = t.new_pi(doc, target, data.unwrap_or(""));
+            if data.is_none() {
+                // xmlNewDocPI(.., NULL): `<?target?>` has no content
+                t.nodes[n].flags |= tree::F_NULL_CONTENT;
+            }
             t.nodes[n].line = line;
             self.add_misc(t, n, in_subset);
         });
@@ -1157,6 +1161,7 @@ pub fn parse_in_context(
                                     notation: None,
                                     parsed: t.nodes[*e].children.is_some(),
                                     expanding: false,
+                                    checked_att: false,
                                     uri: None,
                                     content_start: 0,
                                     content_base: (1, 1),

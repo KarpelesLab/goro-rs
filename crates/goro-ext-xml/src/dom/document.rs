@@ -287,12 +287,19 @@ fn m_create_pi(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     a.count(vm, 1, 2)?;
     let target = a.str(vm, 0, "target")?;
     let data = cstr(&a.str(vm, 1, "data")?).to_string();
+    let null = a.raw(1).is_none();
     let d = doc_node(vm, o)?;
     if !is_valid_name(&target) {
         throw_dom(vm, INVALID_CHARACTER_ERR, strict(Some(d)));
         return Ok(Value::False);
     }
-    let n = tree::with(|t| t.new_pi(Some(d), &target, &data));
+    let n = tree::with(|t| {
+        let n = t.new_pi(Some(d), &target, &data);
+        if null {
+            t.nodes[n].flags |= tree::F_NULL_CONTENT;
+        }
+        n
+    });
     Ok(node_obj(vm, n))
 }
 

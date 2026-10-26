@@ -1561,6 +1561,7 @@ impl Tree {
         }
         let mut n = Node::new(src.t, &src.name);
         n.content = src.content.clone();
+        n.flags = src.flags & F_NULL_CONTENT;
         n.doc = doc;
         n.line = src.line;
         n.atype = 0;

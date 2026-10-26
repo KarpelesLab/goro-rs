@@ -524,10 +524,15 @@ impl<'a> Ctx<'a> {
             if href.is_empty() {
                 continue;
             }
-            match crate::uri::parse_uri(href) {
+            match crate::uri::parse_uri_strict(href) {
                 None => {
-                    self.errors.push(c14n_err(
+                    // raised with the element: its line and document URL
+                    self.errors.push(crate::relaxng::node_error_in(
+                        Some(t),
+                        XML_FROM_C14N,
                         XML_ERR_INVALID_URI,
+                        crate::parser::ERR_ERROR,
+                        Some(cur),
                         "parsing namespace uri".to_string(),
                     ));
                     return Err(());
