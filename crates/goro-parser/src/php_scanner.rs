@@ -611,7 +611,8 @@ impl<'a> Scanner<'a> {
                 }
             }
         }
-        self.tok(T_COMMENT, p, cur)
+        // (it ends before its newline)
+        self.tok_counted(T_COMMENT, p, cur, 0, false)
     }
 
     fn block_comment(&mut self, p: usize) -> Option<ScanToken> {
@@ -635,14 +636,21 @@ impl<'a> Scanner<'a> {
     fn single_quoted(&mut self, p: usize, bprefix: usize) -> Option<ScanToken> {
         let n = self.s.len();
         let mut cur = p + bprefix + 1;
+        // (the newlines counted as they are scanned)
+        let (mut lf, mut cr) = (0u32, false);
         loop {
             if cur < n {
-                if self.s[cur] == b'\'' {
-                    return self.tok(T_CONSTANT_ENCAPSED_STRING, p, cur + 1);
-                }
                 let ch = self.s[cur];
+                if ch == b'\'' {
+                    return self.tok_counted(T_CONSTANT_ENCAPSED_STRING, p, cur + 1, lf, cr);
+                }
                 cur += 1;
+                lf += u32::from(ch == b'\n');
+                cr |= ch == b'\r';
                 if ch == b'\\' && cur < n {
+                    let ch = self.s[cur];
+                    lf += u32::from(ch == b'\n');
+                    cr |= ch == b'\r';
                     cur += 1;
                 }
             } else {
@@ -1480,10 +1488,29 @@ fn count_lf_cr(text: &[u8]) -> (u32, bool) {
 
 #[inline(never)]
 fn count_lf_cr_long(text: &[u8]) -> (u32, bool) {
-    (
-        memchr::memchr_iter(b'\n', text).count() as u32,
-        memchr::memchr(b'\r', text).is_some(),
-    )
+    if text.len() > 256 {
+        return (
+            memchr::memchr_iter(b'\n', text).count() as u32,
+            memchr::memchr(b'\r', text).is_some(),
+        );
+    }
+    // (eight bytes at a time: the high bit of each byte of `x ^ pattern`
+    // that is zero)
+    const LO7: u64 = 0x7f7f_7f7f_7f7f_7f7f;
+    let zero_bytes = |x: u64| !(((x & LO7) + LO7) | x | LO7);
+    let mut chunks = text.chunks_exact(8);
+    let (mut lf, mut cr) = (0u32, 0u64);
+    for c in &mut chunks {
+        let w = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+        lf += zero_bytes(w ^ 0x0a0a_0a0a_0a0a_0a0a).count_ones();
+        cr |= zero_bytes(w ^ 0x0d0d_0d0d_0d0d_0d0d);
+    }
+    let mut cr = cr != 0;
+    for &c in chunks.remainder() {
+        lf += u32::from(c == b'\n');
+        cr |= c == b'\r';
+    }
+    (lf, cr)
 }
 
 fn keyword_id(word: &[u8]) -> Option<i32> {
