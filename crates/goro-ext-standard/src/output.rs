@@ -2568,6 +2568,22 @@ pub fn materialize_print_r(
                 (cl, b.class_name.clone(), keep)
             };
             if keep {
+                // zend_lazy_object_debug_info(): an initialized proxy shows
+                // its instance.
+                let real = o.borrow().get_property(b"__lazy_real");
+                if let Value::Object(real) = real {
+                    memo.insert(key, None);
+                    let rv = Value::Object(real);
+                    let inner = materialize_print_r(vm, &rv, memo).unwrap_or(rv);
+                    memo.remove(&key);
+                    let mut shadow = goro_core::object::PhpObject::new(cn, 0);
+                    shadow.native = Some(goro_core::object::NativeData {
+                        data: Rc::new(()),
+                        handlers: &PRINT_R_SHADOW,
+                    });
+                    shadow.properties = vec![(b"instance".to_vec(), inner)].into();
+                    return Some(Value::Object(Rc::new(RefCell::new(shadow))));
+                }
                 // Rendered by print_r itself: materialize what it holds.
                 memo.insert(key, None);
                 let props: Vec<(Vec<u8>, Value)> = o.borrow().properties.to_vec();
