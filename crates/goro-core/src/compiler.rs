@@ -829,6 +829,14 @@ pub struct Compiler {
     in_const_expr: bool,
     /// Compiling a parameter's default value (see compile_param_default_value).
     in_param_default: bool,
+    /// The array literal being compiled was already through
+    /// zend_try_ct_eval_array()'s pass over its elements.
+    array_prepass_done: bool,
+    /// Likewise for the format of the sprintf() call being compiled
+    /// (zend_compile_func_sprintf()).
+    sprintf_prepass_done: bool,
+    /// The stack-limit error zend_eval_const_expr()'s pass ran into.
+    prepass_error: Option<CompileError>,
     /// A script, include or eval() compile: its class declarations take
     /// runtime definition keys (the engine's own compiles don't).
     pub takes_rtd_keys: bool,
@@ -1156,6 +1164,9 @@ impl Compiler {
             is_discarding_result: false,
             in_const_expr: false,
             in_param_default: false,
+            array_prepass_done: false,
+            sprintf_prepass_done: false,
+            prepass_error: None,
             takes_rtd_keys: false,
             assign_result_discarded: false,
             hrh_assigned: false,
@@ -13710,6 +13721,14 @@ impl Compiler {
                 return OperandType::Const(self.op_array.add_literal(v));
             }
         }
+        let (l, r) = if opcode == OpCode::Concat {
+            (
+                self.concat_const_array_operand(left, l, line),
+                self.concat_const_array_operand(right, r, line),
+            )
+        } else {
+            (l, r)
+        };
         let tmp = self.op_array.alloc_temp();
         let (l, r) = if opcode == OpCode::Concat {
             (
@@ -13889,6 +13908,28 @@ impl Compiler {
         }
     }
 
+    /// zend_compile_binary_op(): a constant array operand of a
+    /// concatenation gets a ZEND_CAST to string of its own, run once both
+    /// operands are evaluated (its "Array to string conversion" comes
+    /// before the concatenation converts the other operand).
+    #[inline(never)]
+    fn concat_const_array_operand(&mut self, e: &Expr, o: OperandType, line: u32) -> OperandType {
+        if !matches!(e.kind, ExprKind::Array(_))
+            || !matches!(Self::zend_ct_value(e, false), Some(Value::Array(_)))
+        {
+            return o;
+        }
+        let t = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::CastString,
+            op1: o,
+            op2: OperandType::Unused,
+            result: OperandType::Tmp(t),
+            line,
+        });
+        OperandType::Tmp(t)
+    }
+
     /// zend_compile_binary_op(): the constant operands of a concatenation
     /// are converted to strings at compile time (a NAN warns then, and a
     /// float is formatted with the precision in effect while compiling).
@@ -14057,10 +14098,16 @@ impl Compiler {
             ) {
                 // (never folded by zend_compile: ZEND_CAST / QM_ASSIGN)
                 2
-            } else if matches!(o, OperandType::Const(i)
-                    if !matches!(literals.get(*i as usize), Some(Value::Resource(_))))
-                || Self::is_const_evaluable(e)
-                || Self::ct_folded(e)
+            } else if Self::zend_ct_value(e, false).is_some()
+                || matches!(o, OperandType::Const(i)
+                    if !matches!(literals.get(*i as usize), Some(Value::Resource(_)))
+                        && matches!(
+                            e.kind,
+                            ExprKind::ConstantAccess(_)
+                                | ExprKind::Identifier(_)
+                                | ExprKind::ClassConstAccess { .. }
+                                | ExprKind::InterpolatedString(_)
+                        ))
             {
                 1
             } else if matches!(o, OperandType::Cv(_)) {
@@ -14083,6 +14130,672 @@ impl Compiler {
             (r, l)
         } else {
             (l, r)
+        }
+    }
+
+    /// The value zend_compile makes a CONST of `e`, if any: a literal, a
+    /// persistent constant, an operation zend_try_ct_eval_*() folds, a
+    /// constant array (zend_try_ct_eval_array(), whose elements go through
+    /// zend_eval_const_expr(): `nested`, folding ternaries, `??` and
+    /// dimension fetches too), `@` of a constant. No side effects: only the
+    /// operand ranks of commutative opcodes use it.
+    #[inline(never)]
+    fn zend_ct_value(e: &Expr, nested: bool) -> Option<Value> {
+        let b = |c: bool| if c { Value::True } else { Value::False };
+        match &e.kind {
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::String(_)
+            | ExprKind::True
+            | ExprKind::False
+            | ExprKind::Null
+            | ExprKind::Identifier(_) => Self::eval_const_expr(e),
+            ExprKind::Suppress(inner) if !nested => Self::zend_ct_value(inner, false),
+            ExprKind::Array(elems) => {
+                let mut arr = crate::array::PhpArray::new();
+                for el in elems {
+                    if el.by_ref {
+                        return None;
+                    }
+                    let v = Self::zend_ct_value(&el.value, true)?;
+                    if el.unpack {
+                        let Value::Array(src) = v else {
+                            return None;
+                        };
+                        for (k, v) in src.borrow().iter() {
+                            match k {
+                                crate::array::ArrayKey::Int(_) => arr.push(v.clone()),
+                                k => arr.set(k.clone(), v.clone()),
+                            }
+                        }
+                        continue;
+                    }
+                    match &el.key {
+                        None => arr.push(v),
+                        Some(k) => {
+                            let key = match Self::zend_ct_value(k, true)? {
+                                Value::Long(n) => crate::array::ArrayKey::Int(n),
+                                Value::String(s) => crate::vm::Vm::value_to_array_key(Value::String(s)),
+                                Value::True => crate::array::ArrayKey::Int(1),
+                                Value::False => crate::array::ArrayKey::Int(0),
+                                _ => return None,
+                            };
+                            arr.set(key, v);
+                        }
+                    }
+                }
+                Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr))))
+            }
+            ExprKind::BinaryOp { left, op, right } => match op {
+                BinaryOp::BooleanAnd
+                | BinaryOp::LogicalAnd
+                | BinaryOp::BooleanOr
+                | BinaryOp::LogicalOr => {
+                    let is_or = matches!(op, BinaryOp::BooleanOr | BinaryOp::LogicalOr);
+                    let l = Self::zend_ct_value(left, nested)?;
+                    if l.is_truthy() == is_or {
+                        return Some(b(is_or));
+                    }
+                    Some(b(Self::zend_ct_value(right, nested)?.is_truthy()))
+                }
+                BinaryOp::Coalesce => None,
+                _ => {
+                    let l = Self::zend_ct_value(left, nested)?;
+                    let r = Self::zend_ct_value(right, nested)?;
+                    Self::zend_ct_binop(*op, &l, &r)
+                }
+            },
+            ExprKind::UnaryOp { op, operand, .. } => {
+                let v = Self::zend_ct_value(operand, nested)?;
+                match op {
+                    UnaryOp::BooleanNot if matches!(v, Value::Double(_)) => None,
+                    UnaryOp::BooleanNot => Some(b(!v.is_truthy())),
+                    UnaryOp::BitwiseNot => match v {
+                        Value::Long(n) => Some(Value::Long(!n)),
+                        Value::String(s) => Some(Value::String(PhpString::from_vec(
+                            s.as_bytes().iter().map(|c| !c).collect(),
+                        ))),
+                        Value::Double(f) if f.is_finite() && f.fract() == 0.0 => {
+                            Some(Value::Long(!(f as i64)))
+                        }
+                        _ => None,
+                    },
+                    UnaryOp::Negate | UnaryOp::Plus => {
+                        let m = Value::Long(if *op == UnaryOp::Negate { -1 } else { 1 });
+                        Self::zend_ct_binop(BinaryOp::Mul, &v, &m)
+                    }
+                    _ => None,
+                }
+            }
+            ExprKind::Cast(ty, inner) if nested => {
+                Self::ct_cast_value(*ty, Self::zend_ct_value(inner, true)?)
+            }
+            ExprKind::NullCoalesce { left, right } if nested => {
+                let l = Self::zend_ct_value(left, true)?;
+                if matches!(l, Value::Null) {
+                    Self::zend_ct_value(right, true)
+                } else {
+                    Some(l)
+                }
+            }
+            ExprKind::Ternary {
+                condition,
+                if_true,
+                if_false,
+            } if nested => {
+                let c = Self::zend_ct_value(condition, true)?;
+                if c.is_truthy() {
+                    match if_true {
+                        Some(t) => Self::zend_ct_value(t, true),
+                        None => Some(c),
+                    }
+                } else {
+                    Self::zend_ct_value(if_false, true)
+                }
+            }
+            ExprKind::ArrayAccess {
+                array,
+                index: Some(index),
+            } if nested => {
+                let c = Self::zend_ct_value(array, true)?;
+                let d = Self::zend_ct_value(index, true)?;
+                match (c, d) {
+                    (Value::Array(a), Value::Long(n)) => {
+                        a.borrow().get(&crate::array::ArrayKey::Int(n)).cloned()
+                    }
+                    (Value::Array(a), Value::String(k)) => {
+                        a.borrow().get(&crate::vm::Vm::value_to_array_key(Value::String(k))).cloned()
+                    }
+                    (Value::String(s), d) => {
+                        let off = match d {
+                            Value::Long(n) => n,
+                            // (is_numeric_string() allowing errors: a
+                            // leading integer)
+                            Value::String(k) => {
+                                let t = k.as_bytes();
+                                let t = t
+                                    .iter()
+                                    .position(|c| !c.is_ascii_whitespace())
+                                    .map_or(&t[t.len()..], |p| &t[p..]);
+                                let end = t
+                                    .iter()
+                                    .enumerate()
+                                    .position(|(i, c)| {
+                                        !(c.is_ascii_digit() || (i == 0 && matches!(c, b'-' | b'+')))
+                                    })
+                                    .unwrap_or(t.len());
+                                let digits = &t[..end];
+                                if digits.is_empty() || matches!(t.get(end), Some(b'.' | b'e' | b'E')) {
+                                    return None;
+                                }
+                                std::str::from_utf8(digits).ok()?.parse::<i64>().ok()?
+                            }
+                            _ => return None,
+                        };
+                        let bytes = s.as_bytes();
+                        if off < 0 || off as usize >= bytes.len() {
+                            return None;
+                        }
+                        Some(Value::String(PhpString::from_vec(vec![bytes[off as usize]])))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// zend_try_ct_eval_cast(): None for a NAN, a float that does not fit an
+    /// int, a float or array to string.
+    fn ct_cast_value(ty: CastType, v: Value) -> Option<Value> {
+        if matches!(v, Value::Double(f) if f.is_nan()) {
+            return None;
+        }
+        match ty {
+            CastType::Bool => Some(if v.is_truthy() { Value::True } else { Value::False }),
+            CastType::Int => match v {
+                Value::Double(f) if !crate::value::php_double_fits_long(f) => None,
+                v => Some(Value::Long(v.to_long())),
+            },
+            CastType::Float => Some(Value::Double(v.to_double())),
+            CastType::String => match v {
+                Value::Array(_) | Value::Double(_) => None,
+                v => Some(Value::String(v.to_php_string())),
+            },
+            CastType::Array => match v {
+                a @ Value::Array(_) => Some(a),
+                Value::Null => Some(Value::Array(Default::default())),
+                v => {
+                    let mut arr = crate::array::PhpArray::new();
+                    arr.push(v);
+                    Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr))))
+                }
+            },
+            _ => None,
+        }
+    }
+
+    /// The elements of an array literal after zend_eval_const_expr() (None
+    /// when nothing changed).
+    #[inline(never)]
+    fn array_elements_ct_pass(
+        &mut self,
+        elements: &[goro_parser::ast::ArrayElement],
+    ) -> Option<Vec<goro_parser::ast::ArrayElement>> {
+        if self.in_param_default {
+            return None;
+        }
+        let mut out: Option<Vec<goro_parser::ast::ArrayElement>> = None;
+        for (i, el) in elements.iter().enumerate() {
+            let v = self.zend_eval_const_expr_ast(&el.value);
+            let k = match &el.key {
+                Some(k) if !el.unpack => self.zend_eval_const_expr_ast(k),
+                _ => None,
+            };
+            if v.is_some() || k.is_some() {
+                let o = out.get_or_insert_with(|| elements[..i].to_vec());
+                o.push(goro_parser::ast::ArrayElement {
+                    key: k.or_else(|| el.key.clone()),
+                    value: v.unwrap_or_else(|| el.value.clone()),
+                    unpack: el.unpack,
+                    by_ref: el.by_ref,
+                });
+            } else if let Some(o) = out.as_mut() {
+                o.push(el.clone());
+            }
+        }
+        out
+    }
+
+    /// A constant as an expression node (at `span`).
+    fn value_to_expr(v: &Value, span: goro_parser::token::Span) -> Option<Expr> {
+        let kind = match v {
+            Value::Long(n) => ExprKind::Int(*n),
+            Value::Double(f) => ExprKind::Float(*f),
+            Value::String(s) => ExprKind::String(s.as_bytes().to_vec()),
+            Value::True => ExprKind::True,
+            Value::False => ExprKind::False,
+            Value::Null => ExprKind::Null,
+            Value::Array(a) => {
+                let mut elems = Vec::new();
+                for (k, v) in a.borrow().iter() {
+                    let key = match k {
+                        crate::array::ArrayKey::Int(n) => ExprKind::Int(*n),
+                        crate::array::ArrayKey::String(s) => ExprKind::String(s.as_bytes().to_vec()),
+                    };
+                    elems.push(goro_parser::ast::ArrayElement {
+                        key: Some(Expr { kind: key, span }),
+                        value: Self::value_to_expr(v, span)?,
+                        unpack: false,
+                        by_ref: false,
+                    });
+                }
+                ExprKind::Array(elems)
+            }
+            _ => return None,
+        };
+        Some(Expr { kind, span })
+    }
+
+    /// The value of a node zend_eval_const_expr() turned into a ZEND_AST_ZVAL.
+    fn ast_zval(e: &Expr) -> Option<Value> {
+        match &e.kind {
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::String(_)
+            | ExprKind::True
+            | ExprKind::False
+            | ExprKind::Null => Self::eval_const_expr(e),
+            ExprKind::Array(elems) if elems.iter().all(|el| {
+                !el.by_ref
+                    && !el.unpack
+                    && Self::ast_zval(&el.value).is_some()
+                    && el.key.as_ref().is_none_or(|k| {
+                        matches!(Self::ast_zval(k), Some(Value::Long(_) | Value::String(_)))
+                    })
+            }) =>
+            {
+                Self::eval_const_expr(e)
+            }
+            _ => None,
+        }
+    }
+
+    /// zend_eval_const_expr() of `e`: the expression with what it folds
+    /// replaced by constants (None when nothing changed), its compile-time
+    /// diagnostics raised (a NAN's zend_is_true(), a NAN concatenated).
+    #[inline(never)]
+    fn zend_eval_const_expr_ast(&mut self, e: &Expr) -> Option<Expr> {
+        if self.prepass_error.is_some() {
+            return None;
+        }
+        // zend_check_stack_limit()
+        if let Err(size) = crate::stack::enter_compile() {
+            self.prepass_error = Some(CompileError {
+                message: format!(
+                    "Maximum call stack size of {} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression",
+                    size
+                ),
+                line: e.span.line,
+            });
+            return None;
+        }
+        let r = crate::stack::with_room(|| self.zend_eval_const_expr_ast_inner(e)).unwrap_or_else(|_| {
+            self.prepass_error = Some(CompileError {
+                message: "Maximum nesting depth exceeded".into(),
+                line: e.span.line,
+            });
+            None
+        });
+        crate::stack::leave_compile();
+        r
+    }
+
+    fn zend_eval_const_expr_ast_inner(&mut self, e: &Expr) -> Option<Expr> {
+        let span = e.span;
+        let line = span.line;
+        let fold = |v: Value| Self::value_to_expr(&v, span);
+        let sub = |this: &mut Self, c: &Expr| this.zend_eval_const_expr_ast(c);
+        match &e.kind {
+            // (a persistent constant; in a namespace the name could be
+            // the namespace's)
+            ExprKind::Identifier(n)
+                if self.current_namespace.is_empty()
+                    || matches!(n.to_ascii_lowercase().as_slice(), b"true" | b"false" | b"null") =>
+            {
+                let v = Self::eval_const_expr(e)?;
+                fold(v)
+            }
+            ExprKind::Array(elems) => {
+                let new = self.array_elements_ct_pass(elems);
+                let elems = new.as_deref().unwrap_or(elems);
+                let arr = Expr {
+                    kind: ExprKind::Array(elems.to_vec()),
+                    span,
+                };
+                match Self::ast_zval(&arr) {
+                    Some(_) if new.is_some() => Some(arr),
+                    _ => new.map(|_| arr),
+                }
+            }
+            ExprKind::BinaryOp { left, op, right } => {
+                let l2 = sub(self, left);
+                let r2 = sub(self, right);
+                let l = l2.as_ref().unwrap_or(left);
+                let r = r2.as_ref().unwrap_or(right);
+                let rebuilt = |l: &Expr, r: &Expr| {
+                    Some(Expr {
+                        kind: ExprKind::BinaryOp {
+                            left: Box::new(l.clone()),
+                            op: *op,
+                            right: Box::new(r.clone()),
+                        },
+                        span,
+                    })
+                };
+                let changed = l2.is_some() || r2.is_some();
+                match op {
+                    BinaryOp::BooleanAnd
+                    | BinaryOp::LogicalAnd
+                    | BinaryOp::BooleanOr
+                    | BinaryOp::LogicalOr => {
+                        let is_or = matches!(op, BinaryOp::BooleanOr | BinaryOp::LogicalOr);
+                        let Some(lv) = Self::ast_zval(l) else {
+                            return if changed { rebuilt(l, r) } else { None };
+                        };
+                        let t0 = self.ct_truthy(&lv, line);
+                        if t0 == is_or {
+                            return fold(if is_or { Value::True } else { Value::False });
+                        }
+                        let Some(rv) = Self::ast_zval(r) else {
+                            return if changed { rebuilt(l, r) } else { None };
+                        };
+                        let t1 = self.ct_truthy(&rv, line);
+                        fold(if t1 { Value::True } else { Value::False })
+                    }
+                    BinaryOp::Coalesce => None,
+                    _ => {
+                        let (Some(lv), Some(rv)) = (Self::ast_zval(l), Self::ast_zval(r)) else {
+                            return if changed { rebuilt(l, r) } else { None };
+                        };
+                        let v = match op {
+                            BinaryOp::LogicalXor => {
+                                let x = self.ct_truthy(&lv, line);
+                                let y = self.ct_truthy(&rv, line);
+                                Some(if x != y { Value::True } else { Value::False })
+                            }
+                            BinaryOp::Concat => {
+                                let v = Self::zend_ct_binop(*op, &lv, &rv);
+                                if v.is_some() {
+                                    for x in [&lv, &rv] {
+                                        if matches!(x, Value::Double(f) if f.is_nan()) {
+                                            push_compile_warning(
+                                                "unexpected NAN value was coerced to string".into(),
+                                                line,
+                                            );
+                                        }
+                                    }
+                                }
+                                v
+                            }
+                            _ => Self::zend_ct_binop(*op, &lv, &rv),
+                        };
+                        match v {
+                            Some(v) => fold(v),
+                            None if changed => rebuilt(l, r),
+                            None => None,
+                        }
+                    }
+                }
+            }
+            ExprKind::UnaryOp {
+                op: op @ (UnaryOp::BooleanNot | UnaryOp::BitwiseNot | UnaryOp::Negate | UnaryOp::Plus),
+                operand,
+                prefix,
+            } => {
+                let o2 = sub(self, operand);
+                let o = o2.as_ref().unwrap_or(operand);
+                let rebuilt = || {
+                    o2.as_ref().map(|o| Expr {
+                        kind: ExprKind::UnaryOp {
+                            op: *op,
+                            operand: Box::new(o.clone()),
+                            prefix: *prefix,
+                        },
+                        span,
+                    })
+                };
+                let Some(v) = Self::ast_zval(o) else {
+                    return rebuilt();
+                };
+                let r = match op {
+                    // (zend_unary_op_produces_error(): `!` of a float, which
+                    // may be NAN, is left to run time)
+                    UnaryOp::BooleanNot if matches!(v, Value::Double(_)) => None,
+                    UnaryOp::BooleanNot => Some(if v.is_truthy() {
+                        Value::False
+                    } else {
+                        Value::True
+                    }),
+                    UnaryOp::BitwiseNot => match v {
+                        Value::Long(n) => Some(Value::Long(!n)),
+                        Value::String(s) => Some(Value::String(PhpString::from_vec(
+                            s.as_bytes().iter().map(|c| !c).collect(),
+                        ))),
+                        Value::Double(f) if f.is_finite() && f.fract() == 0.0 && f.abs() < 9.2e18 => {
+                            Some(Value::Long(!(f as i64)))
+                        }
+                        _ => None,
+                    },
+                    _ => {
+                        let m = Value::Long(if *op == UnaryOp::Negate { -1 } else { 1 });
+                        Self::zend_ct_binop(BinaryOp::Mul, &v, &m)
+                    }
+                };
+                match r {
+                    Some(v) => fold(v),
+                    None => rebuilt(),
+                }
+            }
+            // zend_try_ct_eval_cast()
+            ExprKind::Cast(ty, inner) => {
+                let i2 = sub(self, inner);
+                let i = i2.as_ref().unwrap_or(inner);
+                let rebuilt = || {
+                    i2.as_ref().map(|i| Expr {
+                        kind: ExprKind::Cast(*ty, Box::new(i.clone())),
+                        span,
+                    })
+                };
+                let Some(v) = Self::ast_zval(i) else {
+                    return rebuilt();
+                };
+                let r = Self::ct_cast_value(*ty, v);
+                match r {
+                    Some(v) => fold(v),
+                    None => rebuilt(),
+                }
+            }
+            ExprKind::NullCoalesce { left, right } => {
+                let l2 = sub(self, left);
+                let l = l2.as_ref().unwrap_or(left);
+                match Self::ast_zval(l) {
+                    None => {
+                        let r2 = sub(self, right);
+                        if l2.is_none() && r2.is_none() {
+                            return None;
+                        }
+                        Some(Expr {
+                            kind: ExprKind::NullCoalesce {
+                                left: Box::new(l.clone()),
+                                right: Box::new(r2.unwrap_or_else(|| (**right).clone())),
+                            },
+                            span,
+                        })
+                    }
+                    Some(Value::Null) => {
+                        let r2 = sub(self, right);
+                        Some(r2.unwrap_or_else(|| (**right).clone()))
+                    }
+                    Some(_) => Some(l.clone()),
+                }
+            }
+            ExprKind::Ternary {
+                condition,
+                if_true,
+                if_false,
+            } => {
+                let c2 = sub(self, condition);
+                let c = c2.as_ref().unwrap_or(condition);
+                let Some(cv) = Self::ast_zval(c) else {
+                    let t2 = if_true.as_ref().and_then(|t| sub(self, t));
+                    let f2 = sub(self, if_false);
+                    if c2.is_none() && t2.is_none() && f2.is_none() {
+                        return None;
+                    }
+                    return Some(Expr {
+                        kind: ExprKind::Ternary {
+                            condition: Box::new(c.clone()),
+                            if_true: t2.map(Box::new).or_else(|| if_true.clone()),
+                            if_false: Box::new(f2.unwrap_or_else(|| (**if_false).clone())),
+                        },
+                        span,
+                    });
+                };
+                let chosen: Expr = if self.ct_truthy(&cv, line) {
+                    match if_true {
+                        Some(t) => (**t).clone(),
+                        None => c.clone(),
+                    }
+                } else {
+                    (**if_false).clone()
+                };
+                Some(sub(self, &chosen).unwrap_or(chosen))
+            }
+            ExprKind::ArrayAccess {
+                array,
+                index: Some(index),
+            } => {
+                let a2 = sub(self, array);
+                let i2 = sub(self, index);
+                let a = a2.as_ref().unwrap_or(array);
+                let i = i2.as_ref().unwrap_or(index);
+                let rebuilt = || {
+                    (a2.is_some() || i2.is_some()).then(|| Expr {
+                        kind: ExprKind::ArrayAccess {
+                            array: Box::new(a.clone()),
+                            index: Some(Box::new(i.clone())),
+                        },
+                        span,
+                    })
+                };
+                let (Some(av), Some(iv)) = (Self::ast_zval(a), Self::ast_zval(i)) else {
+                    return rebuilt();
+                };
+                let probe = Expr {
+                    kind: ExprKind::ArrayAccess {
+                        array: Box::new(Self::value_to_expr(&av, span)?),
+                        index: Some(Box::new(Self::value_to_expr(&iv, span)?)),
+                    },
+                    span,
+                };
+                match Self::zend_ct_value(&probe, true) {
+                    Some(v) => fold(v),
+                    None => rebuilt(),
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// zend_try_ct_eval_binary_op(): None when zend_binary_op_produces_error().
+    #[inline(never)]
+    fn zend_ct_binop(op: BinaryOp, a: &Value, b: &Value) -> Option<Value> {
+        let bv = |c: bool| if c { Value::True } else { Value::False };
+        let is_arr = |v: &Value| matches!(v, Value::Array(_));
+        let numeric = |v: &Value| match v {
+            Value::String(s) => crate::value::parse_numeric_string(s.as_bytes()).is_some(),
+            _ => true,
+        };
+        let long_ok = |v: &Value| match v {
+            Value::Double(f) => f.is_finite() && f.fract() == 0.0 && f.abs() < 9.2e18,
+            Value::String(s) => match crate::value::parse_numeric_string(s.as_bytes()) {
+                Some(f) => f.fract() == 0.0 && f.abs() < 9.2e18,
+                None => false,
+            },
+            _ => true,
+        };
+        match op {
+            BinaryOp::Equal => return Some(bv(a.compare_zend(b) == 0)),
+            BinaryOp::NotEqual => return Some(bv(a.compare_zend(b) != 0)),
+            BinaryOp::Identical => return Some(bv(a.identical(b))),
+            BinaryOp::NotIdentical => return Some(bv(!a.identical(b))),
+            BinaryOp::Less => return Some(bv(a.compare_zend(b) < 0)),
+            BinaryOp::LessEqual => return Some(bv(a.compare_zend(b) <= 0)),
+            BinaryOp::Greater => return Some(bv(b.compare_zend(a) < 0)),
+            BinaryOp::GreaterEqual => return Some(bv(b.compare_zend(a) <= 0)),
+            BinaryOp::Spaceship => return Some(Value::Long(a.compare_zend(b).signum())),
+            BinaryOp::LogicalXor => return Some(bv(a.is_truthy() != b.is_truthy())),
+            BinaryOp::Concat => {
+                return (!is_arr(a) && !is_arr(b)).then(|| a.concat(b));
+            }
+            _ => {}
+        }
+        if is_arr(a) || is_arr(b) {
+            return (op == BinaryOp::Add && is_arr(a) && is_arr(b)).then(|| a.add(b));
+        }
+        let bitwise = matches!(op, BinaryOp::BitwiseAnd | BinaryOp::BitwiseOr | BinaryOp::BitwiseXor);
+        if bitwise && matches!(a, Value::String(_)) && matches!(b, Value::String(_)) {
+            let (x, y) = (a.to_php_string(), b.to_php_string());
+            let (x, y) = (x.as_bytes(), y.as_bytes());
+            let out: Vec<u8> = match op {
+                BinaryOp::BitwiseAnd => x.iter().zip(y).map(|(p, q)| p & q).collect(),
+                _ => {
+                    let (long, short) = if x.len() >= y.len() { (x, y) } else { (y, x) };
+                    long.iter()
+                        .enumerate()
+                        .map(|(i, p)| match short.get(i) {
+                            Some(q) if op == BinaryOp::BitwiseOr => p | q,
+                            Some(q) => p ^ q,
+                            None if op == BinaryOp::BitwiseOr => *p,
+                            None => return 0,
+                        })
+                        .take(if op == BinaryOp::BitwiseXor { short.len() } else { long.len() })
+                        .collect()
+                }
+            };
+            return Some(Value::String(PhpString::from_vec(out)));
+        }
+        if !numeric(a) || !numeric(b) {
+            return None;
+        }
+        let int_op = bitwise || matches!(op, BinaryOp::Mod | BinaryOp::ShiftLeft | BinaryOp::ShiftRight);
+        if int_op && (!long_ok(a) || !long_ok(b)) {
+            return None;
+        }
+        match op {
+            BinaryOp::Add => Some(a.add(b)),
+            BinaryOp::Sub => Some(a.sub(b)),
+            BinaryOp::Mul => Some(a.mul(b)),
+            BinaryOp::Div if b.to_double() != 0.0 => a.div(b).ok(),
+            BinaryOp::Mod if b.to_long() != 0 => a.modulo(b).ok(),
+            BinaryOp::Pow if !(a.to_double() == 0.0 && b.to_double() < 0.0) => Some(a.pow(b)),
+            BinaryOp::BitwiseAnd => Some(Value::Long(a.to_long() & b.to_long())),
+            BinaryOp::BitwiseOr => Some(Value::Long(a.to_long() | b.to_long())),
+            BinaryOp::BitwiseXor => Some(Value::Long(a.to_long() ^ b.to_long())),
+            BinaryOp::ShiftLeft | BinaryOp::ShiftRight => {
+                let (x, n) = (a.to_long(), b.to_long());
+                if n < 0 {
+                    return None;
+                }
+                Some(Value::Long(match op {
+                    BinaryOp::ShiftLeft if n >= 64 => 0,
+                    BinaryOp::ShiftLeft => x.wrapping_shl(n as u32),
+                    _ if n >= 64 => if x < 0 { -1 } else { 0 },
+                    _ => x >> n,
+                }))
+            }
+            _ => None,
         }
     }
 
@@ -14138,62 +14851,6 @@ impl Compiler {
             line,
         });
         OperandType::Tmp(t)
-    }
-
-    /// Whether zend_compile folds `e` into a constant: comparisons and
-    /// concatenations of scalar literals, short-circuits decided by a
-    /// literal (beyond what eval_const_expr() computes).
-    #[inline(never)]
-    fn ct_folded(e: &Expr) -> bool {
-        fn scalar(e: &Expr) -> Option<bool> {
-            // the literal's truthiness
-            match &e.kind {
-                ExprKind::Int(n) => Some(*n != 0),
-                ExprKind::Float(f) => Some(*f != 0.0),
-                ExprKind::String(s) => Some(!(s.is_empty() || s.as_slice() == b"0")),
-                ExprKind::True => Some(true),
-                ExprKind::False | ExprKind::Null => Some(false),
-                _ => None,
-            }
-        }
-        match &e.kind {
-            ExprKind::BinaryOp { left, op, right } => match op {
-                BinaryOp::Equal
-                | BinaryOp::NotEqual
-                | BinaryOp::Identical
-                | BinaryOp::NotIdentical
-                | BinaryOp::Less
-                | BinaryOp::Greater
-                | BinaryOp::LessEqual
-                | BinaryOp::GreaterEqual
-                | BinaryOp::Spaceship
-                | BinaryOp::Concat
-                | BinaryOp::LogicalXor => scalar(left).is_some() && scalar(right).is_some(),
-                BinaryOp::BooleanAnd | BinaryOp::LogicalAnd => match scalar(left) {
-                    Some(false) => true,
-                    Some(true) => scalar(right).is_some(),
-                    None => false,
-                },
-                BinaryOp::BooleanOr | BinaryOp::LogicalOr => match scalar(left) {
-                    Some(true) => true,
-                    Some(false) => scalar(right).is_some(),
-                    None => false,
-                },
-                _ => false,
-            },
-            // (zend_try_ct_eval_unary_op(): ~ of a string, ! of a scalar)
-            ExprKind::UnaryOp {
-                op: UnaryOp::BitwiseNot,
-                operand,
-                ..
-            } => matches!(operand.kind, ExprKind::String(_) | ExprKind::Int(_)),
-            ExprKind::UnaryOp {
-                op: UnaryOp::BooleanNot,
-                operand,
-                ..
-            } => scalar(operand).is_some(),
-            _ => false,
-        }
     }
 
     /// zend_compile_property_hooks(): an interface's hooks are abstract and
@@ -16644,6 +17301,31 @@ impl Compiler {
                     if unqualified == b"sprintf"
                         && (self.current_namespace.is_empty() || func_lower.starts_with(b"\\"))
                     {
+                        // (zend_compile_func_sprintf() first runs
+                        // zend_eval_const_expr() on the format)
+                        if !std::mem::take(&mut self.sprintf_prepass_done)
+                            && !args.is_empty()
+                            && args.iter().all(|a| a.name.is_none() && !a.unpack)
+                            && !self.in_param_default
+                        {
+                            let fmt = self.zend_eval_const_expr_ast(&args[0].value);
+                            if let Some(e) = self.prepass_error.take() {
+                                return Err(e);
+                            }
+                            if let Some(fmt) = fmt {
+                                let mut args2 = args.clone();
+                                args2[0].value = fmt;
+                                self.sprintf_prepass_done = true;
+                                let call = Expr {
+                                    kind: ExprKind::FunctionCall {
+                                        name: name.clone(),
+                                        args: args2,
+                                    },
+                                    span: expr.span,
+                                };
+                                return self.compile_expr(&call);
+                            }
+                        }
                         if let Some(r) = self.compile_sprintf_rope(args, expr.span.line)? {
                             return Ok(r);
                         }
@@ -17277,6 +17959,22 @@ impl Compiler {
             }
 
             ExprKind::Array(elements) => {
+                // zend_try_ct_eval_array(): each element (and key) goes
+                // through zend_eval_const_expr() first.
+                if !std::mem::take(&mut self.array_prepass_done) {
+                    let new_elems = self.array_elements_ct_pass(elements);
+                    if let Some(e) = self.prepass_error.take() {
+                        return Err(e);
+                    }
+                    if let Some(new_elems) = new_elems {
+                        self.array_prepass_done = true;
+                        let folded = Expr {
+                            kind: ExprKind::Array(new_elems),
+                            span: expr.span,
+                        };
+                        return self.compile_expr(&folded);
+                    }
+                }
                 let arr_tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
                     opcode: OpCode::ArrayNew,
