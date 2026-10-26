@@ -45148,8 +45148,12 @@ impl Vm {
                     // an array or object assigned to it meanwhile ends the loop
                     // with a warning. (An array assigned to it is not followed:
                     // goro's in-place array operations may replace the array.)
+                    // (`foreach ($v as &$v)`: the variable is rebound to each
+                    // element, the iterator keeps the array's reference)
                     if let (Some(&src), true) = (
-                        foreach_ref_src.get(&iter_idx),
+                        foreach_ref_src
+                            .get(&iter_idx)
+                            .filter(|&&s| op.result != OperandType::Cv(s)),
                         foreach_ref_arrays.contains_key(&iter_idx),
                     ) {
                         match cvs.get(src as usize).map(|v| v.deref()) {
