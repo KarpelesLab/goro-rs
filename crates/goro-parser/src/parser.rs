@@ -86,6 +86,8 @@ pub struct Parser {
     /// Nesting of speculate(): what is parsed may be parsed again, so
     /// advance_take_bytes() copies the payloads instead of taking them.
     speculative: u32,
+    /// A `yield` / `yield from` was parsed (Program::has_yield).
+    saw_yield: bool,
 }
 
 /// See Parser::stack_nesting: the levels in between use far less than the
@@ -281,6 +283,7 @@ impl Parser {
             last_group_close: usize::MAX,
             stack_nesting: 0,
             speculative: 0,
+            saw_yield: false,
         }
     }
 
@@ -698,7 +701,10 @@ impl Parser {
             }
             statements.push(stmt);
         }
-        Ok(Program { statements })
+        Ok(Program {
+            statements,
+            has_yield: self.saw_yield,
+        })
     }
 
     fn parse_attributes(&mut self) -> ParseResult<Vec<Attribute>> {
@@ -7101,6 +7107,7 @@ impl Parser {
                 })
             }
             TokenKind::Yield => {
+                self.saw_yield = true;
                 self.advance();
                 // Tokens after which yield is bare (no value follows). Includes
                 // statement/expr terminators and ALL binary operators that bind
@@ -7168,6 +7175,7 @@ impl Parser {
                 }
             }
             TokenKind::YieldFrom => {
+                self.saw_yield = true;
                 self.advance();
                 let value = self.parse_expression()?;
                 Ok(Expr {

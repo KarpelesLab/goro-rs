@@ -10,9 +10,21 @@ pub struct Attribute {
     /// Whether the attribute has an argument list (`#[A()]` vs `#[A]`).
     pub has_args: bool,
 }
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Program {
     pub statements: Vec<Statement>,
+    /// Whether a `yield` was parsed: when false no function of the program
+    /// is a generator.
+    pub has_yield: bool,
+}
+
+// (as derived, without has_yield: what the statements tell)
+impl std::fmt::Debug for Program {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Program")
+            .field("statements", &self.statements)
+            .finish()
+    }
 }
 #[derive(Debug, Clone)]
 pub struct Statement {

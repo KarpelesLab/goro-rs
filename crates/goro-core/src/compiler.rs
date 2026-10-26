@@ -492,6 +492,9 @@ fn push_pending_compile_warning(msg: String, line: u32) {
 /// E_DEPRECATED (see `Vm::emit_compile_diagnostic`).
 pub const COMPILE_DEPRECATED_TAG: &str = "\u{1}Deprecated:";
 
+/// See Compiler::expr_nesting.
+const EXPR_ROOM_CHECK_EVERY: u32 = 4;
+
 /// A compile-time deprecation reported with the compile warnings.
 fn push_compile_deprecated(msg: String, line: u32) {
     push_compile_warning(format!("{}{}", COMPILE_DEPRECATED_TAG, msg), line);
@@ -797,6 +800,9 @@ pub struct Compiler {
     /// The expression compiled next is the base of a chain element
     /// (`X` of `X->p`, `X[k]`, `X->m()`), not a chain of its own.
     chain_base: bool,
+    /// Nesting of compile_expr(): every EXPR_ROOM_CHECK_EVERY-th level
+    /// makes sure of native stack room.
+    expr_nesting: u32,
     /// The regions with an active exception handler enclosing the code
     /// being compiled (innermost last): the offset of the TryBegin that
     /// pushes it, and whether it leads to a finally block.
@@ -1112,6 +1118,7 @@ impl Compiler {
             goto_finally_paths: Vec::new(),
             nullsafe_chain: None,
             chain_base: false,
+            expr_nesting: 0,
             handler_regions: Vec::new(),
             label_handler_paths: HashMap::new(),
             goto_handler_paths: Vec::new(),
@@ -3174,7 +3181,9 @@ impl Compiler {
         let saved_ticks = TICKS.with(|t| t.replace(0));
         let pending_base = PENDING_COMPILE_DIAGNOSTICS.with(|w| w.borrow().len());
         COMPILE_TIME_BINDS.with(|b| *b.borrow_mut() = None);
+        let saved_has_yield = PROGRAM_HAS_YIELD.with(|y| y.replace(program.has_yield));
         let r = self.compile_file(program);
+        PROGRAM_HAS_YIELD.with(|y| y.set(saved_has_yield));
         TICKS.with(|t| t.set(saved_ticks));
         // (a compiled file reports its diagnostics with its warnings)
         if r.is_ok() {
@@ -3210,7 +3219,11 @@ impl Compiler {
             .map(|st| st as *const Statement as usize)
             .collect();
         // Reject yield/yield-from at script top level (must appear inside a function).
-        if let Some(line) = find_top_level_yield(&program.statements) {
+        if let Some(line) = program
+            .has_yield
+            .then(|| find_top_level_yield(&program.statements))
+            .flatten()
+        {
             return Err(CompileError {
                 message: "The \"yield\" expression can only be used inside a function".into(),
                 line,
@@ -5664,7 +5677,7 @@ impl Compiler {
                 }
 
                 // Check if this function contains yield (making it a generator)
-                let is_generator = stmts_contain_yield(body);
+                let is_generator = body_is_generator(body);
 
                 // Prefix function name with namespace
                 let qualified_name = self.prefix_with_namespace(name);
@@ -8019,7 +8032,7 @@ impl Compiler {
                                         let global_id = next_closure_id();
                                         let closure_name =
                                             format!("__closure_{}", global_id).into_bytes();
-                                        let is_generator = stmts_contain_yield(closure_body);
+                                        let is_generator = body_is_generator(closure_body);
                                         // Compute display_name with no method context (property default).
                                         let display_name = {
                                             let mut s = b"{closure:".to_vec();
@@ -8381,8 +8394,7 @@ impl Compiler {
                                 // The get hook's return type is the property type.
                                 hook_compiler.op_array.return_type = prop_type.clone();
                                 hook_compiler.op_array.returns_by_ref = *get_hook_by_ref;
-                                hook_compiler.op_array.is_generator =
-                                    stmts_contain_yield(hook_body);
+                                hook_compiler.op_array.is_generator = body_is_generator(hook_body);
                                 hook_compiler.source_file = self.source_file.clone();
                                 hook_compiler.current_class = Some(qualified_name.clone());
                                 hook_compiler.current_parent_class = class.parent.clone();
@@ -9670,7 +9682,7 @@ impl Compiler {
 
                             if let Some(body_stmts) = method_body {
                                 // Check if method body contains yield
-                                let method_is_generator = stmts_contain_yield(body_stmts);
+                                let method_is_generator = body_is_generator(body_stmts);
 
                                 let mut method_compiler = Compiler::new();
                                 method_compiler.current_namespace = self.current_namespace.clone();
@@ -10681,7 +10693,7 @@ impl Compiler {
                                         let global_id = next_closure_id();
                                         let closure_name =
                                             format!("__closure_{}", global_id).into_bytes();
-                                        let is_generator = stmts_contain_yield(closure_body);
+                                        let is_generator = body_is_generator(closure_body);
                                         // Const-expression closures have no surrounding method context.
                                         let display_name = {
                                             let mut s = b"{closure:".to_vec();
@@ -14585,14 +14597,26 @@ impl Compiler {
                 line: expr.span.line,
             });
         }
-        let r = crate::stack::with_room(|| self.compile_expr_inner(expr)).unwrap_or_else(|_| {
+        // (the levels in between use far less than the room a check leaves)
+        self.expr_nesting += 1;
+        let r = if self.expr_nesting % EXPR_ROOM_CHECK_EVERY == 1 {
+            self.compile_expr_with_room(expr)
+        } else {
+            self.compile_expr_inner(expr)
+        };
+        self.expr_nesting -= 1;
+        crate::stack::leave_compile();
+        r
+    }
+
+    #[inline(never)]
+    fn compile_expr_with_room(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        crate::stack::with_room(|| self.compile_expr_inner(expr)).unwrap_or_else(|_| {
             Err(CompileError {
                 message: "Maximum nesting depth exceeded".into(),
                 line: expr.span.line,
             })
-        });
-        crate::stack::leave_compile();
-        r
+        })
     }
 
     fn compile_expr_inner(&mut self, expr: &Expr) -> CompileResult<OperandType> {
@@ -14608,7 +14632,14 @@ impl Compiler {
         {
             return self.compile_nullsafe_chain(expr);
         }
-        if self.memoize_mode == 0 && !self.in_const_expr && Self::needs_delayed_chain(expr) {
+        if self.memoize_mode == 0
+            && !self.in_const_expr
+            && matches!(
+                expr.kind,
+                ExprKind::PropertyAccess { .. } | ExprKind::ArrayAccess { .. }
+            )
+            && Self::needs_delayed_chain(expr)
+        {
             return self.compile_delayed_chain(expr);
         }
         if self.memoize_mode != 0
@@ -14617,7 +14648,15 @@ impl Compiler {
         {
             return self.compile_memoized_expr(expr);
         }
-        self.check_write_targets(expr)?;
+        if matches!(
+            expr.kind,
+            ExprKind::Assign { .. }
+                | ExprKind::CompoundAssign { .. }
+                | ExprKind::AssignRef { .. }
+                | ExprKind::UnaryOp { .. }
+        ) {
+            self.check_write_targets(expr)?;
+        }
         match &expr.kind {
             ExprKind::Int(n) => {
                 let idx = self.op_array.add_literal(Value::Long(*n));
@@ -18183,7 +18222,7 @@ impl Compiler {
                 let display_name = self.closure_display_name(expr.span.line);
 
                 // Check if closure body contains yield
-                let is_generator = stmts_contain_yield(body);
+                let is_generator = body_is_generator(body);
 
                 let mut closure_compiler = Compiler::new();
                 self.inherit_name_context(&mut closure_compiler);
@@ -18677,7 +18716,8 @@ impl Compiler {
                 }
                 closure_compiler.op_array.closure_capture_names = use_vars.clone();
                 closure_compiler.op_array.is_static_closure = *arrow_is_static;
-                closure_compiler.op_array.is_generator = expr_contains_yield(body);
+                closure_compiler.op_array.is_generator =
+                    PROGRAM_HAS_YIELD.with(|y| y.get()) && expr_contains_yield(body);
                 closure_compiler.op_array.closure_params =
                     params.iter().map(|p| (p.name.clone(), p.by_ref)).collect();
                 closure_compiler.op_array.param_count = (params.len() + use_vars.len()) as u32;
@@ -23066,6 +23106,18 @@ fn find_top_level_yield(stmts: &[Statement]) -> Option<u32> {
         }
     }
     None
+}
+
+thread_local! {
+    /// Program::has_yield of the program being compiled (true outside
+    /// compile()).
+    static PROGRAM_HAS_YIELD: Cell<bool> = const { Cell::new(true) };
+}
+
+/// Whether a function body of the program being compiled makes it a
+/// generator (a `yield` in it, not in a nested function).
+fn body_is_generator(stmts: &[Statement]) -> bool {
+    PROGRAM_HAS_YIELD.with(|y| y.get()) && stmts_contain_yield(stmts)
 }
 
 /// Check if a list of statements contains any yield expressions.
