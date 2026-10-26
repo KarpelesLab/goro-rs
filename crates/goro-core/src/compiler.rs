@@ -10614,7 +10614,7 @@ impl Compiler {
                                 .collect();
                             let const_attrs = self.compile_attributes_at(
                                 const_attributes,
-                                "",
+                                "class constant",
                                 const_expr.span.line,
                             );
                             let declared_type = const_type_hint.as_ref().map(|hint| {
@@ -10938,7 +10938,7 @@ impl Compiler {
                                 .map(|b| b.to_ascii_lowercase())
                                 .collect();
                             let case_attrs_compiled =
-                                self.compile_attributes_target(case_attributes, "constant");
+                                self.compile_attributes_target(case_attributes, "class constant");
                             class.constants_meta.insert(
                                 case_name.clone(),
                                 crate::object::ConstantMeta {
