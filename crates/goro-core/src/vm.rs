@@ -40327,11 +40327,17 @@ impl Vm {
                         {
                             // write_dimension without offset
                             self.spl_throw(b"Error", "[] operator not supported for SplFixedArray");
+                        } else if self.dim_rw_deferred_skips_set(obj) {
+                            // (offsetSet() is not called with the read's
+                            // exception pending)
                         } else if self
                             .spl_dim_docall(&class_lower, b"offsetset", &spl_args)
                             .is_none()
                         {
                             self.call_object_method(&arr_val, b"offsetset", &[Value::Null, val]);
+                        }
+                        if self.dim_rw_deferred.is_some() {
+                            self.raise_dim_rw_deferred();
                         }
                         if let Some(exc_val) = self.current_exception.take() {
                             if let Some((catch_target, _, _, _, eh_pc_depth)) =
@@ -40924,7 +40930,10 @@ impl Vm {
                                 });
                             }
                             let spl_args = vec![arr_val.clone(), key_val.clone(), val.clone()];
-                            if self
+                            if self.dim_rw_deferred_skips_set(obj) {
+                                // (offsetSet() is not called with the read's
+                                // exception pending)
+                            } else if self
                                 .spl_dim_docall(&class_lower, b"offsetset", &spl_args)
                                 .is_none()
                             {
@@ -66217,6 +66226,17 @@ impl Vm {
         }
         self.dim_rw_deferred = Some((self.call_depth, exc.clone()));
         true
+    }
+
+    /// The write-back of `$obj[k] op= v` whose read's exception is put aside
+    /// does not call an overriding offsetSet() (zend_call_function() calls
+    /// nothing with an exception pending).
+    #[inline(never)]
+    pub(crate) fn dim_rw_deferred_skips_set(&self, obj: &Rc<RefCell<PhpObject>>) -> bool {
+        self.dim_rw_deferred
+            .as_ref()
+            .is_some_and(|(d, _)| *d == self.call_depth)
+            && self.ao_user_has(obj, b"offsetset")
     }
 
     /// The write-back of `$obj[k] op= v` raises the exception its read put
