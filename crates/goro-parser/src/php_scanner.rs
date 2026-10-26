@@ -331,11 +331,14 @@ impl<'a> Scanner<'a> {
         self.line = line;
         self.line_pos = start;
         self.pos = end;
-        // (one pass the compiler vectorizes; "\r" are rare)
+        // (one pass the compiler vectorizes; "\r" are rare) (a number, a
+        // label, a variable or a name holds neither)
         let (mut lf, mut cr) = (0u32, 0u32);
-        for &c in self.s.get(start..end).unwrap_or_default() {
-            lf += u32::from(c == b'\n');
-            cr += u32::from(c == b'\r');
+        if !(T_LNUMBER..=T_VARIABLE).contains(&id) {
+            for &c in self.s.get(start..end).unwrap_or_default() {
+                lf += u32::from(c == b'\n');
+                cr += u32::from(c == b'\r');
+            }
         }
         self.counted = (start, end, lf, cr > 0);
         Some(ScanToken {
