@@ -1235,7 +1235,11 @@ impl Vm {
             _ => 0,
         };
         set_prop(obj, b"__spl_sorting", Value::Long(cur + 1));
+        // (zend_call_function(): the sort function's frame, called from
+        // internal code)
+        self.push_builtin_frame(fname, &args, 0);
         let res = self.spl_call_builtin(fname, &args);
+        self.pop_builtin_frame();
         set_prop(obj, b"__spl_sorting", Value::Long(cur));
         // Write the sorted table back.
         {
