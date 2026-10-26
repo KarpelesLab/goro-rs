@@ -23685,7 +23685,7 @@ impl Vm {
             std::mem::replace(&mut self.cv_frame_hint, std::ptr::null()),
             op_array,
         );
-        let cv_frame = self.register_cv_frame_hinted(op_array, hinted);
+        let cv_frame = self.register_cv_frame_for_call(op_array, hinted, &cvs);
         let prev_global = self.is_global_scope;
         self.is_global_scope = std::mem::take(&mut self.bind_next_frame);
         // The caller fetches the result of this by-ref function for writing.

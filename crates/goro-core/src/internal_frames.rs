@@ -828,6 +828,47 @@ impl Vm {
         op_array: &crate::opcode::OpArray,
         hinted: bool,
     ) -> bool {
+        self.register_cv_frame_ex(op_array, hinted, false)
+    }
+
+    /// register_cv_frame_hinted() for a call whose frame was given its CVs
+    /// `cvs`: a variadic function called with only extra named arguments
+    /// (no positional ones) has a frame showing them too.
+    #[inline]
+    pub(crate) fn register_cv_frame_for_call(
+        &mut self,
+        op_array: &crate::opcode::OpArray,
+        hinted: bool,
+        cvs: &[Value],
+    ) -> bool {
+        if self.register_cv_frame_ex(op_array, hinted, false) {
+            return true;
+        }
+        match op_array.variadic_param {
+            Some(v) => self.register_named_variadic_frame(op_array, hinted, cvs, v as usize),
+            None => false,
+        }
+    }
+
+    #[inline(never)]
+    fn register_named_variadic_frame(
+        &mut self,
+        op_array: &crate::opcode::OpArray,
+        hinted: bool,
+        cvs: &[Value],
+        v: usize,
+    ) -> bool {
+        let named = matches!(cvs.get(v), Some(Value::Array(a)) if !a.borrow().is_packed());
+        named && self.register_cv_frame_ex(op_array, hinted, true)
+    }
+
+    #[inline]
+    fn register_cv_frame_ex(
+        &mut self,
+        op_array: &crate::opcode::OpArray,
+        hinted: bool,
+        named_variadic: bool,
+    ) -> bool {
         // debug_backtrace() shows the frame's `$this` as its "object"
         let has_this = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
         let variadic = op_array.variadic_param.map_or(0, |v| v + 1);
@@ -839,8 +880,7 @@ impl Vm {
         };
         let frame = &self.call_stack[depth];
         if frame.0.is_empty()
-            // (a variadic function may have only extra named arguments)
-            || (frame.3.is_empty() && !has_this && variadic == 0)
+            || (frame.3.is_empty() && !has_this && !named_variadic)
             || self
                 .cv_frames
                 .last()
