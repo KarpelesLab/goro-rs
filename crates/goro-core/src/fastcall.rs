@@ -221,7 +221,12 @@ impl Vm {
                         *v = Value::Null;
                     }
                 }
+                let mut table = crate::object::PropTable::with_capacity(slots.len());
+                for s in slots {
+                    table.push(s);
+                }
                 let t = Rc::new(NewTemplate {
+                    tag: crate::object::class_tag_of(&ce.name),
                     props_ptr: ce.properties.as_ptr(),
                     props_len: ce.properties.len(),
                     methods_len: ce.methods.len(),
@@ -230,7 +235,7 @@ impl Vm {
                     class_idx: std::cell::Cell::new(
                         self.classes.get_index_of(name_lower).unwrap_or(usize::MAX),
                     ),
-                    slots,
+                    slots: table,
                     arrays,
                     has_destruct,
                     no_ctor: !ce.methods.contains_key(b"__construct".as_slice()),
@@ -251,8 +256,20 @@ impl Vm {
         op_array: &OpArray,
         ip: usize,
     ) -> Option<Rc<NewTemplate>> {
+        self.new_site(op_array, ip).map(|(t, _)| t)
+    }
+
+    /// new_site_template(), and whether the NEW is followed by the
+    /// constructor call new_skips_ctor_call() may skip (see
+    /// ctor_call_shape()).
+    #[inline]
+    pub(crate) fn new_site(
+        &self,
+        op_array: &OpArray,
+        ip: usize,
+    ) -> Option<(Rc<NewTemplate>, bool)> {
         // (its class's name lowercased then)
-        let t = op_array
+        let (t, shape) = op_array
             .sites()
             .borrow()
             .as_ref()
@@ -270,7 +287,33 @@ impl Vm {
                 .as_ref()
                 .is_some_and(|ct| Rc::ptr_eq(ct, &t) && t.fits(ce))
         });
-        same.then_some(t)
+        same.then_some((t, shape))
+    }
+
+    /// Whether the opcodes from `ip` (after a NEW) are its constructor
+    /// call without arguments: INIT_METHOD_CALL `__construct` on the new
+    /// object, then DO_FCALL (see new_skips_ctor_call()).
+    fn ctor_call_shape(op_array: &OpArray, ip: usize) -> bool {
+        let (Some(init), Some(fcall)) = (op_array.ops.get(ip), op_array.ops.get(ip + 1)) else {
+            return false;
+        };
+        let Some(new_op) = ip.checked_sub(1).and_then(|i| op_array.ops.get(i)) else {
+            return false;
+        };
+        if init.opcode != crate::opcode::OpCode::InitMethodCall
+            || fcall.opcode != crate::opcode::OpCode::DoFCall
+            || init.op1 != new_op.result
+            || !matches!(new_op.result, OperandType::Tmp(_))
+            || !matches!(fcall.op1, OperandType::Unused)
+            || !matches!(fcall.result, OperandType::Tmp(_) | OperandType::Unused)
+        {
+            return false;
+        }
+        match init.op2 {
+            OperandType::Const(c) => matches!(op_array.literals.get(c as usize),
+                Some(Value::String(s)) if s.as_bytes().eq_ignore_ascii_case(b"__construct")),
+            _ => false,
+        }
     }
 
     /// Whether the NEW before `ip` (that made `obj`, of a class without a
@@ -289,28 +332,16 @@ impl Vm {
         obj: &Value,
         has_destruct: bool,
     ) -> bool {
-        let (Some(init), Some(fcall)) = (op_array.ops.get(ip), op_array.ops.get(ip + 1)) else {
-            return false;
-        };
-        let new_op = &op_array.ops[ip - 1];
-        if init.opcode != crate::opcode::OpCode::InitMethodCall
-            || fcall.opcode != crate::opcode::OpCode::DoFCall
-            || init.op1 != new_op.result
-            || !matches!(new_op.result, OperandType::Tmp(_))
-            || !matches!(fcall.op1, OperandType::Unused)
-            || !matches!(fcall.result, OperandType::Tmp(_) | OperandType::Unused)
-            || self.observer.is_some()
-            || self.current_exception.is_some()
-            || self.error_handler_threw
+        Self::ctor_call_shape(op_array, ip) && self.skip_ctor_call(obj, has_destruct)
+    }
+
+    /// new_skips_ctor_call() of a NEW whose ctor_call_shape() is known:
+    /// the constructor call is skipped unless something watches or
+    /// interrupts it.
+    #[inline]
+    pub(crate) fn skip_ctor_call(&mut self, obj: &Value, has_destruct: bool) -> bool {
+        if self.observer.is_some() || self.current_exception.is_some() || self.error_handler_threw
         {
-            return false;
-        }
-        let ctor_named = match init.op2 {
-            OperandType::Const(c) => matches!(op_array.literals.get(c as usize),
-                Some(Value::String(s)) if s.as_bytes().eq_ignore_ascii_case(b"__construct")),
-            _ => false,
-        };
-        if !ctor_named {
             return false;
         }
         // (what the DO_FCALL of the missing constructor does)
@@ -328,12 +359,13 @@ impl Vm {
     }
 
     fn note_new_site(op_array: &OpArray, ip: usize, t: &Rc<NewTemplate>) {
+        let shape = Self::ctor_call_shape(op_array, ip + 1);
         op_array
             .sites()
             .borrow_mut()
             .get_or_insert_with(Default::default)
             .new_sites
-            .insert(ip as u32, Rc::clone(t));
+            .insert(ip as u32, (Rc::clone(t), shape));
     }
 
     /// new_object_fast() of a class whose NewTemplate is known: what it
@@ -347,20 +379,15 @@ impl Vm {
             }
         }
         let obj_id = self.alloc_object_id();
-        let mut obj = PhpObject::new(t.class_name.clone(), obj_id);
-        // (as init_declared_props() sets them; charged once, for all of them)
-        obj.properties.reserve(t.slots.len());
-        for (name, v) in &t.slots {
-            obj.properties.push((name.clone(), v.clone()));
-        }
-        obj.account();
+        // (as init_declared_props() sets them)
+        let mut props = t.slots.clone();
         // (an array default is shared copy-on-write; fits() saw it alive)
         for (i, a) in &t.arrays {
-            if let (Some(a), Some(slot)) = (a.upgrade(), obj.properties.get_mut(*i)) {
+            if let (Some(a), Some(slot)) = (a.upgrade(), props.get_mut(*i)) {
                 slot.1 = Value::Array(a);
             }
         }
-        obj.mark_declared();
+        let obj = PhpObject::new_declared(t.class_name.clone(), obj_id, props, t.tag);
         let rc = Rc::new(RefCell::new(obj));
         if let Some(h) = t.create_hook {
             h(self, &rc);

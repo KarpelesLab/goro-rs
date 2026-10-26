@@ -867,7 +867,9 @@ pub(crate) struct SiteCaches {
     pub(crate) spl_sites: IpMap<(Vec<u8>, crate::string::PhpString, bool)>,
     /// The template the NEWs of a user class last used (see
     /// Vm::new_object_fast).
-    pub(crate) new_sites: IpMap<std::rc::Rc<crate::object::NewTemplate>>,
+    /// (and whether the constructor call after the NEW may be skipped:
+    /// Vm::ctor_call_shape())
+    pub(crate) new_sites: IpMap<(std::rc::Rc<crate::object::NewTemplate>, bool)>,
     /// The unqualified namespaced function calls / `f(...)` callables that
     /// fell back to the global function: the namespaced (lowercase) name.
     /// Like the runtime cache of INIT_NS_FCALL_BY_NAME, a function of that

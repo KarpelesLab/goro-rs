@@ -3168,18 +3168,20 @@ impl crate::vm::Vm {
         }
         // (an object with a destructor is listed for it: the release points
         // the run skips would then matter)
-        let t = self
-            .new_site_template(op_array, ip)
-            .filter(|t| !t.has_destruct)?;
+        let (t, shape) = self
+            .new_site(op_array, ip)
+            .filter(|(t, _)| !t.has_destruct)?;
         let no_ctor = t.no_ctor;
         let obj = self.new_from_template(&t, op, tmps);
+        drop(t);
         // (the DO_FCALL's result slot is checked before the skip changes anything)
         let skip = no_ctor
+            && shape
             && op_array
                 .ops
                 .get(ip + 2)
                 .is_some_and(|f| tmp_writable(&f.result, tmps))
-            && self.new_skips_ctor_call(op_array, ip + 1, &obj, false);
+            && self.skip_ctor_call(&obj, false);
         // (write_operand() registers the object with the cycle collector)
         if let Value::Object(o) = &obj {
             crate::gc::track_object(o);

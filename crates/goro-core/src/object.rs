@@ -120,7 +120,9 @@ pub struct NewTemplate {
     pub(crate) class_idx: std::cell::Cell<usize>,
     /// The declared property slots and their defaults (an array default
     /// is a placeholder here, see `arrays`).
-    pub(crate) slots: Vec<(Vec<u8>, Value)>,
+    pub(crate) slots: PropTable,
+    /// The class_tag() of the class's objects.
+    pub(crate) tag: u32,
     /// The slots whose default is an array, shared copy-on-write with the
     /// class entry's default (not held here: the template adds no count).
     pub(crate) arrays: Vec<(
@@ -856,6 +858,28 @@ impl PhpObject {
         let t = class_tag_of(&self.class_name);
         self.tag.set(t);
         t
+    }
+
+    /// A new object of a class whose declared properties are `props`
+    /// (init_declared_props() then mark_declared()), whose class_tag() is
+    /// `tag`: memory_limit is charged once.
+    #[inline]
+    pub(crate) fn new_declared(class_name: Vec<u8>, object_id: u64, props: PropTable, tag: u32) -> Self {
+        let o = Self {
+            class_name,
+            properties: props,
+            object_id,
+            gc_tracked: GcFlag::default(),
+            dtor_listed: GcFlag::default(),
+            gc_buffered: GcSlot::default(),
+            weak_key: GcFlag::default(),
+            closure: None,
+            native: None,
+            mem: ObjectMem::new(),
+            tag: std::cell::Cell::new(tag),
+        };
+        o.mark_declared();
+        o
     }
 
     /// Give the object another class (its class_tag() follows).
