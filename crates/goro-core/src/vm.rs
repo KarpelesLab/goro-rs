@@ -30844,7 +30844,7 @@ impl Vm {
                                     )
                                 });
                             // ... named by the unpacked string keys.
-                            let builtin_named_refs: Vec<Vec<u8>> = match (&callee_by_ref, self.pending_calls.last()) {
+                            let builtin_named_refs: Vec<(Vec<u8>, u8)> = match (&callee_by_ref, self.pending_calls.last()) {
                                 (None, Some(call)) if matches!(val, Value::Array(_)) && pairs.iter().any(|p| p.0) => self
                                     .pending_builtin_name(call)
                                     .and_then(|n| crate::arginfo::lookup(&n))
@@ -30852,8 +30852,8 @@ impl Vm {
                                         fi.params
                                             .iter()
                                             .filter(|p| p.by_ref != 0 && !p.variadic)
-                                            .map(|p| p.name.as_bytes().to_vec())
-                                            .filter(|n| pairs.iter().any(|p| p.0 && p.1 == *n))
+                                            .map(|p| (p.name.as_bytes().to_vec(), p.by_ref))
+                                            .filter(|n| pairs.iter().any(|p| p.0 && p.1 == n.0))
                                             .collect()
                                     })
                                     .unwrap_or_default(),
@@ -30944,22 +30944,39 @@ impl Vm {
                                             break;
                                         }
                                         let mut v = v;
+                                        let builtin_ref_mode = builtin_named_refs
+                                            .iter()
+                                            .find(|n| n.0 == name_bytes)
+                                            .map_or(0, |n| n.1);
                                         // (an internal function's by-reference
                                         // array: the element's own copy)
                                         if let (true, Some(src_arr), Value::Array(a)) = (
-                                            array_handle_builtin
-                                                && builtin_named_refs.contains(&name_bytes),
+                                            array_handle_builtin && builtin_ref_mode != 0,
                                             source_arr_rc.as_ref(),
                                             &v,
                                         ) {
                                             let fresh = Value::Array(Rc::new(RefCell::new(
                                                 a.borrow().clone(),
                                             )));
+                                            // (ZEND_SEND_UNPACK leaves the element a
+                                            // reference)
                                             src_arr.borrow_mut().set(
                                                 ArrayKey::String(PhpString::from_vec(name_bytes.clone())),
-                                                fresh.clone(),
+                                                Value::Reference(Rc::new(RefCell::new(fresh.clone()))),
                                             );
                                             v = fresh;
+                                        } else if builtin_ref_mode == 1 && !from_traversable {
+                                            // An internal function's by-reference
+                                            // parameter binds to the element.
+                                            if let Some(src_arr) = source_arr_rc.as_ref() {
+                                                v = Self::unpack_bind_element_ref(
+                                                    src_arr,
+                                                    ArrayKey::String(PhpString::from_vec(
+                                                        name_bytes.clone(),
+                                                    )),
+                                                    v,
+                                                );
+                                            }
                                         }
                                         if let Some(pos) =
                                             callee_param_names.iter().position(|n| *n == name_bytes)
@@ -31020,9 +31037,12 @@ impl Vm {
                                                     let fresh = Value::Array(Rc::new(RefCell::new(
                                                         a.borrow().clone(),
                                                     )));
-                                                    src_arr
-                                                        .borrow_mut()
-                                                        .set(crate::array::ArrayKey::Int(k), fresh.clone());
+                                                    src_arr.borrow_mut().set(
+                                                        crate::array::ArrayKey::Int(k),
+                                                        Value::Reference(Rc::new(RefCell::new(
+                                                            fresh.clone(),
+                                                        ))),
+                                                    );
                                                     call.args.push(fresh);
                                                 }
                                                 _ => call.args.push(v),
@@ -66799,6 +66819,22 @@ impl Vm {
         }
         self.dim_rw_deferred = Some((self.call_depth, exc.clone()));
         true
+    }
+
+    /// ZEND_SEND_UNPACK of a by-reference parameter: the (separated) array's
+    /// element becomes a reference the parameter shares.
+    #[inline(never)]
+    fn unpack_bind_element_ref(src_arr: &Rc<RefCell<PhpArray>>, key: ArrayKey, v: Value) -> Value {
+        let r = match v {
+            Value::Reference(r) => r,
+            // (the element's array is separated by the write)
+            Value::Array(a) => Rc::new(RefCell::new(Value::Array(Rc::new(RefCell::new(
+                a.borrow().clone(),
+            ))))),
+            v => Rc::new(RefCell::new(v)),
+        };
+        src_arr.borrow_mut().set(key, Value::Reference(r.clone()));
+        Value::Reference(r)
     }
 
     /// SEPARATE_ARRAY() of the array argument unpacking binds by reference:
