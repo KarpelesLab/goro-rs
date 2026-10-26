@@ -31,6 +31,9 @@ pub struct Code {
     /// Name table followed by the byte code.
     pub block: Vec<u8>,
     pub code_start: usize,
+    /// JIT emulation: the (bracket, KET) offsets of the repeated groups,
+    /// computed on first use (see Matcher::jit_charge).
+    pub(crate) jit_loops: std::cell::OnceCell<Vec<(usize, usize)>>,
 }
 
 /// A compile error: PCRE2 error code and offset in the pattern.
@@ -436,6 +439,7 @@ impl Code {
             name_count: cb.names_found,
             block: Vec::new(),
             code_start: codestart,
+            jit_loops: std::cell::OnceCell::new(),
         };
 
         let mut pptr = 0usize;

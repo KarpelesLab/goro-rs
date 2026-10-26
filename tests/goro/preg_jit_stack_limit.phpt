@@ -18,6 +18,8 @@ foreach ([
     ['/^(?>(a))*$/', '', 'a', '', 3509],
     ['/^(a(?1)?)$/', '', 'a', '', 4915],
     ['/^(?:x(?=y)y)*$/', '', 'xy', '', 24574],
+    ['/^(?:[^,]*,)*[^,]*$/', '', 'ab,', '', 24574],
+    ['/^(?:a\s*)*$/', '', 'a', '', 8191],
 ] as [$re, $pre, $unit, $post, $n]) {
     $ok = preg_match($re, $pre . str_repeat($unit, $n) . $post);
     $over = preg_match($re, $pre . str_repeat($unit, $n + 1) . $post);
@@ -41,5 +43,7 @@ var_dump(preg_match('/^(?:a|b)*$/i', str_repeat('a', 8192)));
 /^(?>(a))*$/ 1 false JIT stack limit exhausted
 /^(a(?1)?)$/ 1 false JIT stack limit exhausted
 /^(?:x(?=y)y)*$/ 1 false JIT stack limit exhausted
+/^(?:[^,]*,)*[^,]*$/ 1 false JIT stack limit exhausted
+/^(?:a\s*)*$/ 1 false JIT stack limit exhausted
 int(1)
 int(1)

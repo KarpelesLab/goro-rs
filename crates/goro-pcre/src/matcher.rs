@@ -319,6 +319,8 @@ impl Drop for Matcher<'_> {
 
 struct Matcher<'a> {
     code: &'a [u8],
+    /// JIT emulation: the repeated groups' (bracket, KET) offsets.
+    jit_loops: &'a [(usize, usize)],
     subj: &'a [u8],
     tables: &'static [u8],
     frames: Vec<Frame>,
@@ -460,6 +462,20 @@ impl<'a> Matcher<'a> {
         const ITER: [u32; 13] = [2, 1, 2, 1, 1, 1, 2, 1, 0, 0, 0, 0, 0];
         let f = self.f;
         let w = match op {
+            // An iterator outside repeated groups keeps its backtracking
+            // data in a private slot, not on the stack.
+            OP_STAR..=OP_TYPEPOSUPTO
+            | OP_CLASS
+            | OP_NCLASS
+            | OP_XCLASS
+            | OP_REF
+            | OP_REFI
+            | OP_DNREF
+            | OP_DNREFI
+                if !self.jit_loops.iter().any(|&(s, e)| s < ecode && ecode < e) =>
+            {
+                0
+            }
             OP_STAR..=OP_TYPEPOSUPTO => ITER[((op - OP_STAR) % 13) as usize],
             OP_CLASS | OP_NCLASS => self.jit_cr_cost(ecode + 1 + 32),
             OP_XCLASS => self.jit_cr_cost(ecode + get(self.code, ecode + 1)),
@@ -3279,6 +3295,38 @@ fn mark_name(code: &[u8], p: usize) -> Option<Vec<u8>> {
 }
 
 impl Code {
+    /// The (bracket, KET) offsets of the groups repeated by KETRMAX or
+    /// KETRMIN.
+    fn find_loops(&self) -> Vec<(usize, usize)> {
+        let code = &self.block[..];
+        let utf = (self.overall_options & PCRE2_UTF) != 0;
+        let mut out = Vec::new();
+        let mut p = self.code_start;
+        while p < code.len() {
+            let c = code[p] as u32;
+            match c {
+                OP_END => break,
+                OP_ASSERT..=OP_SCOND => {
+                    let mut k = p;
+                    loop {
+                        k += get(code, k + 1);
+                        if code[k] as u32 != OP_ALT {
+                            break;
+                        }
+                    }
+                    if matches!(code[k] as u32, OP_KETRMAX | OP_KETRMIN) {
+                        out.push((p, k));
+                    }
+                    p += op_len(c as u8);
+                }
+                OP_XCLASS => p += get(code, p + 1),
+                OP_CALLOUT_STR => p += get(code, p + 1 + 2 * LINK_SIZE),
+                _ => p = skip_simple_item(code, p, utf),
+            }
+        }
+        out
+    }
+
     /// pcre2_match(): returns the number of captured pairs (>0), 0 if the
     /// ovector was too small, PCRE2_ERROR_NOMATCH or another negative error.
     pub fn match_at(
@@ -3409,6 +3457,11 @@ impl Code {
         ovec.reserve(16 * ovs);
         let mut m = Matcher {
             code: &self.block,
+            jit_loops: if jit_depth.is_some() {
+                self.jit_loops.get_or_init(|| self.find_loops())
+            } else {
+                &[]
+            },
             subj: subject,
             tables: self.tables,
             frames,
