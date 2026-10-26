@@ -22411,6 +22411,54 @@ impl Vm {
     /// argument by reference: what the general handler does then. Returns
     /// false, doing nothing, otherwise.
     #[inline(never)]
+    /// SEND_VAL (`op` of `op_array`) of a variable to a user function's
+    /// by-reference parameter (a call unknown at compile time, resolved
+    /// when it was set up): the variable is made a reference (null when
+    /// undefined) and sent, as the SEND_VAL handler does. False: nothing
+    /// was done.
+    #[inline(never)]
+    pub(crate) fn send_ref_cv_fast(
+        &mut self,
+        op_array: &OpArray,
+        op: &crate::opcode::Op,
+        cvs: &mut [Value],
+    ) -> bool {
+        let (OpCode::SendVal, OperandType::Cv(i)) = (op.opcode, op.op1) else {
+            return false;
+        };
+        let i = i as usize;
+        let fn_gen = self.user_functions.len() + 1;
+        let Some(call) = self.pending_calls.last() else {
+            return false;
+        };
+        if call.target.fn_gen != fn_gen
+            || call.target.user.is_none()
+            || !self
+                .call_user_fn(call)
+                .is_some_and(|f| arg_by_ref(f, call.args.len()))
+            || i >= cvs.len()
+            || op_array.cv_names.get(i).is_some_and(|n| n == b"GLOBALS")
+        {
+            return false;
+        }
+        let r = match &cvs[i] {
+            Value::Reference(r) => r.clone(),
+            v => {
+                let current = match v {
+                    Value::Undef => Value::Null,
+                    v => v.clone(),
+                };
+                let r = Rc::new(RefCell::new(current));
+                cvs[i] = Value::Reference(r.clone());
+                r
+            }
+        };
+        if let Some(call) = self.pending_calls.last_mut() {
+            call.args.push(Value::Reference(r));
+        }
+        true
+    }
+
     pub(crate) fn send_val_fast(
         &mut self,
         op: &crate::opcode::Op,

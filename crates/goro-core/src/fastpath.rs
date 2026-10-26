@@ -1072,6 +1072,57 @@ fn fetch_w_container(
     }
 }
 
+/// ASSIGN_REF of a variable to a variable (`$a = &$b`) whose previous
+/// value has nothing to release: `$b` becomes a reference (null when
+/// undefined) that `$a` is bound to, as the general handler binds them.
+#[inline(never)]
+fn fast_assign_ref_cv(op: &Op, cvs: &mut [Value], tmps: &mut [Value]) -> Fast {
+    let (OperandType::Cv(t), OperandType::Cv(v)) = (op.op1, op.op2) else {
+        return Fast::No;
+    };
+    let (t, v) = (t as usize, v as usize);
+    if t == v
+        || !cvs.get(t).is_some_and(is_plain_scalar)
+        || v >= cvs.len()
+        || !tmp_writable(&op.result, tmps)
+    {
+        return Fast::No;
+    }
+    let r = match &cvs[v] {
+        Value::Reference(r) => {
+            let Ok(mut b) = r.try_borrow_mut() else {
+                return Fast::No;
+            };
+            if matches!(*b, Value::Undef) {
+                *b = Value::Null;
+            }
+            drop(b);
+            r.clone()
+        }
+        cur => {
+            let cur = match cur {
+                Value::Undef => Value::Null,
+                c => c.clone(),
+            };
+            let r = Rc::new(RefCell::new(cur));
+            cvs[v] = Value::Reference(r.clone());
+            r
+        }
+    };
+    let result = match op.result {
+        OperandType::Tmp(_) => Some(r.borrow().clone()),
+        _ => None,
+    };
+    // (a plain value: nothing to release)
+    cvs[t] = Value::Reference(r);
+    if let Some(val) = result {
+        if !store_tmp(&op.result, val, tmps) {
+            return Fast::No;
+        }
+    }
+    Fast::Done
+}
+
 /// ARRAY_NEW (`[]`, the start of an array literal) into a temporary.
 #[inline(never)]
 fn fast_array_new(op: &Op, tmps: &mut [Value]) -> Fast {
@@ -1917,6 +1968,7 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::StaticVarInitOrJmp
             | OpCode::DeclareFunction
             | OpCode::MakeClosure
+            | OpCode::AssignRef
             // (a call whose arguments the general handlers sent: a lean
             // call, or a builtin's, see the DO_FCALL arm of run_fast_ops)
             | OpCode::DoFCall
@@ -2004,7 +2056,9 @@ impl crate::vm::Vm {
                 // (see the SEND_VAL handler).
                 OpCode::SendVal => {
                     let snapshot = send_snapshot(op_array, ip, op, cvs);
-                    if self.send_val_fast(op, cvs, tmps, literals, snapshot, false) {
+                    if self.send_val_fast(op, cvs, tmps, literals, snapshot, false)
+                        || (bound.is_none() && self.send_ref_cv_fast(op_array, op, cvs))
+                    {
                         Fast::Done
                     } else {
                         break 'run ip;
@@ -2423,6 +2477,8 @@ impl crate::vm::Vm {
                     Some(next) => Fast::Jump(next),
                     None => break 'run ip,
                 },
+                // `$a = &$b` (see fast_assign_ref_cv)
+                OpCode::AssignRef if bound.is_none() => fast_assign_ref_cv(op, cvs, tmps),
                 // The creation of a closure (see closure.rs).
                 OpCode::DeclareFunction if self.fast_declare_closure(op_array, op) => Fast::Done,
                 OpCode::MakeClosure => {
