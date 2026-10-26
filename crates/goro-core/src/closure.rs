@@ -1560,7 +1560,7 @@ impl Vm {
                 Err(format!(
                     "function \"{}\" not found or invalid function name",
                     // (printed with %s: a NUL ends it)
-                    crate::string::msg_str(&b.split(|&c| c == 0).next().unwrap_or_default())
+                    crate::string::msg_str(b.split(|&c| c == 0).next().unwrap_or_default())
                 ))
             }
             Value::Array(arr) => {

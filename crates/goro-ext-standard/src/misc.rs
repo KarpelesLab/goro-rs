@@ -4025,6 +4025,11 @@ fn walk_key_value(k: &ArrayKey) -> Value {
     }
 }
 
+thread_local! {
+    /// The nested arrays array_walk_recursive() is walking (by address).
+    static WALK_PROTECTED: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
 /// php_array_walk() for arrays: each element is made a reference (so by-ref
 /// callbacks write back) and the callback is invoked through the generic
 /// callable path, which handles by-value/by-ref parameters and arity.
@@ -4032,11 +4037,6 @@ fn walk_key_value(k: &ArrayKey) -> Value {
 /// `holder` is the variable (reference) the walked array lives in: as in
 /// php_array_walk(), it is reloaded after every callback, so that a callback
 /// replacing the array continues with the new one.
-thread_local! {
-    /// The nested arrays array_walk_recursive() is walking (by address).
-    static WALK_PROTECTED: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
-}
-
 fn php_array_walk_arr(
     vm: &mut Vm,
     arr: Rc<RefCell<PhpArray>>,
