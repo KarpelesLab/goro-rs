@@ -78,6 +78,10 @@ pub struct FuncInfo {
     /// The function's arginfo, when this is a different signature its zpp
     /// parses (zpp_stub_check()): null deprecations name its types.
     pub arginfo: Option<&'static FuncInfo>,
+    /// Per parameter (see zpp_check): the T_* bits of the plain values
+    /// (see fast_type_bit) the generic zpp checks take as they are, without
+    /// a coercion or anything else; 0 when they look at every value.
+    fast: Vec<u16>,
 }
 
 impl FuncInfo {
@@ -101,6 +105,25 @@ impl FuncInfo {
                 variadic: a.flags & A_VARIADIC != 0,
                 sensitive: a.flags & A_SENSITIVE != 0,
             })
+            .collect::<Vec<ArgInfo>>();
+        let fast = params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let m = p.mask;
+                if m & T_MIXED != 0 || (p.by_ref != 0 && m == 0) {
+                    // (taken as they are)
+                    u16::MAX
+                } else if p.by_ref == 0
+                    && m != 0
+                    && m & (T_CLASS | T_OBJECT | T_CALLABLE) == 0
+                    && !(i == 0 && f.name == "number_format")
+                {
+                    m
+                } else {
+                    0
+                }
+            })
             .collect();
         FuncInfo {
             name: f.name,
@@ -109,6 +132,7 @@ impl FuncInfo {
             required: f.required_args() as u8,
             stub: f,
             arginfo: None,
+            fast,
         }
     }
 
@@ -502,6 +526,23 @@ fn legacy_zpp_variadic(name: &str) -> bool {
         || name.starts_with("array_udiff")
         || name.starts_with("array_intersect")
         || name.starts_with("array_uintersect")
+}
+
+/// The T_* bit of an argument's type for FuncInfo::fast: of a plain value
+/// (not a reference, not undefined) of a type a scalar/array parameter may
+/// take; any other one has a bit of its own, that of no type.
+#[inline(always)]
+fn fast_type_bit(v: &Value) -> u16 {
+    match v {
+        Value::Null => T_NULL,
+        Value::False => T_FALSE,
+        Value::True => T_TRUE,
+        Value::Long(_) => T_INT,
+        Value::Double(_) => T_FLOAT,
+        Value::String(_) => T_STRING,
+        Value::Array(_) => T_ARRAY,
+        _ => 1 << 15,
+    }
 }
 
 /// The T_* bit of a (dereferenced) value's type.
@@ -1323,6 +1364,7 @@ impl Vm {
         (m & (T_CLASS | T_OBJECT | T_CALLABLE) != 0).then_some(Ok(()))
     }
 
+    #[inline]
     pub(crate) fn zpp_check(
         &mut self,
         info: &'static FuncInfo,
@@ -1334,14 +1376,54 @@ impl Vm {
     ) -> Result<(), ZppError> {
         let frame_at = self.zpp_frame_at.take();
         if flags & CHECK_ARITY != 0 {
-            if let Some(msg) = info.arity_error(args.len()) {
-                return Err(ZppError::Throw(b"ArgumentCountError", msg));
+            let n = args.len();
+            let in_range =
+                n >= info.required as usize && (n <= info.params.len() || info.is_variadic());
+            if !in_range {
+                if let Some(msg) = info.arity_error(n) {
+                    return Err(ZppError::Throw(b"ArgumentCountError", msg));
+                }
             }
         }
         if flags & CHECK_TYPES == 0 {
             return Ok(());
         }
-        for i in 0..args.len() {
+        // The arguments the checks below take as they are (see
+        // FuncInfo::fast), up to the first one they look at.
+        let fast = &info.fast;
+        let Some(&last) = fast.last() else {
+            return Ok(());
+        };
+        let variadic = info.is_variadic();
+        for (i, a) in args.iter().enumerate() {
+            let m = match fast.get(i) {
+                Some(&m) => m,
+                None if variadic => last,
+                // (past the parameters: nothing more is checked)
+                None => return Ok(()),
+            };
+            if m & fast_type_bit(a) == 0 {
+                return self.zpp_check_from(info, flags, args, orig, strict, line, frame_at, i);
+            }
+        }
+        Ok(())
+    }
+
+    /// zpp_check() from argument `start` on (those before it are checked).
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn zpp_check_from(
+        &mut self,
+        info: &'static FuncInfo,
+        flags: u8,
+        args: &mut [Value],
+        orig: &mut Option<Vec<Value>>,
+        strict: bool,
+        line: u32,
+        frame_at: Option<u32>,
+        start: usize,
+    ) -> Result<(), ZppError> {
+        for i in start..args.len() {
             let Some(p) = info.param(i) else { break };
             let number = zpp_number_param(info, i);
             let m = if number { T_INT | T_FLOAT } else { p.mask };
