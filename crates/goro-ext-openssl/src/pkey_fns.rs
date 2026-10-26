@@ -178,10 +178,7 @@ pub fn from_zval(
         let s = match &val {
             Value::String(s) => s.clone(),
             // (zval_try_get_string(): a non-Stringable object throws)
-            other => match vm.value_to_string_checked(other) {
-                Ok(s) => s,
-                Err(e) => return Err(e),
-            },
+            other => vm.value_to_string_checked(other)?,
         };
         let bytes = s.as_bytes();
         let is_file = bytes.len() > 7 && &bytes[..7] == b"file://";
