@@ -440,7 +440,8 @@ impl Vm {
         if !f.display_name.is_empty() {
             // (a closure is qualified by its scope: Class::{closure:...})
             if let Some(sc) = f.scope_class.as_ref().filter(|_| {
-                crate::closure::is_closure_fn_name(&f.name) && f.display_name.starts_with(b"{closure")
+                crate::closure::is_closure_fn_name(&f.name)
+                    && f.display_name.starts_with(b"{closure")
             }) {
                 match self.classes.get(sc) {
                     Some(c) => push_lossy(out, &c.name),
