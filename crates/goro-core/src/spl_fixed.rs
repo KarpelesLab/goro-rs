@@ -18,7 +18,11 @@ fn storage(obj: &Rc<RefCell<PhpObject>>) -> Rc<RefCell<PhpArray>> {
         return a;
     }
     let a = Rc::new(RefCell::new(PhpArray::new()));
-    let mut ob = obj.borrow_mut();
+    // (an object made without its constructor has no storage yet; a caller
+    // that is reading it, e.g. var_dump(), just sees it empty)
+    let Ok(mut ob) = obj.try_borrow_mut() else {
+        return a;
+    };
     ob.set_property_slice(b"__spl_array", Value::Array(a.clone()));
     ob.set_property_slice(b"__spl_size", Value::Long(0));
     a

@@ -3113,6 +3113,8 @@ pub fn reflection_class_method(
                 b"generator",
                 b"fiber",
                 b"closure",
+                b"weakreference",
+                b"weakmap",
                 b"dom\\htmldocument",
                 b"dom\\xmldocument",
                 b"uri\\rfc3986\\uri",
@@ -3160,6 +3162,32 @@ pub fn reflection_class_method(
                 for (name, default) in props {
                     let resolved = vm.resolve_deferred_value(&default);
                     new_obj.set_property(name, resolved);
+                }
+            }
+            // zend_default_exception_new(): file, line and trace are the
+            // creation site's.
+            if class_lower == b"exception"
+                || class_lower == b"error"
+                || crate::vm::is_builtin_subclass(&class_lower, b"exception")
+                || crate::vm::is_builtin_subclass(&class_lower, b"error")
+                || vm.class_extends_any(&class_lower, &[b"exception", b"error"])
+            {
+                if !new_obj.has_property(b"message") {
+                    new_obj.set_property(b"message".to_vec(), Value::String(PhpString::empty()));
+                }
+                if !new_obj.has_property(b"code") {
+                    new_obj.set_property(b"code".to_vec(), Value::Long(0));
+                }
+                new_obj.set_property(
+                    b"file".to_vec(),
+                    Value::String(PhpString::from_string(vm.current_file.to_string())),
+                );
+                new_obj.set_property(b"line".to_vec(), Value::Long(vm.current_line as i64));
+                new_obj.throwable_set(b"previous", Value::Null);
+                let trace = vm.build_exception_trace();
+                new_obj.throwable_set(b"trace", trace);
+                if vm.class_extends(&class_lower, b"errorexception") {
+                    new_obj.set_property(b"severity".to_vec(), Value::Long(1));
                 }
             }
             let rc = Rc::new(RefCell::new(new_obj));
