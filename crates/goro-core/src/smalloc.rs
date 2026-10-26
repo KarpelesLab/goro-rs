@@ -102,8 +102,12 @@ mod region {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// What a thread takes at a time (and its alignment).
+    /// What a thread takes at a time.
     pub(super) const CHUNK: usize = 1 << 20;
+    /// The alignment of a chunk: a page. (Aligned to its size, a chunk
+    /// would make the system allocator map twice as much address space
+    /// as it hands out, which the binary's RLIMIT_AS counts.)
+    const ALIGN: usize = 4096;
     /// How many chunks may be taken (2 GiB).
     const MAX_CHUNKS: usize = 2048;
     static COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -116,7 +120,7 @@ mod region {
             return None;
         }
         // SAFETY: a valid non-zero layout (a power of two alignment).
-        let p = unsafe { System.alloc(Layout::from_size_align_unchecked(CHUNK, CHUNK)) };
+        let p = unsafe { System.alloc(Layout::from_size_align_unchecked(CHUNK, ALIGN)) };
         if p.is_null() {
             COUNT.fetch_sub(1, Ordering::Relaxed);
             return None;
