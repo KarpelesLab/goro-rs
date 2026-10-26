@@ -31,7 +31,6 @@ pub fn is_engine_fn_name(name: &[u8]) -> bool {
         b"__const_thunk_",
         b"__declare_const",
         b"__deferred_",
-        b"__goro_",
         b"__property_",
         b"__anonymous",
     ];

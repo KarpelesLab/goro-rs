@@ -56,6 +56,8 @@ const SPECIAL_ALWAYS: u8 = 0x80;
 /// the stack once sync_builtin_frames() made it (see LazyLean). None takes
 /// a callback.
 const FRAMELESS: &[&[u8]] = &[
+    // (in_array() of a constant haystack, see compiler::IN_ARRAY_OP_FN)
+    b"__goro_in_array",
     b"abs",
     b"addslashes",
     b"array_combine",
