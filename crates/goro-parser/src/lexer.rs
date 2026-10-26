@@ -38,6 +38,8 @@ pub struct Lexer<'a> {
     /// The token just scanned is a heredoc / nowdoc without interpolation:
     /// its line is the body's (the T_ENCAPSED_AND_WHITESPACE zval's).
     const_heredoc: bool,
+    /// tokenize() produced a `declare` token.
+    saw_declare: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -55,6 +57,7 @@ impl<'a> Lexer<'a> {
             trivia_buffer: Vec::new(),
             dq_term: b'"',
             const_heredoc: false,
+            saw_declare: false,
         }
     }
 
@@ -2175,6 +2178,11 @@ impl<'a> Lexer<'a> {
     }
 
     /// Tokenize the entire source into a vector
+    /// Whether tokenize() produced a `declare` token.
+    pub fn saw_declare(&self) -> bool {
+        self.saw_declare
+    }
+
     pub fn tokenize(&mut self) -> Vec<Token> {
         let _ = crate::take_lexer_error();
         let mut tokens = Vec::with_capacity(self.source.len() / 8 + 16);
@@ -2215,6 +2223,10 @@ impl<'a> Lexer<'a> {
                         }
                         TokenKind::OpenBrace => {
                             depth += 1;
+                            (0, false)
+                        }
+                        TokenKind::Declare => {
+                            self.saw_declare = true;
                             (0, false)
                         }
                         TokenKind::CloseBrace => {

@@ -352,18 +352,28 @@ pub struct Script {
 
 /// Lex a script file: with zend.multibyte on, through the encoding filters.
 pub fn lex_script(source: &[u8], skip_shebang: bool) -> Script {
+    // (with whether a `declare` was lexed: scan_encoding_declares() finds
+    // nothing else)
     let lex = |src: &[u8]| {
         let mut lexer = crate::Lexer::new(src);
         if skip_shebang {
             lexer.skip_shebang();
         }
-        lexer.tokenize()
+        let tokens = lexer.tokenize();
+        (tokens, lexer.saw_declare())
+    };
+    let scan_declares = |tokens: &[Token], declare: bool, settings: Option<&Settings>| {
+        if declare {
+            scan_encoding_declares(tokens, settings);
+        } else {
+            DECLARE_WARNINGS.with(|w| w.borrow_mut().clear());
+        }
     };
     let settings = MULTIBYTE.with(|m| m.borrow().clone());
     let Some(s) = settings else {
         set_halt_offset_map(None);
-        let tokens = lex(source);
-        scan_encoding_declares(&tokens, None);
+        let (tokens, declare) = lex(source);
+        scan_declares(&tokens, declare, None);
         return Script {
             tokens,
             source: source.to_vec(),
@@ -396,8 +406,8 @@ pub fn lex_script(source: &[u8], skip_shebang: bool) -> Script {
         }
         filters = Some(new);
     }
-    let mut tokens = lex(&scanned);
-    scan_encoding_declares(&tokens, Some(&s));
+    let (mut tokens, declare) = lex(&scanned);
+    scan_declares(&tokens, declare, Some(&s));
     let Some(f) = filters else {
         set_halt_offset_map(None);
         return Script {
