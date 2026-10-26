@@ -45341,6 +45341,24 @@ impl Vm {
                     };
                     let is_once = include_kind == 1 || include_kind == 3;
                     let is_require = include_kind == 2 || include_kind == 3;
+                    // php_stream_open_for_zend_ex(): include/require of an
+                    // empty path (include_once resolves it first).
+                    if !is_once && path_str.is_empty() {
+                        let exc =
+                            self.create_exception(b"ValueError", "Path must not be empty", op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            return Ok(Flow::Continue);
+                        }
+                        return Err(VmError {
+                            message: self.uncaught_exception_message(),
+                            line: op.line,
+                        });
+                    }
 
                     // Stream-wrapper URLs are used verbatim.
                     let resolved_stream_path = match self.include_resolve_hook {
