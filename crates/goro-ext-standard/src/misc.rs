@@ -6843,13 +6843,11 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if s.as_bytes().starts_with(b"__closure") && method_lower == b"__invoke" {
                 return Ok(Value::True);
             }
-            let lower: Vec<u8> = s
-                .as_bytes()
-                .iter()
-                .map(|c| c.to_ascii_lowercase())
-                .collect();
+            // (zend_lookup_class(): a leading backslash is not part of the name)
+            let name = s.as_bytes().strip_prefix(b"\\").unwrap_or(s.as_bytes());
+            let lower: Vec<u8> = name.iter().map(|c| c.to_ascii_lowercase()).collect();
             if !vm.classes.contains_key(&lower) && !vm.is_known_builtin_class(&lower) {
-                let name = s.as_bytes().to_vec();
+                let name = name.to_vec();
                 vm.try_autoload_class(&name);
                 if vm.current_exception.is_some() {
                     return Err(VmError {

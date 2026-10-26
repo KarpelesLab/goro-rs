@@ -1303,7 +1303,8 @@ fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bo
         _ => arg.to_php_string().to_msg_string(),
     };
 
-    // Strip leading backslash
+    // Strip leading backslash (the error message names the class as given)
+    let given_name = class_name.clone();
     let class_name = if let Some(stripped) = class_name.strip_prefix('\\') {
         stripped.to_string()
     } else {
@@ -1331,7 +1332,7 @@ fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bo
     }
 
     if !class_exists {
-        let err_msg = format!("Class \"{}\" does not exist", class_name);
+        let err_msg = format!("Class \"{}\" does not exist", given_name);
         let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
         vm.current_exception = Some(exc);
         return false;
@@ -1667,7 +1668,9 @@ fn reflection_method_construct_args(
         return true;
     };
 
-    let class_lower: Vec<u8> = class_name
+    // (zend_lookup_class(): a leading backslash is not part of the name)
+    let lookup_name = class_name.strip_prefix('\\').unwrap_or(&class_name);
+    let class_lower: Vec<u8> = lookup_name
         .as_bytes()
         .iter()
         .map(|b| b.to_ascii_lowercase())
@@ -1683,7 +1686,7 @@ fn reflection_method_construct_args(
     let mut is_user_class = vm.classes.contains_key(&class_lower);
     let mut is_builtin_class = vm.is_known_builtin_class(&class_lower);
     if !is_user_class && !is_builtin_class {
-        vm.try_autoload_class(class_name.as_bytes());
+        vm.try_autoload_class(lookup_name.as_bytes());
         if vm.current_exception.is_some() {
             return false;
         }
