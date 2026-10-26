@@ -27,6 +27,30 @@ pub fn has_byte(b: &[u8], c: u8) -> bool {
     tail.contains(&c)
 }
 
+/// The position of the first "::" in `s` (`s.windows(2).position(|w| w
+/// == b"::")`), skipping eight bytes at a time up to the first ':'.
+#[inline]
+pub fn find_double_colon(s: &[u8]) -> Option<usize> {
+    const LO: u64 = 0x0101_0101_0101_0101;
+    const HI: u64 = 0x8080_8080_8080_8080;
+    const PAT: u64 = LO.wrapping_mul(b':' as u64);
+    let mut i = 0;
+    while let Some(w) = s.get(i..i + 8) {
+        let x = u64::from_ne_bytes(w.try_into().unwrap()) ^ PAT;
+        if x.wrapping_sub(LO) & !x & HI != 0 {
+            break;
+        }
+        i += 8;
+    }
+    while i + 1 < s.len() {
+        if s[i] == b':' && s[i + 1] == b':' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// `a == b` of short byte strings without a call of memcmp: a few word
 /// loads (a name, an array key or a property name is usually short).
 #[inline]
@@ -362,6 +386,32 @@ pub fn msg_char(b: u8) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_find_double_colon() {
+        let cases: &[&[u8]] = &[
+            b"",
+            b":",
+            b"::",
+            b"a::b",
+            b"a:b::c",
+            b"abcdefg:",
+            b"abcdefg::h",
+            b"abcdefgh::",
+            b"abcdefghijklmnop:q::r",
+            b"class@anonymous\0/path:4$1::method",
+            b"abcdefghijklmnopqrstuvwxyz",
+            b"a:::b",
+        ];
+        for s in cases {
+            assert_eq!(
+                find_double_colon(s),
+                s.windows(2).position(|w| w == b"::"),
+                "{:?}",
+                s
+            );
+        }
+    }
 
     #[test]
     fn test_from_bytes() {

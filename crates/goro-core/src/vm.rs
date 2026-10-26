@@ -21835,7 +21835,7 @@ impl Vm {
         // Push class scope temporarily for self/parent/static type checking
         // Use windows(2) to find "::" correctly even in names with embedded colons
         let temp_scope_pushed =
-            if let Some(pos) = func_name_lower.windows(2).position(|w| w == b"::") {
+            if let Some(pos) = crate::string::find_double_colon(&func_name_lower) {
                 let class_part_lower = &func_name_lower[..pos];
                 let method_part_lower = &func_name_lower[pos + 2..];
                 let defining_class = self
@@ -31202,7 +31202,7 @@ impl Vm {
                     }
                     // Extension-registered native class static methods (e.g. ext/date).
                     if !self.native_class_handlers.is_empty() {
-                        if let Some(sep) = func_name_lower.windows(2).position(|w| w == b"::") {
+                        if let Some(sep) = crate::string::find_double_colon(&func_name_lower) {
                             let class_part = func_name_lower[..sep].to_vec();
                             let method_part = func_name_lower[sep + 2..].to_vec();
                             let user_defined = self
@@ -33546,7 +33546,7 @@ impl Vm {
 
                         // Check visibility and abstract for static method calls (ClassName::method)
                         if let Some(sep_pos) =
-                            func_name_lower.windows(2).position(|w| w == b"::")
+                            crate::string::find_double_colon(&func_name_lower)
                         {
                             {
                                 let class_part_lower = &func_name_lower[..sep_pos];
@@ -34407,7 +34407,7 @@ impl Vm {
                             generator.call_line = op.line;
                             // Capture class context for get_class() / get_called_class() inside generator
                             if let Some(sep_pos) =
-                                func_name_lower.windows(2).position(|w| w == b"::")
+                                crate::string::find_double_colon(&func_name_lower)
                             {
                                 // For late static binding, use the actual object class when $this is present.
                                 // For forwarding calls (parent::, self::, static::), preserve the current called class.
@@ -34477,7 +34477,7 @@ impl Vm {
                         // Use windows(2) to find "::" correctly even in names with embedded colons
                         // (e.g. NUL-byte anonymous class names like class@anonymous\0/path:4$1::method)
                         let pushed_called_class = if let Some(pos) =
-                            func_name_lower.windows(2).position(|w| w == b"::")
+                            crate::string::find_double_colon(&func_name_lower)
                         {
                             // For late static binding, use the actual object class when $this is present.
                             // For forwarding calls (parent::, self::, static::), preserve the current
@@ -34593,7 +34593,7 @@ impl Vm {
                         {
                             // Check if the method is static - if so, don't inject $this
                             let method_is_static = if let Some(pos) =
-                                func_name_lower.windows(2).position(|w| w == b"::")
+                                crate::string::find_double_colon(&func_name_lower)
                             {
                                 let class_part = &func_name_lower[..pos];
                                 let method_part = &func_name_lower[pos + 2..];

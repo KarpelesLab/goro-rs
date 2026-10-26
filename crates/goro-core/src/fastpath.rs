@@ -3024,7 +3024,7 @@ impl crate::vm::Vm {
             // A builtin by a plain name (not a method, not a dynamic call):
             // the general handler finds no by-reference parameter there.
             let name = call.name.as_bytes();
-            return ((t.builtin.is_some() && !name.windows(2).any(|w| w == b"::"))
+            return ((t.builtin.is_some() && crate::string::find_double_colon(name).is_none())
                 || is_direct_ucf(call))
             .then_some(false);
         };
@@ -3034,7 +3034,7 @@ impl crate::vm::Vm {
                 t.forward.as_ref()?;
                 return Some(self.forward_arg_by_ref(call, f));
             }
-        } else if call.name.as_bytes().windows(2).any(|w| w == b"::") {
+        } else if crate::string::find_double_colon(call.name.as_bytes()).is_some() {
             return None;
         }
         let idx = call.args.len();

@@ -45,7 +45,7 @@ impl Vm {
             return None;
         }
         let bare = name.strip_prefix(b"\\").unwrap_or(name);
-        let Some(sep) = bare.windows(2).position(|w| w == b"::") else {
+        let Some(sep) = crate::string::find_double_colon(bare) else {
             // A plain function name.
             if bare.starts_with(b"__") || bare.contains(&b':') {
                 return None;
