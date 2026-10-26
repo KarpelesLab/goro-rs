@@ -49,6 +49,7 @@ pub const XML_ERR_INVALID_DEC_CHARREF: i32 = 7;
 pub const XML_ERR_INVALID_CHARREF: i32 = 8;
 pub const XML_ERR_INVALID_CHAR: i32 = 9;
 pub const XML_ERR_PEREF_NO_NAME: i32 = 24;
+pub const XML_ERR_ENTITY_CHAR_ERROR: i32 = 87;
 pub const XML_ERR_PEREF_SEMICOL_MISSING: i32 = 25;
 pub const XML_ERR_ENTITYREF_SEMICOL_MISSING: i32 = 23;
 pub const XML_ERR_UNDECLARED_ENTITY: i32 = 26;
@@ -237,6 +238,68 @@ impl XmlError {
 fn printf_50(s: &str) -> String {
     let b = s.as_bytes();
     String::from_utf8_lossy(&b[..b.len().min(50)]).into_owned()
+}
+
+/// xmlScanName over `b[i..]`: the end of the name (== i when there is none).
+fn scan_name(b: &[u8], i: usize) -> usize {
+    let mut p = i;
+    while p < b.len() {
+        let (c, l) = match utf8_char(b, p) {
+            Some(x) => x,
+            None => break,
+        };
+        let ok = if p == i {
+            is_name_start_char(c)
+        } else {
+            is_name_char(c)
+        };
+        if !ok {
+            break;
+        }
+        p += l;
+    }
+    p
+}
+
+/// xmlCheckCdataPush: the length of the valid prefix of `d` (a truncated
+/// sequence at the end is left out unless `complete`), or minus the index
+/// of the first invalid character.
+fn check_cdata_push(d: &[u8], complete: bool) -> i64 {
+    let len = d.len();
+    let mut ix = 0;
+    while ix < len {
+        let c = d[ix];
+        let need = if c & 0x80 == 0 {
+            if c >= 0x20 || c == 0xA || c == 0xD || c == 0x9 {
+                ix += 1;
+                continue;
+            }
+            return -(ix as i64);
+        } else if c & 0xE0 == 0xC0 {
+            2
+        } else if c & 0xF0 == 0xE0 {
+            3
+        } else if c & 0xF8 == 0xF0 {
+            4
+        } else {
+            return -(ix as i64);
+        };
+        if ix + need > len {
+            return if complete { -(ix as i64) } else { ix as i64 };
+        }
+        if d[ix + 1..ix + need].iter().any(|&b| b & 0xC0 != 0x80) {
+            return -(ix as i64);
+        }
+        let mut cp = (c as u32) & (0x7F >> need);
+        for &b in &d[ix + 1..ix + need] {
+            cp = (cp << 6) | (b & 0x3F) as u32;
+        }
+        if !is_char(cp) {
+            return -(ix as i64);
+        }
+        ix += need;
+    }
+    ix as i64
 }
 
 /// IS_BYTE_CHAR
@@ -911,6 +974,15 @@ pub trait Sink {
         false
     }
     fn end_entity_content(&mut self, _name: &str) {}
+    /// Substituted entity content is about to be parsed into the current
+    /// node: remember where it starts (see `capture_entity_children`).
+    fn mark_children(&mut self) -> Option<(usize, Option<usize>, usize)> {
+        None
+    }
+    /// The content of entity `name` was just parsed in place after `mark`:
+    /// give the (still empty) entity declaration a copy of it, as
+    /// xmlCtxtParseEntity() fills ent->children before the substitution.
+    fn capture_entity_children(&mut self, _name: &str, _mark: (usize, Option<usize>, usize)) {}
     /// Whether the sink builds a tree (affects entity handling).
     fn builds_tree(&self) -> bool {
         false
@@ -1228,6 +1300,9 @@ pub struct ParserState {
     /// Call `Sink::get_entity` on general entity references (a SAX
     /// getEntity callback with XML_PARSE_OLDSAX, as ext/xml installs).
     pub sax_get_entity: bool,
+    /// No SAX getParameterEntity callback (ext/xml): parameter entity
+    /// references never resolve.
+    pub no_pe_lookup: bool,
     /// Base URI for resolving system ids when the input has no filename
     /// (ctxt->directory; PHP's DOM sets it to the current directory when
     /// loading from memory).
@@ -1613,6 +1688,8 @@ pub enum PushState {
     Content,
     EndTag,
     Dtd,
+    /// XML_PARSER_CDATA_SECTION
+    CdataSection,
     Eof,
 }
 
@@ -1647,6 +1724,7 @@ impl<'a, S: Sink> Parser<'a, S> {
             err_no: 0,
             last_err_level: 0,
             sax1: false,
+            no_pe_lookup: false,
             sax_get_entity: false,
             directory: None,
         };
@@ -2224,7 +2302,9 @@ impl<'a, S: Sink> Parser<'a, S> {
             self.clean_special_attr();
             self.parse_misc();
         }
-        if self.cur() != b'<' {
+        if self.stopped() {
+            // (xmlHaltParser emptied the input)
+        } else if self.cur() != b'<' {
             if self.st.well_formed {
                 self.fatal_msg(
                     XML_ERR_DOCUMENT_EMPTY,
@@ -2897,11 +2977,11 @@ impl<'a, S: Sink> Parser<'a, S> {
             self.skip_blanks();
             loop {
                 if self.stopped() {
-                    return;
+                    break;
                 } else if self.at_end() {
                     if self.st.inputs.len() <= old_nr {
                         self.fatal(XML_ERR_INT_SUBSET_NOT_FINISHED, None);
-                        return;
+                        break;
                     }
                     self.st.inputs.pop();
                 } else if self.cur() == b']' && self.st.inputs.len() <= old_nr {
@@ -2917,16 +2997,21 @@ impl<'a, S: Sink> Parser<'a, S> {
                     while self.st.inputs.len() > old_nr {
                         self.st.inputs.pop();
                     }
-                    return;
+                    break;
                 }
                 self.skip_blanks();
             }
         }
-        if self.cur() != b'>' {
+        // "We should be at the end of the DOCTYPE declaration": checked
+        // while well-formed only; the NEXT runs anyway (after an error it
+        // steps over whatever is there)
+        if self.st.well_formed && self.cur() != b'>' {
             self.fatal(XML_ERR_DOCTYPE_NOT_FINISHED, None);
             return;
         }
-        self.skip(1);
+        if !self.at_end() {
+            self.next_char_checked();
+        }
     }
 
     fn parse_markup_decl(&mut self) {
@@ -2986,22 +3071,13 @@ impl<'a, S: Sink> Parser<'a, S> {
         }
         self.skip(1);
         self.st.has_perefs = true;
-        let ent = self.pentities.get(&name).cloned();
+        let ent = if self.st.no_pe_lookup {
+            None
+        } else {
+            self.pentities.get(&name).cloned()
+        };
         match ent {
-            None => {
-                if self.st.standalone == 1 || (!self.st.has_external_subset && !self.st.has_perefs)
-                {
-                    self.fatal_msg(
-                        XML_ERR_UNDECLARED_ENTITY,
-                        format!("PEReference: %{}; not found\n", name),
-                    );
-                } else {
-                    self.warning(
-                        XML_WAR_UNDECLARED_ENTITY,
-                        format!("PEReference: %{}; not found\n", name),
-                    );
-                }
-            }
+            None => self.handle_undeclared_entity(&name),
             Some(e) => {
                 if e.kind == EntKind::InternalParameter {
                     // push the replacement text, surrounded by spaces
@@ -3027,145 +3103,243 @@ impl<'a, S: Sink> Parser<'a, S> {
             return None;
         }
         // xmlParseEntityValue() steps over the quote with CUR_PTR++ and
-        // walks the value with NEXTL(1): no column for the quote, one per
-        // byte of a multi-byte character
+        // copies the raw bytes with NEXTL(1): no column for the quote, one
+        // per byte of a multi-byte character, nothing decoded or checked yet
         let qpos = self.pos();
         self.inp_mut().col_adj.push((qpos, -1));
         self.skip(1);
-        let start = self.pos();
         let base_depth = self.st.inputs.len();
         let mut raw = Vec::new();
         loop {
-            if self.at_end() {
+            if self.at_end() || self.st.inputs.len() != base_depth {
                 break;
             }
-            let (c, l) = self.cur_char();
-            if l == 0 || c == q as u32 {
+            let c = self.cur();
+            if c == 0 {
+                self.fatal_msg(
+                    XML_ERR_INVALID_CHAR,
+                    "invalid character in entity value\n".into(),
+                );
+                return None;
+            }
+            if c == q {
                 break;
             }
-            if !is_char(c) {
-                break;
-            }
-            push_char(&mut raw, c);
-            if l > 1 && self.st.inputs.len() == base_depth {
+            raw.push(c);
+            if c & 0xC0 == 0x80 {
                 let p = self.pos();
-                self.inp_mut().col_adj.push((p, l as i32 - 1));
+                self.inp_mut().col_adj.push((p, 1));
             }
-            self.skip(l);
+            self.skip(1);
         }
         if self.cur() != q || self.st.inputs.len() != base_depth {
             self.fatal(XML_ERR_ENTITY_NOT_FINISHED, None);
             return None;
         }
-        let _ = start;
-        self.skip(1);
         let orig = String::from_utf8_lossy(&raw).into_owned();
-        // expand PE references and char refs
+        // xmlExpandPEsInEntityValue, with the input still on the closing
+        // quote (where its errors are reported); an error stops the
+        // expansion but the partial value is still declared (unless the
+        // fatal error disabled SAX)
         let mut out = Vec::new();
-        let b = raw;
+        let depth = self.st.inputs.len();
+        self.expand_pes_in_entity_value(&mut out, &raw, depth);
+        self.skip(1);
+        Some((String::from_utf8_lossy(&out).into_owned(), orig))
+    }
+
+    /// xmlExpandPEsInEntityValue: validate an entity value, substitute its
+    /// character and parameter entity references (general entity
+    /// references are kept as they are).
+    fn expand_pes_in_entity_value(&mut self, out: &mut Vec<u8>, b: &[u8], depth: usize) {
+        let max_depth = if self.st.options & XML_PARSE_HUGE != 0 {
+            40
+        } else {
+            20
+        };
+        let depth = depth + 1;
+        if depth > max_depth {
+            self.fatal_msg(
+                XML_ERR_RESOURCE_LIMIT,
+                "Maximum entity nesting depth exceeded".into(),
+            );
+            return;
+        }
         let mut i = 0;
-        while i < b.len() {
+        while i < b.len() && !self.stopped() {
             let c = b[i];
-            if c == b'%' {
-                let mut j = i + 1;
-                while j < b.len() && b[j] != b';' && !is_blank(b[j]) {
-                    j += 1;
-                }
-                if j < b.len() && b[j] == b';' {
-                    let name = String::from_utf8_lossy(&b[i + 1..j]).into_owned();
-                    if self.st.in_subset == 1 && self.st.inputs.len() == 1 {
-                        self.fatal(88, None);
-                        return None;
+            if c >= 0x80 {
+                match utf8_char(b, i) {
+                    Some((_, l)) => {
+                        out.extend_from_slice(&b[i..i + l]);
+                        i += l;
                     }
-                    if let Some(e) = self.pentities.get(&name).cloned() {
-                        if e.kind == EntKind::ExternalParameter && !e.parsed {
-                            if self.st.options & XML_PARSE_NO_XXE == 0
-                                && (self.st.replace_entities
-                                    || self.st.options & XML_PARSE_DTDVALID != 0)
-                            {
-                                let content = self
-                                    .load_entity_content(&e)
-                                    .map(|c| c.0.get(c.1..).unwrap_or("").to_string())
-                                    .unwrap_or_default();
-                                if let Some(pe) = self.pentities.get_mut(&name) {
-                                    pe.content = content.clone();
-                                    pe.parsed = true;
-                                }
-                                out.extend_from_slice(content.as_bytes());
-                            } else {
-                                self.warning(
-                                    XML_ERR_ENTITY_PROCESSING,
-                                    format!(
-                                        "not validating will not read content for PE entity {}\n",
-                                        name
-                                    ),
-                                );
-                            }
-                        } else {
-                            out.extend_from_slice(e.content.as_bytes());
+                    None => {
+                        // xmlUTF8MultibyteLen
+                        if !self.inp().enc_error {
+                            self.inp_mut().enc_error = true;
+                            self.fatal(XML_ERR_INVALID_ENCODING, None);
                         }
-                    }
-                    i = j + 1;
-                    continue;
-                }
-                out.push(c);
-                i += 1;
-            } else if c == b'&' && i + 1 < b.len() && b[i + 1] == b'#' {
-                let mut j = i + 2;
-                let hex = j < b.len() && b[j] == b'x';
-                if hex {
-                    j += 1;
-                }
-                let s = j;
-                while j < b.len() && b[j] != b';' {
-                    j += 1;
-                }
-                let digits = String::from_utf8_lossy(&b[s..j.min(b.len())]).into_owned();
-                let v = if hex {
-                    u32::from_str_radix(&digits, 16).ok()
-                } else {
-                    digits.parse::<u32>().ok()
-                };
-                match v {
-                    Some(v) if is_char(v) && j < b.len() => {
-                        push_char(&mut out, v);
-                        i = j + 1;
-                    }
-                    _ => {
-                        let code = if hex {
-                            XML_ERR_INVALID_HEX_CHARREF
-                        } else {
-                            XML_ERR_INVALID_DEC_CHARREF
-                        };
-                        self.fatal(code, None);
-                        return None;
+                        push_char(out, 0xFFFD);
+                        i += 1;
                     }
                 }
             } else if c == b'&' {
-                // general entity reference: validate syntax, keep as-is
-                let mut j = i + 1;
-                while j < b.len() && b[j] != b';' && b[j] != b'&' && !is_blank(b[j]) {
-                    j += 1;
-                }
-                if j >= b.len() || b[j] != b';' || j == i + 1 {
-                    if j == i + 1 {
-                        self.fatal_msg(
-                            XML_ERR_NAME_REQUIRED,
-                            "xmlParseStringEntityRef: no name\n".into(),
-                        );
-                    } else {
-                        self.fatal(XML_ERR_ENTITYREF_SEMICOL_MISSING, None);
+                if b.get(i + 1) == Some(&b'#') {
+                    let (v, next) = self.parse_string_char_ref(b, i);
+                    if v == 0 {
+                        return;
                     }
-                    return None;
+                    push_char(out, v);
+                    i = next;
+                } else {
+                    // general entity references are only checked
+                    let end = scan_name(b, i + 1);
+                    if end == i + 1 || b.get(end) != Some(&b';') {
+                        self.fatal_msg(
+                            XML_ERR_ENTITY_CHAR_ERROR,
+                            "EntityValue: '&' forbidden except for entities references\n".into(),
+                        );
+                        return;
+                    }
+                    out.extend_from_slice(&b[i..=end]);
+                    i = end + 1;
                 }
-                out.extend_from_slice(&b[i..=j]);
-                i = j + 1;
+            } else if c == b'%' {
+                // xmlParseStringPEReference
+                let end = scan_name(b, i + 1);
+                if end == i + 1 {
+                    self.fatal_msg(
+                        XML_ERR_NAME_REQUIRED,
+                        "xmlParseStringPEReference: no name\n".into(),
+                    );
+                    return;
+                }
+                if b.get(end) != Some(&b';') {
+                    self.fatal(XML_ERR_ENTITYREF_SEMICOL_MISSING, None);
+                    return;
+                }
+                let name = String::from_utf8_lossy(&b[i + 1..end]).into_owned();
+                i = end + 1;
+                // (set before xmlHandleUndeclaredEntity)
+                self.st.has_perefs = true;
+                let found = if self.st.no_pe_lookup {
+                    None
+                } else {
+                    self.pentities.get(&name).cloned()
+                };
+                let Some(e) = found else {
+                    self.handle_undeclared_entity(&name);
+                    return;
+                };
+                // PARSER_EXTERNAL
+                if self.st.in_subset == 1 && self.st.inputs.len() == 1 {
+                    self.fatal(88, None);
+                    return;
+                }
+                let mut content = e.content.clone();
+                if e.kind == EntKind::ExternalParameter && !e.parsed {
+                    if self.st.options & XML_PARSE_NO_XXE == 0
+                        && (self.st.replace_entities || self.st.options & XML_PARSE_DTDVALID != 0)
+                    {
+                        content = self
+                            .load_entity_content(&e)
+                            .map(|c| c.0.get(c.1..).unwrap_or("").to_string())
+                            .unwrap_or_default();
+                        if let Some(pe) = self.pentities.get_mut(&name) {
+                            pe.content = content.clone();
+                            pe.parsed = true;
+                        }
+                    } else {
+                        self.warning(
+                            XML_ERR_ENTITY_PROCESSING,
+                            format!(
+                                "not validating will not read content for PE entity {}\n",
+                                name
+                            ),
+                        );
+                    }
+                }
+                if e.expanding {
+                    self.fatal(XML_ERR_ENTITY_LOOP, None);
+                    return;
+                }
+                if let Some(pe) = self.pentities.get_mut(&name) {
+                    pe.expanding = true;
+                }
+                self.expand_pes_in_entity_value(out, content.as_bytes(), depth);
+                if let Some(pe) = self.pentities.get_mut(&name) {
+                    pe.expanding = false;
+                }
             } else {
-                out.push(c);
+                if !is_byte_char(c) {
+                    self.fatal_msg(
+                        XML_ERR_INVALID_CHAR,
+                        "invalid character in entity value\n".into(),
+                    );
+                    push_char(out, 0xFFFD);
+                } else {
+                    out.push(c);
+                }
                 i += 1;
             }
         }
-        Some((String::from_utf8_lossy(&out).into_owned(), orig))
+    }
+
+    /// xmlParseStringCharRef on `b[i..]` ("&#..."): (value, next index);
+    /// the value is 0 after an error.
+    fn parse_string_char_ref(&mut self, b: &[u8], i: usize) -> (u32, usize) {
+        let at = |k: usize| b.get(k).copied().unwrap_or(0);
+        let mut val: u32 = 0;
+        let mut p = i + 2;
+        if at(i + 2) == b'x' {
+            p += 1;
+            while at(p) != b';' {
+                let c = at(p);
+                let d = match c {
+                    b'0'..=b'9' => (c - b'0') as u32,
+                    b'a'..=b'f' => (c - b'a') as u32 + 10,
+                    b'A'..=b'F' => (c - b'A') as u32 + 10,
+                    _ => {
+                        self.fatal(XML_ERR_INVALID_HEX_CHARREF, None);
+                        val = 0;
+                        break;
+                    }
+                };
+                val = (val * 16 + d).min(0x110000);
+                p += 1;
+            }
+        } else {
+            while at(p) != b';' {
+                let c = at(p);
+                if c.is_ascii_digit() {
+                    val = (val * 10 + (c - b'0') as u32).min(0x110000);
+                } else {
+                    self.fatal(XML_ERR_INVALID_DEC_CHARREF, None);
+                    val = 0;
+                    break;
+                }
+                p += 1;
+            }
+        }
+        if at(p) == b';' {
+            p += 1;
+        }
+        if val >= 0x110000 {
+            self.fatal_msg(
+                XML_ERR_INVALID_CHAR,
+                "xmlParseStringCharRef: character reference out of bounds\n".into(),
+            );
+            return (0, p);
+        }
+        if !is_char(val) {
+            self.fatal_msg(
+                XML_ERR_INVALID_CHAR,
+                format!("xmlParseStringCharRef: invalid xmlChar value {}\n", val),
+            );
+            return (0, p);
+        }
+        (val, p)
     }
 
     fn parse_entity_decl(&mut self) {
@@ -3342,7 +3516,8 @@ impl<'a, S: Sink> Parser<'a, S> {
                 XML_ERR_ENTITY_NOT_FINISHED,
                 format!("xmlParseEntityDecl: entity {} not terminated\n", name),
             );
-            // libxml2 stops here (xmlHaltParser in some versions)
+            // 2.13: xmlHaltParser
+            self.st.disable_sax = 2;
         } else {
             self.skip(1);
         }
@@ -5408,14 +5583,14 @@ impl<'a, S: Sink> Parser<'a, S> {
             self.inp_mut().pos = inp;
             if at(inp) == 0xD {
                 if at(inp + 1) == 0xA {
+                    // deliver nothing for the \r: the \n starts the next
+                    // chunk. (`continue` goes through the do-while test on
+                    // the byte after the \n: anything else than ASCII text
+                    // takes the complex path from the \n)
                     self.inp_mut().pos = inp + 1;
-                    inp += 2;
-                    // deliver nothing for the \r, continue
-                    let c = at(inp);
-                    if (0x20..=0x7F).contains(&c) || c == 0x09 || c == 0x0A {
-                        // the \n itself starts the next chunk
-                        inp = self.pos();
-                        continue;
+                    let c = at(inp + 2);
+                    if !((0x20..=0x7F).contains(&c) || c == 0x09 || c == 0x0A) {
+                        break;
                     }
                     inp = self.pos();
                     continue;
@@ -5551,6 +5726,11 @@ impl<'a, S: Sink> Parser<'a, S> {
         }
         if self.st.replace_entities {
             // parse the entity content inline
+            let mark = if !ent.parsed && self.sink.builds_tree() {
+                self.sink.mark_children()
+            } else {
+                None
+            };
             self.parse_entity_content_file(
                 &name,
                 &ent.content,
@@ -5558,6 +5738,12 @@ impl<'a, S: Sink> Parser<'a, S> {
                 true,
                 efile,
             );
+            if let Some(m) = mark {
+                if let Some(e) = self.entities.get_mut(&name) {
+                    e.parsed = true;
+                }
+                self.sink.capture_entity_children(&name, m);
+            }
             return;
         }
         // first reference: parse content into the entity
@@ -6076,10 +6262,10 @@ impl<'a, S: Sink> Parser<'a, S> {
                                     break;
                                 }
                                 if self.cmp(b"<![CDATA[") {
-                                    if !terminate && !self.lookup_string(9, b"]]>") {
-                                        break;
-                                    }
-                                    self.parse_cdsect();
+                                    // SKIP(9): the section is read raw by
+                                    // XML_PARSER_CDATA_SECTION
+                                    self.skip(9);
+                                    self.push_state = PushState::CdataSection;
                                     continue;
                                 }
                             }
@@ -6192,8 +6378,124 @@ impl<'a, S: Sink> Parser<'a, S> {
                     self.parse_internal_subset();
                     self.end_doctype();
                 }
+                PushState::CdataSection => {
+                    if !self.push_cdata_section(terminate, avail) {
+                        break;
+                    }
+                }
             }
         }
+    }
+
+    /// XML_PARSER_CDATA_SECTION of xmlParseTryOrFinish: the content is
+    /// checked (xmlCheckCdataPush) and handed over raw, in pieces of
+    /// XML_PARSER_BIG_BUFFER_SIZE bytes while the end is not in sight;
+    /// SKIPL counts a column per byte. Returns false to stop the loop.
+    #[inline(never)]
+    fn push_cdata_section(&mut self, terminate: bool, avail: usize) -> bool {
+        let pos = self.pos();
+        let data = self.inp().data.clone();
+        let rest = &data[pos..];
+        let term = if terminate {
+            rest.windows(3).position(|w| w == b"]]>")
+        } else if self.lookup_string(0, b"]]>") {
+            rest.windows(3).position(|w| w == b"]]>")
+        } else {
+            None
+        };
+        match term {
+            None => {
+                let size = if terminate {
+                    rest.len()
+                } else {
+                    if avail < 300 + 2 {
+                        return false;
+                    }
+                    self.check_index = 0;
+                    300
+                };
+                let tmp = check_cdata_push(&rest[..size], false);
+                if tmp <= 0 {
+                    self.cdata_encoding_error((-tmp) as usize);
+                    return false;
+                }
+                let tmp = tmp as usize;
+                self.deliver_cdata(&rest[..tmp]);
+                self.skipl(tmp);
+            }
+            Some(base) => {
+                let tmp = check_cdata_push(&rest[..base], true);
+                if tmp < 0 || tmp as usize != base {
+                    self.cdata_encoding_error(tmp.unsigned_abs() as usize);
+                    return false;
+                }
+                if base == 0 {
+                    // (empty sections give a callback too, like the pull
+                    // parser)
+                    if self.sax_ok() && pos >= 9 && &data[pos - 9..pos] == b"<![CDATA[" {
+                        self.deliver_cdata(b"");
+                    }
+                } else {
+                    self.deliver_cdata(&rest[..base]);
+                }
+                self.skipl(base + 3);
+                self.push_state = PushState::Content;
+            }
+        }
+        true
+    }
+
+    fn deliver_cdata(&mut self, text: &[u8]) {
+        if !self.sax_ok() {
+            return;
+        }
+        let text = String::from_utf8_lossy(text).into_owned();
+        if self.st.options & XML_PARSE_NOCDATA == 0 {
+            self.sink.cdata_block(&mut self.st, &text);
+        } else {
+            self.sink.characters(&mut self.st, &text);
+        }
+    }
+
+    /// SKIPL(n): n bytes, one column each.
+    fn skipl(&mut self, n: usize) {
+        let pos = self.pos();
+        let inp = self.inp_mut();
+        let end = (pos + n).min(inp.data.len());
+        let mut i = pos;
+        while i < end {
+            let c = inp.data[i];
+            if c >= 0xC0 {
+                let l = if c >= 0xF0 {
+                    4
+                } else if c >= 0xE0 {
+                    3
+                } else {
+                    2
+                };
+                inp.col_adj.push((i, l - 1));
+            }
+            i += 1;
+        }
+        inp.pos = end;
+    }
+
+    /// encoding_error of xmlParseTryOrFinish: `cur += tmp` (no column),
+    /// report, xmlHaltParser.
+    fn cdata_encoding_error(&mut self, tmp: usize) {
+        let pos = self.pos();
+        let inp = self.inp_mut();
+        let end = (pos + tmp).min(inp.data.len());
+        let chars = inp.data[pos..end]
+            .iter()
+            .filter(|&&c| c & 0xC0 != 0x80 && c != b'\n')
+            .count() as i32;
+        if chars > 0 {
+            inp.col_adj.push((pos, -chars));
+        }
+        inp.pos = end;
+        self.fatal(XML_ERR_INVALID_ENCODING, None);
+        self.st.disable_sax = 2;
     }
 
     fn end_doctype(&mut self) {

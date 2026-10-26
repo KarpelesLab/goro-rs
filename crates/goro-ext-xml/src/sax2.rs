@@ -886,6 +886,48 @@ impl Sink for TreeBuilder {
         }
     }
 
+    fn mark_children(&mut self) -> Option<(usize, Option<usize>, usize)> {
+        let parent = self.node()?;
+        Some(tree::with(|t| {
+            let last = t.nodes[parent].last;
+            // (text of the entity may be merged into a last text node)
+            let len = last
+                .filter(|&l| t.nodes[l].t == NType::Text)
+                .map(|l| t.nodes[l].content.len())
+                .unwrap_or(0);
+            (parent, last, len)
+        }))
+    }
+
+    fn capture_entity_children(&mut self, name: &str, mark: (usize, Option<usize>, usize)) {
+        let Some(doc) = self.doc else { return };
+        let (parent, before, before_len) = mark;
+        tree::with(|t| {
+            let Some(ent) = t.get_doc_entity(doc, name) else {
+                return;
+            };
+            if t.nodes[ent].children.is_some() {
+                return;
+            }
+            if let Some(b) = before {
+                if t.nodes[b].t == NType::Text && t.nodes[b].content.len() > before_len {
+                    let text = t.nodes[b].content[before_len..].to_string();
+                    let tx = t.new_text(Some(doc), &text);
+                    t.link_child_raw(ent, tx);
+                }
+            }
+            let mut cur = match before {
+                Some(b) => t.nodes[b].next,
+                None => t.nodes[parent].children,
+            };
+            while let Some(c) = cur {
+                let cp = t.copy_node(c, Some(doc), 1, Some(ent));
+                t.link_child_raw(ent, cp);
+                cur = t.nodes[c].next;
+            }
+        });
+    }
+
     fn end_entity_content(&mut self, _name: &str) {
         if let Some(e) = self.in_entity.pop() {
             while let Some(top) = self.stack.pop() {

@@ -140,6 +140,8 @@ impl Engine {
         let mut p = Parser::new(sink, Vec::new(), None, parser::XML_PARSE_NOENT);
         p.st.sax1 = !use_namespace;
         p.st.sax_get_entity = true;
+        // (php_xml_compat_handlers has no getParameterEntity)
+        p.st.no_pe_lookup = true;
         // compat.c: parser->parser->wellFormed = 0
         p.st.well_formed = false;
         Box::new(Engine {
