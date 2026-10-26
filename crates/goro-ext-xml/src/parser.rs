@@ -98,6 +98,8 @@ pub const XML_ERR_STANDALONE_VALUE: i32 = 78;
 pub const XML_ERR_ENCODING_NAME: i32 = 79;
 pub const XML_ERR_HYPHEN_IN_COMMENT: i32 = 80;
 pub const XML_ERR_INVALID_ENCODING: i32 = 81;
+/// XML_INVALID_CHAR: what xmlCurrentChar returns for an invalid byte.
+const XML_INVALID_CHAR_VAL: u32 = 0x200000;
 pub const XML_ERR_VALUE_REQUIRED: i32 = 84;
 pub const XML_ERR_NOT_WELL_BALANCED: i32 = 85;
 pub const XML_ERR_EXTRA_CONTENT: i32 = 86;
@@ -945,6 +947,63 @@ pub trait Sink {
 // ---------------------------------------------------------------------------
 // Parser state
 
+/// xmlCurrentChar's incomplete_sequence at `d[i]` (a byte >= 0x80): the
+/// end of the input comes before the checks of the sequence fail.
+fn utf8_truncated_at(d: &[u8], i: usize) -> bool {
+    let c = d[i];
+    let avail = d.len() - i;
+    if avail < 2 {
+        return true;
+    }
+    if d[i + 1] & 0xC0 != 0x80 || c < 0xE0 {
+        return false;
+    }
+    if avail < 3 {
+        return true;
+    }
+    if d[i + 2] & 0xC0 != 0x80 || c < 0xF0 {
+        return false;
+    }
+    avail < 4
+}
+
+/// Replace each byte that is not part of a valid UTF-8 sequence by U+FFFD
+/// (libxml2 2.13 reads them as XML_INVALID_CHAR, one byte at a time). The
+/// offsets of the replacements (relative to `base`) go to `bad`. A valid
+/// but truncated sequence at the end is returned as the pending tail.
+fn sanitize_utf8(d: &[u8], base: usize, bad: &mut Vec<usize>, partial: bool) -> (Vec<u8>, Vec<u8>) {
+    let mut out = Vec::with_capacity(d.len() + 8);
+    let mut i = 0;
+    while i < d.len() {
+        let c = d[i];
+        if c < 0x80 {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if let Some((_, l)) = utf8_char(d, i) {
+            out.extend_from_slice(&d[i..i + l]);
+            i += l;
+            continue;
+        }
+        if if partial {
+            incomplete_utf8_at_end(d, i)
+        } else {
+            utf8_truncated_at(d, i)
+        } {
+            return (out, d[i..].to_vec());
+        }
+        bad.push(base + out.len());
+        out.extend_from_slice("\u{FFFD}".as_bytes());
+        i += 1;
+    }
+    (out, Vec::new())
+}
+
+/// Internal conversion label: the input continues as UTF-8 with invalid
+/// bytes replaced (after an encoding error).
+const CONV_UTF8_INVALID: &str = "x-utf-8-invalid";
+
 pub struct Input {
     pub data: Rc<Vec<u8>>,
     pub pos: usize,
@@ -959,6 +1018,17 @@ pub struct Input {
     pub base_col: u32,
     /// Bytes dropped from the front of `data` (xmlParserInput.consumed).
     pub consumed: u64,
+    /// Offsets (in `data`, sorted) of the U+FFFD that replaced invalid
+    /// UTF-8 bytes after an encoding error. libxml2 reads those bytes raw
+    /// (XML_INVALID_CHAR, one byte each): each counts as one byte of the
+    /// byte index and is no name character.
+    pub bad: Vec<usize>,
+    /// Offsets (in `data`, sorted) where a byte of an incomplete UTF-8
+    /// sequence at the end of input was skipped: each still counts as one
+    /// byte and one column.
+    pub dropped: Vec<usize>,
+    /// XML_INPUT_ENCODING_ERROR: an encoding error was reported.
+    pub enc_error: bool,
     /// Column quirks of libxml2 (position, delta): bytes it walks without
     /// counting a column, or counts one column each.
     col_adj: Vec<(usize, i32)>,
@@ -977,6 +1047,9 @@ impl Input {
             base_line: 1,
             base_col: 1,
             consumed: 0,
+            bad: Vec::new(),
+            dropped: Vec::new(),
+            enc_error: false,
             col_adj: Vec::new(),
         }
     }
@@ -987,6 +1060,23 @@ impl Input {
         }
         let cut = self.pos - keep;
         let (l, c) = self.line_col(cut);
+        let mut raw_cut = cut as u64;
+        if !self.dropped.is_empty() {
+            let n = self.dropped.partition_point(|&b| b <= cut);
+            raw_cut += n as u64;
+            self.dropped.drain(..n);
+            for b in self.dropped.iter_mut() {
+                *b -= cut;
+            }
+        }
+        if !self.bad.is_empty() {
+            let n = self.bad.partition_point(|&b| b < cut);
+            raw_cut -= 2 * n as u64;
+            self.bad.drain(..n);
+            for b in self.bad.iter_mut() {
+                *b -= cut;
+            }
+        }
         let d = Rc::make_mut(&mut self.data);
         d.drain(..cut);
         self.pos -= cut;
@@ -994,7 +1084,7 @@ impl Input {
         for a in self.col_adj.iter_mut() {
             a.0 -= cut;
         }
-        self.consumed += cut as u64;
+        self.consumed += raw_cut;
         self.base_line = l;
         self.base_col = c;
         self.lc_pos = 0;
@@ -1033,6 +1123,15 @@ impl Input {
                 .map(|&(_, d)| d)
                 .sum();
             col = (col as i64 + d as i64).max(0) as u32;
+        }
+        if !self.dropped.is_empty() {
+            // a skipped byte sits just before its offset
+            let lo = if line_start > start || start == 0 {
+                line_start
+            } else {
+                start + 1
+            };
+            col += self.dropped.iter().filter(|&&p| p >= lo && p <= i).count() as u32;
         }
         self.lc_pos = i;
         self.lc_line = line;
@@ -1121,7 +1220,14 @@ impl ParserState {
         let inp = &mut self.inputs[n - 1];
         let pos = inp.pos;
         let (l, c) = inp.line_col(pos);
-        (l, c, inp.consumed + pos as u64)
+        let mut raw = pos as u64;
+        if !inp.bad.is_empty() {
+            raw -= 2 * inp.bad.partition_point(|&b| b < pos) as u64;
+        }
+        if !inp.dropped.is_empty() {
+            raw += inp.dropped.partition_point(|&b| b <= pos) as u64;
+        }
+        (l, c, inp.consumed + raw)
     }
 
     pub fn cur_line(&mut self) -> u32 {
@@ -1641,54 +1747,83 @@ impl<'a, S: Sink> Parser<'a, S> {
             Some(v) => v,
             None if self.partial && incomplete_utf8_at_end(&self.inp().data, pos) => (0, 0),
             None => {
-                self.encoding_error();
-                // the rest of the input is now Latin-1 converted to UTF-8
-                utf8_char(&self.inp().data, pos).unwrap_or((c as u32, 1))
+                // invalid bytes now read as U+FFFD; a skipped byte of an
+                // incomplete sequence ends the current run
+                if self.encoding_error() || pos >= self.inp().data.len() {
+                    return (0, 0);
+                }
+                self.cur_char_raw()
             }
         }
     }
 
-    fn encoding_error(&mut self) {
-        // libxml2: "Input is not proper UTF-8, indicate encoding !"
-        let i = self.inp();
-        let incomplete = {
-            let c = i.data[i.pos];
-            let need = if c & 0xE0 == 0xC0 {
-                2
-            } else if c & 0xF0 == 0xE0 {
-                3
-            } else if c & 0xF8 == 0xF0 {
-                4
-            } else {
-                1
-            };
-            i.pos + need > i.data.len()
-        };
-        if incomplete {
-            let c = i.data[i.pos];
+    /// Returns true when a byte of an incomplete sequence was skipped (the
+    /// caller's run of character data ends there).
+    fn encoding_error(&mut self) -> bool {
+        let pos = self.pos();
+        if !self.partial && utf8_truncated_at(&self.inp().data, pos) {
+            // xmlParseCharDataComplex: a sequence cut by the end of input;
+            // its first byte is skipped
+            let c = self.inp().data[pos];
             self.fatal_msg(
-                XML_ERR_INVALID_ENCODING,
+                XML_ERR_INVALID_CHAR,
                 format!("Incomplete UTF-8 sequence starting with {:02X}\n", c),
             );
-        } else {
-            self.fatal_msg(
-                XML_ERR_INVALID_ENCODING,
-                "Input is not proper UTF-8, indicate encoding !\n".to_string(),
-            );
+            let inp = self.inp_mut();
+            Rc::make_mut(&mut inp.data).remove(pos);
+            for b in inp.bad.iter_mut().filter(|b| **b > pos) {
+                *b -= 1;
+            }
+            for b in inp.dropped.iter_mut().filter(|b| **b > pos) {
+                *b -= 1;
+            }
+            let at = inp.dropped.partition_point(|&b| b <= pos);
+            inp.dropped.insert(at, pos);
+            inp.lc_pos = 0;
+            inp.lc_line = inp.base_line;
+            inp.lc_col = inp.base_col;
+            return true;
         }
-        // libxml2 switches the input to ISO-8859-1 after this error: convert the
-        // rest of the input so that further parsing works.
-        let pos = self.pos();
+        // xmlCurrentChar: only the first error of an input is reported;
+        // each invalid byte then reads as one XML_INVALID_CHAR (U+FFFD)
+        if !self.inp().enc_error {
+            self.inp_mut().enc_error = true;
+            self.fatal(XML_ERR_INVALID_ENCODING, None);
+        }
+        let partial = self.partial;
         let inp = self.inp_mut();
-        let rest: Vec<u8> = inp.data[pos..].to_vec();
+        let mut bad = std::mem::take(&mut inp.bad);
+        let (rest, tail) = sanitize_utf8(&inp.data[pos..], pos, &mut bad, partial);
         let mut conv = inp.data[..pos].to_vec();
-        for b in rest {
-            push_char(&mut conv, b as u32);
+        conv.extend_from_slice(&rest);
+        inp.bad = bad;
+        if partial && self.st.inputs.len() == 1 && self.conv_enc.is_none() {
+            // the rest of the sequence may come with the next chunk
+            self.conv_pending = tail;
+        } else {
+            conv.extend_from_slice(&tail);
         }
+        let inp = self.inp_mut();
         inp.data = Rc::new(conv);
-        if self.st.inputs.len() == 1 {
-            self.conv_enc = Some("ISO-8859-1".into());
+        if self.st.inputs.len() == 1 && self.conv_enc.is_none() {
+            self.conv_enc = Some(CONV_UTF8_INVALID.into());
         }
+        false
+    }
+
+    /// Whether the current character replaced an invalid byte.
+    fn at_bad_char(&self) -> bool {
+        let i = self.inp();
+        !i.bad.is_empty() && i.bad.binary_search(&i.pos).is_ok()
+    }
+
+    /// cur_char_raw for name parsing: replaced bytes are no name chars.
+    fn name_char_raw(&mut self) -> (u32, usize) {
+        let r = self.cur_char_raw();
+        if self.at_bad_char() {
+            return (XML_INVALID_CHAR_VAL, 3);
+        }
+        r
     }
 
     fn skip_blanks(&mut self) -> usize {
@@ -1772,13 +1907,13 @@ impl<'a, S: Sink> Parser<'a, S> {
 
     fn parse_name_generic(&mut self, nc: bool) -> Option<String> {
         let start = self.pos();
-        let (c, l) = self.cur_char_raw();
+        let (c, l) = self.name_char_raw();
         if l == 0 || !is_name_start_char(c) || (nc && c == b':' as u32) {
             return None;
         }
         self.skip(l);
         loop {
-            let (c, l) = self.cur_char_raw();
+            let (c, l) = self.name_char_raw();
             if l == 0 || !is_name_char(c) || (nc && c == b':' as u32) {
                 break;
             }
@@ -1815,7 +1950,7 @@ impl<'a, S: Sink> Parser<'a, S> {
     fn parse_nmtoken(&mut self) -> Option<String> {
         let start = self.pos();
         loop {
-            let (c, l) = self.cur_char_raw();
+            let (c, l) = self.name_char_raw();
             if l == 0 || !is_name_char(c) {
                 break;
             }
@@ -1868,6 +2003,8 @@ impl<'a, S: Sink> Parser<'a, S> {
         let d = &data[..];
         if d.len() >= 3 && d[0] == 0xEF && d[1] == 0xBB && d[2] == 0xBF {
             self.skip(3);
+            // xmlDetectEncoding moves `cur` past the BOM without a column
+            self.inp_mut().col_adj.push((0, -1));
             self.st.input_encoding = Some("UTF-8".into());
             return;
         }
@@ -1876,6 +2013,8 @@ impl<'a, S: Sink> Parser<'a, S> {
             let conv = decode_to_utf8(&d[2..], enc).unwrap_or_default();
             self.inp_mut().data = Rc::new(conv);
             self.inp_mut().pos = 0;
+            // the BOM counts as consumed input (xmlSwitchInputEncoding)
+            self.inp_mut().consumed += 2;
             self.st.input_encoding = Some("UTF-16".into());
             self.conv_enc = Some(enc.into());
             return;
@@ -5376,6 +5515,16 @@ impl<'a, S: Sink> Parser<'a, S> {
         }
         let conv = match &self.conv_enc {
             None => None,
+            Some(enc) if enc == CONV_UTF8_INVALID => {
+                let mut raw = std::mem::take(&mut self.conv_pending);
+                raw.extend_from_slice(chunk);
+                let base = self.st.inputs[0].data.len();
+                let mut bad = std::mem::take(&mut self.st.inputs[0].bad);
+                let (out, tail) = sanitize_utf8(&raw, base, &mut bad, true);
+                self.st.inputs[0].bad = bad;
+                self.conv_pending = tail;
+                Some(out)
+            }
             Some(enc) => {
                 let mut raw = std::mem::take(&mut self.conv_pending);
                 raw.extend_from_slice(chunk);
