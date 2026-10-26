@@ -2966,6 +2966,7 @@ impl Compiler {
         self.is_top_level = true;
         crate::ast_export::register_program(program);
         let warnings_base = COMPILE_WARNINGS.with(|w| w.borrow().len());
+        let pending_diag_base = PENDING_COMPILE_DIAGNOSTICS.with(|w| w.borrow().len());
         // Pre-pass: build the anonymous class name map (NUL-byte PHP names)
         self.build_anon_class_name_map(&program.statements);
         // zend_handle_encoding_declaration() warned while the file was parsed.
@@ -3175,6 +3176,7 @@ impl Compiler {
         // Namespace/use must be processed in order so that class/function names are prefixed correctly
         if let Err(e) = self.compile_hoisting_pass(&program.statements) {
             self.stash_compile_time_binds(e.line, None);
+            self.main_pass_diags_before(&program.statements, e.line, pending_diag_base);
             return Err(e);
         }
         self.emit_delayed_hoisted_decls();
@@ -3488,6 +3490,47 @@ impl Compiler {
         });
         let classes = self.compiled_classes.clone();
         COMPILE_TIME_BINDS.with(|b| *b.borrow_mut() = Some((chunk, classes)));
+    }
+
+    /// The hoisting pass failed at `err_line`: php-src compiles the file top
+    /// to bottom, so the diagnostics of the code before that line (closures'
+    /// signatures, ...), which goro compiles in its second pass, come first.
+    /// Compiles those top-level statements for their diagnostics only and
+    /// puts the pending diagnostics in source order.
+    #[inline(never)]
+    fn main_pass_diags_before(&mut self, stmts: &[Statement], err_line: u32, base: usize) {
+        if err_line == 0
+            || stmts
+                .iter()
+                .any(|s| matches!(s.kind, StmtKind::NamespaceDecl { .. }))
+        {
+            return;
+        }
+        self.current_namespace = Vec::new();
+        self.use_map = HashMap::new();
+        self.use_function_map = HashMap::new();
+        self.use_const_map = HashMap::new();
+        self.in_main_pass = true;
+        for stmt in stmts {
+            if stmt.span.line >= err_line {
+                break;
+            }
+            if matches!(
+                stmt.kind,
+                StmtKind::FunctionDecl { .. } | StmtKind::ClassDecl { .. }
+            ) {
+                continue;
+            }
+            if self.compile_stmt(stmt).is_err() {
+                break;
+            }
+        }
+        self.in_main_pass = false;
+        PENDING_COMPILE_DIAGNOSTICS.with(|w| {
+            let mut w = w.borrow_mut();
+            let base = base.min(w.len());
+            w[base..].sort_by_key(|d| d.2);
+        });
     }
 
     /// Whether a `catch (Throwable ...)` name resolves to \Throwable (it then
