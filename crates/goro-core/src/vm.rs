@@ -53223,7 +53223,18 @@ impl Vm {
                                             variance::defer(&class.name);
                                             return Ok(Flow::Continue);
                                         }
-                                        if parent_read_only {
+                                        // (a hook of the child is checked as a method;
+                                        // a plain property's type as a property's)
+                                        let own_hook = |kind: &[u8]| {
+                                            let m = [kind, child_prop.name.as_slice()]
+                                                .concat()
+                                                .to_ascii_lowercase();
+                                            class.methods.get(&m).is_some_and(|md| {
+                                                md.declaring_class
+                                                    .eq_ignore_ascii_case(&class.name)
+                                            })
+                                        };
+                                        if parent_read_only && own_hook(b"__property_get_") {
                                             // Otherwise emit a hook-style declaration mismatch error.
                                             let child_display =
                                                 crate::string::msg_str(&class.name).to_string();
@@ -53255,7 +53266,7 @@ impl Vm {
                                                 line: op.line,
                                             });
                                         }
-                                        if parent_write_only {
+                                        if parent_write_only && own_hook(b"__property_set_") {
                                             let child_display =
                                                 crate::string::msg_str(&class.name).to_string();
                                             let parent_display =
@@ -53312,9 +53323,14 @@ impl Vm {
                                                     .to_string();
                                             return Err(VmError {
                                                 message: format!(
-                                                    "Type of {}::${} must be {} (as in class {})",
+                                                    "Type of {}::${} must be {}{} (as in class {})",
                                                     child_display,
                                                     prop_display,
+                                                    match prop_variance {
+                                                        1 => "subtype of ",
+                                                        2 => "supertype of ",
+                                                        _ => "",
+                                                    },
                                                     expected_type,
                                                     parent_display
                                                 ),
