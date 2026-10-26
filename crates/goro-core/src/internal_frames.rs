@@ -445,13 +445,12 @@ impl Vm {
         let Some((info, flags)) = self.zpp_info(lname) else {
             // zend_call_function() -> the function's own zpp: the arity
             // check holds for every internal function, even those whose
-            // types the generic layer doesn't check yet. (Not the "+" / "*"
-            // zend_parse_parameters() ones, whose stubs' counts differ:
-            // array_udiff() needs 2 arguments, they check it themselves; nor
-            // strtr()'s: its parsing blocks by argument count have their own
-            // message.)
+            // types the generic layer doesn't check yet. (Not those whose
+            // parsing is not their arginfo's: strtr()'s blocks by argument
+            // count, the "+" / "*" zend_parse_parameters() ones whose stubs'
+            // counts differ: array_udiff() & co.)
             if let Some(msg) = crate::arginfo::lookup(lname)
-                .filter(|i| !crate::arginfo::legacy_zpp_variadic(i.name) && lname != b"strtr")
+                .filter(|i| !own_arity_message(lname) && !crate::arginfo::legacy_zpp_variadic(i.name))
                 .and_then(|i| i.arity_error(args.len()))
             {
                 let line = self.current_line;
@@ -1411,4 +1410,23 @@ pub(crate) fn extra_named_args(
         .filter(|(k, _)| !info.params[..n].iter().any(|p| p.name.as_bytes() == k))
         .map(|(k, v)| (PhpString::from_vec(k.clone()), v.clone()))
         .collect()
+}
+
+/// Builtins whose argument count message is not their arginfo's (see
+/// call_builtin_from_internal()).
+fn own_arity_message(lname: &[u8]) -> bool {
+    matches!(
+        lname,
+        b"strtr"
+            | b"array_udiff"
+            | b"array_udiff_assoc"
+            | b"array_udiff_uassoc"
+            | b"array_uintersect"
+            | b"array_uintersect_assoc"
+            | b"array_uintersect_uassoc"
+            | b"array_diff_ukey"
+            | b"array_diff_uassoc"
+            | b"array_intersect_ukey"
+            | b"array_intersect_uassoc"
+    )
 }
