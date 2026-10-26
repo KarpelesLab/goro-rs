@@ -6033,7 +6033,22 @@ impl Vm {
                     changed = true;
                 }
                 (Value::Array(_) | Value::Object(_), Value::Array(_) | Value::Object(_)) => {
-                    if let Some((x, y)) = self.compare_precast_elements(va, vb, budget) {
+                    let is_lazy = |v: &Value| {
+                        matches!(v, Value::Object(o) if o.borrow().has_property(b"__lazy_state"))
+                    };
+                    if is_lazy(va) || is_lazy(vb) {
+                        // zend_compare() of two objects initializes them.
+                        let r = self.init_lazy_in(&[va, vb]);
+                        if self.current_exception.is_some() {
+                            return None;
+                        }
+                        let (x, y) = self
+                            .compare_precast_elements(&r[0], &r[1], budget)
+                            .unwrap_or_else(|| (r[0].clone(), r[1].clone()));
+                        na[i].1 = x;
+                        nb[j].1 = y;
+                        changed = true;
+                    } else if let Some((x, y)) = self.compare_precast_elements(va, vb, budget) {
                         na[i].1 = x;
                         nb[j].1 = y;
                         changed = true;
@@ -10879,8 +10894,48 @@ impl Vm {
     /// Returns the values with lazy proxies redirected to their real backing
     /// object (so comparing them sees the real class and properties).
     pub fn init_lazy_in(&mut self, vals: &[&Value]) -> Vec<Value> {
-        let all_obj = vals.iter().all(|v| matches!(v.deref(), Value::Object(_)));
-        let mut out = Vec::with_capacity(vals.len());
+        self.init_lazy_in_order(vals, [1, 0])
+    }
+
+    /// init_lazy_in() for `>` / `>=`, compiled by PHP as `<` / `<=` with
+    /// swapped operands: the left operand is initialized first.
+    pub fn init_lazy_in_swapped(&mut self, vals: &[&Value]) -> Vec<Value> {
+        self.init_lazy_in_order(vals, [0, 1])
+    }
+
+    fn init_lazy_in_order(&mut self, vals: &[&Value], order: [usize; 2]) -> Vec<Value> {
+        let mut all_obj = vals.iter().all(|v| matches!(v.deref(), Value::Object(_)));
+        if all_obj && vals.len() == 2 {
+            if let (Value::Object(a), Value::Object(b)) = (vals[0].deref(), vals[1].deref()) {
+                // zend_std_compare_objects(): the same object, or objects of
+                // different classes, are compared without their properties.
+                if Rc::ptr_eq(&a, &b) || a.borrow().class_name != b.borrow().class_name {
+                    all_obj = false;
+                }
+            }
+        }
+        // (zend_compare_symbol_tables(get_properties(o1), get_properties(o2))
+        // fetches the right operand's properties first)
+        let mut out: Vec<Value> = vals.iter().map(|v| (*v).clone()).collect();
+        if all_obj && vals.len() == 2 {
+            for i in order {
+                if let Value::Object(obj) = vals[i].deref() {
+                    let is_lazy = matches!(
+                        obj.borrow().get_property(b"__lazy_state"),
+                        Value::String(ref s) if s.as_bytes() == b"ghost" || s.as_bytes() == b"proxy"
+                    );
+                    if is_lazy {
+                        self.maybe_run_lazy_init(&obj);
+                        if self.current_exception.is_some() {
+                            return out;
+                        }
+                        out[i] = Value::Object(self.proxy_redirect(&obj));
+                    }
+                }
+            }
+            return out;
+        }
+        out.clear();
         for v in vals {
             if let Value::Object(obj) = v.deref() {
                 let is_lazy = matches!(
@@ -25869,7 +25924,7 @@ impl Vm {
                         op_array,
                         op.line,
                     );
-                    let mut vs = self.init_lazy_in(&[&a_raw, &b_raw]);
+                    let mut vs = self.init_lazy_in_swapped(&[&a_raw, &b_raw]);
                     if self.current_exception.is_some() {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
@@ -25982,7 +26037,7 @@ impl Vm {
                         op_array,
                         op.line,
                     );
-                    let mut vs = self.init_lazy_in(&[&a_raw, &b_raw]);
+                    let mut vs = self.init_lazy_in_swapped(&[&a_raw, &b_raw]);
                     if self.current_exception.is_some() {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
