@@ -281,6 +281,30 @@ fn push_signature_deprecated(msg: String, line: u32) {
 }
 
 /// Get the next globally unique closure ID
+/// Whether a (constant) expression has an empty array element (`[1, , 2]`):
+/// "Cannot use empty array elements in arrays".
+fn expr_has_empty_array_elem(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Array(elems) => elems.iter().any(|el| {
+            (el.key.is_none()
+                && matches!(el.value.kind, ExprKind::Null)
+                && el.value.span.start == el.value.span.end)
+                || el.key.as_ref().is_some_and(expr_has_empty_array_elem)
+                || expr_has_empty_array_elem(&el.value)
+        }),
+        ExprKind::PropertyAccess { object, .. } => expr_has_empty_array_elem(object),
+        ExprKind::ArrayAccess { array, index } => {
+            expr_has_empty_array_elem(array)
+                || index.as_deref().is_some_and(expr_has_empty_array_elem)
+        }
+        ExprKind::UnaryOp { operand, .. } => expr_has_empty_array_elem(operand),
+        ExprKind::BinaryOp { left, right, .. } => {
+            expr_has_empty_array_elem(left) || expr_has_empty_array_elem(right)
+        }
+        _ => false,
+    }
+}
+
 /// Does a folded constant value still contain a runtime-resolved marker
 /// (deferred constant / enum case placeholder)?
 fn value_has_marker(v: &Value) -> bool {
@@ -500,7 +524,10 @@ pub struct Compiler {
     in_const_expr: bool,
     /// Compile-time fatal errors collected during attribute validation that
     /// should be raised before the script executes. The first one wins.
-    pub deferred_fatal_errors: Vec<String>,
+    pub deferred_fatal_errors: Vec<(String, u32)>,
+    /// The line of the declaration whose attributes are being compiled
+    /// (their validation errors are reported there; 0: unknown).
+    attr_decl_line: u32,
     /// The attributes being compiled are those of a property hook.
     in_hook_attrs: bool,
     /// The attributes being compiled are those of a closure.
@@ -810,6 +837,7 @@ impl Compiler {
             hoisted_class_idx: HashMap::new(),
             delayed_hoist_ops: Vec::new(),
             deferred_fatal_errors: Vec::new(),
+            attr_decl_line: 0,
             in_hook_attrs: false,
             attrs_scope_unknown: false,
             attr_owner_fn: None,
@@ -1555,10 +1583,11 @@ impl Compiler {
         attrs: &[goro_parser::ast::Attribute],
         class: &[u8],
         method: &[u8],
+        line: u32,
     ) -> Vec<crate::object::RuntimeAttribute> {
         let owner = [class, b"::", method].concat();
         let saved = self.attr_owner_fn.replace(owner);
-        let r = self.compile_attributes_target(attrs, "method");
+        let r = self.compile_attributes_at(attrs, "method", line);
         self.attr_owner_fn = saved;
         r
     }
@@ -1579,6 +1608,35 @@ impl Compiler {
         attrs: &[goro_parser::ast::Attribute],
     ) -> Vec<crate::object::RuntimeAttribute> {
         self.compile_attributes_target(attrs, "")
+    }
+
+    /// A class member's line, or the class's when the parser has none.
+    fn member_line(member: u32, class: u32) -> u32 {
+        if member > 0 { member } else { class }
+    }
+
+    /// The line an attribute validation error is reported on: the
+    /// declaration's (zend_compile_attributes() runs with its lineno).
+    fn attr_error_line(&self, attr_line: u32) -> u32 {
+        if self.attr_decl_line != 0 {
+            self.attr_decl_line
+        } else {
+            attr_line
+        }
+    }
+
+    /// `compile_attributes_target()` of a declaration on `line`.
+    #[inline(never)]
+    fn compile_attributes_at(
+        &mut self,
+        attrs: &[goro_parser::ast::Attribute],
+        target: &str,
+        line: u32,
+    ) -> Vec<crate::object::RuntimeAttribute> {
+        let saved = std::mem::replace(&mut self.attr_decl_line, line);
+        let r = self.compile_attributes_target(attrs, target);
+        self.attr_decl_line = saved;
+        r
     }
 
     /// Same as `compile_attributes`, but additionally validates built-in
@@ -1630,52 +1688,43 @@ impl Compiler {
                 .collect();
             if occurrences.len() > 1 {
                 let display = std::str::from_utf8(builtin).unwrap_or("");
-                self.deferred_fatal_errors
-                    .push(format!("Attribute \"{}\" must not be repeated", display));
+                let line = self.attr_error_line(occurrences[1].line);
+                self.deferred_fatal_errors.push((
+                    format!("Attribute \"{}\" must not be repeated", display),
+                    line,
+                ));
             }
         }
         // zend_compile_attributes(): argument list errors.
-        fn has_empty_array_elem(e: &Expr) -> bool {
-            match &e.kind {
-                ExprKind::Array(elems) => elems.iter().any(|el| {
-                    (el.key.is_none()
-                        && matches!(el.value.kind, ExprKind::Null)
-                        && el.value.span.start == el.value.span.end)
-                        || el.key.as_ref().is_some_and(has_empty_array_elem)
-                        || has_empty_array_elem(&el.value)
-                }),
-                ExprKind::PropertyAccess { object, .. } => has_empty_array_elem(object),
-                ExprKind::ArrayAccess { array, index } => {
-                    has_empty_array_elem(array)
-                        || index.as_deref().is_some_and(has_empty_array_elem)
-                }
-                ExprKind::UnaryOp { operand, .. } => has_empty_array_elem(operand),
-                ExprKind::BinaryOp { left, right, .. } => {
-                    has_empty_array_elem(left) || has_empty_array_elem(right)
-                }
-                _ => false,
-            }
-        }
         for a in attrs {
-            if a.args.iter().any(|arg| has_empty_array_elem(&arg.value)) {
+            let line = self.attr_error_line(a.line);
+            if a.args
+                .iter()
+                .any(|arg| expr_has_empty_array_elem(&arg.value))
+            {
                 self.deferred_fatal_errors
-                    .push("Cannot use empty array elements in arrays".into());
+                    .push(("Cannot use empty array elements in arrays".into(), line));
             }
             let mut seen_named: Vec<&[u8]> = Vec::new();
             for arg in &a.args {
                 match &arg.name {
                     Some(n) => {
                         if seen_named.contains(&n.as_slice()) {
-                            self.deferred_fatal_errors.push(format!(
-                                "Duplicate named parameter ${}",
-                                String::from_utf8_lossy(n)
+                            self.deferred_fatal_errors.push((
+                                format!(
+                                    "Duplicate named parameter ${}",
+                                    String::from_utf8_lossy(n)
+                                ),
+                                line,
                             ));
                         }
                         seen_named.push(n);
                     }
                     None if !seen_named.is_empty() && !arg.unpack => {
-                        self.deferred_fatal_errors
-                            .push("Cannot use positional argument after named argument".into());
+                        self.deferred_fatal_errors.push((
+                            "Cannot use positional argument after named argument".into(),
+                            line,
+                        ));
                     }
                     None => {}
                 }
@@ -1684,6 +1733,7 @@ impl Compiler {
         attrs
             .iter()
             .map(|attr| {
+                let line = self.attr_error_line(attr.line);
                 let name = if attr.name.len() == 1 {
                     self.resolve_class_name(&attr.name[0])
                 } else {
@@ -1706,21 +1756,23 @@ impl Compiler {
                             if flag != 0 { v(flag) } else { None }
                         })
                     {
-                        self.deferred_fatal_errors.push(msg);
+                        self.deferred_fatal_errors.push((msg, line));
                     }
                 }
                 // Attribute argument lists cannot use unpacking (...) per PHP.
                 for arg in &attr.args {
                     if arg.unpack {
-                        self.deferred_fatal_errors
-                            .push("Cannot use unpacking in attribute argument list".to_string());
+                        self.deferred_fatal_errors.push((
+                            "Cannot use unpacking in attribute argument list".to_string(),
+                            line,
+                        ));
                         break;
                     }
                 }
                 // Attribute argument expressions must be constant expressions.
                 for arg in &attr.args {
                     if let Some(msg) = Self::const_expr_error(&arg.value, true) {
-                        self.deferred_fatal_errors.push(msg);
+                        self.deferred_fatal_errors.push((msg, line));
                         break;
                     }
                 }
@@ -1810,7 +1862,7 @@ impl Compiler {
                         .eq_ignore_ascii_case(b"NoDiscard"))
                 .then(|| "#[\\NoDiscard] is not supported for property hooks".to_string());
                 if let (Some(e), false) = (&validation_error, has_delayed) {
-                    self.deferred_fatal_errors.push(e.clone());
+                    self.deferred_fatal_errors.push((e.clone(), line));
                 }
                 crate::object::RuntimeAttribute {
                     name,
@@ -3203,11 +3255,8 @@ impl Compiler {
         });
         // If any deferred fatal errors were collected (e.g. internal attribute
         // target violations), surface the first one as a compile error.
-        if let Some(msg) = self.deferred_fatal_errors.into_iter().next() {
-            return Err(CompileError {
-                message: msg,
-                line: 0,
-            });
+        if let Some((msg, line)) = self.deferred_fatal_errors.into_iter().next() {
+            return Err(CompileError { message: msg, line });
         }
         let mut warnings = std::mem::take(&mut self.warnings);
         COMPILE_WARNINGS.with(|w| {
@@ -5099,7 +5148,7 @@ impl Compiler {
                 func_compiler.op_array.strict_types = self.op_array.strict_types;
                 self.attr_owner_fn = Some(qualified_name.clone());
                 func_compiler.op_array.attributes =
-                    self.compile_attributes_target(func_attributes, "function");
+                    self.compile_attributes_at(func_attributes, "function", stmt.span.line);
                 self.attr_owner_fn = None;
                 // Carry the source filename so ReflectionFunction::getFileName()
                 // can report where the function was declared, not where it was
@@ -5410,8 +5459,10 @@ impl Compiler {
                 // If attributes are present and there's more than one directive,
                 // this is `#[Attr] const A=1, B=2;` which is a fatal error.
                 if !attributes.is_empty() && directives.len() > 1 {
-                    self.deferred_fatal_errors
-                        .push("Cannot apply attributes to multiple constants at once".to_string());
+                    self.deferred_fatal_errors.push((
+                        "Cannot apply attributes to multiple constants at once".to_string(),
+                        stmt.span.line,
+                    ));
                 }
 
                 let mut new_ticks: Option<u32> = None;
@@ -5607,7 +5658,8 @@ impl Compiler {
                     let fqn = self.prefix_with_namespace(name);
                     // Register any attributes for this constant (PHP 8.5+)
                     if !attributes.is_empty() {
-                        let compiled_attrs = self.compile_attributes_target(attributes, "constant");
+                        let compiled_attrs =
+                            self.compile_attributes_at(attributes, "constant", stmt.span.line);
                         let idx = self.op_array.const_attribute_table.len() as i64;
                         self.op_array
                             .const_attribute_table
@@ -7538,7 +7590,7 @@ impl Compiler {
                                             crate::string::msg_str(name),
                                             crate::string::msg_str(prop_name)
                                         ),
-                                        line: stmt.span.line,
+                                        line: Self::member_line(*prop_line, stmt.span.line),
                                     });
                                 }
                                 // Set visibility must not be wider than read visibility
@@ -7555,7 +7607,7 @@ impl Compiler {
                                                 crate::string::msg_str(name),
                                                 crate::string::msg_str(prop_name)
                                             ),
-                                            line: stmt.span.line,
+                                            line: Self::member_line(*prop_line, stmt.span.line),
                                         });
                                     }
                                 }
@@ -7748,7 +7800,8 @@ impl Compiler {
                                 is_virtual: prop_is_virtual,
                                 is_abstract: *prop_is_abstract,
                                 is_final: *prop_is_final,
-                                attributes: self.compile_attributes_target(attributes, "property"),
+                                attributes: self
+                                    .compile_attributes_at(attributes, "property", *prop_line),
                                 doc_comment: prop_doc_comment
                                     .as_ref()
                                     .map(|d| String::from_utf8_lossy(d).into_owned()),
@@ -9408,6 +9461,7 @@ impl Compiler {
                                             method_attributes,
                                             &qualified_name,
                                             method_name,
+                                            *method_line,
                                         ),
                                     },
                                 );
@@ -9595,6 +9649,7 @@ impl Compiler {
                                             method_attributes,
                                             &qualified_name,
                                             method_name,
+                                            *method_line,
                                         ),
                                     },
                                 );
@@ -9613,6 +9668,12 @@ impl Compiler {
                             if let Some(msg) = Self::const_expr_error(const_expr, false) {
                                 return Err(CompileError {
                                     message: msg,
+                                    line: const_expr.span.line,
+                                });
+                            }
+                            if expr_has_empty_array_elem(const_expr) {
+                                return Err(CompileError {
+                                    message: "Cannot use empty array elements in arrays".into(),
                                     line: const_expr.span.line,
                                 });
                             }
@@ -10301,7 +10362,11 @@ impl Compiler {
                                 .iter()
                                 .map(|b| b.to_ascii_lowercase())
                                 .collect();
-                            let const_attrs = self.compile_attributes(const_attributes);
+                            let const_attrs = self.compile_attributes_at(
+                                const_attributes,
+                                "",
+                                const_expr.span.line,
+                            );
                             let declared_type = const_type_hint.as_ref().map(|hint| {
                                 type_hint_to_param_type_with_ns(
                                     hint,

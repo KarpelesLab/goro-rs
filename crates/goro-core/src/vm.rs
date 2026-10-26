@@ -55496,7 +55496,12 @@ impl Vm {
                                             "{}::{}() has #[\\Override] attribute, but no matching parent method exists",
                                             class_display_name, method_display
                                         ),
-                                        line: op.line,
+                                        // (at the method's declaration)
+                                        line: if method.op_array.decl_line > 0 {
+                                            method.op_array.decl_line
+                                        } else {
+                                            op.line
+                                        },
                                     });
                                 }
                             }
