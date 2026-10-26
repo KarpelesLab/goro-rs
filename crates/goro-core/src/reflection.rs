@@ -9867,6 +9867,16 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                         .filter(|d| d.has_get_hook || d.has_set_hook)
                         .map(|d| d.is_virtual || d.property_type.is_none());
                     let ob = target_obj.borrow();
+                    // (SensitiveParameterValue keeps $value natively)
+                    let pn = if pn == b"value"
+                        && ob
+                            .class_name
+                            .eq_ignore_ascii_case(b"SensitiveParameterValue")
+                    {
+                        b"__sensitive_value".as_slice()
+                    } else {
+                        pn
+                    };
                     let has = hooked == Some(true)
                         || (ob.has_property(pn) && !matches!(ob.get_property(pn), Value::Undef));
                     Some(if has { Value::True } else { Value::False })
