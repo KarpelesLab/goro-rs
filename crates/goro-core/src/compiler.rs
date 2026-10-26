@@ -7509,6 +7509,7 @@ impl Compiler {
                     }
                 }
 
+                let mut enum_magic_err: Option<CompileError> = None;
                 for member in body {
                     Self::warn_nan_concat_member(member);
                     self.const_property_name = match member {
@@ -8959,15 +8960,17 @@ impl Compiler {
                                             line: l,
                                         });
                                     }
-                                    return Err(CompileError {
-                                        message: format!(
-                                            "Enum {} cannot include magic method {}",
-                                            crate::string::msg_str(name),
-                                            crate::string::msg_str(method_name)
-                                        ),
-                                        // (zend_verify_enum(): at the enum)
-                                        line: stmt.span.line,
-                                    });
+                                    if enum_magic_err.is_none() {
+                                        enum_magic_err = Some(CompileError {
+                                            message: format!(
+                                                "Enum {} cannot include magic method {}",
+                                                crate::string::msg_str(name),
+                                                crate::string::msg_str(method_name)
+                                            ),
+                                            // (zend_verify_enum(): at the enum)
+                                            line: stmt.span.line,
+                                        });
+                                    }
                                 }
                                 // Backed enums cannot redeclare from/tryFrom, any enum cannot redeclare cases
                                 let is_reserved_enum_method = if enum_backing_type.is_some() {
@@ -11617,6 +11620,10 @@ impl Compiler {
                             }
                         }
                     }
+                }
+                // zend_verify_enum() (at linking): after the methods compiled
+                if let Some(e) = enum_magic_err {
+                    return Err(e);
                 }
 
                 self.const_property_name.clear();
