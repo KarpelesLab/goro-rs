@@ -2790,19 +2790,37 @@ fn array_unshift(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_keys(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let search_value = args.get(1);
         let strict = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
+        if let (Some(search), false) = (search_value, strict) {
+            // fast_equal_check_function(): the loose comparison may warn
+            // (an object compared with a number) or call __toString().
+            let entries: Vec<(ArrayKey, Value)> = arr
+                .borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let mut result = PhpArray::new();
+            for (key, val) in entries {
+                if vm.loose_equals(search, &val.deref()) {
+                    result.push(match key {
+                        goro_core::array::ArrayKey::Int(n) => Value::Long(n),
+                        goro_core::array::ArrayKey::String(s) => Value::String(s),
+                    });
+                }
+                if vm.current_exception.is_some() {
+                    break;
+                }
+            }
+            return Ok(Value::Array(Rc::new(RefCell::new(result))));
+        }
         let arr = arr.borrow();
         let mut result = PhpArray::new();
         for (key, val) in arr.iter() {
             let include = if let Some(search) = search_value {
-                if strict {
-                    val.identical(search)
-                } else {
-                    val.equals(search)
-                }
+                val.identical(search)
             } else {
                 true
             };
@@ -3281,7 +3299,11 @@ fn array_splice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 .collect(),
         ),
         Some(Value::Null | Value::Undef) => Some(Vec::new()),
-        Some(other) => Some(vec![other]),
+        Some(other) => {
+            let line = vm.current_line;
+            vm.warn_nan_coercion(&other, "array", line);
+            Some(vec![other])
+        }
     };
 
     // php_splice(): clamp the offset and the length.
@@ -4670,7 +4692,7 @@ fn array_fill_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     format!("Resource id #{}", n).into_bytes(),
                 )),
                 // (zend_symtable_update() of the string: "1" is the key 1)
-                Value::Double(_) => Vm::value_to_array_key(Value::String(val.to_php_string())),
+                Value::Double(_) => Vm::value_to_array_key(Value::String(vm.value_to_string(&val))),
                 // Only canonical integer strings become int keys ("05" stays a string)
                 Value::String(_) => Vm::value_to_array_key(val.clone()),
                 Value::True => ArrayKey::Int(1),
@@ -4681,14 +4703,10 @@ fn array_fill_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     vm.emit_warning("Array to string conversion");
                     ArrayKey::String(PhpString::from_vec(b"Array".to_vec()))
                 }
-                Value::Object(obj) => {
-                    // Use __toString if available; otherwise fall back to to_php_string.
-                    let obj_val = Value::Object(obj.clone());
-                    if let Some(s) = vm.call_object_method(&obj_val, b"__toString", &[]) {
-                        Vm::value_to_array_key(Value::String(s.to_php_string()))
-                    } else {
-                        ArrayKey::String(val.to_php_string())
-                    }
+                // zval_get_tmp_string(): a non-stringable object throws
+                Value::Object(_) => {
+                    let s = vm.value_to_string_checked(&val)?;
+                    Vm::value_to_array_key(Value::String(s))
                 }
                 _ => value_to_array_key(&val),
             };
@@ -6819,6 +6837,7 @@ fn array_column(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let column = key_param(vm, 1, "column_key")?;
     let index = key_param(vm, 2, "index_key")?;
     let mut result = PhpArray::new();
+    let mut pending: Option<VmError> = None;
     for row in input {
         let data = row.deref();
         let colval = match &column {
@@ -6841,10 +6860,15 @@ fn array_column(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             } else {
                                 "array".to_string()
                             };
-                            let msg = format!("Cannot access offset of type {} on array", tn);
-                            let exc = vm.throw_type_error(msg.clone());
-                            vm.current_exception = Some(exc);
-                            return Err(VmError { message: msg, line });
+                            // (php_array_column() keeps looping after the
+                            // TypeError of array_set_zval_key())
+                            if pending.is_none() {
+                                let msg =
+                                    format!("Cannot access offset of type {} on array", tn);
+                                let exc = vm.throw_type_error(msg.clone());
+                                vm.current_exception = Some(exc);
+                                pending = Some(VmError { message: msg, line });
+                            }
                         }
                         _ => {
                             let key = vm.value_to_array_key_checked(&kv, line);
@@ -6856,19 +6880,16 @@ fn array_column(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             },
         }
     }
+    if let Some(e) = pending {
+        return Err(e);
+    }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 fn value_to_array_key(val: &Value) -> goro_core::array::ArrayKey {
     match val {
         Value::Long(n) => goro_core::array::ArrayKey::Int(*n),
-        Value::String(s) => {
-            // Try to parse as integer
-            if let Ok(n) = s.to_string_lossy().parse::<i64>() {
-                goro_core::array::ArrayKey::Int(n)
-            } else {
-                goro_core::array::ArrayKey::String(s.clone())
-            }
-        }
+        // (only a canonical integer string is an int key: "-0" and "01" are not)
+        Value::String(_) => Vm::value_to_array_key(val.clone()),
         Value::True => goro_core::array::ArrayKey::Int(1),
         Value::False => goro_core::array::ArrayKey::Int(0),
         Value::Null => goro_core::array::ArrayKey::String(PhpString::empty()),
