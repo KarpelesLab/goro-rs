@@ -4986,6 +4986,14 @@ fn sort_regular_cmp(vm: &mut Vm, a: &Value, b: &Value) -> i64 {
         let line = vm.current_line;
         vm.emit_object_comparison_notice(&a, &b, line);
     }
+    // (the compare handlers' warnings of extension objects, those of the
+    // elements of arrays)
+    if matches!(
+        (&a, &b),
+        (Value::Object(_), Value::Object(_)) | (Value::Array(_), Value::Array(_))
+    ) {
+        return vm.zend_compare(&a, &b);
+    }
     a.compare_zend(&b)
 }
 
