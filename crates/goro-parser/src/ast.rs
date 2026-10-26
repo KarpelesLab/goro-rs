@@ -372,6 +372,9 @@ pub struct HookAttrs {
     pub set_short: bool,
     /// The hooks' doc comments (get, set), boxed: rarely present.
     pub docs: Option<Box<[Option<Vec<u8>>; 2]>>,
+    /// The hooks' (start, end) lines (get, set): from the hook's name to the
+    /// end of its body (0: unknown).
+    pub lines: [(u32, u32); 2],
 }
 impl HookAttrs {
     /// The doc comment of the get (`set` false) or set hook.

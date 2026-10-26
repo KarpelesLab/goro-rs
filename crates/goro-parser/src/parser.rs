@@ -1433,6 +1433,13 @@ impl Parser {
         Ok(stmts)
     }
 
+    /// The line of the token consumed last.
+    fn prev_token_line(&self) -> u32 {
+        self.tokens
+            .get(self.pos.wrapping_sub(1))
+            .map_or(0, |t| t.span.line)
+    }
+
     /// Like parse_block but also returns the line number of the closing brace.
     fn parse_block_with_end(&mut self) -> ParseResult<(Vec<Statement>, u32)> {
         self.expect(&TokenKind::OpenBrace)?;
@@ -3523,6 +3530,7 @@ impl Parser {
                 }
             };
 
+            let hook_line = self.span().line;
             if hook_name.eq_ignore_ascii_case(b"get") {
                 if get_hook.is_some() {
                     return Err(ParseError {
@@ -3576,6 +3584,7 @@ impl Parser {
                         span: self.span(),
                     });
                 }
+                self.last_hook_attrs.lines[0] = (hook_line, self.prev_token_line());
             } else if hook_name.eq_ignore_ascii_case(b"set") {
                 if set_hook.is_some() {
                     return Err(ParseError {
@@ -3786,6 +3795,7 @@ impl Parser {
                         span: self.span(),
                     });
                 }
+                self.last_hook_attrs.lines[1] = (hook_line, self.prev_token_line());
             } else {
                 let class_name = self
                     .class_name_stack

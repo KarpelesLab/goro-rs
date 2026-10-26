@@ -197,6 +197,18 @@ pub fn take_pending_compile_warnings() -> Vec<(&'static str, String, u32)> {
 pub fn take_compile_time_binds() -> Option<(OpArray, Vec<ClassEntry>)> {
     COMPILE_TIME_BINDS.with(|b| b.borrow_mut().take())
 }
+/// A property hook's start and end lines (from the parser; else the
+/// property's line).
+#[inline(never)]
+fn set_hook_lines(op: &mut OpArray, lines: (u32, u32), fallback: u32) {
+    if lines.0 > 0 {
+        op.decl_line = lines.0;
+        op.end_line = lines.1.max(lines.0);
+    } else {
+        op.decl_line = fallback;
+    }
+}
+
 /// "Class C declares abstract method m() and must therefore be declared
 /// abstract" (or an anonymous class's "must not be abstract").
 #[inline(never)]
@@ -7822,7 +7834,11 @@ impl Compiler {
                                 hook_compiler.use_function_map = self.use_function_map.clone();
                                 hook_compiler.use_const_map = self.use_const_map.clone();
                                 hook_compiler.op_array.name = hook_display_name.into_bytes();
-                                hook_compiler.op_array.decl_line = stmt.span.line;
+                                set_hook_lines(
+                                    &mut hook_compiler.op_array,
+                                    hook_attrs.lines[0],
+                                    stmt.span.line,
+                                );
                                 hook_compiler.op_array.strict_types = self.op_array.strict_types;
                                 // The get hook's return type is the property type.
                                 hook_compiler.op_array.return_type = prop_type.clone();
@@ -7897,7 +7913,11 @@ impl Compiler {
                                 hook_compiler.use_function_map = self.use_function_map.clone();
                                 hook_compiler.use_const_map = self.use_const_map.clone();
                                 hook_compiler.op_array.name = hook_display_name.into_bytes();
-                                hook_compiler.op_array.decl_line = stmt.span.line;
+                                set_hook_lines(
+                                    &mut hook_compiler.op_array,
+                                    hook_attrs.lines[1],
+                                    stmt.span.line,
+                                );
                                 hook_compiler.op_array.strict_types = self.op_array.strict_types;
                                 hook_compiler.source_file = self.source_file.clone();
                                 hook_compiler.current_class = Some(qualified_name.clone());
@@ -8811,7 +8831,11 @@ impl Compiler {
                                                     self.use_const_map.clone();
                                                 hook_compiler.op_array.name =
                                                     hook_display_name.into_bytes();
-                                                hook_compiler.op_array.decl_line = *method_line;
+                                                set_hook_lines(
+                                                    &mut hook_compiler.op_array,
+                                                    param.hook_attrs.lines[0],
+                                                    *method_line,
+                                                );
                                                 hook_compiler.op_array.strict_types =
                                                     self.op_array.strict_types;
                                                 hook_compiler.op_array.return_type =
@@ -8897,7 +8921,11 @@ impl Compiler {
                                                     self.use_const_map.clone();
                                                 hook_compiler.op_array.name =
                                                     hook_display_name.into_bytes();
-                                                hook_compiler.op_array.decl_line = *method_line;
+                                                set_hook_lines(
+                                                    &mut hook_compiler.op_array,
+                                                    param.hook_attrs.lines[1],
+                                                    *method_line,
+                                                );
                                                 hook_compiler.op_array.strict_types =
                                                     self.op_array.strict_types;
                                                 hook_compiler.source_file =
