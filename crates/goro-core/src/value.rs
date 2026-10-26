@@ -256,6 +256,13 @@ pub fn raise_memory_exhausted(reported: usize) -> bool {
     if MEMORY_OVERFLOW.with(|o| o.get()) {
         return false;
     }
+    // A large block (zend_mm_alloc_pages()) reports its whole pages; a huge
+    // one (over ZEND_MM_MAX_LARGE_SIZE) the size asked for.
+    let reported = if reported > 3072 && reported <= (2 << 20) - 4096 {
+        reported.next_multiple_of(4096)
+    } else {
+        reported
+    };
     MEMORY_EXHAUSTED.with(|c| {
         if c.get() == 0 {
             c.set(reported.max(1));
