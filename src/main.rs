@@ -229,7 +229,8 @@ fn load_php_ini(
     ini: &mut IniSettings,
     sapi_ini: &str,
 ) {
-    if ini_ignore {
+    // (-n with -c still loads the -c file, but scans no directories)
+    if ini_ignore && ini_path_override.is_none() {
         return;
     }
     let mut search: Vec<std::path::PathBuf> = Vec::new();
@@ -239,7 +240,9 @@ fn load_php_ini(
         search.push(rc.into());
     }
     load_php_ini_file(search, ini, sapi_ini);
-    scan_ini_dirs(ini);
+    if !ini_ignore {
+        scan_ini_dirs(ini);
+    }
 }
 
 /// php_init_config(): scan PHP_INI_SCAN_DIR for *.ini files (parsed after
