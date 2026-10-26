@@ -1108,7 +1108,11 @@ fn private_key_reads(vm: &mut Vm, key: &[u8]) -> bool {
     if key.starts_with(b"file://") {
         return false;
     }
-    let Some(f) = vm.functions.get(b"openssl_pkey_get_private".as_slice()).copied() else {
+    let Some(f) = vm
+        .functions
+        .get(b"openssl_pkey_get_private".as_slice())
+        .copied()
+    else {
         return false;
     };
     let saved = vm.warning_capture.replace(Vec::new());
