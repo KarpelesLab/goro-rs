@@ -1654,7 +1654,13 @@ impl Vm {
         if self.spl_has_user_ctor(&cl) {
             self.call_object_method(&Value::Object(new_obj.clone()), b"__construct", args);
         } else {
+            // spl_instantiate_arg_ex*(): the constructor runs as a call
+            // from internal code.
+            self.spl_push_internal_ctor_frame(&cl, args);
             self.dit_construct(&new_obj, args);
+            if let Some(f) = self.call_stack.pop() {
+                self.recycle_frame(f);
+            }
         }
         if self.exc() {
             return Value::Null;

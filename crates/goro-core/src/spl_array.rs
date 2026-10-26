@@ -1843,7 +1843,11 @@ impl Vm {
                 if self.spl_has_user_ctor(&cl) {
                     self.call_object_method(&Value::Object(child.clone()), b"__construct", &cargs);
                 } else {
+                    self.spl_push_internal_ctor_frame(&cl, &cargs);
                     self.ao_construct(&child, &cargs);
+                    if let Some(f) = self.call_stack.pop() {
+                        self.recycle_frame(f);
+                    }
                 }
                 if self.current_exception.is_some() {
                     return Some(Value::Null);

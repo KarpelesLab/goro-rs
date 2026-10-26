@@ -1090,6 +1090,22 @@ impl Vm {
         r
     }
 
+    /// Push the `Decl->__construct` frame (Decl = the built-in class
+    /// declaring the constructor `class_lower` inherits) of a constructor
+    /// run from internal code (spl_instantiate_arg_ex*()): it shows as
+    /// "[internal function]". Pop it with `call_stack.pop()`.
+    #[inline(never)]
+    pub(crate) fn spl_push_internal_ctor_frame(&mut self, class_lower: &[u8], args: &[Value]) {
+        let base = self.spl_builtin_base(class_lower).unwrap_or(b"");
+        let decl = match self.spl_stub_lookup_decl(base, b"__construct") {
+            Some((d, _)) => d.into_owned(),
+            None => base.to_vec(),
+        };
+        let frame = format!("{}->__construct", self.builtin_canonical_name(&decl));
+        self.call_stack
+            .push((frame, self.current_file.clone(), 0, args.to_vec(), true));
+    }
+
     /// Raise a fatal error from a built-in SPL method; the deferred call
     /// returns an error so execution stops.
     pub(crate) fn spl_fatal(&mut self, msg: &str) {
