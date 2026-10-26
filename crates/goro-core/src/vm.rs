@@ -53033,63 +53033,60 @@ impl Vm {
                                             }
                                         }
                                         // Check set-visibility compatibility
-                                        let parent_set_vis = parent_prop.set_visibility;
-                                        let child_set_vis = child_prop.set_visibility;
-                                        // If the parent has no set hook (e.g. get-only abstract),
-                                        // the child is free to add asymmetric set visibility.
-                                        let parent_has_no_set_prototype =
-                                            !parent_prop.has_set_hook && parent_prop.is_virtual; // pure virtual: no backing setter either
-                                        if parent_set_vis != child_set_vis
-                                            && !parent_has_no_set_prototype
+                                        // do_inherit_property(): a child's set visibility
+                                        // (readonly implies protected(set)) can't be
+                                        // stricter than the parent's (or its visibility).
+                                        // (zend_declare_typed_property()'s set flags:
+                                        // an equivalent one is dropped)
+                                        let set_flag = |p: &crate::object::PropertyDef| match p
+                                            .set_visibility
                                         {
-                                            let child_display =
-                                                crate::string::msg_str(&class.name).to_string();
-                                            let parent_display =
-                                                crate::string::msg_str(parent_name).to_string();
-                                            let prop_display =
-                                                crate::string::msg_str(&parent_prop.name)
-                                                    .to_string();
-                                            // Parent has no set-vis (symmetric) but child adds one
-                                            if parent_set_vis.is_none() && child_set_vis.is_some() {
+                                            Some(v) if v == p.visibility => None,
+                                            Some(v) => Some(v),
+                                            None => (p.is_readonly
+                                                && p.visibility == Visibility::Public)
+                                                .then_some(Visibility::Protected),
+                                        };
+                                        let child_set_vis = set_flag(child_prop);
+                                        let parent_set_flag = set_flag(parent_prop);
+                                        // Get-only virtual properties have no set visibility.
+                                        let parent_has_no_set_prototype =
+                                            !parent_prop.has_set_hook && parent_prop.is_virtual;
+                                        let level = |v: Visibility| match v {
+                                            Visibility::Public => 0,
+                                            Visibility::Protected => 1,
+                                            Visibility::Private => 2,
+                                        };
+                                        if let Some(c_sv) =
+                                            child_set_vis.filter(|_| !parent_has_no_set_prototype)
+                                        {
+                                            let p_sv =
+                                                parent_set_flag.unwrap_or(parent_prop.visibility);
+                                            if level(c_sv) > level(p_sv) {
                                                 return Err(VmError {
                                                     message: format!(
-                                                        "Set access level of {}::${} must be omitted (as in class {})",
-                                                        child_display, prop_display, parent_display
+                                                        "Set access level of {}::${} must be {} (as in class {}){}",
+                                                        crate::string::msg_str(&class.name),
+                                                        crate::string::msg_str(&parent_prop.name),
+                                                        match parent_set_flag {
+                                                            None => "omitted",
+                                                            Some(Visibility::Public) => "public(set)",
+                                                            Some(Visibility::Protected) => {
+                                                                "protected(set)"
+                                                            }
+                                                            Some(Visibility::Private) => {
+                                                                "private(set)"
+                                                            }
+                                                        },
+                                                        crate::string::msg_str(parent_name),
+                                                        if parent_set_flag.is_some() {
+                                                            " or weaker"
+                                                        } else {
+                                                            ""
+                                                        }
                                                     ),
                                                     line: op.line,
                                                 });
-                                            }
-                                            // Parent has set-vis but child restricts it more
-                                            if let (Some(p_sv), Some(c_sv)) =
-                                                (parent_set_vis, child_set_vis)
-                                            {
-                                                let p_level = match p_sv {
-                                                    Visibility::Public => 0,
-                                                    Visibility::Protected => 1,
-                                                    Visibility::Private => 2,
-                                                };
-                                                let c_level = match c_sv {
-                                                    Visibility::Public => 0,
-                                                    Visibility::Protected => 1,
-                                                    Visibility::Private => 2,
-                                                };
-                                                if c_level > p_level {
-                                                    let vis_str = match p_sv {
-                                                        Visibility::Public => "public(set)",
-                                                        Visibility::Protected => "protected(set)",
-                                                        Visibility::Private => "private(set)",
-                                                    };
-                                                    return Err(VmError {
-                                                        message: format!(
-                                                            "Set access level of {}::${} must be {} (as in class {}) or weaker",
-                                                            child_display,
-                                                            prop_display,
-                                                            vis_str,
-                                                            parent_display
-                                                        ),
-                                                        line: op.line,
-                                                    });
-                                                }
                                             }
                                         }
                                     }
