@@ -1158,9 +1158,10 @@ fn opcache_is_script_cached(vm: &mut Vm, args: &[Value]) -> R {
     if !with(|s| s.accelerator_enabled) {
         return Ok(Value::False);
     }
-    Ok(b(
-        resolve(vm, &name).is_some_and(|p| script_cache::is_cached(&p))
-    ))
+    // (a script removed since it was cached is still found by its path:
+    // accel_make_persistent_key() does not need the file)
+    let key = resolve(vm, &name).or_else(|| name.starts_with('/').then(|| name.clone()));
+    Ok(b(key.is_some_and(|p| script_cache::is_cached(&p))))
 }
 
 fn opcache_is_script_cached_in_file_cache(vm: &mut Vm, args: &[Value]) -> R {
