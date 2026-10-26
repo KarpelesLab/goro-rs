@@ -10596,6 +10596,20 @@ impl Compiler {
                                 }
                                 match Self::check_literal_default(&pt, const_expr) {
                                     Err((tn, _)) => {
+                                        // (`self` / `parent` named as resolved)
+                                        let tstr = if modifiers.is_trait {
+                                            tstr
+                                        } else {
+                                            let rt = Self::resolve_relative_type(
+                                                pt.clone(),
+                                                &qualified_name,
+                                                class.parent.as_deref(),
+                                            );
+                                            crate::vm::variance::type_to_string(
+                                                &TypeView::from_param_type(&rt),
+                                                None,
+                                            )
+                                        };
                                         return Err(CompileError {
                                             message: format!(
                                                 "Cannot use {} as value for class constant {}::{} of type {}",
@@ -10604,7 +10618,7 @@ impl Compiler {
                                                 crate::string::msg_str(const_name),
                                                 tstr
                                             ),
-                                            line: stmt.span.line,
+                                            line: const_expr.span.line,
                                         });
                                     }
                                     Ok(Some(v)) => val = v,
