@@ -23165,10 +23165,13 @@ impl Vm {
             // frame bound to a symbol table, after the previous opcode's
             // bindings were repaired, on variables that are bound.)
             let mut fast_tried = false;
+            // (a builtin call the last run made failed: its DO_FCALL takes
+            // the failure, below)
             if single_step.is_none()
                 && self.current_exception.is_none()
                 && !self.error_handler_threw
                 && !typed_ref::any()
+                && fast_failure.is_none()
             {
                 if !crate::fastpath::runs_fast(op_array.ops[ip].opcode) {
                     fast_tried = true;

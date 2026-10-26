@@ -1716,6 +1716,9 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::ArrayNew
             | OpCode::SaveHandlerDepth
             | OpCode::FreeLoopVar
+            // (a call whose arguments the general handlers sent: a lean
+            // call, or a builtin's, see the DO_FCALL arm of run_fast_ops)
+            | OpCode::DoFCall
     )
 }
 
