@@ -14153,6 +14153,30 @@ impl Compiler {
     /// zend_eval_const_expr(): `nested`, folding ternaries, `??` and
     /// dimension fetches too), `@` of a constant. No side effects: only the
     /// operand ranks of commutative opcodes use it.
+    /// Constants whose value depends on the running binary or its
+    /// installation (PHP_BINARY, PHP_OS, PHP_*DIR, ...): the
+    /// `eval_const_expr` table only has placeholders for them, so they are
+    /// never folded by the zend_eval_const_expr passes.
+    fn env_dependent_const(n: &[u8]) -> bool {
+        let l = n.to_ascii_lowercase();
+        let l = l.strip_prefix(b"\\").unwrap_or(&l);
+        l.starts_with(b"php_")
+            && !matches!(
+                l,
+                b"php_eol"
+                    | b"php_int_max"
+                    | b"php_int_min"
+                    | b"php_int_size"
+                    | b"php_float_dig"
+                    | b"php_float_epsilon"
+                    | b"php_float_max"
+                    | b"php_float_min"
+                    | b"php_float_inf"
+                    | b"php_float_nan"
+            )
+            || l == b"dirsep"
+    }
+
     #[inline(never)]
     fn zend_ct_value(e: &Expr, nested: bool) -> Option<Value> {
         let b = |c: bool| if c { Value::True } else { Value::False };
@@ -14162,8 +14186,8 @@ impl Compiler {
             | ExprKind::String(_)
             | ExprKind::True
             | ExprKind::False
-            | ExprKind::Null
-            | ExprKind::Identifier(_) => Self::eval_const_expr(e),
+            | ExprKind::Null => Self::eval_const_expr(e),
+            ExprKind::Identifier(n) if !Self::env_dependent_const(n) => Self::eval_const_expr(e),
             ExprKind::Suppress(inner) if !nested => Self::zend_ct_value(inner, false),
             ExprKind::Array(elems) => {
                 let mut arr = crate::array::PhpArray::new();
@@ -14491,7 +14515,7 @@ impl Compiler {
             // (a persistent constant; in a namespace the name could be
             // the namespace's)
             ExprKind::Identifier(n)
-                if self.current_namespace.is_empty()
+                if (self.current_namespace.is_empty() && !Self::env_dependent_const(n))
                     || matches!(
                         n.to_ascii_lowercase().as_slice(),
                         b"true" | b"false" | b"null"
