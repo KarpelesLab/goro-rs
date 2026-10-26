@@ -420,7 +420,8 @@ fn extra_verified_flags(lname: &[u8]) -> u8 {
         b"stream_filter_append",
         b"stream_filter_prepend",
     ];
-    if FILE_FUNCTIONS.contains(&lname) || lname == b"ob_get_status" {
+    // (readgzfile(): gzfile()'s Z_PARAM_PATH + Z_PARAM_LONG)
+    if FILE_FUNCTIONS.contains(&lname) || lname == b"ob_get_status" || lname == b"readgzfile" {
         CHECK_ARITY | CHECK_TYPES
     } else if matches!(lname, b"readdir" | b"rewinddir" | b"closedir") {
         // (their ?resource $dir_handle defaults to the last opened one)
