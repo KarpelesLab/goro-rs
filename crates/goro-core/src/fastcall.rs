@@ -153,7 +153,6 @@ impl Vm {
         let template = match self.classes.get(name_lower) {
             Some(ce)
                 if ce.filename.is_some()
-                    && ce.attributes.is_empty()
                     && !(ce.is_abstract || ce.is_interface || ce.is_enum || ce.is_trait) =>
             {
                 ce.new_template
