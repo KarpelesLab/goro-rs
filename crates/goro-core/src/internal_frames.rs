@@ -153,6 +153,22 @@ impl Vm {
         self.current_exception.is_some()
     }
 
+    /// A builtin went over memory_limit (an allocation it made was refused
+    /// but it carried on): the fatal error is raised while its frame is
+    /// still on the stack, as zend_mm_safe_error() does inside the call.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn builtin_memory_fatal(
+        &mut self,
+        r: Result<Value, crate::vm::VmError>,
+    ) -> Result<Value, crate::vm::VmError> {
+        if self.fatal_bailout || self.exit_requested {
+            return r;
+        }
+        drop(r);
+        Err(self.memory_limit_fatal())
+    }
+
     /// End of the builtin call recorded by the last `push_builtin_frame`.
     #[inline]
     pub fn pop_builtin_frame(&mut self) {
@@ -592,6 +608,11 @@ impl Vm {
         };
         if let Some(snap) = typed_refs {
             r = self.verify_typed_ref_args(snap, r);
+        }
+        // An allocation of the call went over memory_limit (and it carried
+        // on): the fatal error is raised inside the call.
+        if crate::value::memory_exhausted() != 0 {
+            r = self.builtin_memory_fatal(r);
         }
         // ZEND_VM_FCALL_INTERRUPT_CHECK(call): a signal that arrived during
         // the call is handled while its frame is still the current one.
