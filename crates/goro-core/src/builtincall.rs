@@ -156,6 +156,9 @@ pub(crate) struct LeanFrame {
     /// Its frames, once a call it made gave it them (see
     /// enter_lean_frames: they stay until it ends).
     pub(crate) at: Option<LeanFrameAt>,
+    /// Its backtrace frame is the top of call_stack already (a callback's,
+    /// pushed by the builtin's call of it: see Vm::callback_frame).
+    pub(crate) has_call_frame: bool,
 }
 
 impl Vm {
@@ -412,37 +415,11 @@ impl Vm {
             });
             // SAFETY: see LeanFrame.
             let (f, call, slots) = unsafe { (&*lf.f, &*lf.call, &*lf.slots) };
-            let mut display = self.string_pool.pop().unwrap_or_default();
-            display.clear();
-            // (a method's frame is named after what its call site resolved;
-            // a static or forwarding call's as DO_FCALL's fast path names
-            // it: its class, as declared, and the method as called)
-            match (lf.sep, &call.target.method_info, &f.scope_class) {
-                (Some(_), Some(i), _) => display.push_str(&i.display),
-                _ if !f.display_name.is_empty() => push_lossy(&mut display, &f.display_name),
-                (Some((sep, _)), None, Some(scope)) => {
-                    match self.classes.get(scope) {
-                        Some(c) => push_lossy(&mut display, &c.name),
-                        None => push_lossy(&mut display, scope),
-                    }
-                    display.push_str("::");
-                    push_lossy(&mut display, &call.name.as_bytes()[sep + 2..]);
-                }
-                _ => push_lossy(&mut display, call.name.as_bytes()),
-            }
             let this = lf.sep.is_some_and(|(_, this)| this);
-            let base = usize::from(this);
             let frame_this = this && matches!(slots.first(), Some(Value::Object(_)));
-            let mut args = self.value_pool.pop().unwrap_or_default();
-            args.clear();
-            super::leancall::moved_frame_args(f, slots, &call.args, base, lf.nargs, &mut args);
-            // (the file the call was made in: the caller's)
-            let file = match k {
-                0 => self.current_file.clone(),
-                _ => unsafe { &*self.lean_frames[k - 1].f }.file_name(),
-            };
-            self.call_stack
-                .push((display, file, lf.line, args, frame_this));
+            if !lf.has_call_frame {
+                self.push_lean_backtrace_frame(k, &lf, f, call, slots, frame_this);
+            }
             if self.register_cv_frame_hinted(f, true) {
                 self.set_cv_frame_vars(slots);
             }
@@ -480,6 +457,50 @@ impl Vm {
             was_global,
             lean_depth,
         })
+    }
+
+    /// enter_lean_frames(): the backtrace frame of the running lean callee
+    /// `lf` (the `k`th), of `f`, made by `call`.
+    fn push_lean_backtrace_frame(
+        &mut self,
+        k: usize,
+        lf: &LeanFrame,
+        f: &OpArray,
+        call: &PendingCall,
+        slots: &[Value],
+        frame_this: bool,
+    ) {
+        {
+            let mut display = self.string_pool.pop().unwrap_or_default();
+            display.clear();
+            // (a method's frame is named after what its call site resolved;
+            // a static or forwarding call's as DO_FCALL's fast path names
+            // it: its class, as declared, and the method as called)
+            match (lf.sep, &call.target.method_info, &f.scope_class) {
+                (Some(_), Some(i), _) => display.push_str(&i.display),
+                _ if !f.display_name.is_empty() => push_lossy(&mut display, &f.display_name),
+                (Some((sep, _)), None, Some(scope)) => {
+                    match self.classes.get(scope) {
+                        Some(c) => push_lossy(&mut display, &c.name),
+                        None => push_lossy(&mut display, scope),
+                    }
+                    display.push_str("::");
+                    push_lossy(&mut display, &call.name.as_bytes()[sep + 2..]);
+                }
+                _ => push_lossy(&mut display, call.name.as_bytes()),
+            }
+            let base = usize::from(lf.sep.is_some_and(|(_, this)| this));
+            let mut args = self.value_pool.pop().unwrap_or_default();
+            args.clear();
+            super::leancall::moved_frame_args(f, slots, &call.args, base, lf.nargs, &mut args);
+            // (the file the call was made in: the caller's)
+            let file = match k {
+                0 => self.current_file.clone(),
+                _ => unsafe { &*self.lean_frames[k - 1].f }.file_name(),
+            };
+            self.call_stack
+                .push((display, file, lf.line, args, frame_this));
+        }
     }
 
     /// The end of a call enter_lean_frames() set up for (the running lean

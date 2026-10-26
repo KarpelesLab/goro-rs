@@ -10992,7 +10992,7 @@ impl Vm {
         }
         // (a fiber suspended in the call owns the arguments it holds)
         self.gc_call_args = &call.args;
-        let result = self.execute_op_array(op_array, func_cvs);
+        let result = self.callback_frame(op_array, func_cvs, &call);
         self.gc_call_args = std::ptr::null();
         self.closure_frame_leave(scope_pushed);
         self.is_global_scope = was_global;

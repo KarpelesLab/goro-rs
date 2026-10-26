@@ -736,6 +736,7 @@ impl Vm {
                 line: op.line,
                 nargs,
                 at: None,
+                has_call_frame: false,
             });
             let ForeachState {
                 positions,
@@ -979,7 +980,7 @@ impl Vm {
         };
         // (a declared return type: the value must have it already, see
         // recv_fast.rs)
-        if f.lean_kind() & 8 != 0
+        if f.callback_lean_kind() & 8 != 0
             && !crate::recv_fast::return_matches_exactly(self, f, v, r.line == 0)
         {
             return None;
@@ -1473,6 +1474,266 @@ impl Vm {
         match sites.iter_mut().find(|s| s.ip == ip as u32) {
             Some(s) => *s = site,
             None => sites.push(site),
+        }
+    }
+
+    /// The frame of a call of user code `f` a builtin makes (a callback,
+    /// see execute_fn_with_named_args: its backtrace frame pushed, its
+    /// variables `cvs` set up from the arguments of `call`, its class scope
+    /// entered): run as a lean call's callee when it may be (see the
+    /// module's doc), else (or from where it stops) by a frame of its own.
+    #[inline(never)]
+    pub(crate) fn callback_frame(
+        &mut self,
+        f: &OpArray,
+        cvs: Vec<Value>,
+        call: &PendingCall,
+    ) -> Result<Value, VmError> {
+        if f.callback_lean_kind() & 3 == 0 {
+            return self.execute_op_array(f, cvs);
+        }
+        // (user code entered from a builtin: its frame becomes visible, as
+        // execute_op_array() makes it)
+        self.sync_builtin_frames();
+        if !self.callback_lean_ready(f) {
+            return self.execute_op_array(f, cvs);
+        }
+        // (the run has no frame to take them: see gc_call_args)
+        self.gc_call_args = std::ptr::null();
+        match self.lean_callback(f, cvs, call, true) {
+            Ok(r) => r,
+            // (handed over: the frame starts from where the run stopped,
+            // see resume_frame)
+            Err(cvs) => {
+                self.gc_call_args = &call.args;
+                self.execute_op_array(f, cvs)
+            }
+        }
+    }
+
+    /// What a lean run of a callback's callee `f` needs of the running
+    /// state (lean_ready(), and what execute_op_array() would set up).
+    #[inline]
+    fn callback_lean_ready(&mut self, f: &OpArray) -> bool {
+        let ok = self.lean_resume.is_empty()
+            && self.lean_frames.is_empty()
+            && self.lean_depth == 0
+            && self.observer.is_none()
+            && !self.has_release_work()
+            && self.error_reporting != crate::errdisplay::ER_SILENT
+            && !self.bind_next_frame
+            && self.bind_next_tab.is_none()
+            && self.current_exception.is_none()
+            && !self.error_handler_threw
+            && self.resume_frame.is_none()
+            && !self.vm_call
+            && self.unowned_this == 0
+            && self.fiber_depth == 0
+            && !crate::fiber::in_fiber()
+            && !super::typed_ref::any()
+            && self.stack_configured
+            && crate::stack::has_room();
+        if !ok {
+            return false;
+        }
+        // (one whose calls kept being handed over is tried again after a
+        // while, see lean_candidate)
+        let info = f.cv_name_info();
+        let score = info.lean_score.get();
+        if score < 0 {
+            info.lean_score.set(score + 1);
+            return false;
+        }
+        true
+    }
+
+    /// callback_frame(): the lean run. Err: handed over (nothing done, or
+    /// the run stopped at an opcode run_fast_ops() does not run: the frame
+    /// starts from it, see resume_frame), the variables given back.
+    /// `callback`: called by a builtin (execute_op_array()'s frame, else
+    /// execute_op_array_vm()'s: see fcall_closure_frame).
+    fn lean_callback(
+        &mut self,
+        f: &OpArray,
+        mut slots: Vec<Value>,
+        call: &PendingCall,
+        callback: bool,
+    ) -> Result<Result<Value, VmError>, Vec<Value>> {
+        // The frame's room on the VM stack (execute_op_array_frame()).
+        let frame_size = (slots.len().max(f.cv_names.len()) + f.temp_count as usize) * 16
+            + crate::stack::CALL_FRAME_SIZE;
+        // (memory_limit: the frame reports it)
+        let Ok(fr) = crate::stack::vm_push(frame_size) else {
+            return Err(slots);
+        };
+        let vm_frame = crate::stack::VmFrameGuard(fr);
+        // (the emulated C stack of a call from a builtin: execute_op_array)
+        if callback && crate::stack::enter_reentry().is_err() {
+            drop(vm_frame);
+            return Err(slots);
+        }
+        fill_undef_to(&mut slots, f.cv_names.len());
+        // (a by-reference result asked of the call, see call_keeping_ref:
+        // the frame takes it, the function returns no reference)
+        self.keep_ref_depth = None;
+        let saved_line = self.current_line;
+        let calls_base = self.pending_calls.len();
+        let mut fe = self.foreach_pool.pop().unwrap_or_else(new_foreach_state);
+        let mut ctmps = self.take_slots(f.temp_count as usize);
+        // (a function outside any class runs without a class scope:
+        // execute_op_array_frame)
+        let scopeless = f.scope_class.is_none();
+        if scopeless {
+            self.class_scope_stack.push(Vec::new());
+        }
+        let this = f.cv_names.first().is_some_and(|n| n.as_slice() == b"this");
+        self.lean_depth += 1;
+        // (for the builtin calls the callee makes, see builtincall.rs: its
+        // backtrace frame is the builtin's call's)
+        self.lean_frames.push(LeanFrame {
+            f,
+            slots: &slots,
+            tmps: &ctmps,
+            fe: &*fe,
+            call,
+            sep: this.then_some((0, true)),
+            line: saved_line,
+            nargs: call.args.len(),
+            at: None,
+            has_call_frame: true,
+        });
+        let ForeachState {
+            positions,
+            snap,
+            obj,
+            iter_handles,
+            cur_key,
+            weakmap_iter_keys,
+            ref_cells,
+            ..
+        } = &mut *fe;
+        let no_release = !self.has_release_work();
+        let stop = self.run_fast_ops(
+            f,
+            0,
+            &mut slots,
+            &mut ctmps,
+            false,
+            true,
+            no_release,
+            &mut FeView {
+                positions,
+                snap,
+                obj,
+                iter_handles,
+                cur_key,
+                weakmap: weakmap_iter_keys,
+                ref_cells,
+                // (a lean callee has entered no try block)
+                handler_depth: 0,
+            },
+            true,
+            None,
+        );
+        if self.lean_frames.last().is_some_and(|lf| lf.at.is_some()) {
+            self.leave_lean_frame();
+        }
+        self.lean_frames.pop();
+        self.lean_depth -= 1;
+        if scopeless {
+            self.class_scope_stack.pop();
+        }
+        if callback {
+            crate::stack::leave_reentry();
+        }
+        // A builtin call of the callee failed (see builtincall.rs): the call
+        // ends with what it raised.
+        if let Some(e) = self.fast_call_failed.take() {
+            self.lean_callback_failed(fe, slots, ctmps, calls_base);
+            drop(vm_frame);
+            self.current_line = saved_line;
+            return Ok(Err(e));
+        }
+        let Some((result, plain)) = self.lean_return(f, stop, &slots, &mut ctmps, false) else {
+            // Handed over: the frame takes what the run left.
+            drop(vm_frame);
+            let info = f.cv_name_info();
+            info.lean_score
+                .set(info.lean_score.get().saturating_sub(16).max(-256));
+            self.resume_frame = Some(ResumeFrame {
+                tmps: ctmps,
+                fe,
+                ip: stop,
+            });
+            self.current_line = saved_line;
+            return Err(slots);
+        };
+        // The end of the frame (as lean_run() ends one).
+        if fe.positions.capacity() != 0 {
+            fe.positions = Default::default();
+        }
+        if self.foreach_pool.len() < 16 {
+            self.foreach_pool.push(fe);
+        }
+        if plain {
+            // SAFETY: the values left are plain ones, without drop glue.
+            unsafe {
+                ctmps.set_len(0);
+                slots.set_len(0);
+            }
+        } else {
+            crate::gc::release_frame(&slots);
+            release_slots(&mut ctmps);
+            release_slots(&mut slots);
+        }
+        self.recycle_values(ctmps);
+        self.recycle_values(slots);
+        if !crate::gc::release_quiet() {
+            self.run_pending_destructors();
+        }
+        drop(vm_frame);
+        self.last_call_by_ref = false;
+        // (diagnostics the builtin raises after the call report its line,
+        // see execute_op_array)
+        if callback {
+            self.current_line = saved_line;
+        }
+        let info = f.cv_name_info();
+        info.lean_score.set((info.lean_score.get() + 1).min(64));
+        if self.current_exception.is_some() {
+            return Ok(Err(VmError {
+                message: "Uncaught exception".into(),
+                line: self.current_line,
+            }));
+        }
+        Ok(Ok(result))
+    }
+
+    /// lean_callback(): the end of a run whose builtin call failed (see
+    /// lean_failed).
+    #[cold]
+    #[inline(never)]
+    fn lean_callback_failed(
+        &mut self,
+        mut fe: Box<ForeachState>,
+        mut slots: Vec<Value>,
+        mut ctmps: Vec<Value>,
+        calls_base: usize,
+    ) {
+        if self.pending_calls.len() > calls_base {
+            self.pending_calls.truncate(calls_base);
+        }
+        fe.clear();
+        if self.foreach_pool.len() < 16 {
+            self.foreach_pool.push(fe);
+        }
+        crate::gc::release_frame(&slots);
+        release_slots(&mut ctmps);
+        release_slots(&mut slots);
+        self.recycle_values(ctmps);
+        self.recycle_values(slots);
+        if !crate::gc::release_quiet() {
+            self.run_pending_destructors();
         }
     }
 

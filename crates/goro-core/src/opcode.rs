@@ -607,7 +607,7 @@ pub struct OpArray {
     /// See OpArray::free_mask().
     free_mask: std::cell::OnceCell<FreeInfo>,
     /// See OpArray::lean_kind().
-    lean_kind: FreshOnClone<u8>,
+    lean_kind: FreshOnClone<[u8; 2]>,
     /// See OpArray::prop_ic().
     prop_ics: FreshOnClone<PropIcs>,
     /// See OpArray::fused_sends() and OpArray::call_hint().
@@ -925,14 +925,25 @@ impl OpArray {
     #[inline]
     pub(crate) fn lean_kind(&self) -> u8 {
         match self.lean_kind.0.get() {
-            Some(k) => *k,
-            None => self.lean_kind_init(),
+            Some(k) => k[0],
+            None => self.lean_kind_init()[0],
+        }
+    }
+
+    /// lean_kind() of a call made by a builtin (a callback, see
+    /// vm::leancall): a closure's too (its caller binds its scope and
+    /// `$this`, its captured values are among its arguments).
+    #[inline]
+    pub(crate) fn callback_lean_kind(&self) -> u8 {
+        match self.lean_kind.0.get() {
+            Some(k) => k[1],
+            None => self.lean_kind_init()[1],
         }
     }
 
     #[cold]
     #[inline(never)]
-    fn lean_kind_init(&self) -> u8 {
+    fn lean_kind_init(&self) -> [u8; 2] {
         *self.lean_kind.0.get_or_init(|| {
             // (typed parameters and a return type: the arguments and the
             // returned value are checked to have their types already, see
@@ -947,15 +958,19 @@ impl OpArray {
                 && self.attributes.is_empty()
                 && self.internal_sig.is_none()
                 && !self.name.is_empty()
-                && !crate::closure::is_closure_fn_name(&self.name)
                 && self.cv_name_info().plain_cvs;
             let typed = 4 * u8::from(self.param_types.iter().any(|t| t.is_some()))
                 + 8 * u8::from(self.return_type.is_some())
                 + 16 * u8::from(self.by_ref_params.iter().any(|&b| b));
-            match (plain, self.cv_names.first().map(|n| n.as_slice())) {
+            let k = match (plain, self.cv_names.first().map(|n| n.as_slice())) {
                 (false, _) => 0,
                 (true, Some(b"this")) => 2 | typed,
                 (true, _) => 1 | typed,
+            };
+            if crate::closure::is_closure_fn_name(&self.name) {
+                [0, k]
+            } else {
+                [k, k]
             }
         })
     }
