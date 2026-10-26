@@ -12,6 +12,37 @@ use crate::vm::typed_ref;
 use crate::vm::{Vm, native_handlers};
 
 impl Vm {
+    /// zend_lazy_object_clone() of an initialized proxy: a new proxy (whose
+    /// own destructor never runs) over a clone of the instance.
+    #[inline(never)]
+    fn clone_lazy_proxy(&mut self, obj: &Rc<RefCell<PhpObject>>, line: u32) -> Option<Value> {
+        let real = {
+            let ob = obj.borrow();
+            if !matches!(ob.get_property(b"__lazy_state"), Value::String(ref s) if s.as_bytes() == b"proxy")
+            {
+                return None;
+            }
+            match ob.get_property(b"__lazy_real") {
+                Value::Object(r) => r,
+                _ => return None,
+            }
+        };
+        let id = self.alloc_object_id();
+        let mut proxy = {
+            let ob = obj.borrow();
+            let mut p = PhpObject::new(ob.class_name.clone(), id);
+            for (n, v) in ob.properties.iter() {
+                if n.as_slice() != b"__lazy_real" {
+                    p.set_property(n.clone(), v.clone());
+                }
+            }
+            p
+        };
+        let inner = self.clone_value(&Value::Object(real), line);
+        proxy.set_property(b"__lazy_real".to_vec(), inner);
+        Some(Value::Object(Rc::new(RefCell::new(proxy))))
+    }
+
     /// Clone `val` like php-src's clone_obj handler (copy the properties,
     /// then run `__clone()`). On failure `current_exception` is set and
     /// `Value::Null` is returned.
@@ -106,6 +137,9 @@ impl Vm {
             // If the lazy initializer threw, propagate and skip cloning.
             if self.current_exception.is_some() {
                 return Value::Null;
+            }
+            if let Some(v) = self.clone_lazy_proxy(obj, line) {
+                return v;
             }
         }
         match val {
@@ -321,20 +355,6 @@ impl Vm {
                                 Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
                             }
                             other => other.clone(),
-                        }
-                    } else if name == b"__lazy_real" {
-                        // Deep-clone the proxy's real backing object
-                        if let Value::Object(inner) = value {
-                            let inner_b = inner.borrow();
-                            let new_inner_id = self.alloc_object_id();
-                            let mut cloned_inner =
-                                PhpObject::new(inner_b.class_name.clone(), new_inner_id);
-                            for (n, v) in &inner_b.properties {
-                                cloned_inner.set_property(n.clone(), v.clone());
-                            }
-                            Value::Object(Rc::new(RefCell::new(cloned_inner)))
-                        } else {
-                            value.clone()
                         }
                     } else {
                         match value {
