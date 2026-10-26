@@ -6064,12 +6064,117 @@ impl Vm {
             (
                 x @ (Value::Array(_) | Value::Object(_)),
                 y @ (Value::Array(_) | Value::Object(_)),
-            ) => match self.compare_precast_elements(&x, &y, &mut 4096) {
-                Some((x, y)) => (x, y),
-                None => (a, b),
-            },
+            ) => {
+                self.nested_compare_effects(&x, &y, line, &mut 4096);
+                if self.current_exception.is_some() {
+                    return (a, b);
+                }
+                match self.compare_precast_elements(&x, &y, &mut 4096) {
+                    Some((x, y)) => (x, y),
+                    None => (a, b),
+                }
+            }
             _ => (a, b),
         }
+    }
+
+    /// Two distinct objects of one class compared property by property
+    /// (zend_std_compare_objects()), with no extension compare handler.
+    fn plain_object_pair(&self, x: &Rc<RefCell<PhpObject>>, y: &Rc<RefCell<PhpObject>>) -> bool {
+        let (xb, yb) = (x.borrow(), y.borrow());
+        !Rc::ptr_eq(x, y)
+            && xb.native.is_none()
+            && yb.native.is_none()
+            && !xb.properties.has_internal()
+            && !yb.properties.has_internal()
+            && xb.class_name.eq_ignore_ascii_case(&yb.class_name)
+            && self
+                .find_native_class_handler(&xb.class_name.to_ascii_lowercase())
+                .is_none()
+    }
+
+    /// The side effects of zend_compare() on the elements of two arrays (or
+    /// the properties of two plain objects of one class): the object
+    /// conversion notices and the extension compare handlers' warnings and
+    /// exceptions, for the pairs compared before the first unequal one
+    /// (zend_hash_compare() stops there, and compares nothing when the
+    /// counts differ). Returns whether the containers compare equal.
+    #[inline(never)]
+    fn nested_compare_effects(&mut self, a: &Value, b: &Value, line: u32, budget: &mut usize) -> bool {
+        let nested = |v: &Value| matches!(v.deref(), Value::Object(_) | Value::Array(_));
+        let (ea, eb): (Vec<(ArrayKey, Value)>, PhpArray) = match (a, b) {
+            (Value::Array(x), Value::Array(y)) => {
+                if Rc::ptr_eq(x, y) {
+                    return true;
+                }
+                let (xb, yb) = (x.borrow(), y.borrow());
+                if xb.len() != yb.len() {
+                    return false;
+                }
+                if *budget == 0 || !xb.values().any(nested) && !yb.values().any(nested) {
+                    drop((xb, yb));
+                    return a.compare_zend(b) == 0;
+                }
+                (
+                    xb.iter().map(|(k, v)| (k.clone(), v.deref())).collect(),
+                    yb.clone(),
+                )
+            }
+            (Value::Object(oa), Value::Object(ob)) => {
+                if Rc::ptr_eq(oa, ob) {
+                    return true;
+                }
+                if !self.plain_object_pair(oa, ob) {
+                    return a.compare_zend(b) == 0;
+                }
+                let (x, y) = (oa.borrow(), ob.borrow());
+                if x.properties.len() != y.properties.len() {
+                    return false;
+                }
+                if *budget == 0
+                    || !x.properties.iter().any(|(_, v)| nested(v))
+                        && !y.properties.iter().any(|(_, v)| nested(v))
+                {
+                    drop((x, y));
+                    return a.compare_zend(b) == 0;
+                }
+                let mut yb = PhpArray::new();
+                for (k, v) in y.properties.iter() {
+                    yb.set(ArrayKey::String(PhpString::from_bytes(k)), v.deref());
+                }
+                (
+                    x.properties
+                        .iter()
+                        .map(|(k, v)| (ArrayKey::String(PhpString::from_bytes(k)), v.deref()))
+                        .collect(),
+                    yb,
+                )
+            }
+            _ => return a.compare_zend(b) == 0,
+        };
+        *budget -= 1;
+        for (k, va) in &ea {
+            let Some(vb) = eb.get(k).map(|v| v.deref()) else {
+                return false;
+            };
+            let equal = match (va, &vb) {
+                (Value::Array(_), Value::Array(_)) => {
+                    self.nested_compare_effects(va, &vb, line, budget)
+                }
+                (Value::Object(x), Value::Object(y)) if self.plain_object_pair(x, y) => {
+                    self.nested_compare_effects(va, &vb, line, budget)
+                }
+                (Value::Object(_), _) | (_, Value::Object(_)) => {
+                    self.emit_object_comparison_notice(va, &vb, line);
+                    va.compare_zend(&vb) == 0
+                }
+                _ => va.compare_zend(&vb) == 0,
+            };
+            if !equal || self.current_exception.is_some() {
+                return false;
+            }
+        }
+        true
     }
 
     /// Arrays (or same-class plain objects) compared element by element:
