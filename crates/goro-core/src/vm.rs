@@ -15239,7 +15239,7 @@ impl Vm {
             }
             None => (name, 0),
         };
-        let sep = match rest.windows(2).position(|w| w == b"::") {
+        let sep = match crate::string::find_double_colon(rest) {
             Some(p) => p,
             None => return false,
         };
@@ -52056,11 +52056,21 @@ impl Vm {
                         }
                         // Record methods directly defined in this class BEFORE parent inheritance
                         // so we know which methods trait methods should NOT override later
+                        // (only asked about when the class uses traits)
+                        let uses_traits = !class.traits.is_empty();
                         let own_method_names_pre_inherit: crate::fxhash::FxHashSet<Vec<u8>> =
-                            class.methods.keys().cloned().collect();
+                            if uses_traits {
+                                class.methods.keys().cloned().collect()
+                            } else {
+                                Default::default()
+                            };
                         // Record own property names before parent inheritance
                         let own_prop_names_pre_inherit: crate::fxhash::FxHashSet<Vec<u8>> =
-                            class.properties.iter().map(|p| p.name.clone()).collect();
+                            if uses_traits {
+                                class.properties.iter().map(|p| p.name.clone()).collect()
+                            } else {
+                                Default::default()
+                            };
                         // zend_do_link_class(): the parent, then the traits, then the
                         // interfaces are loaded (autoloaded) before anything is bound.
                         if let Some(parent_name) = &class.parent.clone() {
@@ -55875,7 +55885,8 @@ impl Vm {
                                 Vec::with_capacity(name_lower.len() + 2 + method.name.len());
                             func_name.extend_from_slice(&name_lower);
                             func_name.extend_from_slice(b"::");
-                            func_name.extend(method.name.iter().map(|b| b.to_ascii_lowercase()));
+                            func_name.extend_from_slice(&method.name);
+                            func_name[name_lower.len() + 2..].make_ascii_lowercase();
                             // MethodDef keeps attributes apart from the OpArray;
                             // DoFCall's #[\Deprecated]/#[\NoDiscard] checks read
                             // them from the registered function.
