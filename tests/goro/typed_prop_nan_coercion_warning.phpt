@@ -10,6 +10,7 @@ $o->is = NAN; var_dump($o->is);
 $o->ns = NAN; var_dump($o->ns);
 $o->f = NAN; var_dump($o->f);
 P::$st = NAN; var_dump(P::$st);
+$r = &$o->b; $r = NAN; var_dump($o->b);
 --EXPECTF--
 
 Warning: unexpected NAN value was coerced to string in %s on line %d
@@ -27,3 +28,6 @@ float(NAN)
 
 Warning: unexpected NAN value was coerced to string in %s on line %d
 string(3) "NAN"
+
+Warning: unexpected NAN value was coerced to bool in %s on line %d
+bool(true)

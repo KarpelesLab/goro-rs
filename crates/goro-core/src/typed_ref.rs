@@ -697,7 +697,13 @@ impl Vm {
                 *value = Value::String(sv);
             }
         }
-        self.typed_ref_verify_sources(&srcs, value, strict)
+        let was_nan = !strict && matches!(value, Value::Double(d) if d.is_nan());
+        self.typed_ref_verify_sources(&srcs, value, strict)?;
+        if was_nan {
+            let line = self.current_line;
+            self.warn_nan_coerced_to(value, line);
+        }
+        Ok(())
     }
 
     /// Binding reference `r` to the typed static property `decl::$prop` of
