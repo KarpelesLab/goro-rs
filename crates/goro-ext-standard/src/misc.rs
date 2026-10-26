@@ -8522,6 +8522,16 @@ pub(crate) fn normalize_path_lexical(p: &str) -> String {
 
 /// Read a whole file the way file_get_contents()/file()/readfile() do: the
 /// opened stream takes a resource id (plus the inner one of a zlib stream).
+/// The strerror() of a failed plain-file open (ENOENT for the wrapper
+/// failures without one).
+fn open_error_text(e: &std::io::Error) -> String {
+    if e.raw_os_error().is_some() {
+        strip_os_error(&e.to_string())
+    } else {
+        "No such file or directory".to_string()
+    }
+}
+
 pub(crate) fn read_path_with_wrappers(path_str: &str) -> std::io::Result<Vec<u8>> {
     let r = read_path_with_wrappers_inner(path_str);
     if r.is_ok() {
@@ -9030,10 +9040,11 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             };
             Ok(Value::String(PhpString::from_vec(result.to_vec())))
         }
-        Err(_) => {
+        Err(e) => {
             vm.emit_warning(&format!(
-                "file_get_contents({}): Failed to open stream: No such file or directory",
-                path_str
+                "file_get_contents({}): Failed to open stream: {}",
+                path_str,
+                open_error_text(&e)
             ));
             Ok(Value::False)
         }
@@ -9245,7 +9256,8 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Err(e) => {
             vm.emit_warning(&format!(
                 "file_put_contents({}): Failed to open stream: {}",
-                path_str, e
+                path_str,
+                strip_os_error(&e.to_string())
             ));
             Ok(Value::False)
         }
@@ -17066,10 +17078,11 @@ fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.write_output(&data);
             Ok(Value::Long(len as i64))
         }
-        Err(_) => {
+        Err(e) => {
             vm.emit_warning(&format!(
-                "readfile({}): Failed to open stream: No such file or directory",
-                path_str
+                "readfile({}): Failed to open stream: {}",
+                path_str,
+                open_error_text(&e)
             ));
             Ok(Value::False)
         }
@@ -17216,10 +17229,11 @@ fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             Ok(Value::Array(Rc::new(RefCell::new(result))))
         }
-        Err(_) => {
+        Err(e) => {
             vm.emit_warning(&format!(
-                "file({}): Failed to open stream: No such file or directory",
-                path_str
+                "file({}): Failed to open stream: {}",
+                path_str,
+                open_error_text(&e)
             ));
             Ok(Value::False)
         }
@@ -18311,10 +18325,11 @@ fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             scanner_mode,
             &path_str,
         )),
-        Err(_) => {
+        Err(e) => {
             vm.emit_warning(&format!(
-                "parse_ini_file({}): Failed to open stream: No such file or directory",
-                path_str
+                "parse_ini_file({}): Failed to open stream: {}",
+                path_str,
+                open_error_text(&e)
             ));
             Ok(Value::False)
         }
@@ -19441,6 +19456,33 @@ fn flock_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
 
+/// php_stream_memory_stat(): php://memory, php://temp (not yet spilled to
+/// a file) and data: streams report a synthetic regular file.
+#[cfg(unix)]
+#[inline(never)]
+fn memory_stream_stat(fh: &FileHandle, st: &mut libc::stat) {
+    let in_memory = match fh.special {
+        SpecialStream::Memory => true,
+        SpecialStream::Temp => fh
+            .temp_max
+            .is_none_or(|max| (st.st_size as u64) <= max),
+        _ => fh.data_meta.is_some(),
+    };
+    if !in_memory {
+        return;
+    }
+    let size = st.st_size;
+    let read_only = fh.special != SpecialStream::None && fh.mode == "rb";
+    *st = unsafe { std::mem::zeroed() };
+    st.st_mode = (if read_only { 0o444 } else { 0o666 }) | libc::S_IFREG;
+    st.st_size = size;
+    st.st_nlink = 1;
+    st.st_rdev = u64::MAX as _;
+    st.st_dev = 0xC;
+    st.st_blksize = -1;
+    st.st_blocks = -1;
+}
+
 fn fstat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().cloned().unwrap_or(Value::Null);
     // Directory streams have no stat operation.
@@ -19464,6 +19506,7 @@ fn fstat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if ret != 0 {
                     return Ok(Value::False);
                 }
+                memory_stream_stat(fh, &mut stat_buf);
                 let mut result = PhpArray::new();
                 let fields: [(i64, &[u8], i64); 13] = [
                     (0, b"dev", stat_buf.st_dev as i64),
