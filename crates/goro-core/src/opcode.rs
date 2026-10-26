@@ -686,7 +686,9 @@ impl PropIcs {
                     }
                     OpCode::PropertySet => (&o.result, false),
                     // (the fetches of `$cv->p++` and `$cv->p[k] = v`)
-                    OpCode::PropertyGetIncDec | OpCode::PropertyGetW => (&o.op2, false),
+                    OpCode::PropertyGetIncDec | OpCode::PropertyGetW | OpCode::PropertyGetRW => {
+                        (&o.op2, false)
+                    }
                     _ => return u16::MAX,
                 };
                 if (matches!(o.op1, OperandType::Cv(_))
@@ -728,6 +730,7 @@ pub(crate) fn is_fast_prop_op(o: OpCode) -> bool {
             | OpCode::PropertySet
             | OpCode::PropertyGetW
             | OpCode::PropertyGetIncDec
+            | OpCode::PropertyGetRW
             | OpCode::PropertyIsset
             | OpCode::PropertyIssetFetch
     )

@@ -1758,6 +1758,8 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::PropertySet
             | OpCode::PropertyGetW
             | OpCode::PropertyGetIncDec
+            | OpCode::PropertyGetRW
+            | OpCode::PropertyGetWUnset
             | OpCode::PropertyIsset
             | OpCode::PropertyIssetFetch
             | OpCode::ArrayIsset
@@ -1955,6 +1957,7 @@ impl crate::vm::Vm {
                 | OpCode::PropertySet
                 | OpCode::PropertyGetW
                 | OpCode::PropertyGetIncDec
+                | OpCode::PropertyGetRW
                 | OpCode::PropertyIsset
                 | OpCode::PropertyIssetFetch => {
                     if self.isset_get_cache.is_some() {
@@ -1995,6 +1998,13 @@ impl crate::vm::Vm {
                 // `unset($a[k][j])` (see fast_dim_unset_pair)
                 OpCode::ArrayGetWUnset if no_release => {
                     match self.fast_dim_unset_pair(op_array, ip, cvs, tmps) {
+                        Some(next) => Fast::Jump(next),
+                        None => break 'run ip,
+                    }
+                }
+                // `unset($cv->p[k])` (see fast_prop_unset_pair)
+                OpCode::PropertyGetWUnset if no_release => {
+                    match self.fast_prop_unset_pair(op_array, ip, cvs, tmps) {
                         Some(next) => Fast::Jump(next),
                         None => break 'run ip,
                     }
@@ -3272,6 +3282,107 @@ impl crate::vm::Vm {
         Some(ip + 2)
     }
 
+    /// PropertyGetWUnset + ArrayUnset at `ip` (`unset($cv->p[k])`) of a
+    /// plain property (for a write, see plain_public_prop()) holding an
+    /// array, whose element going only frees memory: what both do (the
+    /// property's array separated from its other holders, the element
+    /// removed). Returns the index of the opcode after them, or None
+    /// (nothing done).
+    #[inline(never)]
+    pub(crate) fn fast_prop_unset_pair(
+        &self,
+        op_array: &crate::opcode::OpArray,
+        ip: usize,
+        cvs: &[Value],
+        tmps: &[Value],
+    ) -> Option<usize> {
+        let ops = &op_array.ops[..];
+        let literals = &op_array.literals[..];
+        let op = &ops[ip];
+        let (OperandType::Cv(c), OperandType::Const(ni), OperandType::Tmp(t)) =
+            (op.op1, op.op2, op.result)
+        else {
+            return None;
+        };
+        let unset = ops.get(ip + 1)?;
+        if unset.opcode != OpCode::ArrayUnset
+            || unset.op1 != OperandType::Tmp(t)
+            || self.has_release_work()
+            || crate::gc::gc_pending()
+            || !self.property_hook_stack.is_empty()
+            || self.isset_get_cache.is_some()
+        {
+            return None;
+        }
+        let Some(Value::String(name)) = literals.get(ni as usize) else {
+            return None;
+        };
+        let name = name.as_bytes();
+        if matches!(name, [] | [0, ..] | [b'_', b'_', ..]) {
+            return None;
+        }
+        let held;
+        let obj = match cvs.get(c as usize)? {
+            Value::Object(o) => o,
+            Value::Reference(r) => {
+                held = r.try_borrow().ok()?;
+                match &*held {
+                    Value::Object(o) => o,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let k2 = dim_key(&unset.op2, cvs, tmps, literals)?;
+        let idx = {
+            let ob = obj.try_borrow().ok()?;
+            if ob.native.is_some() || ob.closure.is_some() || ob.properties.has_internal() {
+                return None;
+            }
+            let idx = ob.properties.iter().position(|(k, _)| key_eq(k, name))?;
+            let scope = self.class_scope_ref();
+            let plain = self.plain_public_prop(&ob.class_name, name, true, scope);
+            if plain == 0 || (plain == PLAIN_UNMANGLED && ob.properties.has_mangled()) {
+                return None;
+            }
+            // (what goes must only free memory: looked at before anything
+            // changes)
+            match &ob.properties[idx].1 {
+                Value::Array(a) if !Rc::ptr_eq(a, &self.globals) => {
+                    match a.try_borrow().ok()?.get(&k2) {
+                        None => {}
+                        Some(v) if is_plain_scalar(v) => {}
+                        Some(v @ (Value::Array(_) | Value::Object(_)))
+                            if drops_quietly_deep(v, &mut 256, &self.globals) => {}
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            }
+            idx
+        };
+        // The property's array, separated from its other holders.
+        let arr = {
+            let mut ob = obj.try_borrow_mut().ok()?;
+            let slot = &mut ob.properties.get_mut(idx)?.1;
+            let Value::Array(a) = slot else {
+                return None;
+            };
+            if Rc::strong_count(a) > 1 {
+                let sep = Rc::new(RefCell::new(a.try_borrow().ok()?.clone()));
+                let old = std::mem::replace(slot, Value::Array(sep.clone()));
+                crate::gc::on_value_replaced(&old, slot);
+                drop(old);
+                sep
+            } else {
+                a.clone()
+            }
+        };
+        let mut a = arr.try_borrow_mut().ok()?;
+        a.remove(&k2);
+        Some(ip + 2)
+    }
+
     /// FETCH_DIM_W (the container fetch of `$a[k][...] = v`, `$a[][...] =
     /// v`) of an array variable's element, or of the element of the container
     /// the previous fetch left in a temporary (see fetched_container), when
@@ -3640,6 +3751,8 @@ impl crate::vm::Vm {
         let isset = matches!(opc, OpCode::PropertyIsset | OpCode::PropertyIssetFetch);
         // `$o->p[k] = v` / `$o->p[] = v` (see prop_dim_write)
         let w_fetch = opc == OpCode::PropertyGetW;
+        // (the read of `$o->p op= v`: of a property its write may change)
+        let rw = opc == OpCode::PropertyGetRW;
         // (the object of a variable is borrowed from it: nothing here
         // changes the variables)
         let held;
@@ -3818,7 +3931,7 @@ impl crate::vm::Vm {
             }
         } else if w_fetch {
             matches!(cur, Value::Array(_))
-        } else if opc == OpCode::PropertyGetIncDec && matches!(cur, Value::Object(_)) {
+        } else if (opc == OpCode::PropertyGetIncDec || rw) && matches!(cur, Value::Object(_)) {
             // (++/-- of a readonly property is refused before the object
             // is incremented: the general handler checks)
             false
@@ -3842,7 +3955,7 @@ impl crate::vm::Vm {
                 p
             }
             None => {
-                let p = self.plain_public_prop(&ob.class_name, name, write || w_fetch, scope);
+                let p = self.plain_public_prop(&ob.class_name, name, write || w_fetch || rw, scope);
                 if let Some(c) = sites.as_mut().and_then(|g| {
                     g.get_or_insert_with(Default::default)
                         .prop_slot(&op_array.ops, ip)
@@ -3862,7 +3975,7 @@ impl crate::vm::Vm {
             return Fast::No;
         }
         if const_name {
-            self.prop_ic_fill(op_array, ip, &ob, idx, plain, write, scope, name);
+            self.prop_ic_fill(op_array, ip, &ob, idx, plain, write || w_fetch || rw, scope, name);
         }
         if w_fetch {
             drop(ob);
@@ -4022,7 +4135,9 @@ impl crate::vm::Vm {
         }
         match opc {
             // (++/-- of an object: the general handler checks readonly)
-            OpCode::PropertyGetIncDec if matches!(cur, Value::Object(_)) => return None,
+            OpCode::PropertyGetIncDec | OpCode::PropertyGetRW if matches!(cur, Value::Object(_)) => {
+                return None;
+            }
             OpCode::PropertyGetW => {
                 if !matches!(cur, Value::Array(_)) {
                     return None;
