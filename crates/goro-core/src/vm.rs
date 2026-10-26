@@ -18948,6 +18948,18 @@ impl Vm {
         Ok(())
     }
 
+    /// array_init_size(n) of a builtin's result: the packed table (n
+    /// rounded up to a power of two, 16 bytes a slot, HT_PACKED_SIZE_EX)
+    /// is allocated with the first element, over memory_limit the fatal
+    /// error comes before any element is made.
+    pub fn array_init_size_check(&mut self, n: usize) -> Result<(), VmError> {
+        if n <= 1 << 16 {
+            return Ok(());
+        }
+        let slots = n.checked_next_power_of_two().unwrap_or(1 << 62);
+        self.memory_check(slots.saturating_mul(16).saturating_add(8))
+    }
+
     /// zend_timeout(): the "Maximum execution time" fatal error.
     pub fn timeout_fatal(&mut self) -> VmError {
         use std::sync::atomic::Ordering;

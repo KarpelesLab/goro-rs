@@ -1028,6 +1028,18 @@ fn expand_replacement(
 }
 
 /// php_pcre_replace_impl(): Ok(None) on error.
+/// php_pcre_replace_impl()'s result growing to `new_len` bytes: the new
+/// zend_string (twice that, zend_safe_address_guarded(2, new_len, ...))
+/// checked against memory_limit. Returns the new allocated length.
+#[inline(never)]
+fn pcre_result_grow(vm: &mut Vm, new_len: usize) -> Result<usize, VmError> {
+    let alloc_len = new_len.saturating_mul(2);
+    if alloc_len >= 1 << 20 {
+        vm.memory_check((alloc_len.saturating_add(25).saturating_add(7)) & !7)?;
+    }
+    Ok(alloc_len)
+}
+
 fn php_pcre_replace_impl(
     vm: &mut Vm,
     pce: &Pce,
@@ -1035,10 +1047,13 @@ fn php_pcre_replace_impl(
     replace: &[u8],
     mut limit: usize,
     replace_count: &mut usize,
-) -> Option<Vec<u8>> {
+) -> Result<Option<Vec<u8>>, VmError> {
     let num_subpats = pce.capture_count as usize + 1;
     let subject_len = subject.len();
     let mut result: Option<Vec<u8>> = None;
+    // (the result's zend_string grows to twice what it needs, and the
+    // allocations are checked against memory_limit)
+    let mut alloc_len: usize = 0;
     let mut start_offset: usize = 0;
     let mut last_end_offset: usize = 0;
     vm.preg_last_error = PHP_PCRE_NO_ERROR;
@@ -1067,7 +1082,7 @@ fn php_pcre_replace_impl(
             loop {
                 if md.ovector[1] < md.ovector[0] {
                     vm.preg_last_error = PHP_PCRE_INTERNAL_ERROR;
-                    return None;
+                    return Ok(None);
                 }
                 *replace_count += 1;
                 let res = result.get_or_insert_with(Vec::new);
@@ -1076,6 +1091,9 @@ fn php_pcre_replace_impl(
                     res.extend_from_slice(&subject[piece..m0]);
                 }
                 expand_replacement(res, replace, subject, &md.ovector, c);
+                if res.len() >= alloc_len {
+                    alloc_len = pcre_result_grow(vm, res.len())?;
+                }
                 limit -= 1;
                 start_offset = md.ovector[1];
                 last_end_offset = start_offset;
@@ -1103,11 +1121,14 @@ fn php_pcre_replace_impl(
                             // not_matched
                             let res = result.get_or_insert_with(Vec::new);
                             res.extend_from_slice(&subject[piece..]);
-                            return result;
+                            if res.len() >= alloc_len {
+                                pcre_result_grow(vm, res.len())?;
+                            }
+                            return Ok(result);
                         }
                     } else {
                         pcre_handle_exec_error(vm, count);
-                        return None;
+                        return Ok(None);
                     }
                 }
                 break;
@@ -1115,15 +1136,18 @@ fn php_pcre_replace_impl(
         } else if count == PCRE2_ERROR_NOMATCH || limit == 0 {
             // not_matched
             match result {
-                None => return Some(subject.to_vec()),
+                None => return Ok(Some(subject.to_vec())),
                 Some(mut res) => {
                     res.extend_from_slice(&subject[piece..]);
-                    return Some(res);
+                    if res.len() >= alloc_len {
+                        pcre_result_grow(vm, res.len())?;
+                    }
+                    return Ok(Some(res));
                 }
             }
         } else {
             pcre_handle_exec_error(vm, count);
-            return None;
+            return Ok(None);
         }
         count = pcre_match(
             pce,
@@ -1145,8 +1169,10 @@ fn php_pcre_replace(
     limit: usize,
     replace_count: &mut usize,
     fname: &str,
-) -> Option<Vec<u8>> {
-    let pce = get_compiled_regex(vm, regex, fname)?;
+) -> Result<Option<Vec<u8>>, VmError> {
+    let Some(pce) = get_compiled_regex(vm, regex, fname) else {
+        return Ok(None);
+    };
     php_pcre_replace_impl(vm, &pce, subject, replace, limit, replace_count)
 }
 
@@ -1224,7 +1250,7 @@ fn php_replace_in_subject(
                 StrOrArr::Str(s) => s.clone(),
                 StrOrArr::Arr(_) => PhpString::empty(),
             };
-            Ok(php_pcre_replace(
+            php_pcre_replace(
                 vm,
                 r.as_bytes(),
                 subject,
@@ -1232,7 +1258,7 @@ fn php_replace_in_subject(
                 limit,
                 replace_count,
                 fname,
-            ))
+            )
         }
         StrOrArr::Arr(regex_ht) => {
             // php_pcre_replace_array()
@@ -1259,7 +1285,7 @@ fn php_replace_in_subject(
                             limit,
                             replace_count,
                             fname,
-                        ) {
+                        )? {
                             Some(r) => subject_str = r,
                             None => return Ok(None),
                         }
@@ -1276,7 +1302,7 @@ fn php_replace_in_subject(
                             limit,
                             replace_count,
                             fname,
-                        ) {
+                        )? {
                             Some(r) => subject_str = r,
                             None => return Ok(None),
                         }
@@ -1822,6 +1848,10 @@ fn php_pcre_split_impl(
         };
         let mut count = pcre_match(pce, subject, start_offset, options, &mut md, &mctx);
         'outer: loop {
+            // (over memory_limit: the fatal error ends the call)
+            if ret.len() & 0x3ff == 0 && goro_core::value::memory_exhausted() != 0 {
+                break;
+            }
             if count >= 0 {
                 let mut c = if count == 0 {
                     num_subpats

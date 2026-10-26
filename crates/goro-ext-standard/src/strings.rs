@@ -638,6 +638,33 @@ fn str_replace_in(
     out
 }
 
+/// php_str_to_str_ex() growing `subject`: its zend_string_safe_alloc(count,
+/// repl_len - needle_len, len) is checked against memory_limit (only
+/// computed when the result could be large).
+#[inline(never)]
+fn str_replace_growth_check(
+    vm: &mut Vm,
+    subject: &[u8],
+    needle: &[u8],
+    repl: &[u8],
+    ci: bool,
+) -> Result<(), VmError> {
+    let n = needle.len();
+    if n == 0 || repl.len() <= n || subject.len() < n {
+        return Ok(());
+    }
+    let grow = repl.len() - n;
+    if (subject.len() / n).saturating_mul(grow) < (1 << 24) {
+        return Ok(());
+    }
+    let mut count = 0i64;
+    let _ = str_replace_in(subject.to_vec(), needle, needle, ci, &mut count);
+    let size = (count as usize)
+        .saturating_mul(grow)
+        .saturating_add((subject.len().saturating_add(25).saturating_add(7)) & !7);
+    vm.memory_check(size)
+}
+
 /// One php_str_to_str_ex / php_str_to_str_i_ex / php_char_to_str_ex pass.
 fn str_replace_once(
     subject: &[u8],
@@ -770,9 +797,9 @@ fn php_str_replace_common(
     }
     // Pre-convert search/replace array entries lazily per subject, like PHP.
     let mut count: i64 = 0;
-    let in_subject = |vm: &mut Vm, subj: Vec<u8>, count: &mut i64| -> Vec<u8> {
+    let in_subject = |vm: &mut Vm, subj: Vec<u8>, count: &mut i64| -> Result<Vec<u8>, VmError> {
         if subj.is_empty() {
-            return subj;
+            return Ok(subj);
         }
         match &search {
             StrOrArr::Str(needle) => {
@@ -780,7 +807,8 @@ fn php_str_replace_common(
                     StrOrArr::Str(r) => r,
                     _ => &[],
                 };
-                str_replace_in(subj, needle, repl, ci, count)
+                str_replace_growth_check(vm, &subj, needle, repl, ci)?;
+                Ok(str_replace_in(subj, needle, repl, ci, count))
             }
             StrOrArr::Arr(needles, _) => {
                 let mut cur = subj;
@@ -802,22 +830,23 @@ fn php_str_replace_common(
                     if needle.is_empty() {
                         continue;
                     }
+                    str_replace_growth_check(vm, &cur, &needle, repl, ci)?;
                     cur = str_replace_in(cur, &needle, repl, ci, count);
                     if cur.is_empty() {
                         break;
                     }
                 }
-                cur
+                Ok(cur)
             }
         }
     };
     let result = match subject {
-        StrOrArr::Str(subj) => Value::String(PhpString::from_vec(in_subject(vm, subj, &mut count))),
+        StrOrArr::Str(subj) => Value::String(PhpString::from_vec(in_subject(vm, subj, &mut count)?)),
         StrOrArr::Arr(vals, keys) => {
             let mut out = PhpArray::new();
             for (k, v) in keys.into_iter().zip(vals) {
                 let sb = crate::misc::sort_cmp_string(vm, &v);
-                let r = in_subject(vm, sb, &mut count);
+                let r = in_subject(vm, sb, &mut count)?;
                 out.set(k, Value::String(PhpString::from_vec(r)));
             }
             Value::Array(Rc::new(RefCell::new(out)))
@@ -1101,24 +1130,13 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
         }
     };
 
-    // php_implode()
+    // php_implode(): the pieces are converted first, then the result is
+    // allocated (zend_string_safe_alloc(n - 1, glue length, pieces length)).
     let values: Vec<Value> = arr.borrow().values().cloned().collect();
-    // (room for the strings, the others' text made as they come)
-    let cap = values
-        .iter()
-        .map(|v| match v {
-            Value::String(s) => s.len(),
-            _ => 0,
-        })
-        .sum::<usize>()
-        + glue.len() * values.len().saturating_sub(1);
-    let mut result = Vec::with_capacity(cap);
-    for (i, v) in values.iter().enumerate() {
-        if i > 0 {
-            result.extend_from_slice(glue.as_bytes());
-        }
+    let mut pieces: Vec<PhpString> = Vec::with_capacity(values.len());
+    for v in values.iter() {
         if let Value::String(s) = v {
-            result.extend_from_slice(s.as_bytes());
+            pieces.push(s.clone());
             continue;
         }
         let v = v.deref();
@@ -1133,7 +1151,21 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
                 line: vm.current_line,
             });
         }
-        result.extend_from_slice(s.as_bytes());
+        pieces.push(s);
+    }
+    let len: usize = pieces.iter().map(|p| p.len()).sum();
+    if pieces.len() > 1 {
+        let size = (pieces.len() - 1)
+            .saturating_mul(glue.len())
+            .saturating_add((len.saturating_add(25).saturating_add(7)) & !7);
+        vm.memory_check(size)?;
+    }
+    let mut result = Vec::with_capacity(len + glue.len() * pieces.len().saturating_sub(1));
+    for (i, p) in pieces.iter().enumerate() {
+        if i > 0 {
+            result.extend_from_slice(glue.as_bytes());
+        }
+        result.extend_from_slice(p.as_bytes());
     }
     Ok(Value::String(PhpString::from_vec(result)))
 }
@@ -2791,6 +2823,8 @@ fn strtr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 );
                 return Ok(Value::String(subject));
             }
+            // (php_str_to_str_ex(), as str_replace())
+            str_replace_growth_check(vm, src, key, replace.as_bytes(), false)?;
             let mut result = Vec::with_capacity(src.len());
             let mut i = 0;
             while i < src.len() {
@@ -2831,8 +2865,13 @@ fn strtr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             match found {
                 Some((len, to)) => {
                     let to = strtr_zval_get_string(vm, &to)?;
+                    let before = result.len();
                     result.extend_from_slice(to.as_bytes());
                     i += len;
+                    // (the smart_str growing past memory_limit)
+                    if result.len() >= 1 << 20 && (before >> 16) != (result.len() >> 16) {
+                        vm.memory_check(result.len().next_multiple_of(4096))?;
+                    }
                 }
                 None => {
                     result.push(src[i]);

@@ -7290,8 +7290,12 @@ fn str_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
     // PHP 8.3+: empty string returns empty array
     if !bytes.is_empty() {
+        vm.array_init_size_check((bytes.len() - 1) / len + 1)?;
         for chunk in bytes.chunks(len) {
             result.push(Value::String(PhpString::from_vec(chunk.to_vec())));
+            if result.len() & 0x3ff == 0 && goro_core::value::memory_exhausted() != 0 {
+                break;
+            }
         }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))

@@ -370,6 +370,9 @@ fn shift_operator_helper(vm: &mut Vm, op: &str, a: &Value, b: &Value) -> Result<
         Err(_) if vm.current_exception.is_some() => return Err(String::new()),
         Err(_) => return Err(typeof_failure()),
     };
+    if op != ">>" && gmp_result_size_check(vm, &n, shift as u64, op == "**").is_err() {
+        return Err(String::new());
+    }
     Ok(bigint_to_gmp_value(
         vm,
         match op {
@@ -1453,6 +1456,26 @@ fn int_arg_or(
     get_int_arg(vm, args, idx, func_name, arg_name)
 }
 
+/// The limbs of `n ** e` (pow) or `n << e` are allocated through
+/// emalloc: memory_limit is checked before the result is computed.
+#[inline(never)]
+fn gmp_result_size_check(vm: &mut Vm, n: &Int, e: u64, pow: bool) -> Result<(), VmError> {
+    let bits = n.bit_len() as u64;
+    if bits <= 1 || e == 0 {
+        return Ok(());
+    }
+    let result_bits = if pow {
+        bits.saturating_mul(e)
+    } else {
+        bits.saturating_add(e)
+    };
+    let bytes = (result_bits / 64).saturating_add(1).saturating_mul(8);
+    if bytes < 1 << 20 {
+        return Ok(());
+    }
+    vm.memory_check(usize::try_from(bytes).unwrap_or(usize::MAX))
+}
+
 fn gmp_pow(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let base = get_gmp_arg(vm, args, 0, "gmp_pow", "num")?;
     let exp = get_int_arg(vm, args, 1, "gmp_pow", "exponent")?;
@@ -1466,6 +1489,7 @@ fn gmp_pow(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
+    gmp_result_size_check(vm, &base, exp as u64, true)?;
     Ok(bigint_to_gmp_value(vm, base.pow(exp as u64)))
 }
 

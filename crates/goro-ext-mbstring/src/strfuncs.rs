@@ -829,12 +829,19 @@ fn mb_str_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let split_len = split_len as usize;
     let char_len =
         (enc.flag & (MBFL_ENCTYPE_SBCS | MBFL_ENCTYPE_WCS2 | MBFL_ENCTYPE_WCS4)) as usize;
+    let bail = |arr: &PhpArray| arr.len() & 0x3ff == 0 && goro_core::value::memory_exhausted() != 0;
     if char_len != 0 {
         let chunk_len = char_len * split_len;
+        // (array_init_size() of PHP's own estimate)
+        vm.array_init_size_check((s.len() / chunk_len + split_len - 1) / split_len)?;
         for c in s.chunks(chunk_len) {
             arr.push(pstr(c));
+            if bail(&arr) {
+                break;
+            }
         }
     } else if let Some(mbtab) = enc.mblen_table {
+        vm.array_init_size_check(s.len().div_ceil(split_len))?;
         let e = s.len();
         let mut p = 0;
         while p < e {
@@ -848,11 +855,18 @@ fn mb_str_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 p = e;
             }
             arr.push(pstr(&s[chunk..p]));
+            if bail(&arr) {
+                break;
+            }
         }
     } else {
+        vm.array_init_size_check(s.len().div_ceil(split_len))?;
         let w = to_wchars(enc, &s);
         for c in w.chunks(split_len) {
             arr.push(pstring(from_wchars(enc, c)));
+            if bail(&arr) {
+                break;
+            }
         }
     }
     Ok(new_array(arr))
