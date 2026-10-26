@@ -1054,6 +1054,11 @@ fn m_insert_before(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
                             return Some(child);
                         }
                     }
+                    if t.nodes[refp].t != NType::Attribute {
+                        // xmlAddPrevSibling(): an attribute only goes
+                        // before an attribute
+                        return None;
+                    }
                     Some(t.add_prev_sibling(refp, child))
                 } else if ct == NType::DocumentFrag {
                     let last = t.nodes[child].last?;
@@ -1062,6 +1067,11 @@ fn m_insert_before(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
                     reconcile_ns_list(t, nc, last);
                     Some(nc)
                 } else {
+                    if refp == child {
+                        // xmlAddPrevSibling(cur == next) fails (once the
+                        // node was unlinked)
+                        return None;
+                    }
                     let nc = t.add_prev_sibling(refp, child);
                     reconcile_ns(t, nc);
                     Some(nc)
@@ -1110,6 +1120,15 @@ fn m_insert_before(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
             }
         }
     });
+    if nc.is_none() && (refn == Some(child) || tree::with(|t| t.nodes[child].t == NType::Attribute))
+    {
+        throw_error(
+            vm,
+            b"Error",
+            "Cannot add newnode as the previous sibling of refnode",
+        );
+        return Err(());
+    }
     Ok(node_obj_opt(vm, nc))
 }
 
@@ -1178,11 +1197,6 @@ fn m_remove_child(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let (co, child) = arg_node(vm, &a, 0, "child", "DOMNode", false)?.unwrap();
     let st = strict(doc_of_node(parent));
     let r = tree::with(|t| {
-        if t.nodes[parent].children.is_none() && t.nodes[parent].properties.is_none()
-            || t.nodes[child].parent != Some(parent)
-        {
-            return Err(NOT_FOUND_ERR);
-        }
         if is_read_only(t, parent)
             || t.nodes[child]
                 .parent
@@ -1190,6 +1204,11 @@ fn m_remove_child(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
                 .unwrap_or(false)
         {
             return Err(NO_MODIFICATION_ALLOWED_ERR);
+        }
+        // (`!nodep->children`: an attribute of a childless element is
+        // not found either)
+        if t.nodes[parent].children.is_none() || t.nodes[child].parent != Some(parent) {
+            return Err(NOT_FOUND_ERR);
         }
         t.unlink(child);
         Ok(())
