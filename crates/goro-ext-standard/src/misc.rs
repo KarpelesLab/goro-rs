@@ -18293,7 +18293,7 @@ fn tmpfile_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     // Convert fd to std::fs::File
     use std::os::unix::io::FromRawFd;
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let fid = alloc_file_handle(file, "w+b");
+    let fid = alloc_file_handle(file, "r+b");
     goro_core::value::register_resource(fid, b"stream");
     Ok(Value::resource(fid))
 }
