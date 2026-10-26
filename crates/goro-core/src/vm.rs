@@ -7154,11 +7154,17 @@ impl Vm {
     }
 
     fn dynamic_property_deprecated(&self, class_lower: &[u8]) -> bool {
-        if !self.classes.contains_key(class_lower)
-            || class_lower == b"stdclass"
+        if class_lower == b"stdclass"
+            || class_lower == b"__php_incomplete_class"
             || is_builtin_subclass(class_lower, b"stdclass")
         {
             return false;
+        }
+        // (internal classes deprecate them too: only stdClass allows them)
+        if !self.classes.contains_key(class_lower) {
+            return self.native_class_handlers.contains_key(class_lower)
+                || crate::spl::SPL_CLASSES.contains(&class_lower)
+                || self.is_known_builtin_class(class_lower);
         }
         let mut cur = Some(class_lower.to_vec());
         while let Some(c) = cur {
@@ -7217,6 +7223,7 @@ impl Vm {
         if obj.borrow().has_property(key)
             || key != name.as_bytes()
             || name.as_bytes().starts_with(b"__")
+            || array_as_props(obj)
             || !self.dynamic_property_deprecated(class_lower)
             || self
                 .find_property_def(class_lower, name.as_bytes())
@@ -58685,30 +58692,8 @@ impl Vm {
                                 } else if matches!(prop, Value::Null | Value::Undef)
                                     && (exists || !has_get)
                                 {
-                                    if !exists
-                                        && self.classes.contains_key(&class_lower)
-                                        && class_lower != b"stdclass"
-                                        && !is_builtin_subclass(&class_lower, b"stdclass")
-                                    {
-                                        let mut allows = false;
-                                        let mut cur = Some(class_lower.clone());
-                                        while let Some(c) = cur {
-                                            match self.classes.get(&c) {
-                                                Some(ce) => {
-                                                    if ce.allow_dynamic_properties {
-                                                        allows = true;
-                                                        break;
-                                                    }
-                                                    cur = ce.parent.as_ref().map(|p| {
-                                                        p.iter()
-                                                            .map(|b| b.to_ascii_lowercase())
-                                                            .collect()
-                                                    });
-                                                }
-                                                None => break,
-                                            }
-                                        }
-                                        if !allows {
+                                    if !exists && self.dynamic_property_deprecated(&class_lower) {
+                                        {
                                             let class_display =
                                                 crate::value::display_class_name(&class_name_orig);
                                             self.emit_deprecated(&format!("Creation of dynamic property {}::${} is deprecated", class_display, prop_name.to_msg_string()));
@@ -66356,6 +66341,12 @@ const UNDOTTED_INI_ENTRIES: &[&[u8]] = &[
     b"xmlrpc_error_number",
     b"xmlrpc_errors",
 ];
+
+/// An ArrayObject / ArrayIterator with ARRAY_AS_PROPS: its properties are
+/// its storage's elements.
+fn array_as_props(obj: &Rc<RefCell<PhpObject>>) -> bool {
+    matches!(obj.borrow().get_property(b"__spl_flags"), Value::Long(f) if f & 2 != 0)
+}
 
 /// The get_constructor() error of the internal classes only their
 /// extension's functions create (the others register their own).
