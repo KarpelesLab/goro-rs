@@ -221,6 +221,12 @@ impl Vm {
                     || class_lower == b"sysvmessagequeue"
                     || class_lower == b"fiber"
                     || class_lower == b"weakreference"
+                    || class_lower == b"curlmultihandle"
+                    || class_lower == b"curlsharehandle"
+                    || class_lower == b"curlsharepersistenthandle"
+                    || class_lower == b"opensslcertificate"
+                    || class_lower == b"opensslcertificatesigningrequest"
+                    || class_lower == b"opensslasymmetrickey"
                     // (default_exception_handlers: Exception, Error and
                     // every subclass)
                     || self.class_implements_interface(&class_lower, b"throwable")
