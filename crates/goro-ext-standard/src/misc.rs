@@ -254,7 +254,7 @@ final class StreamBucket {
     vm.register_function(b"get_error_handler", get_error_handler);
     vm.register_function(b"get_exception_handler", get_exception_handler);
     vm.register_function(b"trigger_error", trigger_error);
-    vm.register_function(b"user_error", trigger_error);
+    vm.register_function(b"user_error", user_error);
 
     // Constants
     vm.register_function(b"define", define);
@@ -324,7 +324,7 @@ final class StreamBucket {
 
     // Misc
     vm.register_function(b"ini_set", ini_set);
-    vm.register_function(b"ini_alter", ini_set);
+    vm.register_function(b"ini_alter", ini_alter);
     vm.register_function(b"ini_get", ini_get);
     vm.register_function(b"ini_get_all", ini_get_all);
     vm.register_function(b"ini_restore", ini_restore);
@@ -911,6 +911,15 @@ fn get_exception_handler(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError>
 }
 
 fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    trigger_error_as(vm, args, "trigger_error")
+}
+
+fn user_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    trigger_error_as(vm, args, "user_error")
+}
+
+/// trigger_error() called as `fname` (trigger_error or its alias user_error)
+fn trigger_error_as(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError> {
     use goro_core::errdisplay::{E_USER_DEPRECATED, E_USER_ERROR, E_USER_NOTICE, E_USER_WARNING};
     // (the message's bytes are displayed and passed on as they are)
     let message = goro_core::errdisplay::raw_error_string(
@@ -935,7 +944,10 @@ fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         _ => {
             return Err(throw_value_error_msg(
                 vm,
-                "trigger_error(): Argument #2 ($error_level) must be one of E_USER_ERROR, E_USER_WARNING, E_USER_NOTICE, or E_USER_DEPRECATED",
+                &format!(
+                    "{}(): Argument #2 ($error_level) must be one of E_USER_ERROR, E_USER_WARNING, E_USER_NOTICE, or E_USER_DEPRECATED",
+                    fname
+                ),
             ));
         }
     }
@@ -5734,10 +5746,21 @@ fn key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 // === Misc ===
 
+
 fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    ini_set_as(vm, args, "ini_set")
+}
+
+fn ini_alter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    ini_set_as(vm, args, "ini_alter")
+}
+
+/// ini_set() called as `fname` (ini_set or its alias ini_alter)
+fn ini_set_as(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError> {
     if args.len() != 2 {
         let msg = format!(
-            "ini_set() expects exactly 2 arguments, {} given",
+            "{}() expects exactly 2 arguments, {} given",
+            fname,
             args.len()
         );
         let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
@@ -5755,8 +5778,10 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     ) {
         return Err(throw_type_error_msg(
             vm,
-            "ini_set(): Argument #2 ($value) must be of type string|int|float|bool|null"
-                .to_string(),
+            format!(
+                "{}(): Argument #2 ($value) must be of type string|int|float|bool|null",
+                fname
+            ),
         ));
     }
     // zval_get_tmp_string(): a float is converted with the precision in
@@ -5869,7 +5894,7 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let vs = value.to_php_string();
         let (v, err) = goro_core::ini_quantity::parse_quantity(vs.as_bytes(), false);
         if let Some(e) = err {
-            vm.emit_warning(&e);
+            vm.emit_warning(&format!("Invalid \"memory_limit\" setting. {}", e));
         }
         let max_s = vm
             .constants
@@ -5953,7 +5978,7 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     if key == b"report_memleaks" {
         if let Some(msg) = assert_ini_deprecation(&key, &value) {
-            vm.emit_deprecated(&format!("ini_set(): {}", msg));
+            vm.emit_deprecated(&format!("{}(): {}", fname, msg));
         }
     }
     if key.starts_with(b"assert.") {
@@ -5961,7 +5986,7 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             ASSERT_CALLBACK.with(|c| *c.borrow_mut() = None);
         }
         if let Some(msg) = assert_ini_deprecation(&key, &value) {
-            vm.emit_deprecated(&format!("ini_set(): {}", msg));
+            vm.emit_deprecated(&format!("{}(): {}", fname, msg));
         }
         // ini values are stored as strings
         let sv = match &value {
