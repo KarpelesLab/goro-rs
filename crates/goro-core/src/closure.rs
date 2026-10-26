@@ -2224,3 +2224,134 @@ impl Vm {
         Value::Array(Rc::new(RefCell::new(arr)))
     }
 }
+
+impl Vm {
+    /// DECLARE_FUNCTION of a closure's function (`op`, not hoisted) whose
+    /// name is registered as that very code already (by the closure's
+    /// previous creations): the general handler would only register it
+    /// again (see run_fast_ops()).
+    #[inline(never)]
+    pub(crate) fn fast_declare_closure(&self, op_array: &OpArray, op: &crate::opcode::Op) -> bool {
+        let (OperandType::Const(n), OperandType::Const(i), OperandType::Unused) =
+            (op.op1, op.op2, op.result)
+        else {
+            return false;
+        };
+        let (Some(Value::String(name)), Some(Value::Long(i))) = (
+            op_array.literals.get(n as usize),
+            op_array.literals.get(i as usize),
+        ) else {
+            return false;
+        };
+        let name = name.as_bytes();
+        let Some(f) = usize::try_from(*i)
+            .ok()
+            .and_then(|i| op_array.child_functions.get(i))
+        else {
+            return false;
+        };
+        is_closure_fn_name(name)
+            && !name.iter().any(u8::is_ascii_uppercase)
+            && f.attributes.is_empty()
+            && self
+                .user_functions
+                .get(name)
+                .is_some_and(|g| Rc::ptr_eq(f, g))
+    }
+
+    /// MAKE_CLOSURE (`op` of `op_array`, running with variables `cvs`) of a
+    /// closure the general handler creates as it is: no other scope or
+    /// called class to give its function (closure_scope_at_creation), no
+    /// `$this` to bind (closure_inherit_this), no static variables of its
+    /// own (closure_with_own_statics). `take`: its temporary operand (the
+    /// captured values) is released right after it (see
+    /// OpArray::free_mask()): the closure gets it. False: nothing was done.
+    #[inline(never)]
+    pub(crate) fn fast_make_closure(
+        &mut self,
+        op_array: &OpArray,
+        op: &crate::opcode::Op,
+        cvs: &[Value],
+        tmps: &mut [Value],
+        take: bool,
+    ) -> bool {
+        if !matches!(op.result, OperandType::Tmp(_))
+            || !crate::fastpath::tmp_writable(&op.result, tmps)
+        {
+            return false;
+        }
+        let inner = match op.op1 {
+            OperandType::Const(c) => match op_array.literals.get(c as usize) {
+                Some(v @ Value::String(_)) => v,
+                _ => return false,
+            },
+            OperandType::Tmp(t) if op.result != op.op1 => match tmps.get(t as usize) {
+                Some(v @ Value::Array(_)) => v,
+                _ => return false,
+            },
+            _ => return false,
+        };
+        {
+            let arr;
+            let (name, first_cap): (&[u8], Option<&Value>) = match inner {
+                Value::String(s) => (s.as_bytes(), None),
+                Value::Array(a) => {
+                    arr = match a.try_borrow() {
+                        Ok(a) => a,
+                        Err(_) => return false,
+                    };
+                    let mut it = arr.values();
+                    match it.next() {
+                        Some(Value::String(s)) => (s.as_bytes(), it.next()),
+                        _ => return false,
+                    }
+                }
+                _ => return false,
+            };
+            if !is_closure_fn_name(name) || name.iter().any(u8::is_ascii_uppercase) {
+                return false;
+            }
+            let Some(f) = self.user_functions.get(name) else {
+                return false;
+            };
+            let frame_scope = op_array.scope_class.as_ref();
+            let captures_this =
+                f.closure_capture_names.first().map(|n| n.as_slice()) == Some(b"this");
+            // (closure_scope_at_creation(): the scope it was compiled in, no
+            // other called class)
+            if f.scope_class.as_ref() != frame_scope || f.closure_called_class.is_some() {
+                return false;
+            }
+            let has_this =
+                captures_this && matches!(first_cap.map(|v| v.deref()), Some(Value::Object(_)));
+            if let (false, Some(scope)) = (has_this, frame_scope) {
+                if self.called_class_stack.last().is_some_and(|c| {
+                    c.len() != scope.len()
+                        || c.iter()
+                            .zip(scope)
+                            .any(|(a, b)| a.to_ascii_lowercase() != *b)
+                }) {
+                    return false;
+                }
+            }
+            // (closure_inherit_this(): no `$this` to bind)
+            if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
+                && matches!(cvs.first().map(|v| v.deref()), Some(Value::Object(_)))
+                && !f.is_static_closure
+                && !captures_this
+            {
+                return false;
+            }
+            // (closure_with_own_statics())
+            if op_has_statics(f) {
+                return false;
+            }
+        }
+        let inner = match (take, op.op1) {
+            (true, OperandType::Tmp(t)) => std::mem::replace(&mut tmps[t as usize], Value::Undef),
+            _ => inner.clone(),
+        };
+        let obj = self.make_closure_object(inner);
+        crate::fastpath::store_tmp(&op.result, obj, tmps)
+    }
+}

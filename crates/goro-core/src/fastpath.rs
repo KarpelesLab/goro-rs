@@ -1914,6 +1914,8 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::InitCvNull
             | OpCode::StaticVarInit
             | OpCode::StaticVarInitOrJmp
+            | OpCode::DeclareFunction
+            | OpCode::MakeClosure
             // (a call whose arguments the general handlers sent: a lean
             // call, or a builtin's, see the DO_FCALL arm of run_fast_ops)
             | OpCode::DoFCall
@@ -2400,6 +2402,16 @@ impl crate::vm::Vm {
                     Some(next) => Fast::Jump(next),
                     None => break 'run ip,
                 },
+                // The creation of a closure (see closure.rs).
+                OpCode::DeclareFunction if self.fast_declare_closure(op_array, op) => Fast::Done,
+                OpCode::MakeClosure => {
+                    let take = free_mask.get().get(ip).is_some_and(|m| m & 1 != 0);
+                    if self.fast_make_closure(op_array, op, cvs, tmps, take) {
+                        Fast::Done
+                    } else {
+                        break 'run ip;
+                    }
+                }
                 // (a frame bound to a symbol table rebinds itself: the general handler)
                 OpCode::BindGlobal if bound.is_none() => self.fast_bind_global(op, cvs, literals),
                 // A `static $v` (see leancall.rs).
