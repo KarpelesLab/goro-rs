@@ -3050,7 +3050,13 @@ fn reflection_class_constant_construct_impl(vm: &mut Vm, args: &[Value], line: u
         .map(|b| b.to_ascii_lowercase())
         .collect();
 
-    // Check class exists
+    // Check class exists (zend_lookup_class(): autoloaded)
+    if !vm.classes.contains_key(&class_lower) && !vm.is_known_builtin_class(&class_lower) {
+        vm.try_autoload_class(class_name.as_bytes());
+        if vm.current_exception.is_some() {
+            return false;
+        }
+    }
     if !vm.classes.contains_key(&class_lower) && !vm.is_known_builtin_class(&class_lower) {
         let err_msg = format!("Class \"{}\" does not exist", class_name);
         let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
