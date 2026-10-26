@@ -16652,7 +16652,7 @@ impl Vm {
                     && !(c == b"reflectionproperty" && method == b"setvalue")
                     // (an abstract method is reported before the arguments)
                     && !(c == b"reflectionmethod" && matches!(method, b"invoke" | b"invokeargs"))
-                    && crate::reflection::reflection_stub_arity_error(
+                    && crate::reflection::stub_method_arity_error(
                         self,
                         c,
                         method,
@@ -31581,7 +31581,7 @@ impl Vm {
                             0
                         };
                         // (zpp's argument count of the stub's method)
-                        if crate::reflection::reflection_stub_arity_error(
+                        if crate::reflection::stub_method_arity_error(
                             self,
                             b"weakmap",
                             method,

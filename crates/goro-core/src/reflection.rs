@@ -15030,15 +15030,10 @@ fn param_type_name(pt: &crate::opcode::ParamType) -> String {
     }
 }
 
-/// zend_wrong_parameters_count_error() of a Reflection* instance method
+/// zend_wrong_parameters_count_error() of an internal instance method
 /// called with `n` arguments, from its stub (true when it threw).
 #[inline(never)]
-pub fn reflection_stub_arity_error(
-    vm: &mut Vm,
-    class_lower: &[u8],
-    method: &[u8],
-    n: usize,
-) -> bool {
+pub fn stub_method_arity_error(vm: &mut Vm, class_lower: &[u8], method: &[u8], n: usize) -> bool {
     use crate::stubs::{A_VARIADIC, F_DEPRECATED, F_STATIC};
     let Some((c, f)) = crate::stubs::find_method(class_lower, method) else {
         return false;
