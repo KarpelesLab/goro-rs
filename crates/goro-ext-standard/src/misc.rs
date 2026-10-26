@@ -13475,16 +13475,25 @@ pub(crate) fn fclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// CLI: STDERR writes go straight to descriptor 2 (after pending stdout).
 fn write_cli_stderr(vm: &mut Vm, bytes: &[u8]) -> usize {
+    write_cli_fd(vm, 2, bytes)
+}
+
+/// CLI STDOUT/STDERR: write() straight to the descriptor; a non-blocking
+/// descriptor that fills up reports a partial write.
+fn write_cli_fd(vm: &mut Vm, fd: libc::c_int, bytes: &[u8]) -> usize {
     vm.flush_cli_output();
     let mut done = 0;
     while done < bytes.len() {
         let n = unsafe {
             libc::write(
-                2,
+                fd,
                 bytes[done..].as_ptr() as *const libc::c_void,
                 bytes.len() - done,
             )
         };
+        if n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
         if n <= 0 {
             break;
         }
@@ -13515,6 +13524,9 @@ fn write_to_stream_inner(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
     // ids 1/2/3 without a FILE_HANDLES entry. Route those directly.
     if fid == 3 && vm.cli_direct_output {
         return write_cli_stderr(vm, bytes);
+    }
+    if fid == 2 && vm.cli_direct_output && vm.sapi_ub_write.is_none() {
+        return write_cli_fd(vm, 1, bytes);
     }
     if fid == 2 {
         // CLI: STDOUT is unbuffered and bypasses output buffering.
@@ -14114,7 +14126,10 @@ fn fwrite_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .get(&fid)
             .is_some_and(|fh| matches!(fh.special, SpecialStream::None))
     });
-    Ok(Value::Long(if plain { n } else { original_len } as i64))
+    let cli_std = (fid == 2 || fid == 3) && vm.cli_direct_output && vm.sapi_ub_write.is_none();
+    Ok(Value::Long(
+        if plain || cli_std { n } else { original_len } as i64
+    ))
 }
 
 /// Whether `fid` names an open stream handle.
