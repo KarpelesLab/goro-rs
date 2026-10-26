@@ -1701,6 +1701,7 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::ArrayNew
             | OpCode::SaveHandlerDepth
             | OpCode::FreeLoopVar
+            | OpCode::ArrayGetIncDec
             // (a call whose arguments the general handlers sent: a lean
             // call, or a builtin's, see the DO_FCALL arm of run_fast_ops)
             | OpCode::DoFCall
@@ -1883,6 +1884,11 @@ impl crate::vm::Vm {
                     let f = self.fast_dim_op(op, cvs, tmps, literals, tmp_container);
                     release_consumed(rel, f, op, tmps)
                 }
+                // `$a[k]++` of an int element (see fast_dim_incdec)
+                OpCode::ArrayGetIncDec => match self.fast_dim_incdec(op_array, ip, cvs, tmps) {
+                    Some(next) => Fast::Jump(next),
+                    None => break 'run ip,
+                },
                 // FETCH_DIM_W of an array element (see fast_dim_fetch_w)
                 OpCode::ArrayGetW => {
                     let Some(rel) =
@@ -2973,6 +2979,77 @@ impl crate::vm::Vm {
         } else {
             Fast::No
         }
+    }
+
+    /// `$a[k]++` / `++$a[k]` (and `--`) of an array variable's element
+    /// holding an int: FETCH_DIM_RW at `ip`, the increment of its result,
+    /// the write-back (ArraySetIncDec) of the same variable and key, run at
+    /// once as the general handlers would run them then (the key needs no
+    /// conversion, the element exists: nothing is reported). Returns the
+    /// index of the opcode after the write-back, or None (nothing done).
+    #[inline(never)]
+    pub(crate) fn fast_dim_incdec(
+        &self,
+        op_array: &crate::opcode::OpArray,
+        ip: usize,
+        cvs: &[Value],
+        tmps: &mut [Value],
+    ) -> Option<usize> {
+        let ops = &op_array.ops[..];
+        let op = &ops[ip];
+        let (OperandType::Cv(c), OperandType::Tmp(t)) = (op.op1, op.result) else {
+            return None;
+        };
+        let inc = ops.get(ip + 1)?;
+        let set = ops.get(ip + 2)?;
+        let (up, post) = match inc.opcode {
+            OpCode::PreIncrement => (true, false),
+            OpCode::PostIncrement => (true, true),
+            OpCode::PreDecrement => (false, false),
+            OpCode::PostDecrement => (false, true),
+            _ => return None,
+        };
+        if inc.op1 != OperandType::Tmp(t)
+            || set.opcode != OpCode::ArraySetIncDec
+            || set.op1 != op.op1
+            || set.op2 != OperandType::Tmp(t)
+            || set.result != op.op2
+            || self.dim_rw_key.is_some()
+            || self.dim_rw_abort.is_some()
+            || !tmp_writable(&op.result, tmps)
+            || !tmp_writable(&inc.result, tmps)
+        {
+            return None;
+        }
+        let arr = match cvs.get(c as usize)? {
+            Value::Array(a) => a.clone(),
+            Value::Reference(r) => match &*r.try_borrow().ok()? {
+                Value::Array(a) => a.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if Rc::ptr_eq(&arr, &self.globals) {
+            return None;
+        }
+        let key = dim_key(&op.op2, cvs, tmps, &op_array.literals)?;
+        let mut a = arr.try_borrow_mut().ok()?;
+        let old = match a.get(&key)? {
+            Value::Long(n) => *n,
+            _ => return None,
+        };
+        let new = if up {
+            old.checked_add(1)?
+        } else {
+            old.checked_sub(1)?
+        };
+        a.set(key, Value::Long(new));
+        drop(a);
+        tmps[t as usize] = Value::Long(new);
+        if let OperandType::Tmp(r) = inc.result {
+            tmps[r as usize] = Value::Long(if post { old } else { new });
+        }
+        Some(ip + 3)
     }
 
     /// FETCH_DIM_W (the container fetch of `$a[k][...] = v`, `$a[][...] =
