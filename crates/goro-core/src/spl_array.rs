@@ -571,6 +571,81 @@ impl Vm {
             .unwrap_or(false)
     }
 
+    /// Whether the class's read_dimension handler (ArrayObject's,
+    /// SplFixedArray's) calls an overriding offsetGet(), handing out
+    /// uninitialized_zval rather than NULL when it throws: `$obj[k] op= v`
+    /// is then not zend_use_object_as_array().
+    #[inline(never)]
+    pub(crate) fn spl_read_dim_never_null(
+        &self,
+        obj: &Rc<RefCell<PhpObject>>,
+        class_lower: &[u8],
+    ) -> bool {
+        self.spl_find_base(
+            class_lower,
+            &[b"arrayobject", b"arrayiterator", b"splfixedarray"],
+        )
+        .is_some()
+            && self.ao_user_has(obj, b"offsetget")
+    }
+
+    /// The read of `$obj[] op= v` by an SPL read_dimension handler: Some
+    /// when it does not call offsetGet(null) (an exception may be set).
+    /// ArrayObject / ArrayIterator find no element, or pass no argument to
+    /// an overriding offsetGet(); SplFixedArray does not support `[]`.
+    #[inline(never)]
+    pub(crate) fn spl_dim_read_no_offset(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        class_lower: &[u8],
+    ) -> Option<Value> {
+        let user_get = self.ao_user_has(obj, b"offsetget");
+        if self
+            .spl_find_base(class_lower, &[b"arrayobject", b"arrayiterator"])
+            .is_some()
+        {
+            if !user_get {
+                // spl_array_get_dimension_ptr(): uninitialized_zval
+                return Some(Value::Null);
+            }
+            let m = self
+                .classes
+                .get(class_lower)
+                .and_then(|c| c.get_method(b"offsetget"))
+                .map(|m| {
+                    (
+                        m.declaring_class.clone(),
+                        m.op_array
+                            .cv_names
+                            .iter()
+                            .find(|n| n.as_slice() != b"this")
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
+                });
+            let (decl, pname) = m?;
+            let decl = self
+                .class_name_for_display(&decl.to_ascii_lowercase())
+                .unwrap_or(decl);
+            let msg = format!(
+                "{}::offsetGet(): Argument #1 (${}) not passed",
+                crate::value::display_class_name(&decl),
+                crate::string::msg_str(&pname)
+            );
+            self.spl_throw(b"ArgumentCountError", &msg);
+            return Some(Value::Null);
+        }
+        if !user_get
+            && self
+                .spl_find_base(class_lower, &[b"splfixedarray"])
+                .is_some()
+        {
+            self.spl_throw(b"Error", "[] operator not supported for SplFixedArray");
+            return Some(Value::Null);
+        }
+        None
+    }
+
     /// ARRAY_AS_PROPS routes a property access to the storage when no real
     /// property of that name exists (zend_std_has_property(EXISTS)).
     pub(crate) fn ao_prop_as_dim(&self, obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> bool {

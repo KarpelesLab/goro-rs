@@ -41437,7 +41437,15 @@ impl Vm {
                         }
                         let args = vec![arr_val.clone(), key_val.clone()];
                         self.last_call_by_ref = false;
-                        let offsetget_result = self
+                        let no_offset = if matches!(op.op2, OperandType::Unused) {
+                            self.spl_dim_read_no_offset(obj, &class_lower)
+                        } else {
+                            None
+                        };
+                        let offsetget_result = if let Some(v) = no_offset {
+                            v
+                        } else {
+                            self
                             .spl_dim_docall(&class_lower, b"offsetget", &args)
                             .unwrap_or_else(|| {
                                 // Try user-defined offsetGet method
@@ -41447,7 +41455,8 @@ impl Vm {
                                     std::slice::from_ref(&key_val),
                                 )
                                 .unwrap_or(Value::Null)
-                            });
+                            })
+                        };
                         // `$obj[k]++` (FETCH_DIM_RW): the increment lands on
                         // offsetGet()'s by-value result.
                         let by_value_incdec = matches!(op.opcode, OpCode::ArrayGetIncDec)
@@ -41469,7 +41478,9 @@ impl Vm {
                         if let Some(mut exc_val) = self.current_exception.take() {
                             // zend_binary_assign_op_obj_dim(): no value read
                             // (offsetGet() threw) is zend_use_object_as_array().
-                            if matches!(op.opcode, OpCode::ArrayGetRW) {
+                            if matches!(op.opcode, OpCode::ArrayGetRW)
+                                && !self.spl_read_dim_never_null(obj, &class_lower)
+                            {
                                 let msg = format!(
                                     "Cannot use object of type {} as array",
                                     class_name_orig
