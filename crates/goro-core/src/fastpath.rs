@@ -3073,10 +3073,15 @@ impl crate::vm::Vm {
                         // false, unless it names a global looked up then
                         Fast::No => match op.op1 {
                             OperandType::Cv(i)
-                                if matches!(
-                                    cvs.get(i as usize),
-                                    Some(Value::Undef | Value::Null)
-                                ) && op_array
+                                if match cvs.get(i as usize) {
+                                    Some(Value::Undef | Value::Null) => true,
+                                    // (a global bound to null, `global $v`)
+                                    Some(Value::Reference(r)) => matches!(
+                                        r.try_borrow().as_deref(),
+                                        Ok(Value::Undef | Value::Null)
+                                    ),
+                                    _ => false,
+                                } && op_array
                                     .cv_names
                                     .get(i as usize)
                                     .is_some_and(|n| !lazy_global_name(n)) =>
@@ -4768,6 +4773,18 @@ impl crate::vm::Vm {
         let arr = match op.op1 {
             OperandType::Cv(i) => match cvs.get(i as usize) {
                 Some(Value::Array(a)) => a.clone(),
+                // (a reference's array the general handler would not
+                // separate first: no other holder, see fetch_dim_for_write)
+                Some(Value::Reference(r)) => match r.try_borrow().as_deref() {
+                    Ok(Value::Array(a)) => {
+                        let a = a.clone();
+                        if crate::array::shared_beyond(&a, 2) {
+                            return Fast::No;
+                        }
+                        a
+                    }
+                    _ => return Fast::No,
+                },
                 _ => return Fast::No,
             },
             OperandType::Tmp(i) if op.op1 != op.result => {
