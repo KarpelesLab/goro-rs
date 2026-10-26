@@ -795,6 +795,9 @@ pub struct Compiler {
     in_free_function: bool,
     /// Whether we're compiling inside a trait (for self:: tracking)
     is_in_trait: bool,
+    /// Compiling a closure body (it may be rebound to another scope): its
+    /// self-class literals are tracked like a trait's (class_const_literals).
+    in_closure_body: bool,
     /// Compiling the members of a trait: its constant-expression thunks
     /// resolve `self` / `__CLASS__` in the scope of the using class.
     in_trait_body: bool,
@@ -1159,6 +1162,7 @@ impl Compiler {
             in_main_pass: false,
             in_free_function: false,
             is_in_trait: false,
+            in_closure_body: false,
             in_trait_body: false,
             warnings: Vec::new(),
             is_discarding_result: false,
@@ -12892,7 +12896,7 @@ impl Compiler {
             .op_array
             .add_literal(Value::String(PhpString::from_vec(resolved)));
         // Track self::class for trait patching
-        if is_self && self.is_in_trait {
+        if is_self && (self.is_in_trait || self.in_closure_body) {
             self.op_array.class_const_literals.push(idx);
         }
         Ok(OperandType::Const(idx))
@@ -15252,7 +15256,7 @@ impl Compiler {
                 let idx = self
                     .op_array
                     .add_literal(Value::String(PhpString::from_vec(class_name)));
-                if is_self && self.is_in_trait {
+                if is_self && (self.is_in_trait || self.in_closure_body) {
                     self.op_array.class_const_literals.push(idx);
                 }
                 Ok(OperandType::Const(idx))
@@ -18761,8 +18765,11 @@ impl Compiler {
                             Value::String(PhpString::empty())
                         };
                         // Track this literal as a __CLASS__ magic constant for trait patching
+                        // (a closure's is the class it is declared in, even rebound)
                         let idx = self.op_array.add_literal(class_val);
-                        self.op_array.class_const_literals.push(idx);
+                        if !self.in_closure_body || self.is_in_trait {
+                            self.op_array.class_const_literals.push(idx);
+                        }
                         return Ok(OperandType::Const(idx));
                     }
                     b"__method__" => {
@@ -19031,7 +19038,7 @@ impl Compiler {
                     .op_array
                     .add_literal(Value::String(PhpString::from_vec(class_name)));
                 // Track `new self()` for trait patching
-                if is_self_new && self.is_in_trait {
+                if is_self_new && (self.is_in_trait || self.in_closure_body) {
                     self.op_array.class_const_literals.push(name_idx);
                 }
                 let tmp = self.op_array.alloc_temp();
@@ -19970,6 +19977,7 @@ impl Compiler {
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.is_in_trait = self.is_in_trait;
+                closure_compiler.in_closure_body = true;
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
                 closure_compiler.anon_class_name_map = self.anon_class_name_map.clone();
                 // Inherit scope_class from the enclosing function for visibility checks
@@ -20399,6 +20407,7 @@ impl Compiler {
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.is_in_trait = self.is_in_trait;
+                closure_compiler.in_closure_body = true;
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
                 closure_compiler.anon_class_name_map = self.anon_class_name_map.clone();
                 // Inherit scope_class from the enclosing function for visibility checks
@@ -20914,7 +20923,7 @@ impl Compiler {
                     .op_array
                     .add_literal(Value::String(PhpString::from_vec(resolved_class)));
                 // Track self:: references for trait patching
-                if is_self_const && self.is_in_trait {
+                if is_self_const && (self.is_in_trait || self.in_closure_body) {
                     self.op_array.class_const_literals.push(class_idx);
                 }
                 let const_name_idx = self
@@ -21204,7 +21213,8 @@ impl Compiler {
                 let class_operand = match &class.kind {
                     ExprKind::Identifier(name) => {
                         let resolved = self.resolve_class_name(name);
-                        let resolved = if resolved.eq_ignore_ascii_case(b"self") {
+                        let is_self = resolved.eq_ignore_ascii_case(b"self");
+                        let resolved = if is_self {
                             self.current_class.clone().unwrap_or(resolved)
                         } else if resolved.eq_ignore_ascii_case(b"parent") {
                             self.current_parent_class.clone().unwrap_or(resolved)
@@ -21214,6 +21224,9 @@ impl Compiler {
                         let idx = self
                             .op_array
                             .add_literal(Value::String(PhpString::from_vec(resolved)));
+                        if is_self && (self.is_in_trait || self.in_closure_body) {
+                            self.op_array.class_const_literals.push(idx);
+                        }
                         OperandType::Const(idx)
                     }
                     _ => self.compile_expr(class)?,
@@ -21272,7 +21285,7 @@ impl Compiler {
                             .op_array
                             .add_literal(Value::String(PhpString::from_vec(class_name)));
                         // Track self:: references for trait patching (like __CLASS__)
-                        if is_self && self.is_in_trait {
+                        if is_self && (self.is_in_trait || self.in_closure_body) {
                             self.op_array.class_const_literals.push(idx);
                         }
                         (OperandType::Const(idx), property.clone())
@@ -21362,7 +21375,7 @@ impl Compiler {
                         let idx = self
                             .op_array
                             .add_literal(Value::String(PhpString::from_vec(class_name)));
-                        if is_self && self.is_in_trait {
+                        if is_self && (self.is_in_trait || self.in_closure_body) {
                             self.op_array.class_const_literals.push(idx);
                         }
                         OperandType::Const(idx)

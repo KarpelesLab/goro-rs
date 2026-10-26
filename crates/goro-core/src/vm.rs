@@ -12957,6 +12957,8 @@ impl Vm {
         } else {
             None
         };
+        // (self / __CLASS__ name the new scope)
+        crate::closure::retarget_self_literals(self, &mut new_op, new_scope.as_deref());
         new_op.scope_class = new_scope;
 
         // Determine the $this CV position in the new OpArray

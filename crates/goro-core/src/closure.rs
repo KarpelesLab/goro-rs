@@ -2240,6 +2240,26 @@ impl Vm {
     }
 }
 
+/// A closure's op array rebound from its scope to `new_scope` (lowercase):
+/// the literals compiled from `self` / `__CLASS__` name the new scope.
+#[inline(never)]
+pub(crate) fn retarget_self_literals(vm: &Vm, op: &mut OpArray, new_scope: Option<&[u8]>) {
+    if op.class_const_literals.is_empty() || op.scope_class.as_deref() == new_scope {
+        return;
+    }
+    let old = op
+        .scope_class
+        .as_ref()
+        .and_then(|s| vm.classes.get(s))
+        .map(|c| c.name.clone());
+    let new = new_scope
+        .and_then(|s| vm.classes.get(s))
+        .map(|c| c.name.clone());
+    if let (Some(old), Some(new)) = (old, new) {
+        patch_trait_class_literals(op, &old, &new);
+    }
+}
+
 /// The `Trait` / `Trait::member` literals (class_const_literals) of a
 /// function compiled in trait `trait_name` retargeted to `class_name`.
 #[inline(never)]
