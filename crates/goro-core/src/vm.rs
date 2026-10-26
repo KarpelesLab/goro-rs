@@ -21937,9 +21937,11 @@ impl Vm {
             return false;
         }
         // (a plain function: its parameters count from the first argument)
+        // (or a method its call site resolved, see MethodCallInfo: its
+        // `$this` leads the arguments as it leads the variables)
         let user_target = call.target.user.is_some()
-            && call.target.method.is_none()
-            && call.target.forward.is_none()
+            && ((call.target.method.is_none() && call.target.forward.is_none())
+                || call.target.method_info.is_some())
             && !call.target.closure
             && call.name.as_bytes().first() != Some(&b'\\');
         let v = match op.op1 {

@@ -1152,6 +1152,79 @@ fn fast_isset_check(op: &Op, cvs: &[Value], tmps: &mut [Value], literals: &[Valu
     }
 }
 
+/// `(int) $v` / `(string) $v` of a scalar whose conversion reports nothing
+/// and needs no INI setting (an int, a bool, null, a string; not a float,
+/// whose string form follows `precision`): what the general handlers
+/// store then.
+#[inline(never)]
+fn fast_cast(op: &Op, cvs: &[Value], tmps: &mut [Value], literals: &[Value]) -> Fast {
+    if !tmp_writable(&op.result, tmps) {
+        return Fast::No;
+    }
+    let Some(v) = defined_operand(&op.op1, cvs, tmps, literals) else {
+        return Fast::No;
+    };
+    let r = match (op.opcode, v) {
+        (OpCode::CastInt, v @ (Value::Long(_) | Value::True | Value::False | Value::Null)) => {
+            Value::Long(v.to_long())
+        }
+        (OpCode::CastInt, Value::String(s)) => Value::Long(Value::String(s).to_long()),
+        (OpCode::CastString, Value::String(s)) => Value::String(s),
+        (OpCode::CastString, v @ (Value::Long(_) | Value::True | Value::False | Value::Null)) => {
+            Value::String(v.to_php_string())
+        }
+        _ => return Fast::No,
+    };
+    if store_tmp(&op.result, r, tmps) {
+        Fast::Done
+    } else {
+        Fast::No
+    }
+}
+
+/// INIT_CV_NULL (the write-fetch of a variable a builtin's `array &$array`
+/// parameter takes): an undefined variable becomes null.
+#[inline]
+fn fast_init_cv_null(op: &Op, cvs: &mut [Value]) -> Fast {
+    let OperandType::Cv(i) = op.op1 else {
+        return Fast::No;
+    };
+    match cvs.get_mut(i as usize) {
+        Some(slot @ Value::Undef) => {
+            *slot = Value::Null;
+            Fast::Done
+        }
+        Some(Value::Reference(r)) => match r.try_borrow_mut() {
+            Ok(mut b) => {
+                if matches!(*b, Value::Undef) {
+                    *b = Value::Null;
+                }
+                Fast::Done
+            }
+            Err(_) => Fast::No,
+        },
+        Some(_) => Fast::Done,
+        None => Fast::No,
+    }
+}
+
+/// The names of the variables isset() of an undefined one looks up as a
+/// global (a superglobal not loaded yet, $GLOBALS).
+fn lazy_global_name(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"_SESSION"
+            | b"_SERVER"
+            | b"_GET"
+            | b"_POST"
+            | b"_COOKIE"
+            | b"_FILES"
+            | b"_REQUEST"
+            | b"_ENV"
+            | b"GLOBALS"
+    )
+}
+
 /// FE_FETCH of the next element of an array a foreach loop iterates live
 /// (see FeView::live_array): what the general handler does then. At the
 /// end of the loop, the iterator is released (when that only frees memory:
@@ -1702,6 +1775,9 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::SaveHandlerDepth
             | OpCode::FreeLoopVar
             | OpCode::ArrayGetIncDec
+            | OpCode::CastInt
+            | OpCode::CastString
+            | OpCode::InitCvNull
             // (a call whose arguments the general handlers sent: a lean
             // call, or a builtin's, see the DO_FCALL arm of run_fast_ops)
             | OpCode::DoFCall
@@ -1915,9 +1991,33 @@ impl crate::vm::Vm {
                     else {
                         break 'run ip;
                     };
-                    let f = fast_isset_check(op, cvs, tmps, literals);
+                    let f = match fast_isset_check(op, cvs, tmps, literals) {
+                        // isset() of a variable that is null or undefined:
+                        // false, unless it names a global looked up then
+                        Fast::No => match op.op1 {
+                            OperandType::Cv(i)
+                                if matches!(
+                                    cvs.get(i as usize),
+                                    Some(Value::Undef | Value::Null)
+                                ) && op_array
+                                    .cv_names
+                                    .get(i as usize)
+                                    .is_some_and(|n| !lazy_global_name(n)) =>
+                            {
+                                if store_tmp(&op.result, Value::False, tmps) {
+                                    Fast::Done
+                                } else {
+                                    Fast::No
+                                }
+                            }
+                            _ => Fast::No,
+                        },
+                        f => f,
+                    };
                     release_consumed(rel, f, op, tmps)
                 }
+                OpCode::CastInt | OpCode::CastString => fast_cast(op, cvs, tmps, literals),
+                OpCode::InitCvNull => fast_init_cv_null(op, cvs),
                 // A class constant its site resolved (see fast_class_const).
                 OpCode::StaticPropGet => {
                     if !tmp_writable(&op.result, tmps) {
