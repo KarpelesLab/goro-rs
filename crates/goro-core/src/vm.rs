@@ -30270,7 +30270,7 @@ impl Vm {
                             }
                         }
                         self.caller_strict_types = op_array.strict_types;
-                        self.builtin_named_skipped = Vec::new();
+                        self.reset_named_skipped();
                         let had_exception_before = self.current_exception.is_some();
                         let own_frame = !special;
                         if own_frame {

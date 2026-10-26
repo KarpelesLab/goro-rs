@@ -264,7 +264,7 @@ impl Vm {
             }
         }
         self.caller_strict_types = op_array.strict_types;
-        self.builtin_named_skipped = Vec::new();
+        self.reset_named_skipped();
         let own_frame = !special;
         if own_frame {
             self.push_builtin_frame(
@@ -339,6 +339,16 @@ impl Vm {
         }
         self.recycle_arg_vec(args);
         Some(true)
+    }
+
+    /// No named argument was skipped for the builtin about to be called
+    /// (`builtin_named_skipped = Vec::new()`, without dropping a vector
+    /// that holds no allocation).
+    #[inline(always)]
+    pub(crate) fn reset_named_skipped(&mut self) {
+        if self.builtin_named_skipped.capacity() != 0 {
+            self.builtin_named_skipped = Vec::new();
+        }
     }
 
     /// What fast_builtin_dofcall() needs of the DO_FCALL at `ip` (before it

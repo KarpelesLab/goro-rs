@@ -2487,7 +2487,7 @@ impl crate::vm::Vm {
         self.last_call_by_ref = false;
         self.note_call_result(fcall, lower);
         self.caller_strict_types = op_array.strict_types;
-        self.builtin_named_skipped = Vec::new();
+        self.reset_named_skipped();
         let r = func(self, &args[..nargs]);
         self.ucf_call_line = None;
         let result = match r {
