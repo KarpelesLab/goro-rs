@@ -9060,7 +9060,13 @@ impl Vm {
             } else {
                 self.current_line
             };
-            self.emit_implicit_float_to_int_if_needed(&v, &info.param_type, line);
+            if matches!(v, Value::Double(_) | Value::String(_)) {
+                let saved = self.enter_recv_file(op_array);
+                self.emit_implicit_float_to_int_if_needed(&v, &info.param_type, line);
+                if let Some(f) = saved {
+                    self.current_file = f;
+                }
+            }
             let mut c = v.clone();
             Self::coerce_value_to_type(&mut c, &info.param_type, false);
             if std::mem::discriminant(&c) != std::mem::discriminant(&v) {
