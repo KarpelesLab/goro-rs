@@ -3,6 +3,8 @@
 //! datefmt_parse.rs) and the CLDR data of the `intl` crate
 //! (datefmt_data.rs).
 
+#[path = "datefmt_cal_patterns.rs"]
+mod datefmt_cal_patterns;
 #[path = "datefmt_data.rs"]
 pub mod datefmt_data;
 #[path = "datefmt_ext.rs"]
@@ -145,8 +147,8 @@ fn date_pattern(ld: &data::LocaleData, locale: &str, idx: usize) -> String {
     if matches!(cal.as_str(), "gregorian" | "gregory" | "iso8601") {
         return g;
     }
-    if cal == "hebrew" && ld.lang.starts_with("en") {
-        return ["EEEE, d MMMM y", "d MMMM y", "d MMM y", "d MMM y"][idx].to_string();
+    if let Some(p) = cal_date_pattern(locale, &cal, idx) {
+        return p.to_string();
     }
     // the generic patterns: the era after the year
     let items = pat::compile(&g);
@@ -169,6 +171,45 @@ fn date_pattern(ld: &data::LocaleData, locale: &str, idx: usize) -> String {
         }
     }
     out
+}
+
+/// CLDR's date pattern of a style for a calendar other than the Gregorian
+/// one: the calendar's patterns of the locale or its nearest ancestor,
+/// else those of the calendar root aliases it to (generic, at the end),
+/// looked up from the locale again.
+fn cal_date_pattern(locale: &str, cal: &str, idx: usize) -> Option<&'static str> {
+    use datefmt_cal_patterns::{CAL_ALIASES, CAL_DATE_PATTERNS};
+    let base = crate::numdata::base_name(locale).replace('-', "_");
+    let mut chain = Vec::new();
+    let mut cur = base;
+    while !cur.is_empty() && cur != "root" {
+        chain.push(cur.clone());
+        match cur.rfind('_') {
+            Some(p) => {
+                cur.truncate(p);
+                while cur.ends_with('_') {
+                    cur.pop();
+                }
+            }
+            None => break,
+        }
+    }
+    chain.push("root".to_string());
+    let mut c = cal.to_string();
+    for _ in 0..8 {
+        for l in &chain {
+            let key = (l.as_str(), c.as_str());
+            if let Ok(i) = CAL_DATE_PATTERNS.binary_search_by(|(k, kc, _)| (*k, *kc).cmp(&key)) {
+                return Some(CAL_DATE_PATTERNS[i].2[idx]);
+            }
+        }
+        match CAL_ALIASES.iter().find(|(k, _)| *k == c) {
+            Some((_, t)) => c = t.to_string(),
+            None if c != "generic" => c = "generic".to_string(),
+            None => break,
+        }
+    }
+    None
 }
 
 /// The pattern of a date style and a time style (UDAT_FULL..UDAT_SHORT,
