@@ -650,7 +650,8 @@ impl Vm {
             }
             _ => self.callable_scope(),
         };
-        let this = self.current_frame_this();
+        // (a parameter's check runs in the callee's frame)
+        let this = self.recv_this.clone().or_else(|| self.current_frame_this());
         let mut fcc = Fcc::default();
         let mut error = None;
         let ok = match &callable {

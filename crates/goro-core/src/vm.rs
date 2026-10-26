@@ -2249,6 +2249,9 @@ pub struct Vm {
     pub closure_invoke_call: bool,
     /// The call being type-checked is made by Closure::__invoke().
     pub(crate) pending_call_via_invoke: bool,
+    /// The `$this` of the call whose arguments are being type-checked (the
+    /// callee's RECV): a `callable` parameter is checked in its frame.
+    pub(crate) recv_this: Option<Value>,
     /// The exception a `return` in a finally block discarded (see
     /// OpCode::Return), for the return type check.
     pub(crate) return_discarded_exc: Option<Value>,
@@ -3636,6 +3639,7 @@ impl Vm {
             release_call_at: None,
             closure_invoke_call: false,
             pending_call_via_invoke: false,
+            recv_this: None,
             return_discarded_exc: None,
             exit_in_autoload: false,
             ini_set_hooks: HashMap::new(),
@@ -22826,6 +22830,13 @@ impl Vm {
         // For method calls like ClassName::method, format as ClassName::method
         // For regular functions, just the function name
         self.pending_call_via_invoke = call.target.via_invoke;
+        if implicit_args == 1 {
+            self.recv_this = call
+                .args
+                .first()
+                .filter(|v| matches!(v, Value::Object(_)))
+                .cloned();
+        }
         let param_err = self.check_param_types_with_strict(
             user_fn,
             &call.args,
@@ -22834,6 +22845,7 @@ impl Vm {
             line,
             caller_strict,
         );
+        self.recv_this = None;
         self.pending_call_via_invoke = false;
         // Pop temp scope
         if temp_scope_pushed {
