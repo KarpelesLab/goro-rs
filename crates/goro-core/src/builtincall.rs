@@ -408,14 +408,6 @@ impl Vm {
             return None;
         }
         let framed = (self.lean_framed as usize).min(n);
-        // (a method's frame is named after what its call site resolved)
-        // SAFETY: see LeanFrame (lean_run() keeps them while the run runs).
-        if self.lean_frames[framed..]
-            .iter()
-            .any(|lf| lf.sep.is_some() && unsafe { &*lf.call }.target.method_info.is_none())
-        {
-            return None;
-        }
         let no_sym = None;
         let no_fin = Vec::new();
         for k in framed..n {
@@ -429,9 +421,20 @@ impl Vm {
             let (f, call, slots) = unsafe { (&*lf.f, &*lf.call, &*lf.slots) };
             let mut display = self.string_pool.pop().unwrap_or_default();
             display.clear();
-            match (lf.sep, &call.target.method_info) {
-                (Some(_), Some(i)) => display.push_str(&i.display),
+            // (a method's frame is named after what its call site resolved;
+            // a static or forwarding call's as DO_FCALL's fast path names
+            // it: its class, as declared, and the method as called)
+            match (lf.sep, &call.target.method_info, &f.scope_class) {
+                (Some(_), Some(i), _) => display.push_str(&i.display),
                 _ if !f.display_name.is_empty() => push_lossy(&mut display, &f.display_name),
+                (Some((sep, _)), None, Some(scope)) => {
+                    match self.classes.get(scope) {
+                        Some(c) => push_lossy(&mut display, &c.name),
+                        None => push_lossy(&mut display, scope),
+                    }
+                    display.push_str("::");
+                    push_lossy(&mut display, &call.name.as_bytes()[sep + 2..]);
+                }
                 _ => push_lossy(&mut display, call.name.as_bytes()),
             }
             let this = lf.sep.is_some_and(|(_, this)| this);
