@@ -851,7 +851,13 @@ impl Compiler {
     }
 
     /// Check if a builtin function's parameter at given position is by-reference
-    fn is_builtin_byref_param(func_name: Option<&[u8]>, pos: usize) -> bool {
+    /// (`stub`: the stub lookup of `func_name` once made, for its other
+    /// positions).
+    fn is_builtin_byref_param(
+        func_name: Option<&[u8]>,
+        pos: usize,
+        stub: &mut Option<Option<&'static crate::stubs::StubFunc>>,
+    ) -> bool {
         match func_name {
             Some(name) => {
                 let mut buf = [0u8; 64];
@@ -1018,12 +1024,14 @@ impl Compiler {
                     (b"__ziparchive_getexternalattributes_method", 1..=2) => true,
                     // ext/intl: as its stubs declare (collator_sort(),
                     // numfmt_parse(), grapheme_extract(), idn_to_ascii()...)
-                    (name, p) => crate::stubs::find_function(name).is_some_and(|f| {
-                        (f.ext == "intl" || f.ext == "ldap")
-                            && f.args
-                                .get(p)
-                                .is_some_and(|a| a.flags & crate::stubs::A_BY_REF != 0)
-                    }),
+                    (name, p) => stub
+                        .get_or_insert_with(|| crate::stubs::find_function(name))
+                        .is_some_and(|f| {
+                            (f.ext == "intl" || f.ext == "ldap")
+                                && f.args
+                                    .get(p)
+                                    .is_some_and(|a| a.flags & crate::stubs::A_BY_REF != 0)
+                        }),
                 }
             }
             None => false,
@@ -2305,19 +2313,21 @@ impl Compiler {
 
         if let Some(pos) = name.iter().position(|&b| b == b'\\') {
             // Qualified name
-            let first_part = &name[..pos];
-            let first_part_lower: Vec<u8> =
-                first_part.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if let Some(resolved) = self.use_function_map.get(&first_part_lower) {
-                let mut result = resolved.clone();
-                result.extend_from_slice(&name[pos..]);
-                return result;
-            }
-            // Also check regular use map for namespace aliases
-            if let Some(resolved) = self.use_map.get(&first_part_lower) {
-                let mut result = resolved.clone();
-                result.extend_from_slice(&name[pos..]);
-                return result;
+            if !self.use_function_map.is_empty() || !self.use_map.is_empty() {
+                let first_part = &name[..pos];
+                let first_part_lower: Vec<u8> =
+                    first_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if let Some(resolved) = self.use_function_map.get(&first_part_lower) {
+                    let mut result = resolved.clone();
+                    result.extend_from_slice(&name[pos..]);
+                    return result;
+                }
+                // Also check regular use map for namespace aliases
+                if let Some(resolved) = self.use_map.get(&first_part_lower) {
+                    let mut result = resolved.clone();
+                    result.extend_from_slice(&name[pos..]);
+                    return result;
+                }
             }
             if self.current_namespace.is_empty() {
                 name.to_vec()
@@ -2326,9 +2336,11 @@ impl Compiler {
             }
         } else {
             // Unqualified name - check function use map first
-            let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if let Some(resolved) = self.use_function_map.get(&name_lower) {
-                return resolved.clone();
+            if !self.use_function_map.is_empty() {
+                let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if let Some(resolved) = self.use_function_map.get(&name_lower) {
+                    return resolved.clone();
+                }
             }
             // Prefix with namespace (VM will fall back to global)
             self.prefix_with_namespace(name)
@@ -2345,9 +2357,10 @@ impl Compiler {
         if name.contains(&b'\\') || !resolved.contains(&b'\\') {
             return None;
         }
-        if self
-            .use_function_map
-            .contains_key(&name.to_ascii_lowercase())
+        if !self.use_function_map.is_empty()
+            && self
+                .use_function_map
+                .contains_key(&name.to_ascii_lowercase())
         {
             return None;
         }
@@ -2369,8 +2382,10 @@ impl Compiler {
             return OperandType::Unused;
         }
         let imported = || {
-            self.use_function_map
-                .contains_key(&name.to_ascii_lowercase())
+            !self.use_function_map.is_empty()
+                && self
+                    .use_function_map
+                    .contains_key(&name.to_ascii_lowercase())
         };
         if name.contains(&b'\\') || imported() {
             OperandType::Const(self.op_array.add_literal(Value::True))
@@ -2392,6 +2407,7 @@ impl Compiler {
     ) -> CompileResult<()> {
         let mut has_named = false;
         let mut has_unpack = false;
+        let mut stub = None;
         for (i, arg) in args.iter().enumerate() {
             // The operand of a pipe: a temporary (ZEND_SEND_VAL_EX).
             if matches!(&arg.value.kind, ExprKind::Variable(n) if n.starts_with(PIPE_ALIAS_PREFIX))
@@ -2550,7 +2566,7 @@ impl Compiler {
                     arg
                 };
                 // Check if this argument position is by-ref for known builtins
-                let mut is_byref = Self::is_builtin_byref_param(func_name, i);
+                let mut is_byref = Self::is_builtin_byref_param(func_name, i, &mut stub);
                 // array_multisort() takes its arguments by "prefer-ref": variables
                 // are passed by reference, other expressions (sort flags) by value.
                 if func_name
@@ -2688,25 +2704,27 @@ impl Compiler {
                     found
                 };
                 // Callee declared earlier in this file: its by-ref-ness is known.
-                let known_byval = func_name
-                    .and_then(|n| {
-                        let lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        let lower = lower
-                            .strip_prefix(b"\\")
-                            .map(|x| x.to_vec())
-                            .unwrap_or(lower);
-                        self.op_array
-                            .child_functions
-                            .iter()
-                            // (a function declared further down is not
-                            // declared yet when the call is compiled)
-                            .find(|f| f.name.eq_ignore_ascii_case(&lower) && f.decl_line <= line)
-                            .map(|f| {
-                                !f.by_ref_params.get(i).copied().unwrap_or(false)
-                                    && f.variadic_param.is_none()
-                            })
-                    })
-                    .unwrap_or(false);
+                // (only looked up for the arguments the checks below use it for)
+                let needs_known = is_append
+                    || (!is_byref
+                        && (dim_or_prop
+                            || (func_name.is_some() && Self::is_call_expr(&arg.value))));
+                let known_byval = needs_known
+                    && func_name
+                        .and_then(|n| {
+                            let n = n.strip_prefix(b"\\").unwrap_or(n);
+                            self.op_array
+                                .child_functions
+                                .iter()
+                                // (a function declared further down is not
+                                // declared yet when the call is compiled)
+                                .find(|f| f.name.eq_ignore_ascii_case(n) && f.decl_line <= line)
+                                .map(|f| {
+                                    !f.by_ref_params.get(i).copied().unwrap_or(false)
+                                        && f.variadic_param.is_none()
+                                })
+                        })
+                        .unwrap_or(false);
                 if is_append && known_byval {
                     return Err(CompileError {
                         message: "Cannot use [] for reading".into(),
@@ -15887,7 +15905,7 @@ impl Compiler {
                         });
                         return Ok(OperandType::Tmp(tmp));
                     }
-                    if func_lower == b"compact"
+                    if n.eq_ignore_ascii_case(b"compact")
                         && !args.is_empty()
                         && args.iter().all(|a| a.name.is_none() && !a.unpack)
                     {
@@ -15945,21 +15963,16 @@ impl Compiler {
                 // Special case: assert(expr) with one positional arg injects the source string
                 // as a second argument at compile time (PHP behavior).
                 if let ExprKind::Identifier(n) = &name.kind {
-                    let func_lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
                     // `\assert(...)` is the same compile-time special case.
-                    let func_lower: Vec<u8> = func_lower
+                    let is_assert = n
                         .strip_prefix(b"\\")
-                        .map(|r| r.to_vec())
-                        .unwrap_or(func_lower);
+                        .unwrap_or(n)
+                        .eq_ignore_ascii_case(b"assert");
                     // (a named argument gets a named `description:` added)
-                    if func_lower == b"assert" && args.len() == 1 && args[0].name.is_some() {
+                    if is_assert && args.len() == 1 && args[0].name.is_some() {
                         return self.compile_named_assert(expr, name, &args[0]);
                     }
-                    if func_lower == b"assert"
-                        && args.len() == 1
-                        && args[0].name.is_none()
-                        && !args[0].unpack
-                    {
+                    if is_assert && args.len() == 1 && args[0].name.is_none() && !args[0].unpack {
                         let expr_str = crate::ast_export::export_expr(&args[0].value);
                         let assert_str = format!("assert({})", expr_str);
                         // Emit: InitFCall("assert", 2)
@@ -21307,18 +21320,17 @@ impl Compiler {
         let Some(fname) = func_name else {
             return false;
         };
-        let fname = fname.strip_prefix(b"\\").unwrap_or(fname);
-        // (the longest of the names is 20 bytes)
-        let mut buf = [0u8; 24];
-        let Some(lower) = buf.get_mut(..fname.len()) else {
+        let name = fname.strip_prefix(b"\\").unwrap_or(fname);
+        // (none of them is longer than "array_walk_recursive")
+        let mut buf = [0u8; 20];
+        if name.len() > buf.len() {
             return false;
-        };
-        for (d, s) in lower.iter_mut().zip(fname) {
-            *d = s.to_ascii_lowercase();
         }
-        let lower = &*lower;
+        let lower = &mut buf[..name.len()];
+        lower.copy_from_slice(name);
+        lower.make_ascii_lowercase();
         matches!(
-            lower,
+            &*lower,
             b"next"
                 | b"prev"
                 | b"reset"
