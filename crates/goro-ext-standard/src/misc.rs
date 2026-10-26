@@ -2057,7 +2057,14 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         _ => None,
     };
     vm.callback_closure = closure.clone();
-    let r = call_user_func_inner(vm, args);
+    let fast = match args.split_first() {
+        Some((cb, rest)) => vm.fast_user_callback(cb, rest),
+        None => None,
+    };
+    let r = match fast {
+        Some(r) => r,
+        None => call_user_func_inner(vm, args),
+    };
     vm.callback_closure = None;
     // zend_call_function() of a closure releases it (ZEND_CALL_CLOSURE).
     if let Some(o) = closure.and_then(|w| w.upgrade()) {

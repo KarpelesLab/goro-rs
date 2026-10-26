@@ -17,6 +17,8 @@ use crate::value::Value;
 mod builtincall;
 #[path = "fastcall.rs"]
 mod fastcall;
+#[path = "fastcallback.rs"]
+mod fastcallback;
 #[path = "leancall.rs"]
 mod leancall;
 pub(crate) use builtincall::BuiltinDesc;
@@ -5259,7 +5261,10 @@ impl Vm {
             _ => None,
         };
         self.callback_closure = closure.clone();
-        let r = self.call_callback_inner(callback, args);
+        let r = match self.fast_user_callback(callback, args) {
+            Some(r) => r,
+            None => self.call_callback_inner(callback, args),
+        };
         self.callback_closure = None;
         // zend_call_function() of a closure releases it (ZEND_CALL_CLOSURE).
         if let Some(o) = closure.and_then(|w| w.upgrade()) {
