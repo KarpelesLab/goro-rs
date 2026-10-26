@@ -22732,6 +22732,23 @@ impl Vm {
     /// passed arguments against the declared types and coerces them in weak
     /// mode. `func_name_lower` is the called name (a method's names its
     /// class, the scope of self/parent/static in the types).
+    /// The class self/parent/static name in a callee's parameter types.
+    fn recv_scope_class(&self, user_fn: &OpArray, func_name_lower: &[u8]) -> Option<Vec<u8>> {
+        if let Some(pos) = crate::string::find_double_colon(func_name_lower) {
+            let class_part_lower = &func_name_lower[..pos];
+            let method_part_lower = &func_name_lower[pos + 2..];
+            Some(
+                self.classes
+                    .get(class_part_lower)
+                    .and_then(|c| c.get_method(method_part_lower))
+                    .map(|m| m.declaring_class.clone())
+                    .unwrap_or_else(|| class_part_lower.to_vec()),
+            )
+        } else {
+            user_fn.scope_class.clone()
+        }
+    }
+
     fn recv_typed_params(
         &mut self,
         user_fn: &OpArray,
@@ -22742,23 +22759,12 @@ impl Vm {
     ) -> Result<(), RecvFail> {
         // Push class scope temporarily for self/parent/static type checking
         // Use windows(2) to find "::" correctly even in names with embedded colons
-        let temp_scope_pushed = if let Some(pos) = crate::string::find_double_colon(func_name_lower)
-        {
-            let class_part_lower = &func_name_lower[..pos];
-            let method_part_lower = &func_name_lower[pos + 2..];
-            let defining_class = self
-                .classes
-                .get(class_part_lower)
-                .and_then(|c| c.get_method(method_part_lower))
-                .map(|m| m.declaring_class.clone())
-                .unwrap_or_else(|| class_part_lower.to_vec());
-            self.class_scope_stack.push(defining_class);
-            true
-        } else if let Some(ref scope) = user_fn.scope_class {
-            self.class_scope_stack.push(scope.clone());
-            true
-        } else {
-            false
+        let temp_scope_pushed = match self.recv_scope_class(user_fn, func_name_lower) {
+            Some(scope) => {
+                self.class_scope_stack.push(scope);
+                true
+            }
+            None => false,
         };
         // Determine if this is a method call ($this is first implicit arg)
         let implicit_args = if user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
@@ -22890,8 +22896,16 @@ impl Vm {
         }
         // Coerce Stringable objects to string for string-typed params
         // (zend_verify_weak_scalar_type_hint: a type with string
-        // that does not take the object as is).
+        // that does not take the object as is; self/parent in the callee's
+        // scope).
+        let mut scope_pushed = false;
         for (i, arg) in call.args.iter_mut().enumerate() {
+            if !scope_pushed && matches!(arg, Value::Object(_)) {
+                if let Some(scope) = self.recv_scope_class(user_fn, func_name_lower) {
+                    self.class_scope_stack.push(scope);
+                    scope_pushed = true;
+                }
+            }
             if i >= user_fn.param_types.len() {
                 break;
             }
@@ -22919,6 +22933,9 @@ impl Vm {
                     }
                 }
             }
+        }
+        if scope_pushed {
+            self.class_scope_stack.pop();
         }
         Ok(())
     }
