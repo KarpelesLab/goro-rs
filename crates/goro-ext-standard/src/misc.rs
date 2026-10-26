@@ -18015,10 +18015,12 @@ fn assert_options_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let old = assert_ini_bool(vm, key, default);
     if let Some(nv) = new_value {
-        let sv = match &nv {
-            Value::Object(_) | Value::Array(_) => nv.to_php_string(),
-            other => other.to_php_string(),
-        };
+        // zval_try_get_string()
+        if matches!(nv, Value::Array(_)) {
+            let line = vm.current_line;
+            vm.emit_warning_at("Array to string conversion", line);
+        }
+        let sv = vm.value_to_string_checked(&nv)?;
         vm.constants.insert(key.to_vec(), Value::String(sv));
     }
     Ok(Value::Long(old as i64))

@@ -389,6 +389,11 @@ fn highlight_file_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value
         }
     }
     let ini = get_highlight_struct(vm);
+    if path.is_empty() {
+        // (php_stream_open_wrapper() throws; highlight_file() then warns)
+        vm.emit_warning(&format!("{}(): Failed opening '' for highlighting", fname));
+        return Err(value_error(vm, "Path must not be empty".to_string()));
+    }
     match open_for_scanning(vm, fname, &path) {
         Some(src) => {
             let out = zend_highlight(&src, true, &ini);
@@ -425,6 +430,10 @@ fn php_strip_whitespace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
         ));
     }
     let path = path.to_string_lossy().to_string();
+    if path.is_empty() {
+        // (php_stream_open_wrapper())
+        return Err(value_error(vm, "Path must not be empty".to_string()));
+    }
     match open_for_scanning(vm, "php_strip_whitespace", &path) {
         Some(src) => Ok(Value::String(PhpString::from_vec(zend_strip(&src, true)))),
         None => Ok(Value::String(PhpString::from_bytes(b""))),
