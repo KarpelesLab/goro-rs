@@ -118,8 +118,13 @@ impl Drop for Store {
         if self.charged > 0 {
             memory_free(self.charged);
         }
+        let mut nested = false;
         for (_, v) in self.entries.iter() {
             crate::gc::on_child_released(v);
+            nested |= matches!(v, Value::Array(_) | Value::Reference(_));
+        }
+        if nested {
+            release_nested_entries(std::mem::take(&mut self.entries));
         }
     }
 }
@@ -1450,35 +1455,40 @@ impl Drop for PhpArray {
             crate::gc::on_child_released(v);
             nested |= matches!(v, Value::Array(_) | Value::Reference(_));
         }
-        if !nested {
-            return;
+        if nested {
+            release_nested_entries(std::mem::take(&mut self.entries));
         }
-        // A deeply nested array (`$p[0] = []; $p = &$p[0];` many times) is
-        // released iteratively past a depth: its elements are left for the
-        // outermost release to drop, so the native stack does not overflow.
-        // (thread-local storage may be gone while the thread exits)
-        let Ok(depth) = DROP_DEPTH.try_with(|d| d.get()) else {
-            return;
-        };
-        if depth >= MAX_DROP_DEPTH {
-            let entries = std::mem::take(&mut self.entries);
-            let _ = DEFERRED_DROPS
-                .try_with(|q| q.borrow_mut().extend(entries.into_iter().map(|(_, v)| v)));
-            return;
-        }
-        let _ = DROP_DEPTH.try_with(|d| d.set(depth + 1));
-        drop(std::mem::take(&mut self.entries));
-        if depth == 0 {
-            while let Some(batch) = DEFERRED_DROPS
-                .try_with(|q| std::mem::take(&mut *q.borrow_mut()))
-                .ok()
-                .filter(|b| !b.is_empty())
-            {
-                drop(batch);
-            }
-        }
-        let _ = DROP_DEPTH.try_with(|d| d.set(depth));
     }
+}
+
+/// Drop the entries of an array (or of a shared array storage) holding
+/// arrays or references. A deeply nested array (`$a = [$a]` or
+/// `$p[0] = []; $p = &$p[0];` many times) is released iteratively past a
+/// depth: its elements are left for the outermost release to drop, so the
+/// native stack does not overflow.
+#[inline(never)]
+fn release_nested_entries(entries: Vec<(ArrayKey, Value)>) {
+    // (thread-local storage may be gone while the thread exits)
+    let Ok(depth) = DROP_DEPTH.try_with(|d| d.get()) else {
+        return;
+    };
+    if depth >= MAX_DROP_DEPTH {
+        let _ =
+            DEFERRED_DROPS.try_with(|q| q.borrow_mut().extend(entries.into_iter().map(|(_, v)| v)));
+        return;
+    }
+    let _ = DROP_DEPTH.try_with(|d| d.set(depth + 1));
+    drop(entries);
+    if depth == 0 {
+        while let Some(batch) = DEFERRED_DROPS
+            .try_with(|q| std::mem::take(&mut *q.borrow_mut()))
+            .ok()
+            .filter(|b| !b.is_empty())
+        {
+            drop(batch);
+        }
+    }
+    let _ = DROP_DEPTH.try_with(|d| d.set(depth));
 }
 
 /// Nesting of PhpArray releases in progress (see `Drop for PhpArray`).
