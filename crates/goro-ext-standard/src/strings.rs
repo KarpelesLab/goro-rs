@@ -1104,8 +1104,34 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
     } else {
         // PHP_FUNCTION(implode) after zpp (array|string $separator,
         // ?array $array = null, checked from the arginfo).
-        let a0 = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
+        let mut a0 = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
         let a1 = args.get(1).map(|v| v.deref()).unwrap_or(Value::Null);
+        // Z_PARAM_ARRAY_HT_OR_STR(): a scalar or a Stringable object is
+        // coerced to the string separator, anything else is refused.
+        if !matches!(
+            a0,
+            Value::Array(_) | Value::String(_) | Value::Null | Value::Undef
+        ) {
+            let strict = vm.caller_strict_types;
+            let line = vm.current_line;
+            match vm.zpp_coerce_scalar(goro_core::arginfo::T_STRING, &a0, strict, line) {
+                Ok(Some(v)) => a0 = v,
+                Ok(None) => {
+                    let msg = format!(
+                        "{}(): Argument #1 ($separator) must be of type array|string, {} given",
+                        func_name,
+                        Vm::value_type_name(&a0)
+                    );
+                    return Err(implode_type_error(vm, msg));
+                }
+                Err(()) => {
+                    return Err(VmError {
+                        message: String::new(),
+                        line,
+                    });
+                }
+            }
+        }
         // (Z_PARAM_ARRAY_HT_OR_STR() of a null separator, coerced)
         if matches!(a0, Value::Null) && !vm.caller_strict_types && !args.is_empty() {
             let line = vm.current_line;
