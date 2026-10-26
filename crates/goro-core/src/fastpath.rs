@@ -201,6 +201,43 @@ pub(crate) fn cv_num_writable(i: u32, cvs: &[Value], refs_ok: bool) -> bool {
     }
 }
 
+/// ZEND_DIV / ZEND_MOD of numbers, when no error is raised: None for a
+/// zero divisor (DivisionByZeroError) and for `%` of a float (which
+/// converts with a possible deprecation): the general handler's.
+#[inline(never)]
+pub(crate) fn div_mod(is_mod: bool, a: Num, b: Num) -> Option<Value> {
+    if is_mod {
+        return match (a, b) {
+            (Num::L(_), Num::L(0)) => None,
+            // (LONG_MIN % -1 is 0)
+            (Num::L(x), Num::L(y)) => Some(Value::Long(x.wrapping_rem(y))),
+            _ => None,
+        };
+    }
+    match (a, b) {
+        (Num::L(_), Num::L(0)) => None,
+        (Num::L(x), Num::L(y)) => Some(if y == -1 && x == i64::MIN {
+            Value::Double(x as f64 / -1.0)
+        } else if x % y == 0 {
+            Value::Long(x / y)
+        } else {
+            Value::Double(x as f64 / y as f64)
+        }),
+        _ => {
+            let (x, y) = match (a, b) {
+                (Num::D(x), Num::D(y)) => (x, y),
+                (Num::L(x), Num::D(y)) => (x as f64, y),
+                (Num::D(x), Num::L(y)) => (x, y as f64),
+                (Num::L(x), Num::L(y)) => (x as f64, y as f64),
+            };
+            if y == 0.0 {
+                return None;
+            }
+            Some(Value::Double(x / y))
+        }
+    }
+}
+
 /// `a + b`, `a - b`, `a * b` on numbers (Value's own arithmetic, so the
 /// int overflow to float behaviour is the general handler's).
 /// (Spelled out on the numbers: the same results as Value::add / sub /
@@ -759,6 +796,14 @@ pub(crate) fn fast_op(
                 _ => b'*',
             };
             store!(arith(c, a, b))
+        }
+        OpCode::Div | OpCode::Mod => {
+            let a = num!(op.op1);
+            let b = num!(op.op2);
+            match div_mod(op.opcode == OpCode::Mod, a, b) {
+                Some(v) => store!(v),
+                None => Fast::No,
+            }
         }
         OpCode::Less | OpCode::LessEqual | OpCode::Greater | OpCode::GreaterEqual => {
             let (Some(a), Some(b)) = (
@@ -2649,6 +2694,8 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
         OpCode::Add
             | OpCode::Sub
             | OpCode::Mul
+            | OpCode::Div
+            | OpCode::Mod
             | OpCode::Less
             | OpCode::LessEqual
             | OpCode::Greater
@@ -3212,6 +3259,8 @@ impl crate::vm::Vm {
                 OpCode::Add => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::Sub => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::Mul => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::Div => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::Mod => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::Less => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::LessEqual => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::Greater => fast_op(op, cvs, tmps, literals, refs_ok, no_release),

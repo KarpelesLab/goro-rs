@@ -3751,7 +3751,17 @@ fn strnatcasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn zend_binary_strncmp(a: &[u8], b: &[u8], length: usize) -> i64 {
     let (la, lb) = (a.len().min(length), b.len().min(length));
     let n = la.min(lb);
-    match a[..n].iter().zip(&b[..n]).find(|(x, y)| x != y) {
+    // (memcmp-speed: whole chunks are compared, then the differing one
+    // byte by byte)
+    let (a, b) = (&a[..n], &b[..n]);
+    if a == b {
+        return (la as i64 - lb as i64).signum();
+    }
+    let mut start = 0;
+    while start + 64 <= n && a[start..start + 64] == b[start..start + 64] {
+        start += 64;
+    }
+    match a[start..].iter().zip(&b[start..]).find(|(x, y)| x != y) {
         Some((x, y)) => *x as i64 - *y as i64,
         None => (la as i64 - lb as i64).signum(),
     }
