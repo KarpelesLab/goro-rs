@@ -338,6 +338,11 @@ fn zval_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u
             var_dump_value_inner(vm, val, indent, seen);
             ZVAL_BIAS.with(|b| b.set(0));
             let buf = vm.active_output_buffer();
+            // (after what __debugInfo() emitted, e.g. a deprecation)
+            let start = buf
+                .get(start..)
+                .and_then(|b| b.windows(7).position(|w| w == b"object("))
+                .map_or(start, |p| start + p);
             if start <= buf.len() {
                 let line_end = buf[start..]
                     .iter()
