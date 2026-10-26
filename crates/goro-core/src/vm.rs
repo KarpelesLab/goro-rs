@@ -1235,9 +1235,6 @@ pub(crate) struct CallTarget {
     /// arguments of an internal function's by-reference parameters are
     /// only known to be sent by reference at run time.
     pub(crate) dynamic: bool,
-    /// Arguments were unpacked into the call (`f(...$args)`): php-src
-    /// makes a real call of a function it would otherwise call frameless.
-    pub(crate) unpacked: bool,
 }
 
 /// What the frame of a method call set up by INIT_METHOD_CALL's fast path
@@ -1354,7 +1351,6 @@ impl CallTarget {
         fn_gen: 0,
         via_invoke: false,
         dynamic: false,
-        unpacked: false,
     };
 }
 
@@ -22621,7 +22617,6 @@ impl Vm {
                 fn_gen: self.user_functions.len() + 1,
                 via_invoke: false,
                 dynamic: false,
-                unpacked: false,
             };
         }
         let builtin = match found {
@@ -22659,7 +22654,6 @@ impl Vm {
             fn_gen: self.user_functions.len() + 1,
             via_invoke: false,
             dynamic: false,
-            unpacked: false,
         }
     }
 
@@ -30886,7 +30880,12 @@ impl Vm {
                                                 None
                                             };
                             let r = if let Some(call) = self.pending_calls.last_mut() {
-                                call.target.unpacked = true;
+                                // (unpacked arguments make a real call of a
+                                // builtin php-src would call frameless: a
+                                // call with them has room for named ones)
+                                if call.named_args.capacity() == 0 {
+                                    call.named_args.reserve(1);
+                                }
                                 let mut had_named = false;
                                 let mut result = Ok(());
                                 let mut unpack_idx = 0usize;
@@ -34073,9 +34072,8 @@ impl Vm {
                         }
                         self.caller_strict_types = op_array.strict_types;
                         self.builtin_named_skipped = named_skipped_args;
-                        self.builtin_real_call = call.target.dynamic
-                            || call.target.unpacked
-                            || !call.named_args.is_empty();
+                        self.builtin_real_call =
+                            call.target.dynamic || call.named_args.capacity() != 0;
 
                         let had_exception_before = self.current_exception.is_some();
 
