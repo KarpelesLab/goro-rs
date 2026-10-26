@@ -5358,9 +5358,11 @@ impl crate::vm::Vm {
             matches!(cur, Value::Object(_))
         } else if w_fetch {
             matches!(cur, Value::Array(_))
-        } else if (opc == OpCode::PropertyGetIncDec || rw) && matches!(cur, Value::Object(_)) {
+        } else if (opc == OpCode::PropertyGetIncDec || rw) && matches!(cur, Value::Object(_))
+            || opc == OpCode::PropertyGetIncDec && matches!(cur, Value::Array(_))
+        {
             // (++/-- of a readonly property is refused before the object
-            // is incremented: the general handler checks)
+            // or array is incremented: the general handler checks)
             false
         } else {
             match cur {
