@@ -51058,7 +51058,14 @@ impl Vm {
                     } else {
                         arr_val
                     };
-                    if let Some(msg) = self.dim_write_container_error(&arr_val, append) {
+                    // A read_dimension handler sees BP_VAR_W fetches itself
+                    // (ResourceBundle: "Cannot apply [] to ...").
+                    let own_read_dim = matches!(&arr_val, Value::Object(o)
+                        if native_handlers(o).is_some_and(|h| h.read_dimension.is_some()));
+                    if let Some(msg) = (!own_read_dim)
+                        .then(|| self.dim_write_container_error(&arr_val, append))
+                        .flatten()
+                    {
                         let exc = self.create_exception(b"Error", &msg, op.line);
                         self.current_exception = Some(exc);
                         if let Some((catch_target, _, _, _, eh_pc_depth)) =
