@@ -3925,15 +3925,7 @@ impl crate::vm::Vm {
         // may be destroyed, also when the cycle collector's buffer holds
         // it): only an array of a few plain values is overwritten.
         let ok = if write {
-            match cur {
-                Value::Array(a) => {
-                    !Rc::ptr_eq(a, &self.globals)
-                        && a.try_borrow()
-                            .is_ok_and(|a| a.len() <= 8 && a.values().all(is_plain_scalar))
-                }
-                Value::Undef => false,
-                v => is_plain_scalar(v),
-            }
+            self.prop_overwrite_quiet(cur)
         } else if w_fetch {
             matches!(cur, Value::Array(_))
         } else if (opc == OpCode::PropertyGetIncDec || rw) && matches!(cur, Value::Object(_)) {
@@ -4251,17 +4243,7 @@ impl crate::vm::Vm {
         };
         let mut obm = obj.try_borrow_mut().ok()?;
         let cur = &mut obm.properties.get_mut(slot)?.1;
-        // (an overwritten object may be destroyed: the general handler)
-        let ok = match &*cur {
-            Value::Array(a) => {
-                !Rc::ptr_eq(a, &self.globals)
-                    && a.try_borrow()
-                        .is_ok_and(|a| a.len() <= 8 && a.values().all(is_plain_scalar))
-            }
-            Value::Undef => false,
-            v => is_plain_scalar(v),
-        };
-        if !ok {
+        if !self.prop_overwrite_quiet(cur) {
             return None;
         }
         if let Value::Object(o) = &v {
@@ -4273,6 +4255,30 @@ impl crate::vm::Vm {
         crate::gc::on_value_replaced(&old, &Value::Null);
         drop(old);
         Some(Fast::Done)
+    }
+
+    /// Whether a property's value `cur` overwritten by a write only frees
+    /// memory: a plain scalar, an array of a few of them, or (when no
+    /// destructor can be due, the cycle collector not due) what drops
+    /// quietly (see drops_quietly_deep()). (An uninitialized slot, a
+    /// reference...: the general handler.)
+    fn prop_overwrite_quiet(&self, cur: &Value) -> bool {
+        match cur {
+            Value::Array(a) if Rc::ptr_eq(a, &self.globals) => false,
+            Value::Array(a)
+                if a.try_borrow()
+                    .is_ok_and(|a| a.len() <= 8 && a.values().all(is_plain_scalar)) =>
+            {
+                true
+            }
+            Value::Array(_) | Value::Object(_) => {
+                !self.has_release_work()
+                    && !crate::gc::gc_pending()
+                    && drops_quietly_deep(cur, &mut 256, &self.globals)
+            }
+            Value::Undef => false,
+            v => is_plain_scalar(v),
+        }
     }
 
     /// Whether the class scope is the one `ic` found its answer for.
