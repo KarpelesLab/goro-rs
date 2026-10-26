@@ -1243,6 +1243,14 @@ impl Vm {
         self.make_closure_object(str_val(&n))
     }
 
+    #[inline(never)]
+    fn fcc_trait_self_scope(&self, cls: &[u8], scope: Option<&[u8]>) -> Option<Vec<u8>> {
+        let t = self.classes.get(&lower(cls)).filter(|t| t.is_trait)?;
+        let sc = self.classes.get(&lower(scope?)).filter(|c| !c.is_trait)?;
+        let _ = t;
+        Some(sc.name.clone())
+    }
+
     fn fcc_static(
         &mut self,
         cls: &[u8],
@@ -1273,6 +1281,12 @@ impl Vm {
             cls.to_vec()
         };
         let cls = cls.strip_prefix(b"\\").map(|c| c.to_vec()).unwrap_or(cls);
+        // `self::m(...)` compiled in a trait (self is the trait's name):
+        // the class using the trait, the scope it runs in.
+        let cls = match self.fcc_trait_self_scope(&cls, scope.as_deref()) {
+            Some(c) => c,
+            None => cls,
+        };
         let cl = lower(&cls);
         if !self.classes.contains_key(&cl) {
             self.try_autoload_class(&cls);
