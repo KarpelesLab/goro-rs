@@ -1241,6 +1241,10 @@ pub(crate) struct CallTarget {
     /// arguments of an internal function's by-reference parameters are
     /// only known to be sent by reference at run time.
     pub(crate) dynamic: bool,
+    /// The `__call()` dispatch of a call to an inaccessible or undefined
+    /// method (`[$this, $name]` lead the arguments; the others are packed
+    /// into `$arguments`), not a call of `__call()` itself.
+    pub(crate) magic_call: bool,
 }
 
 /// What the frame of a method call set up by INIT_METHOD_CALL's fast path
@@ -1369,6 +1373,7 @@ impl CallTarget {
         fn_gen: 0,
         via_invoke: false,
         dynamic: false,
+        magic_call: false,
     };
 }
 
@@ -23016,6 +23021,7 @@ impl Vm {
                 fn_gen: self.user_functions.len() + 1,
                 via_invoke: false,
                 dynamic: false,
+                magic_call: false,
             };
         }
         let builtin = match found {
@@ -23053,6 +23059,7 @@ impl Vm {
             fn_gen: self.user_functions.len() + 1,
             via_invoke: false,
             dynamic: false,
+            magic_call: false,
         }
     }
 
@@ -34892,7 +34899,7 @@ impl Vm {
                                     fn_display = self.method_declaring_display(fn_display);
                                 }
                                 if from_trampoline {
-                                } else if func_name_lower.ends_with(b"::__call") {
+                                } else if call.target.magic_call {
                                     if let Some(Value::String(s)) = call.args.get(1) {
                                         if let Some(sep) = fn_display.rfind("::") {
                                             fn_display = format!(
@@ -34983,7 +34990,7 @@ impl Vm {
                                     call.name.to_msg_string()
                                 };
                                 // __call/__callStatic name the method that was called.
-                                let magic_name = if func_name_lower.ends_with(b"::__call") {
+                                let magic_name = if call.target.magic_call {
                                     call.args.get(1)
                                 } else if func_name_lower.ends_with(b"::__callstatic") {
                                     call.args.first()
@@ -35409,7 +35416,7 @@ impl Vm {
                         // Resolve named arguments by reordering to match parameter positions
                         if !call.named_args.is_empty() {
                             // For __call/__callStatic, pack named args into the args for the $args array
-                            let is_magic_call = func_name_lower.ends_with(b"::__call")
+                            let is_magic_call = call.target.magic_call
                                 || func_name_lower.ends_with(b"::__callstatic");
                             if is_magic_call {
                                 // Named args become part of the args array with string keys
@@ -35582,7 +35589,7 @@ impl Vm {
                             let required = user_fn.required_param_count;
                             // Don't check for __call/__callStatic (their arguments
                             // are packed below)
-                            let is_special = func_name_lower.ends_with(b"::__call")
+                            let is_special = call.target.magic_call
                                 || func_name_lower.ends_with(b"::__callstatic");
                             if !is_special && provided < required {
                                 let display_name = if !user_fn.display_name.is_empty() {
@@ -35787,7 +35794,7 @@ impl Vm {
                         // Special handling for __call/__callStatic:
                         // Pack extra args into an array for the $args parameter
                         // Must happen BEFORE type checking so the array arg passes the type check.
-                        if func_name_lower.ends_with(b"::__call")
+                        if call.target.magic_call
                             || func_name_lower.ends_with(b"::__callstatic")
                         {
                             // Args: [this, method_name, arg1, arg2, ...]
@@ -63528,7 +63535,10 @@ impl Vm {
                                         name: call_name,
                                         args: vec![obj_val.clone(), method_name_val],
                                         named_args: Vec::new(),
-                                        target: CallTarget::NONE,
+                                        target: CallTarget {
+                                            magic_call: true,
+                                            ..CallTarget::NONE
+                                        },
                                     });
                                 } else {
                                     // Method not accessible and no __call - throw error
@@ -63584,7 +63594,10 @@ impl Vm {
                                     name: call_name,
                                     args: vec![obj_val.clone(), method_name_val],
                                     named_args: Vec::new(),
-                                    target: CallTarget::NONE,
+                                    target: CallTarget {
+                                        magic_call: true,
+                                        ..CallTarget::NONE
+                                    },
                                 });
                             } else {
                                 // Method not found - push call with class-qualified name
