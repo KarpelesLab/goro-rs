@@ -822,6 +822,19 @@ fn install(
     Ok(())
 }
 
+/// PHP builds with zend signals route php_signal4() through zend_sigaction(),
+/// which turns a failing sigaction() (SIGKILL, SIGSTOP) into
+/// `zend_error_noreturn(E_ERROR, ...)` rather than pcntl's "Error assigning
+/// signal" warning.
+#[cold]
+fn sigaction_fatal(vm: &mut Vm, signo: i64) -> VmError {
+    let line = vm.current_line;
+    vm.emit_fatal_at(
+        &format!("Error installing signal handler for {signo}"),
+        line,
+    )
+}
+
 fn pcntl_signal(vm: &mut Vm, args: &[Value]) -> R {
     let f = "pcntl_signal";
     let signo = long(args, 0);
@@ -852,9 +865,7 @@ fn pcntl_signal(vm: &mut Vm, args: &[Value]) -> R {
             );
         }
         if install(signo as i32, h as usize, restart, false, true).is_err() {
-            set_last_error(errno());
-            warn(vm, f, "Error assigning signal");
-            return Ok(Value::False);
+            return Err(sigaction_fatal(vm, signo));
         }
         HANDLERS.with(|t| t.borrow_mut().insert(signo, handle));
         return Ok(Value::True);
@@ -877,9 +888,7 @@ fn pcntl_signal(vm: &mut Vm, args: &[Value]) -> R {
     }
     let h: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) = signal_handler;
     if install(signo as i32, h as usize, restart, true, true).is_err() {
-        set_last_error(errno());
-        warn(vm, f, "Error assigning signal");
-        return Ok(Value::False);
+        return Err(sigaction_fatal(vm, signo));
     }
     HANDLERS.with(|t| t.borrow_mut().insert(signo, handle));
     Ok(Value::True)
