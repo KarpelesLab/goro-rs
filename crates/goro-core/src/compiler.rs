@@ -15982,6 +15982,20 @@ impl Compiler {
                 operand,
                 prefix,
             } => {
+                if matches!(&operand.kind, ExprKind::Variable(n) if n == b"GLOBALS")
+                    && matches!(
+                        op,
+                        UnaryOp::PostIncrement
+                            | UnaryOp::PostDecrement
+                            | UnaryOp::PreIncrement
+                            | UnaryOp::PreDecrement
+                    )
+                {
+                    return Err(CompileError {
+                        message: "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax".to_string(),
+                        line: expr.span.line,
+                    });
+                }
                 if matches!(&operand.kind, ExprKind::DynamicVariable(i) if Self::static_dynvar_name(i).is_none())
                     && matches!(
                         op,
@@ -17028,6 +17042,12 @@ impl Compiler {
                             line: expr.span.line,
                         });
                     } else if elem.by_ref {
+                        if matches!(&elem.value.kind, ExprKind::Variable(n) if n == b"GLOBALS") {
+                            return Err(CompileError {
+                                message: "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax".to_string(),
+                                line: elem.value.span.line,
+                            });
+                        }
                         // [&$var] or ['k' => &$var] — store reference into array slot
                         // Compile the value as a CV (must be a variable) and make it a reference
                         if let ExprKind::PropertyAccess {
