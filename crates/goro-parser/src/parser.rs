@@ -39,6 +39,8 @@ pub struct Parser {
     /// between). When a declaration starts at index N, the parser may consume
     /// the doc comment via `take_doc_comment_at(N)`.
     token_doc_comments: Vec<Option<Vec<u8>>>,
+    /// take_doc_comment() cleared every doc comment up to this token.
+    doc_floor: usize,
     pos: usize,
     depth: u32,
     /// Anonymous class declarations that need to be emitted before the current statement
@@ -220,6 +222,7 @@ impl Parser {
         Self {
             tokens: filtered,
             token_doc_comments: doc_comments,
+            doc_floor: 0,
             pos: 0,
             depth: 0,
             anon_class_stmts: Vec::new(),
@@ -244,11 +247,33 @@ impl Parser {
         }
     }
 
-    /// Take and clear the doc comment attached to the current token (if any).
+    /// Take CG(doc_comment) as of the current token: the latest doc comment
+    /// lexed so far that no declaration took yet and no `}` (or namespace
+    /// declaration) reset since; the ones before it are dropped with it.
     fn take_doc_comment(&mut self) -> Option<Vec<u8>> {
-        self.token_doc_comments
-            .get_mut(self.pos)
-            .and_then(|d| d.take())
+        let end = self.pos.min(self.token_doc_comments.len().checked_sub(1)?);
+        let mut found: Option<Vec<u8>> = None;
+        let mut i = end;
+        loop {
+            // (an older one was overwritten by the newer: dropped too)
+            if let Some(d) = self.token_doc_comments[i].take() {
+                if found.is_none() {
+                    found = Some(d);
+                }
+            }
+            // (the scanner resets it as it lexes `}` or a namespace name)
+            if i == 0
+                || (i <= self.doc_floor && i < end)
+                || matches!(
+                    self.tokens.get(i - 1).map(|t| &t.kind),
+                    Some(TokenKind::CloseBrace | TokenKind::Namespace)
+                )
+            {
+                self.doc_floor = self.doc_floor.max(end);
+                return found;
+            }
+            i -= 1;
+        }
     }
 
     /// Peek the doc comment at the current token without consuming it.
@@ -264,8 +289,11 @@ impl Parser {
     /// comment.
     fn attach_stmt_doc_comment(stmt: &mut Statement, doc: Vec<u8>) {
         match &mut stmt.kind {
+            // (one the declaration took later is the newer)
             StmtKind::FunctionDecl { doc_comment, .. }
-            | StmtKind::ClassDecl { doc_comment, .. } => {
+            | StmtKind::ClassDecl { doc_comment, .. }
+                if doc_comment.is_none() =>
+            {
                 *doc_comment = Some(doc);
             }
             _ => {}
@@ -1872,6 +1900,8 @@ impl Parser {
             }
         };
 
+        // (backup_doc_comment after the name: the latest doc comment so far)
+        let late_doc = self.take_doc_comment();
         self.expect(&TokenKind::OpenParen)?;
         let params = self.parse_params()?;
         self.expect(&TokenKind::CloseParen)?;
@@ -1893,7 +1923,7 @@ impl Parser {
                 is_static: false,
                 attributes,
                 end_line,
-                doc_comment: None,
+                doc_comment: late_doc,
                 returns_by_ref,
             },
             span,
@@ -2609,6 +2639,8 @@ impl Parser {
             }
         }
 
+        // (backup_doc_comment before `{`: the latest doc comment so far)
+        let late_doc = self.take_doc_comment();
         self.expect(&TokenKind::OpenBrace)?;
         let mut body = Vec::new();
         self.class_name_stack.push(name.clone());
@@ -2641,7 +2673,7 @@ impl Parser {
                 enum_backing_type,
                 attributes,
                 end_line,
-                doc_comment: None,
+                doc_comment: late_doc,
             },
             span,
         })
@@ -2768,6 +2800,8 @@ impl Parser {
                 _ => break,
             }
         }
+        // (one after the modifiers is the latest: it wins)
+        let member_doc_comment = self.take_doc_comment().or(member_doc_comment);
 
         match self.peek() {
             TokenKind::Case => {
@@ -6346,6 +6380,7 @@ impl Parser {
                         self.anon_counter += 1;
                         // Parse class body with class name on stack for error messages
                         self.class_name_stack.push(anon_name.as_bytes().to_vec());
+                        let anon_doc = self.take_doc_comment();
                         let body_result = self.parse_class_body();
                         self.class_name_stack.pop();
                         let (body, end_line) = body_result?;
@@ -6362,7 +6397,7 @@ impl Parser {
                                 enum_backing_type: None,
                                 attributes: anon_attrs,
                                 end_line,
-                                doc_comment: None,
+                                doc_comment: anon_doc,
                             },
                             span,
                         };

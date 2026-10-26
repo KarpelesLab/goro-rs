@@ -180,12 +180,12 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     self.advance();
                     // A doc comment is /** ... */ where the character after the
-                    // second `*` is whitespace (space, tab, CR, LF) or `/`
-                    // (empty doc comment /**/). PHP rejects /*** ... */ etc.
+                    // second `*` is whitespace (space, tab, CR, LF): /**/ and
+                    // /*** ... */ are plain comments.
                     let is_doc = self.peek() == Some(b'*')
                         && matches!(
                             self.peek_at(1),
-                            Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') | Some(b'/')
+                            Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
                         );
                     // (up to the first `*/`, the newlines counted in one pass)
                     let rest = &self.source[self.pos..];
