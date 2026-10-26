@@ -741,6 +741,70 @@ fn release_object_storage(props: &mut [(Vec<u8>, crate::value::Value)]) {
     drop(infs);
 }
 
+/// How many object releases are nested (see release_props()). A plain
+/// static (cheaper than a thread local on this hot path): with several
+/// threads it only makes deferral happen sooner.
+static RELEASE_DEPTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Whether RELEASE_PENDING may hold anything.
+static RELEASE_DEFERRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+thread_local! {
+    /// The property tables of objects released too deep down a chain,
+    /// released by the outermost release instead.
+    static RELEASE_PENDING: std::cell::RefCell<Vec<Vec<(Vec<u8>, Value)>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Nested releases deeper than this go on RELEASE_PENDING: a long chain
+/// of objects (a linked list let go at once) is released iteratively
+/// instead of overflowing the native stack.
+const RELEASE_MAX_DEPTH: u32 = 2000;
+
+/// Release an object's property table: in place (recursively, the order
+/// in which handles are freed), or, deep down a chain, after the outermost
+/// release returns.
+#[inline(never)]
+fn release_props(props: Vec<(Vec<u8>, Value)>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let depth = RELEASE_DEPTH.load(Relaxed);
+    if depth >= RELEASE_MAX_DEPTH {
+        defer_release(props);
+        return;
+    }
+    RELEASE_DEPTH.store(depth + 1, Relaxed);
+    drop(props);
+    RELEASE_DEPTH.store(depth, Relaxed);
+    if depth == 0 && RELEASE_DEFERRED.load(Relaxed) {
+        drain_deferred_releases();
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn defer_release(props: Vec<(Vec<u8>, Value)>) {
+    RELEASE_DEFERRED.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Err(e) = RELEASE_PENDING.try_with(|p| p.borrow_mut().push(props)) {
+        let _ = e;
+    }
+}
+
+/// The outermost release: what was deferred, until none is left.
+#[cold]
+#[inline(never)]
+fn drain_deferred_releases() {
+    use std::sync::atomic::Ordering::Relaxed;
+    RELEASE_DEPTH.store(1, Relaxed);
+    while let Some(next) = RELEASE_PENDING
+        .try_with(|p| p.borrow_mut().pop())
+        .ok()
+        .flatten()
+    {
+        drop(next);
+    }
+    RELEASE_DEFERRED.store(false, Relaxed);
+    RELEASE_DEPTH.store(0, Relaxed);
+}
+
 impl Drop for PhpObject {
     fn drop(&mut self) {
         if self.gc_buffered.get() {
@@ -756,8 +820,11 @@ impl Drop for PhpObject {
             hook(self as *const PhpObject as usize);
         }
         let mut defer_on: Option<usize> = None;
+        // (only a held object or array can release further objects)
+        let mut containers = false;
         for (_, v) in self.properties.iter() {
             crate::gc::on_child_released(v);
+            containers |= matches!(v, Value::Object(_) | Value::Array(_));
             if let Some(k) = pending_dtor_child(v) {
                 defer_on = Some(k);
             }
@@ -775,7 +842,11 @@ impl Drop for PhpObject {
         if internal {
             release_object_storage(&mut props);
         }
-        drop(props);
+        if containers {
+            release_props(props);
+        } else {
+            drop(props);
+        }
         drop(self.closure.take());
         // Don't recycle the sentinel zero id.
         if self.object_id != 0 && !weak_target {
