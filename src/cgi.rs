@@ -684,7 +684,8 @@ fn run_request(ini: &IniSettings, req: &CgiRequest, job: &Job) -> Result<i32, ()
             websapi::with_cwd(dir, || match engine::compile(&src, &filename, true) {
                 Ok(mut c) => {
                     engine::load(&mut vm, &mut c);
-                    vm.execute(&c.op_array)
+                    let r = engine::with_auto_files(&mut vm, |vm| vm.execute_chunk(&c.op_array));
+                    vm.finish_request(r)
                 }
                 Err(e) => {
                     engine::report_compile_error(&mut vm, &e, &filename);

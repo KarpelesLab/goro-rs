@@ -445,6 +445,102 @@ pub fn run_main_script(vm: &mut Vm, src: &[u8], name: &str) -> Result<Value, VmE
     }
 }
 
+/// php_execute_script(): `run` (the primary script) between the
+/// auto_prepend_file and the auto_append_file. exit() or a fatal error
+/// ends the sequence.
+pub fn with_auto_files(
+    vm: &mut Vm,
+    run: impl FnOnce(&mut Vm) -> Result<Value, VmError>,
+) -> Result<Value, VmError> {
+    if let Some(r) = run_auto_file(vm, b"auto_prepend_file") {
+        if r.is_err() || vm.exit_requested || vm.fatal_emitted {
+            return r;
+        }
+    }
+    let r = run(vm);
+    if r.is_ok() && !vm.exit_requested && !vm.fatal_emitted {
+        if let Some(Err(e)) = run_auto_file(vm, b"auto_append_file") {
+            return Err(e);
+        }
+    }
+    r
+}
+
+/// php_execute_script(): the auto_prepend_file / auto_append_file `key`
+/// names, run as a required file of the main script (in the global scope,
+/// from include_path). None when the setting is empty.
+pub fn run_auto_file(vm: &mut Vm, key: &[u8]) -> Option<Result<Value, VmError>> {
+    let file = vm
+        .constants
+        .get(key)
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_default();
+    if file.is_empty() {
+        return None;
+    }
+    // (the primary script is the first of get_included_files())
+    if vm.included_files_list.is_empty() && !vm.current_file.is_empty() {
+        let main = std::fs::canonicalize(&*vm.current_file)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| vm.current_file.to_string());
+        vm.included_files_list.push(main);
+    }
+    let resolved = vm.resolve_include_path(&file);
+    let src = match std::fs::read(&resolved) {
+        Ok(s) => s,
+        Err(e) => {
+            let reason = e.to_string();
+            let reason = reason
+                .find(" (os error")
+                .map_or(reason.as_str(), |i| &reason[..i]);
+            vm.display_error(
+                "Warning",
+                &format!("Unknown: Failed to open stream: {}", reason),
+                "Unknown",
+                0,
+            );
+            let include_path = vm
+                .constants
+                .get(b"include_path".as_slice())
+                .map(|v| v.to_php_string().to_string_lossy())
+                .unwrap_or_else(|| ".".to_string());
+            let msg = format!(
+                "Failed opening required '{}' (include_path='{}')",
+                file, include_path
+            );
+            let saved = std::mem::replace(&mut vm.current_file, "Unknown".into());
+            let err = vm.emit_fatal_typed_at(64, &msg, 0);
+            vm.current_file = saved;
+            return Some(Err(err));
+        }
+    };
+    let name = std::fs::canonicalize(&resolved)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or(resolved);
+    vm.included_files_list.push(name.clone());
+    let saved = std::mem::replace(&mut vm.current_file, name.as_str().into());
+    let compiled = {
+        let _ct = goro_core::compiler::CtVmGuard::new(vm);
+        compile(&src, &name, true)
+    };
+    let r = match compiled {
+        Ok(mut c) => {
+            load(vm, &mut c);
+            vm.execute_chunk(&c.op_array)
+        }
+        Err(e) => {
+            report_compile_error(vm, &e, &name);
+            vm.fatal_emitted = true;
+            Err(VmError {
+                message: e.message,
+                line: e.line,
+            })
+        }
+    };
+    vm.current_file = saved;
+    Some(r)
+}
+
 /// Report a compile error through the engine's error display (display_errors,
 /// html_errors, log_errors), like php_error_cb.
 pub fn report_compile_error(vm: &mut Vm, e: &CompileError, filename: &str) {

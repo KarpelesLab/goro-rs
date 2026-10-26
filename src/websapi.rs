@@ -152,7 +152,26 @@ impl PhpRun {
         let dir = std::path::Path::new(std::ffi::OsStr::from_bytes(cstr(path)))
             .parent()
             .map(|p| p.to_path_buf());
-        with_cwd(dir, || self.run_file(path))
+        with_cwd(dir, || {
+            // (auto_prepend_file / auto_append_file around it: the main
+            // script is the first of get_included_files())
+            let name = std::fs::canonicalize(std::ffi::OsStr::from_bytes(cstr(path)))
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| String::from_utf8_lossy(path).into_owned());
+            self.vm.current_file = name.as_str().into();
+            if let Some(r) = engine::run_auto_file(&mut self.vm, b"auto_prepend_file") {
+                if r.is_err() || self.vm.exit_requested || self.vm.fatal_emitted {
+                    return r;
+                }
+            }
+            let r = self.run_file(path);
+            if r.is_ok() && !self.vm.exit_requested && !self.vm.fatal_emitted {
+                if let Some(Err(e)) = engine::run_auto_file(&mut self.vm, b"auto_append_file") {
+                    return Err(e);
+                }
+            }
+            r
+        })
     }
 
     pub fn last_error(&self) -> Option<LastError> {

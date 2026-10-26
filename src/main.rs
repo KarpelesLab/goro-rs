@@ -992,7 +992,13 @@ fn run_main(vm: &mut Vm, src: &[u8], filename: &str) -> bool {
     match compiled {
         Ok(mut c) => {
             engine::load(vm, &mut c);
-            let r = vm.execute(&c.op_array);
+            // (-r code runs without auto_prepend_file / auto_append_file)
+            let r = if filename == "Command line code" {
+                vm.execute_chunk(&c.op_array)
+            } else {
+                engine::with_auto_files(vm, |vm| vm.execute_chunk(&c.op_array))
+            };
+            let r = vm.finish_request(r);
             let failed = r.is_err();
             finish_errors(vm, r);
             failed

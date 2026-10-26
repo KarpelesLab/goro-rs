@@ -1658,7 +1658,9 @@ fn handle_request() {
                 }
                 // (opcache: the script's compilation from an earlier
                 // request of this worker)
-                result = engine::run_main_script(&mut vm, &src, &filename);
+                result = engine::with_auto_files(&mut vm, |vm| {
+                    engine::run_main_script(vm, &src, &filename)
+                });
             }
         }
     }
