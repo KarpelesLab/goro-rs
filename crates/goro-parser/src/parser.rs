@@ -4068,11 +4068,61 @@ impl Parser {
         self.enter_depth()?;
         let result = if self.at_lone_operand() {
             self.parse_primary()
+        } else if self.at_postfix_operand() {
+            self.with_room(Self::parse_expression_from_postfix)
         } else {
             self.with_room(Self::parse_logical_or_low)
         };
         self.leave_depth();
         result
+    }
+
+    /// Whether parse_unary_inner() parses the current token's operand with
+    /// parse_postfix() (it is no unary operator): all the precedence
+    /// levels then start with it.
+    #[inline(always)]
+    fn at_postfix_operand(&self) -> bool {
+        !matches!(
+            self.peek(),
+            TokenKind::Minus
+                | TokenKind::Plus
+                | TokenKind::BooleanNot
+                | TokenKind::Tilde
+                | TokenKind::Increment
+                | TokenKind::Decrement
+                | TokenKind::IntCast
+                | TokenKind::FloatCast
+                | TokenKind::StringCast
+                | TokenKind::BoolCast
+                | TokenKind::ArrayCast
+                | TokenKind::ObjectCast
+                | TokenKind::UnsetCast
+                | TokenKind::RealCast
+                | TokenKind::At
+                | TokenKind::Clone
+                | TokenKind::Print
+                | TokenKind::Throw
+        )
+    }
+
+    /// parse_logical_or_low() when at_postfix_operand(): the first operand
+    /// is parsed at once, then each level, from the tightest, carries on
+    /// with it (as the descent through them would on its way back).
+    fn parse_expression_from_postfix(&mut self) -> ParseResult<Expr> {
+        let e = self.parse_postfix()?;
+        if Self::ends_expression(self.peek()) {
+            return Ok(e);
+        }
+        let e = self.pow_rest(e)?;
+        let e = self.instanceof_rest(e)?;
+        let e = self.binary_rest(e, 1)?;
+        let e = self.ternary_rest(e)?;
+        let e = self.null_coalesce_rest(e)?;
+        let e = self.assignment_inner_rest(e)?;
+        let e = self.assignment_rest(e)?;
+        let e = self.logical_and_low_rest(e)?;
+        let e = self.logical_xor_low_rest(e)?;
+        self.logical_or_low_rest(e)
     }
 
     /// Whether the expression at the current token is that token alone
@@ -4091,13 +4141,22 @@ impl Parser {
                 | TokenKind::True
                 | TokenKind::False
                 | TokenKind::Null
-        ) && matches!(
-            self.peek_at(1),
+        ) && Self::ends_expression(self.peek_at(1))
+    }
+
+    /// A token no precedence level takes as an operator after an operand.
+    #[inline(always)]
+    fn ends_expression(kind: &TokenKind) -> bool {
+        matches!(
+            kind,
             TokenKind::Semicolon
                 | TokenKind::Comma
                 | TokenKind::CloseParen
                 | TokenKind::CloseBracket
+                | TokenKind::CloseBrace
                 | TokenKind::DoubleArrow
+                | TokenKind::Colon
+                | TokenKind::CloseTag
         )
     }
 
@@ -4128,7 +4187,13 @@ impl Parser {
 
     /// Low-precedence 'or' (lower than assignment)
     fn parse_logical_or_low(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_logical_xor_low()?;
+        let left = self.parse_logical_xor_low()?;
+        self.logical_or_low_rest(left)
+    }
+
+    /// parse_logical_or_low() after its first operand.
+    #[inline(always)]
+    fn logical_or_low_rest(&mut self, mut left: Expr) -> ParseResult<Expr> {
         while matches!(self.peek(), TokenKind::Or) {
             self.advance();
             let right = self.parse_short_circuit_rhs(&left, true, Self::parse_logical_xor_low)?;
@@ -4147,7 +4212,12 @@ impl Parser {
     /// Low-precedence 'xor' (lower than assignment, higher than 'or')
     #[inline(always)]
     fn parse_logical_xor_low(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_logical_and_low()?;
+        let left = self.parse_logical_and_low()?;
+        self.logical_xor_low_rest(left)
+    }
+
+    #[inline(always)]
+    fn logical_xor_low_rest(&mut self, mut left: Expr) -> ParseResult<Expr> {
         while matches!(self.peek(), TokenKind::Xor) {
             self.advance();
             let right = self.parse_logical_and_low()?;
@@ -4166,7 +4236,12 @@ impl Parser {
     /// Low-precedence 'and' (lower than assignment, higher than 'xor')
     #[inline(always)]
     fn parse_logical_and_low(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_assignment()?;
+        let left = self.parse_assignment()?;
+        self.logical_and_low_rest(left)
+    }
+
+    #[inline(always)]
+    fn logical_and_low_rest(&mut self, mut left: Expr) -> ParseResult<Expr> {
         while matches!(self.peek(), TokenKind::And) {
             self.advance();
             let right = self.parse_short_circuit_rhs(&left, false, Self::parse_assignment)?;
@@ -4197,6 +4272,11 @@ impl Parser {
     #[inline(always)]
     fn parse_assignment(&mut self) -> ParseResult<Expr> {
         let e = self.parse_assignment_inner()?;
+        self.assignment_rest(e)
+    }
+
+    #[inline(always)]
+    fn assignment_rest(&mut self, e: Expr) -> ParseResult<Expr> {
         // `@$x .= v` is `@($x .= v)`: the silence operator does not stop the
         // compound assignment from targeting the variable.
         if let ExprKind::CompoundAssign { target, .. } = &e.kind {
@@ -4230,7 +4310,11 @@ impl Parser {
             return self.parse_primary();
         }
         let left = self.parse_null_coalesce()?;
+        self.assignment_inner_rest(left)
+    }
 
+    /// parse_assignment_inner() after the operand before the operator.
+    fn assignment_inner_rest(&mut self, left: Expr) -> ParseResult<Expr> {
         let compound_op = match self.peek() {
             TokenKind::Assign => None,
             TokenKind::PlusAssign => Some(BinaryOp::Add),
@@ -4503,6 +4587,11 @@ impl Parser {
 
     fn parse_null_coalesce(&mut self) -> ParseResult<Expr> {
         let left = self.parse_ternary()?;
+        self.null_coalesce_rest(left)
+    }
+
+    #[inline(always)]
+    fn null_coalesce_rest(&mut self, left: Expr) -> ParseResult<Expr> {
         if self.eat(&TokenKind::NullCoalesce) {
             let right = self.parse_null_coalesce()?; // right-associative
             Ok(Expr {
@@ -4519,6 +4608,10 @@ impl Parser {
 
     fn parse_ternary(&mut self) -> ParseResult<Expr> {
         let cond = self.parse_logical_or()?;
+        self.ternary_rest(cond)
+    }
+
+    fn ternary_rest(&mut self, cond: Expr) -> ParseResult<Expr> {
         if self.eat(&TokenKind::QuestionMark) {
             let if_true = if matches!(self.peek(), TokenKind::Colon) {
                 None // short ternary: $a ?: $b
@@ -4614,7 +4707,11 @@ impl Parser {
     /// tighter (see binary_op_level); its operands are `**` / unary
     /// expressions.
     fn parse_binary(&mut self, min: u8) -> ParseResult<Expr> {
-        let mut left = self.parse_instanceof()?;
+        let left = self.parse_instanceof()?;
+        self.binary_rest(left, min)
+    }
+
+    fn binary_rest(&mut self, mut left: Expr, min: u8) -> ParseResult<Expr> {
         while let Some((level, op)) = Self::binary_op_level(self.peek()) {
             if level < min {
                 break;
@@ -4708,7 +4805,12 @@ impl Parser {
     /// than `**`, the casts and the other unary operators; its right side is
     /// a class name reference, not an expression.
     fn parse_instanceof(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_pow()?;
+        let left = self.parse_pow()?;
+        self.instanceof_rest(left)
+    }
+
+    #[inline(always)]
+    fn instanceof_rest(&mut self, mut left: Expr) -> ParseResult<Expr> {
         while matches!(self.peek(), TokenKind::Instanceof) {
             self.advance();
             let right = self.parse_unary()?;
@@ -4737,6 +4839,11 @@ impl Parser {
 
     fn parse_pow(&mut self) -> ParseResult<Expr> {
         let base = self.parse_unary()?;
+        self.pow_rest(base)
+    }
+
+    #[inline(always)]
+    fn pow_rest(&mut self, base: Expr) -> ParseResult<Expr> {
         if self.eat(&TokenKind::Pow) {
             let exp = self.parse_pow()?; // right-associative
             Ok(Expr {
