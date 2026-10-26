@@ -15294,23 +15294,22 @@ fn header_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(colon) = header_str.find(':') {
         let name = header_str[..colon].trim().as_bytes().to_vec();
         let value = header_str[colon + 1..].trim().as_bytes().to_vec();
-        // PHP auto-sets 401 when WWW-Authenticate is sent without an explicit
-        // status code (and the current code is still 200).
-        if name.eq_ignore_ascii_case(b"WWW-Authenticate") && response_code == 0 {
-            RESPONSE_CODE.with(|c| {
-                if c.get() == 200 || c.get() == 0 {
-                    c.set(401);
-                }
-            });
-        }
-        // PHP auto-sets 302 for Location: headers (unless code is already 3xx).
-        if name.eq_ignore_ascii_case(b"Location") && response_code == 0 {
-            RESPONSE_CODE.with(|c| {
-                let cur = c.get();
-                if cur == 200 || cur < 300 {
-                    c.set(302);
-                }
-            });
+        // sapi_header_op(): a Location header redirects unless the code is
+        // already 3xx or 201; WWW-Authenticate means 401. (An explicit
+        // response_code argument wins, below.) The 303 for a non-GET
+        // HTTP/1.1 request needs proto_num > 1000, which only mod_php
+        // sets: cgi/fpm use 1000, the cli-server llhttp's 101.
+        if name.eq_ignore_ascii_case(b"Location") {
+            let cur = RESPONSE_CODE.with(|c| c.get());
+            if !(300..=399).contains(&cur) && cur != 201 {
+                sapi_update_response_code(if response_code != 0 {
+                    response_code
+                } else {
+                    302
+                });
+            }
+        } else if name.eq_ignore_ascii_case(b"WWW-Authenticate") {
+            sapi_update_response_code(401);
         }
         // sapi_header_op(): SG(sapi_headers).mimetype, with the default
         // charset applied (sapi_apply_default_charset()).
