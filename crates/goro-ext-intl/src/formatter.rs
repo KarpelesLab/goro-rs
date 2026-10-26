@@ -84,6 +84,8 @@ pub struct Nf {
     /// RBNF attributes.
     pub rb_lenient: bool,
     pub rb_rounding: i32,
+    /// The rule set setTextAttribute(DEFAULT_RULESET) chose.
+    pub rb_ruleset: Option<String>,
 }
 
 impl Nf {
@@ -161,6 +163,7 @@ impl Nf {
             data,
             rb_lenient: false,
             rb_rounding: crate::decfmt::ROUND_UNNECESSARY,
+            rb_ruleset: None,
         })
     }
 
@@ -227,79 +230,20 @@ fn compact(tag: &str, long: bool, v: f64) -> String {
     intl::number::format(tag, v, &o)
 }
 
-/// The word between the integer and the fraction digits of a spelled-out
-/// number.
-fn point_word(lang: &str) -> &'static str {
-    match lang {
-        "de" | "nl" | "sv" | "da" | "nb" | "no" | "nn" => match lang {
-            "de" => "Komma",
-            _ => "komma",
-        },
-        "fr" => "virgule",
-        "es" | "ca" => "coma",
-        "it" => "virgola",
-        "pt" => "vírgula",
-        "pl" => "przecinek",
-        "ro" => "virgulă",
-        "fi" => "pilkku",
-        "tr" => "virgül",
-        "uk" => "кома",
-        // (CLDR ja: "x.x: ←←・→→→", zh: "x.x: ←←点→→→")
-        "ja" => "・",
-        "zh" => "点",
-        _ => "point",
-    }
-}
-
-/// Spell out a quantity.
-fn spellout(tag: &str, q: &Dq, df: &DecimalFormat) -> String {
+/// Spell out a quantity: a whole number of one of intl's spell-out
+/// locales with intl, anything else (fractions, negative numbers, the
+/// other locales) with the locale's CLDR rules (root's give the digits).
+fn spellout(id: &str, tag: &str, q: &Dq, df: &DecimalFormat) -> String {
     let lang = numdata::language(tag);
-    if !q.is_finite() {
-        return df.format_dq(q.clone(), None).unwrap_or_default();
-    }
-    let ip = {
-        let mut t = q.clone();
-        t.neg = false;
-        let _ = t.round_at(0, crate::decfmt::ROUND_DOWN);
-        t.to_i64()
-    };
-    let Some(ip) = ip else {
-        return df.format_dq(q.clone(), None).unwrap_or_default();
-    };
-    let Some(int_words) = intl::spellout::spell_cardinal(tag, ip) else {
-        return df.format_dq(q.clone(), None).unwrap_or_default();
-    };
-    let mut out = String::new();
-    if q.neg && !q.is_zero() {
-        let m1 = intl::spellout::spell_cardinal(tag, -1).unwrap_or_default();
-        let p1 = intl::spellout::spell_cardinal(tag, 1).unwrap_or_default();
-        let pre = m1.strip_suffix(&p1).unwrap_or("minus ");
-        // (intl's rule sets lack some -x rules and fall back to English)
-        let pre = match (pre, lang.as_str()) {
-            ("minus ", "fr") => "moins ",
-            ("minus ", "es" | "pt") => "menos ",
-            ("minus ", "it") => "meno ",
-            ("minus ", "ca") => "menys ",
-            ("minus ", "nl") => "min ",
-            (p, _) => p,
-        };
-        out.push_str(pre);
-    }
-    out.push_str(&int_words);
-    if q.lower() < 0 {
-        // (`→→→`: the digits without spaces, nor around the separator)
-        let sep = if matches!(lang.as_str(), "ja" | "zh") { "" } else { " " };
-        out.push_str(sep);
-        out.push_str(point_word(&lang));
-        let mut m = -1;
-        while m >= q.lower() {
-            let dg = q.digit(m);
-            out.push_str(sep);
-            out.push_str(&intl::spellout::spell_cardinal(tag, dg as i64).unwrap_or_else(|| dg.to_string()));
-            m -= 1;
+    if q.is_finite() && !q.neg && q.lower() >= 0 {
+        if let Some(words) = q.to_i64().and_then(|n| intl::spellout::spell_cardinal(tag, n)) {
+            return words;
         }
     }
-    out
+    match crate::rbnf::spellout_rules(id) {
+        Some(rules) => crate::rbnf::format_with(rules, Some("%spellout-numbering"), q, df, &lang),
+        None => df.format_dq(q.clone(), None).unwrap_or_default(),
+    }
 }
 
 /// %duration (English RBNF): seconds as h:mm:ss.
@@ -320,27 +264,43 @@ fn duration(q: &Dq, df: &DecimalFormat) -> String {
     if neg { format!("-{}", body) } else { body }
 }
 
+/// The rules of an RBNF formatter (None: the built-in %duration).
+fn rbnf_rules<'a>(nf: &Nf, style: i64, custom: Option<&'a str>) -> Option<&'a str> {
+    match style {
+        SPELLOUT => crate::rbnf::spellout_rules(&nf.valid),
+        ORDINAL => Some(crate::rbnf::digits_ordinal_rules(&nf.valid)),
+        PATTERN_RULEBASED => custom,
+        _ => None,
+    }
+}
+
+/// The default rule set name (getDefaultRuleSetName()).
+fn rbnf_default_set(nf: &Nf, style: i64, custom: Option<&str>) -> String {
+    if let Some(r) = &nf.rb_ruleset {
+        return r.clone();
+    }
+    match rbnf_rules(nf, style, custom) {
+        Some(rules) => crate::rbnf::default_set_name(rules),
+        None => "%duration".to_string(),
+    }
+}
+
 fn rbnf_format(nf: &Nf, style: i64, rules: Option<&str>, df: &DecimalFormat, q: Dq) -> String {
     let tag = &nf.data.tag;
     let lang = numdata::language(tag);
+    if let (Some(set), Some(r)) = (&nf.rb_ruleset, rbnf_rules(nf, style, rules)) {
+        if !(style == SPELLOUT && set == "%spellout-numbering") {
+            return crate::rbnf::format_with(r, Some(set), &q, df, &lang).replace("' ", " ");
+        }
+    }
     match style {
         // (intl leaves RBNF's leading-space apostrophes in)
-        SPELLOUT => spellout(tag, &q, df).replace("' ", " "),
+        SPELLOUT => spellout(&nf.valid, tag, &q, df).replace("' ", " "),
         ORDINAL => {
-            // (rounded to an integer first, as ICU's RBNF rounds with no
-            // fraction digits)
-            let mut t = q.clone();
-            let _ = t.round_at(0, crate::decfmt::ROUND_HALFEVEN);
-            if t.to_i64().is_none() {
-                return df.format_dq(q, None).unwrap_or_default();
-            }
-            if t.is_zero() {
-                t.neg = false;
-            }
-            let mut d = df.clone();
-            d.props.max_frac = 0;
+            // (ICU's double path: the rule of the value rounded half up,
+            // =#,##0= formatting the value itself)
             let rules = crate::rbnf::digits_ordinal_rules(&nf.valid);
-            crate::rbnf::format_with(rules, Some("%digits-ordinal"), &t, &d, &lang)
+            crate::rbnf::format_with(rules, Some("%digits-ordinal"), &q, df, &lang)
         }
         DURATION => {
             if lang == "en" {
@@ -896,18 +856,12 @@ fn get_text_attribute(vm: &mut Vm, c: &mut Call) -> Value {
                 5 => Some(d.currency_attr.clone().unwrap_or_else(|| "XXX".to_string())),
                 _ => None,
             },
-            Kind::Rbnf(style, ..) => match attr {
-                6 => Some(match *style {
-                    SPELLOUT => "%spellout-numbering".to_string(),
-                    ORDINAL => "%digits-ordinal".to_string(),
-                    DURATION => "%duration".to_string(),
-                    _ => String::new(),
-                }),
-                7 => Some(match *style {
-                    SPELLOUT => "%spellout-numbering-year;%spellout-numbering;%spellout-cardinal;%spellout-ordinal".to_string(),
-                    ORDINAL => "%digits-ordinal".to_string(),
-                    DURATION => "%duration".to_string(),
-                    _ => String::new(),
+            Kind::Rbnf(style, custom, _) => match attr {
+                6 => Some(rbnf_default_set(nf, *style, custom.as_deref())),
+                // (each public rule set followed by a ';')
+                7 => Some(match rbnf_rules(nf, *style, custom.as_deref()) {
+                    Some(rules) => crate::rbnf::public_sets(rules).iter().map(|n| format!("{};", n)).collect(),
+                    None => "%duration;".to_string(),
                 }),
                 _ => None,
             },
@@ -939,7 +893,25 @@ fn set_text_attribute(vm: &mut Vm, c: &mut Call) -> Value {
         let mut b = st.borrow_mut();
         let b = &mut *b;
         let nf = b.nf.as_mut().unwrap();
+        let is_rbnf = matches!(nf.kind, Kind::Rbnf(..));
         let ok = match &mut nf.kind {
+            _ if is_rbnf && attr == 6 => {
+                // setDefaultRuleSet(): a public rule set of the rules
+                let (style, custom) = match &nf.kind {
+                    Kind::Rbnf(st, cu, _) => (*st, cu.clone()),
+                    _ => unreachable!(),
+                };
+                let sets = match rbnf_rules(nf, style, custom.as_deref()) {
+                    Some(rules) => crate::rbnf::public_sets(rules),
+                    None => vec!["%duration".to_string()],
+                };
+                if sets.iter().any(|n| n == v) {
+                    nf.rb_ruleset = Some(v.to_string());
+                } else {
+                    b.err.code = error::U_ILLEGAL_ARGUMENT_ERROR;
+                }
+                true
+            }
             Kind::Decimal(d) | Kind::Compact(_, d) => match attr {
                 0 => {
                     d.props.pos_prefix = Some(v.to_string());
@@ -967,7 +939,7 @@ fn set_text_attribute(vm: &mut Vm, c: &mut Call) -> Value {
                 }
                 _ => false,
             },
-            Kind::Rbnf(..) => attr == 6,
+            Kind::Rbnf(..) => false,
         };
         if !ok {
             b.err.code = error::U_UNSUPPORTED_ERROR;

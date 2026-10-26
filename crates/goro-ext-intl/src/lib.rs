@@ -34,8 +34,10 @@ pub mod msgdate;
 pub mod msgpattern;
 pub mod numdata;
 mod numdata_tables;
+mod parent_locales;
 pub mod rbnf;
 mod rbnf_ordinal;
+mod rbnf_spellout;
 // misc area helpers (break iterator rules, UnicodeSet patterns)
 pub mod breakiter_rules;
 mod translit_cldr;

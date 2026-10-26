@@ -4,21 +4,21 @@
 pub static DIGITS_ORDINAL: &[(&str, &str)] = &[
     (
         "af",
-        "%digits-ordinal: -x: −→→; 0: =#,##0==%%digits-ordinal-indicator=; %%digits-ordinal-indicator: 0: ste; 1: ste; 2: de; 20: ste; 100: →→;",
+        "%%digits-ordinal-indicator: 0: ste; 1: ste; 2: de; 20: ste; 100: →→; %digits-ordinal: -x: −→→; 0: =#,##0==%%digits-ordinal-indicator=;",
     ),
     ("am", "%digits-ordinal: -x: −→→; 0: =#,##0=ኛ;"),
     ("ar", "%digits-ordinal: -x: −→→; 0: =#,##0=;"),
     (
         "az",
-        "%digits-ordinal: -x: −→→; 0: =#,##0==%%digits-ordinal-indicator=; %%digits-ordinal-indicator: 0: ''inci;",
+        "%%digits-ordinal-indicator: 0: ''inci; %digits-ordinal: -x: −→→; 0: =#,##0==%%digits-ordinal-indicator=;",
     ),
     (
         "bg",
-        "%digits-ordinal: 0: =%digits-ordinal-masculine=; %digits-ordinal-masculine: -x: −→→; 0: =#,##0=-=%%digits-ordinal-masculine-suffix=; %%digits-ordinal-masculine-suffix: 0: и; 1: ви; 2: ри; 3: ти; 5: и; 20: →→; 100: →%%digits-ordinal-masculine-larger-suffix→; 1000: →→; %%digits-ordinal-masculine-larger-suffix: 0: тен; 1: →%%digits-ordinal-masculine-suffix→; 100: →→;",
+        "%%digits-ordinal-masculine-larger-suffix: 0: тен; 1: →%%digits-ordinal-masculine-suffix→; 100: →→; %%digits-ordinal-masculine-suffix: 0: и; 1: ви; 2: ри; 3: ти; 5: и; 20: →→; 100: →%%digits-ordinal-masculine-larger-suffix→; 1000: →→; %digits-ordinal-masculine: -x: −→→; 0: =#,##0=-=%%digits-ordinal-masculine-suffix=; %%digits-ordinal-feminine-larger-suffix: 0: тна; 1: →%%digits-ordinal-feminine-suffix→; 100: →→; %%digits-ordinal-feminine-suffix: 0: а; 1: ва; 2: ра; 3: та; 5: а; 20: →→; 100: →%%digits-ordinal-feminine-larger-suffix→; 1000: →→; %digits-ordinal-feminine: -x: −→→; 0: =#,##0=-=%%digits-ordinal-feminine-suffix=; %%digits-ordinal-neuter-larger-suffix: 0: тно; 1: →%%digits-ordinal-neuter-suffix→; 100: →→; %%digits-ordinal-neuter-suffix: 0: o; 1: вo; 2: рo; 3: тo; 5: o; 20: →→; 100: →%%digits-ordinal-neuter-larger-suffix→; 1000: →→; %digits-ordinal-neuter: -x: −→→; 0: =#,##0=-=%%digits-ordinal-neuter-suffix=; %digits-ordinal: 0: =%digits-ordinal-masculine=;",
     ),
     (
         "ca",
-        "%digits-ordinal: 0: =%digits-ordinal-masculine=; %digits-ordinal-masculine: -x: −→→; 0: =#,##0=$(ordinal,one{r}two{n}few{t}other{è})$;",
+        "%digits-ordinal: 0: =%digits-ordinal-masculine=; %digits-ordinal-masculine: -x: −→→; 0: =#,##0=$(ordinal,one{r}two{n}few{t}other{è})$; %digits-ordinal-masculine-plural: -x: −→→; 0: =#,##0=$(ordinal,one{rs}few{ts}other{ns})$; %digits-ordinal-feminine: -x: −→→; 0: =#,##0=a; %digits-ordinal-feminine-plural: -x: −→→; 0: =#,##0=es;",
     ),
     (
         "ee",
@@ -31,31 +31,31 @@ pub static DIGITS_ORDINAL: &[(&str, &str)] = &[
     ),
     (
         "es",
-        "%digits-ordinal: 0: =%digits-ordinal-masculine=; %digits-ordinal-masculine: -x: −→→; 0: =#,##0=.º;",
+        "%%dord-mascabbrev: 0: º; 1: ᵉʳ; 2: º; 3: ᵉʳ; 4: º; 20: →→; 100: →→; %digits-ordinal-masculine-adjective: -x: −→→; 0: =#,##0=.=%%dord-mascabbrev=; %digits-ordinal-masculine: -x: −→→; 0: =#,##0=.º; %digits-ordinal-feminine: -x: −→→; 0: =#,##0=.ª; %digits-ordinal-masculine-plural: -x: −→→; 0: =#,##0=.ᵒˢ; %digits-ordinal-feminine-plural: -x: −→→; 0: =#,##0=.ᵃˢ; %digits-ordinal: 0: =%digits-ordinal-masculine=;",
     ),
     (
         "es_419",
-        "%digits-ordinal: 0: =%digits-ordinal-masculine=; %digits-ordinal-masculine: -x: −→→; 0: =#,##0=º.;",
+        "%%dord-mascabbrev: 0: º; 1: ᵉʳ; 2: º; 3: ᵉʳ; 4: º; 20: →→; 100: →→; %digits-ordinal-masculine-adjective: -x: −→→; 0: =#,##0==%%dord-mascabbrev=.; %digits-ordinal-masculine: -x: −→→; 0: =#,##0=º.; %digits-ordinal-feminine: -x: −→→; 0: =#,##0=ª.; %digits-ordinal-masculine-plural: -x: −→→; 0: =#,##0=ᵒˢ.; %digits-ordinal-feminine-plural: -x: −→→; 0: =#,##0=ᵃˢ.; %digits-ordinal: 0: =%digits-ordinal-masculine=;",
     ),
     ("fil", "%digits-ordinal: -x: −→→; 0: ika=#,##0=;"),
     (
         "fr",
-        "%digits-ordinal: 0: =%digits-ordinal-masculine=; %digits-ordinal-masculine: -x: −→→; 0: =#,##0=$(ordinal,one{er}other{e})$;",
+        "%digits-ordinal-masculine: -x: −→→; 0: =#,##0=$(ordinal,one{er}other{e})$; %digits-ordinal-feminine: -x: −→→; 0: =#,##0=$(ordinal,one{re}other{e})$; %digits-ordinal-masculine-plural: -x: −→→; 0: =#,##0=$(ordinal,one{ers}other{es})$; %digits-ordinal-feminine-plural: -x: −→→; 0: =#,##0=$(ordinal,one{res}other{es})$; %digits-ordinal: 0: =%digits-ordinal-masculine=;",
     ),
     ("ga", "%digits-ordinal: -x: −→→; 0: =#,##0=ú;"),
     (
         "gu",
-        "%digits-ordinal: 0: =%digits-ordinal-masculine=; %digits-ordinal-masculine: -x: −→→; x.x: =#,##,##0.0=; 0: =#,##,##0=$(ordinal,one{લા}two{જા}few{થા}many{્ઠા}other{મા})$;",
+        "%digits-ordinal-masculine: -x: −→→; x.x: =#,##,##0.0=; 0: =#,##,##0=$(ordinal,one{લા}two{જા}few{થા}many{્ઠા}other{મા})$; %digits-ordinal-masculine-oblique: -x: −→→; x.x: =#,##,##0.0=; 0: =#,##,##0=$(ordinal,one{લે}two{જે}few{થે}many{ટ્ઠે}other{મેં})$; %digits-ordinal-feminine: -x: −→→; x.x: =#,##,##0.0=; 0: =#,##,##0=$(ordinal,one{લી}two{જી}few{થી}many{ટ્ઠી}other{મી})$; %digits-ordinal: 0: =%digits-ordinal-masculine=;",
     ),
     ("he", "%digits-ordinal: -x: −→→; 0: =#,##0=;"),
     (
         "hi",
-        "%digits-ordinal: 0: =%digits-ordinal-masculine=; %digits-ordinal-masculine: -x: −→→; x.x: =#,##,##0.0=; 0: =#,##,##0=$(ordinal,one{ला}two{रा}few{था}many{ठा}other{वाँ})$;",
+        "%digits-ordinal-masculine: -x: −→→; x.x: =#,##,##0.0=; 0: =#,##,##0=$(ordinal,one{ला}two{रा}few{था}many{ठा}other{वाँ})$; %digits-ordinal-masculine-oblique: -x: −→→; x.x: =#,##,##0.0=; 0: =#,##,##0=$(ordinal,one{ले}two{रे}few{थे}many{ठे}other{वें})$; %digits-ordinal-feminine: -x: −→→; x.x: =#,##,##0.0=; 0: =#,##,##0=$(ordinal,one{ली}two{री}few{थी}many{ठी}other{वीँ})$; %digits-ordinal: 0: =%digits-ordinal-masculine=;",
     ),
     ("id", "%digits-ordinal: -x: −ke-→#,##0→; 0: ke-=#,##0=;"),
     (
         "it",
-        "%digits-ordinal: 0: =%digits-ordinal-masculine=; %digits-ordinal-masculine: -x: −→→; 0: =#,##0==%%dord-mascabbrev=; %%dord-mascabbrev: 0: º;",
+        "%%dord-mascabbrev: 0: º; %digits-ordinal-masculine: -x: −→→; 0: =#,##0==%%dord-mascabbrev=; %%dord-femabbrev: 0: ª; %digits-ordinal-feminine: -x: −→→; 0: =#,##0==%%dord-femabbrev=; %digits-ordinal: 0: =%digits-ordinal-masculine=;",
     ),
     ("ja", "%digits-ordinal: -x: 第−→#,##0→; 0: 第=#,##0=;"),
     (
@@ -66,7 +66,7 @@ pub static DIGITS_ORDINAL: &[(&str, &str)] = &[
     ("ko", "%digits-ordinal: -x: −→→; 0: =#,##0=번째;"),
     (
         "ky",
-        "%digits-ordinal: -x: −→→; 0: =#,##0==%%digits-ordinal-indicator=; %%digits-ordinal-indicator: 0: ''инчи;",
+        "%%digits-ordinal-indicator: 0: ''инчи; %digits-ordinal: -x: −→→; 0: =#,##0==%%digits-ordinal-indicator=;",
     ),
     ("lo", "%digits-ordinal: -x: ที่−→#,##0→; 0: ที่\u{200B}=#,##0=;"),
     (
@@ -76,20 +76,23 @@ pub static DIGITS_ORDINAL: &[(&str, &str)] = &[
     ("nl", "%digits-ordinal: -x: −→→; 0: =#,##0=e;"),
     (
         "pt",
-        "%digits-ordinal: 0: =%digits-ordinal-masculine=; %digits-ordinal-masculine: -x: −→→; 0: =#,##0=º;",
+        "%digits-ordinal-masculine: -x: −→→; 0: =#,##0=º; %digits-ordinal-feminine: -x: −→→; 0: =#,##0=ª; %digits-ordinal: 0: =%digits-ordinal-masculine=;",
     ),
     ("ro", "%digits-ordinal: -x: −→→; 0: =#,##0=a;"),
     ("root", "%digits-ordinal: -x: −→→; 0: =#,##0=.;"),
-    ("ru", "%digits-ordinal: -x: −→→; 0: =#,##0=;"),
+    (
+        "ru",
+        "%digits-ordinal: -x: −→→; 0: =#,##0=; %digits-ordinal-masculine: -x: −→→; 0: =#,##0=-й; %digits-ordinal-neuter: -x: −→→; 0: =#,##0=-е; %digits-ordinal-feminine: -x: −→→; 0: =#,##0=-я; %digits-ordinal-plural: -x: −→→; 0: =#,##0=-e; %digits-ordinal-masculine-genitive: -x: −→→; 0: =#,##0=-го; %digits-ordinal-neuter-genitive: -x: −→→; 0: =#,##0=-го; %digits-ordinal-feminine-genitive: -x: −→→; 0: =#,##0=-й; %digits-ordinal-plural-genitive: -x: −→→; 0: =#,##0=-х; %digits-ordinal-masculine-dative: -x: −→→; 0: =#,##0=-му; %digits-ordinal-neuter-dative: -x: −→→; 0: =#,##0=-му; %digits-ordinal-feminine-dative: -x: −→→; 0: =#,##0=-й; %digits-ordinal-plural-dative: -x: −→→; 0: =#,##0=-м; %digits-ordinal-masculine-accusative: -x: −→→; 0: =#,##0=-й; %digits-ordinal-neuter-accusative: -x: −→→; 0: =#,##0=-е; %digits-ordinal-feminine-accusative: -x: −→→; 0: =#,##0=-ю; %digits-ordinal-plural-accusative: -x: −→→; 0: =#,##0=-e; %digits-ordinal-masculine-prepositional: -x: −→→; 0: =#,##0=-м; %digits-ordinal-neuter-prepositional: -x: −→→; 0: =#,##0=-м; %digits-ordinal-feminine-prepositional: -x: −→→; 0: =#,##0=-й; %digits-ordinal-plural-prepositional: -x: −→→; 0: =#,##0=-х; %digits-ordinal-masculine-locative: 0: =%digits-ordinal-masculine-prepositional=; %digits-ordinal-neuter-locative: 0: =%digits-ordinal-neuter-prepositional=; %digits-ordinal-feminine-locative: 0: =%digits-ordinal-feminine-prepositional=; %digits-ordinal-plural-locative: 0: =%digits-ordinal-plural-prepositional=; %digits-ordinal-masculine-instrumental: -x: −→→; 0: =#,##0=-м; %digits-ordinal-neuter-instrumental: -x: −→→; 0: =#,##0=-м; %digits-ordinal-feminine-instrumental: -x: −→→; 0: =#,##0=-й; %digits-ordinal-plural-instrumental: -x: −→→; 0: =#,##0=-ми; %digits-ordinal-masculine-ablative: 0: =%digits-ordinal-masculine-instrumental=; %digits-ordinal-neuter-ablative: 0: =%digits-ordinal-neuter-instrumental=; %digits-ordinal-feminine-ablative: 0: =%digits-ordinal-feminine-instrumental=; %digits-ordinal-plural-ablative: 0: =%digits-ordinal-plural-instrumental=;",
+    ),
     (
         "sv",
-        "%digits-ordinal: 0: =%digits-ordinal-feminine=; %digits-ordinal-feminine: -x: −→→; 0: =#,##0=$(ordinal,one{:a}other{:e})$;",
+        "%digits-ordinal-neuter: 0: =%digits-ordinal-feminine=; %digits-ordinal-masculine: -x: −→→; 0: =#,##0=:e; %digits-ordinal-feminine: -x: −→→; 0: =#,##0=$(ordinal,one{:a}other{:e})$; %digits-ordinal-reale: 0: =%digits-ordinal-feminine=; %digits-ordinal: 0: =%digits-ordinal-feminine=;",
     ),
     ("ta", "%digits-ordinal: -x: −→→; 0: =#,##,##0=.;"),
     ("th", "%digits-ordinal: -x: ที่ −→#,##0→; 0: ที่ =#,##0=;"),
     (
         "uk",
-        "%digits-ordinal: 0: =%digits-ordinal-masculine=; %digits-ordinal-masculine: -x: −→→; 0: =#,##0=-$(ordinal,few{ій}other{ий})$;",
+        "%digits-ordinal: 0: =%digits-ordinal-masculine=; %digits-ordinal-masculine: -x: −→→; 0: =#,##0=-$(ordinal,few{ій}other{ий})$; %digits-ordinal-neuter: -x: −→→; 0: =#,##0=-$(ordinal,few{є}other{е})$; %digits-ordinal-feminine: -x: −→→; 0: =#,##0=-$(ordinal,few{я}other{а})$;",
     ),
     ("vi", "%digits-ordinal: -x: −→→; 0: thứ =#,##0=;"),
     ("yue", "%digits-ordinal: -x: 第−→#,##0→; 0: 第=#,##0=;"),
