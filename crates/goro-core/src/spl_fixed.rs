@@ -60,6 +60,10 @@ impl Vm {
             self.spl_fatal(&msg);
             return;
         }
+        // (the element block over memory_limit: zend_mm_safe_error())
+        if size > cur && self.memory_check(size as usize * 16).is_err() {
+            return;
+        }
         // A resize requested by a destructor run by this resize is
         // remembered and performed afterwards (cached_resize).
         const CACHED: &[u8] = b"__spl_cached_resize";

@@ -35186,7 +35186,20 @@ impl Vm {
                                     if let Some(handler) = construct_handler {
                                         drop(obj_mut);
                                         let args_clone = call.args.clone();
-                                        match handler(self, &args_clone, op.line) {
+                                        let fatal_before = self.fatal_emitted;
+                                        let r = handler(self, &args_clone, op.line);
+                                        // (a fatal error raised by the constructor
+                                        // ends the script)
+                                        if !fatal_before
+                                            && self.fatal_emitted
+                                            && self.current_exception.is_none()
+                                        {
+                                            return Err(VmError {
+                                                message: String::new(),
+                                                line: op.line,
+                                            });
+                                        }
+                                        match r {
                                             Ok(()) => {
                                                 self.write_operand(
                                                     &op.result,
