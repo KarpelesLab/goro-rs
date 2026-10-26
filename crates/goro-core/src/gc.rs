@@ -1880,7 +1880,9 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
             add_time(1, dtor_start);
         }
         let free_start = std::time::Instant::now();
-        let mut count = 0i64;
+        // A garbage generator its close freed (the close released the
+        // variables of its frame that made the cycle) was collected.
+        let mut count = dtor_gens.iter().filter(|w| w.strong_count() == 0).count() as i64;
         let mut dead_props: Vec<Vec<(Vec<u8>, Value)>> = Vec::new();
         let mut dead_arrays: Vec<PhpArray> = Vec::new();
         let mut dead_vals: Vec<Value> = Vec::new();
