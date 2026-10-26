@@ -218,7 +218,10 @@ impl Vm {
                 match t.method {
                     // (the engine's own names start with two underscores)
                     None => {
-                        if name[0] == b'_' && name.get(1) == Some(&b'_') {
+                        if name[0] == b'_'
+                            && name.get(1) == Some(&b'_')
+                            && crate::closure::is_engine_fn_name(name)
+                        {
                             return None;
                         }
                         None
@@ -1070,7 +1073,10 @@ impl Vm {
             let call = self.pending_calls.last()?;
             let name = call.name.as_bytes();
             // (closures: the general path)
-            if call.target.closure || name.starts_with(b"__") || !self.fast_fcall_target() {
+            if call.target.closure
+                || (name.starts_with(b"__") && crate::closure::is_engine_fn_name(name))
+                || !self.fast_fcall_target()
+            {
                 return None;
             }
             // (a function returning by reference: what the next opcode

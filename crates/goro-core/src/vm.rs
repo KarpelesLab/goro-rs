@@ -17714,7 +17714,7 @@ pub(crate) fn plain_fcall_name<'a>(
             let b = s.as_bytes();
             (!b.is_empty()
                 && b.len() <= 64
-                && !b.starts_with(b"__")
+                && !(b.starts_with(b"__") && crate::closure::is_engine_fn_name(b))
                 && !crate::string::has_byte(b, b':'))
             .then_some(s)
         }
@@ -21010,9 +21010,10 @@ impl Vm {
         if !call.named_args.is_empty() || name.is_empty() || name.len() > 128 {
             return false;
         }
-        // (a name with one leading underscore is a plain one: the engine's
-        // own names start with two)
-        if name[0] == b'_' && name.get(1) == Some(&b'_') {
+        // (the engine's own names start with two underscores: see
+        // is_engine_fn_name)
+        if name[0] == b'_' && name.get(1) == Some(&b'_') && crate::closure::is_engine_fn_name(name)
+        {
             // A closure without a scope or $this, called through its object.
             if !crate::closure::is_closure_fn_name(name) {
                 return false;

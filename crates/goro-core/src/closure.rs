@@ -19,6 +19,25 @@ use crate::string::PhpString;
 use crate::value::Value;
 use crate::vm::Vm;
 
+/// A function name the engine makes (a closure's, a bound closure's, a
+/// first-class callable's trampoline...), not one user code declares
+/// (`__()`, `__return_true()`).
+#[inline]
+pub fn is_engine_fn_name(name: &[u8]) -> bool {
+    const PREFIXES: &[&[u8]] = &[
+        b"__closure_",
+        b"__arrow_",
+        b"__bound_closure_",
+        b"__const_thunk_",
+        b"__declare_const",
+        b"__deferred_",
+        b"__goro_",
+        b"__property_",
+        b"__anonymous",
+    ];
+    PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
 /// Whether `name` is an internal closure function name.
 #[inline]
 pub fn is_closure_fn_name(name: &[u8]) -> bool {
