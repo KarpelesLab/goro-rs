@@ -1237,9 +1237,6 @@ pub(crate) struct CallTarget {
     /// arguments of an internal function's by-reference parameters are
     /// only known to be sent by reference at run time.
     pub(crate) dynamic: bool,
-    /// The call_user_func() call INIT_DYNAMIC_CALL makes of an array
-    /// callable (`$cb()`): like a direct one, it has no frame of its own.
-    pub(crate) array_callable: bool,
 }
 
 /// What the frame of a method call set up by INIT_METHOD_CALL's fast path
@@ -1341,6 +1338,18 @@ impl CachedCallTarget {
 const _: () = assert!(std::mem::size_of::<PendingCall>() <= 128);
 
 impl CallTarget {
+    /// Mark the call_user_func() call INIT_DYNAMIC_CALL makes of an array
+    /// callable (`$cb()`): like a direct one, it has no frame of its own.
+    /// (`forward_this` without a `forward`, which no forwarding call has:
+    /// a field of its own would cost every call its initialization.)
+    pub(crate) fn set_array_callable(&mut self) {
+        self.forward_this = true;
+    }
+
+    pub(crate) fn is_array_callable(&self) -> bool {
+        self.forward.is_none() && self.forward_this
+    }
+
     pub(crate) const NONE: CallTarget = CallTarget {
         user: None,
         builtin: None,
@@ -1356,7 +1365,6 @@ impl CallTarget {
         fn_gen: 0,
         via_invoke: false,
         dynamic: false,
-        array_callable: false,
     };
 }
 
@@ -12198,7 +12206,7 @@ impl Vm {
                     {
                         let mut target = CallTarget::NONE;
                         target.dynamic = true;
-                        target.array_callable = true;
+                        target.set_array_callable();
                         self.pending_calls.push(PendingCall {
                             name: PhpString::from_bytes(b"call_user_func"),
                             args: vec![Value::Array(arr)],
@@ -22744,7 +22752,6 @@ impl Vm {
                 fn_gen: self.user_functions.len() + 1,
                 via_invoke: false,
                 dynamic: false,
-                array_callable: false,
             };
         }
         let builtin = match found {
@@ -22782,7 +22789,6 @@ impl Vm {
             fn_gen: self.user_functions.len() + 1,
             via_invoke: false,
             dynamic: false,
-            array_callable: false,
         }
     }
 
@@ -29969,7 +29975,7 @@ impl Vm {
                         // Dispatch through call_user_func (handles every array-callable form).
                         let mut target = CallTarget::NONE;
                         target.dynamic = true;
-                        target.array_callable = true;
+                        target.set_array_callable();
                         self.pending_calls.push(PendingCall {
                             name: PhpString::from_bytes(b"call_user_func"),
                             args: vec![name_val.clone()],
@@ -34259,7 +34265,7 @@ impl Vm {
                             || func_name_lower == b"call_user_func_array")
                             && !call_name_bytes.contains(&b'\\')
                             // (a dynamic call is a real one: not compiled)
-                            && (!call.target.dynamic || call.target.array_callable);
+                            && (!call.target.dynamic || call.target.is_array_callable());
                         let own_frame = !is_assert_call && !is_direct_ucf && !special;
                         if own_frame {
                             self.push_builtin_frame(
