@@ -92,7 +92,6 @@ impl Fv {
 enum Sub {
     Number(Box<Nf>),
     Date(String),
-    DateSkeleton(String),
 }
 
 /// A MessageFormat.
@@ -277,9 +276,12 @@ impl MsgFmt {
                     };
                     Sub::Date(p)
                 } else if let Some(sk) = st.strip_prefix("::") {
-                    Sub::DateSkeleton(sk.to_string())
+                    // (DateFormat::createInstanceForSkeleton(): the
+                    // generator's best pattern)
+                    Sub::Date(crate::datepatterngen::best_pattern(locale, sk))
                 } else {
-                    Sub::Date(st.to_string())
+                    // (the pattern as written, white space included)
+                    Sub::Date(style.to_string())
                 };
                 Ok((sub, FType::Date))
             }
@@ -308,19 +310,6 @@ impl MsgFmt {
         let info = CalInfo::gregorian(ms, &tz, &self.locale);
         match sub {
             Sub::Date(p) => msgdate::format_date_pattern(vm, &self.locale, p, &info),
-            Sub::DateSkeleton(sk) => {
-                let f = datecore::compute_fields(&info);
-                let dt = intl::datetime::DateTime {
-                    year: f[datecore::EXTENDED_YEAR],
-                    month: (f[datecore::MONTH] + 1) as u8,
-                    day: f[datecore::DATE] as u8,
-                    hour: f[datecore::HOUR_OF_DAY] as u8,
-                    minute: f[datecore::MINUTE] as u8,
-                    second: f[datecore::SECOND] as u8,
-                    millisecond: f[datecore::MILLISECOND] as u16,
-                };
-                intl::datetime::format_skeleton(&crate::numdata::intl_tag(&self.locale), &dt, sk)
-            }
             Sub::Number(_) => String::new(),
         }
     }
@@ -771,7 +760,6 @@ impl MsgFmt {
                         }
                         _ => return Err(error::U_MESSAGE_PARSE_ERROR),
                     },
-                    Sub::DateSkeleton(_) => return Err(error::U_MESSAGE_PARSE_ERROR),
                 }
             } else if arg_type == ArgType::None {
                 let after = self.literal_until_next_argument(arg_limit);
