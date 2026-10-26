@@ -6187,6 +6187,7 @@ impl Vm {
     /// (zend_compare()): objects meeting strings are cast with __toString()
     /// and objects meeting numbers emit the conversion notice.
     pub fn loose_equals(&mut self, a: &Value, b: &Value) -> bool {
+        let pending = self.current_exception.is_some();
         let (a, b) = match (a.deref(), b.deref()) {
             (Value::Object(_), _) | (_, Value::Object(_)) => {
                 let line = self.current_line;
@@ -6194,7 +6195,7 @@ impl Vm {
             }
             _ => return a.equals(b),
         };
-        self.current_exception.is_none() && a.equals(&b)
+        (pending || self.current_exception.is_none()) && a.equals(&b)
     }
 
     /// The operands of a comparison of an object with a string, the
@@ -6228,7 +6229,10 @@ impl Vm {
                 return None;
             };
             let cl = obj.borrow().class_name.to_ascii_lowercase();
-            if obj.borrow().native.is_some()
+            // zend_call_function() calls nothing while an exception is
+            // pending: the cast fails.
+            if vm.current_exception.is_some()
+                || obj.borrow().native.is_some()
                 || !vm
                     .classes
                     .get(&cl)

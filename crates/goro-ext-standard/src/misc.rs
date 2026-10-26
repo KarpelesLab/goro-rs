@@ -2931,9 +2931,7 @@ fn array_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         goro_core::array::ArrayKey::String(s) => Value::String(s),
                     });
                 }
-                if vm.current_exception.is_some() {
-                    break;
-                }
+                // (php_search_array() goes on comparing after an exception)
             }
             return Ok(Value::Array(Rc::new(RefCell::new(result))));
         }
@@ -3556,10 +3554,9 @@ fn array_search(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             } else {
                 vm.loose_equals(needle, &val)
             };
-            if vm.current_exception.is_some() {
-                return Ok(Value::Null);
-            }
-            if matches {
+            // php_search_array(): an exception does not stop the search (a
+            // later element's comparison still emits its notices).
+            if matches && vm.current_exception.is_none() {
                 return Ok(match key {
                     ArrayKey::Int(n) => Value::Long(n),
                     ArrayKey::String(s) => Value::String(s),
@@ -3612,11 +3609,9 @@ fn in_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         let values: Vec<Value> = arr.borrow().values().cloned().collect();
         for val in values {
-            let eq = vm.loose_equals(needle, &val);
-            if vm.current_exception.is_some() {
-                return Ok(Value::Null);
-            }
-            if eq {
+            // php_search_array(): an exception does not stop the search (a
+            // later element's comparison still emits its notices).
+            if vm.loose_equals(needle, &val) {
                 return Ok(Value::True);
             }
         }
