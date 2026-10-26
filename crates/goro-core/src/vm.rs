@@ -28076,6 +28076,28 @@ impl Vm {
                             }
                         }
                     }
+                    // parent::$x::get() of a private parent property
+                    // (ZEND_INIT_PARENT_PROPERTY_HOOK_CALL).
+                    if let (OperandType::Const(_), Value::String(s)) = (&op.op1, &name_val) {
+                        if s.as_bytes().starts_with(b"parent::__property_") {
+                            if let Some(msg) = self.parent_hook_private_error(s.as_bytes(), op_array)
+                            {
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    ip = *catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught Error: {}", msg),
+                                    line: op.line,
+                                });
+                            }
+                        }
+                    }
                     let from_closure = name_val.is_closure_obj();
                     if let (true, Value::Object(o)) = (from_closure, &name_val) {
                         let at = self.pending_calls.len();
@@ -67189,4 +67211,37 @@ fn globals_dim_write_this(
         _ => None,
     };
     matches!(v.map(|v| v.deref()), Some(Value::String(s)) if s.as_bytes() == b"this")
+}
+
+impl Vm {
+    /// `parent::$prop::get()` / `::set()` where the parent's property is
+    /// private: "Cannot access private property P::$prop".
+    #[inline(never)]
+    fn parent_hook_private_error(&self, name: &[u8], op_array: &OpArray) -> Option<String> {
+        let rest = &name[b"parent::__property_".len()..];
+        let prop = rest
+            .strip_prefix(b"get_".as_slice())
+            .or_else(|| rest.strip_prefix(b"set_".as_slice()))?;
+        let scope = op_array.scope_class.as_ref()?;
+        let parent = self
+            .classes
+            .get(&scope.to_ascii_lowercase())?
+            .parent
+            .clone()?;
+        let pl = parent.to_ascii_lowercase();
+        let (vis, decl, ..) = self.find_property_def(&pl, prop)?;
+        if vis != Visibility::Private {
+            return None;
+        }
+        let pd = self
+            .classes
+            .get(&pl)
+            .map(|c| crate::value::display_class_name(&c.name))
+            .unwrap_or_else(|| crate::value::display_class_name(&decl));
+        Some(format!(
+            "Cannot access private property {}::${}",
+            pd,
+            String::from_utf8_lossy(prop)
+        ))
+    }
 }
