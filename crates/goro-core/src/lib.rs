@@ -2,6 +2,7 @@ pub mod anon_class;
 pub mod arginfo;
 pub mod array;
 pub mod ast_export;
+pub mod ast_walk;
 pub mod basedir;
 pub mod callable;
 pub mod class_table;
