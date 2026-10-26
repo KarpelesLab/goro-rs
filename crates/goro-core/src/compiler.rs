@@ -4150,8 +4150,15 @@ impl Compiler {
         if modifiers.is_enum {
             return false;
         }
-        if modifiers.is_interface || modifiers.is_trait {
-            return true;
+        // zend_compile_class_decl(): no early binding with interfaces
+        // (an interface's parents) or used traits.
+        if modifiers.is_interface {
+            return extends.is_none() && implements.is_empty();
+        }
+        if modifiers.is_trait {
+            return !body
+                .iter()
+                .any(|m| matches!(m, ClassMember::TraitUse { .. }));
         }
         if !implements.is_empty() {
             return false;

@@ -1525,7 +1525,8 @@ impl Vm {
         cur: &ClassEntry,
         prop_type: &ParamType,
         param_type: &ParamType,
-    ) -> bool {
+        autoload: bool,
+    ) -> Status {
         let cur_lc = LinkClass::from_entry(cur);
         let prop_tv = TypeView::from_param_type(prop_type);
         let param_tv = TypeView::from_param_type(param_type);
@@ -1537,7 +1538,11 @@ impl Vm {
                 let unresolved: Vec<Vec<u8>> = ctx.unresolved.borrow().clone();
                 (status, unresolved)
             };
-            if status == Status::Unresolved && attempt == 0 && !self.autoload_functions.is_empty() {
+            if status == Status::Unresolved
+                && attempt == 0
+                && autoload
+                && !self.autoload_functions.is_empty()
+            {
                 attempt += 1;
                 push_linking(cur);
                 for n in &unresolved {
@@ -1549,7 +1554,7 @@ impl Vm {
                 pop_linking();
                 continue;
             }
-            return status == Status::Success;
+            return status;
         }
     }
 

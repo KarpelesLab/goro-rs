@@ -56872,9 +56872,23 @@ impl Vm {
                                                 // checked just above; keeps the error path flat
                                                 let prop_type =
                                                     prop.property_type.as_ref().unwrap();
-                                                if !self.variance_hook_param(
-                                                    &class, prop_type, param_type,
-                                                ) {
+                                                // (no autoloading while
+                                                // early binding)
+                                                let st = self.variance_hook_param(
+                                                    &class,
+                                                    prop_type,
+                                                    param_type,
+                                                    !is_early_attempt,
+                                                );
+                                                // (a class not declared yet: no
+                                                // early binding)
+                                                if st == variance::Status::Unresolved
+                                                    && is_early_attempt
+                                                {
+                                                    variance::defer(&class.name);
+                                                    return Ok(Flow::Continue);
+                                                }
+                                                if st != variance::Status::Success {
                                                     let cls_display =
                                                         crate::string::msg_str(&class.name);
                                                     let prop_display =
