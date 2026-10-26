@@ -34636,10 +34636,16 @@ impl Vm {
                             .bind_closure(&closure, new_this, scope, true)
                             .unwrap_closure();
 
-                        // Builtin-class method closures: [$obj, 'method']
+                        // Builtin-class method closures: [$obj, 'method']; and
+                        // (without named arguments) user closures, called from
+                        // the internal Closure->call() frame.
                         if matches!(&bound, Value::Array(a) if matches!(a.borrow().get_int(0), Some(Value::Object(_))))
+                            || (call.named_args.is_empty()
+                                && matches!(&bound, Value::Array(_) | Value::String(_)))
                         {
-                            let r = self.call_callback(&bound, &extra_args);
+                            let frame_args = call.args.get(1..).unwrap_or_default().to_vec();
+                            let r =
+                                self.closure_call_framed(&bound, frame_args, &extra_args, op.line);
                             if self.current_exception.is_some() {
                                 if let Some((catch_target, _, _, _, saved_pc)) =
                                     exception_handlers.pop()
@@ -69070,6 +69076,30 @@ fn array_as_props(obj: &Rc<RefCell<PhpObject>>) -> bool {
 }
 
 impl Vm {
+    /// `$closure->call($newThis, ...$args)` of the bound closure `bound`:
+    /// run from the internal `Closure->call()` frame (its callee is called
+    /// from "[internal function]").
+    #[inline(never)]
+    fn closure_call_framed(
+        &mut self,
+        bound: &Value,
+        frame_args: Vec<Value>,
+        args: &[Value],
+        line: u32,
+    ) -> Result<Value, VmError> {
+        let depth = self.call_stack.len();
+        self.call_stack.push((
+            "Closure->call".to_string(),
+            self.current_file.clone(),
+            line,
+            frame_args,
+            true,
+        ));
+        let r = self.call_callback(bound, args);
+        self.call_stack.truncate(depth);
+        r
+    }
+
     /// `new C` of an internal class whose stub constructor is private
     /// (InternalIterator, HashContext, ...): zend_std_get_constructor()'s
     /// visibility error.
