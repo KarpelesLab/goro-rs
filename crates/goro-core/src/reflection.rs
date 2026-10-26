@@ -17638,7 +17638,9 @@ pub fn class_all_interface_names(vm: &Vm, class_lower: &[u8]) -> Vec<String> {
                 m.declaring_class.eq_ignore_ascii_case(lower)
                     || rcls(vm, &m.declaring_class.to_ascii_lowercase()).is_some_and(|d| d.is_trait)
             })
-            && !declared.iter().any(|i| i.eq_ignore_ascii_case(b"stringable"))
+            && !declared
+                .iter()
+                .any(|i| i.eq_ignore_ascii_case(b"stringable"))
         {
             declared.push(b"Stringable".to_vec());
         }

@@ -1053,7 +1053,9 @@ impl Vm {
     ) -> Option<Value> {
         let decl = match class {
             b"spldoublylinkedlist" | b"splstack" | b"splqueue" => "SplDoublyLinkedList",
-            b"splobjectstorage" if !matches!(args.get(1).map(Value::deref), Some(Value::Object(_))) => {
+            b"splobjectstorage"
+                if !matches!(args.get(1).map(Value::deref), Some(Value::Object(_))) =>
+            {
                 "SplObjectStorage"
             }
             _ => return self.handle_spl_docall(class, method, args),
@@ -1074,7 +1076,8 @@ impl Vm {
             args.get(1..).unwrap_or(&[]).to_vec(),
             true,
         ));
-        self.spl_internal_frames.push((self.call_stack.len(), frame));
+        self.spl_internal_frames
+            .push((self.call_stack.len(), frame));
         let mut r = self.handle_spl_docall(class, method, args);
         if r.is_none() && self.current_exception.is_some() {
             // (zpp failed: no fallback call)

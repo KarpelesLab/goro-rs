@@ -262,10 +262,8 @@ impl Vm {
                             named_value = Some(vec![pv.clone()]);
                             continue;
                         }
-                        let msg = format!(
-                            "Unknown named parameter ${}",
-                            crate::string::msg_str(pn)
-                        );
+                        let msg =
+                            format!("Unknown named parameter ${}", crate::string::msg_str(pn));
                         self.spl_throw(b"Error", &msg);
                         return Value::Null;
                     }
