@@ -7749,7 +7749,10 @@ impl Compiler {
                                         operand,
                                         ..
                                     } => match Self::eval_const_expr(operand) {
-                                        Some(Value::Long(n)) => Value::Long(-n),
+                                        Some(Value::Long(n)) => n
+                                            .checked_neg()
+                                            .map(Value::Long)
+                                            .unwrap_or(Value::Double(-(n as f64))),
                                         Some(Value::Double(f)) => Value::Double(-f),
                                         _ => self.compile_const_thunk(
                                             expr,
@@ -10610,7 +10613,10 @@ impl Compiler {
                                             )
                                         });
                                         match inner {
-                                            Some(Value::Long(n)) => Value::Long(-n),
+                                            Some(Value::Long(n)) => n
+                                                .checked_neg()
+                                                .map(Value::Long)
+                                                .unwrap_or(Value::Double(-(n as f64))),
                                             Some(Value::Double(f)) => Value::Double(-f),
                                             _ => self.compile_const_thunk(
                                                 const_expr,
