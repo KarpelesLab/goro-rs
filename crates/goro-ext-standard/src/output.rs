@@ -314,6 +314,10 @@ fn zval_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u
             // var_dump()'s object dump, with the refcount added to its
             // header line ("object(C)#N (M) {").
             let mut rc = Rc::strong_count(obj).saturating_sub(bias);
+            // (the VM's list of objects awaiting destruction is no holder)
+            if obj.borrow().dtor_listed.get() {
+                rc = rc.saturating_sub(1);
+            }
             // SplFixedArray's get_properties_for(DEBUG) table, built before
             // the refcount is read, references the elements once more.
             if class_extends(
