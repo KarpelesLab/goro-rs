@@ -3027,31 +3027,66 @@ impl Compiler {
                 }
                 None
             }
+            // A strict_types declare() anywhere but at the top level.
             fn nested_strict(stmts: &[Statement]) -> Option<u32> {
-                for st in stmts {
-                    match &st.kind {
-                        StmtKind::NamespaceDecl { body: Some(b), .. } => {
-                            if let Some(l) = b
-                                .iter()
-                                .find(|x| is_declare_directive(x) == Some(true))
-                                .map(|x| x.span.line)
-                            {
-                                return Some(l);
-                            }
-                        }
-                        StmtKind::Declare { body: Some(b), .. } => {
-                            if let Some(l) = b
-                                .iter()
-                                .find(|x| is_declare_directive(x) == Some(true))
-                                .map(|x| x.span.line)
-                            {
-                                return Some(l);
-                            }
-                        }
-                        _ => {}
+                stmts.iter().find_map(|st| match &st.kind {
+                    StmtKind::NamespaceDecl { body: Some(b), .. }
+                    | StmtKind::Declare { body: Some(b), .. } => nested_strict_in(b),
+                    _ => stmt_nested_strict(st),
+                })
+            }
+            fn nested_strict_in(stmts: &[Statement]) -> Option<u32> {
+                stmts.iter().find_map(|x| {
+                    if is_declare_directive(x) == Some(true) {
+                        Some(x.span.line)
+                    } else {
+                        stmt_nested_strict(x)
                     }
+                })
+            }
+            fn stmt_nested_strict(st: &Statement) -> Option<u32> {
+                match &st.kind {
+                    StmtKind::FunctionDecl { body, .. }
+                    | StmtKind::While { body, .. }
+                    | StmtKind::DoWhile { body, .. }
+                    | StmtKind::For { body, .. }
+                    | StmtKind::Foreach { body, .. } => nested_strict_in(body),
+                    StmtKind::Declare { body: Some(b), .. }
+                    | StmtKind::NamespaceDecl { body: Some(b), .. } => nested_strict_in(b),
+                    StmtKind::If {
+                        body,
+                        elseif_clauses,
+                        else_body,
+                        ..
+                    } => nested_strict_in(body)
+                        .or_else(|| elseif_clauses.iter().find_map(|(_, b)| nested_strict_in(b)))
+                        .or_else(|| else_body.as_deref().and_then(nested_strict_in)),
+                    StmtKind::Switch { cases, .. } => {
+                        cases.iter().find_map(|c| nested_strict_in(&c.body))
+                    }
+                    StmtKind::TryCatch {
+                        try_body,
+                        catches,
+                        finally_body,
+                    } => nested_strict_in(try_body)
+                        .or_else(|| catches.iter().find_map(|c| nested_strict_in(&c.body)))
+                        .or_else(|| finally_body.as_deref().and_then(nested_strict_in)),
+                    StmtKind::ClassDecl { body, .. } => body.iter().find_map(|m| match m {
+                        ClassMember::Method { body: Some(b), .. } => nested_strict_in(b),
+                        _ => None,
+                    }),
+                    _ => None,
                 }
-                None
+            }
+            // zend_compile_declare(): its value is the integer 0 or 1.
+            fn bad_strict_value(stmt: &Statement) -> bool {
+                let StmtKind::Declare { directives, .. } = &stmt.kind else {
+                    return false;
+                };
+                directives.iter().any(|(n, v)| {
+                    n.eq_ignore_ascii_case(b"strict_types")
+                        && !matches!(v.kind, ExprKind::Int(0) | ExprKind::Int(1))
+                })
             }
             let mut seen_other = false;
             for st in &program.statements {
@@ -3066,6 +3101,13 @@ impl Compiler {
                         if let StmtKind::Declare { body: Some(_), .. } = &st.kind {
                             return Err(CompileError {
                                 message: "strict_types declaration must not use block mode".into(),
+                                line: st.span.line,
+                            });
+                        }
+                        if bad_strict_value(st) {
+                            return Err(CompileError {
+                                message: "strict_types declaration must have 0 or 1 as its value"
+                                    .into(),
                                 line: st.span.line,
                             });
                         }
