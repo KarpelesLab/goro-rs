@@ -1361,7 +1361,8 @@ pub(crate) enum GcFrame {
         /// Exceptions pending in the frame's running finally blocks.
         fin: *const Vec<(usize, Option<Value>)>,
         /// The argument list its caller keeps while the call runs (see
-        /// Vm::gc_call_args), or null.
+        /// Vm::gc_call_args), or null; its low bit tags a call whose result
+        /// is discarded (Vm::call_args_tagged).
         args: *const Vec<Value>,
         /// CV 0 is `$this`
         has_this: bool,
@@ -1464,9 +1465,12 @@ impl GcFrame {
                 for v in cvs.iter().chain(tmps.iter()) {
                     f(v);
                 }
+                // (the low bit tags a discarded result, see
+                // Vm::call_args_tagged)
+                let args = (*args as usize & !1) as *const Vec<Value>;
                 if !args.is_null() {
                     // SAFETY: the caller keeps the list until the call returns.
-                    for v in unsafe { &**args } {
+                    for v in unsafe { &*args } {
                         f(v);
                     }
                 }

@@ -24042,6 +24042,11 @@ impl Vm {
                     v => v,
                 };
                 self.verify_return_value(op_array, ret_type, &mut val, implicit_return)?;
+                // (a discarded result goes once checked: see the Return
+                // opcode)
+                if matches!(val, Value::Object(_) | Value::Array(_)) {
+                    self.discard_returned(op_array, &mut val);
+                }
                 Ok(val)
             }
         }
@@ -24288,6 +24293,69 @@ impl Vm {
         self.recycle_values(cvs);
         drop(sym);
         r
+    }
+
+    /// The argument list a DO_FCALL hands the callee's frame (gc_call_args),
+    /// tagged in its low bit when the call's result is discarded (its op1
+    /// set): the frame's GcFrame keeps it so (see discards_result()).
+    #[inline(always)]
+    pub(crate) fn call_args_tagged(args: &Vec<Value>, op: &crate::opcode::Op) -> *const Vec<Value> {
+        let d = matches!(op.op1, OperandType::Const(_));
+        (args as *const Vec<Value> as usize | usize::from(d)) as *const Vec<Value>
+    }
+
+    /// The running frame was called with its result discarded (DO_FCALL
+    /// with RETURN_VALUE_UNUSED) and no observer watches (it is handed the
+    /// value).
+    fn discards_result(&self) -> bool {
+        self.observer.is_none()
+            && matches!(self.gc_frames.last(), Some(crate::gc::GcFrame::Frame { args, .. }) if *args as usize & 1 != 0)
+    }
+
+    /// discard_returned() of a variable: nothing to release (the variable
+    /// goes with the frame's), the caller is handed nothing.
+    #[cold]
+    #[inline(never)]
+    fn discard_returned_cv(&self, op_array: &OpArray) -> bool {
+        !op_array.is_generator && !op_array.returns_by_ref && self.discards_result()
+    }
+
+    /// discard_returned() at the general RETURN: the temporary it came from
+    /// lets go of it too; with a declared return type it goes once checked
+    /// (see verify_return_in_frame()).
+    #[cold]
+    #[inline(never)]
+    fn discard_returned_slow(
+        &self,
+        op_array: &OpArray,
+        operand: &OperandType,
+        tmps: &mut [Value],
+        v: &mut Value,
+    ) {
+        if op_array.is_generator || op_array.returns_by_ref || !self.discards_result() {
+            return;
+        }
+        if let OperandType::Tmp(t) = operand {
+            if let Some(slot) = tmps.get_mut(*t as usize) {
+                *slot = Value::Undef;
+            }
+        }
+        if op_array.return_type.is_none() {
+            self.discard_returned(op_array, v);
+        }
+    }
+
+    /// ZEND_RETURN without a return_value: a returned object or array (not
+    /// a reference, nor a generator's) is released now, before the frame's
+    /// locals and `$this` are.
+    #[cold]
+    #[inline(never)]
+    fn discard_returned(&self, op_array: &OpArray, v: &mut Value) {
+        if !op_array.is_generator && !op_array.returns_by_ref && self.discards_result() {
+            let v = std::mem::replace(v, Value::Null);
+            crate::gc::on_child_released(&v);
+            drop(v);
+        }
     }
 
     /// Execute the single opcode at `ip` on a suspended frame's variables
@@ -31580,7 +31648,7 @@ impl Vm {
                             self.keep_ref_depth = Some(self.call_depth + 1);
                         }
                         // (a fiber suspended in the call owns its arguments)
-                        self.gc_call_args = &call.args;
+                        self.gc_call_args = Self::call_args_tagged(&call.args, op);
                         // (the top call_stack frame is this call's)
                         self.cv_frame_hint = Rc::as_ptr(&user_fn);
                         let call_result = if captures.is_some() {
@@ -35881,7 +35949,7 @@ impl Vm {
                             self.keep_ref_depth = Some(self.call_depth + 1);
                         }
                         // (a fiber suspended in the call owns its arguments)
-                        self.gc_call_args = &call.args;
+                        self.gc_call_args = Self::call_args_tagged(&call.args, op);
                         let call_result = self.execute_op_array_vm(&user_fn, func_cvs);
                         self.gc_call_args = std::ptr::null();
                         self.keep_ref_depth = None;
@@ -40510,10 +40578,24 @@ impl Vm {
                                     v
                                 }
                             }
+                            // (a discarded result: the variable is released
+                            // with the frame's, see discard_returned())
+                            v @ (Value::Object(_) | Value::Array(_)) => {
+                                if self.discard_returned_cv(op_array) {
+                                    Value::Null
+                                } else {
+                                    v.clone()
+                                }
+                            }
                             v => v.clone(),
                         },
                         OperandType::Tmp(i) => match std::mem::take(&mut tmps[i as usize]) {
                             Value::Undef => Value::Null,
+                            // (a discarded result: see discard_returned())
+                            mut v @ (Value::Object(_) | Value::Array(_)) => {
+                                self.discard_returned(op_array, &mut v);
+                                v
+                            }
                             v => v,
                         },
                         OperandType::Const(i) => op_array.literals[i as usize].clone(),
@@ -40618,6 +40700,10 @@ impl Vm {
                     // Also clear any pending deferred return/jump (this explicit return supersedes it)
                     self.pending_return = None;
                     self.pending_finally_jump = None;
+                    let mut val = val;
+                    if matches!(val, Value::Object(_) | Value::Array(_)) {
+                        self.discard_returned_slow(op_array, &op.op1, &mut tmps, &mut val);
+                    }
                     return Ok(Flow::Return(val));
                     #[allow(unreachable_code)]
                     Ok(Flow::Next)

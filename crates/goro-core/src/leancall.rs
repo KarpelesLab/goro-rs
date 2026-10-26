@@ -1238,7 +1238,7 @@ impl Vm {
         }
         let mut saved_pending_return = self.pending_return.take();
         let saved_pending_jump = self.pending_finally_jump.take();
-        self.gc_call_args = &call.args;
+        self.gc_call_args = Vm::call_args_tagged(&call.args, op);
         self.cv_frame_hint = Rc::as_ptr(&user_fn);
         let call_result = self.execute_op_array_vm(&user_fn, func_cvs);
         self.gc_call_args = std::ptr::null();
