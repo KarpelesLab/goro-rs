@@ -560,7 +560,7 @@ pub enum ZppError {
 
 /// Variadic functions parsing their arguments with zend_parse_parameters()
 /// and a "*" / "+" spec (not the fast ZPP macros).
-fn legacy_zpp_variadic(name: &str) -> bool {
+pub(crate) fn legacy_zpp_variadic(name: &str) -> bool {
     matches!(
         name,
         "register_shutdown_function" | "register_tick_function"

@@ -429,8 +429,12 @@ impl Vm {
         let Some((info, flags)) = self.zpp_info(lname) else {
             // zend_call_function() -> the function's own zpp: the arity
             // check holds for every internal function, even those whose
-            // types the generic layer doesn't check yet.
-            if let Some(msg) = crate::arginfo::lookup(lname).and_then(|i| i.arity_error(args.len()))
+            // types the generic layer doesn't check yet. (Not the "+" / "*"
+            // zend_parse_parameters() ones, whose stubs' counts differ:
+            // array_udiff() needs 2 arguments, they check it themselves.)
+            if let Some(msg) = crate::arginfo::lookup(lname)
+                .filter(|i| !crate::arginfo::legacy_zpp_variadic(i.name))
+                .and_then(|i| i.arity_error(args.len()))
             {
                 let line = self.current_line;
                 self.push_builtin_frame(lname, args, at);
