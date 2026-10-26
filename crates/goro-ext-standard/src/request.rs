@@ -2044,11 +2044,16 @@ fn is_uploaded(path: &[u8]) -> bool {
     UPLOADED_FILES.with(|u| u.borrow().iter().any(|f| f == path))
 }
 
-fn is_uploaded_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn is_uploaded_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let p = args
         .first()
         .map(|v| v.to_php_string())
         .unwrap_or_else(|| PhpString::from_bytes(b""));
+    if let Some(e) =
+        crate::misc::path_arg_nul_error(vm, p.as_bytes(), "is_uploaded_file", 1, "filename")
+    {
+        return Err(e);
+    }
     Ok(if is_uploaded(p.as_bytes()) {
         Value::True
     } else {

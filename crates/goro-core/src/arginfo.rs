@@ -322,7 +322,40 @@ pub fn verified_flags(lname: &[u8]) -> u8 {
     let t = verified::VERIFIED;
     t.binary_search_by(|(n, _)| n.as_bytes().cmp(lname))
         .map(|i| t[i].1)
-        .unwrap_or(0)
+        .unwrap_or_else(|_| extra_verified_flags(lname))
+}
+
+/// Functions the verifier cannot match to a single zpp block but whose
+/// parsing is the stub's: ext/standard/filestat.c's FileFunction() macro
+/// (Z_PARAM_STR(filename)).
+#[inline(never)]
+fn extra_verified_flags(lname: &[u8]) -> u8 {
+    const FILE_FUNCTIONS: &[&[u8]] = &[
+        b"file_exists",
+        b"fileatime",
+        b"filectime",
+        b"filegroup",
+        b"fileinode",
+        b"filemtime",
+        b"fileowner",
+        b"fileperms",
+        b"filesize",
+        b"filetype",
+        b"is_dir",
+        b"is_executable",
+        b"is_file",
+        b"is_link",
+        b"is_readable",
+        b"is_writable",
+        b"is_writeable",
+        b"lstat",
+        b"stat",
+    ];
+    if FILE_FUNCTIONS.contains(&lname) {
+        CHECK_ARITY | CHECK_TYPES
+    } else {
+        0
+    }
 }
 
 /// Arginfo and verified flags of the internal method `key` (lowercase

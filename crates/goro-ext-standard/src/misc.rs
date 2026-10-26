@@ -9362,6 +9362,9 @@ fn realpath_cache_seed(vm: &Vm) {
 
 fn realpath_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), "realpath", 1, "path") {
+        return Err(e);
+    }
     let p = path.as_bytes();
     realpath_cache_seed(vm);
     let abs: Vec<u8> = if p.first() == Some(&b'/') {
@@ -9519,6 +9522,9 @@ fn chroot_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn filesize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if stat_nul_byte(vm, "filesize", path.as_bytes()) {
+        return Ok(Value::False);
+    }
     let path_str = path.to_string_lossy();
     if path_str.is_empty() {
         return Ok(Value::False);
@@ -9623,6 +9629,9 @@ fn is_link_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn stat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if stat_nul_byte(vm, "stat", path.as_bytes()) {
+        return Ok(Value::False);
+    }
     let path_str = path.to_string_lossy();
     let res = stat_path(&path_str, false)?;
     // php_stat(): an empty filename fails silently.
@@ -16454,6 +16463,9 @@ fn symlink_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn readlink_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), "readlink", 1, "path") {
+        return Err(e);
+    }
     let path_str = path.to_string_lossy();
     match std::fs::read_link(&*path_str) {
         Ok(p) => Ok(Value::String(PhpString::from_string(
@@ -16692,6 +16704,18 @@ fn array_walk_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     Ok(Value::True)
 }
 
+/// php_stat(): a filename with a NUL byte (other than for the existence
+/// checks) warns and fails.
+#[inline(never)]
+fn stat_nul_byte(vm: &mut Vm, func: &str, path: &[u8]) -> bool {
+    if !path.contains(&0) {
+        return false;
+    }
+    let line = vm.current_line;
+    vm.emit_warning_at(&format!("{}(): Filename contains null byte", func), line);
+    true
+}
+
 fn fileperms_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
@@ -16726,6 +16750,9 @@ fn fileperms_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn filetype_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if stat_nul_byte(vm, "filetype", path.as_bytes()) {
+        return Ok(Value::False);
+    }
     let path_str = path.to_string_lossy();
     let p = std::path::Path::new(&*path_str);
     // Use symlink_metadata so that symlinks are reported as "link" (not whatever they point to)
@@ -17276,6 +17303,9 @@ fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn lstat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if stat_nul_byte(vm, "lstat", path.as_bytes()) {
+        return Ok(Value::False);
+    }
     let path_str = path.to_string_lossy();
     let res = stat_path(&path_str, true)?;
     if matches!(res, Value::False) && !path_str.is_empty() {
@@ -17928,6 +17958,9 @@ fn tmpfile_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 
 fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if stat_nul_byte(vm, "filemtime", path.as_bytes()) {
+        return Ok(Value::False);
+    }
     let path_str = path.to_string_lossy();
     if path_str.is_empty() {
         return Ok(Value::False);
@@ -17956,6 +17989,9 @@ fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fileatime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if stat_nul_byte(vm, "fileatime", path.as_bytes()) {
+        return Ok(Value::False);
+    }
     let path_str = path.to_string_lossy();
     if path_str.is_empty() {
         return Ok(Value::False);
@@ -17984,6 +18020,9 @@ fn fileatime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn filectime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if stat_nul_byte(vm, "filectime", path.as_bytes()) {
+        return Ok(Value::False);
+    }
     let path_str = path.to_string_lossy();
     if path_str.is_empty() {
         return Ok(Value::False);
@@ -18291,6 +18330,9 @@ fn fpassthru_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn linkinfo_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), "linkinfo", 1, "path") {
+        return Err(e);
+    }
     let path_s = path.to_string_lossy();
     #[cfg(unix)]
     {
@@ -22208,15 +22250,6 @@ fn disk_space_impl(
     let path_val = args.first().cloned().unwrap_or(Value::Null);
     let path_str = path_val.to_php_string();
     let path_bytes = path_str.as_bytes();
-    if path_bytes.is_empty() {
-        let msg = "Path cannot be empty".to_string();
-        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: vm.current_line,
-        });
-    }
     if path_bytes.contains(&0u8) {
         let msg = format!(
             "{}(): Argument #1 ($directory) must not contain any null bytes",
@@ -22228,6 +22261,10 @@ fn disk_space_impl(
             message: msg,
             line: vm.current_line,
         });
+    }
+    // expand_filepath() of an empty path fails silently.
+    if path_bytes.is_empty() {
+        return Ok(Value::False);
     }
     let path_string = String::from_utf8_lossy(path_bytes).to_string();
     let path = std::path::Path::new(&path_string);
@@ -22877,9 +22914,6 @@ fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, 
         .first()
         .map(|v| v.to_php_string().to_string_lossy())
         .unwrap_or_default();
-    if filename.is_empty() {
-        return Ok(Value::False);
-    }
     // Absolute paths resolve directly.
     let p = std::path::Path::new(&*filename);
     if p.is_absolute() {
@@ -22903,7 +22937,10 @@ fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, 
         if entry.is_empty() {
             continue;
         }
-        let candidate = if entry == "." {
+        // (an empty name is the include_path directory itself: "./")
+        let candidate = if filename.is_empty() {
+            std::path::PathBuf::from(entry)
+        } else if entry == "." {
             std::path::PathBuf::from(&*filename)
         } else {
             std::path::PathBuf::from(entry).join(&*filename)
