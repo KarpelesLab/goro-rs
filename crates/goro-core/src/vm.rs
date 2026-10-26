@@ -51845,7 +51845,11 @@ impl Vm {
                                                 continue;
                                             }
                                             if let Some(prev_trait) = method_from_trait.get(&key) {
-                                                if !existing.is_abstract {
+                                                // (property hooks conflict as hooked
+                                                // properties, bound after the methods)
+                                                if !existing.is_abstract
+                                                    && !key.starts_with(b"__property_")
+                                                {
                                                     return Err(VmError {
                                                         message: format!(
                                                             "Trait method {}::{} has not been applied as {}::{}, because of collision with {}::{}",
