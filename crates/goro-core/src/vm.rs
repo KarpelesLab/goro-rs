@@ -62454,7 +62454,15 @@ impl Vm {
                                     let max_len = self.exception_string_param_max_len;
                                     Some(self.trace_to_string(&trace, true, max_len))
                                 }
-                                b"__tostring" => Some(self.throwable_chain_string(obj)),
+                                b"__tostring" => {
+                                    let s = self.throwable_chain_string(obj);
+                                    // (kept in the private $string, as zend_exceptions.c does)
+                                    obj.borrow_mut().throwable_set(
+                                        b"string",
+                                        Value::String(PhpString::from_string(s.clone())),
+                                    );
+                                    Some(s)
+                                }
                                 _ => None,
                             }
                         } else {
