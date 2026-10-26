@@ -101,6 +101,9 @@ impl Cert {
         if validity.len() != 2 {
             return None;
         }
+        if validity.iter().any(|t| time_too_short(t.tag, t.content.len())) {
+            return None;
+        }
         let subject = Name::parse(tc.get(i + 4)?)?;
         let spki = tc.get(i + 5)?;
         let mut extensions = Vec::new();
@@ -372,6 +375,11 @@ pub fn sig_alg_for(key: &PKey, md: Option<Md>) -> Option<Vec<u8>> {
 
 /// Sign a TBS structure: returns (algid, signature bits).
 pub fn sign_tbs(tbs: &[u8], key: &PKey, md: Option<Md>) -> Option<(Vec<u8>, Vec<u8>)> {
+    if matches!(key, PKey::Ecx(_)) && md.is_some() {
+        // EVP_DigestSignInit() with a digest for EdDSA.
+        crate::err::push(crate::err::LIB_PROV, 122, "invalid digest");
+        return None;
+    }
     let alg = sig_alg_for(key, md)?;
     let sig = key.sign(md, tbs, false).ok()?;
     Some((alg, sig))
@@ -406,7 +414,13 @@ pub fn verify_signed(tbs: &[u8], sig_alg: &[u8], sig: &[u8], key: &PKey) -> i64 
             return -1;
         }
     };
-    if ok == 1 { 1 } else { 0 }
+    if ok == 1 {
+        1
+    } else {
+        // ASN1_item_verify_ctx() after EVP_DigestVerify() fails.
+        crate::err::push(crate::err::LIB_ASN1, crate::err::RFLAG_COMMON | 6, "EVP lib");
+        0
+    }
 }
 
 fn pss_md(sig_alg: &[u8]) -> Option<Md> {
@@ -469,6 +483,34 @@ pub fn asn1_time_from_unix(t: i64) -> (u8, Vec<u8>) {
     }
 }
 
+/// asn1_ex_c2i() (OpenSSL 3.3+): a UTCTime under 13 or GeneralizedTime
+/// under 15 characters (omitted seconds) does not decode.
+pub fn time_too_short(tag: u8, len: usize) -> bool {
+    (tag == asn1::UTC_TIME && len < 13) || (tag == asn1::GENERALIZED_TIME && len < 15)
+}
+
+/// The errors d2i_X509() leaves for a too short validity time, or false.
+pub fn push_short_time_errors(der: &[u8]) -> bool {
+    let short = asn1::parse_one(der)
+        .and_then(|t| t.children())
+        .and_then(|c| c.first().and_then(|tbs| tbs.children()))
+        .and_then(|tc| {
+            let i = usize::from(tc.first()?.context() == Some(0));
+            tc.get(i + 3)?.children()
+        })
+        .and_then(|v| v.iter().find(|t| time_too_short(t.tag, t.content.len())).map(|t| t.tag));
+    let Some(tag) = short else { return false };
+    if tag == asn1::UTC_TIME {
+        crate::err::push(crate::err::LIB_ASN1, 233, "utctime is too short");
+    } else {
+        crate::err::push(crate::err::LIB_ASN1, 232, "generalizedtime is too short");
+    }
+    for _ in 0..3 {
+        crate::err::push(crate::err::LIB_ASN1, crate::err::RFLAG_COMMON | 266, "nested asn1 error");
+    }
+    true
+}
+
 /// ASN1_TIME to unix time (strict parsing as ASN1_TIME_to_tm), None if invalid.
 pub fn asn1_time_to_unix(tag: u8, v: &[u8]) -> Option<i64> {
     let s = std::str::from_utf8(v).ok()?;
@@ -496,16 +538,29 @@ pub fn asn1_time_to_unix(tag: u8, v: &[u8]) -> Option<i64> {
     } else {
         0
     };
+    // GeneralizedTime fractional seconds
+    if tag != asn1::UTC_TIME && s.as_bytes().get(idx) == Some(&b'.') {
+        let n = s.as_bytes()[idx + 1..].iter().take_while(|b| b.is_ascii_digit()).count();
+        if n == 0 {
+            return None;
+        }
+        idx += 1 + n;
+    }
     let mut off = 0;
     match s.as_bytes().get(idx) {
-        Some(b'Z') => {}
+        Some(b'Z') => idx += 1,
         Some(b'+') | Some(b'-') => {
             let sign = if s.as_bytes()[idx] == b'+' { 1 } else { -1 };
             let oh = digits(idx + 1..idx + 3)?;
             let om = digits(idx + 3..idx + 5)?;
             off = sign * (oh * 3600 + om * 60);
+            idx += 5;
         }
         _ => return None,
+    }
+    // Nothing may follow the zone.
+    if idx != s.len() {
+        return None;
     }
     if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 59 {
         return None;

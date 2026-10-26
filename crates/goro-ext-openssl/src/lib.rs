@@ -184,7 +184,7 @@ pub fn register(vm: &mut Vm) {
 
     // Constants (values from OpenSSL 3.0 / php-src)
     let longs: &[(&str, i64)] = &[
-        ("OPENSSL_VERSION_NUMBER", 0x30000000),
+        ("OPENSSL_VERSION_NUMBER", 0x30500050),
         ("X509_PURPOSE_SSL_CLIENT", 1),
         ("X509_PURPOSE_SSL_SERVER", 2),
         ("X509_PURPOSE_NS_SSL_SERVER", 3),
@@ -259,7 +259,7 @@ pub fn register(vm: &mut Vm) {
     }
     vm.constants.insert(
         b"OPENSSL_VERSION_TEXT".to_vec(),
-        Value::String(PhpString::from_bytes(b"OpenSSL 3.0.0 7 sep 2021")),
+        Value::String(PhpString::from_bytes(b"OpenSSL 3.5.5 27 Jan 2026")),
     );
     vm.constants.insert(
         b"OPENSSL_DEFAULT_STREAM_CIPHERS".to_vec(),

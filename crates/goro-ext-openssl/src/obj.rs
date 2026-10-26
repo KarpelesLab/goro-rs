@@ -92,11 +92,6 @@ pub fn create(oid: &str, sn: &str, ln: &str) -> bool {
     true
 }
 
-/// Short name for an OID, or the dotted text if unknown (OBJ_obj2txt(.., 0)).
-pub fn oid_sn(oid: &str) -> String {
-    by_oid(oid).map(|o| o.sn).unwrap_or_else(|| oid.to_string())
-}
-
 pub fn oid_ln(oid: &str) -> String {
     by_oid(oid).map(|o| o.ln).unwrap_or_else(|| oid.to_string())
 }

@@ -245,6 +245,15 @@ impl PKey {
         if !self.has_private() {
             return None;
         }
+        if let PKey::Rsa(r) = self {
+            // An RSA key built from n/e/d alone has no CRT components;
+            // i2d_RSAPrivateKey() cannot encode the missing INTEGERs.
+            if r.p.is_none() || r.q.is_none() || r.dmp1.is_none() || r.dmq1.is_none() || r.iqmp.is_none() {
+                err::push(err::LIB_ASN1, 222, "illegal zero content");
+                err::push(err::LIB_PROV, err::RFLAG_COMMON | 13, "ASN1 lib");
+                return None;
+            }
+        }
         let der = self.pkcs8_der();
         match cipher {
             None => Some(asn1::pem_encode("PRIVATE KEY", &der)),
@@ -1601,7 +1610,10 @@ impl Rsa {
             rsa_err(132, "data too large for modulus");
             return None;
         }
-        let nm = Modulus::new(&self.n)?;
+        let Some(nm) = Modulus::new(&self.n) else {
+            err::push(err::LIB_BN, 108, "no inverse");
+            return None;
+        };
         Some(pad_be(
             &Bn::from_box(&nm.pow_public(&s.to_box(), &self.e.to_box())),
             k,

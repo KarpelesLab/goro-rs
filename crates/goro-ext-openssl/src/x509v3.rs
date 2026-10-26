@@ -91,6 +91,32 @@ fn ip_mask_text(b: &[u8]) -> String {
     }
 }
 
+/// X509_NAME_print() (XN_FLAG_COMPAT): the X509_NAME_oneline() form with
+/// a slash turned into ", " only before an "X=" or "XY=" (upper case) type.
+pub fn name_print_compat(n: &Name) -> String {
+    let b = n.oneline().into_bytes();
+    let s = b.get(1..).unwrap_or(&[]);
+    let mut out = Vec::new();
+    let mut c = 0;
+    let up = |i: usize| s.get(i).is_some_and(|x| x.is_ascii_uppercase());
+    let at = |i: usize| s.get(i).copied();
+    for i in 0..=s.len() {
+        let end = i == s.len();
+        let split = !end
+            && s[i] == b'/'
+            && up(i + 1)
+            && (at(i + 2) == Some(b'=') || (up(i + 2) && at(i + 3) == Some(b'=')));
+        if split || end {
+            out.extend_from_slice(&s[c..i]);
+            c = i + 1;
+            if !end {
+                out.extend_from_slice(b", ");
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// X509_NAME_print_ex(.., XN_FLAG_ONELINE)
 pub fn name_print_oneline(n: &Name) -> String {
     let mut parts = Vec::new();
@@ -1410,6 +1436,24 @@ pub fn check_purpose(c: &Cert, id: i64, ca: bool) -> i32 {
             }
             1
         }
+        // check_purpose_code_sign() (OpenSSL 3.4+)
+        10 => {
+            if ca {
+                return check_ca(&f);
+            }
+            let Some(k) = f.kusage else { return 0 };
+            if k & KU_DIGITAL_SIGNATURE == 0 || k & (KU_KEY_CERT_SIGN | KU_CRL_SIGN) != 0 {
+                return 0;
+            }
+            if !c.ext(OID_KU).is_some_and(|e| e.critical) {
+                return 0;
+            }
+            let Some(x) = f.xkusage else { return 0 };
+            if x & XKU_CODE_SIGN == 0 || x & (XKU_ANYEKU | XKU_SSL_SERVER) != 0 {
+                return 0;
+            }
+            1
+        }
         _ => -1,
     }
 }
@@ -1425,4 +1469,5 @@ pub const PURPOSES: &[(i64, &str, &str)] = &[
     (7, "any", "Any Purpose"),
     (8, "ocsphelper", "OCSP helper"),
     (9, "timestampsign", "Time Stamp signing"),
+    (10, "codesign", "Code signing"),
 ];

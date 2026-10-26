@@ -306,6 +306,12 @@ fn cert_from_str_opt(
         &["CERTIFICATE", "X509 CERTIFICATE"]
     };
     let block = asn1::pem_find(&data, labels);
+    if let Some(b) = &block {
+        if cert::push_short_time_errors(&b.der) {
+            err::push(err::LIB_PEM, err::RFLAG_COMMON | 13, "ASN1 lib");
+            return Ok(None);
+        }
+    }
     match block.and_then(|b| {
         let der = if b.label == "TRUSTED CERTIFICATE" {
             asn1::parse(&b.der)
@@ -519,7 +525,41 @@ fn print_pubkey(k: Option<PKey>, spki: &[u8], indent: usize) -> String {
             }
             if let Some(n) = e.group.name {
                 s.push_str(&format!("{}ASN1 OID: {}\n", pad2, n));
+                // EC_curve_nid2nist()
+                let nist = match n {
+                    "prime192v1" => Some("P-192"),
+                    "secp224r1" => Some("P-224"),
+                    "prime256v1" => Some("P-256"),
+                    "secp384r1" => Some("P-384"),
+                    "secp521r1" => Some("P-521"),
+                    "sect163k1" => Some("K-163"),
+                    "sect233k1" => Some("K-233"),
+                    "sect283k1" => Some("K-283"),
+                    "sect409k1" => Some("K-409"),
+                    "sect571k1" => Some("K-571"),
+                    "sect163r2" => Some("B-163"),
+                    "sect233r1" => Some("B-233"),
+                    "sect283r1" => Some("B-283"),
+                    "sect409r1" => Some("B-409"),
+                    "sect571r1" => Some("B-571"),
+                    _ => None,
+                };
+                if let Some(c) = nist {
+                    s.push_str(&format!("{}NIST CURVE: {}\n", pad2, c));
+                }
             }
+        }
+        Some(PKey::Dsa(f)) => {
+            // do_dsa_print(), public part
+            s.push_str(&format!("{}Public-Key: ({} bit)\n", pad2, f.p.bits()));
+            if let Some(y) = &f.pub_key {
+                s.push_str(&bn_print("pub: ", y, indent + 4));
+            }
+            s.push_str(&bn_print("P:   ", &f.p, indent + 4));
+            if let Some(q) = &f.q {
+                s.push_str(&bn_print("Q:   ", q, indent + 4));
+            }
+            s.push_str(&bn_print("G:   ", &f.g, indent + 4));
         }
         Some(k) => {
             s.push_str(&format!("{}Public-Key: ({} bit)\n", pad2, k.bits()));
@@ -529,27 +569,6 @@ fn print_pubkey(k: Option<PKey>, spki: &[u8], indent: usize) -> String {
     s
 }
 
-fn print_exts(exts: &[Ext], indent: usize) -> String {
-    let mut s = String::new();
-    for e in exts {
-        let o = obj::by_oid(&e.oid);
-        let label = o.map(|o| o.ln).unwrap_or_else(|| e.oid.clone());
-        s.push_str(&format!(
-            "{}{}: {}\n",
-            " ".repeat(indent),
-            label,
-            if e.critical { "critical" } else { "" }
-        ));
-        let body = match x509v3::ext_print(e) {
-            Some(b) => String::from_utf8_lossy(&b).to_string(),
-            None => String::from_utf8_lossy(&e.value).to_string(),
-        };
-        for line in body.trim_end_matches('\n').split('\n') {
-            s.push_str(&format!("{}{}\n", " ".repeat(indent + 4), line));
-        }
-    }
-    s
-}
 
 /// Two's-complement big-endian INTEGER content as (negative, magnitude).
 fn signed_int(b: &[u8]) -> (bool, Bn) {
@@ -568,48 +587,204 @@ fn signed_int(b: &[u8]) -> (bool, Bn) {
         (false, Bn::from_be(b))
     }
 }
-
-fn serial_text(serial: &[u8]) -> String {
-    if serial.len() <= 8 {
-        let (neg, mag) = signed_int(serial);
-        let mut v: u64 = 0;
-        for &b in mag.be() {
-            v = (v << 8) | b as u64;
-        }
-        if neg {
-            return format!("-{} (-0x{:x})", v, v);
-        }
-        return format!("{} (0x{:x})", v, v);
-    }
-    format!("\n{}", hex_block(serial, 12).trim_end())
+/// ASN1_STRING_print(): printable ASCII (and CR/LF) as is, the rest as '.'.
+fn asn1_string_print(v: &[u8]) -> String {
+    v.iter()
+        .map(|&c| {
+            if c > b'~' || (c < b' ' && c != b'\n' && c != b'\r') {
+                '.'
+            } else {
+                c as char
+            }
+        })
+        .collect()
 }
 
-fn sig_alg_ln(alg: &[u8]) -> String {
+/// x509v3_add_len_value() refuses an IA5 GeneralName value with an
+/// embedded NUL, which makes the whole SAN/IAN print fail.
+fn gennames_have_nul(value: &[u8]) -> bool {
+    asn1::parse_one(value)
+        .and_then(|t| t.children())
+        .is_some_and(|names| {
+            names.iter().any(|g| {
+                matches!(g.tag, 0x81 | 0x82 | 0x86)
+                    && g.content.len() > 1
+                    && g.content[..g.content.len() - 1].contains(&0)
+            })
+        })
+}
+
+/// X509V3_extensions_print() body: each extension's name line, then
+/// X509V3_EXT_print() at `indent + 4` (ASN1_STRING_print() of the raw
+/// value when it cannot be printed) and a newline.
+fn print_exts(exts: &[Ext], indent: usize) -> String {
+    let mut s = String::new();
+    let pad = " ".repeat(indent + 4);
+    for e in exts {
+        s.push_str(&format!(
+            "{}{}: {}\n",
+            " ".repeat(indent),
+            obj::oid_ln(&e.oid),
+            if e.critical { "critical" } else { "" }
+        ));
+        let alt = matches!(e.oid.as_str(), "2.5.29.17" | "2.5.29.18");
+        let body = if alt && gennames_have_nul(&e.value) {
+            None
+        } else {
+            x509v3::ext_print(e)
+        };
+        match body {
+            Some(b) => {
+                // The body is X509V3_EXT_print() at indent 0; indent its
+                // lines (an i2r printer's trailing newline is kept).
+                let b = String::from_utf8_lossy(&b).to_string();
+                let mut first = true;
+                for line in b.split('\n') {
+                    if !first {
+                        s.push('\n');
+                    }
+                    first = false;
+                    if !line.is_empty() {
+                        s.push_str(&pad);
+                        s.push_str(line);
+                    }
+                }
+            }
+            None => {
+                s.push_str(&pad);
+                s.push_str(&asn1_string_print(&e.value));
+            }
+        }
+        s.push('\n');
+    }
+    s
+}
+
+/// ossl_serial_number_print(): decimal and hex when it fits an int64,
+/// otherwise the magnitude's bytes on the next line.
+fn serial_text(serial: &[u8]) -> String {
+    if serial.is_empty() {
+        return " (Empty)".into();
+    }
+    let (neg, mag) = signed_int(serial);
+    let mb = mag.be();
+    let fits = mb.len() < 8 || (mb.len() == 8 && (mb[0] & 0x80 == 0 || (neg && mb[0] == 0x80 && mb[1..].iter().all(|&b| b == 0))));
+    if fits {
+        let mut v: u64 = 0;
+        for &b in mb {
+            v = (v << 8) | b as u64;
+        }
+        let n = if neg { "-" } else { "" };
+        return format!(" {n}{v} ({n}0x{v:x})");
+    }
+    let hex: Vec<String> = mb.iter().map(|b| format!("{:02x}", b)).collect();
+    format!(
+        "\n{}{}{}",
+        " ".repeat(12),
+        if neg { " (Negative)" } else { "" },
+        hex.join(":")
+    )
+}
+
+fn sig_alg_oid(alg: &[u8]) -> String {
     asn1::parse_one(alg)
         .and_then(|t| t.children())
         .and_then(|c| c.first().and_then(|o| o.oid()))
-        .map(|o| obj::oid_ln(&o))
         .unwrap_or_default()
 }
 
+/// X509_signature_dump(): 18 bytes per line.
+fn sig_dump(b: &[u8], indent: usize) -> String {
+    let mut out = String::new();
+    for (i, x) in b.iter().enumerate() {
+        if i % 18 == 0 {
+            if i > 0 {
+                out.push('\n');
+            }
+            out.push_str(&" ".repeat(indent));
+        }
+        out.push_str(&format!("{:02x}", x));
+        if i + 1 != b.len() {
+            out.push(':');
+        }
+    }
+    out.push('\n');
+    out
+}
+
+/// ASN1_bn_print()
+fn bn_print(label: &str, n: &Bn, indent: usize) -> String {
+    let pad = " ".repeat(indent);
+    if n.is_zero() {
+        return format!("{pad}{label} 0\n");
+    }
+    let b = n.be();
+    if b.len() <= 8 {
+        let mut v: u64 = 0;
+        for &x in b {
+            v = (v << 8) | x as u64;
+        }
+        return format!("{pad}{label} {v} (0x{v:x})\n");
+    }
+    let mut nb = b.to_vec();
+    if nb[0] & 0x80 != 0 {
+        nb.insert(0, 0);
+    }
+    format!("{pad}{label}\n{}", hex_block(&nb, indent + 4))
+}
+
+/// X509_signature_print(): the algorithm, then (with a signature) the
+/// key type's sig_print or a plain dump.
+fn signature_print(alg: &[u8], sig: Option<&[u8]>) -> String {
+    let oid = sig_alg_oid(alg);
+    let mut s = format!("    Signature Algorithm: {}", obj::oid_ln(&oid));
+    if sig.is_some() {
+        s.push_str("\n    Signature Value:");
+    }
+    s.push('\n');
+    let Some(sig) = sig else { return s };
+    let is_dsa = matches!(
+        oid.as_str(),
+        "1.2.840.10040.4.3" | "2.16.840.1.101.3.4.3.1" | "2.16.840.1.101.3.4.3.2"
+            | "2.16.840.1.101.3.4.3.3" | "2.16.840.1.101.3.4.3.4" | "2.16.840.1.101.3.4.3.5"
+            | "2.16.840.1.101.3.4.3.6" | "2.16.840.1.101.3.4.3.7" | "2.16.840.1.101.3.4.3.8"
+            | "1.3.14.3.2.27"
+    );
+    if is_dsa {
+        // dsa_sig_print()
+        let rs = asn1::parse_one(sig).and_then(|t| {
+            let c = t.children()?;
+            (t.tag == asn1::SEQUENCE && c.len() == 2 && t.raw.len() == sig.len())
+                .then(|| (c[0].uint(), c[1].uint()))
+        });
+        if let Some((r, ss)) = rs {
+            s.push_str(&bn_print("r:   ", &r, 8));
+            s.push_str(&bn_print("s:   ", &ss, 8));
+            return s;
+        }
+    }
+    s.push_str(&sig_dump(sig, 8));
+    s
+}
+
+/// X509_print() (XN_FLAG_COMPAT names, X509_FLAG_COMPAT).
 pub fn x509_print(c: &Cert) -> String {
     let mut s = String::from("Certificate:\n    Data:\n");
-    s.push_str(&format!(
-        "        Version: {} (0x{:x})\n",
-        c.version + 1,
-        c.version
-    ));
-    s.push_str(&format!(
-        "        Serial Number: {}\n",
-        serial_text(&c.serial)
-    ));
-    s.push_str(&format!(
-        "        Signature Algorithm: {}\n",
-        sig_alg_ln(&c.tbs_sig_alg)
-    ));
+    if (0..=2).contains(&c.version) {
+        s.push_str(&format!(
+            "        Version: {} (0x{:x})\n",
+            c.version + 1,
+            c.version
+        ));
+    } else {
+        s.push_str(&format!("        Version: Unknown ({})\n", c.version));
+    }
+    s.push_str(&format!("        Serial Number:{}\n", serial_text(&c.serial)));
+    s.push_str("    ");
+    s.push_str(&signature_print(&c.tbs_sig_alg, None));
     s.push_str(&format!(
         "        Issuer: {}\n",
-        x509v3::name_print_oneline(&c.issuer)
+        x509v3::name_print_compat(&c.issuer)
     ));
     s.push_str("        Validity\n");
     s.push_str(&format!(
@@ -622,7 +797,7 @@ pub fn x509_print(c: &Cert) -> String {
     ));
     s.push_str(&format!(
         "        Subject: {}\n",
-        x509v3::name_print_oneline(&c.subject)
+        x509v3::name_print_compat(&c.subject)
     ));
     s.push_str("        Subject Public Key Info:\n");
     s.push_str(&print_pubkey(c.public_key(), &c.spki, 12));
@@ -630,61 +805,57 @@ pub fn x509_print(c: &Cert) -> String {
         s.push_str("        X509v3 extensions:\n");
         s.push_str(&print_exts(&c.extensions, 12));
     }
-    s.push_str(&format!(
-        "    Signature Algorithm: {}\n",
-        sig_alg_ln(&c.sig_alg)
-    ));
-    s.push_str("    Signature Value:\n");
-    s.push_str(&hex_block(&c.signature, 8));
+    s.push_str(&signature_print(&c.sig_alg, Some(&c.signature)));
     s
 }
 
+/// X509_REQ_print() (XN_FLAG_COMPAT names, X509_FLAG_COMPAT).
 pub fn x509_req_print(c: &Csr) -> String {
     let mut s = String::from("Certificate Request:\n    Data:\n");
-    s.push_str(&format!(
-        "        Version: {} (0x{:x})\n",
-        c.version + 1,
-        c.version
-    ));
+    if c.version == 0 {
+        s.push_str("        Version: 1 (0x0)\n");
+    } else {
+        s.push_str(&format!("        Version: Unknown ({})\n", c.version));
+    }
     s.push_str(&format!(
         "        Subject: {}\n",
-        x509v3::name_print_oneline(&c.subject)
+        x509v3::name_print_compat(&c.subject)
     ));
     s.push_str("        Subject Public Key Info:\n");
     s.push_str(&print_pubkey(c.public_key(), &c.spki, 12));
     s.push_str("        Attributes:\n");
-    let mut any = false;
-    for (oid, vals) in &c.attributes {
-        if oid == "1.2.840.113549.1.9.14" {
-            continue;
-        }
-        any = true;
-        let v = asn1::parse_all(vals)
-            .and_then(|v| {
-                v.first()
-                    .map(|t| name::to_utf8(t.tag, t.content).unwrap_or_default())
-            })
-            .unwrap_or_default();
-        s.push_str(&format!(
-            "            {:<24}:{}\n",
-            obj::oid_sn(oid),
-            String::from_utf8_lossy(&v)
-        ));
-    }
-    let exts = c.extensions();
-    if !any && exts.is_empty() {
+    let is_ext_req = |oid: &str| oid == "1.2.840.113549.1.9.14" || oid == "1.3.6.1.4.1.311.2.1.14";
+    if c.attributes.is_empty() {
         s.push_str("            (none)\n");
     }
-    if !exts.is_empty() {
-        s.push_str("        Requested Extensions:\n");
-        s.push_str(&print_exts(&exts, 12));
+    for (oid, vals) in &c.attributes {
+        if is_ext_req(oid) {
+            continue;
+        }
+        let name = obj::oid_ln(oid);
+        let values = asn1::parse_all(vals).unwrap_or_default();
+        let mut width = name.len();
+        s.push_str("            ");
+        s.push_str(&name);
+        for (i, t) in values.iter().enumerate() {
+            if i > 0 {
+                width = 0;
+            }
+            s.push_str(&" ".repeat(25usize.saturating_sub(width)));
+            s.push(':');
+            if matches!(t.tag, 0x13 | 0x14 | 0x12 | 0x0c | 0x16) {
+                s.push_str(&String::from_utf8_lossy(t.content));
+                s.push('\n');
+            } else {
+                s.push_str("unable to print attribute\n");
+            }
+        }
     }
-    s.push_str(&format!(
-        "    Signature Algorithm: {}\n",
-        sig_alg_ln(&c.sig_alg)
-    ));
-    s.push_str("    Signature Value:\n");
-    s.push_str(&hex_block(&c.signature, 8));
+    if c.attributes.iter().any(|(o, _)| is_ext_req(o)) {
+        s.push_str("            Requested Extensions:\n");
+        s.push_str(&print_exts(&c.extensions(), 16));
+    }
+    s.push_str(&signature_print(&c.sig_alg, Some(&c.signature)));
     s
 }
 
@@ -1018,9 +1189,22 @@ pub fn openssl_x509_check_private_key(vm: &mut Vm, args: &[Value]) -> Result<Val
 
 /// X509_check_private_key()
 fn check_private_key(spki: &[u8], k: &PKey) -> bool {
-    let ok = k.spki_der() == spki;
+    let theirs = k.spki_der();
+    let ok = theirs == spki;
     if !ok {
-        err::push(err::LIB_X509, 116, "key values mismatch");
+        // EVP_PKEY_eq(): -1 for keys of different types.
+        let alg = |d: &[u8]| {
+            asn1::parse_one(d)
+                .and_then(|t| t.children())
+                .and_then(|c| c.first().and_then(|a| a.children()))
+                .and_then(|a| a.first().and_then(|o| o.oid()))
+        };
+        if alg(&theirs) != alg(spki) {
+            err::push(err::LIB_EVP, 101, "different key types");
+            err::push(err::LIB_X509, 115, "key type mismatch");
+        } else {
+            err::push(err::LIB_X509, 116, "key values mismatch");
+        }
     }
     ok
 }
