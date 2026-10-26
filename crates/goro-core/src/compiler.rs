@@ -4231,6 +4231,15 @@ impl Compiler {
         if modifiers.is_enum {
             return false;
         }
+        // A __toString() method implicitly implements Stringable
+        // (add_stringable_interface()): an interface, so no early binding.
+        if !modifiers.is_trait
+            && body.iter().any(
+                |m| matches!(m, ClassMember::Method { name, .. } if name.eq_ignore_ascii_case(b"__tostring")),
+            )
+        {
+            return false;
+        }
         // zend_compile_class_decl(): no early binding with interfaces
         // (an interface's parents) or used traits.
         if modifiers.is_interface {
