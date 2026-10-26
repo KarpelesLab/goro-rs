@@ -1735,8 +1735,9 @@ impl crate::vm::Vm {
         fe_quiet: bool,
         bound: Option<Option<u32>>,
     ) -> usize {
-        let ops = &op_array.ops;
-        let literals = &op_array.literals;
+        // (the slices: the vectors are not looked at again for each opcode)
+        let ops: &[Op] = &op_array.ops;
+        let literals: &[Value] = &op_array.literals;
         // An opcode consuming a temporary object or array is left to the
         // dispatch loop, which releases it after the opcode (see
         // OpArray::free_mask()). (Only the property and dimension opcodes
