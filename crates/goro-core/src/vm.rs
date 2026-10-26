@@ -6540,6 +6540,11 @@ impl Vm {
         let mut changed = false;
         let mut na = ea.clone();
         let mut nb = eb.clone();
+        // zend_hash_compare(): containers of different sizes compare no
+        // element; the walk stops at a missing key or the first unequal pair.
+        if ea.len() != eb.len() {
+            return None;
+        }
         for (i, (k, va)) in ea.iter().enumerate() {
             // (the same position when both have the same keys in order)
             let same_pos = eb.get(i).is_some_and(|(kb, _)| kb == k);
@@ -6548,7 +6553,7 @@ impl Vm {
             } else {
                 eb.iter().position(|(kb, _)| kb == k)
             }) else {
-                continue;
+                break;
             };
             let vb = &eb[j].1;
             match (va, vb) {
@@ -6589,6 +6594,9 @@ impl Vm {
                     }
                 }
                 _ => {}
+            }
+            if na[i].1.compare_zend(&nb[j].1) != 0 {
+                break;
             }
         }
         if !changed {
