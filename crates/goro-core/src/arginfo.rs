@@ -344,6 +344,11 @@ pub fn verified_flags(lname: &[u8]) -> u8 {
     if lname == b"implode" || lname == b"simplexml_import_dom" {
         return CHECK_ARITY;
     }
+    // ext/sodium parses its own arguments: its errors drop the trace's
+    // argument values (sodium_remove_param_values_from_backtrace()).
+    if lname.starts_with(b"sodium_") {
+        return 0;
+    }
     let t = verified::VERIFIED;
     t.binary_search_by(|(n, _)| n.as_bytes().cmp(lname))
         .map(|i| t[i].1)
