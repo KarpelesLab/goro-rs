@@ -1006,7 +1006,8 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let normalized = normalize_ns_const_name(&name_bytes);
     // Check if constant is already defined
     if vm.constants.contains_key(&normalized) {
-        let name_str = name.to_msg_string();
+        // (zend_register_constant(): the name with its namespace lowercased)
+        let name_str = goro_core::string::msg_str(&normalized).to_string();
         vm.emit_warning(&format!(
             "Constant {} already defined, this will be an error in PHP 9",
             name_str

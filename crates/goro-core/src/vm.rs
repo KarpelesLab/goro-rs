@@ -3471,11 +3471,13 @@ impl Vm {
             .last()
             .filter(|s| !s.is_empty())
             .cloned();
+        // (an internal class scope: the dummy Closure scope of a closure
+        // bound to an object without one)
         let canonical = |vm: &Self, lower: &[u8]| -> Vec<u8> {
             vm.classes
                 .get(lower)
                 .map(|c| c.name.clone())
-                .unwrap_or_else(|| lower.to_vec())
+                .unwrap_or_else(|| vm.builtin_canonical_name(lower).into_bytes())
         };
         let Some(scope) = scope else {
             let msg = if const_expr {
@@ -4078,7 +4080,13 @@ impl Vm {
             let is_constructor = member_name.eq_ignore_ascii_case("__construct");
             let method_word = if is_constructor { "" } else { "method " };
             let scope = if let Some(caller_bytes) = caller.filter(|c| !c.is_empty()) {
-                format!("scope {}", String::from_utf8_lossy(caller_bytes))
+                // (the dummy scope of a closure bound to an object without
+                // one, the only internal class a scope can be)
+                if caller_bytes == b"closure" {
+                    "scope Closure".to_string()
+                } else {
+                    format!("scope {}", String::from_utf8_lossy(caller_bytes))
+                }
             } else {
                 "global scope".to_string()
             };
@@ -58733,12 +58741,10 @@ impl Vm {
                             return Ok(Flow::Continue);
                         }
 
-                        // Closures/WeakReference/WeakMap cannot have dynamic properties
-                        if class_lower == b"closure"
-                            || class_lower == b"weakreference"
-                            || class_lower == b"weakmap"
-                            || (class_lower == b"sensitiveparametervalue"
-                                && prop_name.as_bytes() != b"value")
+                        // Internal classes with ZEND_ACC_NO_DYNAMIC_PROPERTIES
+                        // (@strict-properties: Closure, WeakMap, Directory...)
+                        if Self::no_dynamic_properties(&class_lower)
+                            && self.undeclared_prop_of(&obj_val, &class_lower, prop_name.as_bytes())
                         {
                             let prop_str =
                                 String::from_utf8_lossy(prop_name.as_bytes()).to_string();
@@ -60840,6 +60846,109 @@ impl Vm {
             );
         }
         f as i64
+    }
+
+    /// Whether internal class `class_lower` (exactly: the flag is not
+    /// inherited) is declared @strict-properties (ZEND_ACC_NO_DYNAMIC_PROPERTIES).
+    pub(crate) fn no_dynamic_properties(class_lower: &[u8]) -> bool {
+        // (from php-src's *.stub.php; a match: a length switch first)
+        matches!(
+            class_lower,
+            b"addressinfo"
+                | b"bcmath\\number"
+                | b"closure"
+                | b"curlhandle"
+                | b"curlmultihandle"
+                | b"curlsharehandle"
+                | b"curlsharepersistenthandle"
+                | b"dateerror"
+                | b"dateexception"
+                | b"dateinvalidoperationexception"
+                | b"dateinvalidtimezoneexception"
+                | b"datemalformedintervalstringexception"
+                | b"datemalformedperiodstringexception"
+                | b"datemalformedstringexception"
+                | b"dateobjecterror"
+                | b"daterangeerror"
+                | b"dba\\connection"
+                | b"deflatecontext"
+                | b"delayedtargetvalidation"
+                | b"deprecated"
+                | b"directory"
+                | b"dom\\implementation"
+                | b"dom\\namespaceinfo"
+                | b"dom\\node"
+                | b"dom\\tokenlist"
+                | b"enchantbroker"
+                | b"enchantdictionary"
+                | b"fiber"
+                | b"ftp\\connection"
+                | b"gdfont"
+                | b"gdimage"
+                | b"generator"
+                | b"inflatecontext"
+                | b"intllistformatter"
+                | b"ldap\\connection"
+                | b"ldap\\result"
+                | b"ldap\\resultentry"
+                | b"nodiscard"
+                | b"odbc\\connection"
+                | b"odbc\\result"
+                | b"opensslasymmetrickey"
+                | b"opensslcertificate"
+                | b"opensslcertificatesigningrequest"
+                | b"override"
+                | b"pdo\\dblib"
+                | b"pdo\\firebird"
+                | b"pdo\\mysql"
+                | b"pdo\\odbc"
+                | b"pdo\\pgsql"
+                | b"pdo\\sqlite"
+                | b"pgsql\\connection"
+                | b"pgsql\\lob"
+                | b"pgsql\\result"
+                | b"random\\brokenrandomengineerror"
+                | b"random\\engine\\mt19937"
+                | b"random\\engine\\pcgoneseq128xslrr64"
+                | b"random\\engine\\secure"
+                | b"random\\engine\\xoshiro256starstar"
+                | b"random\\randomerror"
+                | b"random\\randomexception"
+                | b"random\\randomizer"
+                | b"reflectionconstant"
+                | b"sensitiveparameter"
+                | b"sensitiveparametervalue"
+                | b"shmop"
+                | b"soap\\sdl"
+                | b"soap\\url"
+                | b"socket"
+                | b"sqlite3exception"
+                | b"sysvmessagequeue"
+                | b"sysvsemaphore"
+                | b"sysvsharedmemory"
+                | b"uri\\invaliduriexception"
+                | b"uri\\rfc3986\\uri"
+                | b"uri\\urierror"
+                | b"uri\\uriexception"
+                | b"uri\\whatwg\\invalidurlexception"
+                | b"uri\\whatwg\\url"
+                | b"uri\\whatwg\\urlvalidationerror"
+                | b"weakmap"
+                | b"weakreference"
+                | b"xmlparser"
+        )
+    }
+
+    /// Whether `prop` is neither set on `obj` nor declared by its class.
+    #[inline(never)]
+    fn undeclared_prop_of(&self, obj: &Value, class_lower: &[u8], prop: &[u8]) -> bool {
+        let Value::Object(o) = obj else {
+            return false;
+        };
+        !o.borrow().has_property(prop)
+            && self.find_property_def(class_lower, prop).is_none()
+            && crate::stubs::find_class_lower(class_lower)
+                .is_none_or(|c| !c.props.iter().any(|p| p.name.as_bytes() == prop))
     }
 
     /// The "Cannot create dynamic property" error of a write fetch
