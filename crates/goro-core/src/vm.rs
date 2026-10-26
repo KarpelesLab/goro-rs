@@ -6033,9 +6033,7 @@ impl Vm {
                     changed = true;
                 }
                 (Value::Array(_) | Value::Object(_), Value::Array(_) | Value::Object(_)) => {
-                    let is_lazy = |v: &Value| {
-                        matches!(v, Value::Object(o) if o.borrow().has_property(b"__lazy_state"))
-                    };
+                    let is_lazy = |v: &Value| matches!(v, Value::Object(o) if o.borrow().has_property(b"__lazy_state"));
                     if is_lazy(va) || is_lazy(vb) {
                         // zend_compare() of two objects initializes them.
                         let r = self.init_lazy_in(&[va, vb]);
