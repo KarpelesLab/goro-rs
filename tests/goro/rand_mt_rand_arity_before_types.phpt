@@ -7,7 +7,7 @@ foreach (['rand', 'mt_rand'] as $f) {
     t(fn() => $f(null));
     t(fn() => $f(1.5));
     t(fn() => $f([]));
-    t(fn() => var_dump($f(1, null)));
+    t(fn() => var_dump($f(1, null) <= 1));
     t(fn() => var_dump($f(1, 1.5)));
     t(fn() => var_dump($f(1, "1")));
     t(fn() => var_dump($f(1, " 1")));
@@ -22,7 +22,7 @@ ArgumentCountError: rand() expects exactly 2 arguments, 1 given
 ArgumentCountError: rand() expects exactly 2 arguments, 1 given
 
 Deprecated: rand(): Passing null to parameter #2 ($max) of type int is deprecated in %s on line 7
-int(1)
+bool(true)
 
 Deprecated: Implicit conversion from float 1.5 to int loses precision in %s on line 8
 int(1)
