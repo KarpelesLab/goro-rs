@@ -1056,18 +1056,18 @@ impl<'a, 'b> Cx<'a, 'b> {
 
     /// xmlAddID with error reporting; returns false if already defined.
     pub fn add_id(&mut self, attr: NodeId, value: &str) -> bool {
-        if value.is_empty() {
-            return false;
-        }
         let doc = match self.t.nodes[attr].doc {
             Some(d) => d,
             None => return false,
         };
-        let exists = self
-            .t
-            .doc_info(doc)
-            .map(|d| d.ids.contains_key(value))
-            .unwrap_or(false);
+        // libxml2's ID table never takes an empty name: reported as if
+        // already defined
+        let exists = value.is_empty()
+            || self
+                .t
+                .doc_info(doc)
+                .map(|d| d.ids.contains_key(value))
+                .unwrap_or(false);
         if exists {
             let parent = self.t.nodes[attr].parent;
             self.err_e(

@@ -1162,12 +1162,16 @@ impl<'a> HtmlParser<'a> {
                 // xmlIsID for HTML documents
                 if aname == "id" || (aname == "name" && name == "a") {
                     let content = v.to_string();
-                    self.t.nodes[at].atype = 2;
-                    let exists = self
-                        .t
-                        .doc_info(doc)
-                        .map(|di| di.ids.contains_key(&content))
-                        .unwrap_or(false);
+                    if !content.is_empty() {
+                        self.t.nodes[at].atype = 2;
+                    }
+                    // (an empty ID is reported as already defined)
+                    let exists = content.is_empty()
+                        || self
+                            .t
+                            .doc_info(doc)
+                            .map(|di| di.ids.contains_key(&content))
+                            .unwrap_or(false);
                     if exists {
                         id_errors.push(content);
                     } else if let Some(di) = self.t.doc_info_mut(doc) {
