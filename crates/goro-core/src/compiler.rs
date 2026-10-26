@@ -13661,7 +13661,9 @@ impl Compiler {
     }
 
     /// `isset($v[k])` of a plain variable by a literal key: the one
-    /// ISSET_ISEMPTY_DIM_OBJ php-src emits. (ArrayIsset reads
+    /// ISSET_ISEMPTY_DIM_OBJ php-src emits (by a plain variable key: in
+    /// the silenced region the general isset() makes, without the copy of
+    /// its result and the path for a false a single fetch never takes). (ArrayIsset reads
     /// its key unsilenced and the dimension quietly itself: the silenced
     /// region the general isset() compiles around it changes nothing then.)
     /// None: not such an isset() (nothing was emitted).
@@ -13683,9 +13685,14 @@ impl Compiler {
             return Ok(None);
         };
         let ok_base = matches!(&array.kind, ExprKind::Variable(n) if plain(n));
-        // (a variable key's diagnostics depend on the silence)
-        let ok_key = matches!(&index.kind, ExprKind::Int(_) | ExprKind::String(_));
-        if !ok_base || !ok_key {
+        // (a variable key's diagnostics depend on the silence: kept around
+        // the fetch)
+        let silenced = match &index.kind {
+            ExprKind::Int(_) | ExprKind::String(_) => false,
+            ExprKind::Variable(n) if plain(n) => true,
+            _ => return Ok(None),
+        };
+        if !ok_base {
             return Ok(None);
         }
         let before = self.op_array.ops.len();
@@ -13693,11 +13700,23 @@ impl Compiler {
         let key = self.compile_expr(index)?;
         if self.op_array.ops.len() != before
             || !matches!(arr, OperandType::Cv(_))
-            || !matches!(key, OperandType::Const(_))
+            || !matches!(key, OperandType::Cv(_) | OperandType::Const(_))
         {
             // (cannot happen: a plain variable and a literal emit nothing)
             self.op_array.ops.truncate(before);
             return Ok(None);
+        }
+        let bracket = |c: &mut Self, opcode| {
+            c.op_array.emit(Op {
+                opcode,
+                op1: OperandType::Unused,
+                op2: OperandType::Unused,
+                result: OperandType::Unused,
+                line,
+            });
+        };
+        if silenced {
+            bracket(self, OpCode::ErrorSuppress);
         }
         let tmp = self.op_array.alloc_temp();
         self.op_array.emit(Op {
@@ -13707,6 +13726,9 @@ impl Compiler {
             result: OperandType::Tmp(tmp),
             line,
         });
+        if silenced {
+            bracket(self, OpCode::ErrorRestore);
+        }
         Ok(Some(OperandType::Tmp(tmp)))
     }
 
