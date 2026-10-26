@@ -381,6 +381,8 @@ impl Vm {
                         let copy = arr.borrow().clone();
                         separated.get_or_insert_with(|| args.to_vec())[i] =
                             Value::Array(std::rc::Rc::new(std::cell::RefCell::new(copy)));
+                    } else if let Some(arr) = Self::array_ref_builtin_arg(lname, i, a) {
+                        separated.get_or_insert_with(|| args.to_vec())[i] = arr;
                     }
                 }
                 if p.by_ref == 1 && !matches!(a, Value::Reference(_)) {
@@ -442,6 +444,31 @@ impl Vm {
         self.pop_builtin_frame();
         self.interrupt_after_internal_call();
         r
+    }
+
+    /// A reference to an array given for the `array &$array` parameter of a
+    /// builtin that sorts/modifies the array it is handed (goro passes those
+    /// arrays by handle, see Compiler::is_array_ref_builtin): the referenced
+    /// array, separated from other holders, so the change lands in it.
+    #[inline(never)]
+    fn array_ref_builtin_arg(lname: &[u8], i: usize, a: &Value) -> Option<Value> {
+        let Value::Reference(r) = a else {
+            return None;
+        };
+        if i != 0 || !crate::compiler::Compiler::is_array_ref_builtin(Some(lname)) {
+            return None;
+        }
+        let inner = r.borrow().clone();
+        let Value::Array(arr) = inner else {
+            return None;
+        };
+        // (the reference and `arr` hold it: anyone else shares it)
+        if std::rc::Rc::strong_count(&arr) > 2 {
+            let copy = std::rc::Rc::new(std::cell::RefCell::new(arr.borrow().clone()));
+            *r.borrow_mut() = Value::Array(copy.clone());
+            return Some(Value::Array(copy));
+        }
+        Some(Value::Array(arr))
     }
 
     #[cold]
