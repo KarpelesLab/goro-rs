@@ -753,8 +753,8 @@ fn alloc_socket_stream(fd: i32, sd: SockData, uri: Option<&[u8]>, ctx: Option<i6
         }
     });
     if let Some(cid) = ctx {
-        let is_ctx_resource = goro_core::value::resource_type_of(cid).as_deref()
-            == Some(b"stream-context".as_ref());
+        let is_ctx_resource =
+            goro_core::value::resource_type_of(cid).as_deref() == Some(b"stream-context".as_ref());
         if is_ctx_resource {
             // php_stream_context_set(): the stream holds a reference to its
             // context resource and shares it (options set through the

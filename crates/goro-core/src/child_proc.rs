@@ -44,16 +44,15 @@ impl ChildState {
             let mut sa: libc::sigaction = std::mem::zeroed();
             let sigpipe_ignored = libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut sa) == 0
                 && sa.sa_sigaction == libc::SIG_IGN;
-            let rlimit_as = if AS_RECORDED.load(Ordering::Acquire)
-                && !AS_USER_SET.load(Ordering::Relaxed)
-            {
-                Some(libc::rlimit {
-                    rlim_cur: AS_SOFT.load(Ordering::Relaxed) as libc::rlim_t,
-                    rlim_max: AS_HARD.load(Ordering::Relaxed) as libc::rlim_t,
-                })
-            } else {
-                None
-            };
+            let rlimit_as =
+                if AS_RECORDED.load(Ordering::Acquire) && !AS_USER_SET.load(Ordering::Relaxed) {
+                    Some(libc::rlimit {
+                        rlim_cur: AS_SOFT.load(Ordering::Relaxed) as libc::rlim_t,
+                        rlim_max: AS_HARD.load(Ordering::Relaxed) as libc::rlim_t,
+                    })
+                } else {
+                    None
+                };
             ChildState {
                 sigpipe_ignored,
                 rlimit_as,
