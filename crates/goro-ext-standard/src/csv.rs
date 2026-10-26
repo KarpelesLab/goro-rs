@@ -100,7 +100,7 @@ fn zpp_stream(vm: &mut Vm, func: &str, v: Option<&Value>) -> Result<Value, VmErr
             ),
         ));
     }
-    if !crate::misc::has_file_handle(h.to_long()) {
+    if !crate::misc::has_file_handle(h.to_long()) && !crate::misc::is_dir_handle(&h) {
         return Err(type_error(
             vm,
             format!(
@@ -260,6 +260,10 @@ pub fn fgetcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(l) => l,
     };
 
+    // (a directory stream has no line to read)
+    if crate::misc::is_dir_handle(&handle) {
+        return Ok(Value::False);
+    }
     let buf = if len < 0 {
         crate::misc::stream_get_line(vm, F, &handle, None)
     } else {
@@ -364,6 +368,11 @@ pub fn fputcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         escape,
         eol_s.as_ref().map(|s| s.as_bytes()),
     );
+    if crate::misc::is_dir_handle(&handle) {
+        let l = vm.current_line;
+        vm.emit_notice_at("fputcsv(): Stream is not writable", l);
+        return Ok(Value::False);
+    }
     match crate::misc::stream_write(vm, F, &handle, &line) {
         Some(n) if n >= 0 => Ok(Value::Long(n)),
         _ => Ok(Value::False),

@@ -2101,6 +2101,10 @@ pub(crate) fn stream_set_blocking(vm: &mut Vm, args: &[Value]) -> Result<Value, 
     const F: &str = "stream_set_blocking";
     check_arity(vm, F, args, 2, 2)?;
     let raw = args[0].deref();
+    if crate::misc::is_dir_handle(&raw) {
+        zpp_bool(vm, F, 2, "enable", &args[1])?;
+        return crate::misc::dir_stream_op(vm, F, args).unwrap_or(Ok(Value::True));
+    }
     let fid = match raw {
         Value::Resource(ref r) if (1..=3).contains(&r.id()) => raw.to_long(),
         _ => require_open_stream(vm, &args[0], F)?,

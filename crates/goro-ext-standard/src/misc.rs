@@ -12585,7 +12585,12 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 line: vm.current_line,
             });
         };
-        let chain_str = &rest[..idx];
+        // php_stream_url_wrap_php() cuts the chain at the first
+        // "/resource=" by writing a NUL over its '/', then tokenises from
+        // the byte after the leading '/': with an empty chain that '/' IS
+        // the NUL, so the whole remainder (target included) is read as
+        // filter names.
+        let chain_str = if idx == 0 { &rest[1..] } else { &rest[..idx] };
         // The target, binary-safe.
         let raw_inner = raw_name
             .windows(10)
@@ -13270,7 +13275,10 @@ fn write_to_stream_inner(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
                         .chars()
                         .filter(|&c| c != 'b' && c != 't' && c != 'e')
                         .collect();
-                    if mode_chars.starts_with('a') {
+                    // (a php://temp that moved to a temporary file writes
+                    // through that file's stream, opened "r+b": no append)
+                    let spilled_temp = special == SpecialStream::Temp && fh.temp_max.is_none();
+                    if mode_chars.starts_with('a') && !spilled_temp {
                         let _ = fh.file.seek(SeekFrom::End(0));
                     }
                     // php_stream_temp_write(): reaching the limit moves the
@@ -13298,6 +13306,9 @@ fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn fread_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = dir_stream_op(vm, "fread", args) {
+        return r;
+    }
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, &called_as(vm, "fread"))?;
     let length_signed = args.get(1).map(|v| v.to_long()).unwrap_or(0);
@@ -13637,7 +13648,7 @@ fn fwrite_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let raw_fid = arg.to_long();
     let is_special_writer =
         matches!(arg.deref(), Value::Resource(_)) && (raw_fid == 1 || raw_fid == 2 || raw_fid == 3);
-    let fid = if is_special_writer {
+    let fid = if is_special_writer || is_dir_handle(arg) {
         raw_fid
     } else {
         require_open_stream(vm, arg, &called_as(vm, "fwrite"))?
@@ -13668,15 +13679,19 @@ fn fwrite_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Long(0));
     }
 
-    // Streams without a write op (data:): "Stream is not writable".
-    if FILE_HANDLES.with(|h| {
-        h.borrow()
-            .get(&fid)
-            .map(|fh| fh.data_meta.is_some())
-            .unwrap_or(false)
-    }) {
+    // Streams without a write op (data:, a directory): "Stream is not
+    // writable".
+    if is_dir_handle(arg)
+        || FILE_HANDLES.with(|h| {
+            h.borrow()
+                .get(&fid)
+                .map(|fh| fh.data_meta.is_some())
+                .unwrap_or(false)
+        })
+    {
         let line = vm.current_line;
-        vm.emit_notice_at("fwrite(): Stream is not writable", line);
+        let msg = format!("{}(): Stream is not writable", called_as(vm, "fwrite"));
+        vm.emit_notice_at(&msg, line);
         return Ok(Value::False);
     }
     // Check if the underlying stream allows writing.
@@ -13888,6 +13903,9 @@ fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = dir_stream_op(vm, "fgets", args) {
+        return r;
+    }
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, &called_as(vm, "fgets"))?;
     // PHP semantics: $length (if provided) must be > 0. fgets reads up to
@@ -14065,6 +14083,9 @@ fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn feof_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = dir_stream_op(vm, "feof", args) {
+        return r;
+    }
     let arg = args.first().unwrap_or(&Value::Null);
     require_resource_arg(vm, arg, &called_as(vm, "feof"))?;
     let fid = arg.to_long();
@@ -14131,6 +14152,9 @@ fn resync_append_pos(fid: i64) {
 }
 
 fn rewind_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = dir_stream_op(vm, "rewind", args) {
+        return r;
+    }
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, &called_as(vm, "rewind"))?;
     flush_write_filters(vm, fid, false);
@@ -14153,8 +14177,45 @@ fn rewind_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn is_dir_handle(v: &Value) -> bool {
+pub(crate) fn is_dir_handle(v: &Value) -> bool {
     matches!(v.deref(), Value::Resource(id) if DIR_HANDLES.with(|dh| dh.borrow().contains_key(&id.id())))
+}
+
+/// A directory handle is a stream (php_plain_files_dirstream_ops): it has
+/// no write op, its read op only hands out whole php_stream_dirent records
+/// (any other read size fails), and seeking rewinds it. The result of a
+/// stream function given one, or None for any other argument.
+#[inline(never)]
+pub(crate) fn dir_stream_op(
+    vm: &mut Vm,
+    func: &str,
+    args: &[Value],
+) -> Option<Result<Value, VmError>> {
+    let arg = args.first()?;
+    if !is_dir_handle(arg) {
+        return None;
+    }
+    Some(Ok(match func {
+        "feof" => Value::False,
+        "ftell" => Value::Long(0),
+        "fflush" | "stream_set_blocking" => Value::True,
+        "rewind" => {
+            if let Err(e) = rewinddir_fn(vm, std::slice::from_ref(arg)) {
+                return Some(Err(e));
+            }
+            Value::True
+        }
+        "ftruncate" => {
+            vm.emit_warning(&format!(
+                "{}(): Can't truncate this stream!",
+                called_as(vm, "ftruncate")
+            ));
+            Value::False
+        }
+        "stream_get_contents" => Value::String(PhpString::from_bytes(b"")),
+        "fpassthru" => Value::Long(-1),
+        _ => Value::False,
+    }))
 }
 
 fn fseek_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -14307,6 +14368,9 @@ fn fseek_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn ftell_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = dir_stream_op(vm, "ftell", args) {
+        return r;
+    }
     let arg = args.first().unwrap_or(&Value::Null);
     require_resource_arg(vm, arg, &called_as(vm, "ftell"))?;
     let fid = arg.to_long();
@@ -14361,6 +14425,9 @@ fn ftell_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn fflush_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = dir_stream_op(vm, "fflush", args) {
+        return r;
+    }
     require_open_stream(
         vm,
         args.first().unwrap_or(&Value::Null),
@@ -18064,6 +18131,9 @@ fn assert_options_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn ftruncate_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = dir_stream_op(vm, "ftruncate", args) {
+        return r;
+    }
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, "ftruncate")?;
     let size_long = args.get(1).map(|v| v.to_long()).unwrap_or(0);
@@ -18446,6 +18516,9 @@ fn fpassthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn fpassthru_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = dir_stream_op(vm, "fpassthru", args) {
+        return r;
+    }
     require_open_stream(
         vm,
         args.first().unwrap_or(&Value::Null),
@@ -19535,6 +19608,9 @@ fn fgetc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn fgetc_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = dir_stream_op(vm, "fgetc", args) {
+        return r;
+    }
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, &called_as(vm, "fgetc"))?;
     // PHP emits a notice if the underlying mode is write-only.
@@ -19847,6 +19923,9 @@ pub(crate) fn stream_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Valu
 }
 
 fn stream_get_contents_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = dir_stream_op(vm, "stream_get_contents", args) {
+        return r;
+    }
     require_open_stream(
         vm,
         args.first().unwrap_or(&Value::Null),
@@ -22157,6 +22236,9 @@ fn stream_get_record(vm: &mut Vm, fid: i64, maxlen: usize, delim: &[u8]) -> Opti
 }
 
 fn stream_get_line_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = dir_stream_op(vm, "stream_get_line", args) {
+        return r;
+    }
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, "stream_get_line")?;
     let max_length = args.get(1).map(|v| v.to_long()).unwrap_or(0);
@@ -22731,6 +22813,9 @@ fn unregister_tick_function_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
 }
 
 fn stream_isatty_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(r) = dir_stream_op(vm, "stream_isatty", args) {
+        return r;
+    }
     let fid = require_open_stream(vm, args.first().unwrap_or(&Value::Null), "stream_isatty")?;
     use std::os::unix::io::AsRawFd;
     let fd = FILE_HANDLES.with(|h| {

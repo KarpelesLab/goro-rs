@@ -948,6 +948,9 @@ pub fn fscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let format = zpp_string(vm, "fscanf", 2, "format", &args[1])?;
     // zend_fetch_resource2(..., "File-Handle", ...)
+    if crate::misc::is_dir_handle(&handle) {
+        return Ok(Value::False);
+    }
     if !crate::misc::has_file_handle(handle.to_long()) {
         let msg = "fscanf(): supplied resource is not a valid File-Handle resource".to_string();
         let exc = vm.throw_type_error(msg.clone());
