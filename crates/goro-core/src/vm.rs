@@ -49444,6 +49444,13 @@ impl Vm {
                     };
                     let found = match found {
                         Some(v) => v,
+                        // (isset($$name) / empty($$name): ISSET_ISEMPTY_VAR)
+                        None if name == b"this"
+                            && matches!(op.op2, OperandType::Const(i)
+                                if matches!(op_array.literals.get(i as usize), Some(Value::True))) =>
+                        {
+                            Value::Null
+                        }
                         None if name == b"this" => match Self::frame_this(&cvs, &op_array.cv_names)
                         {
                             Some(t) => t,

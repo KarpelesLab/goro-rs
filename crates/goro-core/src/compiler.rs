@@ -14414,6 +14414,11 @@ impl Compiler {
     /// Operand of isset() / empty(): `$this` itself is checked quietly
     /// (ZEND_ISSET_ISEMPTY_THIS).
     fn compile_isset_operand(&mut self, e: &Expr) -> CompileResult<OperandType> {
+        if let ExprKind::DynamicVariable(inner) = &e.kind {
+            if Self::static_dynvar_name(inner).is_none() {
+                return self.compile_isset_dynvar(inner, e.span.line);
+            }
+        }
         if matches!(&e.kind, ExprKind::Variable(n) if n == b"this") {
             self.quiet_this = true;
             let r = self.compile_expr(e);
@@ -14421,6 +14426,23 @@ impl Compiler {
             return r;
         }
         self.compile_expr(e)
+    }
+
+    /// ZEND_ISSET_ISEMPTY_VAR of `$$name`: VarVarGet with a `true` op2
+    /// (the symbol table has no `$this`).
+    #[inline(never)]
+    fn compile_isset_dynvar(&mut self, inner: &Expr, line: u32) -> CompileResult<OperandType> {
+        let name_op = self.compile_expr(inner)?;
+        let flag = self.op_array.add_literal(Value::True);
+        let tmp = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::VarVarGet,
+            op1: name_op,
+            op2: OperandType::Const(flag),
+            result: OperandType::Tmp(tmp),
+            line,
+        });
+        Ok(OperandType::Tmp(tmp))
     }
 
     /// Compile a constant expression's value (see `in_const_expr`).
