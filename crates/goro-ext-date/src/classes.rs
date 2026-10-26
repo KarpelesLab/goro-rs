@@ -1745,21 +1745,25 @@ fn datetime_static(
             let f = m("createFromTimestamp");
             check_count(vm, &f, args, 1, 1)?;
             let v = args[0].deref();
-            let t = match &v {
-                Value::Long(l) => initialize_from_ts_long(*l, 0),
-                Value::Double(d) => initialize_from_ts_double(vm, &f, *d)?,
+            // (zpp, then php_date_instantiate(), then the range check)
+            let num: Result<i64, f64> = match &v {
+                Value::Long(l) => Ok(*l),
+                Value::Double(d) => Err(*d),
                 Value::String(sv) => match numeric_str(sv.as_bytes()) {
-                    Some(Ok(l)) => initialize_from_ts_long(l, 0),
-                    Some(Err(d)) => initialize_from_ts_double(vm, &f, d)?,
+                    Some(n) => n,
                     None => return Err(type_err_class(vm, &f, 0, "timestamp", "int|float", &v)),
                 },
-                Value::True => initialize_from_ts_long(1, 0),
-                Value::False => initialize_from_ts_long(0, 0),
+                Value::True => Ok(1),
+                Value::False => Ok(0),
                 _ => return Err(type_err_class(vm, &f, 0, "timestamp", "int|float", &v)),
             };
             let cls = called_or_base(vm);
             check_instantiable(vm, &cls)?;
             let o = new_object(vm, &cls);
+            let t = match num {
+                Ok(l) => initialize_from_ts_long(l, 0),
+                Err(d) => initialize_from_ts_double(vm, &f, d)?,
+            };
             date_set(&o, &t);
             Ok(Value::Object(o))
         }
