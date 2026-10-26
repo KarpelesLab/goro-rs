@@ -7631,38 +7631,45 @@ fn set_param_type_compatible(prop: &TypeHint, param: &TypeHint) -> bool {
         return true;
     }
 
-    // Property is nullable T, param is also nullable (or T?) - same base type
-    if let (TypeHint::Nullable(pi), TypeHint::Nullable(pai)) = (prop, param) {
-        return set_param_type_compatible(pi, pai);
-    }
-
-    // Helper: collapse a type to the list of its alternatives.
-    fn alternatives(t: &TypeHint) -> Vec<&TypeHint> {
+    // Collapse a type to its alternatives (`?T` is `T|null`).
+    fn alternatives<'a>(t: &'a TypeHint, out: &mut Vec<&'a TypeHint>) {
         match t {
-            TypeHint::Union(parts) => parts.iter().collect(),
-            _ => vec![t],
-        }
-    }
-
-    // For the param type to be compatible, every alternative of the property type
-    // must also appear in the param type (so the set hook can accept every
-    // possible stored value). We match alternatives structurally.
-    let prop_alts = alternatives(prop);
-    let param_alts = alternatives(param);
-    for pa in &prop_alts {
-        let pa_disp = type_display(pa);
-        if !param_alts.iter().any(|pp| type_display(pp) == pa_disp) {
-            // For simple class-name vs simple class-name we can't tell
-            // without the class hierarchy: allow it to avoid false positives.
-            if prop_alts.len() == 1 && param_alts.len() == 1 {
-                if let (TypeHint::Simple(_), TypeHint::Simple(_)) = (prop, param) {
-                    return true;
-                }
+            TypeHint::Union(parts) => parts.iter().for_each(|p| alternatives(p, out)),
+            TypeHint::Nullable(inner) => {
+                alternatives(inner, out);
+                out.push(&NULL_HINT);
             }
-            return false;
+            _ => out.push(t),
         }
     }
-    true
+    static NULL_HINT: TypeHint = TypeHint::Simple(Vec::new());
+    fn name(t: &TypeHint) -> Option<String> {
+        match t {
+            TypeHint::Simple(n) if n.is_empty() => Some("null".into()),
+            TypeHint::Simple(n) => Some(String::from_utf8_lossy(n).to_ascii_lowercase()),
+            _ => None,
+        }
+    }
+    let (mut prop_alts, mut param_alts) = (Vec::new(), Vec::new());
+    alternatives(prop, &mut prop_alts);
+    alternatives(param, &mut param_alts);
+    // Only builtin scalar types are decided here: class types (and
+    // intersections) need the class hierarchy, checked when linking.
+    const BUILTIN: &[&str] = &[
+        "int", "float", "string", "bool", "false", "true", "null", "array",
+    ];
+    let names = |alts: &[&TypeHint]| -> Option<Vec<String>> {
+        alts.iter()
+            .map(|t| name(t).filter(|n| BUILTIN.contains(&n.as_str())))
+            .collect()
+    };
+    let (Some(prop_names), Some(param_names)) = (names(&prop_alts), names(&param_alts)) else {
+        return true;
+    };
+    prop_names.iter().all(|n| {
+        param_names.contains(n)
+            || ((n == "false" || n == "true") && param_names.iter().any(|p| p == "bool"))
+    })
 }
 
 #[cfg(test)]

@@ -55968,8 +55968,9 @@ impl Vm {
                         // (methods' signature deprecations were raised at compile time)
                         // Validate: virtual hooked properties cannot have a default value.
                         // (After inheritance, is_virtual may have been adjusted to false if
-                        // a parent provided a backing slot.)
-                        if !class.is_trait {
+                        // a parent provided a backing slot; a trait's properties
+                        // are checked as declared.)
+                        {
                             for prop in &class.properties {
                                 // Only check properties declared in *this* class (not inherited)
                                 if prop.declaring_class
