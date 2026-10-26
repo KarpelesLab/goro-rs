@@ -24127,7 +24127,10 @@ impl Vm {
             }
 
             let op = &op_array.ops[ip];
-            if free_mask.get(ip).is_some_and(|m| *m != 0) {
+            if free_mask
+                .get(ip)
+                .is_some_and(|m| *m & crate::opcode::FREE_BITS != 0)
+            {
                 pending_free = ip;
             }
             ip += 1;

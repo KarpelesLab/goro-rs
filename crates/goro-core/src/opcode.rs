@@ -1175,8 +1175,8 @@ impl OpArray {
                 operand(&op.result)
             );
             // (the temporaries it releases: see free_mask())
-            match free_mask.get(i) {
-                Some(&m) if m != 0 => {
+            match free_mask.get(i).map(|m| m & FREE_BITS) {
+                Some(m) if m != 0 => {
                     let _ = writeln!(out, "  [free {:#x}]", m);
                 }
                 _ => out.push('\n'),
@@ -1605,6 +1605,8 @@ fn compute_free_mask(oa: &OpArray) -> FreeInfo {
             }
         }
     }
+    mark_plain_free_tmps(oa, &mut mask);
+    mark_tested_free_tmps(oa, &mut mask);
     // (none: no mask, whose lookups the dispatch loop then skips at once)
     if mask.iter().all(|&m| m == 0) {
         mask = Vec::new();
@@ -1612,6 +1614,245 @@ fn compute_free_mask(oa: &OpArray) -> FreeInfo {
     FreeInfo {
         mask: mask.into_boxed_slice(),
         call_frees: call_frees.into_boxed_slice(),
+    }
+}
+
+/// OpArray::free_mask() bit 5 (of a FREE_TMPS): whenever it runs, its
+/// temporaries hold nothing to release, only Undef or plain values (null,
+/// bools, numbers: see mark_plain_free_tmps). With no destructor due, it
+/// has nothing to do then (run_fast_ops() steps over it). (The bits of the
+/// temporaries an opcode releases are the lower ones, FREE_BITS.)
+pub(crate) const FREE_PLAIN: u8 = 0x20;
+/// OpArray::free_mask() bit 6 (of a JMPZ / JMPNZ): the next opcode is a
+/// FREE_TMPS of a few temporaries (an `if` condition's: run_fast_ops() steps
+/// over it when they hold plain values).
+pub(crate) const FREE_TESTED_NEXT: u8 = 0x40;
+/// Bit 7: the same of the opcode the JMPZ / JMPNZ jumps to.
+pub(crate) const FREE_TESTED_TARGET: u8 = 0x80;
+/// The free_mask() bits of the temporaries released after an opcode.
+pub(crate) const FREE_BITS: u8 = 0x1f;
+
+/// Whether the result an opcode writes in a temporary is a plain value
+/// (null, a bool, an int or a float), when it writes one: a comparison, a
+/// cast to a scalar, a test.
+#[inline]
+fn plain_result(opc: OpCode) -> bool {
+    matches!(
+        opc,
+        OpCode::Identical
+            | OpCode::NotIdentical
+            | OpCode::Equal
+            | OpCode::NotEqual
+            | OpCode::Less
+            | OpCode::LessEqual
+            | OpCode::Greater
+            | OpCode::GreaterEqual
+            | OpCode::Spaceship
+            | OpCode::BooleanNot
+            | OpCode::BoolXor
+            | OpCode::CastBool
+            | OpCode::CastInt
+            | OpCode::CastFloat
+            | OpCode::TypeCheck
+            | OpCode::IssetCheck
+            | OpCode::ArrayIsset
+            | OpCode::ArrayIssetFetch
+            | OpCode::PropertyIsset
+            | OpCode::PropertyIssetFetch
+            | OpCode::StaticPropIsset
+    )
+}
+
+/// Whether an opcode only reads its op1 / op2 temporaries (or moves the
+/// value out of them): it never stores anything there.
+#[inline]
+fn reads_tmp_operands(opc: OpCode) -> bool {
+    plain_result(opc)
+        || matches!(
+            opc,
+            OpCode::JmpZ
+                | OpCode::JmpNz
+                | OpCode::QmAssign
+                | OpCode::Echo
+                | OpCode::Return
+                | OpCode::SendVal
+                | OpCode::SendValChecked
+                | OpCode::Add
+                | OpCode::Sub
+                | OpCode::Mul
+                | OpCode::Concat
+                | OpCode::ArrayGet
+        )
+}
+
+/// A literal that is a plain value (not Undef).
+#[inline]
+fn plain_literal(oa: &OpArray, o: OperandType) -> bool {
+    matches!(o, OperandType::Const(c) if matches!(
+        oa.literals.get(c as usize),
+        Some(Value::Null | Value::False | Value::True | Value::Long(_) | Value::Double(_))
+    ))
+}
+
+/// Sets FREE_PLAIN in `mask` (see compute_free_mask) on each FREE_TMPS of
+/// `oa` whose temporaries can only hold Undef or plain values when it runs.
+/// A forward data flow over the code: per temporary, whether it may hold
+/// something else ("dirty"). The temporaries start Undef; an opcode's
+/// result makes its temporary dirty unless the opcode only stores plain
+/// values (plain_result(), or a plain literal copied); an op1 / op2
+/// temporary of an opcode that may store into it gets dirty (all but those
+/// of reads_tmp_operands()); a FREE_TMPS leaves its temporaries Undef, as
+/// an ASSIGN to a variable leaves the temporary it moves the value of. The
+/// target of a jump other than the plain jumps (a catch, a finally, a
+/// deferred jump: the exception's temporary is written there) starts with
+/// all of them dirty.
+#[inline(never)]
+fn mark_plain_free_tmps(oa: &OpArray, mask: &mut [u8]) {
+    let n = oa.ops.len();
+    let tc = oa.temp_count as usize;
+    // (one bit per temporary: code with more of them is left alone)
+    if n == 0 || tc == 0 || tc > 127 || mask.len() != n {
+        return;
+    }
+    if !oa.ops.iter().any(|o| o.opcode == OpCode::FreeTmps) {
+        return;
+    }
+    let bit = |t: u32| -> u128 { if (t as usize) < tc { 1 << t } else { 0 } };
+    // (the temporaries a..b)
+    let span = |a: u32, b: u32| -> u128 {
+        let below = |t: u32| (1u128 << t.min(tc as u32)) - 1;
+        below(b) & !below(a)
+    };
+    // The state before each opcode (0: not reached; SEEN set once it is).
+    const SEEN: u128 = 1 << 127;
+    let mut state = vec![0u128; n + 1];
+    state[0] = SEEN;
+    // (a pass over the code, again from the earliest opcode a jump back
+    // changed the state of)
+    let mut from = 0;
+    for _ in 0..64 {
+        let mut again = usize::MAX;
+        for i in from..n {
+            let before = state[i];
+            if before == 0 {
+                continue;
+            }
+            let op = &oa.ops[i];
+            let mut cur = before;
+            if op.opcode == OpCode::FreeTmps {
+                if let (OperandType::Tmp(a), OperandType::Tmp(b)) = (op.op1, op.op2) {
+                    cur &= !span(a, b);
+                }
+            } else {
+                if !reads_tmp_operands(op.opcode) {
+                    for o in [op.op1, op.op2] {
+                        if let OperandType::Tmp(t) = o {
+                            cur |= bit(t);
+                        }
+                    }
+                }
+                if let OperandType::Tmp(r) = op.result {
+                    let plain = plain_result(op.opcode)
+                        || (op.opcode == OpCode::QmAssign
+                            && match op.op1 {
+                                OperandType::Tmp(s) => before & bit(s) == 0,
+                                o => plain_literal(oa, o),
+                            });
+                    if !plain {
+                        cur |= bit(r);
+                    }
+                }
+                if op.opcode == OpCode::Assign {
+                    // (`Assign T, literal`: a condition's value, see `&&`)
+                    if let OperandType::Tmp(t) = op.op1 {
+                        if op.result == OperandType::Unused
+                            && before & bit(t) == 0
+                            && plain_literal(oa, op.op2)
+                        {
+                            cur &= !bit(t);
+                        }
+                    }
+                    // (a temporary is moved into the variable, its slot
+                    // left Undef)
+                    if let (OperandType::Tmp(s), OperandType::Cv(_)) = (op.op2, op.op1) {
+                        if op.result != OperandType::Tmp(s) {
+                            cur &= !bit(s);
+                        }
+                    }
+                }
+            }
+            let plain_jump = matches!(
+                op.opcode,
+                OpCode::Jmp
+                    | OpCode::JmpZ
+                    | OpCode::JmpNz
+                    | OpCode::ForeachNext
+                    | OpCode::ForeachNextRef
+                    | OpCode::JmpIfArgByRef
+                    | OpCode::StaticVarInitOrJmp
+            );
+            let mut flow = |k: usize, v: u128| {
+                let k = k.min(n);
+                let new = state[k] | v;
+                if state[k] != new {
+                    state[k] = new;
+                    if k <= i {
+                        again = again.min(k);
+                    }
+                }
+            };
+            for o in [op.op1, op.op2, op.result] {
+                if let OperandType::JmpTarget(k) = o {
+                    flow(k as usize, if plain_jump { cur } else { u128::MAX });
+                }
+            }
+            if !matches!(op.opcode, OpCode::Jmp | OpCode::Return) {
+                flow(i + 1, cur);
+            }
+        }
+        if again == usize::MAX {
+            for (i, op) in oa.ops.iter().enumerate() {
+                let (OpCode::FreeTmps, OperandType::Tmp(a), OperandType::Tmp(b)) =
+                    (op.opcode, op.op1, op.op2)
+                else {
+                    continue;
+                };
+                let s = state[i];
+                if s != 0 && a <= b && b as usize <= tc && s & span(a, b) == 0 {
+                    mask[i] |= FREE_PLAIN;
+                }
+            }
+            return;
+        }
+        from = again;
+    }
+}
+
+/// Sets FREE_TESTED_NEXT / FREE_TESTED_TARGET in `mask` (see
+/// compute_free_mask) on the JMPZ / JMPNZ of `oa` followed by (jumping to)
+/// a FREE_TMPS of a few temporaries.
+#[inline(never)]
+fn mark_tested_free_tmps(oa: &OpArray, mask: &mut [u8]) {
+    if mask.len() != oa.ops.len() {
+        return;
+    }
+    let small_free = |k: usize| match oa.ops.get(k) {
+        Some(f) if f.opcode == OpCode::FreeTmps => matches!(
+            (f.op1, f.op2),
+            (OperandType::Tmp(a), OperandType::Tmp(b)) if a < b && b - a <= 8
+        ),
+        _ => false,
+    };
+    for (i, op) in oa.ops.iter().enumerate() {
+        let (OpCode::JmpZ | OpCode::JmpNz, OperandType::JmpTarget(t)) = (op.opcode, op.op2) else {
+            continue;
+        };
+        if small_free(i + 1) {
+            mask[i] |= FREE_TESTED_NEXT;
+        }
+        if small_free(t as usize) {
+            mask[i] |= FREE_TESTED_TARGET;
+        }
     }
 }
 

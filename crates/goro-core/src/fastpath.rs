@@ -1997,6 +1997,107 @@ fn release_consumed(rel: u8, fast: Fast, op: &Op, tmps: &mut [Value]) -> Fast {
     fast
 }
 
+/// After the JMPZ / JMPNZ at `ip` (`f`: where it goes), the FREE_TMPS it
+/// goes to (see OpArray::free_mask(), FREE_TESTED_NEXT /
+/// FREE_TESTED_TARGET) when that has nothing to do: its temporaries hold
+/// only plain values (nothing to release: what it does is empty them, which
+/// nothing tells from leaving them), no foreach state is held by the frame,
+/// and no destructor is due (`no_release`: the general handler's release
+/// point does nothing). The opcode after it is gone to instead.
+#[inline(always)]
+fn past_tested_free(
+    f: Fast,
+    ip: usize,
+    ops: &[Op],
+    free_mask: &[u8],
+    tmps: &[Value],
+    no_release: bool,
+    fe: &FeView,
+) -> Fast {
+    use crate::opcode::{FREE_TESTED_NEXT, FREE_TESTED_TARGET};
+    let m = free_mask.get(ip).copied().unwrap_or(0);
+    if m & (FREE_TESTED_NEXT | FREE_TESTED_TARGET) == 0 || !no_release {
+        return f;
+    }
+    let d = match f {
+        Fast::Done if m & FREE_TESTED_NEXT != 0 => ip + 1,
+        Fast::Jump(t) if m & FREE_TESTED_TARGET != 0 => t,
+        f => return f,
+    };
+    let Some(&Op {
+        opcode: OpCode::FreeTmps,
+        op1: OperandType::Tmp(a),
+        op2: OperandType::Tmp(b),
+        ..
+    }) = ops.get(d)
+    else {
+        return f;
+    };
+    let plain = tmps
+        .get(a as usize..b as usize)
+        .is_some_and(|r| r.iter().all(is_plain_value));
+    if plain && !fe.any_state() {
+        Fast::Jump(d + 1)
+    } else {
+        f
+    }
+}
+
+/// Undef, null, a bool or a number (nothing to release).
+#[inline(always)]
+fn is_plain_value(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Undef | Value::Null | Value::False | Value::True | Value::Long(_) | Value::Double(_)
+    )
+}
+
+/// FreeTmps (run_fast_ops()) of temporaries from the first one holding
+/// something else than a plain value or a string on: an array or object
+/// held elsewhere too only loses a holder; one held here alone is freed
+/// when it holds a few plain values (nothing to destroy). (No object with a
+/// destructor exists: `no_release`.) False (nothing done): the general
+/// handler releases them (they are not all such, or the cycle collector is
+/// due).
+#[inline(never)]
+fn fast_free_containers(
+    range: &mut [Value],
+    globals: &Rc<RefCell<crate::array::PhpArray>>,
+) -> bool {
+    // (one pass: nothing is released unless all of them may be)
+    let mut heap = false;
+    for v in range.iter() {
+        match v {
+            Value::Undef
+            | Value::Null
+            | Value::False
+            | Value::True
+            | Value::Long(_)
+            | Value::Double(_)
+            | Value::String(_) => {}
+            Value::Array(_) | Value::Object(_) => {
+                if !drops_quietly_deep(v, &mut 256, globals) {
+                    return false;
+                }
+                heap = true;
+            }
+            _ => return false,
+        }
+    }
+    if heap && crate::gc::gc_pending() {
+        return false;
+    }
+    for slot in range {
+        match slot {
+            Value::Undef => {}
+            Value::Array(_) | Value::Object(_) | Value::String(_) => *slot = Value::Undef,
+            // (plain values: nothing to drop)
+            v => std::mem::forget(std::mem::replace(v, Value::Undef)),
+        }
+    }
+    true
+}
+
 /// The temporaries whose foreach iteration state (snapshot, object or
 /// iterator handle) a frame holds, for FreeTmps (a few; more count as all).
 #[derive(Clone, Copy)]
@@ -2046,6 +2147,12 @@ pub(crate) struct FeView<'a> {
 }
 
 impl FeView<'_> {
+    /// Whether the frame holds any foreach state (see busy()).
+    #[inline(always)]
+    fn any_state(&self) -> bool {
+        !(self.snap.is_empty() && self.obj.is_empty() && self.iter_handles.is_empty())
+    }
+
     /// The temporaries whose foreach state (snapshot, object or iterator
     /// handle) the frame holds.
     #[inline(always)]
@@ -2633,55 +2740,50 @@ impl crate::vm::Vm {
                 // foreach state and nothing to destroy: the general handler
                 // just empties them.
                 OpCode::FreeTmps if no_release => {
-                    let (OperandType::Tmp(a), OperandType::Tmp(b)) = (op.op1, op.op2) else {
-                        break 'run ip;
-                    };
-                    // (no running foreach's state is held by these)
-                    if fe.busy().any_in(a, b) {
-                        break 'run ip;
-                    }
-                    let end = (b as usize).min(tmps.len());
-                    let range = &mut tmps[(a as usize).min(end)..end];
-                    // An array or object held elsewhere too only loses a
-                    // holder; one held here alone is freed when it holds a
-                    // few plain values (nothing to destroy). (No object
-                    // with a destructor exists: `no_release`; the cycle
-                    // collector is not due.)
-                    // (one pass: scalars are emptied at once, the containers
-                    // checked; nothing is released unless all of them may be)
-                    let mut heap = false;
-                    for v in range.iter() {
-                        match v {
-                            Value::Undef
-                            | Value::Null
-                            | Value::False
-                            | Value::True
-                            | Value::Long(_)
-                            | Value::Double(_)
-                            | Value::String(_) => {}
-                            Value::Array(_) | Value::Object(_) => {
-                                if !drops_quietly_deep(v, &mut 256, &self.globals) {
-                                    break 'run ip;
+                    // (nothing to release in them: see OpArray::free_mask())
+                    if free_mask
+                        .get()
+                        .get(ip)
+                        .is_some_and(|m| m & crate::opcode::FREE_PLAIN != 0)
+                    {
+                        Fast::Done
+                    } else {
+                        let (OperandType::Tmp(a), OperandType::Tmp(b)) = (op.op1, op.op2) else {
+                            break 'run ip;
+                        };
+                        // (no running foreach's state is held by these)
+                        if fe.any_state() && fe.busy().any_in(a, b) {
+                            break 'run ip;
+                        }
+                        let end = (b as usize).min(tmps.len());
+                        let range = &mut tmps[(a as usize).min(end)..end];
+                        // (plain values and strings are emptied at once; from
+                        // the first container on, see fast_free_containers)
+                        let mut rest = None;
+                        for (k, slot) in range.iter_mut().enumerate() {
+                            match slot {
+                                Value::Undef => {}
+                                Value::String(_) => *slot = Value::Undef,
+                                Value::Null
+                                | Value::False
+                                | Value::True
+                                | Value::Long(_)
+                                | Value::Double(_) => {
+                                    std::mem::forget(std::mem::replace(slot, Value::Undef))
                                 }
-                                heap = true;
+                                _ => {
+                                    rest = Some(k);
+                                    break;
+                                }
                             }
-                            _ => break 'run ip,
+                        }
+                        match rest {
+                            Some(k) if !fast_free_containers(&mut range[k..], &self.globals) => {
+                                break 'run ip;
+                            }
+                            _ => Fast::Done,
                         }
                     }
-                    if heap && crate::gc::gc_pending() {
-                        break 'run ip;
-                    }
-                    for slot in range {
-                        match slot {
-                            Value::Undef => {}
-                            Value::Array(_) | Value::Object(_) | Value::String(_) => {
-                                *slot = Value::Undef
-                            }
-                            // (plain values: nothing to drop)
-                            v => std::mem::forget(std::mem::replace(v, Value::Undef)),
-                        }
-                    }
-                    Fast::Done
                 }
                 // (one arm per opcode: each inlined fast_op() reduces to its own case)
                 OpCode::Add => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
@@ -2727,8 +2829,14 @@ impl crate::vm::Vm {
                 OpCode::PreDecrement => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::PostIncrement => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::PostDecrement => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
-                OpCode::JmpZ => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
-                OpCode::JmpNz => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::JmpZ => {
+                    let f = fast_op(op, cvs, tmps, literals, refs_ok, no_release);
+                    past_tested_free(f, ip, ops, free_mask.get(), tmps, no_release, fe)
+                }
+                OpCode::JmpNz => {
+                    let f = fast_op(op, cvs, tmps, literals, refs_ok, no_release);
+                    past_tested_free(f, ip, ops, free_mask.get(), tmps, no_release, fe)
+                }
                 OpCode::Assign => match fast_op(op, cvs, tmps, literals, refs_ok, no_release) {
                     Fast::No => {
                         // (a temporary no running loop holds; or the iterator
