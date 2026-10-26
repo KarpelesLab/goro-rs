@@ -6302,6 +6302,12 @@ impl Vm {
                 let line = self.current_line;
                 self.compare_operands(a.deref(), b.deref(), line)
             }
+            (Value::Generator(_), Value::Long(_) | Value::Double(_))
+            | (Value::Long(_) | Value::Double(_), Value::Generator(_)) => {
+                let line = self.current_line;
+                self.emit_object_comparison_notice(a, b, line);
+                return a.equals(b);
+            }
             _ => return a.equals(b),
         };
         (pending || self.current_exception.is_none()) && a.equals(&b)
