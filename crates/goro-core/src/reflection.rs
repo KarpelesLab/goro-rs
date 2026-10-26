@@ -2023,7 +2023,8 @@ fn reflection_property_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
     // When constructed from an object instance, accept dynamic properties even if the class
     // doesn't declare them (matches PHP behavior for #[AllowDynamicProperties] and stdClass).
     let mut is_dynamic_prop = false;
-    if is_user_class {
+    // (internal classes known to the stubs declare their properties too)
+    if is_user_class || rcls(vm, &class_lower).is_some() {
         // A parent's private property is not a property of the class.
         let prop_exists_decl = rcls(vm, &class_lower)
             .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
@@ -2036,7 +2037,9 @@ fn reflection_property_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
         if !prop_exists_decl {
             // Check if it exists as a dynamic property on the passed-in object.
             let dyn_exists = if let Value::Object(o) = &class_arg {
-                o.borrow().has_property(prop_name.as_bytes())
+                let ob = o.borrow();
+                ob.has_property(prop_name.as_bytes())
+                    && !crate::foreach_obj::is_date_view_prop(&ob, prop_name.as_bytes())
                     && rprop(vm, &class_lower, prop_name.as_bytes()).is_none()
             } else {
                 false
@@ -2055,7 +2058,7 @@ fn reflection_property_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
         }
     }
     // `$class` is the declaring class (prop_info->ce), as getProperty() does.
-    let canonical_class = if is_user_class && !is_dynamic_prop {
+    let canonical_class = if !is_dynamic_prop && rcls(vm, &class_lower).is_some() {
         rprop(vm, &class_lower, prop_name.as_bytes())
             .map(|p| p.declaring_class.to_ascii_lowercase())
             .and_then(|d| rcls(vm, &d).map(|c| String::from_utf8_lossy(&c.name).to_string()))
@@ -3446,7 +3449,8 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     drop(ob);
                     if let Value::Object(inst) = &self_obj {
                         let io = inst.borrow();
-                        let on_instance = io.has_property(prop_name.as_bytes());
+                        let on_instance = io.has_property(prop_name.as_bytes())
+                            && !crate::foreach_obj::is_date_view_prop(&io, prop_name.as_bytes());
                         if !on_instance {
                             false
                         } else {
@@ -4032,12 +4036,16 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                         let self_obj = ob.get_property(b"__reflection_object");
                         drop(ob);
                         if let Value::Object(inst) = &self_obj {
-                            // The dynamic entries of its property table.
-                            vm.object_prop_table(inst)
+                            // The dynamic entries of its property table
+                            // (a DateTime's date/timezone are only views).
+                            let table = vm.object_prop_table(inst);
+                            let ib = inst.borrow();
+                            table
                                 .into_iter()
                                 .filter(|e| e.slot.is_none())
                                 .map(|e| e.key)
                                 .filter(|name| !name.starts_with(b"__") && name.first() != Some(&0))
+                                .filter(|name| !crate::foreach_obj::is_date_view_prop(&ib, name))
                                 .filter(|name| !visible_declared_names.iter().any(|n| n == name))
                                 .collect()
                         } else {
