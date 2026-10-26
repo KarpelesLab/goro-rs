@@ -21863,24 +21863,24 @@ impl Vm {
     ) -> Result<(), RecvFail> {
         // Push class scope temporarily for self/parent/static type checking
         // Use windows(2) to find "::" correctly even in names with embedded colons
-        let temp_scope_pushed =
-            if let Some(pos) = crate::string::find_double_colon(&func_name_lower) {
-                let class_part_lower = &func_name_lower[..pos];
-                let method_part_lower = &func_name_lower[pos + 2..];
-                let defining_class = self
-                    .classes
-                    .get(class_part_lower)
-                    .and_then(|c| c.get_method(method_part_lower))
-                    .map(|m| m.declaring_class.clone())
-                    .unwrap_or_else(|| class_part_lower.to_vec());
-                self.class_scope_stack.push(defining_class);
-                true
-            } else if let Some(ref scope) = user_fn.scope_class {
-                self.class_scope_stack.push(scope.clone());
-                true
-            } else {
-                false
-            };
+        let temp_scope_pushed = if let Some(pos) = crate::string::find_double_colon(func_name_lower)
+        {
+            let class_part_lower = &func_name_lower[..pos];
+            let method_part_lower = &func_name_lower[pos + 2..];
+            let defining_class = self
+                .classes
+                .get(class_part_lower)
+                .and_then(|c| c.get_method(method_part_lower))
+                .map(|m| m.declaring_class.clone())
+                .unwrap_or_else(|| class_part_lower.to_vec());
+            self.class_scope_stack.push(defining_class);
+            true
+        } else if let Some(ref scope) = user_fn.scope_class {
+            self.class_scope_stack.push(scope.clone());
+            true
+        } else {
+            false
+        };
         // Determine if this is a method call ($this is first implicit arg)
         let implicit_args = if user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
             1

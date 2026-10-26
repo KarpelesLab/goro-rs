@@ -263,9 +263,7 @@ impl ClassMap {
     #[inline]
     pub fn get_index_mut(&mut self, i: usize) -> Option<(&Vec<u8>, &mut ClassEntry)> {
         self.stamp = fresh_gen();
-        self.map
-            .get_index_mut(i)
-            .map(|(k, c)| (&*k, Rc::make_mut(c)))
+        self.map.get_index_mut(i).map(|(k, c)| (k, Rc::make_mut(c)))
     }
 
     #[inline]
