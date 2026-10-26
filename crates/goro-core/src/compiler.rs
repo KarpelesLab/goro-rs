@@ -22193,7 +22193,16 @@ impl Compiler {
                 ExprKind::Identifier(cn) => {
                     let class_n = self.resolve_class_name(cn);
                     let resolved = if class_n.eq_ignore_ascii_case(b"self") {
-                        self.current_class.clone().unwrap_or(class_n.clone())
+                        match &self.current_class {
+                            // (self:: forwards the called scope)
+                            Some(c) if !self.in_const_expr => {
+                                let mut v = b"self:".to_vec();
+                                v.extend_from_slice(c);
+                                v
+                            }
+                            Some(c) => c.clone(),
+                            None => class_n.clone(),
+                        }
                     } else if class_n.eq_ignore_ascii_case(b"static") {
                         b"static".to_vec()
                     } else if class_n.eq_ignore_ascii_case(b"parent") {

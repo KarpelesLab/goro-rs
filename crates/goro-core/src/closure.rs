@@ -125,7 +125,9 @@ pub fn closures_equal(a: &PhpObject, b: &PhpObject) -> bool {
     };
     let (na, ca) = closure_parts(x);
     let (nb, cb) = closure_parts(y);
-    if is_closure_fn_name(&na) || is_closure_fn_name(&nb) {
+    // (a static method closure with a forwarded called scope is fake too)
+    let user = |n: &[u8]| is_closure_fn_name(n) && !n.starts_with(b"__bound_closure_sfwd_");
+    if user(&na) || user(&nb) {
         return false;
     }
     if !na.eq_ignore_ascii_case(&nb) {
@@ -1341,6 +1343,77 @@ impl Vm {
         Some(sc.name.clone())
     }
 
+    /// The closure of the static method `n` ("Class::method") called with
+    /// `called` as its called scope (static::), when that differs from the
+    /// named class: `parent::m(...)` / `self::m(...)` / fromCallable("parent::m")
+    /// forward the caller's called scope (zend_is_callable_check_class()).
+    /// A copy of the method that runs with the called scope, still showing
+    /// as the fake closure of `n`.
+    #[inline(never)]
+    pub(crate) fn static_method_closure_called(&mut self, n: &[u8], called: &[u8]) -> Value {
+        let Some(p) = n.windows(2).position(|w| w == b"::") else {
+            return self.make_closure_object(str_val(n));
+        };
+        let (cl, ml) = (lower(&n[..p]), lower(&n[p + 2..]));
+        let called_l = lower(called);
+        if called_l == cl || !self.class_extends(&called_l, &cl) {
+            return self.make_closure_object(str_val(n));
+        }
+        let found = self
+            .classes
+            .get(&cl)
+            .and_then(|c| c.methods.get(&ml))
+            .map(|m| {
+                let mut op = m.op_array.clone();
+                if op.attributes.is_empty() && !m.attributes.is_empty() {
+                    Rc::make_mut(&mut op).attributes = m.attributes.clone();
+                }
+                (lower(&m.declaring_class), op)
+            });
+        let Some((decl, op)) = found else {
+            return self.make_closure_object(str_val(n));
+        };
+        let called_canon = self
+            .classes
+            .get(&called_l)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| called.to_vec());
+        let name = format!(
+            "__bound_closure_sfwd_{}@{}",
+            String::from_utf8_lossy(&lower(n)).replace("::", ":"),
+            String::from_utf8_lossy(&called_l)
+        )
+        .into_bytes();
+        if !self.user_functions.contains_key(&name) {
+            let mut nop = (*op).clone();
+            nop.name = name.clone();
+            nop.scope_class = Some(decl);
+            nop.closure_called_class = Some(called_canon);
+            nop.fcc_target_name = Some(n.to_vec());
+            self.user_functions.insert(name.clone(), Rc::new(nop));
+        }
+        self.make_closure_object(str_val(&name))
+    }
+
+    /// A static method closure (`"Class::method"`) re-made to run with the
+    /// called scope `called` (see static_method_closure_called()); other
+    /// closures are returned unchanged.
+    #[inline(never)]
+    fn rescope_static_closure(&mut self, clo: Value, called: &[u8]) -> Value {
+        let n = match clo.closure_inner() {
+            Some(Value::String(s)) if s.as_bytes().windows(2).any(|w| w == b"::") => {
+                s.as_bytes().to_vec()
+            }
+            _ => return clo,
+        };
+        let cl = lower(&n[..n.windows(2).position(|w| w == b"::").unwrap_or(0)]);
+        let called_l = lower(called);
+        if cl == called_l || !self.class_extends(&called_l, &cl) {
+            return clo;
+        }
+        self.static_method_closure_called(&n, called)
+    }
+
     fn fcc_static(
         &mut self,
         cls: &[u8],
@@ -1349,7 +1422,22 @@ impl Vm {
         wrapper: Value,
         scope: Option<Vec<u8>>,
     ) -> FccResult {
-        let cls: Vec<u8> = if let Some(p) = cls.strip_prefix(b"parent:") {
+        // `parent::` / `self::` forward the called scope.
+        let forward_called: Option<Vec<u8>> =
+            if cls.starts_with(b"parent:") || cls.starts_with(b"self:") {
+                self.called_class_stack.last().cloned().or_else(|| {
+                    this.as_ref().and_then(|t| match t {
+                        Value::Object(o) => Some(o.borrow().class_name.clone()),
+                        _ => None,
+                    })
+                })
+            } else {
+                None
+            };
+        let cls: Vec<u8> = if let Some(p) = cls
+            .strip_prefix(b"parent:")
+            .or_else(|| cls.strip_prefix(b"self:"))
+        {
             p.to_vec()
         } else if cls.eq_ignore_ascii_case(b"static") {
             let called = self.called_class_stack.last().cloned().or_else(|| {
@@ -1483,6 +1571,9 @@ impl Vm {
                     }
                 }
                 if is_static {
+                    if let Some(c) = forward_called {
+                        return Ok(self.static_method_closure_called(&n, &c));
+                    }
                     return Ok(self.make_closure_object(str_val(&n)));
                 }
                 match bound_this {
@@ -1738,7 +1829,17 @@ impl Vm {
                 let b = s.as_bytes().to_vec();
                 if let Some(p) = b.windows(2).position(|w| w == b"::") {
                     let cls = self.callable_class_relative(&b[..p], scope.as_deref())?;
-                    return self.resolve_callable_method(&cls, &b[p + 2..], None, this, scope);
+                    let forward = matches!(lower(&b[..p]).as_slice(), b"self" | b"parent");
+                    let called = if forward {
+                        self.called_class_stack.last().cloned()
+                    } else {
+                        None
+                    };
+                    let r = self.resolve_callable_method(&cls, &b[p + 2..], None, this, scope)?;
+                    return Ok(match called {
+                        Some(c) => self.rescope_static_closure(r, &c),
+                        None => r,
+                    });
                 }
                 let name = b.strip_prefix(b"\\").unwrap_or(&b).to_vec();
                 let l = lower(&name);
@@ -1785,18 +1886,27 @@ impl Vm {
                                 )?,
                                 m[p + 2..].to_vec(),
                             ),
-                            None => (ocls, m.clone()),
+                            None => (ocls.clone(), m.clone()),
                         };
-                        self.resolve_callable_method(
+                        let r = self.resolve_callable_method(
                             &cls,
                             &meth,
                             Some(Value::Object(o)),
                             None,
                             scope,
-                        )
+                        )?;
+                        Ok(self.rescope_static_closure(r, &ocls))
                     }
                     Some(Value::String(c)) => {
                         let cls = self.callable_class_relative(c.as_bytes(), scope.as_deref())?;
+                        let called = match lower(c.as_bytes()).as_slice() {
+                            b"self" | b"parent" => self
+                                .called_class_stack
+                                .last()
+                                .cloned()
+                                .unwrap_or_else(|| cls.clone()),
+                            _ => cls.clone(),
+                        };
                         // ["C", "self::m"] / ["C", "A::m"] (deprecated forms):
                         // the scoped class is relative to C
                         // (zend_is_callable_check_func()'s ce_org).
@@ -1805,9 +1915,10 @@ impl Vm {
                                 self.callable_class_relative(&m[..p], Some(&lower(&cls)))?,
                                 m[p + 2..].to_vec(),
                             ),
-                            None => (cls, m.clone()),
+                            None => (cls.clone(), m.clone()),
                         };
-                        self.resolve_callable_method(&cls, &meth, None, this, scope)
+                        let r = self.resolve_callable_method(&cls, &meth, None, this, scope)?;
+                        Ok(self.rescope_static_closure(r, &called))
                     }
                     _ => Err("first array member is not a valid class name or object".to_string()),
                 }
