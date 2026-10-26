@@ -316,7 +316,28 @@ impl<'a> Scanner<'a> {
         self.state = self.stack.pop().unwrap_or(St::InScripting);
     }
 
+    #[inline(always)]
     fn tok(&mut self, id: i32, start: usize, end: usize) -> Option<ScanToken> {
+        // (a single character, a number, a label, a variable or a name
+        // holds neither)
+        let (lf, cr) = if id < 256 || (T_LNUMBER..=T_VARIABLE).contains(&id) {
+            (0, false)
+        } else {
+            count_lf_cr(self.s.get(start..end).unwrap_or_default())
+        };
+        self.tok_counted(id, start, end, lf, cr)
+    }
+
+    /// tok() for a token of `lf` "\n" (`cr`: and a "\r").
+    #[inline(always)]
+    fn tok_counted(
+        &mut self,
+        id: i32,
+        start: usize,
+        end: usize,
+        lf: u32,
+        cr: bool,
+    ) -> Option<ScanToken> {
         // Advance the line counter to `start`.
         let mut line = self.line;
         if self.line_pos < start {
@@ -331,16 +352,7 @@ impl<'a> Scanner<'a> {
         self.line = line;
         self.line_pos = start;
         self.pos = end;
-        // (one pass the compiler vectorizes; "\r" are rare) (a number, a
-        // label, a variable or a name holds neither)
-        let (mut lf, mut cr) = (0u32, 0u32);
-        if !(T_LNUMBER..=T_VARIABLE).contains(&id) {
-            for &c in self.s.get(start..end).unwrap_or_default() {
-                lf += u32::from(c == b'\n');
-                cr += u32::from(c == b'\r');
-            }
-        }
-        self.counted = (start, end, lf, cr > 0);
+        self.counted = (start, end, lf, cr);
         Some(ScanToken {
             id,
             start,
@@ -348,7 +360,7 @@ impl<'a> Scanner<'a> {
             line,
             scripting: self.tok_state == St::InScripting,
             newlines: lf,
-            has_cr: cr > 0,
+            has_cr: cr,
         })
     }
 
@@ -745,6 +757,7 @@ impl<'a> Scanner<'a> {
         Some(self.tok(T_START_HEREDOC, p, end))
     }
 
+    #[inline(always)]
     fn scan_scripting(&mut self) -> Option<ScanToken> {
         let p = self.pos;
         let n = self.s.len();
@@ -756,11 +769,15 @@ impl<'a> Scanner<'a> {
         let c2 = self.at(p + 2);
         match c {
             b' ' | b'\n' | b'\r' | b'\t' => {
+                // (the newlines counted as they are scanned)
+                let (mut lf, mut cr) = (u32::from(c == b'\n'), c == b'\r');
                 let mut e = p + 1;
                 while e < n && is_ws(self.s[e]) {
+                    lf += u32::from(self.s[e] == b'\n');
+                    cr |= self.s[e] == b'\r';
                     e += 1;
                 }
-                self.tok(T_WHITESPACE, p, e)
+                self.tok_counted(T_WHITESPACE, p, e, lf, cr)
             }
             b'$' => {
                 if is_label_start(c1) && p + 1 < n {
@@ -848,17 +865,26 @@ impl<'a> Scanner<'a> {
                 while self.at(k).is_ascii_alphabetic() {
                     k += 1;
                 }
-                let word = self.s[j.min(n)..k.min(n)].to_ascii_lowercase();
-                let cast = match word.as_slice() {
-                    b"int" | b"integer" => Some(T_INT_CAST),
-                    b"float" | b"double" | b"real" => Some(T_DOUBLE_CAST),
-                    b"string" | b"binary" => Some(T_STRING_CAST),
-                    b"array" => Some(T_ARRAY_CAST),
-                    b"object" => Some(T_OBJECT_CAST),
-                    b"bool" | b"boolean" => Some(T_BOOL_CAST),
-                    b"unset" => Some(T_UNSET_CAST),
-                    b"void" => Some(T_VOID_CAST),
-                    _ => None,
+                let word = &self.s[j.min(n)..k.min(n)];
+                // (no cast type is longer than "integer")
+                let mut lower = [0u8; 7];
+                let cast = if word.is_empty() || word.len() > lower.len() {
+                    None
+                } else {
+                    let lower = &mut lower[..word.len()];
+                    lower.copy_from_slice(word);
+                    lower.make_ascii_lowercase();
+                    match &*lower {
+                        b"int" | b"integer" => Some(T_INT_CAST),
+                        b"float" | b"double" | b"real" => Some(T_DOUBLE_CAST),
+                        b"string" | b"binary" => Some(T_STRING_CAST),
+                        b"array" => Some(T_ARRAY_CAST),
+                        b"object" => Some(T_OBJECT_CAST),
+                        b"bool" | b"boolean" => Some(T_BOOL_CAST),
+                        b"unset" => Some(T_UNSET_CAST),
+                        b"void" => Some(T_VOID_CAST),
+                        _ => None,
+                    }
                 };
                 if let Some(id) = cast {
                     let mut m = k;
@@ -1036,8 +1062,17 @@ impl<'a> Scanner<'a> {
             };
             return self.tok(id, p, q);
         }
-        let word = self.s[p..e].to_ascii_lowercase();
-        match word.as_slice() {
+        // (no keyword is longer than 16 bytes)
+        let mut buf = [0u8; 16];
+        let word: &[u8] = if e - p <= buf.len() {
+            let w = &mut buf[..e - p];
+            w.copy_from_slice(&self.s[p..e]);
+            w.make_ascii_lowercase();
+            w
+        } else {
+            return self.tok(T_STRING, p, e);
+        };
+        match word {
             b"yield" => {
                 let w = self.skip_ws_comments(e);
                 if w > e
@@ -1062,7 +1097,7 @@ impl<'a> Scanner<'a> {
                 return self.tok(T_STRING, p, e);
             }
             b"public" | b"protected" | b"private" if self.starts_ci(e, b"(set)") => {
-                let id = match word.as_slice() {
+                let id = match word {
                     b"public" => T_PUBLIC_SET,
                     b"protected" => T_PROTECTED_SET,
                     _ => T_PRIVATE_SET,
@@ -1071,7 +1106,7 @@ impl<'a> Scanner<'a> {
             }
             _ => {}
         }
-        let id = keyword_id(&word).unwrap_or(T_STRING);
+        let id = keyword_id(word).unwrap_or(T_STRING);
         self.tok(id, p, e)
     }
 
@@ -1382,6 +1417,7 @@ impl<'a> Scanner<'a> {
     }
 
     /// Return the next token, or None at the end of input.
+    #[inline(always)]
     pub fn next_token(&mut self) -> Option<ScanToken> {
         loop {
             self.tok_state = self.state;
@@ -1426,6 +1462,28 @@ impl<'a> Scanner<'a> {
             }
         }
     }
+}
+
+/// The number of "\n" in `text`, and whether it holds a "\r".
+#[inline(always)]
+fn count_lf_cr(text: &[u8]) -> (u32, bool) {
+    if text.len() <= 4 {
+        let (mut lf, mut cr) = (0u32, false);
+        for &c in text {
+            lf += u32::from(c == b'\n');
+            cr |= c == b'\r';
+        }
+        return (lf, cr);
+    }
+    count_lf_cr_long(text)
+}
+
+#[inline(never)]
+fn count_lf_cr_long(text: &[u8]) -> (u32, bool) {
+    (
+        memchr::memchr_iter(b'\n', text).count() as u32,
+        memchr::memchr(b'\r', text).is_some(),
+    )
 }
 
 fn keyword_id(word: &[u8]) -> Option<i32> {
