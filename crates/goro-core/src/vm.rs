@@ -10568,6 +10568,41 @@ impl Vm {
         }
     }
 
+    /// An uncaught exception leaves the frame: the generators its variables
+    /// held are released (one nothing else references is destroyed, running
+    /// its finally blocks; an exception thrown there has the one in flight
+    /// as its previous and replaces it).
+    #[inline(never)]
+    fn release_frame_generators(
+        &mut self,
+        cvs: &mut [Value],
+        tmps: &mut [Value],
+        mut exc_val: Value,
+    ) -> Value {
+        let mut any = false;
+        for slot in cvs.iter_mut().chain(tmps.iter_mut()) {
+            if let Value::Generator(_) = slot {
+                *slot = Value::Undef;
+                any = true;
+            }
+        }
+        if !any || self.finally_generators.is_empty() {
+            return exc_val;
+        }
+        let prev = self.current_exception.take();
+        self.close_released_generators();
+        if let Some(new) = self.current_exception.take() {
+            if !new.identical(&exc_val) {
+                Self::exception_set_previous(&new, exc_val);
+                exc_val = new;
+            }
+        }
+        if self.current_exception.is_none() {
+            self.current_exception = prev;
+        }
+        exc_val
+    }
+
     /// Destroy watched generators nothing references any more: a suspended
     /// one runs its pending finally blocks (not its catch blocks) first.
     pub(crate) fn close_released_generators(&mut self) -> bool {
@@ -45291,22 +45326,7 @@ impl Vm {
                         self.chain_pending_exception(&exc_val);
                         // Close any generators in CVs/tmps before propagating the exception
                         // (in PHP, generators run their finally blocks when destroyed)
-                        for cv in cvs.iter_mut() {
-                            if let Value::Generator(gen_rc) = cv {
-                                let gen_clone = gen_rc.clone();
-                                *cv = Value::Undef;
-                                let mut generator = gen_clone.borrow_mut();
-                                generator.close(self);
-                            }
-                        }
-                        for tmp in tmps.iter_mut() {
-                            if let Value::Generator(gen_rc) = tmp {
-                                let gen_clone = gen_rc.clone();
-                                *tmp = Value::Undef;
-                                let mut generator = gen_clone.borrow_mut();
-                                generator.close(self);
-                            }
-                        }
+                        let exc_val = self.release_frame_generators(&mut cvs, &mut tmps, exc_val);
                         // Store exception and return error
                         let msg = if let Value::Object(obj) = &exc_val {
                             let obj = obj.borrow();
