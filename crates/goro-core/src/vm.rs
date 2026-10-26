@@ -49914,8 +49914,36 @@ impl Vm {
                         let hooked = hooks.is_some();
                         // The write fetch reads a hooked property through its
                         // get hook before the assignment fails.
+                        // A by-value result is an indirect modification
+                        // (zend_std_read_property() for BP_VAR_W), which the
+                        // assignment's own error then takes as previous.
+                        let mut indirect = false;
                         if let Some((true, _)) = hooks {
                             self.call_prop_get_hook(&obj_val, &class_lower, pn);
+                            if self.current_exception.is_none() && !self.last_call_by_ref {
+                                let msg = format!(
+                                    "Indirect modification of {}::${} is not allowed",
+                                    crate::value::display_class_name(&class_name),
+                                    prop_name.to_msg_string()
+                                );
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                indirect = true;
+                            }
+                        } else if hooks.is_some()
+                            && self.classes.get(&class_lower).is_some_and(|c| {
+                                c.properties
+                                    .iter()
+                                    .any(|p| p.name == pn && !p.is_static && p.is_virtual)
+                            })
+                        {
+                            let msg = format!(
+                                "Property {}::${} is write-only",
+                                crate::value::display_class_name(&class_name),
+                                prop_name.to_msg_string()
+                            );
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
                         }
                         // Unset or inaccessible from this scope: __get() serves it.
                         let overloaded = !hooked
@@ -49941,12 +49969,13 @@ impl Vm {
                             }
                         }
                         if hooked || overloaded {
-                            if self.current_exception.is_none() {
+                            if self.current_exception.is_none() || indirect {
                                 let exc = self.create_exception(
                                     b"Error",
                                     "Cannot assign by reference to overloaded object",
                                     op.line,
                                 );
+                                self.chain_pending_exception(&exc);
                                 self.current_exception = Some(exc);
                             }
                             if let Some((catch_target, _, _, _, saved_pc)) =
