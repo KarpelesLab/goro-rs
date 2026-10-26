@@ -110,7 +110,8 @@ Highlights beyond the core language:
   uri (`Uri\Rfc3986\Uri` on a uriparser port, `Uri\WhatWg\Url` on a port of lexbor's WHATWG
   URL parser), tidy (a port of tidy-html5 5.8.0 matching libtidy's output and messages),
   Zend OPcache (an in-memory script cache with the opcache_*() API, preloading and the file
-  cache's entries; no optimizer or JIT, the directives are reported as php-src does),
+  cache: `opcache.file_cache` keeps included files compiled on disk for the next processes;
+  no optimizer or JIT, the directives are reported as php-src does),
   sqlite3 and pdo_sqlite (on goro-sqlite, a pure-Rust port of SQLite 3.54.1 incl. WAL, JSON and virtual tables),
   zend_test; and the PECL extensions uuid (RFC 9562 UUIDs v1/v3/v4/v5/v6/v7, the API of
   util-linux libuuid), mailparse (RFC 822 address parsing, an incremental MIME parser with
