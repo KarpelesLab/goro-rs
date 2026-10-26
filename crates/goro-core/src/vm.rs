@@ -637,6 +637,23 @@ impl Vm {
     /// Place named arguments of a native method call at their positions.
     /// `args[offset..]` are the positional arguments. Returns Err(name) for an
     /// unknown parameter name.
+    /// "Unknown named parameter" for a native method whose frame is already
+    /// on the call stack: the error comes from the send, before the call, so
+    /// the trace must not show the method.
+    #[inline(never)]
+    pub(crate) fn unknown_named_param_outside_frame(&mut self, name: &[u8], line: u32) {
+        let msg = format!(
+            "Unknown named parameter ${}",
+            crate::string::msg_str(name)
+        );
+        let frame = self.call_stack.pop();
+        let exc = self.create_exception(b"Error", &msg, line);
+        if let Some(f) = frame {
+            self.call_stack.push(f);
+        }
+        self.current_exception = Some(exc);
+    }
+
     pub fn merge_native_named_args(
         &self,
         native_class: &[u8],
@@ -30964,13 +30981,19 @@ impl Vm {
                                             &args,
                                         ),
                                         Err(n) => {
-                                            let msg = format!(
-                                                "Unknown named parameter ${}",
-                                                crate::string::msg_str(&n)
-                                            );
-                                            let exc =
-                                                self.create_exception(b"Error", &msg, op.line);
-                                            self.current_exception = Some(exc);
+                                            if own_frame {
+                                                self.unknown_named_param_outside_frame(
+                                                    &n, op.line,
+                                                );
+                                            } else {
+                                                let msg = format!(
+                                                    "Unknown named parameter ${}",
+                                                    crate::string::msg_str(&n)
+                                                );
+                                                let exc = self
+                                                    .create_exception(b"Error", &msg, op.line);
+                                                self.current_exception = Some(exc);
+                                            }
                                             Value::Null
                                         }
                                     };
@@ -32237,12 +32260,7 @@ impl Vm {
                                     }
                                 }
                                 let result = if let Some(n) = named_err {
-                                    let msg = format!(
-                                        "Unknown named parameter ${}",
-                                        crate::string::msg_str(&n)
-                                    );
-                                    let exc = self.create_exception(b"Error", &msg, op.line);
-                                    self.current_exception = Some(exc);
+                                    self.unknown_named_param_outside_frame(&n, op.line);
                                     Value::Null
                                 } else if !named_ok {
                                     Value::Null

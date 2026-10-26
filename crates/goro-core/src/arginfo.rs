@@ -842,9 +842,19 @@ impl Vm {
                 self.call_stack
                     .push((info.name.to_string(), file, fline, shown, is_instance));
             }
+            // A bad named argument fails at the send, before the call: no
+            // frame for the method, even one its caller already pushed.
+            let hidden = if !in_call && frame.is_none() {
+                self.call_stack.pop()
+            } else {
+                None
+            };
             let exc = self.create_exception(cls, &msg, line);
             if push {
                 self.call_stack.pop();
+            }
+            if let Some(f) = hidden {
+                self.call_stack.push(f);
             }
             self.current_exception = Some(exc);
         }
