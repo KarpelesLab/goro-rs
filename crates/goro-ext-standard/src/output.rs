@@ -665,6 +665,9 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                     }
                 }
                 var_dump_value(vm, value, indent + 2, seen);
+                if vm.fatal_bailout {
+                    return;
+                }
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
             seen.remove(&akey);
@@ -698,6 +701,9 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                         }
                     }
                     var_dump_value(vm, value, indent + 2, seen);
+                    if vm.fatal_bailout {
+                        return;
+                    }
                 }
                 vm.write_output(format!("{}}}\n", prefix).as_bytes());
                 seen.remove(&oid);
@@ -831,6 +837,9 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                 // Release our borrow: __debugInfo() may modify the object
                 // (e.g. initialize a lazy object).
                 drop(obj_borrow);
+                // php_var_dump() indents before get_properties_for() runs
+                // __debugInfo() (what it prints or raises follows it).
+                vm.write_output(prefix.as_bytes());
                 let debug_result = debug_info_protected(vm, val, oid, seen);
                 obj_borrow = obj.borrow();
                 // Lazy prefix reflects the state after __debugInfo() ran.
@@ -862,15 +871,17 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                             goro_core::array::PhpArray::new(),
                         ))))
                     }
-                    Some(Value::Array(a)) => Some(Value::Array(a)),
-                    Some(_) if vm.current_exception.is_none() => {
+                    Some(Value::Array(a)) if vm.current_exception.is_none() => {
+                        Some(Value::Array(a))
+                    }
+                    // (a thrown exception leaves retval UNDEF: fatal too)
+                    _ => {
                         drop(obj_borrow);
                         let line = vm.current_line;
                         vm.emit_fatal_at("__debuginfo() must return an array", line);
                         vm.fatal_bailout = true;
                         return;
                     }
-                    other => other,
                 };
                 if let Some(Value::Array(debug_arr)) = debug_result {
                     let arr_borrow = debug_arr.borrow();
@@ -879,8 +890,8 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                     drop(obj_borrow);
                     vm.write_output(
                         format!(
-                            "{}{}object({})#{} ({}) {{\n",
-                            prefix, udbg_lazy_prefix, class_name_owned, oid, count
+                            "{}object({})#{} ({}) {{\n",
+                            udbg_lazy_prefix, class_name_owned, oid, count
                         )
                         .as_bytes(),
                     );
@@ -904,6 +915,9 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                             }
                         }
                         var_dump_value(vm, value, indent + 2, seen);
+                        if vm.fatal_bailout {
+                            return;
+                        }
                     }
                     vm.write_output(format!("{}}}\n", prefix).as_bytes());
                     seen.remove(&oid);
@@ -1057,6 +1071,9 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                     let name_str = String::from_utf8_lossy(name);
                     vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, name_str).as_bytes());
                     var_dump_value(vm, value, indent + 2, seen);
+                    if vm.fatal_bailout {
+                        return;
+                    }
                 }
                 // Show private storage property — declaring class is the
                 // closest built-in ArrayObject/ArrayIterator ancestor, not
@@ -1151,6 +1168,9 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                             }
                         }
                         var_dump_value(vm, value, indent + 2, seen);
+                        if vm.fatal_bailout {
+                            return;
+                        }
                     }
                     vm.write_output(format!("{}}}\n", prefix).as_bytes());
                     seen.remove(&oid);
@@ -1282,6 +1302,9 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                             }
                         }
                         var_dump_value(vm, value, indent + 2, seen);
+                        if vm.fatal_bailout {
+                            return;
+                        }
                     }
                     vm.write_output(format!("{}}}\n", prefix).as_bytes());
                     seen.remove(&oid);
@@ -1520,6 +1543,12 @@ fn print_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let saved_memo = PRINT_R_MEMO_OBJ.with(|k| k.take());
     let materialized = materialize_print_r(vm, &args[0], &mut std::collections::HashMap::new());
     PRINT_R_MEMO_OBJ.with(|k| k.replace(saved_memo));
+    if vm.fatal_bailout {
+        return Err(VmError {
+            message: String::new(),
+            line: vm.current_line,
+        });
+    }
     let args: &[Value] = match &materialized {
         Some(v) => std::slice::from_ref(v),
         None => args,
@@ -2689,7 +2718,7 @@ pub fn materialize_print_r(
                     .call_object_method(v, b"__debugInfo", &[])
                     .map(|r| r.deref())
                 {
-                    Some(Value::Array(a)) => a
+                    Some(Value::Array(a)) if vm.current_exception.is_none() => a
                         .borrow()
                         .iter()
                         .map(|(k, v)| (array_key_bytes(k), v.clone()))
@@ -2708,7 +2737,13 @@ pub fn materialize_print_r(
                         );
                         Vec::new()
                     }
-                    _ => Vec::new(),
+                    // anything else (or a thrown exception) is fatal
+                    _ => {
+                        let line = vm.current_line;
+                        vm.emit_fatal_at("__debuginfo() must return an array", line);
+                        vm.fatal_bailout = true;
+                        return None;
+                    }
                 }
             } else if let Some(t) = vm.spl_debug_info(o) {
                 // An SPL class's get_debug_info handler (inherited by
