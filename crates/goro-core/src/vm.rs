@@ -4238,6 +4238,52 @@ impl Vm {
         }
     }
 
+    /// zend_std_get_static_method() for a `"C::m"` / `["C", "m"]` dynamic
+    /// call of the existing method `ml`: its visibility (unless __callStatic
+    /// or, with a compatible $this, __call takes over), then abstract and
+    /// non-static methods are errors.
+    #[inline(never)]
+    fn dyn_static_callable_error(
+        &self,
+        cl: &[u8],
+        ml: &[u8],
+        this_in_scope: bool,
+    ) -> Option<String> {
+        let c = self.classes.get(cl)?;
+        let meth = c.get_method(ml)?;
+        if meth.visibility != Visibility::Public {
+            let scope = self.current_class_scope();
+            if let Some(e) = self.check_visibility(
+                meth.visibility,
+                &meth.declaring_class,
+                &c.name,
+                &String::from_utf8_lossy(&meth.name),
+                false,
+                scope.as_deref(),
+            ) {
+                let fallback = c.get_method(b"__callstatic").is_some()
+                    || (this_in_scope && c.get_method(b"__call").is_some());
+                return if fallback { None } else { Some(e) };
+            }
+        }
+        if meth.is_abstract {
+            let decl = self.class_name_for_display(&meth.declaring_class.to_ascii_lowercase());
+            return Some(format!(
+                "Cannot call abstract method {}::{}()",
+                crate::string::msg_str(decl.as_deref().unwrap_or(&meth.declaring_class)),
+                crate::string::msg_str(&meth.name)
+            ));
+        }
+        if !meth.is_static {
+            return Some(format!(
+                "Non-static method {}::{}() cannot be called statically",
+                crate::string::msg_str(&c.name),
+                crate::string::msg_str(&meth.name)
+            ));
+        }
+        None
+    }
+
     /// zend_init_dynamic_call_array(): `[$obj, 'm']()` naming a method the
     /// calling scope cannot access (and no __call() to fall back on).
     #[inline(never)]
@@ -29695,15 +29741,9 @@ impl Vm {
                                                 && matches!(cvs.first(), Some(Value::Object(o))
                                                     if { let ocl: Vec<u8> = o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect(); ocl == cl || self.class_extends(&ocl, &cl) });
                                             match c.get_method(&ml) {
-                                                Some(meth) if !meth.is_static => Some((
-                                                    b"Error",
-                                                    format!(
-                                                        "Non-static method {}::{}() cannot be called statically",
-                                                        String::from_utf8_lossy(&c.name),
-                                                        String::from_utf8_lossy(&meth.name)
-                                                    ),
-                                                )),
-                                                Some(_) => None,
+                                                Some(_) => self
+                                                    .dyn_static_callable_error(&cl, &ml, this_in_scope)
+                                                    .map(|e| (b"Error".as_slice(), e)),
                                                 None if c.get_method(b"__callstatic").is_some() => {
                                                     None
                                                 }
