@@ -9806,7 +9806,11 @@ impl Vm {
                             }
                             // Check parent chain and interfaces
                             if let Some(class_entry) = self.classes.get(&obj_class_lower) {
-                                return self.class_is_a(class_entry, &class_name_lower);
+                                // (a class_alias() of the object's own class)
+                                return self.class_is_a(class_entry, &class_name_lower)
+                                    || self.classes.get(&class_name_lower).is_some_and(|t| {
+                                        t.name.eq_ignore_ascii_case(&obj_class_lower)
+                                    });
                             }
                             // Check built-in class hierarchy
                             if is_builtin_subclass(&obj_class_lower, &class_name_lower) {
@@ -54018,8 +54022,9 @@ impl Vm {
                                 .classes
                                 .get(&parent_lower)
                                 .map(|p| p.name.clone())
-                                .filter(|n| !n.eq_ignore_ascii_case(parent_name))
+                                .filter(|n| n != parent_name)
                             {
+                                // (or spelled in another case)
                                 class.parent = Some(canon);
                             }
                         }
