@@ -708,8 +708,14 @@ impl<'a> Lexer<'a> {
                         TokenKind::Variable(var_name),
                         Span::new(self.pos as u32, self.pos as u32, self.line),
                     ));
-                    // Check for ->property access (e.g., "$obj->name")
-                    if self.peek() == Some(b'-') && self.peek_at(1) == Some(b'>') {
+                    // Check for ->property access (e.g., "$obj->name"; only
+                    // before a label: "$a->" and "$a->$b" keep the "->" as text)
+                    if self.peek() == Some(b'-')
+                        && self.peek_at(1) == Some(b'>')
+                        && self
+                            .peek_at(2)
+                            .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80)
+                    {
                         self.advance(); // consume -
                         self.advance(); // consume >
                         self.pending.push(Token::new(
@@ -2032,8 +2038,14 @@ impl<'a> Lexer<'a> {
                         Span::new(self.pos as u32, self.pos as u32, self.line),
                     ));
 
-                    // Check for ->property access
-                    if i + 1 < len && content[i] == b'-' && content[i + 1] == b'>' {
+                    // Check for ->property access (only before a label)
+                    if i + 2 < len
+                        && content[i] == b'-'
+                        && content[i + 1] == b'>'
+                        && (content[i + 2].is_ascii_alphabetic()
+                            || content[i + 2] == b'_'
+                            || content[i + 2] >= 0x80)
+                    {
                         i += 2; // skip ->
                         self.pending.push(Token::new(
                             TokenKind::Arrow,
