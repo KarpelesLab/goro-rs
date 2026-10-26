@@ -1320,7 +1320,7 @@ pub struct Vm {
     pub(crate) globals_gen: Rc<std::cell::Cell<u64>>,
     /// Globals made PHP references by `global $x` (IS_REFERENCE in the
     /// symbol table: skipped by the shutdown symbol-table pass).
-    pub(crate) global_ref_names: std::collections::HashSet<Vec<u8>>,
+    pub(crate) global_ref_names: crate::fxhash::FxHashSet<Vec<u8>>,
     /// The next executed op_array is a global-scope frame (main script,
     /// include/eval at global scope) whose CVs live in the symbol table.
     pub(crate) bind_next_frame: bool,
@@ -2049,7 +2049,7 @@ impl Vm {
             ob_pending_fatal: None,
             ob_fname: None,
             globals_gen: Rc::new(std::cell::Cell::new(0)),
-            global_ref_names: std::collections::HashSet::new(),
+            global_ref_names: Default::default(),
             bind_next_frame: false,
             bind_next_tab: None,
             hrh_cells: Vec::new(),
