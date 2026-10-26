@@ -78,6 +78,37 @@ fn lead(sep: Option<(usize, bool)>) -> usize {
     usize::from(sep.is_some_and(|(_, this)| this))
 }
 
+/// The arguments a backtrace shows for a call of `f` whose arguments moved
+/// to its variables `cvs` (a lean call's, see enter_lean_frames, or a
+/// resumed one's): the parameters' current values (from `skip`, past a
+/// method's `$this`), then the extra arguments a variadic parameter
+/// collected (copied into its array: still in `args`, of `nargs`).
+pub(crate) fn moved_frame_args(
+    f: &OpArray,
+    cvs: &[Value],
+    args: &[Value],
+    skip: usize,
+    nargs: usize,
+    out: &mut Vec<Value>,
+) {
+    match f.variadic_param {
+        Some(vi) => {
+            let vi = (vi as usize).max(skip).min(nargs);
+            if let Some(a) = cvs.get(skip..vi.min(cvs.len())) {
+                out.extend_from_slice(a);
+            }
+            if let Some(a) = args.get(vi..nargs.min(args.len())) {
+                out.extend_from_slice(a);
+            }
+        }
+        None => {
+            if let Some(a) = cvs.get(skip..nargs.min(cvs.len())) {
+                out.extend_from_slice(a);
+            }
+        }
+    }
+}
+
 /// Release the values of `slots` in order, as a frame's end does.
 #[inline]
 fn release_slots(slots: &mut Vec<Value>) {
@@ -194,7 +225,7 @@ impl Vm {
             let nargs = call.args.len();
             let base = lead(sep);
             let required = f.required_param_count as usize;
-            if nargs > f.param_count as usize
+            if (nargs > f.param_count as usize && f.variadic_param.is_none())
                 || nargs < base + required
                 || call.args[base..base + required]
                     .iter()
@@ -285,8 +316,32 @@ impl Vm {
         if keep == 1 {
             slots[0] = call.args[0].clone();
         }
-        for (d, s) in slots[keep..].iter_mut().zip(call.args[keep..].iter_mut()) {
-            std::mem::swap(d, s);
+        match f.variadic_param {
+            None => {
+                for (d, s) in slots[keep..].iter_mut().zip(call.args[keep..].iter_mut()) {
+                    std::mem::swap(d, s);
+                }
+            }
+            // The arguments from the variadic parameter's position on make
+            // its array (copies: the call keeps them, as DO_FCALL's fast
+            // path does).
+            Some(vi) => {
+                let vi = (vi as usize).max(keep);
+                let fixed = vi.min(nargs);
+                for (d, s) in slots[keep..fixed]
+                    .iter_mut()
+                    .zip(call.args[keep..fixed].iter_mut())
+                {
+                    std::mem::swap(d, s);
+                }
+                let mut rest = crate::array::PhpArray::new();
+                for arg in call.args.iter().skip(vi) {
+                    rest.push(arg.clone());
+                }
+                if let Some(slot) = slots.get_mut(vi) {
+                    *slot = Value::Array(Rc::new(RefCell::new(rest)));
+                }
+            }
         }
         self.lean_run(op_array, ip, f, sep, slots, nargs, call, cvs, tmps)
     }
@@ -310,6 +365,11 @@ impl Vm {
         let ops = &op_array.ops;
         let literals = &op_array.literals;
         let (f, sep) = self.lean_target(true)?;
+        // (a variadic function: the call is made by its DO_FCALL, the
+        // arguments then sent, see lean_call)
+        if f.variadic_param.is_some() {
+            return None;
+        }
         // (a method's `$this` leads the arguments)
         let base = lead(sep);
         // The sends, then the DO_FCALL (a nested call's INIT_* ends them).
@@ -440,7 +500,8 @@ impl Vm {
         // By-value array parameters get their own copy (nothing of the call
         // holds one any more: the frame's copy of the arguments is not made).
         let base = lead(sep);
-        for (ci, slot) in slots.iter_mut().enumerate().take(nargs).skip(base) {
+        let fixed = f.variadic_param.map_or(nargs, |vi| nargs.min(vi as usize));
+        for (ci, slot) in slots.iter_mut().enumerate().take(fixed).skip(base) {
             if let Value::Array(a) = slot {
                 if Rc::strong_count(a) > 1 && !f.by_ref_params.get(ci).copied().unwrap_or(false) {
                     let copy = crate::array::cow_copy(a);
@@ -565,8 +626,20 @@ impl Vm {
         let unused = matches!(op.result, OperandType::Unused)
             || op_array.free_mask().get(ip).is_some_and(|m| m & 4 != 0);
         let result = match vm_frame {
-            Some(_) => self.lean_return(&f, stop, &slots, &mut ctmps, unused),
-            None => None,
+            // (the extra arguments a variadic parameter collected are
+            // released after the frame too)
+            Some(_)
+                if f.variadic_param.is_none_or(|vi| {
+                    let mut budget = 256u32;
+                    call.args.iter().skip(vi as usize).all(|a| {
+                        is_plain_scalar(a)
+                            || crate::fastpath::drops_quietly_deep(a, &mut budget, &self.globals)
+                    })
+                }) =>
+            {
+                self.lean_return(&f, stop, &slots, &mut ctmps, unused)
+            }
+            _ => None,
         };
         let Some(result) = result else {
             // Handed over to DO_FCALL's general handler.
@@ -615,6 +688,13 @@ impl Vm {
             self.run_pending_destructors();
         }
         drop(vm_frame);
+        // zend_free_extra_args(): extra arguments still shared elsewhere
+        // become possible roots.
+        if let Some(vi) = f.variadic_param {
+            for a in call.args.iter().skip(vi as usize) {
+                crate::gc::on_child_released(a);
+            }
+        }
         // (DO_FCALL: the arguments' buffer is kept, the result stored)
         self.recycle_args(&mut call);
         match &result {
@@ -866,7 +946,9 @@ impl Vm {
         match &self.lean_resumed {
             // (a resumed lean call's arguments moved to the parameters:
             // what they hold now, as backtraces show them)
-            Some((cvs, _)) => args.extend_from_slice(&cvs[skip..call.args.len()]),
+            Some((cvs, _)) => {
+                moved_frame_args(&user_fn, cvs, &call.args, skip, call.args.len(), &mut args)
+            }
             None => args.extend_from_slice(&call.args[skip..]),
         }
         self.call_stack

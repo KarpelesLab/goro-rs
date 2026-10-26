@@ -319,9 +319,7 @@ impl Vm {
             let frame_this = this && matches!(slots.first(), Some(Value::Object(_)));
             let mut args = self.value_pool.pop().unwrap_or_default();
             args.clear();
-            if let Some(a) = slots.get(base..lf.nargs.min(slots.len())) {
-                args.extend_from_slice(a);
-            }
+            super::leancall::moved_frame_args(f, slots, &call.args, base, lf.nargs, &mut args);
             // (the file the call was made in: the caller's)
             let file = match k {
                 0 => self.current_file.clone(),

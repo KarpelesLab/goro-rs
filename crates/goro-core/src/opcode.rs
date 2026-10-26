@@ -804,7 +804,11 @@ impl OpArray {
             // vm::leancall)
             let plain = !self.returns_by_ref
                 && !self.is_generator
-                && self.variadic_param.is_none()
+                // (a variadic parameter by value: the call packs its
+                // arguments, see vm::leancall)
+                && self
+                    .variadic_param
+                    .is_none_or(|v| !self.by_ref_params.get(v as usize).copied().unwrap_or(false))
                 && self.attributes.is_empty()
                 && self.internal_sig.is_none()
                 && self.static_defaults.is_none()

@@ -29719,9 +29719,14 @@ impl Vm {
                                 // (a resumed lean call's arguments moved to
                                 // the parameters: what they hold now, as
                                 // backtraces show them)
-                                Some((cvs, _)) => {
-                                    frame.3.extend_from_slice(&cvs[skip..call.args.len()])
-                                }
+                                Some((cvs, _)) => leancall::moved_frame_args(
+                                    &user_fn,
+                                    cvs,
+                                    &call.args,
+                                    skip,
+                                    call.args.len(),
+                                    &mut frame.3,
+                                ),
                                 None => frame.3.extend_from_slice(&call.args[skip..]),
                             }
                         }
