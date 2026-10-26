@@ -369,12 +369,22 @@ impl Vm {
             .get_or_insert_with(Default::default)
             .prop_slot(&op_array.ops, ip)
         {
-            c.class.clear();
-            c.class.extend_from_slice(&ob.class_name);
-            c.scope = None;
-            c.plain = u8::from(matches!(result, Value::True));
-            c.slot = 0;
-            c.set = true;
+            // (two classes: the slot's `scope` holds the second one, its
+            // `slot` the answer for it; a third replaces the first)
+            let answer = u8::from(matches!(result, Value::True));
+            if c.set && c.class != ob.class_name && c.scope.is_none() {
+                c.scope = Some(ob.class_name.clone());
+                c.slot = u32::from(answer);
+            } else {
+                c.class.clear();
+                c.class.extend_from_slice(&ob.class_name);
+                c.plain = answer;
+                if !c.set {
+                    c.scope = None;
+                    c.slot = 0;
+                }
+                c.set = true;
+            }
         }
     }
 
@@ -420,6 +430,9 @@ impl Vm {
             };
             match sites.as_mut().and_then(|s| s.prop_slot(&op_array.ops, ip)) {
                 Some(c) if c.set && c.class == ob.class_name => c.plain != 0,
+                Some(c) if c.set && c.scope.as_deref() == Some(ob.class_name.as_slice()) => {
+                    c.slot != 0
+                }
                 _ => return Fast::No,
             }
         };
