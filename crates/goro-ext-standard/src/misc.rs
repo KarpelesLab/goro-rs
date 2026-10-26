@@ -8699,7 +8699,10 @@ fn context_param_check(
                 return None;
             }
             (
-                format!("{}(): supplied resource is not a valid Stream-Context resource", func),
+                format!(
+                    "{}(): supplied resource is not a valid Stream-Context resource",
+                    func
+                ),
                 true,
             )
         }
@@ -13711,11 +13714,7 @@ fn canon_fopen_mode(m: &str) -> String {
 }
 
 fn stream_mode_clean(fid: i64) -> Option<String> {
-    FILE_HANDLES.with(|h| {
-        h.borrow()
-            .get(&fid)
-            .map(|fh| canon_fopen_mode(&fh.mode))
-    })
+    FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| canon_fopen_mode(&fh.mode)))
 }
 
 /// `php_stream_get_line(stream, NULL/buf, maxlen + 1, &len)` for the
@@ -19637,9 +19636,7 @@ fn flock_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn memory_stream_stat(fh: &FileHandle, st: &mut libc::stat) {
     let in_memory = match fh.special {
         SpecialStream::Memory => true,
-        SpecialStream::Temp => fh
-            .temp_max
-            .is_none_or(|max| (st.st_size as u64) <= max),
+        SpecialStream::Temp => fh.temp_max.is_none_or(|max| (st.st_size as u64) <= max),
         _ => fh.data_meta.is_some(),
     };
     if !in_memory {
@@ -21405,7 +21402,12 @@ fn stream_context_set_option_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
 
 fn stream_context_get_options_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let ctx_val = args.first().unwrap_or(&Value::Null);
-    let fid = context_arg(vm, ctx_val, "stream_context_get_options", "stream_or_context")?;
+    let fid = context_arg(
+        vm,
+        ctx_val,
+        "stream_context_get_options",
+        "stream_or_context",
+    )?;
     let arr = STREAM_CONTEXTS.with(|c| {
         c.borrow()
             .get(&fid)
@@ -21644,7 +21646,11 @@ fn stream_is_local_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// socket_get_status(): stream_get_meta_data() under its own name.
 fn socket_get_status_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    require_resource_arg(vm, args.first().unwrap_or(&Value::Null), "socket_get_status")?;
+    require_resource_arg(
+        vm,
+        args.first().unwrap_or(&Value::Null),
+        "socket_get_status",
+    )?;
     stream_get_meta_data_fn(vm, args)
 }
 
@@ -23038,7 +23044,13 @@ fn set_file_buffer_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(f) = args.first() {
         let f = f.to_php_string();
-        let r = path_arg_nul_error(vm, f.as_bytes(), "stream_resolve_include_path", 1, "filename");
+        let r = path_arg_nul_error(
+            vm,
+            f.as_bytes(),
+            "stream_resolve_include_path",
+            1,
+            "filename",
+        );
         if let Some(e) = r {
             return Err(e);
         }
