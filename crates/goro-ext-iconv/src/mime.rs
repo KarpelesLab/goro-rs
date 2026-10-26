@@ -280,7 +280,7 @@ fn mime_encode(
                 }
                 let encoded = base64_encode(&buf);
                 if char_cnt < encoded.len() as i64 {
-                    return Err::Unknown(0);
+                    return Err::Unknown(crate::conv::last_errno());
                 }
                 out.extend_from_slice(&encoded);
                 char_cnt -= encoded.len() as i64;
@@ -701,11 +701,11 @@ fn mime_decode(out: &mut Vec<u8>, s: &[u8], enc: &[u8], mode: i64) -> (Err, usiz
                                     scan_stat = if strict { 12 } else { 0 };
                                     skip_rest = true;
                                 } else {
-                                    fail!(Err::Unknown(0));
+                                    fail!(Err::Unknown(crate::conv::last_errno()));
                                 }
                             }
                             Some(d) => {
-                                let mut e = Err::Unknown(0);
+                                let mut e = Err::Unknown(crate::conv::last_errno());
                                 if let Some(cdv) = cd.as_mut() {
                                     e = appendl(out, Some(&d), cdv);
                                     if e == Err::Success {

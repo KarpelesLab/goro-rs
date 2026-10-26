@@ -15,6 +15,32 @@ pub enum Errno {
     TooBig,
 }
 
+impl Errno {
+    /// The errno value glibc sets.
+    pub fn code(self) -> i32 {
+        match self {
+            Errno::Ilseq => 84,
+            Errno::Inval => 22,
+            Errno::TooBig => 7,
+        }
+    }
+}
+
+thread_local! {
+    /// The errno the last failing iconv_open()/iconv() call left behind
+    /// (php-src's "Unknown error (%d)" notices print errno).
+    static LAST_ERRNO: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
+/// The errno left behind by the last failing conversion call.
+pub fn last_errno() -> i32 {
+    LAST_ERRNO.with(|c| c.get())
+}
+
+fn set_errno(code: i32) {
+    LAST_ERRNO.with(|c| c.set(code));
+}
+
 /// iconv_t
 #[derive(Clone, Debug)]
 pub struct Iconv {
@@ -53,6 +79,14 @@ impl Iconv {
     /// iconv_open(tocode, fromcode): None for an unsupported conversion
     /// (EINVAL).
     pub fn open(to: &[u8], from: &[u8]) -> Option<Iconv> {
+        let cd = Self::open_inner(to, from);
+        if cd.is_none() {
+            set_errno(22);
+        }
+        cd
+    }
+
+    fn open_inner(to: &[u8], from: &[u8]) -> Option<Iconv> {
         let (to_name, to_sfx) = split_spec(to);
         let (from_name, _) = split_spec(from);
         let to_kind = charset::lookup(to_name)?;
@@ -71,6 +105,20 @@ impl Iconv {
     /// iconv(cd, &in, &inleft, &out, &outleft): converts `input[*pos..]`
     /// appending to `out`, at most `limit` bytes when given.
     pub fn conv(
+        &mut self,
+        input: &[u8],
+        pos: &mut usize,
+        out: &mut Vec<u8>,
+        limit: Option<usize>,
+    ) -> Result<(), Errno> {
+        let r = self.conv_inner(input, pos, out, limit);
+        if let Err(e) = r {
+            set_errno(e.code());
+        }
+        r
+    }
+
+    fn conv_inner(
         &mut self,
         input: &[u8],
         pos: &mut usize,
@@ -264,6 +312,7 @@ impl Iconv {
     pub fn flush(&mut self, out: &mut Vec<u8>, limit: Option<usize>) -> Result<(), Errno> {
         let b = self.enc.reset_bytes();
         if limit.is_some_and(|l| b.len() > l) {
+            set_errno(7);
             return Err(Errno::TooBig);
         }
         out.extend_from_slice(&b);
@@ -355,7 +404,11 @@ pub fn decode_all_marked(
     second: &mut Vec<bool>,
 ) -> Option<(Vec<u32>, Option<Errno>)> {
     let (name, _) = split_spec(enc);
-    let mut dec = Decoder::new(charset::lookup(name)?);
+    let Some(kind) = charset::lookup(name) else {
+        set_errno(22);
+        return None;
+    };
+    let mut dec = Decoder::new(kind);
     let mut out = Vec::with_capacity(input.len());
     let mut pos = 0;
     while pos < input.len() || dec.has_pending() {
@@ -366,8 +419,14 @@ pub fn decode_all_marked(
                 pos += n;
             }
             Dec::Shift(n) => pos += n,
-            Dec::Illegal(_) => return Some((out, Some(Errno::Ilseq))),
-            Dec::Incomplete => return Some((out, Some(Errno::Inval))),
+            Dec::Illegal(_) => {
+                set_errno(84);
+                return Some((out, Some(Errno::Ilseq)));
+            }
+            Dec::Incomplete => {
+                set_errno(22);
+                return Some((out, Some(Errno::Inval)));
+            }
         }
     }
     Some((out, None))
