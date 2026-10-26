@@ -873,8 +873,25 @@ impl Vm {
                             mdef = Some(m.clone());
                         }
                     }
+                    // A public method called by the engine goes the generic
+                    // way (its frame is at the current line, like a closure's).
+                    if !from_builtin
+                        && mdef
+                            .as_ref()
+                            .is_some_and(|m| m.visibility == crate::object::Visibility::Public)
+                    {
+                        self.ucf_call_line = Some(site_line);
+                        self.ucf_strict = false;
+                        let r = self.call_callback(cb, &args);
+                        self.ucf_call_line = None;
+                        if let Err(e) = r {
+                            fatal = Some(e);
+                        }
+                        return fatal;
+                    }
                     if let Some(m) = mdef {
-                        let sep = if this.is_some() { "->" } else { "::" };
+                        // (frames name methods Class::m; the flag tells "->")
+                        let sep = "::";
                         let decl_disp = self
                             .classes
                             .get(&m.declaring_class)

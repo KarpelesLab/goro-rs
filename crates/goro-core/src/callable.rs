@@ -803,18 +803,24 @@ impl Vm {
             Value::String(s) => add_from_method(s.as_bytes(), &mut out),
             Value::Array(arr) => {
                 let a = arr.borrow();
+                // (only a [class, method] pair names a class: an internal
+                // closure callable ["__closure_N", $captured] does not)
                 if a.len() == 2 {
-                    if let Some(Value::String(c)) = a.get_int(0).map(|v| v.deref()) {
-                        out.push(c.as_bytes().to_vec());
-                    }
                     if let Some(Value::String(m)) = a.get_int(1).map(|v| v.deref()) {
+                        if let Some(Value::String(c)) = a.get_int(0).map(|v| v.deref()) {
+                            out.push(c.as_bytes().to_vec());
+                        }
                         add_from_method(m.as_bytes(), &mut out);
                     }
                 }
             }
             _ => {}
         }
-        out.retain(|c| !matches!(lower(c).as_slice(), b"self" | b"parent" | b"static" | b""));
+        out.retain(|c| {
+            !matches!(lower(c).as_slice(), b"self" | b"parent" | b"static" | b"")
+                && !crate::closure::is_closure_fn_name(c)
+                && !c.starts_with(b"__closure_fcc_")
+        });
         out
     }
 
