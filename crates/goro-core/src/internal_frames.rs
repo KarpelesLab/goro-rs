@@ -429,12 +429,18 @@ impl Vm {
                 }
                 if p.by_ref == 1 && !matches!(a, Value::Reference(_)) {
                     let line = self.current_line;
+                    // (get_function_arg_name(): none for a variadic one)
+                    let name = if p.variadic {
+                        String::new()
+                    } else {
+                        format!(" (${})", p.name)
+                    };
                     self.emit_warning_at(
                         &format!(
-                            "{}(): Argument #{} (${}) must be passed by reference, value given",
+                            "{}(): Argument #{}{} must be passed by reference, value given",
                             info.name,
                             i + 1,
-                            p.name
+                            name
                         ),
                         line,
                     );
@@ -1413,8 +1419,14 @@ pub(crate) fn extra_named_args(
 }
 
 /// Builtins whose argument count message is not their arginfo's (see
-/// call_builtin_from_internal()).
+/// call_builtin_from_internal()), or comes after their deprecation (a
+/// deprecated function's call is reported first: zend_deprecated_function()).
 fn own_arity_message(lname: &[u8]) -> bool {
+    if let Some(f) = crate::stubs::find_function(lname) {
+        if f.flags & crate::stubs::F_DEPRECATED != 0 {
+            return true;
+        }
+    }
     matches!(
         lname,
         b"strtr"
