@@ -1603,7 +1603,10 @@ pub fn dtor_step<H: GcHost + ?Sized>(host: &mut H) -> bool {
         buffer_object(&o);
         return false;
     }
-    let zombie = !orphan && Rc::strong_count(&o) == 1 + held;
+    if !orphan {
+        dtor_drain_orphans(host);
+    }
+    let zombie = !orphan && Rc::strong_count(&o) <= 1 + held;
     if !orphan && !zombie {
         // Still alive: a possible root of the rerun.
         buffer_object(&o);
@@ -1619,6 +1622,48 @@ pub fn dtor_step<H: GcHost + ?Sized>(host: &mut H) -> bool {
         }
     });
     true
+}
+
+/// The destructor candidates the last destructor dropped the last
+/// reference to: Zend frees them (zend_objects_store_del: destructor, then
+/// free) while that destructor runs, before the destructors queued ahead
+/// of them. Their bookkeeping goes too, so what they hold is released.
+#[inline(never)]
+fn dtor_drain_orphans<H: GcHost + ?Sized>(host: &mut H) {
+    loop {
+        let found = DTOR_CTX.with(|c| {
+            let c = c.borrow();
+            let c = c.as_ref()?;
+            c.queue.iter().enumerate().find_map(|(i, w)| {
+                let o = w.upgrade()?;
+                let p = Rc::as_ptr(&o) as *const u8 as usize;
+                let held = c.base_extra.get(&p).copied().unwrap_or(0);
+                // (`o` here is our own upgrade)
+                (Rc::strong_count(&o) <= 1 + held).then_some((i, o, p))
+            })
+        });
+        let Some((i, o, p)) = found else {
+            return;
+        };
+        DTOR_CTX.with(|c| {
+            if let Some(c) = c.borrow_mut().as_mut() {
+                c.queue.remove(i);
+            }
+        });
+        if host.gc_needs_destructor(&o) {
+            host.gc_call_destructor(&o);
+        }
+        let mut one = PtrSet::default();
+        one.insert(p);
+        DTOR_CTX.with(|c| {
+            if let Some(c) = c.borrow_mut().as_mut() {
+                c.called.insert(p);
+                c.base_extra.remove(&p);
+            }
+        });
+        host.gc_forget_destructed(&one);
+        drop(o);
+    }
 }
 
 /// Every generator has a destructor (zend_generator_dtor_storage, which
