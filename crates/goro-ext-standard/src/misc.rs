@@ -15762,6 +15762,15 @@ fn header_remove_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
 }
 
+/// A php://temp stream cast to a file descriptor (php_stream_temp_cast()):
+/// its memory stream is replaced by a temporary file stream.
+pub(crate) fn temp_stream_to_file(temp_max: &mut Option<u64>) {
+    if temp_max.is_some() {
+        *temp_max = None;
+        goro_core::value::alloc_resource_id();
+    }
+}
+
 /// getallheaders(), apache_request_headers() and apache_response_headers()
 /// are functions of the web SAPIs (cli-server, cgi-fcgi, ...): the CLI
 /// SAPI has none of them.

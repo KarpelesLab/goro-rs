@@ -307,11 +307,15 @@ fn stream_file(vm: &mut Vm, fid: i64) -> Option<std::fs::File> {
     let cast = if get_us(fid).is_some() {
         Err("user-space")
     } else {
-        FILE_HANDLES.with(|h| match h.borrow().get(&fid) {
+        FILE_HANDLES.with(|h| match h.borrow_mut().get_mut(&fid) {
             None => Err("unknown"),
             Some(fh) => match fh.special {
                 SpecialStream::Memory => Err("MEMORY"),
-                SpecialStream::Temp => Err("TEMP"),
+                // (php_stream_temp_cast(): the data moves to a temporary file)
+                SpecialStream::Temp => {
+                    crate::misc::temp_stream_to_file(&mut fh.temp_max);
+                    fh.file.try_clone().map_err(|_| "TEMP")
+                }
                 SpecialStream::Output => Err("Output"),
                 _ => fh.file.try_clone().map_err(|_| "STDIO"),
             },
