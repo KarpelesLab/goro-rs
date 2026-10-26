@@ -24376,15 +24376,7 @@ impl Vm {
                         ),
                         Err(msg) => {
                             // Throw DivisionByZeroError
-                            let err_id = self.alloc_object_id();
-                            let mut err_obj =
-                                PhpObject::new(b"DivisionByZeroError".to_vec(), err_id);
-                            err_obj.set_property(
-                                b"message".to_vec(),
-                                Value::String(PhpString::from_string(msg.to_string())),
-                            );
-                            err_obj.set_property(b"code".to_vec(), Value::Long(0));
-                            let exc_val = Value::Object(Rc::new(RefCell::new(err_obj)));
+                            let exc_val = self.create_exception(b"DivisionByZeroError", msg, op.line);
                             self.current_exception = Some(exc_val);
                             if let Some((catch_target, _, _, _, saved_pc)) =
                                 exception_handlers.pop()
@@ -24505,15 +24497,7 @@ impl Vm {
                             &static_cv_keys,
                         ),
                         Err(msg) => {
-                            let err_id = self.alloc_object_id();
-                            let mut err_obj =
-                                PhpObject::new(b"DivisionByZeroError".to_vec(), err_id);
-                            err_obj.set_property(
-                                b"message".to_vec(),
-                                Value::String(PhpString::from_string(msg.to_string())),
-                            );
-                            err_obj.set_property(b"code".to_vec(), Value::Long(0));
-                            let exc_val = Value::Object(Rc::new(RefCell::new(err_obj)));
+                            let exc_val = self.create_exception(b"DivisionByZeroError", msg, op.line);
                             self.current_exception = Some(exc_val);
                             if let Some((catch_target, _, _, _, saved_pc)) =
                                 exception_handlers.pop()
