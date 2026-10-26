@@ -4148,7 +4148,7 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         } else {
             // No callback - filter falsy values
             for (key, val) in &arr_data {
-                if val.is_truthy() {
+                if vm.is_true(&val) {
                     result.set(key.clone(), val.clone());
                 }
             }
@@ -18237,7 +18237,7 @@ fn array_find_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             ArrayKey::String(s) => Value::String(s.clone()),
         };
         let result = call_user_func(vm, &[callback.clone(), value.clone(), key_val])?;
-        if result.is_truthy() {
+        if vm.is_true(&result) {
             return Ok(match key {
                 ArrayKey::Int(n) => Value::Long(*n),
                 ArrayKey::String(s) => Value::String(s.clone()),
@@ -22531,7 +22531,14 @@ fn stream_get_transports_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmErr
     }
     // (ext/openssl's socket transports)
     if vm.crypto_hooks.is_some() {
-        for name in &[b"ssl" as &[u8], b"tls", b"tlsv1.0", b"tlsv1.1", b"tlsv1.2", b"tlsv1.3"] {
+        for name in &[
+            b"ssl" as &[u8],
+            b"tls",
+            b"tlsv1.0",
+            b"tlsv1.1",
+            b"tlsv1.2",
+            b"tlsv1.3",
+        ] {
             arr.push(Value::String(PhpString::from_bytes(name)));
         }
     }
