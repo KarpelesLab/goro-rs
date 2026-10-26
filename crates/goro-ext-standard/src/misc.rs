@@ -4871,18 +4871,7 @@ fn array_fill(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// which the memory limit may refuse.
 #[inline(never)]
 fn array_init_size_check(vm: &mut Vm, n: usize, packed: bool) -> Result<(), VmError> {
-    let size = n.next_power_of_two().max(8);
-    let bytes = if packed {
-        size * 16 + 8
-    } else {
-        size * 32 + size * 2 * 4
-    };
-    let limit = goro_core::value::memory_get_limit();
-    if limit > 0 && goro_core::value::memory_get_usage().saturating_add(bytes) > limit {
-        goro_core::value::memory_alloc(bytes);
-        return Err(vm.memory_limit_fatal());
-    }
-    Ok(())
+    vm.array_init_size_check(n, packed)
 }
 
 fn array_fill_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

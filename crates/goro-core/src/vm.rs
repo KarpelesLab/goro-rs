@@ -19194,16 +19194,23 @@ impl Vm {
         Ok(())
     }
 
-    /// array_init_size(n) of a builtin's result: the packed table (n
-    /// rounded up to a power of two, 16 bytes a slot, HT_PACKED_SIZE_EX)
-    /// is allocated with the first element, over memory_limit the fatal
-    /// error comes before any element is made.
-    pub fn array_init_size_check(&mut self, n: usize) -> Result<(), VmError> {
-        if n <= 1 << 16 {
-            return Ok(());
+    /// The allocation of an array_init_size(n) array once initialised:
+    /// packed (zvals and the 2-slot hash) or mixed (buckets and a hash twice
+    /// the size), which the memory limit may refuse.
+    #[inline(never)]
+    pub fn array_init_size_check(&mut self, n: usize, packed: bool) -> Result<(), VmError> {
+        let size = n.next_power_of_two().max(8);
+        let bytes = if packed {
+            size * 16 + 8
+        } else {
+            size * 32 + size * 2 * 4
+        };
+        let limit = crate::value::memory_get_limit();
+        if limit > 0 && crate::value::memory_get_usage().saturating_add(bytes) > limit {
+            crate::value::memory_alloc(bytes);
+            return Err(self.memory_limit_fatal());
         }
-        let slots = n.checked_next_power_of_two().unwrap_or(1 << 62);
-        self.memory_check(slots.saturating_mul(16).saturating_add(8))
+        Ok(())
     }
 
     /// zend_timeout(): the "Maximum execution time" fatal error.
