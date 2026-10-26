@@ -864,7 +864,12 @@ impl PhpObject {
     /// (init_declared_props() then mark_declared()), whose class_tag() is
     /// `tag`: memory_limit is charged once.
     #[inline]
-    pub(crate) fn new_declared(class_name: Vec<u8>, object_id: u64, props: PropTable, tag: u32) -> Self {
+    pub(crate) fn new_declared(
+        class_name: Vec<u8>,
+        object_id: u64,
+        props: PropTable,
+        tag: u32,
+    ) -> Self {
         let o = Self {
             class_name,
             properties: props,

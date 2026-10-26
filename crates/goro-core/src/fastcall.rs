@@ -340,8 +340,7 @@ impl Vm {
     /// interrupts it.
     #[inline]
     pub(crate) fn skip_ctor_call(&mut self, obj: &Value, has_destruct: bool) -> bool {
-        if self.observer.is_some() || self.current_exception.is_some() || self.error_handler_threw
-        {
+        if self.observer.is_some() || self.current_exception.is_some() || self.error_handler_threw {
             return false;
         }
         // (what the DO_FCALL of the missing constructor does)
