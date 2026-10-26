@@ -3841,8 +3841,9 @@ fn h_stream_is_local(_vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmEr
         Value::String(sv) => {
             let p = sv.as_bytes();
             match scheme_len(p).and_then(|n| user_wrapper(&p[..n].to_ascii_lowercase())) {
-                Some(u) => u.is_url,
-                None => return Ok(None),
+                // (builtin wrappers served by this layer: stream_is_local())
+                Some(u) if u.native.is_none() && u.ext.is_none() => u.is_url,
+                _ => return Ok(None),
             }
         }
         _ => return Ok(None),
@@ -5865,4 +5866,32 @@ pub(crate) fn install_ext_streams() {
 /// Whether `fid` is a userspace-wrapper directory stream (PHP_STREAM_FLAG_IS_DIR).
 pub(crate) fn is_user_dir(fid: i64) -> bool {
     get_us(fid).is_some_and(|us| us.borrow().flags & FLAG_IS_DIR != 0)
+}
+
+/// stream_is_local() of a path: php_stream_locate_url_wrapper() and the
+/// wrapper's is_url (an unknown scheme warns and falls back to files).
+pub(crate) fn path_is_local(vm: &mut Vm, path: &[u8]) -> bool {
+    FN_STACK.with(|st| st.borrow_mut().push("stream_is_local"));
+    let loc = locate(vm, path, 0);
+    FN_STACK.with(|st| {
+        st.borrow_mut().pop();
+    });
+    let builtin = match &loc {
+        Loc::User(u) => u.native.is_some() || u.ext.is_some(),
+        _ => true,
+    };
+    match loc {
+        Loc::User(u) if !builtin => !u.is_url,
+        Loc::User(_) | Loc::Builtin { .. } => match scheme_len(path) {
+            Some(n) => {
+                let lower = path[..n].to_ascii_lowercase();
+                !matches!(
+                    lower.as_slice(),
+                    b"http" | b"https" | b"ftp" | b"ftps" | b"data"
+                )
+            }
+            None => true,
+        },
+        Loc::None => false,
+    }
 }

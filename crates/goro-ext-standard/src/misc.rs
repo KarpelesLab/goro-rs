@@ -16193,116 +16193,41 @@ fn resolve_dir_handle(
             );
             Ok(CURRENT_DIR_RESOURCE.with(|c| c.get()))
         }
-        Value::Long(_) => {
-            // PHP TypeError: arg is int, not resource.
-            let exc = vm.throw_type_error(format!(
-                "{}(): Argument #1 ($dir_handle) must be of type resource, int given",
-                func_name
-            ));
-            vm.current_exception = Some(exc);
-            Err(VmError {
-                message: format!(
-                    "{}(): Argument #1 ($dir_handle) must be of type resource, int given",
-                    func_name
-                ),
-                line: vm.current_line,
-            })
-        }
+        // PHP_Z_PARAM_STREAM_OR_NULL, then PHP_STREAM_FLAG_IS_DIR.
         Value::Resource(n) => {
-            let is_dir = DIR_HANDLES.with(|dh| dh.borrow().contains_key(&n.id()));
-            if is_dir {
-                Ok(Some(n.id()))
-            } else if !goro_core::value::is_open_resource(n.id()) {
-                let exc = vm.throw_type_error(format!(
-                    "{}(): Argument #1 ($dir_handle) must be an open stream resource",
-                    func_name
-                ));
-                vm.current_exception = Some(exc);
-                Err(VmError {
-                    message: format!(
-                        "{}(): Argument #1 ($dir_handle) must be an open stream resource",
-                        func_name
-                    ),
-                    line: vm.current_line,
-                })
-            } else {
-                let exc = vm.throw_type_error(format!(
-                    "{}(): Argument #1 ($dir_handle) must be a valid Directory resource",
-                    func_name
-                ));
-                vm.current_exception = Some(exc);
-                Err(VmError {
-                    message: format!(
-                        "{}(): Argument #1 ($dir_handle) must be a valid Directory resource",
-                        func_name
-                    ),
-                    line: vm.current_line,
-                })
+            let id = n.id();
+            if DIR_HANDLES.with(|dh| dh.borrow().contains_key(&id)) {
+                return Ok(Some(id));
             }
-        }
-        Value::Object(_) => {
-            if let Some(id) = dir_handle_resource_id(&val) {
-                let is_dir = DIR_HANDLES.with(|dh| dh.borrow().contains_key(&id));
-                if is_dir {
-                    Ok(Some(id))
-                } else if !goro_core::value::is_open_resource(id) {
-                    let exc = vm.throw_type_error(format!(
-                        "{}(): Argument #1 ($dir_handle) must be an open stream resource",
-                        func_name
-                    ));
-                    vm.current_exception = Some(exc);
-                    Err(VmError {
-                        message: format!(
-                            "{}(): Argument #1 ($dir_handle) must be an open stream resource",
-                            func_name
-                        ),
-                        line: vm.current_line,
-                    })
+            let is_stream = goro_core::value::is_open_resource(id)
+                && FILE_HANDLES.with(|h| h.borrow().contains_key(&id));
+            Err(dir_handle_type_error(
+                vm,
+                func_name,
+                if is_stream {
+                    "must be a valid Directory resource".to_string()
                 } else {
-                    let exc = vm.throw_type_error(format!(
-                        "{}(): Argument #1 ($dir_handle) must be a valid Directory resource",
-                        func_name
-                    ));
-                    vm.current_exception = Some(exc);
-                    Err(VmError {
-                        message: format!(
-                            "{}(): Argument #1 ($dir_handle) must be a valid Directory resource",
-                            func_name
-                        ),
-                        line: vm.current_line,
-                    })
-                }
-            } else {
-                let type_name = val.type_name();
-                let exc = vm.throw_type_error(format!(
-                    "{}(): Argument #1 ($dir_handle) must be of type resource, {} given",
-                    func_name, type_name
-                ));
-                vm.current_exception = Some(exc);
-                Err(VmError {
-                    message: format!(
-                        "{}(): Argument #1 ($dir_handle) must be of type resource, {} given",
-                        func_name, type_name
-                    ),
-                    line: vm.current_line,
-                })
-            }
+                    "must be an open stream resource".to_string()
+                },
+            ))
         }
         other => {
-            let type_name = other.type_name();
-            let exc = vm.throw_type_error(format!(
-                "{}(): Argument #1 ($dir_handle) must be of type resource, {} given",
-                func_name, type_name
-            ));
-            vm.current_exception = Some(exc);
-            Err(VmError {
-                message: format!(
-                    "{}(): Argument #1 ($dir_handle) must be of type resource, {} given",
-                    func_name, type_name
-                ),
-                line: vm.current_line,
-            })
+            let msg = format!(
+                "must be of type resource or null, {} given",
+                Vm::value_type_name(&other)
+            );
+            Err(dir_handle_type_error(vm, func_name, msg))
         }
+    }
+}
+
+fn dir_handle_type_error(vm: &mut Vm, func_name: &str, what: String) -> VmError {
+    let msg = format!("{}(): Argument #1 ($dir_handle) {}", func_name, what);
+    let exc = vm.throw_type_error(msg.clone());
+    vm.current_exception = Some(exc);
+    VmError {
+        message: msg,
+        line: vm.current_line,
     }
 }
 
@@ -20938,6 +20863,34 @@ fn type_name_of(v: &Value) -> &'static str {
     }
 }
 
+/// Z_PARAM_RESOURCE + php_stream_context_from_zval() for the stream
+/// context functions' first argument.
+#[inline(never)]
+fn context_arg(vm: &mut Vm, val: &Value, func: &str, pname: &str) -> Result<i64, VmError> {
+    let v = val.deref();
+    let msg = if !matches!(v, Value::Resource(_)) {
+        format!(
+            "{}(): Argument #1 (${}) must be of type resource, {} given",
+            func,
+            pname,
+            Vm::value_type_name(&v)
+        )
+    } else if let Some(fid) = resolve_context_id(&v) {
+        return Ok(fid);
+    } else {
+        format!(
+            "{}(): Argument #1 (${}) must be a valid stream/context",
+            func, pname
+        )
+    };
+    let exc = vm.throw_type_error(msg.clone());
+    vm.current_exception = Some(exc);
+    Err(VmError {
+        message: msg,
+        line: vm.current_line,
+    })
+}
+
 fn resolve_context_id(val: &Value) -> Option<i64> {
     let fid = val.to_long();
     // (a closed stream is no stream/context)
@@ -20949,7 +20902,9 @@ fn resolve_context_id(val: &Value) -> Option<i64> {
         return Some(fid);
     }
     // Stream resource: lazily attach default context.
-    let has_stream = FILE_HANDLES.with(|h| h.borrow().contains_key(&fid));
+    let has_stream = FILE_HANDLES.with(|h| h.borrow().contains_key(&fid))
+        || (matches!(val, Value::Resource(_))
+            && DIR_HANDLES.with(|d| d.borrow().contains_key(&fid)));
     if has_stream {
         STREAM_CONTEXTS.with(|c| {
             c.borrow_mut().insert(fid, StreamContext::default());
@@ -21098,18 +21053,7 @@ fn stream_context_create_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
 /// PHP_FUNCTION(stream_context_set_options)
 fn stream_context_set_options_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let ctx_val = args.first().unwrap_or(&Value::Null);
-    let fid = match resolve_context_id(ctx_val) {
-        Some(n) => n,
-        None => {
-            let msg = "stream_context_set_options(): Argument #1 ($context) must be a valid stream/context".to_string();
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            });
-        }
-    };
+    let fid = context_arg(vm, ctx_val, "stream_context_set_options", "context")?;
     let opts_v = args.get(1).map(|v| v.deref()).unwrap_or(Value::Null);
     if !matches!(opts_v, Value::Array(_)) {
         let msg = format!(
@@ -21151,18 +21095,7 @@ fn stream_context_set_option_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
         }
     }
     let ctx_val = args.first().unwrap_or(&Value::Null);
-    let fid = match resolve_context_id(ctx_val) {
-        Some(n) => n,
-        None => {
-            let msg = "stream_context_set_option(): Argument #1 ($context) must be a valid stream/context".to_string();
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            });
-        }
-    };
+    let fid = context_arg(vm, ctx_val, "stream_context_set_option", "context")?;
     let arg2 = args.get(1).unwrap_or(&Value::Null);
     let arg3 = args.get(2);
     let arg4 = args.get(3);
@@ -21205,7 +21138,11 @@ fn stream_context_set_option_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
         return Ok(Value::True);
     }
     // String/wrapper signature
-    if matches!(arg2, Value::String(_)) {
+    // (Z_PARAM_ARRAY_HT_OR_STR: scalars are strings)
+    if matches!(
+        arg2,
+        Value::String(_) | Value::Long(_) | Value::Double(_) | Value::True | Value::False
+    ) {
         // 2-arg form: emit deprecation, then error on missing $option_name
         if arg3.is_none() && arg4.is_none() {
             let msg = "stream_context_set_option(): Argument #3 ($option_name) cannot be null when argument #2 ($wrapper_or_options) is a string".to_string();
@@ -21251,18 +21188,7 @@ fn stream_context_set_option_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
 
 fn stream_context_get_options_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let ctx_val = args.first().unwrap_or(&Value::Null);
-    let fid = match resolve_context_id(ctx_val) {
-        Some(n) => n,
-        None => {
-            let msg = "stream_context_get_options(): Argument #1 ($stream_or_context) must be a valid stream/context".to_string();
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            });
-        }
-    };
+    let fid = context_arg(vm, ctx_val, "stream_context_get_options", "stream_or_context")?;
     let arr = STREAM_CONTEXTS.with(|c| {
         c.borrow()
             .get(&fid)
@@ -21274,18 +21200,7 @@ fn stream_context_get_options_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, V
 
 fn stream_context_set_params_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let ctx_val = args.first().unwrap_or(&Value::Null);
-    let fid = match resolve_context_id(ctx_val) {
-        Some(n) => n,
-        None => {
-            let msg = "stream_context_set_params(): Argument #1 ($context) must be a valid stream/context".to_string();
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            });
-        }
-    };
+    let fid = context_arg(vm, ctx_val, "stream_context_set_params", "context")?;
     let params = args.get(1).unwrap_or(&Value::Null);
     let mut ctx_clone = STREAM_CONTEXTS.with(|c| c.borrow().get(&fid).cloned().unwrap_or_default());
     apply_context_params(
@@ -21302,18 +21217,7 @@ fn stream_context_set_params_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
 
 fn stream_context_get_params_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let ctx_val = args.first().unwrap_or(&Value::Null);
-    let fid = match resolve_context_id(ctx_val) {
-        Some(n) => n,
-        None => {
-            let msg = "stream_context_get_params(): Argument #1 ($stream_or_context) must be a valid stream/context".to_string();
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            });
-        }
-    };
+    let fid = context_arg(vm, ctx_val, "stream_context_get_params", "context")?;
     let mut arr = PhpArray::new();
     STREAM_CONTEXTS.with(|c| {
         if let Some(ctx) = c.borrow().get(&fid) {
@@ -21480,22 +21384,45 @@ fn stream_context_set_default_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, V
     stream_context_get_default_fn(vm, args)
 }
 
-fn stream_is_local_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
-    match val {
-        Value::String(s) => {
-            let s_str = s.to_string_lossy();
-            if s_str.starts_with("http://")
-                || s_str.starts_with("https://")
-                || s_str.starts_with("ftp://")
+fn stream_is_local_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null).deref();
+    let local = if let Value::Resource(r) = &val {
+        // php_stream_from_zval(): the stream's wrapper.
+        let fid = r.id();
+        let wrapper = FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.wrapper_type.clone()));
+        match wrapper {
+            Some(w) => !matches!(w.as_str(), "http" | "ftp" | "RFC2397"),
+            None if goro_core::value::is_open_resource(fid)
+                && DIR_HANDLES.with(|d| d.borrow().contains_key(&fid)) =>
             {
-                Ok(Value::False)
-            } else {
-                Ok(Value::True)
+                true
+            }
+            None => {
+                let msg = "stream_is_local(): supplied resource is not a valid stream resource";
+                let exc = vm.throw_type_error(msg.to_string());
+                vm.current_exception = Some(exc);
+                return Err(VmError {
+                    message: msg.to_string(),
+                    line: vm.current_line,
+                });
             }
         }
-        _ => Ok(Value::True),
-    }
+    } else {
+        // try_convert_to_string()
+        if matches!(val, Value::Array(_)) {
+            let line = vm.current_line;
+            vm.emit_warning_at("Array to string conversion", line);
+        }
+        let s = vm.value_to_string_checked(&val)?;
+        if vm.current_exception.is_some() {
+            return Err(VmError {
+                message: String::new(),
+                line: vm.current_line,
+            });
+        }
+        userstream::path_is_local(vm, s.as_bytes())
+    };
+    Ok(if local { Value::True } else { Value::False })
 }
 
 fn stream_get_meta_data_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
