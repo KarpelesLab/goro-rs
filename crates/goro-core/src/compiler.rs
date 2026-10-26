@@ -17945,8 +17945,14 @@ impl Compiler {
                     let base_op = self.snapshot_cv(base_op, expr.span.line);
                     let mut current = base_op;
 
+                    // zend_delayed_compile_dim(): every key is evaluated
+                    // before the quiet fetches run (a `??=` reuses them for
+                    // its write even when a level is missing).
+                    let mut keys = Vec::with_capacity(chain.len());
                     for idx_expr in chain.iter() {
-                        let idx = self.compile_key_unsilenced(idx_expr, true)?;
+                        keys.push(self.compile_key_unsilenced(idx_expr, true)?);
+                    }
+                    for idx in keys {
                         // (snapshotted while unsilenced)
 
                         // Check offsetExists first (FETCH_DIM_IS)
