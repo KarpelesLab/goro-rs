@@ -2191,6 +2191,24 @@ impl Vm {
         let nl = lower(&new_name);
         if !self.user_functions.contains_key(&nl) {
             let mut nop = (**op).clone();
+            // A closure declared in a trait method, created in the class
+            // using the trait: its self / __CLASS__ name that class (as the
+            // imported method's do).
+            let trait_using = op
+                .scope_class
+                .as_ref()
+                .and_then(|sc| self.classes.get(sc))
+                .filter(|t| t.is_trait)
+                .map(|t| t.name.clone())
+                .zip(
+                    frame_scope
+                        .and_then(|fs| self.classes.get(fs))
+                        .filter(|c| !c.is_trait)
+                        .map(|c| c.name.clone()),
+                );
+            if let Some((trait_name, class_name)) = trait_using {
+                patch_trait_class_literals(&mut nop, &trait_name, &class_name);
+            }
             nop.name = new_name.clone();
             nop.scope_class = frame_scope.cloned();
             nop.closure_called_class = called;
@@ -2205,6 +2223,33 @@ impl Vm {
             arr.push(c);
         }
         Value::Array(Rc::new(RefCell::new(arr)))
+    }
+}
+
+/// The `Trait` / `Trait::member` literals (class_const_literals) of a
+/// function compiled in trait `trait_name` retargeted to `class_name`.
+#[inline(never)]
+fn patch_trait_class_literals(op: &mut OpArray, trait_name: &[u8], class_name: &[u8]) {
+    for i in op.class_const_literals.clone() {
+        let Some(Value::String(s)) = op.literals.get(i as usize) else {
+            continue;
+        };
+        let b = s.as_bytes();
+        let n = trait_name.len();
+        let new = if b.eq_ignore_ascii_case(trait_name) {
+            class_name.to_vec()
+        } else if b.len() > n + 2
+            && b[..n].eq_ignore_ascii_case(trait_name)
+            && &b[n..n + 2] == b"::"
+        {
+            // (a self::method() call: forwarding, in the using class's scope)
+            let mut v = b"self".to_vec();
+            v.extend_from_slice(&b[n..]);
+            v
+        } else {
+            continue;
+        };
+        op.literals[i as usize] = Value::String(PhpString::from_vec(new));
     }
 }
 

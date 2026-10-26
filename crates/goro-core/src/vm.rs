@@ -54198,8 +54198,10 @@ impl Vm {
                                             ..trait_name_original.len() + 2]
                                             == b"::"
                                     {
-                                        // self::method() call literal inside a trait method
-                                        let mut nv = class_name.to_vec();
+                                        // self::method() call literal inside a trait method:
+                                        // a forwarding call in the using class's scope
+                                        let _ = class_name;
+                                        let mut nv = b"self".to_vec();
                                         nv.extend_from_slice(
                                             &s.as_bytes()[trait_name_original.len()..],
                                         );
