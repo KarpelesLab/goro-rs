@@ -4152,8 +4152,8 @@ impl Parser {
         let e = self.pow_rest(e)?;
         let e = self.instanceof_rest(e)?;
         let e = self.binary_rest(e, 1)?;
-        let e = self.ternary_rest(e)?;
         let e = self.null_coalesce_rest(e)?;
+        let e = self.ternary_rest(e)?;
         let e = self.assignment_inner_rest(e)?;
         let e = self.assignment_rest(e)?;
         let e = self.logical_and_low_rest(e)?;
@@ -4345,7 +4345,7 @@ impl Parser {
         if self.at_lone_operand() {
             return self.parse_primary();
         }
-        let left = self.parse_null_coalesce()?;
+        let left = self.parse_ternary()?;
         self.assignment_inner_rest(left)
     }
 
@@ -4621,8 +4621,9 @@ impl Parser {
         })
     }
 
+    /// `??` binds tighter than `? :` (and is right-associative).
     fn parse_null_coalesce(&mut self) -> ParseResult<Expr> {
-        let left = self.parse_ternary()?;
+        let left = self.parse_logical_or()?;
         self.null_coalesce_rest(left)
     }
 
@@ -4643,7 +4644,7 @@ impl Parser {
     }
 
     fn parse_ternary(&mut self) -> ParseResult<Expr> {
-        let cond = self.parse_logical_or()?;
+        let cond = self.parse_null_coalesce()?;
         self.ternary_rest(cond)
     }
 
