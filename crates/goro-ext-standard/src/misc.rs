@@ -13579,13 +13579,30 @@ fn write_to_stream_inner(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
                             goro_core::value::alloc_resource_id();
                         }
                     }
-                    fh.file.write(bytes).unwrap_or_default()
+                    write_all_available(&mut fh.file, bytes)
                 } else {
                     0
                 }
             })
         }
     }
+}
+
+/// _php_stream_write_buffer(): keeps writing until everything went out or
+/// the descriptor stops accepting data (a non-blocking pipe that is full
+/// reports what was written so far).
+#[inline(never)]
+fn write_all_available<W: IoWrite + ?Sized>(w: &mut W, bytes: &[u8]) -> usize {
+    let mut done = 0;
+    while done < bytes.len() {
+        match w.write(&bytes[done..]) {
+            Ok(0) => break,
+            Ok(n) => done += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    done
 }
 
 fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -14090,10 +14107,14 @@ fn fwrite_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if !exists {
         return Ok(Value::False);
     }
-    write_to_stream(vm, fid, &filtered);
-    // PHP returns the number of bytes from the user's input that were
-    // accepted, regardless of how many post-filter bytes were emitted.
-    Ok(Value::Long(original_len as i64))
+    let n = write_to_stream(vm, fid, &filtered);
+    // A plain descriptor reports a partial write (a full non-blocking pipe).
+    let plain = FILE_HANDLES.with(|h| {
+        h.borrow()
+            .get(&fid)
+            .is_some_and(|fh| matches!(fh.special, SpecialStream::None))
+    });
+    Ok(Value::Long(if plain { n } else { original_len } as i64))
 }
 
 /// Whether `fid` names an open stream handle.
