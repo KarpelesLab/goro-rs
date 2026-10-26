@@ -785,10 +785,36 @@ impl Vm {
     // Iteration
     // ------------------------------------------------------------------
 
+    /// The object holding the table an ArrayObject / ArrayIterator works
+    /// on (the end of its USE_OTHER chain).
+    fn ao_table_owner(&self, obj: &Rc<RefCell<PhpObject>>) -> Rc<RefCell<PhpObject>> {
+        let mut cur = obj.clone();
+        for _ in 0..32 {
+            if ao_flags(&cur) & (IS_SELF | USE_OTHER) != USE_OTHER {
+                break;
+            }
+            match prop(&cur, b"__spl_array") {
+                Value::Object(o) => cur = o,
+                _ => break,
+            }
+        }
+        cur
+    }
+
+    /// How many times the table was sorted through an ArrayObject /
+    /// ArrayIterator method (sorting keeps the bucket index of every hash
+    /// iterator of the table, so their keys are stale after it).
+    fn ao_sort_epoch(&self, obj: &Rc<RefCell<PhpObject>>) -> i64 {
+        match prop(&self.ao_table_owner(obj), b"__spl_sort_epoch") {
+            Value::Long(n) => n,
+            _ => 0,
+        }
+    }
+
     /// Current (index, entry) of the iterator, resolving a stale index by key.
     fn ao_current(&self, obj: &Rc<RefCell<PhpObject>>) -> Option<(usize, ArrayKey, Value)> {
         let t = self.ao_table(obj);
-        let (mut idx, pos_key) = {
+        let (mut idx, mut pos_key, pos_epoch) = {
             let ob = obj.borrow();
             let idx = match ob.get_property(b"__spl_pos") {
                 Value::Long(n) if n >= 0 => n as usize,
@@ -798,8 +824,21 @@ impl Vm {
                 k @ (Value::Long(_) | Value::String(_)) => Some(Self::value_to_array_key(k)),
                 _ => None,
             };
-            (idx, key)
+            let epoch = match ob.get_property(b"__spl_pos_epoch") {
+                Value::Long(n) => n,
+                _ => 0,
+            };
+            (idx, key, epoch)
         };
+        if pos_key.is_some() {
+            let epoch = self.ao_sort_epoch(obj);
+            if epoch != pos_epoch {
+                // Sorted since the position was taken: the index stands.
+                pos_key = None;
+                let (_, k) = self.table_len_key_at(&t, idx);
+                self.ao_set_pos(obj, idx, k.as_ref());
+            }
+        }
         match &t {
             Table::Arr(a) => {
                 let ab = a.borrow();
@@ -828,8 +867,12 @@ impl Vm {
 
     /// Store the iterator position: the index plus the key found there (so
     /// the position survives insertions/removals); no key past the end.
-    fn ao_set_pos(obj: &Rc<RefCell<PhpObject>>, idx: usize, key: Option<&ArrayKey>) {
+    fn ao_set_pos(&self, obj: &Rc<RefCell<PhpObject>>, idx: usize, key: Option<&ArrayKey>) {
+        let epoch = self.ao_sort_epoch(obj);
         let mut ob = obj.borrow_mut();
+        if epoch != 0 || ob.has_property(b"__spl_pos_epoch") {
+            ob.set_property_slice(b"__spl_pos_epoch", Value::Long(epoch));
+        }
         ob.set_property_slice(b"__spl_pos", Value::Long(idx as i64));
         ob.set_property_slice(
             b"__spl_pos_key",
@@ -858,7 +901,7 @@ impl Vm {
     pub(crate) fn ao_rewind(&self, obj: &Rc<RefCell<PhpObject>>) {
         let t = self.ao_table(obj);
         let (_, k) = self.table_len_key_at(&t, 0);
-        Self::ao_set_pos(obj, 0, k.as_ref());
+        self.ao_set_pos(obj, 0, k.as_ref());
     }
 
     pub(crate) fn ao_next(&self, obj: &Rc<RefCell<PhpObject>>) {
@@ -876,7 +919,7 @@ impl Vm {
             }
         };
         let (_, k) = self.table_len_key_at(&t, next);
-        Self::ao_set_pos(obj, next, k.as_ref());
+        self.ao_set_pos(obj, next, k.as_ref());
     }
 
     pub(crate) fn ao_valid(&self, obj: &Rc<RefCell<PhpObject>>) -> bool {
@@ -1222,12 +1265,21 @@ impl Vm {
                 }
             }
         }
-        // The hash iterator keeps its bucket index over the sorted (and
+        // Every hash iterator of the table keeps its bucket index.
+        {
+            let owner = self.ao_table_owner(obj);
+            let epoch = match prop(&owner, b"__spl_sort_epoch") {
+                Value::Long(n) => n,
+                _ => 0,
+            };
+            set_prop(&owner, b"__spl_sort_epoch", Value::Long(epoch + 1));
+        }
+        // The sorting iterator keeps its bucket index over the sorted (and
         // compacted) table.
         if let Some(p) = phys {
             let t = self.ao_table(obj);
             let (_, k) = self.table_len_key_at(&t, p);
-            Self::ao_set_pos(obj, p, k.as_ref());
+            self.ao_set_pos(obj, p, k.as_ref());
         }
         Some(res.unwrap_or(Value::True))
     }
@@ -1741,12 +1793,12 @@ impl Vm {
                 let t = self.ao_table(obj);
                 let (len, key) = self.table_len_key_at(&t, pos.max(0) as usize);
                 if pos >= 0 && (pos as usize) < len {
-                    Self::ao_set_pos(obj, pos as usize, key.as_ref());
+                    self.ao_set_pos(obj, pos as usize, key.as_ref());
                     Value::Null
                 } else {
                     // (a non-negative position was walked to the end)
                     if pos >= 0 {
-                        Self::ao_set_pos(obj, len, None);
+                        self.ao_set_pos(obj, len, None);
                     }
                     let msg = format!("Seek position {} is out of range", pos);
                     return self.spl_throw(b"OutOfBoundsException", &msg);
