@@ -117,6 +117,28 @@ fn emit_fcc_dynamic_static_body(op: &mut OpArray, method: &[u8], args_cv: u32, l
 }
 
 /// The config of internal attribute `name` (resolved, any case).
+/// The validators of #[\Attribute] (and #[\AllowDynamicProperties] /
+/// #[\Deprecated]) on a class run when the class is compiled
+/// (zend_compile_attributes), so the first offending declaration in the
+/// file is the one reported.
+#[inline(never)]
+fn check_class_attr_validators(class: &crate::object::ClassEntry, line: u32) -> CompileResult<()> {
+    let delayed = class.attributes.iter().any(|a| {
+        let n = a.name.strip_prefix(b"\\").unwrap_or(&a.name);
+        n.eq_ignore_ascii_case(b"DelayedTargetValidation")
+    });
+    if delayed {
+        return Ok(());
+    }
+    for attr in &class.attributes {
+        let lower = attr.name.to_ascii_lowercase();
+        if let Some(message) = crate::vm::Vm::class_attribute_validation_error(class, &lower) {
+            return Err(CompileError { message, line });
+        }
+    }
+    Ok(())
+}
+
 fn internal_attribute(name: &[u8]) -> Option<InternalAttribute> {
     let n = name
         .strip_prefix(b"\\")
@@ -3347,8 +3369,12 @@ impl Compiler {
                     extends,
                     implements,
                     body,
+                    attributes,
                     ..
                 } if !name.starts_with(b"__anonymous_class_") => {
+                    // (PHP compiles top to bottom: a class's attribute
+                    // validators run before the later declarations')
+                    self.precheck_class_attrs(name, modifiers, attributes, stmt.span.line)?;
                     // Only early-bind (hoist) declarations PHP would early-bind. Others are
                     // left for the second pass to emit at their source position.
                     let qn_lower: Vec<u8> = self
@@ -3459,6 +3485,36 @@ impl Compiler {
         r.strip_prefix(b"\\")
             .unwrap_or(&r)
             .eq_ignore_ascii_case(b"Throwable")
+    }
+
+    /// check_class_attr_validators() for a class declaration seen by the
+    /// hoisting pass (in source order).
+    #[inline(never)]
+    fn precheck_class_attrs(
+        &self,
+        name: &[u8],
+        modifiers: &ClassModifiers,
+        attributes: &[goro_parser::ast::Attribute],
+        line: u32,
+    ) -> CompileResult<()> {
+        if attributes.is_empty() {
+            return Ok(());
+        }
+        let mut class = crate::object::ClassEntry::new(self.prefix_with_namespace(name));
+        class.is_abstract = modifiers.is_abstract;
+        class.is_readonly = modifiers.is_readonly;
+        class.is_interface = modifiers.is_interface;
+        class.is_trait = modifiers.is_trait;
+        class.is_enum = modifiers.is_enum;
+        for a in attributes {
+            let joined = a.name.join(&b'\\');
+            class.attributes.push(crate::object::RuntimeAttribute {
+                name: self.resolve_class_name(&joined),
+                args_op_array: OpArray::new(),
+                validation_error: None,
+            });
+        }
+        check_class_attr_validators(&class, line)
     }
 
     /// Whether an earlier declaration in this file already hoisted `qn_lower`.
@@ -6756,6 +6812,7 @@ impl Compiler {
                     self.current_parent_class = Some(self.resolve_class_name(ext));
                 }
                 class.attributes = self.compile_attributes_target(class_attributes, "class");
+                check_class_attr_validators(&class, stmt.span.line)?;
 
                 // Enums automatically implement UnitEnum (and BackedEnum if backed)
                 if modifiers.is_enum {

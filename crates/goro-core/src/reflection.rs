@@ -14472,7 +14472,8 @@ pub fn reflection_attribute_method(
                                 "Attribute::__construct(): Argument #1 ($flags) must be of type int, {} given",
                                 actual_type
                             );
-                            let exc = vm.create_exception(b"TypeError", &err_msg, call_site_line);
+                            // (zend_get_attribute_target_names: zend_throw_error)
+                            let exc = vm.create_exception(b"Error", &err_msg, call_site_line);
                             vm.current_exception = Some(exc);
                             return Some(Value::Null);
                         }
