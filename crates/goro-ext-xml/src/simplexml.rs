@@ -2099,7 +2099,7 @@ fn read_file(vm: &mut Vm, fname: &str, filename: &str, options: i64) -> Option<N
             );
             let e = parser::XmlError::simple(
                 parser::FROM_IO,
-                1549,
+                1524, // XML_IO_ENOENT
                 parser::ERR_WARNING,
                 format!(
                     "failed to load \"{}\": No such file or directory\n",

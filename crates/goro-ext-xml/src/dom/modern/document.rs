@@ -521,7 +521,7 @@ pub fn xml_load(vm: &mut Vm, a: &[Value], file: bool) -> R<Value> {
                 );
                 let mut e = XmlError::simple(
                     FROM_IO,
-                    1549,
+                    1524, // XML_IO_ENOENT
                     ERR_WARNING,
                     format!("failed to load \"{}\": No such file or directory\n", p),
                 );

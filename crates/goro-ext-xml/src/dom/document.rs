@@ -859,7 +859,7 @@ fn load_common(vm: &mut Vm, o: &Obj, a: &[Value], file: bool) -> R<Value> {
                 );
                 let mut e = XmlError::simple(
                     FROM_IO,
-                    1549,
+                    1524, // XML_IO_ENOENT
                     ERR_WARNING,
                     format!("failed to load \"{}\": No such file or directory\n", path),
                 );
@@ -955,7 +955,7 @@ fn html_load(vm: &mut Vm, o: &Obj, a: &[Value], file: bool) -> R<Value> {
                 );
                 let mut e = XmlError::simple(
                     FROM_IO,
-                    1549,
+                    1524, // XML_IO_ENOENT
                     ERR_WARNING,
                     format!("failed to load \"{}\": No such file or directory\n", src),
                 );
