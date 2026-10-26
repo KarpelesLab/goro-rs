@@ -1874,7 +1874,7 @@ pub(crate) fn stream_socket_sendto(vm: &mut Vm, args: &[Value]) -> Result<Value,
                 vm.emit_warning(&format!(
                     "{}(): Failed to parse `{}' into a valid network address",
                     F,
-                    goro_core::string::msg_str(&target)
+                    goro_core::string::msg_str(target.split(|&c| c == 0).next().unwrap_or_default())
                 ));
                 return Ok(Value::False);
             }

@@ -757,7 +757,7 @@ final class StreamBucket {
     // get_html_translation_table is registered by strings::register with proper flag handling
     vm.register_function(b"time_nanosleep", time_nanosleep_fn);
     vm.register_function(b"time_sleep_until", time_sleep_until_fn);
-    vm.register_function(b"socket_get_status", stream_get_meta_data_fn); // alias
+    vm.register_function(b"socket_get_status", socket_get_status_fn); // alias
     vm.register_function(b"set_file_buffer", set_file_buffer_fn);
     vm.register_function(
         b"stream_resolve_include_path",
@@ -14450,6 +14450,9 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn scandir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let dir = args.first().unwrap_or(&Value::Null).to_php_string();
+    if let Some(e) = path_arg_nul_error(vm, dir.as_bytes(), "scandir", 1, "directory") {
+        return Err(e);
+    }
     let dir_str = dir.to_string_lossy();
     let sort_order = args.get(1).map(|v| v.to_long()).unwrap_or(0); // 0 = ascending, 1 = descending
 
@@ -16146,6 +16149,13 @@ fn opendir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// opendir() / dir(): php_stream_opendir() of the path.
 fn opendir_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), fname, 1, "directory") {
+        return Err(e);
+    }
+    // php_stream_opendir(): an empty path fails silently.
+    if path.as_bytes().is_empty() {
+        return Ok(Value::False);
+    }
     let path_str = path.to_string_lossy();
     if let Some(pattern) = path_str.strip_prefix("glob://") {
         let names = glob_stream_entries(vm, pattern);
@@ -16562,7 +16572,13 @@ fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn clearstatcache_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn clearstatcache_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(f) = args.get(1) {
+        let f = f.to_php_string();
+        if let Some(e) = path_arg_nul_error(vm, f.as_bytes(), "clearstatcache", 2, "filename") {
+            return Err(e);
+        }
+    }
     // Stat results are not cached; the realpath cache is.
     let clear_realpath = args.first().map(|v| v.is_truthy()).unwrap_or(false);
     if clear_realpath {
@@ -18305,6 +18321,9 @@ fn linkinfo_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), "parse_ini_file", 1, "filename") {
+        return Err(e);
+    }
     let path_str = path.to_string_lossy();
     if path.as_bytes().is_empty() {
         return Err(throw_value_error_in(
@@ -19416,6 +19435,20 @@ fn flock_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // The 3rd argument ($would_block) is a ref parameter. PHP sets it to 1 if
     // the lock would block (only meaningful with LOCK_NB), and to 0 otherwise.
     let mut would_block: i64 = 0;
+    // php_stream_lock(): memory, temp and data: streams cannot lock.
+    let no_locking = FILE_HANDLES.with(|h| {
+        h.borrow().get(&fid).is_some_and(|fh| {
+            fh.user_wrapper.is_none()
+                && (fh.data_meta.is_some()
+                    || matches!(fh.special, SpecialStream::Memory | SpecialStream::Temp))
+        })
+    });
+    if no_locking {
+        if let Some(Value::Reference(r)) = args.get(2) {
+            *r.borrow_mut() = Value::Long(0);
+        }
+        return Ok(Value::False);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
@@ -21478,6 +21511,12 @@ fn stream_is_local_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(if local { Value::True } else { Value::False })
 }
 
+/// socket_get_status(): stream_get_meta_data() under its own name.
+fn socket_get_status_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    require_resource_arg(vm, args.first().unwrap_or(&Value::Null), "socket_get_status")?;
+    stream_get_meta_data_fn(vm, args)
+}
+
 fn stream_get_meta_data_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let first = args.first().unwrap_or(&Value::Null);
     // Accept either a stream resource or a directory resource.
@@ -21968,36 +22007,12 @@ fn headers_list_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 
 fn dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    let path_str = path.to_string_lossy();
-    // glob:// (php_glob_stream_opener)
-    if path_str.starts_with("glob://") {
-        let r = opendir_impl(vm, args, "dir")?;
-        return Ok(match r {
-            Value::Resource(_) => dir_class::new_directory(vm, Value::String(path.clone()), r),
-            other => other,
-        });
-    }
-    let dir_path = std::path::Path::new(&*path_str);
-    if !dir_path.is_dir() {
-        vm.emit_warning(&format!(
-            "dir({}): Failed to open directory: No such file or directory",
-            path_str
-        ));
-        return Ok(Value::False);
-    }
-    if std::fs::read_dir(dir_path).is_err() {
-        vm.emit_warning(&format!(
-            "dir({}): Failed to open directory: Permission denied",
-            path_str
-        ));
-        return Ok(Value::False);
-    }
-    let did = alloc_dir_handle(path_str.to_string());
-    Ok(dir_class::new_directory(
-        vm,
-        Value::String(path.clone()),
-        Value::resource(did),
-    ))
+    // _php_do_opendir(): the Directory object wraps the opened stream.
+    let r = opendir_impl(vm, args, "dir")?;
+    Ok(match r {
+        Value::Resource(_) => dir_class::new_directory(vm, Value::String(path), r),
+        other => other,
+    })
 }
 
 fn popen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -22890,6 +22905,13 @@ fn set_file_buffer_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(f) = args.first() {
+        let f = f.to_php_string();
+        let r = path_arg_nul_error(vm, f.as_bytes(), "stream_resolve_include_path", 1, "filename");
+        if let Some(e) = r {
+            return Err(e);
+        }
+    }
     let filename = args
         .first()
         .map(|v| v.to_php_string().to_string_lossy())

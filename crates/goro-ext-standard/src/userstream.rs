@@ -5097,7 +5097,10 @@ fn h_stream_wrapper_restore(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>
     if !is_builtin(&lower) {
         warn(
             vm,
-            &format!("{}:// never existed, nothing to restore", lossy(&protocol)),
+            &format!(
+                "{}:// never existed, nothing to restore",
+                lossy(protocol.split(|&c| c == 0).next().unwrap_or_default())
+            ),
         );
         return Ok(Some(Value::False));
     }

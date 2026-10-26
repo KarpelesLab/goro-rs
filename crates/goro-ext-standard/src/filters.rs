@@ -409,7 +409,13 @@ pub fn create_filter(
     let (key, user_class) = match find_factory(name) {
         Some(f) => f,
         None => {
-            docref_warning(vm, &format!("Unable to locate filter \"{}\"", lossy(name)));
+            docref_warning(
+                vm,
+                &format!(
+                    "Unable to locate filter \"{}\"",
+                    lossy(name.split(|&c| c == 0).next().unwrap_or_default())
+                ),
+            );
             return Ok(None);
         }
     };

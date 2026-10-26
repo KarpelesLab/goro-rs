@@ -322,7 +322,8 @@ pub fn verified_flags(lname: &[u8]) -> u8 {
     let t = verified::VERIFIED;
     t.binary_search_by(|(n, _)| n.as_bytes().cmp(lname))
         .map(|i| t[i].1)
-        .unwrap_or_else(|_| extra_verified_flags(lname))
+        .unwrap_or(0)
+        | extra_verified_flags(lname)
 }
 
 /// Functions the verifier cannot match to a single zpp block but whose
@@ -351,8 +352,36 @@ fn extra_verified_flags(lname: &[u8]) -> u8 {
         b"lstat",
         b"stat",
     ];
-    if FILE_FUNCTIONS.contains(&lname) {
+    // ext/standard/file.c's PHP_Z_PARAM_STREAM functions: the stream, then
+    // the stub's typed parameters.
+    const STREAM_FUNCTIONS: &[&[u8]] = &[
+        b"fclose",
+        b"feof",
+        b"fflush",
+        b"fgetc",
+        b"fgets",
+        b"fpassthru",
+        b"fputs",
+        b"fread",
+        b"fseek",
+        b"ftell",
+        b"fwrite",
+        b"rewind",
+    ];
+    // A path, then an optional int, then Z_PARAM_RESOURCE_OR_NULL(context);
+    // and the filter functions (stream, string, int, zval).
+    const PATH_CONTEXT_FUNCTIONS: &[&[u8]] = &[
+        b"dir",
+        b"file",
+        b"opendir",
+        b"scandir",
+        b"stream_filter_append",
+        b"stream_filter_prepend",
+    ];
+    if FILE_FUNCTIONS.contains(&lname) || lname == b"ob_get_status" {
         CHECK_ARITY | CHECK_TYPES
+    } else if STREAM_FUNCTIONS.contains(&lname) || PATH_CONTEXT_FUNCTIONS.contains(&lname) {
+        CHECK_ARITY | CHECK_TYPES | CHECK_PAST_STOP | CHECK_RESOURCE
     } else {
         0
     }
@@ -398,7 +427,31 @@ fn zpp_number_param(info: &FuncInfo, i: usize) -> bool {
 #[inline(never)]
 fn zpp_stream_param(info: &FuncInfo, i: usize, v: &Value) -> Option<ZppError> {
     const STREAM_PARAMS: &[&str] = &[
+        "fclose",
+        "feof",
+        "fflush",
+        "fgetc",
+        "fgetcsv",
+        "fgets",
+        "flock",
+        "fpassthru",
         "fprintf",
+        "fputcsv",
+        "fputs",
+        "fread",
+        "fseek",
+        "ftell",
+        "ftruncate",
+        "fwrite",
+        "rewind",
+        "stream_filter_append",
+        "stream_filter_prepend",
+        "stream_get_contents",
+        "stream_get_line",
+        "stream_set_blocking",
+        "stream_set_chunk_size",
+        "stream_set_timeout",
+        "stream_socket_shutdown",
         "stream_copy_to_stream",
         "stream_socket_enable_crypto",
         "stream_socket_get_name",

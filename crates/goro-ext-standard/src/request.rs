@@ -2070,6 +2070,13 @@ fn move_uploaded_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
         .get(1)
         .map(|v| v.to_php_string())
         .unwrap_or_else(|| PhpString::from_bytes(b""));
+    for (n, name, p) in [(1, "from", &from), (2, "to", &to)] {
+        if let Some(e) =
+            crate::misc::path_arg_nul_error(vm, p.as_bytes(), "move_uploaded_file", n, name)
+        {
+            return Err(e);
+        }
+    }
     if !is_uploaded(from.as_bytes()) {
         return Ok(Value::False);
     }
