@@ -51,11 +51,28 @@ pub struct Unsupported;
 
 type Res<T> = Result<T, Unsupported>;
 
+/// How deeply arrays and op arrays may nest in what is stored (the
+/// encoder and the decoder recurse).
+const MAX_DEPTH: u32 = 128;
+
 pub(crate) struct W {
     buf: Vec<u8>,
+    depth: u32,
 }
 
 impl W {
+    #[inline]
+    fn enter(&mut self) -> Res<()> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(Unsupported);
+        }
+        Ok(())
+    }
+    #[inline]
+    fn leave(&mut self) {
+        self.depth -= 1;
+    }
     #[inline]
     fn u64(&mut self, mut v: u64) {
         while v >= 0x80 {
@@ -94,9 +111,22 @@ pub(crate) struct R<'a> {
     data: &'a [u8],
     pos: usize,
     remap: Remap,
+    depth: u32,
 }
 
 impl<'a> R<'a> {
+    #[inline]
+    fn enter(&mut self) -> Res<()> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(Unsupported);
+        }
+        Ok(())
+    }
+    #[inline]
+    fn leave(&mut self) {
+        self.depth -= 1;
+    }
     #[inline]
     fn u8(&mut self) -> Res<u8> {
         let b = *self.data.get(self.pos).ok_or(Unsupported)?;
@@ -214,6 +244,17 @@ fn find_generated_name(s: &[u8], from: usize) -> Option<(usize, usize, bool, usi
     ];
     let mut i = from;
     while i + 1 < s.len() {
+        // (8 bytes at a time while none is a '_' or a NUL)
+        if let Some(w) = s.get(i..i + 8) {
+            let v = u64::from_le_bytes(w.try_into().unwrap());
+            const ONES: u64 = 0x0101_0101_0101_0101;
+            const HIGH: u64 = 0x8080_8080_8080_8080;
+            let zero = |x: u64| x.wrapping_sub(ONES) & !x & HIGH;
+            if zero(v) == 0 && zero(v ^ (ONES * b'_' as u64)) == 0 {
+                i += 8;
+                continue;
+            }
+        }
         let rest = &s[i..];
         let found = match (rest[0], rest[1]) {
             (0, b'm') if rest.starts_with(b"\0main#") => Some((6, true)),
@@ -493,6 +534,7 @@ impl Enc for Value {
             }
             Value::Array(a) => {
                 w.u8(7);
+                w.enter()?;
                 let a = a.try_borrow().map_err(|_| Unsupported)?;
                 w.u64(a.len() as u64);
                 w.i64(a.next_free_key());
@@ -509,6 +551,7 @@ impl Enc for Value {
                     }
                     v.enc(w)?;
                 }
+                w.leave();
             }
             _ => return Err(Unsupported),
         }
@@ -530,6 +573,7 @@ impl Dec for Value {
             }
             6 => Value::String(PhpString::dec(r)?),
             7 => {
+                r.enter()?;
                 let n = r.len()?;
                 let next = r.i64()?;
                 let mut a = PhpArray::with_capacity(n);
@@ -542,6 +586,7 @@ impl Dec for Value {
                     a.set(k, Value::dec(r)?);
                 }
                 a.set_next_free_key(next);
+                r.leave();
                 Value::Array(Rc::new(RefCell::new(a)))
             }
             _ => return Err(Unsupported),
@@ -1043,6 +1088,7 @@ impl Enc for OpArray {
         if internal_sig.is_some() {
             return Err(Unsupported);
         }
+        w.enter()?;
         ops.enc(w)?;
         literals.enc(w)?;
         cv_names.enc(w)?;
@@ -1079,11 +1125,14 @@ impl Enc for OpArray {
         closure_params.enc(w)?;
         fcc_desc.enc(w)?;
         closure_called_class.enc(w)?;
-        origin_id.enc(w)
+        origin_id.enc(w)?;
+        w.leave();
+        Ok(())
     }
 }
 impl Dec for OpArray {
     fn dec(r: &mut R) -> Res<Self> {
+        r.enter()?;
         let mut o = OpArray::new();
         o.ops = Vec::dec(r)?;
         o.literals = Vec::dec(r)?;
@@ -1125,6 +1174,7 @@ impl Dec for OpArray {
         // OpArray::new() gave is fresh in this process.
         let old = u32::dec(r)?;
         o.origin_id = *r.remap.origins.entry(old).or_insert(o.origin_id);
+        r.leave();
         Ok(o)
     }
 }
@@ -1209,6 +1259,7 @@ pub fn encode(
 ) -> Option<Vec<u8>> {
     let mut w = W {
         buf: Vec::with_capacity(64 * 1024),
+        depth: 0,
     };
     w.buf.resize(HEADER_LEN, 0);
     let body = (|| -> Res<()> {
@@ -1267,6 +1318,7 @@ pub fn decode(path: &str, data: &[u8]) -> Option<Compiled> {
         data: payload,
         pos: 0,
         remap: Remap::default(),
+        depth: 0,
     };
     let r = &mut r;
     if r.raw().ok()? != path.as_bytes() {

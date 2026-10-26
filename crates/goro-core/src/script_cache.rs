@@ -586,7 +586,10 @@ pub fn file_cache_store_compiled(
     let Some((bin, mtime, size)) = file_cache_storable(path) else {
         return;
     };
-    match crate::file_cache::encode(path, mtime, size, op_array, classes, diags) {
+    let data = crate::stack::with_room(|| {
+        crate::file_cache::encode(path, mtime, size, op_array, classes, diags)
+    });
+    match data.ok().flatten() {
         Some(data) => file_cache_write(&bin, &data),
         None => file_cache_write(&bin, &marker(mtime.0, size)),
     }
@@ -620,7 +623,9 @@ pub fn file_cache_load(path: &str) -> Option<Rc<Compiled>> {
             return None;
         }
     }
-    let compiled = Rc::new(crate::file_cache::decode(path, &data)?);
+    // (on a fresh stack segment when this one is nearly used up)
+    let compiled = crate::stack::with_room(|| crate::file_cache::decode(path, &data)).ok()??;
+    let compiled = Rc::new(compiled);
     if cfg.enabled && (cfg.record_warnings || compiled.diags.is_empty()) && !is_blacklisted(path) {
         let key = cache_key(path, &cfg);
         let size = estimate_size(&compiled.op_array);
