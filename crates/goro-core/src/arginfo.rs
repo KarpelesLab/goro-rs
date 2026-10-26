@@ -340,7 +340,8 @@ pub fn verified_flags(lname: &[u8]) -> u8 {
     // implode() calls are frameless (ZEND_FRAMELESS_FUNCTION(implode, n)),
     // whose argument parsing differs from the stub's: implode() checks its
     // argument types itself.
-    if lname == b"implode" {
+    // (simplexml_import_dom()'s "C!" class name: checked by the function)
+    if lname == b"implode" || lname == b"simplexml_import_dom" {
         return CHECK_ARITY;
     }
     let t = verified::VERIFIED;
@@ -391,6 +392,18 @@ fn extra_verified_flags(lname: &[u8]) -> u8 {
         b"ftell",
         b"fwrite",
         b"rewind",
+        // (ext/zlib's aliases of them)
+        b"gzclose",
+        b"gzeof",
+        b"gzgetc",
+        b"gzgets",
+        b"gzpassthru",
+        b"gzputs",
+        b"gzread",
+        b"gzrewind",
+        b"gzseek",
+        b"gztell",
+        b"gzwrite",
     ];
     // A path, then an optional int, then Z_PARAM_RESOURCE_OR_NULL(context);
     // and the filter functions (stream, string, int, zval).
@@ -404,6 +417,9 @@ fn extra_verified_flags(lname: &[u8]) -> u8 {
     ];
     if FILE_FUNCTIONS.contains(&lname) || lname == b"ob_get_status" {
         CHECK_ARITY | CHECK_TYPES
+    } else if matches!(lname, b"readdir" | b"rewinddir" | b"closedir") {
+        // (their ?resource $dir_handle defaults to the last opened one)
+        CHECK_ARITY
     } else if STREAM_FUNCTIONS.contains(&lname) || PATH_CONTEXT_FUNCTIONS.contains(&lname) {
         CHECK_ARITY | CHECK_TYPES | CHECK_PAST_STOP | CHECK_RESOURCE
     } else {

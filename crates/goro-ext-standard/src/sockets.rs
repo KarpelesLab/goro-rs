@@ -1733,6 +1733,10 @@ pub(crate) fn stream_socket_accept(vm: &mut Vm, args: &[Value]) -> Result<Value,
 pub(crate) fn stream_socket_get_name(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     const F: &str = "stream_socket_get_name";
     check_arity(vm, F, args, 2, 2)?;
+    if crate::misc::is_dir_handle(&args[0]) {
+        zpp_bool(vm, F, 2, "remote", &args[1])?;
+        return Ok(Value::False);
+    }
     let fid = require_open_stream_arg(vm, &args[0], F, 1, "socket")?;
     let want_peer = zpp_bool(vm, F, 2, "remote", &args[1])?;
     let Some((_, fd)) = sock_of(fid) else {
@@ -1990,6 +1994,9 @@ pub(crate) fn stream_socket_recvfrom(vm: &mut Vm, args: &[Value]) -> Result<Valu
 pub(crate) fn stream_socket_shutdown(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     const F: &str = "stream_socket_shutdown";
     check_arity(vm, F, args, 2, 2)?;
+    if crate::misc::is_dir_handle(&args[0]) {
+        return Ok(Value::False);
+    }
     let fid = require_open_stream(vm, &args[0], F)?;
     let how = zpp_long(vm, F, 2, "mode", &args[1], false)?.unwrap_or(0);
     if !(0..=2).contains(&how) {
@@ -2133,6 +2140,9 @@ pub(crate) fn socket_set_timeout(vm: &mut Vm, args: &[Value]) -> Result<Value, V
 
 fn stream_set_timeout_as(vm: &mut Vm, f: &str, args: &[Value]) -> Result<Value, VmError> {
     check_arity(vm, f, args, 2, 3)?;
+    if crate::misc::is_dir_handle(&args[0]) {
+        return Ok(Value::False);
+    }
     let fid = require_open_stream(vm, &args[0], f)?;
     let mut sec = zpp_long(vm, f, 2, "seconds", &args[1], false)?.unwrap_or(0);
     let mut usec = 0;

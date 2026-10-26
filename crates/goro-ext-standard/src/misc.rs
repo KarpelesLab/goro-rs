@@ -7691,7 +7691,10 @@ fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    require_open_stream(vm, &args[0], "fprintf")?;
+    let dir = is_dir_handle(&args[0]);
+    if !dir {
+        require_open_stream(vm, &args[0], "fprintf")?;
+    }
     validate_fmt_arg2(vm, "fprintf", &args[1])?;
     crate::strings::deprecate_null_format(vm, "fprintf", 2, args.get(1));
     let fid = args[0].to_long();
@@ -7701,7 +7704,11 @@ fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let len = formatted.len();
 
     // php_stream_write() on the stream (filters, read buffer, sockets).
-    if has_file_handle(fid) {
+    if dir {
+        // (a directory stream has no write op; the length is returned)
+        let line = vm.current_line;
+        vm.emit_notice_at("fprintf(): Stream is not writable", line);
+    } else if has_file_handle(fid) {
         stream_write(vm, "fprintf", &args[0], &formatted);
     } else {
         vm.write_output(&formatted);
@@ -7723,7 +7730,10 @@ fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    require_open_stream(vm, &args[0], "vfprintf")?;
+    let dir = is_dir_handle(&args[0]);
+    if !dir {
+        require_open_stream(vm, &args[0], "vfprintf")?;
+    }
     validate_fmt_arg2(vm, "vfprintf", &args[1])?;
     crate::strings::deprecate_null_format(vm, "vfprintf", 2, args.get(1));
     validate_values_arg3(vm, "vfprintf", &args[2])?;
@@ -7739,7 +7749,10 @@ fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         crate::strings::do_sprintf_vm_named_partial(vm, "vfprintf", &format_args)?;
     let len = formatted.len();
 
-    if has_file_handle(fid) {
+    if dir {
+        let line = vm.current_line;
+        vm.emit_notice_at("vfprintf(): Stream is not writable", line);
+    } else if has_file_handle(fid) {
         stream_write(vm, "vfprintf", &args[0], &formatted);
     } else {
         vm.write_output(&formatted);
@@ -20915,6 +20928,9 @@ fn getopt_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 // Stream stubs
 fn stream_set_write_buffer_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if is_dir_handle(args.first().unwrap_or(&Value::Null)) {
+        return Ok(Value::Long(-1));
+    }
     let func = called_as(vm, "stream_set_write_buffer");
     let fid = require_open_stream(vm, args.first().unwrap_or(&Value::Null), &func)?;
     // PHP_STREAM_OPTION_WRITE_BUFFER: only a FILE*-backed stream (popen())
@@ -20923,6 +20939,9 @@ fn stream_set_write_buffer_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
     Ok(Value::Long(if popened { 0 } else { -1 }))
 }
 fn stream_set_read_buffer_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if is_dir_handle(args.first().unwrap_or(&Value::Null)) {
+        return Ok(Value::Long(0));
+    }
     require_open_stream(
         vm,
         args.first().unwrap_or(&Value::Null),
@@ -22429,7 +22448,12 @@ fn stream_get_line_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn stream_set_chunk_size_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
-    let fid = require_open_stream(vm, arg, "stream_set_chunk_size")?;
+    let dir = is_dir_handle(arg);
+    let fid = if dir {
+        0
+    } else {
+        require_open_stream(vm, arg, "stream_set_chunk_size")?
+    };
     let size = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     if size <= 0 {
         let msg = "stream_set_chunk_size(): Argument #2 ($size) must be greater than 0".to_string();
@@ -22593,6 +22617,11 @@ thread_local! {
 }
 
 fn pclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // (any stream: closed as fclose() would, the close's result is 0)
+    if is_dir_handle(args.first().unwrap_or(&Value::Null)) {
+        closedir_fn(vm, &args[..1])?;
+        return Ok(Value::Long(0));
+    }
     let fid = require_open_stream_arg(
         vm,
         args.first().unwrap_or(&Value::Null),
@@ -22600,6 +22629,10 @@ fn pclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         1,
         "handle",
     )?;
+    if !POPEN_CHILDREN.with(|p| p.borrow().contains_key(&fid)) {
+        fclose_fn(vm, &args[..1])?;
+        return Ok(Value::Long(0));
+    }
     // Closing our end of the pipe lets the child finish.
     FILE_HANDLES.with(|h| h.borrow_mut().remove(&fid));
     goro_core::value::close_resource(fid);
@@ -23476,6 +23509,9 @@ fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, 
 
 fn stream_supports_lock_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
+    if is_dir_handle(arg) {
+        return Ok(Value::False);
+    }
     let fid = require_open_stream(vm, arg, "stream_supports_lock")?;
     // PHP_STREAM_OPTION_LOCKING: plain files (and descriptor streams);
     // memory/temp and data: streams have no lock support.
