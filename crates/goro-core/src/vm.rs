@@ -4355,6 +4355,18 @@ impl Vm {
         last_private
     }
 
+    /// The declaring class of typed instance property `prop` of an internal
+    /// class's stub (ReflectionClass::$name) in the hierarchy of
+    /// `class_lower`: an unset one is uninitialized, not undefined.
+    #[inline(never)]
+    pub(crate) fn unset_internal_typed_prop(&self, class_lower: &[u8], prop: &[u8]) -> Option<Vec<u8>> {
+        let scope = self.current_class_scope().map(|s| s.to_ascii_lowercase());
+        match self.find_property_def_walk(class_lower, prop, scope.as_deref()) {
+            Some((_, decl, _, Some(_), _)) => Some(decl),
+            _ => None,
+        }
+    }
+
     /// The class whose `properties` declare the instance properties of
     /// class `lower`: its entry, or for an internal class (also one an
     /// extension registers as a bare entry) the stub's view of it.
@@ -58352,26 +58364,33 @@ impl Vm {
                                     Value::Null
                                 } else {
                                     // Check if property was declared as typed in the class (unset typed property)
-                                    let typed_prop = self.classes.get(&class_lower).and_then(|c| {
-                                        c.properties.iter().find(|p| {
-                                            p.name == prop_name.as_bytes()
-                                                && p.property_type.is_some()
-                                                && !p.is_static
+                                    let typed_prop = self
+                                        .classes
+                                        .get(&class_lower)
+                                        .and_then(|c| {
+                                            c.properties.iter().find(|p| {
+                                                p.name == prop_name.as_bytes()
+                                                    && p.property_type.is_some()
+                                                    && !p.is_static
+                                            })
                                         })
-                                    });
-                                    if let Some(tp) = typed_prop {
+                                        .map(|tp| tp.declaring_class.clone())
+                                        .or_else(|| {
+                                            self.unset_internal_typed_prop(
+                                                &class_lower,
+                                                prop_name.as_bytes(),
+                                            )
+                                        });
+                                    if let Some(tp_decl) = typed_prop {
                                         // Typed property was unset — throw Error
                                         let class_display = self
-                                            .classes
-                                            .get(&tp.declaring_class.to_ascii_lowercase())
-                                            .map(|c| crate::value::display_class_name(&c.name))
+                                            .class_name_for_display(&tp_decl.to_ascii_lowercase())
+                                            .map(|n| crate::value::display_class_name(&n))
                                             .unwrap_or_else(|| {
                                                 crate::value::display_class_name(&class_name_orig)
                                             });
                                         let prop_display =
                                             crate::string::msg_str(prop_name.as_bytes());
-                                        let _type_name = self
-                                            .param_type_name(tp.property_type.as_ref().unwrap());
                                         let msg = format!(
                                             "Typed property {}::${} must not be accessed before initialization",
                                             class_display, prop_display
