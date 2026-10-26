@@ -685,6 +685,8 @@ impl PropIcs {
                         (&o.op2, true)
                     }
                     OpCode::PropertySet => (&o.result, false),
+                    // (the fetches of `$cv->p++` and `$cv->p[k] = v`)
+                    OpCode::PropertyGetIncDec | OpCode::PropertyGetW => (&o.op2, false),
                     _ => return u16::MAX,
                 };
                 if (matches!(o.op1, OperandType::Cv(_))

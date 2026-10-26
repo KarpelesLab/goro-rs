@@ -3973,6 +3973,7 @@ impl crate::vm::Vm {
         }
         let opc = op.opcode;
         let write = opc == OpCode::PropertySet;
+        let is_isset = matches!(opc, OpCode::PropertyIsset | OpCode::PropertyIssetFetch);
         let OperandType::Const(ni) = (if write { op.result } else { op.op2 }) else {
             return None;
         };
@@ -4018,6 +4019,21 @@ impl crate::vm::Vm {
             set_plain(&mut obm.properties.get_mut(slot)?.1, v);
             return Some(Fast::Done);
         }
+        match opc {
+            // (++/-- of an object: the general handler checks readonly)
+            OpCode::PropertyGetIncDec if matches!(cur, Value::Object(_)) => return None,
+            OpCode::PropertyGetW => {
+                if !matches!(cur, Value::Array(_)) {
+                    return None;
+                }
+                drop(ob);
+                return Some(match self.prop_dim_write(op_array, ip, obj, slot, cvs, tmps) {
+                    Fast::No => prop_fetch_w(obj, slot, op, tmps),
+                    f => f,
+                });
+            }
+            _ => {}
+        }
         let v = match cur {
             Value::Undef => return None,
             // (a property bound to a reference: its value)
@@ -4027,7 +4043,7 @@ impl crate::vm::Vm {
                 };
                 match &*b {
                     Value::Undef => return None,
-                    v if opc != OpCode::PropertyGet => {
+                    v if is_isset => {
                         if matches!(v, Value::Null) {
                             Value::False
                         } else {
@@ -4037,7 +4053,7 @@ impl crate::vm::Vm {
                     v => v.clone(),
                 }
             }
-            v if opc != OpCode::PropertyGet => {
+            v if is_isset => {
                 if matches!(v, Value::Null) {
                     Value::False
                 } else {
