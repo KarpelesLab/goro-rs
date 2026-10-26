@@ -6748,9 +6748,13 @@ impl Vm {
                 }
                 if let Value::Array(arr) = &args_val {
                     // (the attribute's constructor call: zend_get_attribute_object())
-                    if let Some(msg) = Self::deprecated_attr_args_error(&arr.borrow()) {
-                        let exc = self.create_exception(msg.0, &msg.1, caller_line);
-                        self.current_exception = Some(exc);
+                    if self.internal_attr_args_error(
+                        &arr.borrow(),
+                        "Deprecated",
+                        &[b"message", b"since"],
+                        &caller_file,
+                        caller_line,
+                    ) {
                         return None;
                     }
                     let arr = arr.borrow();
@@ -6845,34 +6849,57 @@ impl Vm {
         None
     }
 
-    /// The error of binding #[\Deprecated]'s arguments to
-    /// Deprecated::__construct(?string $message = null, ?string $since = null).
+    /// The error of binding an internal attribute's arguments to its
+    /// constructor (`class`::__construct() taking the `?string` parameters
+    /// `params`), as zend_get_attribute_object() raises it: an unknown named
+    /// parameter, or too many arguments (thrown from inside the
+    /// constructor's frame, whose args the trace shows). Sets
+    /// `current_exception` and returns true on error.
     #[inline(never)]
-    fn deprecated_attr_args_error(arr: &crate::array::PhpArray) -> Option<(&'static [u8], String)> {
-        let mut positional = 0usize;
-        for (k, _) in arr.iter() {
+    fn internal_attr_args_error(
+        &mut self,
+        arr: &crate::array::PhpArray,
+        class: &str,
+        params: &[&[u8]],
+        file: &str,
+        line: u32,
+    ) -> bool {
+        let mut positional = Vec::new();
+        for (k, v) in arr.iter() {
             match k {
-                crate::array::ArrayKey::Int(_) => positional += 1,
+                crate::array::ArrayKey::Int(_) => positional.push(v.clone()),
                 crate::array::ArrayKey::String(s) => {
-                    if !matches!(s.as_bytes(), b"message" | b"since") {
-                        return Some((
-                            b"Error",
-                            format!("Unknown named parameter ${}", s.to_string_lossy()),
-                        ));
+                    if !params.contains(&s.as_bytes()) {
+                        let msg = format!("Unknown named parameter ${}", s.to_string_lossy());
+                        let exc = self.create_exception(b"Error", &msg, line);
+                        self.current_exception = Some(exc);
+                        return true;
                     }
                 }
             }
         }
-        if positional > 2 {
-            return Some((
-                b"ArgumentCountError",
-                format!(
-                    "Deprecated::__construct() expects at most 2 arguments, {} given",
-                    arr.len()
-                ),
+        if positional.len() > params.len() {
+            let n = params.len();
+            let msg = format!(
+                "{}::__construct() expects at most {} argument{}, {} given",
+                class,
+                n,
+                if n == 1 { "" } else { "s" },
+                positional.len()
+            );
+            self.call_stack.push((
+                format!("{}->__construct", class),
+                file.into(),
+                line,
+                positional,
+                true,
             ));
+            let exc = self.create_exception(b"ArgumentCountError", &msg, line);
+            self.call_stack.pop();
+            self.current_exception = Some(exc);
+            return true;
         }
-        None
+        false
     }
 
     /// Check the OpArray's attributes for #[\Deprecated] and emit a banner if present.
@@ -7123,6 +7150,15 @@ impl Vm {
             let Value::Array(arr) = &args_val else {
                 return Some(String::new());
             };
+            if self.internal_attr_args_error(
+                &arr.borrow(),
+                "NoDiscard",
+                &[b"message"],
+                &caller_file,
+                caller_line,
+            ) {
+                return None;
+            }
             // With arguments, the NoDiscard object is constructed
             // (zend_get_attribute_object()): its internal constructor runs.
             if self.observer.is_some() && !arr.borrow().is_empty() {
