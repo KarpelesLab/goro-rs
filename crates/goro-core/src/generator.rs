@@ -743,18 +743,51 @@ impl PhpGenerator {
     /// Returns Ok(true) if a value was yielded, Ok(false) if the generator completed.
     /// Name of the generator function's frame in backtraces, and whether it
     /// is an instance method.
+    /// The generator function's `$this`.
+    fn this_obj(&self) -> Option<Value> {
+        let i = self
+            .op_array
+            .cv_names
+            .iter()
+            .position(|n| n.as_slice() == b"this")?;
+        match self.cvs.get(i).map(|v| v.deref()) {
+            Some(v @ Value::Object(_)) => Some(v),
+            _ => None,
+        }
+    }
+
     fn frame_name(&self, vm: &Vm) -> (String, bool) {
         let op = &self.op_array;
         let raw_name = String::from_utf8_lossy(&op.name).to_string();
         let is_instance = op.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
         // Format closure names for stack traces using the canonical display name.
-        let name = if !op.display_name.is_empty() {
-            String::from_utf8_lossy(&op.display_name).to_string()
-        } else if (raw_name.starts_with("__closure_") || raw_name.starts_with("__arrow_"))
-            && !raw_name.starts_with("__closure_fcc_")
-        {
-            let file = String::from_utf8_lossy(&op.filename).to_string();
-            format!("{{closure:{}:{}}}", file, op.decl_line)
+        let is_closure = (raw_name.starts_with("__closure_")
+            || raw_name.starts_with("__arrow_")
+            || raw_name.starts_with("__bound_closure_"))
+            && !raw_name.starts_with("__closure_fcc_");
+        let name = if !op.display_name.is_empty() || is_closure {
+            let n = if !op.display_name.is_empty() {
+                String::from_utf8_lossy(&op.display_name).to_string()
+            } else {
+                let file = String::from_utf8_lossy(&op.filename).to_string();
+                format!("{{closure:{}:{}}}", file, op.decl_line)
+            };
+            // A closure's frame is its scope's (Class->{closure} with a
+            // `$this`, Class::{closure} without).
+            match (
+                is_closure,
+                self.class_scope.as_ref().or(op.scope_class.as_ref()),
+            ) {
+                (true, Some(scope)) if !scope.is_empty() => {
+                    let class = vm
+                        .classes
+                        .get(scope)
+                        .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                        .unwrap_or_else(|| String::from_utf8_lossy(scope).to_string());
+                    return (format!("{}::{}", class, n), self.this_obj().is_some());
+                }
+                _ => n,
+            }
         } else if let (Some(scope), false) = (&op.scope_class, raw_name.contains("::")) {
             // A generator method: Class::method, as for other method frames
             let class = vm
@@ -875,6 +908,11 @@ impl PhpGenerator {
             self.args.clone(),
             is_instance,
         ));
+        if is_instance {
+            if let Some(t) = self.this_obj() {
+                vm.note_frame_this(&t);
+            }
+        }
 
         // Restore a deferred exception (yield-in-finally) if we stashed one
         // when this generator suspended. The body's ReturnDeferred will pick
@@ -1040,7 +1078,11 @@ impl PhpGenerator {
         // The frames of the generators between us and the root appear in
         // backtraces taken while the root runs.
         let f = self.trace_frame(vm, &outer_caller);
+        let inst = f.4;
         vm.call_stack.push(f);
+        if let (true, Some(t)) = (inst, self.this_obj()) {
+            vm.note_frame_this(&t);
+        }
         vm.push_delegating_generator(self);
         for i in 0..path.len().saturating_sub(1) {
             let site = if i == 0 {
@@ -1049,7 +1091,14 @@ impl PhpGenerator {
                 path[i - 1].borrow().yield_from_site()
             };
             let f = path[i].borrow().trace_frame(vm, &Some(site));
+            let inst = f.4;
             vm.call_stack.push(f);
+            if inst {
+                let t = path[i].borrow().this_obj();
+                if let Some(t) = t {
+                    vm.note_frame_this(&t);
+                }
+            }
             vm.push_delegating_generator(&path[i].borrow());
         }
         // The generators the loop holds belong to a fiber suspended in it
