@@ -970,18 +970,8 @@ fn fetched_container(
     };
     match prev.opcode {
         OpCode::ArrayGetW => {
-            let container = match prev.op1 {
-                OperandType::Cv(i) => cvs.get(i as usize),
-                OperandType::Tmp(i) => tmps.get(i as usize),
-                _ => None,
-            };
-            let arr = match container {
-                Some(Value::Array(a)) => a.clone(),
-                Some(Value::Reference(r)) => match r.try_borrow().as_deref() {
-                    Ok(Value::Array(a)) => a.clone(),
-                    _ => return false,
-                },
-                _ => return false,
+            let Some(arr) = fetch_w_container(op_array, ip - 1, cvs, tmps, literals, 3) else {
+                return false;
             };
             let Ok(a) = arr.try_borrow() else {
                 return false;
@@ -1026,6 +1016,59 @@ fn fetched_container(
                     .is_some_and(|(_, v)| is_it(v))
         }
         _ => false,
+    }
+}
+
+/// The array the FETCH_DIM_W at `at` fetched from (its op1): an array
+/// variable's, or the temporary's the write fetch before it filled. That
+/// temporary may be released already (`$a[k][j][l] = v`: each fetch frees
+/// the one before, see OpArray::free_mask()): then it is the element the
+/// fetch before it fetched, looked up again from that one's container (at
+/// most `depth` fetches back).
+fn fetch_w_container(
+    op_array: &crate::opcode::OpArray,
+    at: usize,
+    cvs: &[Value],
+    tmps: &[Value],
+    literals: &[Value],
+    depth: u32,
+) -> Option<Rc<RefCell<crate::array::PhpArray>>> {
+    let op = &op_array.ops[at];
+    let container = match op.op1 {
+        OperandType::Cv(i) => cvs.get(i as usize)?,
+        OperandType::Tmp(i) => match tmps.get(i as usize)? {
+            Value::Undef if depth > 0 => {
+                let before = op_array.ops.get(at.checked_sub(1)?)?;
+                if before.opcode != OpCode::ArrayGetW
+                    || before.result != op.op1
+                    || before.op1 == before.result
+                    || matches!(before.op2, OperandType::Unused | OperandType::Tmp(_))
+                {
+                    return None;
+                }
+                let arr = fetch_w_container(op_array, at - 1, cvs, tmps, literals, depth - 1)?;
+                let k = dim_key(&before.op2, cvs, tmps, literals)?;
+                let a = arr.try_borrow().ok()?;
+                return match a.get(&k)? {
+                    Value::Array(e) => Some(e.clone()),
+                    Value::Reference(r) => match r.try_borrow().as_deref() {
+                        Ok(Value::Array(e)) => Some(e.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+            }
+            v => v,
+        },
+        _ => return None,
+    };
+    match container {
+        Value::Array(a) => Some(a.clone()),
+        Value::Reference(r) => match r.try_borrow().as_deref() {
+            Ok(Value::Array(a)) => Some(a.clone()),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
