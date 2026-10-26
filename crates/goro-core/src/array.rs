@@ -926,10 +926,8 @@ impl PhpArray {
 
     /// Get a value by ArrayKey
     pub fn get(&self, key: &ArrayKey) -> Option<&Value> {
-        match key {
-            ArrayKey::Int(n) => self.get_int(*n),
-            ArrayKey::String(s) => self.get_str(s.as_bytes()),
-        }
+        // (a string key's hash is cached with it: find_pstr())
+        self.find(key).map(|p| &self.ents()[p].1)
     }
 
     /// Get a mutable reference by ArrayKey
