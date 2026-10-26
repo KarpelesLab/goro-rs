@@ -660,8 +660,14 @@ impl Vm {
                 );
                 let class = class.strip_prefix(b"\\").unwrap_or(&class);
                 // (an internal class: no user declaration)
-                if !self.classes.get(class).is_some_and(|c| c.filename.is_some()) {
-                    if let Some((c, m)) = crate::stubs::find_method(class, &method.to_ascii_lowercase()) {
+                if !self
+                    .classes
+                    .get(class)
+                    .is_some_and(|c| c.filename.is_some())
+                {
+                    if let Some((c, m)) =
+                        crate::stubs::find_method(class, &method.to_ascii_lowercase())
+                    {
                         let p = arg_index.saturating_sub(this_arg);
                         let pname = m
                             .args
@@ -808,32 +814,32 @@ impl Vm {
                 }) && !self.class_implements_interface(&cl, b"arrayaccess");
                 let array_access = !read_only_dims
                     && (cl == b"weakmap"
-                    || self
-                        .classes
-                        .get(&cl)
-                        .map(|c| c.get_method(b"offsetset").is_some())
-                        .unwrap_or(false)
-                    || self.class_implements_interface(&cl, b"arrayaccess")
-                    || self
-                        .spl_find_base(
-                            &cl,
-                            &[
-                                b"arrayobject",
-                                b"arrayiterator",
-                                b"splfixedarray",
-                                b"splobjectstorage",
-                                b"multipleiterator",
-                                b"simplexmlelement",
-                                b"spldoublylinkedlist",
-                            ],
-                        )
-                        .is_some()
-                    || self.native_class_handlers.contains_key(&cl)
-                    || crate::vm::native_handlers(o).is_some_and(|h| {
-                        h.write_dimension.is_some() || h.unset_dimension.is_some()
-                    })
-                    || Self::spl_iter_class(&cl)
-                    || crate::vm::get_builtin_parent(&cl).is_some());
+                        || self
+                            .classes
+                            .get(&cl)
+                            .map(|c| c.get_method(b"offsetset").is_some())
+                            .unwrap_or(false)
+                        || self.class_implements_interface(&cl, b"arrayaccess")
+                        || self
+                            .spl_find_base(
+                                &cl,
+                                &[
+                                    b"arrayobject",
+                                    b"arrayiterator",
+                                    b"splfixedarray",
+                                    b"splobjectstorage",
+                                    b"multipleiterator",
+                                    b"simplexmlelement",
+                                    b"spldoublylinkedlist",
+                                ],
+                            )
+                            .is_some()
+                        || self.native_class_handlers.contains_key(&cl)
+                        || crate::vm::native_handlers(o).is_some_and(|h| {
+                            h.write_dimension.is_some() || h.unset_dimension.is_some()
+                        })
+                        || Self::spl_iter_class(&cl)
+                        || crate::vm::get_builtin_parent(&cl).is_some());
                 if array_access {
                     None
                 } else {

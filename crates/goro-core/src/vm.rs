@@ -804,8 +804,10 @@ impl Vm {
         ) else {
             return false;
         };
-        matches!(get.opcode, OpCode::PropertyGetRW | OpCode::PropertyGetIncDec)
-            && get.op1 == set.op1
+        matches!(
+            get.opcode,
+            OpCode::PropertyGetRW | OpCode::PropertyGetIncDec
+        ) && get.op1 == set.op1
             && get.op2 == set.result
     }
 
@@ -7544,14 +7546,20 @@ impl Vm {
         let Value::Object(obj) = obj_val else {
             return None;
         };
-        if !array_as_props(obj) || !self.ao_prop_as_dim(obj, name) || self.ao_user_has(obj, b"offsetget") {
+        if !array_as_props(obj)
+            || !self.ao_prop_as_dim(obj, name)
+            || self.ao_user_has(obj, b"offsetget")
+        {
             return None;
         }
         let key = Value::String(PhpString::from_bytes(name));
         if mode == b'&' {
             return Some(self.ao_fetch_dim_ref(obj, &key).unwrap_or(Value::Null));
         }
-        Some(self.ao_fetch_dim_w(obj, Some(&key), mode).unwrap_or(Value::Null))
+        Some(
+            self.ao_fetch_dim_w(obj, Some(&key), mode)
+                .unwrap_or(Value::Null),
+        )
     }
 
     /// A by-reference fetch of a property of an object whose

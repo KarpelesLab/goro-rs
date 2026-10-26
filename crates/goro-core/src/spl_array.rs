@@ -1083,7 +1083,10 @@ impl Vm {
             return true;
         }
         let array = args[0].deref();
-        if !matches!(array, Value::Array(_) | Value::Object(_) | Value::Generator(_)) {
+        if !matches!(
+            array,
+            Value::Array(_) | Value::Object(_) | Value::Generator(_)
+        ) {
             let msg = format!(
                 "{}(): Argument #1 ($array) must be of type array, {} given",
                 func,
