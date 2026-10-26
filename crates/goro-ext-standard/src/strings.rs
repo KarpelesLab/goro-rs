@@ -1478,6 +1478,12 @@ fn sprintf_append_string(
 /// memory limit may refuse.
 #[inline(never)]
 fn sprintf_grow_check(vm: &mut Option<&mut Vm>, pos: usize, width: usize) -> Result<(), VmError> {
+    if width > (i32::MAX as usize).saturating_sub(pos + 1) {
+        if let Some(vm_ref) = vm.as_deref_mut() {
+            let line = vm_ref.current_line;
+            return Err(vm_ref.emit_fatal_at(&format!("Field width {} is too long", width), line));
+        }
+    }
     let req = pos.saturating_add(width).saturating_add(1);
     let mut size: usize = 240;
     while req > size {
