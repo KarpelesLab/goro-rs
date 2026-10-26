@@ -26,6 +26,28 @@ use crate::value::Value;
 
 /// A running lean call's callee (see leancall.rs: Vm::lean_run's state, alive
 /// while its run of fast opcodes runs), for the builtin calls it makes.
+/// What enter_lean_frames() changed, for leave_lean_frames().
+pub(crate) struct LeanFramesSaved {
+    frames: Vec<LeanFrame>,
+    n: u32,
+    /// The lengths of call_stack, cv_frames and gc_frames with the lean
+    /// callees' frames.
+    top: (usize, usize, usize),
+    outer_exec: usize,
+    saved_file: Option<crate::rcstr::RcStr>,
+    was_global: bool,
+    lean_depth: u32,
+}
+
+/// Where a running lean callee's frames (see enter_lean_frames) are: the
+/// lengths of call_stack, cv_frames and gc_frames before them.
+#[derive(Clone, Copy)]
+pub(crate) struct LeanFrameAt {
+    call: u32,
+    cv: u32,
+    gc: u32,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct LeanFrame {
     pub(crate) f: *const OpArray,
@@ -40,6 +62,9 @@ pub(crate) struct LeanFrame {
     pub(crate) line: u32,
     /// The number of arguments the call passed (`$this` included).
     pub(crate) nargs: usize,
+    /// Its frames, once a call it made gave it them (see
+    /// enter_lean_frames: they stay until it ends).
+    pub(crate) at: Option<LeanFrameAt>,
 }
 
 impl Vm {
@@ -236,32 +261,52 @@ impl Vm {
         tmps: &mut [Value],
         free_mask: &[u8],
     ) -> Option<bool> {
+        if !self.builtin_dofcall_ok(op_array, ip, tmps, free_mask) {
+            return None;
+        }
+        let Some(saved) = self.enter_lean_frames(op_array) else {
+            return None;
+        };
+        let r = self.fast_builtin_dofcall(op_array, ip, tmps, false, free_mask);
+        self.leave_lean_frames(saved);
+        r
+    }
+
+    /// For a call the callee of the running lean calls makes (`op_array`,
+    /// the innermost's function): each running lean callee, outermost
+    /// first, gets the frame DO_FCALL's fast path would have given it (its
+    /// backtrace frame, its parameters registered for backtraces, its
+    /// variables as cycle collector roots), and the call runs as from
+    /// frames of their own, as many levels down. A callee keeps its frame
+    /// until it ends (see leave_lean_frame): the next calls made below it
+    /// find it. None: a callee's frame cannot be named so (nothing was
+    /// done). See leave_lean_frames().
+    pub(crate) fn enter_lean_frames(&mut self, op_array: &OpArray) -> Option<LeanFramesSaved> {
         let n = self.lean_frames.len();
         if n == 0
             || n != self.lean_depth as usize
             || !std::ptr::eq(self.lean_frames[n - 1].f, op_array)
-            || !self.builtin_dofcall_ok(op_array, ip, tmps, free_mask)
         {
             return None;
         }
+        let framed = (self.lean_framed as usize).min(n);
         // (a method's frame is named after what its call site resolved)
         // SAFETY: see LeanFrame (lean_run() keeps them while the run runs).
-        if self
-            .lean_frames
+        if self.lean_frames[framed..]
             .iter()
             .any(|lf| lf.sep.is_some() && unsafe { &*lf.call }.target.method_info.is_none())
         {
             return None;
         }
-        let depth = self.call_stack.len();
-        let cv_depth = self.cv_frames.len();
-        let gc_depth = self.gc_frames.len();
         let no_sym = None;
         let no_fin = Vec::new();
-        // Each running lean callee, outermost first, gets the frame DO_FCALL's
-        // fast path would have given it.
-        for k in 0..n {
+        for k in framed..n {
             let lf = self.lean_frames[k];
+            self.lean_frames[k].at = Some(LeanFrameAt {
+                call: self.call_stack.len() as u32,
+                cv: self.cv_frames.len() as u32,
+                gc: self.gc_frames.len() as u32,
+            });
             // SAFETY: see LeanFrame.
             let (f, call, slots) = unsafe { (&*lf.f, &*lf.call, &*lf.slots) };
             let mut display = self.string_pool.pop().unwrap_or_default();
@@ -299,27 +344,70 @@ impl Vm {
                 frame_this,
             ));
         }
+        self.lean_framed = n as u32;
+        let top = (
+            self.call_stack.len(),
+            self.cv_frames.len(),
+            self.gc_frames.len(),
+        );
         let outer_exec = std::mem::replace(&mut self.exec_frame_len, self.call_stack.len());
         let saved_file = self.enter_op_array_file(op_array);
         let was_global = std::mem::replace(&mut self.is_global_scope, false);
-        // (the call runs as from frames of their own, as many levels down)
         let lean_depth = std::mem::replace(&mut self.lean_depth, 0);
         self.call_depth += n as u32;
-        let r = self.fast_builtin_dofcall(op_array, ip, tmps, false, free_mask);
-        self.gc_frames.truncate(gc_depth);
-        self.call_depth -= n as u32;
-        self.lean_depth = lean_depth;
-        self.is_global_scope = was_global;
-        self.leave_op_array_file(saved_file);
-        self.exec_frame_len = outer_exec;
-        self.cv_frames.truncate(cv_depth);
-        while self.call_stack.len() > depth {
+        // (the lean calls the call makes start a list of their own)
+        let spare = self.lean_frames_pool.pop().unwrap_or_default();
+        let frames = std::mem::replace(&mut self.lean_frames, spare);
+        self.lean_framed = 0;
+        Some(LeanFramesSaved {
+            frames,
+            n: n as u32,
+            top,
+            outer_exec,
+            saved_file,
+            was_global,
+            lean_depth,
+        })
+    }
+
+    /// The end of a call enter_lean_frames() set up for (the running lean
+    /// callees keep their frames; what the call left above them goes).
+    pub(crate) fn leave_lean_frames(&mut self, s: LeanFramesSaved) {
+        let mut inner = std::mem::replace(&mut self.lean_frames, s.frames);
+        inner.clear();
+        if self.lean_frames_pool.len() < 8 {
+            self.lean_frames_pool.push(inner);
+        }
+        self.lean_framed = s.n;
+        self.call_depth -= s.n;
+        self.lean_depth = s.lean_depth;
+        self.is_global_scope = s.was_global;
+        self.leave_op_array_file(s.saved_file);
+        self.exec_frame_len = s.outer_exec;
+        self.truncate_frames(s.top.0, s.top.1, s.top.2);
+    }
+
+    /// The innermost running lean callee ends: it loses the frames a call
+    /// it made gave it (see enter_lean_frames).
+    pub(crate) fn leave_lean_frame(&mut self) {
+        let k = self.lean_frames.len() - 1;
+        let Some(at) = self.lean_frames[k].at.take() else {
+            return;
+        };
+        self.lean_framed = self.lean_framed.min(k as u32);
+        self.truncate_frames(at.call as usize, at.cv as usize, at.gc as usize);
+    }
+
+    fn truncate_frames(&mut self, call: usize, cv: usize, gc: usize) {
+        self.gc_frames.truncate(gc);
+        self.cv_frames.truncate(cv);
+        while self.call_stack.len() > call {
             if let Some(frame) = self.call_stack.pop() {
                 self.recycle_frame(frame);
             }
         }
-        r
     }
+
     /// The builtin call made by the DO_FCALL at `ip` of `op_array` failed
     /// (see fast_builtin_dofcall): what the dispatch loop's DO_FCALL takes.
     #[cold]

@@ -13,7 +13,7 @@
 //! with just the callee's variables and temporaries (a "lean" call): right
 //! after its INIT_FCALL when the arguments are plain sends of the next
 //! opcodes (see Vm::lean_fused), else at its DO_FCALL. When the callee reaches a RETURN whose release of its
-//! variables only frees memory (see drops_quietly()), the call ends as
+//! variables only frees memory (see drops_quietly_deep()), the call ends as
 //! DO_FCALL's fast path would end it. When it stops at any other opcode,
 //! the call is handed over to that fast path (a LeanResume, taken by the
 //! DO_FCALL of the call): it sets up all of the frame, as it would have
@@ -24,8 +24,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::builtincall::LeanFrame;
-use super::{ForeachState, PendingCall, Vm, arg_by_ref, new_foreach_state};
-use crate::fastpath::{FeView, is_plain_scalar, object_release_quiet, store_tmp, tmp_writable};
+use super::{
+    ForeachState, PendingCall, Vm, VmError, arg_by_ref, arg_cv_bound, move_args, new_foreach_state,
+    push_lossy,
+};
+use crate::fastpath::{FeView, is_plain_scalar, store_tmp, tmp_writable};
 use crate::opcode::{Op, OpArray, OpCode, OperandType};
 use crate::value::Value;
 
@@ -75,50 +78,10 @@ fn lead(sep: Option<(usize, bool)>) -> usize {
     usize::from(sep.is_some_and(|(_, this)| this))
 }
 
-/// Whether the last holder of `v` letting it go here only frees memory
-/// and makes possible cycle roots (no resource is freed, no generator
-/// closed, nothing a destructor or a release point would see): plain
-/// values, containers held elsewhere too, and containers of such values.
-fn drops_quietly(v: &Value) -> bool {
-    fn shallow(v: &Value) -> bool {
-        match v {
-            Value::Array(a) => Rc::strong_count(a) > 1,
-            Value::Object(o) => Rc::strong_count(o) > 1,
-            Value::Reference(r) => Rc::strong_count(r) > 1,
-            Value::Generator(g) => Rc::strong_count(g) > 1,
-            Value::Resource(_) => false,
-            v => is_plain_scalar(v),
-        }
-    }
-    match v {
-        Value::Array(a) => {
-            Rc::strong_count(a) > 1
-                || a.try_borrow()
-                    .is_ok_and(|a| a.len() <= 64 && a.values().all(shallow))
-        }
-        Value::Object(o) => Rc::strong_count(o) > 1 || object_release_quiet(o),
-        Value::Reference(r) => Rc::strong_count(r) > 1 || r.try_borrow().is_ok_and(|b| shallow(&b)),
-        v => shallow(v),
-    }
-}
-
 /// Release the values of `slots` in order, as a frame's end does.
 #[inline]
 fn release_slots(slots: &mut Vec<Value>) {
-    for v in slots.iter_mut() {
-        if !matches!(
-            v,
-            Value::Undef
-                | Value::Null
-                | Value::False
-                | Value::True
-                | Value::Long(_)
-                | Value::Double(_)
-        ) {
-            *v = Value::Undef;
-        }
-    }
-    slots.clear();
+    super::clear_values(slots);
 }
 
 impl Vm {
@@ -539,6 +502,7 @@ impl Vm {
                 sep,
                 line: op.line,
                 nargs,
+                at: None,
             });
             let ForeachState {
                 positions,
@@ -573,6 +537,10 @@ impl Vm {
                 true,
                 None,
             );
+            // (the frames a call it made gave it: see enter_lean_frames)
+            if self.lean_frames.last().is_some_and(|lf| lf.at.is_some()) {
+                self.leave_lean_frame();
+            }
             self.lean_frames.pop();
             self.lean_depth -= 1;
             if sep.is_some() {
@@ -740,12 +708,19 @@ impl Vm {
         if f.lean_kind() & 8 != 0 && !crate::recv_fast::return_matches_exactly(f, &v, r.line == 0) {
             return None;
         }
+        // (containers of such values too, within a budget: a tree of
+        // plain objects the callee built and drops, see drops_quietly_deep)
+        let mut budget = 256u32;
+        let globals = &self.globals;
+        let mut quiet = |v: &Value| {
+            is_plain_scalar(v) || crate::fastpath::drops_quietly_deep(v, &mut budget, globals)
+        };
         if (unused && !is_plain_scalar(&v))
-            || !cvs.iter().all(drops_quietly)
+            || !cvs.iter().all(&mut quiet)
             || !tmps
                 .iter()
                 .enumerate()
-                .all(|(i, t)| i == ret_tmp || drops_quietly(t))
+                .all(|(i, t)| i == ret_tmp || quiet(t))
         {
             return None;
         }
@@ -756,6 +731,325 @@ impl Vm {
         self.last_return_line = r.line;
         self.current_line = r.line;
         Some(v)
+    }
+
+    /// The DO_FCALL at `ip` of `op_array`, the callee of the running lean
+    /// calls (see enter_lean_frames), when it calls a user function as
+    /// DO_FCALL's fast path would (see fast_fcall_target), or resumes the
+    /// lean call it made that was handed over: the call is made from here,
+    /// with a frame of its own, the running lean calls given theirs for it
+    /// (see builtincall.rs), instead of handing them over too. Some(true):
+    /// done, its result stored (the run stops after it when what it did
+    /// needs the dispatch loop: see lean_frame_call_left). Some(false): the
+    /// call failed (see fast_call_failed): the run stops there. None:
+    /// nothing was done.
+    #[inline(never)]
+    pub(crate) fn lean_user_dofcall(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        cvs: &[Value],
+        tmps: &mut [Value],
+        free_mask: &[u8],
+    ) -> Option<bool> {
+        let op = &op_array.ops[ip];
+        let mask = free_mask.get(ip).copied().unwrap_or(0);
+        if self.lean_depth == 0
+            || mask & !4 != 0
+            || !matches!(op.op2, OperandType::Unused)
+            || !matches!(op.result, OperandType::Tmp(_) | OperandType::Unused)
+            || !tmp_writable(&op.result, tmps)
+            || self.has_release_work()
+            || self.observer.is_some()
+            || self.current_exception.is_some()
+            || self.bind_next_frame
+            || self.bind_next_tab.is_some()
+            || self.fiber_depth != 0
+            || crate::fiber::in_fiber()
+            || self.fast_call_failed.is_some()
+        {
+            return None;
+        }
+        let resumed = self.lean_resume_here(op_array, ip);
+        if !resumed {
+            let call = self.pending_calls.last()?;
+            let name = call.name.as_bytes();
+            // (closures: the general path)
+            if call.target.closure || name.starts_with(b"__") || !self.fast_fcall_target() {
+                return None;
+            }
+            // (a function returning by reference: what the next opcode
+            // knows of the call, see last_call_by_ref, is the dispatch
+            // loop's; a handed over lean call would forget it)
+            let typed_ok = match (&self.fast_fcall_fn, self.fast_fcall_captures) {
+                (Some(f), None) if !f.returns_by_ref => {
+                    !f.param_types.iter().any(|t| t.is_some())
+                        || self.recv_has_nothing_to_do(
+                            f,
+                            &self.pending_calls.last().expect("pending call").args,
+                        )
+                }
+                _ => false,
+            };
+            if !typed_ok {
+                self.fast_fcall_fn = None;
+                self.fast_fcall_sep = None;
+                self.fast_fcall_captures = None;
+                self.fast_fcall_forward = false;
+                return None;
+            }
+        }
+        let Some(saved) = self.enter_lean_frames(op_array) else {
+            if !resumed {
+                self.fast_fcall_fn = None;
+                self.fast_fcall_sep = None;
+                self.fast_fcall_forward = false;
+            }
+            return None;
+        };
+        if resumed && !self.resume_lean_call(op_array, ip) {
+            self.leave_lean_frames(saved);
+            return None;
+        }
+        let r = self.lean_frame_call(op_array, op, cvs, tmps, mask);
+        self.leave_lean_frames(saved);
+        Some(r)
+    }
+
+    /// lean_user_dofcall(): the call, as DO_FCALL's fast path makes it (the
+    /// function found by fast_fcall_target, or the lean call resumed).
+    fn lean_frame_call(
+        &mut self,
+        op_array: &OpArray,
+        op: &Op,
+        cvs: &[Value],
+        tmps: &mut [Value],
+        mask: u8,
+    ) -> bool {
+        let user_fn = self.fast_fcall_fn.take().expect("fast call target");
+        let method_sep = self.fast_fcall_sep.take();
+        self.fast_fcall_captures = None;
+        let forwarding = std::mem::take(&mut self.fast_fcall_forward);
+        self.last_call_by_ref = false;
+        let mut call = self.pop_lean_call();
+        let mut display = self.string_pool.pop().unwrap_or_default();
+        display.clear();
+        // (resolved by the call site, see MethodCallInfo)
+        let method_info = call
+            .target
+            .method_info
+            .take()
+            .filter(|i| i.name.ptr_eq(&call.name) || i.name.as_bytes() == call.name.as_bytes());
+        if let Some(info) = &method_info {
+            display.push_str(&info.display);
+        } else if !user_fn.display_name.is_empty() {
+            push_lossy(&mut display, &user_fn.display_name);
+        } else if let (Some((sep, _)), Some(scope)) = (method_sep, &user_fn.scope_class) {
+            match self.classes.get(scope) {
+                Some(c) => push_lossy(&mut display, &c.name),
+                None => push_lossy(&mut display, scope),
+            }
+            display.push_str("::");
+            push_lossy(&mut display, &call.name.as_bytes()[sep + 2..]);
+        } else {
+            push_lossy(&mut display, call.name.as_bytes());
+        }
+        let is_method = method_sep.is_some();
+        let has_this = method_sep.is_some_and(|(_, t)| t);
+        let skip = usize::from(has_this).min(call.args.len());
+        let line = op.line;
+        self.current_line = line;
+        let mut args = self.value_pool.pop().unwrap_or_default();
+        args.clear();
+        match &self.lean_resumed {
+            // (a resumed lean call's arguments moved to the parameters:
+            // what they hold now, as backtraces show them)
+            Some((cvs, _)) => args.extend_from_slice(&cvs[skip..call.args.len()]),
+            None => args.extend_from_slice(&call.args[skip..]),
+        }
+        self.call_stack
+            .push((display, self.current_file.clone(), line, args, has_this));
+        let was_global = std::mem::replace(&mut self.is_global_scope, false);
+        if let Some((sep, _)) = method_sep {
+            // A forwarding call keeps the called class: the caller's
+            // $this's, else the current one.
+            let caller_this = match cvs.first() {
+                Some(Value::Object(obj))
+                    if forwarding
+                        && op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") =>
+                {
+                    Some(obj)
+                }
+                _ => None,
+            };
+            self.push_fast_method_scopes(
+                &call,
+                sep,
+                has_this,
+                forwarding,
+                caller_this,
+                method_info.as_ref().map(|i| i.scope.as_slice()),
+            );
+        }
+        let mut func_cvs;
+        let bound;
+        if let Some((cvs, frame)) = self.lean_resumed.take() {
+            func_cvs = cvs;
+            bound = arg_cv_bound(&user_fn, func_cvs.len());
+            self.resume_frame = Some(frame);
+        } else {
+            func_cvs = self.take_values(user_fn.cv_names.len());
+            bound = arg_cv_bound(&user_fn, func_cvs.len());
+            let keep = usize::from(has_this);
+            match user_fn.variadic_param {
+                None => move_args(&mut func_cvs, &mut call.args, bound, keep),
+                Some(vi) => {
+                    let vi = vi as usize;
+                    move_args(&mut func_cvs, &mut call.args, vi, keep);
+                    let mut rest = crate::array::PhpArray::new();
+                    for arg in call.args.iter().skip(vi) {
+                        rest.push(arg.clone());
+                    }
+                    if let Some(slot) = func_cvs.get_mut(vi) {
+                        *slot = Value::Array(Rc::new(RefCell::new(rest)));
+                    }
+                }
+            }
+            // By-value array parameters get their own copy (see the fast
+            // DO_FCALL arm of the dispatch loop).
+            let plain_args = user_fn.variadic_param.is_none();
+            let nargs = call.args.len();
+            for (ci, slot) in func_cvs.iter_mut().enumerate() {
+                if user_fn.by_ref_params.get(ci).copied().unwrap_or(false) {
+                    continue;
+                }
+                if let Value::Array(a) = slot {
+                    let held = if plain_args && ci >= skip && ci < bound.min(nargs) {
+                        2
+                    } else {
+                        1
+                    };
+                    if Rc::strong_count(a) > held {
+                        let copy = crate::array::cow_copy(a);
+                        *slot = Value::Array(Rc::new(RefCell::new(copy)));
+                    }
+                }
+            }
+        }
+        let mut saved_pending_return = self.pending_return.take();
+        let saved_pending_jump = self.pending_finally_jump.take();
+        self.gc_call_args = &call.args;
+        self.cv_frame_hint = Rc::as_ptr(&user_fn);
+        let call_result = self.execute_op_array_vm(&user_fn, func_cvs);
+        self.gc_call_args = std::ptr::null();
+        self.keep_ref_depth = None;
+        if self.pending_return.is_none() {
+            self.pending_return = saved_pending_return.take();
+        }
+        if self.pending_finally_jump.is_none() {
+            self.pending_finally_jump = saved_pending_jump;
+        }
+        if call_result.is_ok() {
+            if let Some(frame) = self.call_stack.pop() {
+                self.recycle_frame(frame);
+            }
+            // A constructor that completed: the object's destructor runs at
+            // shutdown.
+            if let Some((sep, true)) = method_sep {
+                if call.name.as_bytes()[sep + 2..].eq_ignore_ascii_case(b"__construct") {
+                    if let Some(Value::Object(obj_rc)) = call.args.first() {
+                        obj_rc
+                            .borrow_mut()
+                            .properties
+                            .retain(|(k, _)| k != b"__ctor_pending");
+                    }
+                }
+            }
+        }
+        if is_method {
+            for v in [self.called_class_stack.pop(), self.class_scope_stack.pop()]
+                .into_iter()
+                .flatten()
+            {
+                self.recycle_bytes(v);
+            }
+        }
+        self.is_global_scope = was_global;
+        let result = match call_result {
+            Ok(v) => v,
+            Err(e) => {
+                self.fast_call_failed = Some(e);
+                drop(saved_pending_return);
+                self.recycle_args(&mut call);
+                return false;
+            }
+        };
+        // zend_free_extra_args(): extra arguments still shared elsewhere
+        // become possible roots.
+        let extra_from = match user_fn.variadic_param {
+            Some(vi) => (vi as usize).min(bound),
+            None => bound,
+        };
+        if call.args.len() > extra_from {
+            for a in &call.args[extra_from..] {
+                crate::gc::on_child_released(a);
+            }
+        }
+        // The arguments are released when the call returns.
+        if self.has_release_work() && !call.args.is_empty() {
+            call.args.clear();
+            self.current_line = line;
+            self.run_pending_destructors();
+            if self.current_exception.is_some() {
+                drop(result);
+                self.fast_call_failed = Some(VmError {
+                    message: "Uncaught exception from destructor".into(),
+                    line,
+                });
+                drop(saved_pending_return);
+                self.recycle_args(&mut call);
+                return false;
+            }
+        }
+        match &result {
+            Value::Object(o) => crate::gc::track_object(o),
+            Value::Generator(g) => crate::gc::track_generator(g),
+            _ => {}
+        }
+        if mask & 4 != 0 {
+            // (the result's last user is the call: released at once)
+            let heap = matches!(result, Value::Object(_) | Value::Array(_));
+            drop(result);
+            if heap && self.has_release_work() {
+                self.current_line = line;
+                self.run_pending_destructors();
+                if self.current_exception.is_some() {
+                    self.fast_call_failed = Some(VmError {
+                        message: "Uncaught exception from destructor".into(),
+                        line,
+                    });
+                    drop(saved_pending_return);
+                    self.recycle_args(&mut call);
+                    return false;
+                }
+            }
+        } else {
+            store_tmp(&op.result, result, tmps);
+        }
+        drop(saved_pending_return);
+        self.recycle_args(&mut call);
+        true
+    }
+
+    /// After a call lean_user_dofcall() made: whether the run of the lean
+    /// callee stops (after the DO_FCALL): what the call did needs the
+    /// dispatch loop (exit(), a fatal error's bailout, a destructor due).
+    #[inline]
+    pub(crate) fn lean_frame_call_left(&self) -> bool {
+        self.has_release_work()
+            || self.exit_requested
+            || self.fatal_bailout
+            || self.current_exception.is_some()
     }
 
     /// Whether the DO_FCALL at `ip` of `op_array` handed over a lean call

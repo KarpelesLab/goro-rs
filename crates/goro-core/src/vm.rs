@@ -1495,6 +1495,11 @@ pub struct Vm {
     pub(crate) fast_call_failed: Option<VmError>,
     /// The running lean calls' callees (see builtincall::LeanFrame).
     pub(crate) lean_frames: Vec<builtincall::LeanFrame>,
+    /// Buffers of lean_frames lists (see enter_lean_frames).
+    pub(crate) lean_frames_pool: Vec<Vec<builtincall::LeanFrame>>,
+    /// How many of lean_frames (the outermost) have their frames (see
+    /// enter_lean_frames).
+    pub(crate) lean_framed: u32,
     /// Lean calls running (their callees' opcodes in run_fast_ops()).
     pub(crate) lean_depth: u32,
     /// Emptied buffers of finished calls (locals, temporaries, backtrace
@@ -2107,6 +2112,8 @@ impl Vm {
             lean_resumed: None,
             fast_call_failed: None,
             lean_frames: Vec::new(),
+            lean_frames_pool: Vec::new(),
+            lean_framed: 0,
             lean_depth: 0,
             value_pool: Vec::new(),
             foreach_pool: Vec::new(),

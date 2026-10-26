@@ -2127,6 +2127,17 @@ impl crate::vm::Vm {
                     if no_release && self.lean_candidate() {
                         if self.lean_call(op_array, ip, cvs, tmps) {
                             Fast::Done
+                        } else if self.lean_depth >= 1 {
+                            // (the callee of a lean call makes the call
+                            // itself, see Vm::lean_user_dofcall)
+                            match self.lean_user_dofcall(op_array, ip, cvs, tmps, free_mask.get()) {
+                                Some(true) if self.lean_frame_call_left() => {
+                                    line = Some(op.line);
+                                    break 'run ip + 1;
+                                }
+                                Some(true) => Fast::Done,
+                                _ => break 'run ip,
+                            }
                         } else {
                             break 'run ip;
                         }
@@ -2164,6 +2175,18 @@ impl crate::vm::Vm {
                         // The callee of a lean call (see builtincall.rs).
                         match self.lean_builtin_dofcall(op_array, ip, tmps, free_mask.get()) {
                             Some(true) if self.has_release_work() => {
+                                line = Some(op.line);
+                                break 'run ip + 1;
+                            }
+                            Some(true) => Fast::Done,
+                            Some(false) => break 'run ip,
+                            None => return ip,
+                        }
+                    } else if no_release && self.lean_depth >= 1 {
+                        // A user function the callee of a lean call calls
+                        // with a frame (see Vm::lean_user_dofcall).
+                        match self.lean_user_dofcall(op_array, ip, cvs, tmps, free_mask.get()) {
+                            Some(true) if self.lean_frame_call_left() => {
                                 line = Some(op.line);
                                 break 'run ip + 1;
                             }
