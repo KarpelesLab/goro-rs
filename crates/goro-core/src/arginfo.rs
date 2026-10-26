@@ -42,6 +42,13 @@ pub const T_CLASS: u16 = 16384;
 pub const CHECK_ARITY: u8 = 1;
 /// Verified flag: parameter type errors / coercions match php-src.
 pub const CHECK_TYPES: u8 = 2;
+/// Verified flag (with CHECK_TYPES): the parameters whose validation is
+/// left to the function (object/class/callable typed, untyped, scalar typed
+/// by-reference) are plain zvals to zpp, which goes on with the later ones.
+pub const CHECK_PAST_STOP: u8 = 4;
+/// Verified flag (with CHECK_PAST_STOP): the untyped by-value ones of those
+/// are resources (Z_PARAM_RESOURCE).
+pub const CHECK_RESOURCE: u8 = 8;
 
 /// One parameter of an internal function, derived from its stub
 /// (`crate::stubs::StubArg`) in the form the zpp layer needs.
@@ -68,6 +75,9 @@ pub struct FuncInfo {
     pub params: Vec<ArgInfo>,
     pub required: u8,
     pub stub: &'static crate::stubs::StubFunc,
+    /// The function's arginfo, when this is a different signature its zpp
+    /// parses (zpp_stub_check()): null deprecations name its types.
+    pub arginfo: Option<&'static FuncInfo>,
 }
 
 impl FuncInfo {
@@ -98,6 +108,7 @@ impl FuncInfo {
             params,
             required: f.required_args() as u8,
             stub: f,
+            arginfo: None,
         }
     }
 
@@ -440,6 +451,46 @@ impl Vm {
         let Some(info) = lookup(lname) else {
             return Ok(owned);
         };
+        let mut orig = None;
+        let strict = self.caller_strict_types;
+        if let Err(e) = self.zpp_check(info, flags, &mut owned, &mut orig, strict, line) {
+            if let ZppError::Throw(cls, msg) = e {
+                let exc = self.create_exception(cls, &msg, line);
+                self.current_exception = Some(exc);
+            }
+            return Err(crate::vm::VmError {
+                message: self.uncaught_exception_message(),
+                line,
+            });
+        }
+        Ok(owned)
+    }
+
+    /// The generic zpp checks of `stub`, a signature a builtin parses its
+    /// arguments with that is not its arginfo (strtr()'s blocks by argument
+    /// count, a variadic's per-argument check...). The coerced arguments,
+    /// or Err with the exception set.
+    pub fn zpp_stub_check(
+        &mut self,
+        stub: &'static crate::stubs::StubFunc,
+        flags: u8,
+        args: &[Value],
+    ) -> Result<Vec<Value>, crate::vm::VmError> {
+        thread_local! {
+            static INFOS: std::cell::RefCell<crate::fxhash::FxHashMap<usize, &'static FuncInfo>> =
+                Default::default();
+        }
+        let info: &'static FuncInfo = INFOS.with(|n| {
+            *n.borrow_mut()
+                .entry(stub as *const _ as usize)
+                .or_insert_with(|| {
+                    let mut info = FuncInfo::from_stub(stub);
+                    info.arginfo = lookup(stub.name.to_ascii_lowercase().as_bytes());
+                    Box::leak(Box::new(info))
+                })
+        });
+        let line = self.current_line;
+        let mut owned = args.to_vec();
         let mut orig = None;
         let strict = self.caller_strict_types;
         if let Err(e) = self.zpp_check(info, flags, &mut owned, &mut orig, strict, line) {
@@ -1088,6 +1139,47 @@ impl Vm {
     /// the call frame while int/float/bool ones only change the value the
     /// function sees: when one of the latter happens, `orig` receives the
     /// arguments as passed, for the frame shown in backtraces.
+    /// A parameter of a CHECK_PAST_STOP function that the generic layer
+    /// leaves to the function: zpp accepts it as a zval (Some(Ok)) or, an
+    /// untyped one with CHECK_RESOURCE, as a resource. None: not one of them.
+    #[inline(never)]
+    fn zpp_past_stop(
+        &self,
+        info: &FuncInfo,
+        flags: u8,
+        i: usize,
+        p: &ArgInfo,
+        arg: &Value,
+    ) -> Option<Result<(), ZppError>> {
+        let m = p.mask;
+        if p.by_ref != 0 {
+            // (array/object ones are checked as zpp does below)
+            return (m & (T_BOOL | T_INT | T_FLOAT | T_STRING | T_CALLABLE) != 0).then_some(Ok(()));
+        }
+        if m == 0 {
+            if flags & CHECK_RESOURCE != 0 {
+                // (`$x = null` ones are Z_PARAM_RESOURCE_OR_NULL)
+                let nullable = p.default == Some("null");
+                let v = arg.deref();
+                if !(matches!(v, Value::Resource(_))
+                    || nullable && matches!(v, Value::Null | Value::Undef))
+                {
+                    return Some(Err(ZppError::Throw(
+                        b"TypeError",
+                        format!(
+                            "{} must be of type resource{}, {} given",
+                            info.arg_prefix(i),
+                            if nullable { " or null" } else { "" },
+                            value_name(&v)
+                        ),
+                    )));
+                }
+            }
+            return Some(Ok(()));
+        }
+        (m & (T_CLASS | T_OBJECT | T_CALLABLE) != 0).then_some(Ok(()))
+    }
+
     pub(crate) fn zpp_check(
         &mut self,
         info: &'static FuncInfo,
@@ -1111,6 +1203,13 @@ impl Vm {
             let m = if number { T_INT | T_FLOAT } else { p.mask };
             if m & T_MIXED != 0 || (p.by_ref != 0 && m == 0) {
                 continue;
+            }
+            if flags & CHECK_PAST_STOP != 0 {
+                match self.zpp_past_stop(info, flags, i, p, &args[i]) {
+                    Some(Ok(())) => continue,
+                    Some(Err(e)) => return Err(e),
+                    None => {}
+                }
             }
             // The common case, without a copy of the argument: a plain value
             // (not a reference) of a type a scalar/array-typed by-value
@@ -1299,19 +1398,24 @@ impl Vm {
                 if m & (T_BOOL | T_INT | T_FLOAT | T_STRING) == 0 {
                     return Err(self.zpp_type_error_n(info, i, p, &v, number));
                 }
+                // (the type of the arginfo: zend_null_arg_deprecated())
+                let nty = info
+                    .arginfo
+                    .and_then(|a| a.params.get(i))
+                    .map_or(arg_type_display(p), |q| q.ty.as_str());
                 let msg = match info.arg_name(i) {
                     Some(n) => format!(
                         "{}(): Passing null to parameter #{} (${}) of type {} is deprecated",
                         info.name,
                         i + 1,
                         n,
-                        arg_type_display(p)
+                        nty
                     ),
                     None => format!(
                         "{}(): Passing null to parameter #{} of type {} is deprecated",
                         info.name,
                         i + 1,
-                        arg_type_display(p)
+                        nty
                     ),
                 };
                 self.emit_deprecated_at(&msg, line);

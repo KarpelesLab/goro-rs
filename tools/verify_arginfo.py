@@ -171,6 +171,8 @@ SKIP_CLASSES = {"mysqli", "mysqli_result", "mysqli_stmt", "mysqli_driver", "mysq
 T_NULL, T_FALSE, T_TRUE, T_INT, T_FLOAT, T_STRING, T_ARRAY, T_OBJECT, T_CALLABLE = 1, 2, 4, 8, 16, 32, 64, 128, 256
 T_MIXED, T_CLASS = 1024, 16384
 T_BOOL = T_FALSE | T_TRUE
+# zpp_signature() markers: Z_PARAM_ZVAL / "z" and Z_PARAM_RESOURCE / "r"
+ZVAL_MARK, RESOURCE_MARK = 1 << 20, 1 << 21
 SCALAR = T_BOOL | T_INT | T_FLOAT | T_STRING
 
 
@@ -224,6 +226,9 @@ def build_probes(f):
     variadic = any(p["variadic"] for p in f["params"])
     req = f["required"]
     probes = []  # (kind, args, expected_first_line)
+    # (the parameters after a "stop" one are probed too: kind "past")
+    sf = source_flags(f)
+    past = sf & 4 != 0
 
     def args_with(n, at=None, probe=None):
         out = []
@@ -235,6 +240,8 @@ def build_probes(f):
                 out.append("1")
                 continue
             ph = placeholder(params[j])
+            if ph is None and past and checkable(params[j]) == "stop":
+                ph = stop_placeholder(params[j])
             if ph is None:
                 return None
             out.append(ph)
@@ -248,10 +255,21 @@ def build_probes(f):
         a = args_with(len(params) + 1)
         if a is not None:
             probes.append(("arity", a, arity_msg(name, req, len(params), variadic, len(params) + 1)))
+    kind = "types"
     for i, p in enumerate(params):
         c = checkable(p)
         if c == "stop":
-            break
+            if not past:
+                break
+            kind = "past"
+            if sf & 8 and p["mask"] == 0 and not p["by_ref"]:
+                exp = "X: TypeError: %s(): Argument #%d ($%s) must be of type resource%s, string given" % (
+                    name, i + 1, p["name"], " or null" if p["default"] == "null" else "")
+                for n in range(max(req, i + 1), len(params) + 1):
+                    a = args_with(n, i, "'abc'")
+                    if a is not None:
+                        probes.append((kind, a, exp))
+            continue
         if c == "skip":
             continue
         m = p["mask"]
@@ -276,7 +294,7 @@ def build_probes(f):
             for n in range(max(req, k), len(params) + 1):
                 a = args_with(n, i, val)
                 if a is not None:
-                    probes.append(("types", a, exp))
+                    probes.append((kind, a, exp))
     return probes
 
 
@@ -352,9 +370,12 @@ ZP = {  # Z_PARAM_* -> mask
     "ARRAY": T_ARRAY, "ARRAY_HT": T_ARRAY, "ARRAY_EX": T_ARRAY, "ARRAY_HT_EX": T_ARRAY,
     "ARRAY_HT_OR_STR": T_ARRAY | T_STRING, "STR_OR_LONG": T_STRING | T_INT,
     "ARRAY_HT_OR_LONG": T_ARRAY | T_INT, "NUMBER_OR_STR": T_INT | T_FLOAT | T_STRING,
+    # (parameters zpp accepts anything for / only resources for: see source_flags())
+    "ZVAL": ZVAL_MARK, "RESOURCE": RESOURCE_MARK, "STREAM": RESOURCE_MARK,
 }
 FMT = {"s": T_STRING, "S": T_STRING, "p": T_STRING, "P": T_STRING, "l": T_INT, "d": T_FLOAT,
-       "b": T_BOOL, "a": T_ARRAY, "A": T_ARRAY, "h": T_ARRAY, "H": T_ARRAY, "n": T_INT | T_FLOAT}
+       "b": T_BOOL, "a": T_ARRAY, "A": T_ARRAY, "h": T_ARRAY, "H": T_ARRAY, "n": T_INT | T_FLOAT,
+       "z": ZVAL_MARK, "r": RESOURCE_MARK}
 
 _C_BODIES = None
 
@@ -518,7 +539,7 @@ def zpp_signature(body, method=False):
     if starts:
         mn, mx, inner = starts[0]
         masks = []
-        for m in re.finditer(r"Z_PARAM_(\w+)\s*\(([^;]*?)\)\s*(?:\n|$)", inner):
+        for m in re.finditer(r"Z_PARAM_(\w+)\s*\(([^;]*?)\)\s*;?[ \t]*(?:\n|$)", inner):
             k, a = m.group(1), m.group(2)
             if k == "OPTIONAL":
                 continue
@@ -557,7 +578,13 @@ def zpp_signature(body, method=False):
 
 
 def source_flags(f):
-    """CHECK_* flags allowed by php-src's implementation of `f`."""
+    """CHECK_* flags allowed by php-src's implementation of `f`.
+
+    4 (CHECK_PAST_STOP): the parameters the generic layer leaves to the
+    function ("stop", see checkable()) are parsed as plain zvals, or are
+    by-reference arrays/objects zpp checks the way the generic layer does,
+    so the parameters after them are checked too; 8 (CHECK_RESOURCE): the
+    untyped by-value ones of them are resources (Z_PARAM_RESOURCE, "r")."""
     bodies = c_bodies().get(f["impl"].lower(), [])
     if len(bodies) != 1:
         return 0
@@ -582,7 +609,48 @@ def source_flags(f):
             break
     if ok:
         flags |= 2
+        past, kinds, after = len(masks) >= len(params), set(), False
+        for i, p in enumerate(params):
+            if not past:
+                break
+            c, m, pm = checkable(p), masks[i], p["mask"]
+            if c == "skip":
+                continue
+            if c == "check":
+                past = m == pm
+                after = bool(kinds) or after
+            elif m is not None and m & ZVAL_MARK and not (p["by_ref"] and pm & ~(SCALAR | T_NULL)):
+                kinds.add("z" if not p["by_ref"] and pm == 0 else "zt")
+            elif m is not None and m & RESOURCE_MARK and not p["by_ref"] and pm == 0:
+                # (arginfo.rs: `$x = null` ones are Z_PARAM_RESOURCE_OR_NULL)
+                if bool(m & T_NULL) != (p["default"] == "null"):
+                    past = False
+                kinds.add("r")
+            elif p["by_ref"] and m == pm and not pm & (SCALAR | T_CALLABLE):
+                kinds.add("a")
+            else:
+                past = False
+        # (only where there is a parameter to check after one of them)
+        if past and after and not ("r" in kinds and "z" in kinds):
+            flags |= 4 | (8 if "r" in kinds else 0)
     return flags
+
+
+def stop_placeholder(p):
+    """An argument for a parameter checkable() stops at, when the function
+    has CHECK_PAST_STOP (zpp accepts anything there)."""
+    m = p["mask"]
+    if p["by_ref"] and m & T_ARRAY:
+        return "[]"
+    if m == 0:
+        return "fopen('php://memory', 'r')"
+    if m & T_STRING:
+        return "'stdClass'"
+    if m & T_ARRAY:
+        return "[]"
+    if m & T_CALLABLE:
+        return "'strlen'"
+    return "new stdClass"
 
 
 def rs_unescape(lit):
@@ -782,11 +850,11 @@ def verdict(f, probes, first):
     """CHECK_* flags of `f` from its probe results (None: did not run)."""
     if not f["exists"]:
         # Not in PHP_BIN: php-src's C implementation alone decides.
-        return 3 & source_flags(f)
+        return 15 & source_flags(f)
     if not first:
         return 0
     flags = 0
-    ok = {"arity": True, "types": True}
+    ok = {"arity": True, "types": True, "past": True}
     for idx, (kind, _, exp) in enumerate(probes):
         got = first.get(idx)
         if got != exp:
@@ -797,6 +865,8 @@ def verdict(f, probes, first):
         flags |= 1
     if ok["types"]:
         flags |= 2
+        if ok["past"]:
+            flags |= 12
     sf = source_flags(f)
     if os.environ.get("VERBOSE") and flags & ~sf:
         print("%s: source check drops flags %d" % (f["disp"], flags & ~sf))
@@ -809,7 +879,7 @@ def goro_mismatches(f, probes, php_out, flags):
     out = run_probes(GORO, f, probes)
     bad = []
     for idx, (kind, args, _) in enumerate(probes):
-        if not flags & (1 if kind == "arity" else 2):
+        if not flags & {"arity": 1, "types": 2, "past": 4}[kind]:
             continue
         want = (php_out.get(idx) or [None])[0]
         got = ((out or {}).get(idx) or [None])[0]
@@ -849,7 +919,7 @@ def main():
                     report.append("%s: %s\n   php:  %r\n   goro: %r" % (f["disp"], call, want, got))
     with open(OUT, "w") as fo:
         fo.write("// Generated by tools/verify_arginfo.py (probing %s); do not edit.\n" % os.path.basename(PHP_BIN))
-        fo.write("// Functions and methods whose generated arginfo reproduces PHP's zpp errors: 1 = argument count, 2 = parameter types.\n")
+        fo.write("// Functions and methods whose generated arginfo reproduces PHP's zpp errors: 1 = argument count, 2 = parameter types, 4 = also past the parameters left to the function (parsed as zvals), 8 = the untyped ones of them are resources.\n")
         fo.write("#![cfg_attr(rustfmt, rustfmt_skip)]\n")
         fo.write("pub static VERIFIED: &[(&str, u8)] = &[\n")
         for k in sorted(results):

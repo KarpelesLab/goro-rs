@@ -14562,6 +14562,9 @@ fn setcookie_common(
     fname: &str,
     is_raw: bool,
 ) -> Result<Value, VmError> {
+    // (one zpp block matching the stub: php_setcookie_common())
+    let checked = vm.zpp_self_check(fname.as_bytes(), args)?;
+    let args = &checked[..];
     let throw = |vm: &mut Vm, class: &[u8], msg: String| -> Result<Value, VmError> {
         let exc = vm.create_exception(class, &msg, vm.current_line);
         vm.current_exception = Some(exc);
@@ -15599,7 +15602,15 @@ fn class_level_props<'a>(
 }
 
 fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let class_name = args.first().unwrap_or(&Value::Null).to_php_string();
+    // zend_parse_arg_class(): the argument is converted to a string
+    // (an array warns, an object without __toString() throws)
+    let arg = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
+    let class_name = if matches!(arg, Value::Array(_)) {
+        vm.emit_warning("Array to string conversion");
+        PhpString::from_bytes(b"Array")
+    } else {
+        vm.value_to_string_checked(&arg)?
+    };
     let bare = class_name
         .as_bytes()
         .strip_prefix(b"\\")
@@ -17146,7 +17157,32 @@ fn sys_get_temp_dir_fn3(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> 
     )))
 }
 
-fn array_replace_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+/// php_array_replace_wrapper(): every argument must be an array.
+fn array_replace_check(vm: &mut Vm, fname: &str, args: &[Value]) -> Result<(), VmError> {
+    for (i, a) in args.iter().enumerate() {
+        let v = a.deref();
+        if !matches!(v, Value::Array(_)) {
+            let name = if i == 0 { " ($array)" } else { "" };
+            let msg = format!(
+                "{}(): Argument #{}{} must be of type array, {} given",
+                fname,
+                i + 1,
+                name,
+                Vm::value_type_name(&v)
+            );
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn array_replace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    array_replace_check(vm, "array_replace", args)?;
     let mut result = PhpArray::new();
     for arg in args {
         if let Value::Array(arr) = arg {
@@ -17162,6 +17198,7 @@ fn array_replace_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn array_replace_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    array_replace_check(vm, "array_replace_recursive", args)?;
     if args.is_empty() {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }

@@ -23,8 +23,8 @@ int(3)
 int(2)
 int(2)
 TypeError: strtr(): Argument #2 ($from) must be of type array, string given
-ArgumentCountError: strtr() expects at least 2 arguments, 1 given
-ArgumentCountError: strtr() expects at most 3 arguments, 4 given
+ArgumentCountError: strtr() expects exactly 2 arguments, 1 given
+ArgumentCountError: strtr() expects exactly 3 arguments, 4 given
 TypeError: strtr(): Argument #2 ($from) must be of type array, null given
 string(3) "xbc"
 

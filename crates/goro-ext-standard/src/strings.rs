@@ -1,6 +1,7 @@
 use goro_core::array::{ArrayKey, PhpArray};
 use goro_core::opcode::ParamType;
 use goro_core::string::PhpString;
+use goro_core::stubs::{StubArg, StubFunc};
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
 use std::cell::RefCell;
@@ -2507,42 +2508,68 @@ fn convert_uudecode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(out)))
 }
 
+/// strtr()'s zpp: ZEND_PARSE_PARAMETERS_START(2, 2) (string, array) or
+/// (3, 3) (string, string, string) by argument count.
+static STRTR_ARRAY: StubFunc = StubFunc {
+    name: "strtr",
+    flags: 0,
+    args: &[
+        StubArg {
+            name: "string",
+            ty: "string",
+            default: None,
+            flags: 0,
+        },
+        StubArg {
+            name: "from",
+            ty: "array",
+            default: None,
+            flags: 0,
+        },
+    ],
+    ret: "string",
+    ext: "standard",
+};
+static STRTR_STRINGS: StubFunc = StubFunc {
+    name: "strtr",
+    flags: 0,
+    args: &[
+        StubArg {
+            name: "string",
+            ty: "string",
+            default: None,
+            flags: 0,
+        },
+        StubArg {
+            name: "from",
+            ty: "string",
+            default: None,
+            flags: 0,
+        },
+        StubArg {
+            name: "to",
+            ty: "string",
+            default: None,
+            flags: 0,
+        },
+    ],
+    ret: "string",
+    ext: "standard",
+};
+
 fn strtr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // ZEND_PARSE_PARAMETERS_START(2, 2) / (3, 3) by argument count.
-    let arity = if args.len() < 2 {
-        Some(format!(
-            "strtr() expects at least 2 arguments, {} given",
-            args.len()
-        ))
-    } else if args.len() > 3 {
-        Some(format!(
-            "strtr() expects at most 3 arguments, {} given",
-            args.len()
-        ))
+    let sig = if args.len() <= 2 {
+        &STRTR_ARRAY
     } else {
-        None
+        &STRTR_STRINGS
     };
-    if let Some(msg) = arity {
-        let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: vm.current_line,
-        });
-    }
-    if args.len() == 2 && !matches!(args[1].deref(), Value::Array(_)) {
-        let msg = format!(
-            "strtr(): Argument #2 ($from) must be of type array, {} given",
-            Vm::value_type_name(&args[1].deref())
-        );
-        let exc = vm.create_exception(b"TypeError", &msg, 0);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: vm.current_line,
-        });
-    }
-    let subject = args.first().unwrap_or(&Value::Null).to_php_string();
+    let checked = vm.zpp_stub_check(
+        sig,
+        goro_core::arginfo::CHECK_ARITY | goro_core::arginfo::CHECK_TYPES,
+        args,
+    )?;
+    let args = &checked[..];
+    let subject = args[0].to_php_string();
 
     // PHP shortcuts an empty subject before doing any work — no warnings
     // are emitted even when the replacement set contains empty keys.
@@ -2555,64 +2582,6 @@ fn strtr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // a deprecation); array and resource raise TypeError. The 2-arg form
     // requires $from to be an array; everything else raises TypeError.
     if args.len() >= 3 {
-        let from_val = args[1].deref();
-        match &from_val {
-            Value::Array(_) => {
-                let msg =
-                    "strtr(): Argument #2 ($from) must be of type string, array given".to_string();
-                let exc = vm.throw_type_error(msg.clone());
-                vm.current_exception = Some(exc);
-                return Err(VmError {
-                    message: msg,
-                    line: vm.current_line,
-                });
-            }
-            Value::Resource(_) => {
-                let msg = "strtr(): Argument #2 ($from) must be of type string, resource given"
-                    .to_string();
-                let exc = vm.throw_type_error(msg.clone());
-                vm.current_exception = Some(exc);
-                return Err(VmError {
-                    message: msg,
-                    line: vm.current_line,
-                });
-            }
-            Value::Null | Value::Undef => {
-                vm.emit_deprecated_at(
-                    "strtr(): Passing null to parameter #2 ($from) of type array|string is deprecated",
-                    vm.current_line,
-                );
-            }
-            Value::Object(obj) => {
-                // Only objects with __toString coerce cleanly to a string; the
-                // rest must raise TypeError like for any string-typed param.
-                let class_lower: Vec<u8> = obj
-                    .borrow()
-                    .class_name
-                    .iter()
-                    .map(|b| b.to_ascii_lowercase())
-                    .collect();
-                let has_to_string = vm
-                    .classes
-                    .get(&class_lower)
-                    .map(|c| c.methods.contains_key(&b"__tostring".to_vec()))
-                    .unwrap_or(false);
-                if !has_to_string {
-                    let type_name = Vm::value_type_name(&from_val);
-                    let msg = format!(
-                        "strtr(): Argument #2 ($from) must be of type string, {} given",
-                        type_name
-                    );
-                    let exc = vm.throw_type_error(msg.clone());
-                    vm.current_exception = Some(exc);
-                    return Err(VmError {
-                        message: msg,
-                        line: vm.current_line,
-                    });
-                }
-            }
-            _ => {}
-        }
         let from = args[1].to_php_string();
         let to = args[2].to_php_string();
         let from_bytes = from.as_bytes();
