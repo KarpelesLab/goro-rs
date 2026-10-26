@@ -669,6 +669,42 @@ impl ParseCtx<'_> {
     /// fields from 1970-01-01 00:00:00.000), and the zone to use.
     /// With `keep` (udat_parseCalendar()), the calendar is not cleared: the
     /// fields not parsed keep the calendar's.
+    /// A non-lenient calendar's field validation (Calendar::validateField)
+    /// of what was parsed, Gregorian calendars only.
+    pub fn fields_valid(&self, p: &Parsed) -> bool {
+        if self.lenient || !self.greg() {
+            return true;
+        }
+        let in_range = |i: usize, lo: i32, hi: i32| p.f[i].is_none_or(|v| (lo..=hi).contains(&v));
+        if !(in_range(dc::MONTH, 0, 11)
+            && in_range(dc::HOUR_OF_DAY, 0, 23)
+            && in_range(dc::HOUR, 0, 11)
+            && in_range(dc::MINUTE, 0, 59)
+            && in_range(dc::SECOND, 0, 59)
+            && in_range(dc::MILLISECOND, 0, 999)
+            && in_range(dc::DAY_OF_WEEK, 1, 7)
+            && in_range(dc::AM_PM, 0, 1))
+        {
+            return false;
+        }
+        let year = p.f[dc::YEAR].or(p.f[dc::EXTENDED_YEAR]).unwrap_or(1970) as i64;
+        let year = if p.f[dc::ERA] == Some(0) && p.f[dc::YEAR].is_some() { 1 - year } else { year };
+        let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+        if let Some(d) = p.f[dc::DATE] {
+            let m = p.f[dc::MONTH].unwrap_or(0);
+            let days = match m {
+                1 if leap => 29,
+                1 => 28,
+                3 | 5 | 8 | 10 => 30,
+                _ => 31,
+            };
+            if !(1..=days).contains(&d) {
+                return false;
+            }
+        }
+        in_range(dc::DAY_OF_YEAR, 1, if leap { 366 } else { 365 })
+    }
+
     pub fn resolve(&self, p: &Parsed, keep: bool) -> (f64, String) {
         let tz = p.tz.clone().unwrap_or_else(|| self.info.tz_id.clone());
         let base = if keep {

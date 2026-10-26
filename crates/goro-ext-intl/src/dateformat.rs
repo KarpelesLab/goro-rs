@@ -1083,6 +1083,8 @@ fn do_parse(st: &DateFmt, text: &str, pos: i64, keep: bool) -> Result<(f64, Stri
         lenient: st.lenient,
     };
     match cx.parse(&st.items, &chars, start) {
+        // (the calendar refusing the fields fails the parse there)
+        Ok((p, end)) if !cx.fields_valid(&p) => Err(offs[end.min(chars.len())]),
         Ok((p, end)) => {
             let (millis, tz) = cx.resolve(&p, keep);
             Ok((millis, tz, offs[end.min(chars.len())]))
