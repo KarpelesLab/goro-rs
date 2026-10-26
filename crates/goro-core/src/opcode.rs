@@ -921,9 +921,9 @@ impl OpArray {
         })
     }
 
-    /// The INIT_* of a call at `ip`: the number of plain sends (SEND_VAL,
-    /// SEND_VAL_EX) right after it, at most 16, when the DO_FCALL of the
-    /// call follows them (see Vm::lean_fused).
+    /// The INIT_FCALL / INIT_METHOD_CALL of a call at `ip`: the number of
+    /// plain sends (SEND_VAL, SEND_VAL_EX) right after it, at most 16, when
+    /// the DO_FCALL of the call follows them (see Vm::lean_fused).
     #[inline]
     pub(crate) fn fused_sends(&self, ip: usize) -> Option<usize> {
         let m = match self.fused_sends.0.get() {
@@ -967,6 +967,10 @@ impl OpArray {
                 .iter()
                 .enumerate()
                 .map(|(ip, op)| {
+                    // (only the INIT_* of calls are asked)
+                    if !matches!(op.opcode, OpCode::InitFCall | OpCode::InitMethodCall) {
+                        return std::cell::Cell::new(CALL_SENDS);
+                    }
                     let n = fused_sends_at(&self.ops, ip).map_or(CALL_SENDS, |n| n as u8);
                     let plain = op.opcode == OpCode::InitFCall
                         && crate::vm::plain_fcall_name(op, &self.literals).is_some();
