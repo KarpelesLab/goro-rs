@@ -839,7 +839,8 @@ impl Vm {
         };
         let frame = &self.call_stack[depth];
         if frame.0.is_empty()
-            || (frame.3.is_empty() && !has_this)
+            // (a variadic function may have only extra named arguments)
+            || (frame.3.is_empty() && !has_this && variadic == 0)
             || self
                 .cv_frames
                 .last()
