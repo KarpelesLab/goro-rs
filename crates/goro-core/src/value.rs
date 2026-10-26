@@ -2035,6 +2035,10 @@ impl Value {
             // Object vs String: object is always greater than string in PHP 8
             (Value::Object(_), Value::String(_)) => 1,
             (Value::String(_), Value::Object(_)) => -1,
+            // Object vs resource: the object cannot be cast to a resource
+            // (zend_std_compare_objects()), so it is greater.
+            (Value::Object(_), Value::Resource(_)) => 1,
+            (Value::Resource(_), Value::Object(_)) => -1,
             // Object vs int/float: convert object to int/float, compare numerically
             (Value::Object(_), _) | (_, Value::Object(_)) => {
                 // PHP 8 converts object to int (1) for numeric comparisons
