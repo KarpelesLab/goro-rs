@@ -158,6 +158,29 @@ fn ini_strtol(v: &Value) -> i64 {
     }
 }
 
+/// ini_strtol() of the value of pcre ini setting `slot` (see
+/// match_context): a string value is parsed once (while the setting keeps
+/// that string).
+fn ini_strtol_memo(slot: usize, v: &Value) -> i64 {
+    thread_local! {
+        static PARSED: RefCell<[Option<(PhpString, i64)>; 3]> = const { RefCell::new([None, None, None]) };
+    }
+    let Value::String(s) = v else {
+        return ini_strtol(v);
+    };
+    PARSED.with(|p| {
+        let mut p = p.borrow_mut();
+        match &p[slot] {
+            Some((cached, n)) if cached.ptr_eq(s) => *n,
+            _ => {
+                let n = strtol_bytes(s.as_bytes());
+                p[slot] = Some((s.clone(), n));
+                n
+            }
+        }
+    })
+}
+
 /// ZEND_STRTOL(s, NULL, 10).
 fn strtol_bytes(b: &[u8]) -> i64 {
     let mut i = 0;
@@ -198,16 +221,16 @@ fn match_context(vm: &Vm) -> MatchContext {
     let jit = vm
         .constants
         .get(b"pcre.jit".as_ref())
-        .is_none_or(|v| ini_strtol(v) != 0);
+        .is_none_or(|v| ini_strtol_memo(0, v) != 0);
     let bl = vm
         .constants
         .get(b"pcre.backtrack_limit".as_ref())
-        .map(ini_strtol)
+        .map(|v| ini_strtol_memo(1, v))
         .unwrap_or(1000000);
     let rl = vm
         .constants
         .get(b"pcre.recursion_limit".as_ref())
-        .map(ini_strtol)
+        .map(|v| ini_strtol_memo(2, v))
         .unwrap_or(100000);
     MatchContext {
         match_limit: bl as u32,
