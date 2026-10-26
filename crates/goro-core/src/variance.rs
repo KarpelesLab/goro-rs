@@ -217,7 +217,7 @@ pub(crate) fn push_linking_ex(ce: &ClassEntry, nearly_linked: bool) {
 
 /// Whether `name_lower` is being linked (registered but unlinked in PHP terms).
 pub(crate) fn is_linking(name_lower: &[u8]) -> bool {
-    LINKING.with(|s| s.borrow().iter().any(|(c, _)| lower(&c.name) == name_lower))
+    LINKING.with(|s| s.borrow().iter().any(|(c, _)| lower_is(&c.name, name_lower)))
 }
 
 thread_local! {
@@ -313,7 +313,7 @@ pub(crate) fn linking_entry(name_lower: &[u8]) -> Option<ClassEntry> {
         s.borrow()
             .iter()
             .rev()
-            .find(|(c, nl)| *nl && lower(&c.name) == name_lower)
+            .find(|(c, nl)| *nl && lower_is(&c.name, name_lower))
             .map(|(c, _)| c.clone())
     })
 }
@@ -329,6 +329,12 @@ pub(crate) enum Status {
     Success,
     Error,
     Unresolved,
+}
+
+/// `lower(n) == l`, without the copy.
+fn lower_is(n: &[u8], l: &[u8]) -> bool {
+    let n = n.strip_prefix(b"\\").unwrap_or(n);
+    n.len() == l.len() && n.iter().zip(l).all(|(a, b)| a.to_ascii_lowercase() == *b)
 }
 
 fn lower(n: &[u8]) -> Vec<u8> {
@@ -364,14 +370,14 @@ impl<'a> Ctx<'a> {
 
     pub(crate) fn lookup(&self, name: &[u8]) -> Option<LinkClass> {
         let l = lower(name);
-        if lower(&self.cur.name) == l {
+        if lower_is(&self.cur.name, &l) {
             return Some(self.cur.clone());
         }
         let linking = LINKING.with(|s| {
             s.borrow()
                 .iter()
                 .rev()
-                .find(|(c, _)| lower(&c.name) == l)
+                .find(|(c, _)| lower_is(&c.name, &l))
                 .map(|(c, _)| LinkClass::from_entry(c))
         });
         if linking.is_some() {
@@ -1327,19 +1333,19 @@ impl Vm {
         let parent_decl_lc = self.variance_scope_for(&ctx, &parent.declaring_class, parent_class);
         // Trait methods resolve self/parent against the using class.
         let parent_lc = if parent_decl_lc.is_trait {
-            cur_lc.clone()
+            &cur_lc
         } else {
-            parent_decl_lc.clone()
+            &parent_decl_lc
         };
-        let child_lc = cur_lc.clone();
-        let status = ctx.implementation_check(child, &child_lc, parent, &parent_lc);
+        let child_lc = &cur_lc;
+        let status = ctx.implementation_check(child, child_lc, parent, parent_lc);
         if status == Status::Success {
             return (status, Vec::new(), String::new());
         }
         let child_display = self.variance_method_class_display(&ctx, child, &cur_lc);
         let parent_display = parent_decl_lc.name.clone();
-        let child_decl = function_declaration(child, &child_display, &child_lc);
-        let parent_decl = function_declaration(parent, &parent_display, &parent_lc);
+        let child_decl = function_declaration(child, &child_display, child_lc);
+        let parent_decl = function_declaration(parent, &parent_display, parent_lc);
         let unresolved: Vec<Vec<u8>> = ctx.unresolved.borrow().clone();
         let msg = if status == Status::Unresolved {
             format!(
