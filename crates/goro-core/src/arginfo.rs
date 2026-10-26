@@ -427,6 +427,10 @@ fn extra_verified_flags(lname: &[u8]) -> u8 {
         CHECK_ARITY
     } else if STREAM_FUNCTIONS.contains(&lname) || PATH_CONTEXT_FUNCTIONS.contains(&lname) {
         CHECK_ARITY | CHECK_TYPES | CHECK_PAST_STOP | CHECK_RESOURCE
+    } else if matches!(lname, b"hash_update" | b"mb_ereg_replace_callback") {
+        // (single zpp blocks the probes cannot reach: "OS" needs a
+        // HashContext, "sfs|s!" a valid callback)
+        CHECK_ARITY | CHECK_TYPES
     } else {
         0
     }
