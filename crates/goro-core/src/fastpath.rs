@@ -1940,16 +1940,11 @@ impl crate::vm::Vm {
                     };
                     match special {
                         Some(next) => Fast::Jump(next),
-                        None if self.init_fcall_fast(op_array, ip, cvs) => {
-                            // (a plain user function called with plain
-                            // arguments: the whole call, see leancall.rs)
-                            let lean = no_release && self.lean_candidate();
-                            match lean.then(|| self.lean_fused(op_array, ip, cvs, tmps)) {
-                                Some(Some(next)) => Fast::Jump(next),
-                                _ => Fast::Done,
-                            }
-                        }
-                        None => break 'run ip,
+                        None => match self.init_fcall_fast(op_array, ip, cvs, tmps, no_release) {
+                            0 => break 'run ip,
+                            usize::MAX => Fast::Done,
+                            next => Fast::Jump(next),
+                        },
                     }
                 }
                 // A by-value argument of a call resolved when it was set up
@@ -2624,30 +2619,57 @@ impl crate::vm::Vm {
     }
 
     /// INIT_FCALL by a constant plain function name or static method name
-    /// (see push_plain_call / push_static_call). False: nothing was done.
+    /// (see push_plain_call / push_static_call): 0, nothing was done;
+    /// usize::MAX, the call was set up; else where the run goes on, the
+    /// call of a plain user function with plain arguments made whole (see
+    /// leancall.rs: lean_direct, lean_fused).
     #[inline(never)]
     fn init_fcall_fast(
         &mut self,
         op_array: &crate::opcode::OpArray,
         ip: usize,
         cvs: &[Value],
-    ) -> bool {
+        tmps: &mut [Value],
+        no_release: bool,
+    ) -> usize {
         let op = &op_array.ops[ip];
         let literals = &op_array.literals;
-        if let Some(name) = crate::vm::plain_fcall_name(op, literals) {
+        // (a name: a constant; else the general handler, see
+        // init_closure_call_fast)
+        let OperandType::Const(ni) = op.op1 else {
+            return 0;
+        };
+        // (what plain_fcall_name() finds, found once)
+        let hint = op_array.call_hint(ip);
+        let plain = match literals.get(ni as usize) {
+            Some(Value::String(s)) if hint & crate::opcode::CALL_PLAIN != 0 => Some(s),
+            _ => None,
+        };
+        if let Some(name) = plain {
+            // (a call of a user function with plain arguments: see
+            // leancall.rs)
+            if no_release
+                && hint & (crate::opcode::CALL_NOT_DIRECT | crate::opcode::CALL_SENDS)
+                    < crate::opcode::CALL_SENDS
+            {
+                if let Some(next) = self.lean_direct(op_array, ip, name, cvs, tmps) {
+                    return next;
+                }
+            }
             self.push_plain_call(op_array, ip, name.clone());
             // (an undefined function: the dispatch loop's handler throws)
             if self.top_call_unresolved() {
                 if let Some(mut call) = self.pending_calls.pop() {
                     self.recycle_args(&mut call);
                 }
-                return false;
+                return 0;
             }
-            true
         } else if let Some(name) = crate::vm::static_fcall_name(op, literals) {
             let frame_this = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
                 && matches!(cvs.first().map(|v| v.deref()), Some(Value::Object(_)));
-            self.push_static_call(op_array, ip, name, frame_this)
+            if !self.push_static_call(op_array, ip, name, frame_this) {
+                return 0;
+            }
         } else if let Some(name) = crate::vm::forward_fcall_name(op, literals) {
             let this = if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
                 match cvs.first().map(|v| v.deref()) {
@@ -2663,12 +2685,19 @@ impl crate::vm::Vm {
                 if let Some(mut call) = self.pending_calls.pop() {
                     self.recycle_args(&mut call);
                 }
-                return false;
+                return 0;
             }
-            true
         } else {
-            false
+            return 0;
         }
+        // (a user function called with plain arguments: the whole call, see
+        // leancall.rs)
+        if no_release && self.lean_candidate() {
+            if let Some(next) = self.lean_fused(op_array, ip, cvs, tmps) {
+                return next;
+            }
+        }
+        usize::MAX
     }
 
     /// The assignments fast_op() leaves: `$cv = <array|object>` (a

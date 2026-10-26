@@ -22195,6 +22195,35 @@ impl Vm {
         true
     }
 
+    /// cached_call_target(), when the site resolved `name` to a user
+    /// function of that plain name (no builtin, not a method): Some(true).
+    /// Some(false): it resolved it to something else. None: nothing usable
+    /// is cached.
+    #[inline(always)]
+    pub(crate) fn cached_user_call_target(
+        op_array: &OpArray,
+        ip: usize,
+        name: &[u8],
+        fn_gen: usize,
+        t: &mut CallTarget,
+    ) -> Option<bool> {
+        let sites = op_array.sites().borrow();
+        let c = sites.as_ref()?.call_targets.get(&(ip as u32))?;
+        if c.fn_gen != fn_gen || !crate::string::bytes_eq(&c.name, name) {
+            return None;
+        }
+        if c.has_builtin || c.method.is_some() || c.user.is_none() {
+            return Some(false);
+        }
+        let f = c.user.as_ref().and_then(Weak::upgrade)?;
+        t.user = Some(f);
+        t.builtin = c.builtin;
+        t.method_info = c.method_info.clone();
+        t.fn_gen = fn_gen;
+        t.ns_global = c.ns_global;
+        Some(true)
+    }
+
     /// The builtin the INIT_FCALL at `ip` of `op_array` resolved to (when
     /// last set up), when it is one php-src compiles into an opcode of its
     /// own: the function and its fastpath::SPECIAL_CALLS index + 1. (Only

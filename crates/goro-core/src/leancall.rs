@@ -109,6 +109,20 @@ pub(crate) fn moved_frame_args(
     }
 }
 
+/// Fill the empty `v` with `n` undefined values.
+#[inline(always)]
+fn fill_undef(v: &mut Vec<Value>, n: usize) {
+    debug_assert!(v.is_empty());
+    v.reserve(n);
+    let p = v.as_mut_ptr();
+    for i in 0..n {
+        // SAFETY: within the capacity reserved.
+        unsafe { p.add(i).write(Value::Undef) };
+    }
+    // SAFETY: the first `n` values were written.
+    unsafe { v.set_len(n) };
+}
+
 /// Release the values of `slots` in order, as a frame's end does.
 #[inline]
 fn release_slots(slots: &mut Vec<Value>) {
@@ -146,7 +160,16 @@ impl Vm {
     /// then where it is in the name it resolved to, which the call takes.
     #[inline(always)]
     fn lean_target(&self, fresh: bool) -> Option<(&Rc<OpArray>, Option<(usize, bool)>)> {
-        let call = self.pending_calls.last()?;
+        self.lean_target_of(self.pending_calls.last()?, fresh)
+    }
+
+    /// lean_target() of `call`.
+    #[inline(always)]
+    fn lean_target_of<'c>(
+        &self,
+        call: &'c PendingCall,
+        fresh: bool,
+    ) -> Option<(&'c Rc<OpArray>, Option<(usize, bool)>)> {
         let t = &call.target;
         let f = t.user.as_ref()?;
         if t.has_builtin
@@ -265,10 +288,26 @@ impl Vm {
         true
     }
 
+    /// take_values(), inline.
+    #[inline(always)]
+    fn take_slots(&mut self, n: usize) -> Vec<Value> {
+        let mut v = self.value_pool.pop().unwrap_or_default();
+        fill_undef(&mut v, n);
+        v
+    }
+
     /// The top pending call, taken for a lean call of its function.
     #[inline(always)]
     fn pop_lean_call(&mut self) -> PendingCall {
         let call = self.pending_calls.pop().expect("pending call");
+        self.trim_closure_pending_calls();
+        call
+    }
+
+    /// What pop_lean_call() does with closure_pending_calls once the call
+    /// is popped.
+    #[inline(always)]
+    fn trim_closure_pending_calls(&mut self) {
         while matches!(self.closure_pending_calls.last(), Some(&i) if i > self.pending_calls.len())
         {
             self.closure_pending_calls.pop();
@@ -276,7 +315,6 @@ impl Vm {
         if self.closure_pending_calls.last() == Some(&self.pending_calls.len()) {
             self.closure_pending_calls.pop();
         }
-        call
     }
 
     /// DO_FCALL at `ip` of `op_array`, met by run_fast_ops(): a call set up
@@ -362,9 +400,80 @@ impl Vm {
         cvs: &[Value],
         tmps: &mut [Value],
     ) -> Option<usize> {
+        let call = self.pending_calls.last()?;
+        let (f, sep, nsends) = self.lean_fused_ready(call, op_array, ip, cvs, tmps)?;
+        let call = self.pop_lean_call();
+        Some(self.lean_fused_run(op_array, ip, f, sep, nsends, call, cvs, tmps))
+    }
+
+    /// The INIT_FCALL at `ip` of `op_array`, of plain function name `name`
+    /// (see plain_fcall_name; its arguments sent by plain sends, see
+    /// OpArray::call_hint), whose call site resolved it to a user
+    /// function a lean call is made of (see lean_candidate) when its
+    /// arguments are sent as lean_fused() takes them: the whole call made
+    /// at once, as INIT_FCALL's fast path then lean_fused() would make it,
+    /// without setting up the pending call (Some: what lean_fused()
+    /// returns). None: nothing was done.
+    #[inline(never)]
+    pub(crate) fn lean_direct(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        name: &crate::string::PhpString,
+        cvs: &[Value],
+        tmps: &mut [Value],
+    ) -> Option<usize> {
+        let fn_gen = self.user_functions.len() + 1;
+        // The pending call push_plain_call() makes (see cached_call_target).
+        let mut target = super::CallTarget::NONE;
+        match Self::cached_user_call_target(op_array, ip, name.as_bytes(), fn_gen, &mut target) {
+            Some(true) => {}
+            // (a builtin, or not a lean function: its calls take the
+            // general path from now on)
+            Some(false) => {
+                op_array.no_direct_lean(ip);
+                return None;
+            }
+            None => return None,
+        }
+        // (lean_candidate(), when it lets the call be tried)
+        let f = target.user.as_ref()?;
+        if f.lean_kind() == 0 {
+            op_array.no_direct_lean(ip);
+            return None;
+        }
+        if f.cv_name_info().lean_score.get() < 0 {
+            return None;
+        }
+        // (INIT_FCALL's result operand flags a name without global fallback)
+        target.no_ns_fallback = !matches!(op_array.ops[ip].result, OperandType::Unused);
+        let call = PendingCall {
+            name: name.clone(),
+            args: Vec::new(),
+            named_args: Vec::new(),
+            target,
+        };
+        let (f, sep, nsends) = self.lean_fused_ready(&call, op_array, ip, cvs, tmps)?;
+        // (what popping the call would do)
+        self.trim_closure_pending_calls();
+        Some(self.lean_fused_run(op_array, ip, f, sep, nsends, call, cvs, tmps))
+    }
+
+    /// lean_fused(): whether the call `call`, set up by the INIT_* at `ip`
+    /// of `op_array`, is made as a lean one there: its function, where "::"
+    /// is in its name (a method's) and the number of sends.
+    #[inline(always)]
+    fn lean_fused_ready(
+        &self,
+        call: &PendingCall,
+        op_array: &OpArray,
+        ip: usize,
+        cvs: &[Value],
+        tmps: &[Value],
+    ) -> Option<(Rc<OpArray>, Option<(usize, bool)>, usize)> {
         let ops = &op_array.ops;
         let literals = &op_array.literals;
-        let (f, sep) = self.lean_target(true)?;
+        let (f, sep) = self.lean_target_of(call, true)?;
         // (a variadic function: the call is made by its DO_FCALL, the
         // arguments then sent, see lean_call)
         if f.variadic_param.is_some() {
@@ -436,19 +545,42 @@ impl Vm {
                 return None;
             }
         }
-        let f = Rc::clone(f);
         if !self.lean_ready(fcall, tmps) {
             return None;
         }
-        let mut call = self.pop_lean_call();
+        Some((Rc::clone(f), sep, nsends))
+    }
+
+    /// lean_fused(): the lean call of `f` (`sep`: see lean_target), the
+    /// pending call `call` taken, its `nsends` arguments sent by the
+    /// opcodes after the INIT_* at `ip` of `op_array`.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn lean_fused_run(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        f: Rc<OpArray>,
+        sep: Option<(usize, bool)>,
+        nsends: usize,
+        mut call: PendingCall,
+        cvs: &[Value],
+        tmps: &mut [Value],
+    ) -> usize {
+        let literals = &op_array.literals;
+        let base = lead(sep);
+        let nargs = base + nsends;
+        let do_ip = ip + 1 + nsends;
+        let sends = &op_array.ops[ip + 1..do_ip];
         // (the variables in the buffer the call's arguments would have
-        // had: none was sent, but a method's `$this`)
-        let mut slots = if base == 0 && call.args.is_empty() {
+        // had: none was sent, but a method's `$this`; a call lean_direct()
+        // set up has none)
+        let mut slots = if base == 0 && call.args.is_empty() && call.args.capacity() != 0 {
             let mut v = std::mem::take(&mut call.args);
-            v.resize_with(f.cv_names.len(), || Value::Undef);
+            fill_undef(&mut v, f.cv_names.len());
             v
         } else {
-            self.take_values(f.cv_names.len())
+            self.take_slots(f.cv_names.len())
         };
         if base == 1 {
             slots[0] = call.args[0].clone();
@@ -477,7 +609,7 @@ impl Vm {
             };
         }
         let done = self.lean_run(op_array, do_ip, f, sep, slots, nargs, call, cvs, tmps, true);
-        Some(if done { do_ip + 1 } else { do_ip })
+        if done { do_ip + 1 } else { do_ip }
     }
 
     /// The lean call of `f` made by the DO_FCALL at `ip` of `op_array`,
@@ -536,7 +668,7 @@ impl Vm {
         let depth = self.call_depth + self.lean_depth;
         let calls_base = self.pending_calls.len();
         let mut fe = self.foreach_pool.pop().unwrap_or_else(new_foreach_state);
-        let mut ctmps = self.take_values(f.temp_count as usize);
+        let mut ctmps = self.take_slots(f.temp_count as usize);
         let stop = if vm_frame.is_none() {
             0
         } else {
@@ -843,14 +975,18 @@ impl Vm {
                 is_plain_scalar(v) || crate::fastpath::drops_quietly_deep(v, &mut budget, globals)
             }
         };
-        if (unused && !is_plain_scalar(v))
-            || !cvs.iter().all(&mut quiet)
-            || !tmps
-                .iter()
-                .enumerate()
-                .all(|(i, t)| i == ret_tmp || quiet(t))
-        {
+        if unused && !is_plain_scalar(v) {
             return None;
+        }
+        for c in cvs {
+            if !quiet(c) {
+                return None;
+            }
+        }
+        for (i, t) in tmps.iter().enumerate() {
+            if i != ret_tmp && !quiet(t) {
+                return None;
+            }
         }
         let v = match copy {
             Some(v) => v,

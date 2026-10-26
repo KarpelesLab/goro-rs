@@ -592,8 +592,8 @@ pub struct OpArray {
     lean_kind: FreshOnClone<u8>,
     /// See OpArray::prop_ic().
     prop_ics: FreshOnClone<PropIcs>,
-    /// See OpArray::fused_sends().
-    fused_sends: FreshOnClone<Box<[u8]>>,
+    /// See OpArray::fused_sends() and OpArray::call_hint().
+    fused_sends: FreshOnClone<Box<[std::cell::Cell<u8>]>>,
     /// See OpArray::static_sites().
     static_sites: FreshOnClone<std::cell::RefCell<Vec<StaticSite>>>,
 }
@@ -931,18 +931,47 @@ impl OpArray {
             Some(_) => return fused_sends_at(&self.ops, ip),
             None => self.fused_sends_init(),
         };
-        match m.get(ip) {
-            Some(&n) if n != u8::MAX => Some(n as usize),
+        match m.get(ip).map(|c| c.get() & CALL_SENDS) {
+            Some(n) if n != CALL_SENDS => Some(n as usize),
             _ => None,
+        }
+    }
+
+    /// What the opcode at `ip` is as a call's INIT_* (CALL_SENDS: its
+    /// fused_sends(), CALL_SENDS when none; CALL_PLAIN: an INIT_FCALL by a
+    /// plain function name, see vm::plain_fcall_name; CALL_NOT_DIRECT: see
+    /// no_direct_lean): computed with fused_sends(), once.
+    #[inline]
+    pub(crate) fn call_hint(&self, ip: usize) -> u8 {
+        let m = match self.fused_sends.0.get() {
+            Some(m) => m,
+            None => self.fused_sends_init(),
+        };
+        m.get(ip).map_or(CALL_SENDS, |c| c.get())
+    }
+
+    /// The call at `ip` is not one Vm::lean_direct() makes (its function
+    /// is a builtin...): it is not tried there again.
+    #[cold]
+    pub(crate) fn no_direct_lean(&self, ip: usize) {
+        if let Some(c) = self.fused_sends.0.get().and_then(|m| m.get(ip)) {
+            c.set(c.get() | CALL_NOT_DIRECT);
         }
     }
 
     #[cold]
     #[inline(never)]
-    fn fused_sends_init(&self) -> &[u8] {
+    fn fused_sends_init(&self) -> &[std::cell::Cell<u8>] {
         self.fused_sends.0.get_or_init(|| {
-            (0..self.ops.len())
-                .map(|ip| fused_sends_at(&self.ops, ip).map_or(u8::MAX, |n| n as u8))
+            self.ops
+                .iter()
+                .enumerate()
+                .map(|(ip, op)| {
+                    let n = fused_sends_at(&self.ops, ip).map_or(CALL_SENDS, |n| n as u8);
+                    let plain = op.opcode == OpCode::InitFCall
+                        && crate::vm::plain_fcall_name(op, &self.literals).is_some();
+                    std::cell::Cell::new(n | if plain { CALL_PLAIN } else { 0 })
+                })
                 .collect()
         })
     }
@@ -1278,6 +1307,13 @@ pub(crate) struct FreeInfo {
     /// (DoFCall index, callable temporary), by index.
     call_frees: Box<[(u32, u32)]>,
 }
+
+/// OpArray::call_hint(): the number of fused sends (CALL_SENDS: none).
+pub(crate) const CALL_SENDS: u8 = 0x1f;
+/// OpArray::call_hint(): an INIT_FCALL by a plain function name.
+pub(crate) const CALL_PLAIN: u8 = 0x20;
+/// OpArray::call_hint(): see OpArray::no_direct_lean().
+pub(crate) const CALL_NOT_DIRECT: u8 = 0x80;
 
 /// OpArray::fused_sends() of the opcode at `ip` of `ops`.
 fn fused_sends_at(ops: &[Op], ip: usize) -> Option<usize> {
