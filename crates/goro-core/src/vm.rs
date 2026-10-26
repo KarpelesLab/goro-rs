@@ -10081,6 +10081,14 @@ impl Vm {
         );
     }
 
+    /// zend_is_true() of a value internal code tests (a callback's result,
+    /// an array element): a NAN warns "unexpected NAN value was coerced to bool".
+    #[inline(never)]
+    pub fn is_true(&mut self, v: &Value) -> bool {
+        self.warn_nan_coercion(v, "bool", self.current_line);
+        v.is_truthy()
+    }
+
     /// "unexpected NAN value was coerced to <type>" (zend_nan_coerced_to_type_warning).
     pub fn warn_nan_coercion(&mut self, v: &Value, type_name: &str, line: u32) {
         let is_nan = match v {

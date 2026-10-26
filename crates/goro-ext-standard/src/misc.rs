@@ -1293,11 +1293,14 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // (a namespaced constant is stored with its namespace lowercased)
         lookup_name
             .contains(&b'\\')
-            .then(|| vm.constants.const_get(&normalize_ns_const_name(lookup_name)).cloned())
+            .then(|| {
+                vm.constants
+                    .const_get(&normalize_ns_const_name(lookup_name))
+                    .cloned()
+            })
             .flatten()
     });
-    if let Some(val) = found
-    {
+    if let Some(val) = found {
         if let Some(m) = vm.internal_deprecated_constants.get(lookup_name).cloned() {
             vm.emit_deprecated_at(&m, vm.current_line);
         }
@@ -4118,15 +4121,24 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let keep = match mode {
                     1 => {
                         // ARRAY_FILTER_USE_BOTH - pass value and key
-                        call_user_func(vm, &[cb.clone(), val.clone(), key_val])?.is_truthy()
+                        {
+                            let r = call_user_func(vm, &[cb.clone(), val.clone(), key_val])?;
+                            vm.is_true(&r)
+                        }
                     }
                     2 => {
                         // ARRAY_FILTER_USE_KEY - pass key to callback
-                        call_user_func(vm, &[cb.clone(), key_val])?.is_truthy()
+                        {
+                            let r = call_user_func(vm, &[cb.clone(), key_val])?;
+                            vm.is_true(&r)
+                        }
                     }
                     _ => {
                         // Default - pass value to callback
-                        call_user_func(vm, &[cb.clone(), val.clone()])?.is_truthy()
+                        {
+                            let r = call_user_func(vm, &[cb.clone(), val.clone()])?;
+                            vm.is_true(&r)
+                        }
                     }
                 };
                 if keep {
@@ -6522,22 +6534,50 @@ fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::True);
     }
     let assertion = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
-    let description = args.get(1).map(|v| v.deref());
-    if let Some(d) = &description {
-        match d {
-            Value::Null | Value::String(_) | Value::Object(_) => {}
-            other => {
-                let msg = format!(
-                    "assert(): Argument #2 ($description) must be of type Throwable|string|null, {} given",
-                    Vm::value_type_name(other)
-                );
-                let exc = vm.throw_type_error(msg.clone());
-                vm.current_exception = Some(exc);
+    let mut description = args.get(1).map(|v| v.deref());
+    // Z_PARAM_OBJ_OF_CLASS_OR_STR_OR_NULL(description, zend_ce_throwable)
+    if let Some(d) = description.clone() {
+        let throwable = match &d {
+            Value::Object(o) => {
+                let cl = o.borrow().class_name.to_ascii_lowercase();
+                vm.class_implements_interface(&cl, b"throwable")
+            }
+            _ => false,
+        };
+        let stringable = match &d {
+            Value::Object(o) if !throwable => {
+                let cl = o.borrow().class_name.to_ascii_lowercase();
+                vm.class_implements_interface(&cl, b"stringable")
+            }
+            _ => false,
+        };
+        let scalar = matches!(
+            d,
+            Value::Long(_) | Value::Double(_) | Value::True | Value::False
+        );
+        if scalar && !vm.caller_strict_types {
+            vm.warn_nan_coercion(&d, "string", vm.current_line);
+            description = Some(Value::String(d.to_php_string()));
+        } else if stringable {
+            let s = vm.value_to_string(&d);
+            if vm.current_exception.is_some() {
                 return Err(VmError {
-                    message: format!("Uncaught TypeError: {}", msg),
+                    message: "exception".into(),
                     line: vm.current_line,
                 });
             }
+            description = Some(Value::String(s));
+        } else if !(matches!(d, Value::Null | Value::String(_)) || throwable) {
+            let msg = format!(
+                "assert(): Argument #2 ($description) must be of type Throwable|string|null, {} given",
+                Vm::value_type_name(&d)
+            );
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError {
+                message: format!("Uncaught TypeError: {}", msg),
+                line: vm.current_line,
+            });
         }
     }
     if assertion.is_truthy() {
@@ -15777,7 +15817,7 @@ fn array_all_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     ArrayKey::String(s) => Value::String(s.clone()),
                 };
                 let result = call_user_func(vm, &[cb.clone(), val.clone(), key_val])?;
-                if !result.is_truthy() {
+                if !vm.is_true(&result) {
                     return Ok(Value::False);
                 }
             }
@@ -15810,7 +15850,7 @@ fn array_any_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     ArrayKey::String(s) => Value::String(s.clone()),
                 };
                 let result = call_user_func(vm, &[cb.clone(), val.clone(), key_val])?;
-                if result.is_truthy() {
+                if vm.is_true(&result) {
                     return Ok(Value::True);
                 }
             }
@@ -15902,6 +15942,7 @@ fn user_sort_compare(
             ));
         }
     }
+    vm.warn_oob_float_to_int(&result, vm.current_line);
     let n = result.to_long();
     if n > 0 {
         1
@@ -18169,7 +18210,7 @@ fn array_find_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             ArrayKey::String(s) => Value::String(s.clone()),
         };
         let result = call_user_func(vm, &[callback.clone(), value.clone(), key_val])?;
-        if result.is_truthy() {
+        if vm.is_true(&result) {
             return Ok(value.deref());
         }
     }
