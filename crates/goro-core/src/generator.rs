@@ -2898,14 +2898,23 @@ impl Vm {
         line: u32,
     ) -> Result<Value, VmError> {
         let addr = RefCell::as_ptr(g) as usize;
-        let vals = self
+        let entry = self
             .running_gen_values
             .iter()
             .rev()
             .find(|(a, _)| *a == addr)
-            .and_then(|(_, v)| v.clone());
-        let Some((value, key)) = vals else {
-            return Err(PhpGenerator::running_error(self));
+            .map(|(_, v)| v.clone());
+        let (value, key) = match entry {
+            Some(Some(vals)) => vals,
+            // Not run to its first yield yet: that would run it.
+            Some(None) => return Err(PhpGenerator::running_error(self)),
+            // Delegating with `yield from` to the generator that runs.
+            None => match method {
+                b"next" | b"send" | b"throw" | b"rewind" => {
+                    return Err(PhpGenerator::running_error(self));
+                }
+                _ => return Ok(Value::Null),
+            },
         };
         let msg = match method {
             b"next" | b"send" | b"throw" => return Err(PhpGenerator::running_error(self)),

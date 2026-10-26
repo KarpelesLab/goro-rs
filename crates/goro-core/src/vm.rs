@@ -20861,6 +20861,11 @@ impl Vm {
             let before = self.globals.borrow().len();
             let keys: Vec<ArrayKey> = self.globals.borrow().keys().cloned().collect();
             for k in keys.into_iter().rev() {
+                match self.shutdown_global_generator(&k) {
+                    Some(true) => continue,
+                    Some(false) => return false,
+                    None => {}
+                }
                 let obj = {
                     let g = self.globals.borrow();
                     match g.get(&k) {
@@ -20914,6 +20919,52 @@ impl Vm {
                 return true;
             }
         }
+    }
+
+    /// shutdown_symbol_table_destructors() for a global holding a Generator
+    /// object: one nothing else references is destroyed (running its pending
+    /// finally blocks, releasing its variables). None: not such an entry;
+    /// Some(false): an exception aborts the shutdown.
+    #[inline(never)]
+    fn shutdown_global_generator(&mut self, k: &ArrayKey) -> Option<bool> {
+        let g = match self.globals.borrow().get(k) {
+            Some(Value::Generator(g)) => g.clone(),
+            Some(Value::Reference(r)) if Rc::strong_count(r) == 1 => match &*r.borrow() {
+                Value::Generator(g) => g.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let name = match k {
+            ArrayKey::String(s) => s.as_bytes().to_vec(),
+            ArrayKey::Int(n) => n.to_string().into_bytes(),
+        };
+        if self.global_ref_names.contains(&name) {
+            return Some(true);
+        }
+        let watched = self.finally_generators.iter().any(|x| Rc::ptr_eq(x, &g));
+        // Held only by the table (plus our clone and the watch list).
+        if Rc::strong_count(&g) != 2 + watched as usize {
+            return Some(true);
+        }
+        let old = self.globals.borrow_mut().remove(k);
+        self.bump_globals_gen();
+        drop(old);
+        drop(g);
+        if watched {
+            self.close_released_generators();
+        }
+        if self.exit_requested {
+            return Some(true);
+        }
+        if self.shutdown_exception_check() {
+            return Some(false);
+        }
+        self.shutdown_release_garbage();
+        if self.shutdown_exception_check() {
+            return Some(false);
+        }
+        Some(true)
     }
 
     /// Destruct the listed objects nothing else references any more, in
@@ -40239,22 +40290,6 @@ impl Vm {
                     // Also clear any pending deferred return/jump (this explicit return supersedes it)
                     self.pending_return = None;
                     self.pending_finally_jump = None;
-                    // At the end of the main script, force-close any suspended
-                    // generators so their finally blocks run on script exit
-                    // (matches PHP's "shutdown" semantics).
-                    if fsym.as_ref().is_some_and(|f| f.tab.global) && self.call_depth == 1 {
-                        // Close any generator CVs (top-level script ending). Any
-                        // exception they produce is surfaced as a Fatal error below.
-                        for cv in cvs.iter() {
-                            if let Value::Generator(gen_rc) = &cv.deref() {
-                                if let Ok(mut g) = gen_rc.try_borrow_mut() {
-                                    let prev_caller = self.generator_caller.take();
-                                    g.close(self);
-                                    self.generator_caller = prev_caller;
-                                }
-                            }
-                        }
-                    }
                     return Ok(Flow::Return(val));
                     #[allow(unreachable_code)]
                     Ok(Flow::Next)
