@@ -13705,6 +13705,11 @@ impl Compiler {
         if let Some(v) = self.ct_eval_arith(opcode, &l, &r) {
             return OperandType::Const(self.op_array.add_literal(v));
         }
+        if opcode == OpCode::BoolXor {
+            if let Some(v) = self.ct_eval_xor(&l, &r, line) {
+                return OperandType::Const(self.op_array.add_literal(v));
+            }
+        }
         let tmp = self.op_array.alloc_temp();
         let (l, r) = if opcode == OpCode::Concat {
             (
@@ -13723,6 +13728,86 @@ impl Compiler {
             line,
         });
         OperandType::Tmp(tmp)
+    }
+
+    /// zend_try_ct_eval_binary_op() of `xor` (boolean_xor_function(): each
+    /// operand's zend_is_true(), a NAN warning while compiling).
+    #[inline(never)]
+    fn ct_eval_xor(&self, l: &OperandType, r: &OperandType, line: u32) -> Option<Value> {
+        let (OperandType::Const(a), OperandType::Const(b)) = (l, r) else {
+            return None;
+        };
+        let lits = &self.op_array.literals;
+        let (a, b) = (lits.get(*a as usize)?, lits.get(*b as usize)?);
+        if matches!(a, Value::Resource(_)) || matches!(b, Value::Resource(_)) {
+            return None;
+        }
+        let x = self.ct_truthy(a, line);
+        let y = self.ct_truthy(b, line);
+        Some(if x != y { Value::True } else { Value::False })
+    }
+
+    /// zend_is_true() of a constant while compiling: a NAN warns then.
+    fn ct_truthy(&self, v: &Value, line: u32) -> bool {
+        if matches!(v, Value::Double(f) if f.is_nan()) && !self.in_param_default {
+            push_compile_warning("unexpected NAN value was coerced to bool".into(), line);
+        }
+        v.is_truthy()
+    }
+
+    /// zend_compile_short_circuiting() with a constant left operand (a
+    /// literal or a constant array): `&&` / `||` decided by it is a
+    /// constant (the right operand is not compiled); otherwise the right
+    /// operand's truthiness, a constant too when it is one. None when the
+    /// left operand is not a constant.
+    #[inline(never)]
+    fn short_circuit_const(
+        &mut self,
+        l: &OperandType,
+        left: &Expr,
+        right: &Expr,
+        is_and: bool,
+        line: u32,
+    ) -> CompileResult<Option<OperandType>> {
+        let lv = match l {
+            OperandType::Const(i) => match self.op_array.literals.get(*i as usize) {
+                Some(Value::Resource(_)) | None => return Ok(None),
+                Some(v) => v.clone(),
+            },
+            _ if matches!(left.kind, ExprKind::Array(_)) && Self::is_const_evaluable(left) => {
+                match Self::eval_const_expr(left) {
+                    Some(v) => v,
+                    None => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
+        };
+        let t = self.ct_truthy(&lv, line);
+        if is_and != t {
+            // (the result is zend_is_true() of the left operand once more)
+            let t = if is_and { t } else { self.ct_truthy(&lv, line) };
+            let idx = self.op_array.add_literal(if t { Value::True } else { Value::False });
+            return Ok(Some(OperandType::Const(idx)));
+        }
+        let r = self.compile_expr(right)?;
+        if let OperandType::Const(i) = r {
+            if let Some(rv) = self.op_array.literals.get(i as usize).cloned() {
+                if !matches!(rv, Value::Resource(_)) {
+                    let t = self.ct_truthy(&rv, line);
+                    let idx = self.op_array.add_literal(if t { Value::True } else { Value::False });
+                    return Ok(Some(OperandType::Const(idx)));
+                }
+            }
+        }
+        let tmp = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::CastBool,
+            op1: r,
+            op2: OperandType::Unused,
+            result: OperandType::Tmp(tmp),
+            line,
+        });
+        Ok(Some(OperandType::Tmp(tmp)))
     }
 
     /// zend_try_ct_eval_binary_op() for arithmetic on int / float literals
@@ -16060,13 +16145,10 @@ impl Compiler {
                         // A constant left operand that decides the result
                         // leaves the right one uncompiled
                         // (zend_compile_short_circuiting).
-                        if let OperandType::Const(i) = l {
-                            if let Some(v) = self.op_array.literals.get(i as usize) {
-                                if !v.is_truthy() {
-                                    let idx = self.op_array.add_literal(Value::False);
-                                    return Ok(OperandType::Const(idx));
-                                }
-                            }
+                        if let Some(r) =
+                            self.short_circuit_const(&l, left, right, true, expr.span.line)?
+                        {
+                            return Ok(r);
                         }
                         let result_tmp = self.op_array.alloc_temp();
                         // If left is false, short-circuit: result = false
@@ -16114,13 +16196,10 @@ impl Compiler {
                         // A constant left operand that decides the result
                         // leaves the right one uncompiled
                         // (zend_compile_short_circuiting).
-                        if let OperandType::Const(i) = l {
-                            if let Some(v) = self.op_array.literals.get(i as usize) {
-                                if v.is_truthy() {
-                                    let idx = self.op_array.add_literal(Value::True);
-                                    return Ok(OperandType::Const(idx));
-                                }
-                            }
+                        if let Some(r) =
+                            self.short_circuit_const(&l, left, right, false, expr.span.line)?
+                        {
+                            return Ok(r);
                         }
                         let result_tmp = self.op_array.alloc_temp();
                         // If left is true, short-circuit: result = true
