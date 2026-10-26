@@ -23523,15 +23523,30 @@ impl Vm {
         let cost = crate::stack::REENTRY_COST;
         let mut nested = 0usize;
         let mut it = self.call_object_method(agg, b"getIterator", &[]);
+        let mut from = agg.clone();
         while self.current_exception.is_none() {
-            let Some(Value::Object(o)) = &it else { break };
+            let o = match &it {
+                Some(Value::Object(o)) => o.clone(),
+                Some(Value::Generator(_)) => break,
+                _ => {
+                    self.aggregate_not_traversable(&from);
+                    break;
+                }
+            };
             let cl = o.borrow().class_name.to_ascii_lowercase();
             let is = |vm: &Self, i: &[u8]| {
                 vm.class_implements_interface(&cl, i) || vm.builtin_implements_interface(&cl, i)
             };
-            if is(self, b"iterator") || !is(self, b"iteratoraggregate") {
+            if is(self, b"iterator") {
                 break;
             }
+            if !is(self, b"iteratoraggregate") {
+                if !is(self, b"traversable") {
+                    self.aggregate_not_traversable(&from);
+                }
+                break;
+            }
+            from = Value::Object(o.clone());
             if !crate::stack::enter_native(cost) {
                 let size = crate::stack::emulated_size();
                 let _ = self.stack_size_error(size);
@@ -23543,6 +23558,23 @@ impl Vm {
         }
         crate::stack::leave_native(nested * cost);
         it
+    }
+
+    /// zend_user_it_get_new_iterator(): `agg`'s getIterator() returned
+    /// something that cannot be iterated.
+    #[cold]
+    fn aggregate_not_traversable(&mut self, agg: &Value) {
+        let cname = match agg {
+            Value::Object(o) => crate::value::display_class_name(&o.borrow().class_name),
+            _ => String::new(),
+        };
+        let msg = format!(
+            "Objects returned by {}::getIterator() must be traversable or implement interface Iterator",
+            cname
+        );
+        let line = self.current_line;
+        let exc = self.create_exception(b"Exception", &msg, line);
+        self.current_exception = Some(exc);
     }
 
     /// zend_call_stack_size_error(): the (emulated) C stack is used up.
