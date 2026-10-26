@@ -410,6 +410,39 @@ fn fast_scalar_cmp(op: &Op, cvs: &[Value], tmps: &mut [Value], literals: &[Value
     }
 }
 
+/// `a <=> b` (ZEND_SPACESHIP) of numbers, or of strings held by variables
+/// or literals: no conversion with a side effect.
+#[inline(never)]
+fn fast_spaceship(op: &Op, cvs: &[Value], tmps: &mut [Value], literals: &[Value]) -> Fast {
+    let r = match (
+        num_operand(&op.op1, cvs, tmps, literals),
+        num_operand(&op.op2, cvs, tmps, literals),
+    ) {
+        (Some(Num::L(x)), Some(Num::L(y))) => (x > y) as i64 - (x < y) as i64,
+        (Some(a), Some(b)) => a.value().compare_zend(&b.value()),
+        _ => {
+            if matches!(op.op1, OperandType::Tmp(_)) || matches!(op.op2, OperandType::Tmp(_)) {
+                return Fast::No;
+            }
+            let (Some(a), Some(b)) = (
+                defined_operand(&op.op1, cvs, tmps, literals),
+                defined_operand(&op.op2, cvs, tmps, literals),
+            ) else {
+                return Fast::No;
+            };
+            if !matches!((&a, &b), (Value::String(_), Value::String(_))) {
+                return Fast::No;
+            }
+            a.compare_zend(&b)
+        }
+    };
+    if store_tmp(&op.result, Value::Long(r), tmps) {
+        Fast::Done
+    } else {
+        Fast::No
+    }
+}
+
 /// i_zend_is_true() of a value whose conversion has no side effect (no
 /// object, no NAN, which warns).
 #[inline(always)]
@@ -2137,6 +2170,7 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::LessEqual
             | OpCode::Greater
             | OpCode::GreaterEqual
+            | OpCode::Spaceship
             | OpCode::Equal
             | OpCode::NotEqual
             | OpCode::Identical
@@ -2635,6 +2669,7 @@ impl crate::vm::Vm {
                 OpCode::NotEqual => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::Identical => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::NotIdentical => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::Spaceship => fast_spaceship(op, cvs, tmps, literals),
                 OpCode::AssignAdd => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::AssignSub => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::AssignMul => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
