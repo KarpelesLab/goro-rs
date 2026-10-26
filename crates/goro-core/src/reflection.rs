@@ -5825,8 +5825,7 @@ pub fn reflection_method_method(
                         .map(|f| f.flags & crate::stubs::F_TENTATIVE != 0)
                         .unwrap_or(false)
                 })
-                .and_then(|m| m.op_array.return_type.as_ref())
-                .cloned();
+                .and_then(reflect_return_type);
             // Resolve `self` to the declaring class of the method, falling
             // back to the lookup class if declaring info is unavailable.
             let scope: Vec<u8> = rmethod(vm, &class_lower, method_lower.as_bytes())
@@ -5856,7 +5855,7 @@ pub fn reflection_method_method(
                         .map(|f| f.flags & crate::stubs::F_TENTATIVE != 0)
                         .unwrap_or(false)
                 })
-                .and_then(|m| m.op_array.return_type.as_ref())
+                .and_then(reflect_return_type)
                 .is_some();
             Some(if has { Value::True } else { Value::False })
         }
@@ -6037,7 +6036,7 @@ pub fn reflection_method_method(
                         .map(|f| f.flags & crate::stubs::F_TENTATIVE != 0)
                         .unwrap_or(false)
                 })
-                .and_then(|m| m.op_array.return_type.clone());
+                .and_then(reflect_return_type);
             Some(match (method, rt) {
                 (b"hastentativereturntype", r) => {
                     if r.is_some() {
@@ -9952,7 +9951,7 @@ fn reflection_parameter_op_array(
             .collect();
         // (rmethod(): also an enum's implicit cases()/from()/tryFrom())
         if let Some(m) = rmethod(vm, &class_lower, &method_lower) {
-            return Some((*m.op_array).clone());
+            return Some(reflect_sig_op_array(&m.op_array).unwrap_or_else(|| (*m.op_array).clone()));
         }
     }
     None
@@ -14000,11 +13999,37 @@ pub fn closure_hidden_params(op_array: &OpArray) -> usize {
 }
 
 /// Create ReflectionParameter objects for a method's parameters (skipping $this for non-static methods)
+/// The signature reflection shows for a method an extension declares from
+/// PHP source taking its arguments as `...$args`: its stub's arginfo.
+/// The return type reflection shows for method `m` (see
+/// reflect_sig_op_array()).
+fn reflect_return_type(m: &crate::object::MethodDef) -> Option<ParamType> {
+    match m.op_array.internal_sig {
+        Some(f) if !m.op_array.ops.is_empty() => crate::stubs::parse_type(f.ret),
+        _ => m.op_array.return_type.clone(),
+    }
+}
+
+pub(crate) fn reflect_sig_op_array(oa: &OpArray) -> Option<OpArray> {
+    let sig = oa.internal_sig?;
+    // (an op array built from the stub already has its signature)
+    if oa.ops.is_empty() {
+        return None;
+    }
+    let mut o = crate::stubs::op_array_for(sig, oa.scope_class.as_deref(), true);
+    o.name = oa.name.clone();
+    o.scope_class = oa.scope_class.clone();
+    o.attributes = oa.attributes.clone();
+    Some(o)
+}
+
 pub fn create_reflection_parameters_method(
     vm: &mut Vm,
     op_array: &OpArray,
     is_static: bool,
 ) -> Value {
+    let sig_oa = reflect_sig_op_array(op_array);
+    let op_array = sig_oa.as_ref().unwrap_or(op_array);
     let mut result = PhpArray::new();
     let skip = if !is_static { 1usize } else { 0usize };
     let param_count = (op_array.param_count as usize).saturating_sub(skip);
@@ -16062,7 +16087,8 @@ pub(crate) struct FnStrCtx<'a> {
 
 /// Port of `_function_string()`.
 pub(crate) fn function_string(vm: &Vm, ctx: &FnStrCtx, indent: &str) -> String {
-    let op = ctx.op;
+    let sig_oa = reflect_sig_op_array(ctx.op);
+    let op = sig_oa.as_ref().unwrap_or(ctx.op);
     let is_internal =
         op.internal_sig.is_some() || ctx.internal_fn_ext.is_some() || ctx.internal_user_arginfo;
     let mut s = String::new();
