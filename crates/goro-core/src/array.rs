@@ -963,6 +963,38 @@ impl PhpArray {
         self.sync_packed();
     }
 
+    /// set(), unless the element it would overwrite fails `ok`: then
+    /// nothing is written (but the storage may have been separated), and
+    /// the value comes back. (One lookup of the key for both.)
+    pub fn set_if(
+        &mut self,
+        key: ArrayKey,
+        value: Value,
+        ok: impl FnOnce(&Value) -> bool,
+    ) -> Result<(), Value> {
+        self.separate();
+        if let Some(p) = self.find(&key) {
+            if !ok(&self.entries[p].1) {
+                return Err(value);
+            }
+            let old = std::mem::replace(&mut self.entries[p].1, value);
+            crate::gc::on_value_replaced(&old, &self.entries[p].1);
+            return Ok(());
+        }
+        if !self.reserve_one() {
+            return Ok(()); // Memory limit exceeded
+        }
+        if let ArrayKey::Int(n) = &key
+            && *n >= self.next_int_key
+        {
+            self.next_int_key = n.saturating_add(1);
+        }
+        self.entries.push((key, value));
+        self.after_push();
+        self.sync_packed();
+        Ok(())
+    }
+
     /// The key the next append would use (nNextFreeElement).
     pub fn next_free_key(&self) -> i64 {
         self.next_int_key

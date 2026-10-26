@@ -3167,35 +3167,24 @@ impl crate::vm::Vm {
             return Fast::No;
         };
         if let Some(val) = val {
+            let val = if dup { self.dup_array_value(val) } else { val };
             let Ok(mut a) = arr.try_borrow_mut() else {
                 return Fast::No;
             };
             // (an overwritten element: a plain value, or one whose release
             // only frees memory when no destructor can be due; a reference
             // is written through by the general handler)
-            match a.get(&key) {
-                None => {}
-                Some(v) if is_plain_scalar(v) => {}
-                Some(v @ (Value::Array(_) | Value::Object(_)))
-                    if !self.has_release_work()
-                        && drops_quietly_deep(v, &mut 256, &self.globals) => {}
-                _ => return Fast::No,
-            }
-            let val = if dup {
-                drop(a);
-                let v = self.dup_array_value(val);
-                match arr.try_borrow_mut() {
-                    Ok(b) => {
-                        a = b;
-                        v
-                    }
-                    Err(_) => return Fast::No,
+            let quiet = |v: &Value| match v {
+                v if is_plain_scalar(v) => true,
+                Value::Array(_) | Value::Object(_) => {
+                    !self.has_release_work() && drops_quietly_deep(v, &mut 256, &self.globals)
                 }
-            } else {
-                val
+                _ => false,
             };
-            a.set(key, val);
-            return Fast::Done;
+            return match a.set_if(key, val, quiet) {
+                Ok(()) => Fast::Done,
+                Err(_) => Fast::No,
+            };
         }
         if !tmp_writable(&op.result, tmps) {
             return Fast::No;
