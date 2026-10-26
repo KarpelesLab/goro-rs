@@ -11025,7 +11025,10 @@ impl Vm {
                 Some(a) => Rc::new(RefCell::new(a)),
                 None => self.object_to_array(&obj),
             },
-            Value::Null | Value::Undef => Rc::new(RefCell::new(PhpArray::new())),
+            // (a Generator has no properties)
+            Value::Null | Value::Undef | Value::Generator(_) => {
+                Rc::new(RefCell::new(PhpArray::new()))
+            }
             Value::Reference(r) => {
                 let v = r.borrow().clone();
                 self.convert_to_array(v)

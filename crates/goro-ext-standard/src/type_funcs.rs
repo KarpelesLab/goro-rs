@@ -264,7 +264,7 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             } {
                 cur @ Value::Array(_) => cur,
-                Value::Null | Value::Undef => Value::Array(std::rc::Rc::new(
+                Value::Null | Value::Undef | Value::Generator(_) => Value::Array(std::rc::Rc::new(
                     std::cell::RefCell::new(goro_core::array::PhpArray::new()),
                 )),
                 Value::Object(ref o) => Value::Array(_vm.object_to_array(o)),
