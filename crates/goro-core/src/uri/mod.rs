@@ -313,6 +313,10 @@ const STRICT_PROPERTY_CLASSES: [&[u8]; 5] = [
 /// (ZEND_ACC_NO_DYNAMIC_PROPERTIES is not inherited): no dynamic
 /// properties, and their own readonly properties stay as initialized.
 fn strict_prop_write(vm: &mut Vm, o: &Obj, name: &[u8], kind: u8) -> bool {
+    // (kind 2: a query, see NativeClassHandler::prop_write)
+    if kind == 2 {
+        return true;
+    }
     let cls = o.borrow().class_name.to_ascii_lowercase();
     if !STRICT_PROPERTY_CLASSES.contains(&cls.as_slice()) {
         return true;

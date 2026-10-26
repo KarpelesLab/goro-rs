@@ -377,6 +377,9 @@ pub struct NativeClassHandler {
     pub prop_added: Option<fn(&Rc<RefCell<PhpObject>>)>,
     /// Called before a property write (kind 0) or unset (kind 1). Returning
     /// false aborts the operation; the hook must have set `current_exception`.
+    /// Kind 2 asks (without side effects) whether a write of the property
+    /// reaches a real one: false for one the read handler synthesizes (a
+    /// user subclass's __set() is called for it).
     pub prop_write: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>, &[u8], u8) -> bool>,
     /// Called before comparing two objects (one of them of this class); may
     /// emit warnings or set `current_exception`.
@@ -819,8 +822,13 @@ impl Vm {
         }
         let (_, h) = self.find_native_class_handler(&class_lower)?;
         let read = h.prop_read?;
-        // (only a field the read handler reports undefined)
-        if !matches!(read(self, obj, name.as_bytes()), Some(None)) {
+        // (only a field the read handler reports undefined, or, for a
+        // write, one it synthesizes: prop_write's kind 2 query)
+        if !matches!(read(self, obj, name.as_bytes()), Some(None))
+            && !(magic == b"__set"
+                && h.prop_write
+                    .is_some_and(|w| !w(self, obj, name.as_bytes(), 2)))
+        {
             return None;
         }
         self.magic_prop_guards.insert(guard_key.clone());

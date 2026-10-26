@@ -837,6 +837,16 @@ pub(crate) const PERIOD_PROPS: [&[u8]; 7] = [
 
 /// DatePeriod's properties are read-only and cannot be unset.
 pub fn prop_write(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8], kind: u8) -> bool {
+    // kind 2: whether `name` is a real property for a write (false: one the
+    // read handler synthesizes, whose write zend_std_write_property() makes:
+    // a user subclass's __set() gets it). DateInterval only writes y, m, d,
+    // h, i, s, f and invert into the interval.
+    if kind == 2 {
+        let cn = o.borrow().class_name.clone();
+        return !(base_of(vm, &cn) == Some(Base::Interval)
+            && interval_get(o).is_some()
+            && matches!(name, b"days" | b"from_string" | b"date_string"));
+    }
     if base_of(vm, &o.borrow().class_name.clone()) != Some(Base::Period)
         || !PERIOD_PROPS.contains(&name)
     {

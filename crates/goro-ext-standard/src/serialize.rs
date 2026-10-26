@@ -3107,8 +3107,12 @@ fn incomplete_prop_write(
     vm: &mut Vm,
     obj: &Rc<RefCell<PhpObject>>,
     _name: &[u8],
-    _kind: u8,
+    kind: u8,
 ) -> bool {
+    // (kind 2: a query, see NativeClassHandler::prop_write)
+    if kind == 2 {
+        return true;
+    }
     let msg = incomplete_class_msg("modify a property", &incomplete_class_name(obj));
     let exc = vm.create_exception(b"Error", &msg, vm.current_line);
     vm.current_exception = Some(exc);
