@@ -37911,7 +37911,18 @@ impl Vm {
                                         Some(v @ Value::Object(_)) => Some(v.clone()),
                                         _ => None,
                                     };
-                                    let (this_val, args_skip_first) = if is_forwarding_call {
+                                    // `X::m($o)` in a method whose $this is an X:
+                                    // ZEND_INIT_STATIC_METHOD_CALL passes $this (the
+                                    // arguments are the method's own).
+                                    let scoped_this = !is_forwarding_call
+                                        && op_array.cv_names.first().map(|n| n.as_slice())
+                                            == Some(b"this".as_slice())
+                                        && cv0_object
+                                            .as_ref()
+                                            .is_some_and(|v| self.obj_instanceof(v, &class_lower));
+                                    let (this_val, args_skip_first) = if is_forwarding_call
+                                        || scoped_this
+                                    {
                                         // parent::X(args): $this from CV, args as-is
                                         (
                                             cv0_object.or(arg0_object).unwrap_or(Value::Null),
@@ -37939,7 +37950,42 @@ impl Vm {
                                     } else {
                                         class_lower
                                     };
-                                    if let Value::Object(obj) = &this_val {
+                                    // An SPL method with a stub: the deferred call
+                                    // checks it like a method call does (deprecation,
+                                    // arity, named arguments, frame).
+                                    if let Some(r) = self.spl_static_form_call(
+                                        &this_val,
+                                        &class_lower,
+                                        &method_lower,
+                                        &call,
+                                        args_skip_first,
+                                        op.line,
+                                        op_array.strict_types,
+                                    ) {
+                                        self.write_operand(
+                                            &op.result,
+                                            r,
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        );
+                                        handled = true;
+                                        if self.current_exception.is_some() {
+                                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                                exception_handlers.last()
+                                            {
+                                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                ip = *catch_target as usize;
+                                                return Ok(Flow::Continue);
+                                            }
+                                            return Err(VmError {
+                                                message: self.uncaught_exception_message(),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                    if handled {
+                                    } else if let Value::Object(obj) = &this_val {
                                         // Try dispatch_spl_method (no-argument
                                         // methods; named arguments go below)
                                         let spl_result = if call.named_args.is_empty() {

@@ -162,6 +162,43 @@ impl Vm {
         }
     }
 
+    /// `parent::m()` / `self::m()` / `SplX::m()` naming a stubbed method of
+    /// the built-in SPL class `class_lower` with `this` an instance of it:
+    /// run as the deferred method call (deprecation, arity, named
+    /// arguments, frame). None when that is not such a call.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    pub(crate) fn spl_static_form_call(
+        &mut self,
+        this: &Value,
+        class_lower: &[u8],
+        method_lower: &[u8],
+        call: &crate::vm::PendingCall,
+        skip_first: bool,
+        line: u32,
+        strict: bool,
+    ) -> Option<Value> {
+        if !matches!(this, Value::Object(_)) {
+            return None;
+        }
+        if self.classes.contains_key(class_lower)
+            || !self.spl_should_defer(class_lower, method_lower)
+            || !self.obj_instanceof(this, class_lower)
+        {
+            return None;
+        }
+        let name = call.name.as_bytes();
+        let sep = name.windows(2).position(|w| w == b"::")?;
+        let method_orig = name[sep + 2..].to_vec();
+        let mut args = self.take_values(0);
+        args.push(this.clone());
+        args.extend_from_slice(&call.args[skip_first as usize..]);
+        let r = self.spl_deferred_call(&method_orig, &args, &call.named_args, line, strict);
+        crate::vm::clear_values(&mut args);
+        self.recycle_values(args);
+        Some(r)
+    }
+
     /// Execute a deferred SPL method call: `args[0]` is $this. Maps named
     /// arguments, checks arity against the stub signature, pushes a stack
     /// frame (`Class->method`) and runs the built-in implementation.
