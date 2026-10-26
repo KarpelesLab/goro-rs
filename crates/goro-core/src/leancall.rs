@@ -1142,6 +1142,17 @@ impl Vm {
         if let Some(info) = &method_info {
             display.push_str(&info.display);
         } else if !user_fn.display_name.is_empty() {
+            // (a closure is qualified by its scope: Class::{closure:...})
+            if let Some(sc) = user_fn.scope_class.as_ref().filter(|_| {
+                crate::closure::is_closure_fn_name(&user_fn.name)
+                    && user_fn.display_name.starts_with(b"{closure")
+            }) {
+                match self.classes.get(sc) {
+                    Some(c) => push_lossy(&mut display, &c.name),
+                    None => display.push_str(&self.builtin_canonical_name(sc)),
+                }
+                display.push_str("::");
+            }
             push_lossy(&mut display, &user_fn.display_name);
         } else if let (Some((sep, _)), Some(scope)) = (method_sep, &user_fn.scope_class) {
             match self.classes.get(scope) {

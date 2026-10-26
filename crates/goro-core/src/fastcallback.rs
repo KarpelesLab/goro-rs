@@ -438,6 +438,16 @@ impl Vm {
     #[inline]
     fn push_callback_display(&self, f: &crate::opcode::OpArray, out: &mut String) {
         if !f.display_name.is_empty() {
+            // (a closure is qualified by its scope: Class::{closure:...})
+            if let Some(sc) = f.scope_class.as_ref().filter(|_| {
+                crate::closure::is_closure_fn_name(&f.name) && f.display_name.starts_with(b"{closure")
+            }) {
+                match self.classes.get(sc) {
+                    Some(c) => push_lossy(out, &c.name),
+                    None => out.push_str(&self.builtin_canonical_name(sc)),
+                }
+                out.push_str("::");
+            }
             push_lossy(out, &f.display_name);
         } else if let Some(fcc) = &f.fcc_target_name {
             push_lossy(out, fcc);
