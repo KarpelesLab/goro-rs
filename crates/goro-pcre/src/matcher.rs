@@ -238,6 +238,27 @@ impl MatchData {
     }
 }
 
+thread_local! {
+    /// The frame and ovector vectors of the last finished match, reused
+    /// (with their capacity) by the next one.
+    static BUFFERS: std::cell::Cell<(Vec<Frame>, Vec<usize>)> =
+        const { std::cell::Cell::new((Vec::new(), Vec::new())) };
+}
+
+impl Drop for Matcher<'_> {
+    fn drop(&mut self) {
+        let mut frames = std::mem::take(&mut self.frames);
+        let mut ovec = std::mem::take(&mut self.ovec);
+        // Keep the pooled buffers small: a pathological match can grow them
+        // to megabytes.
+        if frames.capacity() <= 1024 && ovec.capacity() <= 16384 {
+            frames.clear();
+            ovec.clear();
+            BUFFERS.with(|b| b.set((frames, ovec)));
+        }
+    }
+}
+
 struct Matcher<'a> {
     code: &'a [u8],
     subj: &'a [u8],
@@ -3165,12 +3186,15 @@ impl Code {
             self.flags & PCRE2_NOJIT == 0
                 && options & (PCRE2_ANCHORED | PCRE2_ENDANCHORED | PCRE2_NO_JIT) == 0
         });
+        let (mut frames, mut ovec) = BUFFERS.with(|b| b.take());
+        frames.reserve(16);
+        ovec.reserve(16 * ovs);
         let mut m = Matcher {
             code: &self.block,
             subj: subject,
             tables: self.tables,
-            frames: Vec::with_capacity(16),
-            ovec: Vec::with_capacity(16 * ovs),
+            frames,
+            ovec,
             ovs,
             f: 0,
             top_bracket: self.top_bracket,
@@ -3236,7 +3260,7 @@ impl Code {
             PCRE2_NEWLINE_ANY => m.nltype = NLTYPE_ANY,
             PCRE2_NEWLINE_ANYCRLF => m.nltype = NLTYPE_ANYCRLF,
             _ => {
-                md.ovector = m.out_ovector;
+                md.ovector = std::mem::take(&mut m.out_ovector);
                 return PCRE2_ERROR_INTERNAL;
             }
         }
