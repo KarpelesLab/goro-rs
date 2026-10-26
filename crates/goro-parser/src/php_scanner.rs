@@ -1516,15 +1516,15 @@ fn count_lf_cr_long(text: &[u8]) -> (u32, bool) {
     // that is zero)
     const LO7: u64 = 0x7f7f_7f7f_7f7f_7f7f;
     let zero_bytes = |x: u64| !(((x & LO7) + LO7) | x | LO7);
-    let mut chunks = text.chunks_exact(8);
+    let (chunks, rest) = text.as_chunks::<8>();
     let (mut lf, mut cr) = (0u32, 0u64);
-    for c in &mut chunks {
-        let w = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+    for c in chunks {
+        let w = u64::from_le_bytes(*c);
         lf += zero_bytes(w ^ 0x0a0a_0a0a_0a0a_0a0a).count_ones();
         cr |= zero_bytes(w ^ 0x0d0d_0d0d_0d0d_0d0d);
     }
     let mut cr = cr != 0;
-    for &c in chunks.remainder() {
+    for &c in rest {
         lf += u32::from(c == b'\n');
         cr |= c == b'\r';
     }
