@@ -1923,8 +1923,12 @@ impl<'a, S: Sink> Parser<'a, S> {
 
     fn parse_name_generic(&mut self, nc: bool) -> Option<String> {
         let start = self.pos();
+        let complex = self.name_is_complex(nc);
         let (c, l) = self.name_char_raw();
         if l == 0 || !is_name_start_char(c) || (nc && c == b':' as u32) {
+            if complex {
+                self.name_eol_quirk();
+            }
             return None;
         }
         self.skip(l);
@@ -1935,6 +1939,9 @@ impl<'a, S: Sink> Parser<'a, S> {
             }
             self.skip(l);
         }
+        if complex {
+            self.name_eol_quirk();
+        }
         let end = self.pos();
         if end - start > self.max_name_length() {
             self.fatal(
@@ -1944,6 +1951,40 @@ impl<'a, S: Sink> Parser<'a, S> {
             return None;
         }
         Some(String::from_utf8_lossy(&self.inp().data[start..end]).into_owned())
+    }
+
+    /// Whether xmlParseName/xmlParseNCName leave their ASCII fast path for
+    /// the Complex variant (which reads characters with CUR_CHAR).
+    fn name_is_complex(&self, nc: bool) -> bool {
+        let i = self.inp();
+        let d = &i.data[..];
+        let mut p = i.pos;
+        let first = |c: u8| c.is_ascii_alphabetic() || c == b'_' || (!nc && c == b':');
+        if p >= d.len() || !first(d[p]) {
+            return true;
+        }
+        p += 1;
+        while p < d.len()
+            && (d[p].is_ascii_alphanumeric()
+                || matches!(d[p], b'_' | b'-' | b'.')
+                || (!nc && d[p] == b':'))
+        {
+            p += 1;
+        }
+        !(p < d.len() && d[p] > 0 && d[p] < 0x80)
+    }
+
+    /// CUR_CHAR on a CR LF pair moves past the CR (without a column), so a
+    /// name parsed the complex way leaves `cur` on the LF.
+    fn name_eol_quirk(&mut self) {
+        if self.cur() == b'\r' && self.nxt(1) == b'\n' {
+            let p = self.pos();
+            self.skip(1);
+            let adj = &mut self.inp_mut().col_adj;
+            if !adj.contains(&(p, -1)) {
+                adj.push((p, -1));
+            }
+        }
     }
 
     /// XML_MAX_NAME_LENGTH, or XML_MAX_TEXT_LENGTH with XML_PARSE_HUGE.
@@ -1972,6 +2013,7 @@ impl<'a, S: Sink> Parser<'a, S> {
             }
             self.skip(l);
         }
+        self.name_eol_quirk();
         let end = self.pos();
         if end == start {
             None
