@@ -4401,6 +4401,19 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     "resetAsLazyGhost"
                 };
                 let Value::Object(obj) = &target else {
+                    let ce_disp = vm
+                        .classes
+                        .get(&class_lower)
+                        .map(|c| crate::value::display_class_name(&c.name))
+                        .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower));
+                    let err_msg = format!(
+                        "ReflectionClass::{}(): Argument #1 ($object) must be of type {}, {} given",
+                        method_name,
+                        ce_disp,
+                        Vm::value_type_name(&target)
+                    );
+                    let exc = vm.create_exception(b"TypeError", &err_msg, vm.current_line);
+                    vm.current_exception = Some(exc);
                     return Some(Value::Null);
                 };
                 let obj_class_lower: Vec<u8> = obj
@@ -4416,7 +4429,7 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                         .classes
                         .get(&class_lower)
                         .map(|c| crate::value::display_class_name(&c.name))
-                        .unwrap_or_default();
+                        .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower));
                     let given = crate::value::display_class_name(&obj.borrow().class_name);
                     let err_msg = format!(
                         "ReflectionClass::{}(): Argument #1 ($object) must be of type {}, {} given",
@@ -4424,6 +4437,9 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     );
                     let exc = vm.create_exception(b"TypeError", &err_msg, vm.current_line);
                     vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                if !lazy_check_initializer_arg(vm, &initializer, method_name, 2) {
                     return Some(Value::Null);
                 }
                 // ZEND_LAZY_OBJECT_USER_MASK = SKIP_INITIALIZATION_ON_SERIALIZE | SKIP_DESTRUCTOR
@@ -4580,6 +4596,40 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 let initializer = args.get(1).cloned().unwrap_or(Value::Null);
                 let options = args.get(2).map(|v| v.to_long()).unwrap_or(0);
                 let is_proxy = method == b"newlazyproxy";
+                let method_disp = if is_proxy {
+                    "newLazyProxy"
+                } else {
+                    "newLazyGhost"
+                };
+                if !lazy_check_initializer_arg(vm, &initializer, method_disp, 1) {
+                    return Some(Value::Null);
+                }
+                // Validate options: only SKIP_INITIALIZATION_ON_SERIALIZE (1)
+                // is allowed for newLazyGhost/newLazyProxy. SKIP_DESTRUCTOR (2)
+                // is only allowed on resetAsLazyProxy.
+                if options & !LAZY_SKIP_INIT_ON_SERIALIZE != 0 {
+                    let method_name = if is_proxy {
+                        "newLazyProxy"
+                    } else {
+                        "newLazyGhost"
+                    };
+                    let err_msg = if options & LAZY_SKIP_DESTRUCTOR != 0
+                        && options & !(LAZY_SKIP_INIT_ON_SERIALIZE | LAZY_SKIP_DESTRUCTOR) == 0
+                    {
+                        format!(
+                            "ReflectionClass::{}(): Argument #2 ($options) does not accept ReflectionClass::SKIP_DESTRUCTOR",
+                            method_name
+                        )
+                    } else {
+                        format!(
+                            "ReflectionClass::{}(): Argument #2 ($options) contains invalid flags",
+                            method_name
+                        )
+                    };
+                    let exc = vm.create_exception(b"ReflectionException", &err_msg, 0);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 // PHP: internal classes cannot be initialized lazily.
                 // stdClass is whitelisted as it is considered safe.
                 if !vm.classes.contains_key(&class_lower) && class_lower != b"stdclass" {
@@ -4631,35 +4681,15 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                         return Some(Value::Null);
                     }
                 }
+                // object_init_ex()'s error for an uninstantiable class.
+                if let Some(msg) = uninstantiable_class_error(vm, &class_lower) {
+                    let exc = vm.create_exception(b"Error", &msg, 0);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 // zend_object_make_lazy(): the class's constants and default
                 // values are evaluated first.
                 if vm.update_class_constants(&class_lower).is_err() {
-                    return Some(Value::Null);
-                }
-                // Validate options: only SKIP_INITIALIZATION_ON_SERIALIZE (1)
-                // is allowed for newLazyGhost/newLazyProxy. SKIP_DESTRUCTOR (2)
-                // is only allowed on resetAsLazyProxy.
-                if options & !LAZY_SKIP_INIT_ON_SERIALIZE != 0 {
-                    let method_name = if is_proxy {
-                        "newLazyProxy"
-                    } else {
-                        "newLazyGhost"
-                    };
-                    let err_msg = if options & LAZY_SKIP_DESTRUCTOR != 0
-                        && options & !(LAZY_SKIP_INIT_ON_SERIALIZE | LAZY_SKIP_DESTRUCTOR) == 0
-                    {
-                        format!(
-                            "ReflectionClass::{}(): Argument #2 ($options) does not accept ReflectionClass::SKIP_DESTRUCTOR",
-                            method_name
-                        )
-                    } else {
-                        format!(
-                            "ReflectionClass::{}(): Argument #2 ($options) contains invalid flags",
-                            method_name
-                        )
-                    };
-                    let exc = vm.create_exception(b"ReflectionException", &err_msg, 0);
-                    vm.current_exception = Some(exc);
                     return Some(Value::Null);
                 }
                 let obj_id = vm.alloc_object_id();
@@ -8197,6 +8227,51 @@ fn set_prop_lazy_flag(obj: &Rc<RefCell<PhpObject>>, prop: &[u8], lazy: bool) {
 }
 
 /// True if `prop` of the (proxy-resolved) object is still lazy.
+/// Z_PARAM_FUNC for the `$initializer`/`$factory` argument of the lazy
+/// object methods: false (with a TypeError thrown) when it is not callable.
+#[inline(never)]
+fn lazy_check_initializer_arg(vm: &mut Vm, cb: &Value, method: &str, arg_num: usize) -> bool {
+    let Some(err) = vm.callable_error(cb) else {
+        return true;
+    };
+    if vm.current_exception.is_some() {
+        return false;
+    }
+    let param = if method.contains("Proxy") {
+        "factory"
+    } else {
+        "initializer"
+    };
+    let msg = format!(
+        "ReflectionClass::{}(): Argument #{} (${}) must be a valid callback, {}",
+        method, arg_num, param, err
+    );
+    let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+    vm.current_exception = Some(exc);
+    false
+}
+
+/// object_init_ex()'s error for an interface, trait, enum or abstract class.
+fn uninstantiable_class_error(vm: &Vm, class_lower: &[u8]) -> Option<String> {
+    let c = rcls(vm, class_lower)?;
+    let kind = if c.is_interface {
+        "interface"
+    } else if c.is_trait {
+        "trait"
+    } else if c.is_enum {
+        "enum"
+    } else if c.is_abstract {
+        "abstract class"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "Cannot instantiate {} {}",
+        kind,
+        crate::value::display_class_name(&c.name)
+    ))
+}
+
 fn prop_is_lazy(obj: &Rc<RefCell<PhpObject>>, prop: &[u8]) -> bool {
     Vm::is_uninit_lazy(obj) && !crate::vm::is_prop_skipped(obj, prop)
 }
