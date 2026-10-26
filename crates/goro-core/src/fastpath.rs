@@ -330,6 +330,129 @@ pub(crate) fn assign_concat_in_place(
     }
 }
 
+/// `$cv .= <string|int>` of a variable holding a string assign_concat_in_place()
+/// could not append to (a shared string: a literal's, another variable's):
+/// the variable gets a new string, as the general handler builds it.
+/// `refs_ok`: see assign_concat_in_place(). False: nothing was done.
+#[inline(never)]
+fn assign_concat_new(
+    op: &Op,
+    cvs: &mut [Value],
+    tmps: &[Value],
+    literals: &[Value],
+    refs_ok: bool,
+) -> bool {
+    let OperandType::Cv(ci) = op.op1 else {
+        return false;
+    };
+    let mut buf = [0u8; 20];
+    let mut joined = |a: &[u8], b: &Value| -> Option<Vec<u8>> {
+        let b: &[u8] = match b {
+            Value::String(s) => s.as_bytes(),
+            Value::Long(n) => fmt_long(*n, &mut buf),
+            _ => return None,
+        };
+        let mut v = Vec::with_capacity(a.len() + b.len());
+        v.extend_from_slice(a);
+        v.extend_from_slice(b);
+        Some(v)
+    };
+    // (the right operand is read first, as the general handler reads it)
+    let joined = {
+        let rhs_ref;
+        let rhs: &Value = match op.op2 {
+            OperandType::Cv(i) => match cvs.get(i as usize) {
+                Some(Value::Reference(r)) => match r.try_borrow() {
+                    Ok(b) => {
+                        rhs_ref = b;
+                        &rhs_ref
+                    }
+                    Err(_) => return false,
+                },
+                Some(v) => v,
+                None => return false,
+            },
+            OperandType::Tmp(i) => match tmps.get(i as usize) {
+                Some(v) => v,
+                None => return false,
+            },
+            OperandType::Const(i) => match literals.get(i as usize) {
+                Some(v) => v,
+                None => return false,
+            },
+            _ => return false,
+        };
+        match cvs.get(ci as usize) {
+            Some(Value::String(s)) => joined(s.as_bytes(), rhs),
+            Some(Value::Reference(r)) if refs_ok => match r.try_borrow().as_deref() {
+                Ok(Value::String(s)) => joined(s.as_bytes(), rhs),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    let Some(joined) = joined else {
+        return false;
+    };
+    let v = Value::String(PhpString::from_vec(joined));
+    match cvs.get_mut(ci as usize) {
+        Some(Value::Reference(r)) => match r.try_borrow_mut() {
+            Ok(mut b) => *b = v,
+            Err(_) => return false,
+        },
+        Some(slot) => *slot = v,
+        None => return false,
+    }
+    true
+}
+
+/// SEND_REF of a variable (made a reference, null when undefined, unless
+/// it is one) or of the reference a temporary holds (ArrayGetRef & co.:
+/// the temporary is emptied), as the SEND_REF handler sends them. False:
+/// nothing was done.
+#[inline(never)]
+fn send_ref_fast(
+    op_array: &crate::opcode::OpArray,
+    op: &Op,
+    cvs: &mut [Value],
+    tmps: &mut [Value],
+    pending: &mut [crate::vm::PendingCall],
+) -> bool {
+    let Some(call) = pending.last_mut() else {
+        return false;
+    };
+    if !matches!(op.result, OperandType::Unused) {
+        return false;
+    }
+    let v = match op.op1 {
+        OperandType::Cv(i) => {
+            let i = i as usize;
+            if i >= cvs.len() || op_array.cv_names.get(i).is_none_or(|n| n == b"GLOBALS") {
+                return false;
+            }
+            match &cvs[i] {
+                Value::Reference(r) => Value::Reference(r.clone()),
+                v => {
+                    let current = match v {
+                        Value::Undef => Value::Null,
+                        v => v.clone(),
+                    };
+                    let r = Rc::new(RefCell::new(current));
+                    cvs[i] = Value::Reference(r.clone());
+                    Value::Reference(r)
+                }
+            }
+        }
+        OperandType::Tmp(t) => match tmps.get_mut(t as usize) {
+            Some(slot @ Value::Reference(_)) => std::mem::replace(slot, Value::Null),
+            _ => return false,
+        },
+        _ => return false,
+    };
+    call.args.push(v);
+    true
+}
+
 /// php_increment / php_decrement on a number.
 #[inline(always)]
 fn inc_dec(old: Num, inc: bool) -> Value {
@@ -1180,8 +1303,18 @@ fn fetch_w_container(
 /// temporary's: ISSET_ISEMPTY_DIM_OBJ / FETCH_DIM_IS): whether it is within
 /// the string, counting from its end when negative.
 #[inline(never)]
-fn fast_str_offset_isset(op: &Op, len: usize, cvs: &[Value], tmps: &mut [Value]) -> Fast {
+fn fast_str_offset_isset(
+    op: &Op,
+    len: usize,
+    cvs: &[Value],
+    tmps: &mut [Value],
+    literals: &[Value],
+) -> Fast {
     let k = match op.op2 {
+        OperandType::Const(i) => match literals.get(i as usize) {
+            Some(Value::Long(k)) => *k,
+            _ => return Fast::No,
+        },
         OperandType::Cv(i) => match cvs.get(i as usize) {
             Some(Value::Long(k)) => *k,
             _ => return Fast::No,
@@ -1202,6 +1335,194 @@ fn fast_str_offset_isset(op: &Op, len: usize, cvs: &[Value], tmps: &mut [Value])
         if set { Value::True } else { Value::False },
         tmps,
     ) {
+        Fast::Done
+    } else {
+        Fast::No
+    }
+}
+
+/// `(array) $v` of an array (the array itself), null (an empty array) or
+/// an int, string or bool (an array of it), into a temporary, as
+/// convert_to_array() makes it. `take`: a temporary operand is released by
+/// the opcode (see OpArray::free_mask()): its value is moved.
+#[inline(never)]
+fn fast_cast_array(op: &Op, cvs: &[Value], tmps: &mut [Value], take: bool) -> Fast {
+    if !matches!(op.result, OperandType::Tmp(_)) || !tmp_writable(&op.result, tmps) {
+        return Fast::No;
+    }
+    let ok = |v: &Value| {
+        matches!(
+            v,
+            Value::Array(_)
+                | Value::Null
+                | Value::Long(_)
+                | Value::String(_)
+                | Value::True
+                | Value::False
+        )
+    };
+    let v = match op.op1 {
+        OperandType::Cv(i) => match cvs.get(i as usize) {
+            Some(Value::Reference(r)) => match r.try_borrow() {
+                Ok(b) if ok(&b) => b.clone(),
+                _ => return Fast::No,
+            },
+            Some(v) if ok(v) => v.clone(),
+            _ => return Fast::No,
+        },
+        OperandType::Tmp(i) => match tmps.get_mut(i as usize) {
+            Some(slot) if ok(slot) => {
+                if take {
+                    std::mem::replace(slot, Value::Undef)
+                } else {
+                    slot.clone()
+                }
+            }
+            _ => return Fast::No,
+        },
+        _ => return Fast::No,
+    };
+    let arr = match v {
+        Value::Array(a) => a,
+        Value::Null => Rc::new(RefCell::new(crate::array::PhpArray::new())),
+        other => {
+            let mut arr = crate::array::PhpArray::new();
+            arr.push(other);
+            Rc::new(RefCell::new(arr))
+        }
+    };
+    if let OperandType::Tmp(t) = op.result {
+        tmps[t as usize] = Value::Array(arr);
+    }
+    Fast::Done
+}
+
+/// `&$cv[k]` (FETCH_DIM_W for a reference) of a variable's array with an
+/// int / string key held by a variable or a literal: the element becomes
+/// a reference (to null when it is missing) unless it is one, as the
+/// general handler makes it, and the temporary result holds it. Not of
+/// $GLOBALS.
+#[inline(never)]
+fn fast_dim_get_ref(
+    op: &Op,
+    cvs: &[Value],
+    tmps: &mut [Value],
+    literals: &[Value],
+    globals: &Rc<RefCell<crate::array::PhpArray>>,
+) -> Fast {
+    if !matches!(op.op2, OperandType::Cv(_) | OperandType::Const(_))
+        || !matches!(op.result, OperandType::Tmp(_))
+        || !tmp_writable(&op.result, tmps)
+    {
+        return Fast::No;
+    }
+    let OperandType::Cv(ai) = op.op1 else {
+        return Fast::No;
+    };
+    let arr = match cvs.get(ai as usize) {
+        Some(Value::Array(a)) => a.clone(),
+        Some(Value::Reference(r)) => match r.try_borrow().as_deref() {
+            Ok(Value::Array(a)) => a.clone(),
+            _ => return Fast::No,
+        },
+        _ => return Fast::No,
+    };
+    if Rc::ptr_eq(&arr, globals) {
+        return Fast::No;
+    }
+    let Some(key) = dim_key(&op.op2, cvs, tmps, literals) else {
+        return Fast::No;
+    };
+    let Ok(mut arr_mut) = arr.try_borrow_mut() else {
+        return Fast::No;
+    };
+    // (the element is inspected for writing: the array's storage is its
+    // own, see PhpArray::make_unique())
+    arr_mut.make_unique();
+    let existing = arr_mut.get(&key).cloned();
+    let ref_val = if let Some(Value::Reference(r)) = existing {
+        if let Ok(mut inner) = r.try_borrow_mut() {
+            crate::array::separate_shared(&mut inner);
+        }
+        Value::Reference(r)
+    } else {
+        let mut inner = existing.unwrap_or(Value::Null);
+        // (the clone above is one more holder)
+        if let Value::Array(a) = &inner {
+            if Rc::strong_count(a) > 2 {
+                crate::array::separate_shared(&mut inner);
+            }
+        }
+        let r = Rc::new(RefCell::new(inner));
+        arr_mut.set(key, Value::Reference(r.clone()));
+        Value::Reference(r)
+    };
+    drop(arr_mut);
+    if let OperandType::Tmp(t) = op.result {
+        tmps[t as usize] = ref_val;
+    }
+    Fast::Done
+}
+
+/// ISSET_ISEMPTY_DIM / FETCH_DIM_IS (both answer whether the element is
+/// set) of a variable holding a string, with an int offset (see
+/// fast_str_offset_isset), or holding null or nothing (not a lazily
+/// looked up global): what the general handler answers then. Not of an
+/// undefined variable as the key (it warns).
+#[inline(never)]
+fn fast_dim_isset_scalar(
+    op_array: &crate::opcode::OpArray,
+    op: &Op,
+    cvs: &[Value],
+    tmps: &mut [Value],
+    literals: &[Value],
+) -> Fast {
+    let ci = match op.op1 {
+        OperandType::Cv(ci) => ci,
+        // (a temporary null; one holding a string: see fast_dim_isset)
+        OperandType::Tmp(t) if matches!(tmps.get(t as usize), Some(Value::Null)) => {
+            return null_dim_isset(op, cvs, tmps);
+        }
+        _ => return Fast::No,
+    };
+    let len = match cvs.get(ci as usize) {
+        Some(Value::String(s)) => Some(s.len()),
+        Some(Value::Reference(r)) => match r.try_borrow().as_deref() {
+            Ok(Value::String(s)) => Some(s.len()),
+            Ok(Value::Null) => None,
+            _ => return Fast::No,
+        },
+        Some(Value::Null) => None,
+        Some(Value::Undef)
+            if op_array
+                .cv_names
+                .get(ci as usize)
+                .is_some_and(|n| !lazy_global_name(n)) =>
+        {
+            None
+        }
+        _ => return Fast::No,
+    };
+    match len {
+        Some(len) => fast_str_offset_isset(op, len, cvs, tmps, literals),
+        None => null_dim_isset(op, cvs, tmps),
+    }
+}
+
+/// fast_dim_isset_scalar() of a null container: false whatever the key,
+/// but an undefined variable's (it warns).
+#[inline]
+fn null_dim_isset(op: &Op, cvs: &[Value], tmps: &mut [Value]) -> Fast {
+    let key_ok = match op.op2 {
+        OperandType::Cv(i) => match cvs.get(i as usize) {
+            Some(Value::Reference(r)) => r.try_borrow().is_ok_and(|v| !matches!(*v, Value::Undef)),
+            Some(Value::Undef) | None => false,
+            Some(_) => true,
+        },
+        OperandType::Tmp(_) | OperandType::Const(_) => true,
+        _ => false,
+    };
+    if key_ok && store_tmp(&op.result, Value::False, tmps) {
         Fast::Done
     } else {
         Fast::No
@@ -1259,49 +1580,74 @@ fn fast_list_ops(
     }
 }
 
-/// ASSIGN_REF of a variable to a variable (`$a = &$b`) whose previous
-/// value has nothing to release: `$b` becomes a reference (null when
-/// undefined) that `$a` is bound to, as the general handler binds them.
+/// ASSIGN_REF of a variable to a variable (`$a = &$b`) or to the
+/// reference a temporary holds (`$a = &$b[k]`, see fast_dim_get_ref)
+/// whose previous value has nothing to release (a plain value, or, when no
+/// destructor is due (`no_release`), a reference held elsewhere too): `$b`
+/// becomes a reference (null when undefined) that `$a` is bound to, as
+/// the general handler binds them.
 #[inline(never)]
-fn fast_assign_ref_cv(op: &Op, cvs: &mut [Value], tmps: &mut [Value]) -> Fast {
-    let (OperandType::Cv(t), OperandType::Cv(v)) = (op.op1, op.op2) else {
+fn fast_assign_ref_cv(op: &Op, cvs: &mut [Value], tmps: &mut [Value], no_release: bool) -> Fast {
+    let OperandType::Cv(t) = op.op1 else {
         return Fast::No;
     };
-    let (t, v) = (t as usize, v as usize);
-    if t == v
-        || !cvs.get(t).is_some_and(is_plain_scalar)
-        || v >= cvs.len()
-        || !tmp_writable(&op.result, tmps)
-    {
+    let t = t as usize;
+    let old_ref = match cvs.get(t) {
+        Some(v) if is_plain_scalar(v) => false,
+        Some(Value::Reference(r)) if no_release && Rc::strong_count(r) > 1 => true,
+        _ => return Fast::No,
+    };
+    if !tmp_writable(&op.result, tmps) {
         return Fast::No;
     }
-    let r = match &cvs[v] {
-        Value::Reference(r) => {
-            let Ok(mut b) = r.try_borrow_mut() else {
+    let r = match op.op2 {
+        OperandType::Cv(v) => {
+            let v = v as usize;
+            if t == v || v >= cvs.len() {
                 return Fast::No;
-            };
-            if matches!(*b, Value::Undef) {
-                *b = Value::Null;
             }
-            drop(b);
-            r.clone()
+            match &cvs[v] {
+                Value::Reference(r) => {
+                    let Ok(mut b) = r.try_borrow_mut() else {
+                        return Fast::No;
+                    };
+                    if matches!(*b, Value::Undef) {
+                        *b = Value::Null;
+                    }
+                    drop(b);
+                    r.clone()
+                }
+                cur => {
+                    let cur = match cur {
+                        Value::Undef => Value::Null,
+                        c => c.clone(),
+                    };
+                    let r = Rc::new(RefCell::new(cur));
+                    cvs[v] = Value::Reference(r.clone());
+                    r
+                }
+            }
         }
-        cur => {
-            let cur = match cur {
-                Value::Undef => Value::Null,
-                c => c.clone(),
-            };
-            let r = Rc::new(RefCell::new(cur));
-            cvs[v] = Value::Reference(r.clone());
-            r
-        }
+        OperandType::Tmp(i) => match tmps.get(i as usize) {
+            Some(Value::Reference(r)) => r.clone(),
+            _ => return Fast::No,
+        },
+        _ => return Fast::No,
     };
     let result = match op.result {
-        OperandType::Tmp(_) => Some(r.borrow().clone()),
+        OperandType::Tmp(_) => match r.try_borrow() {
+            Ok(b) => Some(b.clone()),
+            Err(_) => return Fast::No,
+        },
         _ => None,
     };
-    // (a plain value: nothing to release)
-    cvs[t] = Value::Reference(r);
+    let old = std::mem::replace(&mut cvs[t], Value::Reference(r));
+    // (a reference held elsewhere too loses a holder, see the general
+    // handler; a plain value has nothing to release)
+    if old_ref {
+        crate::gc::possible_root(&old);
+    }
+    drop(old);
     if let Some(val) = result {
         if !store_tmp(&op.result, val, tmps) {
             return Fast::No;
@@ -2346,6 +2692,10 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::InitFCall
             | OpCode::SendVal
             | OpCode::SendValChecked
+            | OpCode::SendRef
+            | OpCode::ArrayGetRef
+            | OpCode::CloneObj
+            | OpCode::CastArray
             | OpCode::StaticPropGet
             | OpCode::StaticPropFetch
             | OpCode::ConstLookup
@@ -2459,7 +2809,10 @@ impl crate::vm::Vm {
                     match special {
                         Some(next) => Fast::Jump(next),
                         None => match self.init_fcall_fast(op_array, ip, cvs, tmps, no_release) {
-                            0 => break 'run ip,
+                            0 => match self.fast_func_num_args(op_array, ip, tmps) {
+                                Some(next) => Fast::Jump(next),
+                                None => break 'run ip,
+                            },
                             usize::MAX => Fast::Done,
                             next => Fast::Jump(next),
                         },
@@ -2474,6 +2827,15 @@ impl crate::vm::Vm {
                             && self.send_val_ucf(op, cvs, tmps, literals, snapshot))
                         || (bound.is_none() && self.send_ref_cv_fast(op_array, op, cvs))
                     {
+                        Fast::Done
+                    } else {
+                        break 'run ip;
+                    }
+                }
+                // A by-reference argument known as such at compile time
+                // (see send_ref_fast).
+                OpCode::SendRef => {
+                    if send_ref_fast(op_array, op, cvs, tmps, &mut self.pending_calls) {
                         Fast::Done
                     } else {
                         break 'run ip;
@@ -2503,6 +2865,29 @@ impl crate::vm::Vm {
                                         .get(idx)
                                         .or_else(|| fi.params.last().filter(|p| p.variadic))
                                         .is_none_or(|p| p.by_ref == 0)
+                                        && match defined_operand(&op.op1, cvs, tmps, literals) {
+                                            None => false,
+                                            Some(Value::Array(_)) => {
+                                                ucf = idx != 0
+                                                    || !crate::compiler::Compiler::is_array_ref_builtin(
+                                                        Some(c.name.as_bytes()),
+                                                    );
+                                                ucf
+                                            }
+                                            Some(_) => true,
+                                        }
+                                }
+                                // (a builtin without generic zpp info: by
+                                // value as the general handler finds it, from
+                                // its arginfo; a variable's send may be a
+                                // dynamic call's by-reference one: not here)
+                                (None, Some(crate::vm::BuiltinDesc { zpp: None, .. }))
+                                    if !matches!(op.op1, OperandType::Cv(_)) =>
+                                {
+                                    let idx = c.args.len();
+                                    !self.builtin_arg_must_be_ref(c, idx)
+                                        && !self.spl_deferred_arg_by_ref(c, idx)
+                                        && !self.native_method_arg_by_ref(c, idx)
                                         && match defined_operand(&op.op1, cvs, tmps, literals) {
                                             None => false,
                                             Some(Value::Array(_)) => {
@@ -2626,6 +3011,32 @@ impl crate::vm::Vm {
                     let f = self.fast_dim_fetch_w(op_array, ip, cvs, tmps);
                     release_consumed(rel, f, op, tmps)
                 }
+                // `(array) $v` (see fast_cast_array)
+                OpCode::CastArray => {
+                    let m = free_mask.get().get(ip).copied().unwrap_or(0);
+                    if m & !1 != 0 {
+                        break 'run ip;
+                    }
+                    fast_cast_array(op, cvs, tmps, m & 1 != 0)
+                }
+                // `clone $v` (see fast_clone_obj)
+                OpCode::CloneObj => {
+                    let Some(rel) = consumed_tmps(
+                        free_mask.get(),
+                        ops,
+                        ip,
+                        op,
+                        tmps,
+                        no_release,
+                        &self.globals,
+                    ) else {
+                        break 'run ip;
+                    };
+                    let f = self.fast_clone_obj(op, cvs, tmps);
+                    release_consumed(rel, f, op, tmps)
+                }
+                // `&$cv[k]` (see fast_dim_get_ref)
+                OpCode::ArrayGetRef => fast_dim_get_ref(op, cvs, tmps, literals, &self.globals),
                 // (on an array, FETCH_DIM_IS's isset answers as ISSET_ISEMPTY_DIM's)
                 OpCode::ArrayIsset | OpCode::ArrayIssetFetch => {
                     let Some(rel) = consumed_tmps(
@@ -2639,7 +3050,10 @@ impl crate::vm::Vm {
                     ) else {
                         break 'run ip;
                     };
-                    let f = self.fast_dim_isset(op, cvs, tmps, literals);
+                    let f = match self.fast_dim_isset(op, cvs, tmps, literals) {
+                        Fast::No => fast_dim_isset_scalar(op_array, op, cvs, tmps, literals),
+                        f => f,
+                    };
                     release_consumed(rel, f, op, tmps)
                 }
                 OpCode::IssetCheck => {
@@ -2865,7 +3279,11 @@ impl crate::vm::Vm {
                     Fast::No => self.fast_qm_assign_container(op, cvs, tmps),
                     f => f,
                 },
-                OpCode::AssignConcat => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::AssignConcat => match fast_op(op, cvs, tmps, literals, refs_ok, no_release)
+                {
+                    Fast::No if assign_concat_new(op, cvs, tmps, literals, refs_ok) => Fast::Done,
+                    f => f,
+                },
                 OpCode::BooleanNot => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::BitwiseAnd => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::BitwiseOr => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
@@ -2954,7 +3372,9 @@ impl crate::vm::Vm {
                     release_consumed(rel, f, op, tmps)
                 }
                 // `$a = &$b` (see fast_assign_ref_cv)
-                OpCode::AssignRef if bound.is_none() => fast_assign_ref_cv(op, cvs, tmps),
+                OpCode::AssignRef if bound.is_none() => {
+                    fast_assign_ref_cv(op, cvs, tmps, no_release)
+                }
                 // The creation of a closure (see closure.rs).
                 OpCode::DeclareFunction if self.fast_declare_closure(op_array, op) => Fast::Done,
                 OpCode::MakeClosure => {
@@ -3223,6 +3643,86 @@ impl crate::vm::Vm {
         }
         store_tmp(&fcall.result, result, tmps);
         Some(ip + 2 + nargs)
+    }
+
+    /// INIT_FCALL / DO_FCALL at `ip` of `op_array` of `func_num_args()` (a
+    /// builtin php-src compiles into ZEND_FUNC_NUM_ARGS: no frame of its
+    /// own) in the callee of a lean call, `op_array` (see leancall.rs): the
+    /// number of arguments the frame it would have (see moved_frame_args)
+    /// passed, as the builtin counts them, with what DO_FCALL does for the
+    /// call. The index of the opcode after the DO_FCALL, or None (nothing
+    /// done).
+    #[inline(never)]
+    fn fast_func_num_args(
+        &mut self,
+        op_array: &crate::opcode::OpArray,
+        ip: usize,
+        tmps: &mut [Value],
+    ) -> Option<usize> {
+        let ops = &op_array.ops;
+        let op = &ops[ip];
+        let OperandType::Const(ni) = op.op1 else {
+            return None;
+        };
+        let Some(Value::String(name)) = op_array.literals.get(ni as usize) else {
+            return None;
+        };
+        if self.lean_depth == 0 || !name.as_bytes().eq_ignore_ascii_case(b"func_num_args") {
+            return None;
+        }
+        // (no arguments; the DO_FCALL right after)
+        if !matches!(op.op2, OperandType::Const(c)
+            if matches!(op_array.literals.get(c as usize), Some(Value::Long(0))))
+        {
+            return None;
+        }
+        let fcall = ops.get(ip + 1)?;
+        if fcall.opcode != OpCode::DoFCall
+            || !matches!(fcall.op2, OperandType::Unused)
+            || !matches!(fcall.result, OperandType::Tmp(_) | OperandType::Unused)
+            || !tmp_writable(&fcall.result, tmps)
+        {
+            return None;
+        }
+        // The running lean callee's call (the innermost one: this code's).
+        let lf = self.lean_frames.last()?;
+        if !std::ptr::eq(lf.f, op_array) {
+            return None;
+        }
+        let skip = usize::from(lf.sep.is_some_and(|(_, this)| this));
+        let n = lf.nargs.checked_sub(skip)?;
+        // (its parameters hold all of its arguments)
+        if op_array.variadic_param.is_some() || n > op_array.param_count as usize {
+            return None;
+        }
+        // The call INIT_FCALL sets up: the builtin (not disabled).
+        self.push_plain_call(op_array, ip, name.clone());
+        let builtin = self.pending_calls.last().and_then(|c| {
+            (c.target.user.is_none() && !c.target.dynamic && c.named_args.is_empty())
+                .then_some(c.target.builtin)
+                .flatten()
+        });
+        let mut call = self.pending_calls.pop()?;
+        self.recycle_args(&mut call);
+        drop(call);
+        let desc = builtin?;
+        if desc.lower != b"func_num_args" || desc.ns_fallback(name.as_bytes()) {
+            return None;
+        }
+        // (what DO_FCALL does for such a call)
+        self.last_call_by_ref = false;
+        self.note_call_result(fcall, desc.lower);
+        self.caller_strict_types = op_array.strict_types;
+        self.reset_named_skipped();
+        self.ucf_call_line = None;
+        self.ucf_strict = false;
+        if let OperandType::Tmp(t) = fcall.result {
+            let unused = op_array.free_mask().get(ip + 1).is_some_and(|m| m & 4 != 0);
+            if !unused {
+                tmps[t as usize] = Value::Long(n as i64);
+            }
+        }
+        Some(ip + 2)
     }
 
     /// JMP_IF_ARG_BY_REF of a positional argument of a call set up with its
@@ -3623,6 +4123,75 @@ impl crate::vm::Vm {
         Some(ip + 1)
     }
 
+    /// `clone $v` of an object of a user class (all of its ancestors user
+    /// classes too) or of stdClass, with no __clone() or destructor, no
+    /// extension state, closure or engine marker (lazy, enum case...):
+    /// clone_value() then only copies its properties, raising nothing and
+    /// running no code (the uncloneable classes and those with a clone
+    /// hook extensions list are internal ones). Into a temporary.
+    /// Fast::No: nothing was done.
+    #[inline(never)]
+    fn fast_clone_obj(&mut self, op: &Op, cvs: &[Value], tmps: &mut [Value]) -> Fast {
+        if !matches!(op.result, OperandType::Tmp(_))
+            || !tmp_writable(&op.result, tmps)
+            || crate::vm::typed_ref::any()
+        {
+            return Fast::No;
+        }
+        let v = match op.op1 {
+            OperandType::Cv(i) => match cvs.get(i as usize) {
+                Some(Value::Reference(r)) => match r.try_borrow() {
+                    Ok(b) => b.clone(),
+                    Err(_) => return Fast::No,
+                },
+                Some(v) => v.clone(),
+                None => return Fast::No,
+            },
+            OperandType::Tmp(i) => match tmps.get(i as usize) {
+                Some(v) => v.clone(),
+                None => return Fast::No,
+            },
+            _ => return Fast::No,
+        };
+        let Value::Object(o) = &v else {
+            return Fast::No;
+        };
+        {
+            let Ok(ob) = o.try_borrow() else {
+                return Fast::No;
+            };
+            if ob.closure.is_some() || ob.native.is_some() || ob.properties.has_internal() {
+                return Fast::No;
+            }
+            let mut buf = [0u8; 128];
+            let Some(lower) = lower_into(&ob.class_name, &mut buf) else {
+                return Fast::No;
+            };
+            let lower: &[u8] = lower;
+            if (lower != b"stdclass" && !self.user_class_chain(lower))
+                || crate::vm::native_handlers(o).is_some()
+            {
+                return Fast::No;
+            }
+            // (what clone_value() looks up: stdClass has no entry)
+            if self.classes.get(lower).is_some_and(|c| {
+                c.get_method(b"__clone").is_some() || c.get_method(b"__destruct").is_some()
+            }) {
+                return Fast::No;
+            }
+        }
+        let line = op.line;
+        let cloned = self.clone_value(&v, line);
+        drop(v);
+        if let Value::Object(c) = &cloned {
+            crate::gc::track_object(c);
+        }
+        if let OperandType::Tmp(t) = op.result {
+            tmps[t as usize] = cloned;
+        }
+        Fast::Done
+    }
+
     /// `global $name` in a frame not bound to a symbol table: the variable
     /// becomes a reference to the global's cell (created as null when
     /// missing), as the general handler binds it, when what it held is a
@@ -3691,7 +4260,9 @@ impl crate::vm::Vm {
             },
             OperandType::Tmp(i) => match tmps.get(i as usize) {
                 Some(Value::Array(a)) => a.clone(),
-                Some(Value::String(s)) => return fast_str_offset_isset(op, s.len(), cvs, tmps),
+                Some(Value::String(s)) => {
+                    return fast_str_offset_isset(op, s.len(), cvs, tmps, literals);
+                }
                 _ => return Fast::No,
             },
             _ => return Fast::No,
