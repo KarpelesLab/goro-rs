@@ -538,7 +538,7 @@ impl Vm {
                     OperandType::Const(c) => literals.get(c as usize)?.clone(),
                     _ => return None,
                 };
-                if !crate::recv_fast::arg_matches_exactly(f, base + i, &v) {
+                if !crate::recv_fast::arg_matches_exactly(self, f, base + i, &v) {
                     return None;
                 }
             }
@@ -979,7 +979,9 @@ impl Vm {
         };
         // (a declared return type: the value must have it already, see
         // recv_fast.rs)
-        if f.lean_kind() & 8 != 0 && !crate::recv_fast::return_matches_exactly(f, v, r.line == 0) {
+        if f.lean_kind() & 8 != 0
+            && !crate::recv_fast::return_matches_exactly(self, f, v, r.line == 0)
+        {
             return None;
         }
         // (containers of such values too, within a budget: a tree of
