@@ -4515,6 +4515,12 @@ impl Compiler {
     }
 
     fn compile_stmt(&mut self, stmt: &Statement) -> CompileResult<()> {
+        if let Some(line) = Self::globals_append_in_stmt(stmt) {
+            return Err(CompileError {
+                message: "Cannot append to $GLOBALS".into(),
+                line,
+            });
+        }
         let ret_tmps = matches!(stmt.kind, StmtKind::Return(_)).then_some(self.op_array.temp_next);
         let r = self.compile_stmt_inner(stmt);
         if let Some(start) = ret_tmps {
@@ -14443,6 +14449,33 @@ impl Compiler {
             line,
         });
         Ok(OperandType::Tmp(tmp))
+    }
+
+    /// zend_delayed_compile_dim(): `$GLOBALS[]` in a statement's own
+    /// expressions (outside isset() and unset(), which reject `[]` first).
+    #[inline(never)]
+    fn globals_append_in_stmt(stmt: &Statement) -> Option<u32> {
+        fn find(e: &Expr, line: &mut Option<u32>) -> bool {
+            match &e.kind {
+                ExprKind::Isset(_) => false,
+                ExprKind::ArrayAccess { array, index: None }
+                    if matches!(&array.kind, ExprKind::Variable(n) if n == b"GLOBALS") =>
+                {
+                    *line = Some(e.span.line);
+                    true
+                }
+                _ => crate::ast_walk::expr_any_child(e, &mut |c| find(c, line)),
+            }
+        }
+        if matches!(stmt.kind, StmtKind::Unset(_)) {
+            return None;
+        }
+        let mut line = None;
+        crate::ast_walk::stmt_any_child(stmt, &mut |c| match c {
+            crate::ast_walk::Child::Expr(e) => find(e, &mut line),
+            crate::ast_walk::Child::Block(_) => false,
+        });
+        line
     }
 
     /// Compile a constant expression's value (see `in_const_expr`).
