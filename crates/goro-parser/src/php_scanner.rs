@@ -636,25 +636,20 @@ impl<'a> Scanner<'a> {
     fn single_quoted(&mut self, p: usize, bprefix: usize) -> Option<ScanToken> {
         let n = self.s.len();
         let mut cur = p + bprefix + 1;
-        // (the newlines counted as they are scanned)
-        let (mut lf, mut cr) = (0u32, false);
         loop {
-            if cur < n {
-                let ch = self.s[cur];
-                if ch == b'\'' {
-                    return self.tok_counted(T_CONSTANT_ENCAPSED_STRING, p, cur + 1, lf, cr);
-                }
-                cur += 1;
-                lf += u32::from(ch == b'\n');
-                cr |= ch == b'\r';
-                if ch == b'\\' && cur < n {
-                    let ch = self.s[cur];
-                    lf += u32::from(ch == b'\n');
-                    cr |= ch == b'\r';
-                    cur += 1;
-                }
-            } else {
+            // (to the next quote or backslash)
+            let Some(k) = memchr::memchr2(b'\'', b'\\', self.s.get(cur..).unwrap_or_default())
+            else {
                 return self.tok(T_ENCAPSED_AND_WHITESPACE, p, n);
+            };
+            cur += k;
+            if self.s[cur] == b'\'' {
+                return self.tok(T_CONSTANT_ENCAPSED_STRING, p, cur + 1);
+            }
+            // (a backslash escapes the byte after it)
+            cur += 1;
+            if cur < n {
+                cur += 1;
             }
         }
     }
