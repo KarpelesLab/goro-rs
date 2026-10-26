@@ -57536,6 +57536,23 @@ impl Vm {
                     };
                     // zval_try_get_string() of the property name
                     let name_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    // ++ / -- of an undefined property of an internal class
+                    // without dynamic properties (get_property_ptr_ptr())
+                    if op.opcode == OpCode::PropertyGetIncDec {
+                        if let Some(msg) = self.incdec_forbidden_dynamic_prop(&obj_val_raw, &name_val) {
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     let prop_name = match name_val.deref() {
                         o @ Value::Object(_) => match self.value_to_string_checked(&o) {
                             Ok(s) => s,
@@ -62019,6 +62036,22 @@ impl Vm {
         )
     }
 
+    /// forbidden_dynamic_prop_w() of the property an increment / decrement
+    /// fetches (`$o->p++`).
+    #[inline(never)]
+    fn incdec_forbidden_dynamic_prop(&mut self, obj: &Value, name: &Value) -> Option<String> {
+        let Value::Object(o) = obj.deref() else {
+            return None;
+        };
+        if !Self::no_dynamic_properties(&o.borrow().class_name.to_ascii_lowercase()) {
+            return None;
+        }
+        let Value::String(n) = name.deref() else {
+            return None;
+        };
+        self.forbidden_dynamic_prop_w(&obj.deref(), n.as_bytes())
+    }
+
     /// Whether `prop` is neither set on `obj` nor declared by its class.
     #[inline(never)]
     fn undeclared_prop_of(&self, obj: &Value, class_lower: &[u8], prop: &[u8]) -> bool {
@@ -62052,10 +62085,10 @@ impl Vm {
         }
         let ob = o.borrow();
         let cl = ob.class_name.to_ascii_lowercase();
-        if !matches!(
-            cl.as_slice(),
-            b"closure" | b"weakreference" | b"weakmap" | b"sensitiveparametervalue"
-        ) || ob.has_property(prop)
+        if !Self::no_dynamic_properties(&cl)
+            || ob.has_property(prop)
+            || crate::stubs::find_class_lower(&cl)
+                .is_some_and(|c| c.props.iter().any(|p| p.name.as_bytes() == prop))
         {
             return None;
         }
