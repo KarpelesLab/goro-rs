@@ -323,11 +323,18 @@ pub fn compile(
             } else {
                 ("Parse error", "syntax error".to_string())
             };
+            // (the scanner's deprecations for what it read before the
+            // error: non-canonical casts...)
+            let prior = lexer_deprecations
+                .into_iter()
+                .filter(|(_, l)| *l <= e.span.line)
+                .map(|(m, l)| ("Deprecated", m, l))
+                .collect();
             return Err(CompileError {
                 kind,
                 message,
                 line: e.span.line,
-                prior: Vec::new(),
+                prior,
             });
         }
     };

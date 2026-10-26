@@ -21102,6 +21102,10 @@ impl Compiler {
             // Cast expressions in constant contexts
             ExprKind::Cast(cast_type, operand) => {
                 let val = Self::eval_const_expr(operand)?;
+                // (a cast that warns is evaluated at run time)
+                if Self::const_cast_warns(cast_type, &val) {
+                    return None;
+                }
                 match cast_type {
                     CastType::Int => Some(Value::Long(val.to_long())),
                     CastType::Float => Some(Value::Double(val.to_double())),
@@ -21145,6 +21149,19 @@ impl Compiler {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// Whether casting `val` raises a diagnostic ("Array to string
+    /// conversion", "The float ... is not representable as an int").
+    #[inline(never)]
+    fn const_cast_warns(cast_type: &CastType, val: &Value) -> bool {
+        match (cast_type, val) {
+            (CastType::String, Value::Array(_)) => true,
+            (CastType::Int, Value::Double(d)) => {
+                !d.is_finite() || *d >= 9223372036854775808.0 || *d < -9223372036854775808.0
+            }
+            _ => false,
         }
     }
 
