@@ -115,11 +115,12 @@ pub fn prov_bad_decrypt() {
     push(LIB_PROV, 100, "bad decrypt");
 }
 
-/// A system (errno) error: OpenSSL 3 packs these as `0x80000000 | errno`.
+/// A system (errno) error: OpenSSL 3 packs these as `ERR_SYSTEM_FLAG | errno`,
+/// which ERR_error_string_n() prints sign-extended to 64 bits.
 pub fn sys(errno: i32, text: &str) {
     push_str(format!(
         "error:{:08X}:system library::{}",
-        0x8000_0000u32 | errno as u32,
+        0xFFFF_FFFF_8000_0000u64 | errno as u32 as u64,
         text
     ));
 }

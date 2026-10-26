@@ -196,7 +196,7 @@ pub fn from_zval(
                     };
                     key = pkey::read_public_pem(&data);
                     if key.is_none() {
-                        err::pem_no_start_line();
+                        // PEM_read_bio_PUBKEY_ex() goes through the decoders.
                         err::push(err::LIB_DECODER, err::R_UNSUPPORTED, "unsupported");
                     }
                 }
@@ -504,7 +504,7 @@ pub fn generate_private_key(vm: &mut Vm, fname: &str, r: &Req) -> Option<PKey> {
     match r.priv_key_type {
         req::OPENSSL_KEYTYPE_RSA => {
             if bits < 512 {
-                err::push(err::LIB_PROV, 172, "key size too small");
+                err::push(err::LIB_PROV, 171, "key size too small");
                 return None;
             }
             if bits > 16384 {
@@ -514,6 +514,11 @@ pub fn generate_private_key(vm: &mut Vm, fname: &str, r: &Req) -> Option<PKey> {
             pkey::generate_rsa(bits).map(PKey::Rsa)
         }
         req::OPENSSL_KEYTYPE_DSA => {
+            // ffc_validate_LN() (non-FIPS): L >= 1024 with the default N.
+            if bits < 1024 {
+                err::push(err::LIB_DSA, 114, "bad ffc parameters");
+                return None;
+            }
             let (p, q, g) = pkey::generate_dsa_params(bits)?;
             let (x, y) = pkey::generate_ffc(&p, Some(&q), &g);
             Some(PKey::Dsa(Ffc {
@@ -918,7 +923,7 @@ fn algo_arg(vm: &mut Vm, args: &[Value], idx: usize, f: &str) -> Result<Algo, Vm
 /// Resolve the digest: Ok(Some(md)) / Ok(None) default (algo 0) / Err unknown.
 fn resolve_md(a: &Algo) -> Result<Option<Md>, ()> {
     match a {
-        Algo::Str(s) => Md::by_name(s).map(Some).ok_or(()),
+        Algo::Str(s) => crate::digest::fetch(s).map(Some).ok_or(()),
         Algo::Long(0) => Ok(None),
         Algo::Long(l) => md_from_algo(*l).map(Some).ok_or(()),
     }
@@ -1038,6 +1043,11 @@ fn rsa_of(key: &PKey) -> Option<&Rsa> {
     }
 }
 
+/// EVP_PKEY_sign()/EVP_PKEY_verify_recover() failure after the provider.
+fn provider_signature_failure() {
+    err::push(err::LIB_EVP, 234, "provider signature failure");
+}
+
 fn not_rsa() {
     err::push(
         err::LIB_EVP,
@@ -1051,7 +1061,7 @@ fn oaep_digest(vm: &mut Vm, f: &str, padding: i64, digest: &Option<PhpString>) -
     match digest {
         Some(d) => {
             let name = d.to_string_lossy();
-            match Md::by_name(&name) {
+            match crate::digest::fetch(&name) {
                 Some(m) => Ok(if padding == pkey::RSA_PKCS1_OAEP_PADDING {
                     m
                 } else {
@@ -1067,11 +1077,10 @@ fn oaep_digest(vm: &mut Vm, f: &str, padding: i64, digest: &Option<PhpString>) -
     }
 }
 
+/// The asymmetric-cipher provider refuses only PSS as a padding mode (and
+/// says nothing); other unknown modes fail in RSA_*_crypt().
 fn valid_enc_padding(p: i64) -> bool {
-    matches!(
-        p,
-        pkey::RSA_PKCS1_PADDING | pkey::RSA_NO_PADDING | pkey::RSA_PKCS1_OAEP_PADDING
-    )
+    p != pkey::RSA_PKCS1_PSS_PADDING
 }
 
 pub fn openssl_private_encrypt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1088,15 +1097,27 @@ pub fn openssl_private_encrypt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
         return Ok(Value::False);
     };
     let Some(r) = rsa_of(&key) else {
-        not_rsa();
+        // EVP_PKEY_sign_init() works for EC/DSA keys; the RSA padding
+        // ctrl then fails quietly.
+        if !matches!(&*key, PKey::Ec(_) | PKey::Dsa(_)) {
+            not_rsa();
+        }
         return Ok(Value::False);
     };
+    if !matches!(padding, pkey::RSA_PKCS1_PADDING | pkey::RSA_NO_PADDING) {
+        err::push(err::LIB_PROV, 165, "illegal or unsupported padding mode");
+        return Ok(Value::False);
+    }
     match r.sign_raw(data.as_bytes(), padding) {
         Some(out) => {
             zpp::set_ref(args, 1, zpp::bytes(out));
             Ok(Value::True)
         }
-        None => Ok(Value::False),
+        None => {
+            pkey::prov_rsa_lib();
+            provider_signature_failure();
+            Ok(Value::False)
+        }
     }
 }
 
@@ -1133,7 +1154,6 @@ pub fn openssl_private_decrypt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
         return Ok(Value::False);
     };
     if !valid_enc_padding(padding) {
-        err::push(err::LIB_PROV, 165, "illegal or unsupported padding mode");
         return Ok(Value::False);
     }
     let Ok(md) = oaep_digest(vm, f, padding, &digest) else {
@@ -1178,7 +1198,6 @@ pub fn openssl_public_encrypt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
         return Ok(Value::False);
     };
     if !valid_enc_padding(padding) {
-        err::push(err::LIB_PROV, 165, "illegal or unsupported padding mode");
         return Ok(Value::False);
     }
     let Ok(md) = oaep_digest(vm, f, padding, &digest) else {
@@ -1210,12 +1229,21 @@ pub fn openssl_public_decrypt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
         not_rsa();
         return Ok(Value::False);
     };
+    if !matches!(padding, pkey::RSA_PKCS1_PADDING | pkey::RSA_NO_PADDING) {
+        err::push(err::LIB_PROV, 165, "illegal or unsupported padding mode");
+        return Ok(Value::False);
+    }
     match r.verify_recover(data.as_bytes(), padding) {
-        Some(out) => {
+        // RSA_public_decrypt() returning 0 bytes is a failure too.
+        Some(out) if !out.is_empty() => {
             zpp::set_ref(args, 1, zpp::bytes(out));
             Ok(Value::True)
         }
-        None => Ok(Value::False),
+        _ => {
+            pkey::prov_rsa_lib();
+            provider_signature_failure();
+            Ok(Value::False)
+        }
     }
 }
 

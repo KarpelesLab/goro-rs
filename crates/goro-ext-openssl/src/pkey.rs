@@ -1371,23 +1371,73 @@ impl Rsa {
                 em
             }
             _ => {
-                err::push(err::LIB_PROV, 165, "illegal or unsupported padding mode");
+                rsa_err(118, "unknown padding type");
                 return None;
             }
         };
         self.public_op(&bn(&em))
     }
 
+    /// The PKCS#1 v1.5 implicit-rejection key derivation key
+    /// (rsa_ossl.c derive_kdk()): HMAC-SHA256 keyed with SHA256(d) over
+    /// the ciphertext left-padded to the modulus size.
+    fn implicit_rejection_kdk(&self, ct: &[u8]) -> Option<Vec<u8>> {
+        let k = self.k();
+        let d = self.d.as_ref()?;
+        let d_hash = Md::Sha256.digest(&pad_be(d, k));
+        let mut msg = vec![0u8; k.saturating_sub(ct.len())];
+        msg.extend_from_slice(ct);
+        Some(crate::digest::hmac(Md::Sha256, &d_hash, &msg))
+    }
+
+    /// rsa_pk1.c ossl_rsa_prf()
+    fn implicit_rejection_prf(kdk: &[u8], label: &[u8], len: usize) -> Vec<u8> {
+        let bitlen = ((len * 8) as u16).to_be_bytes();
+        let mut out = Vec::with_capacity(len + 32);
+        let mut iter: u16 = 0;
+        while out.len() < len {
+            let mut m = iter.to_be_bytes().to_vec();
+            m.extend_from_slice(label);
+            m.extend_from_slice(&bitlen);
+            out.extend(crate::digest::hmac(Md::Sha256, kdk, &m));
+            iter = iter.wrapping_add(1);
+        }
+        out.truncate(len);
+        out
+    }
+
+    /// ossl_rsa_padding_check_PKCS1_type_2(): a bad padding yields a
+    /// synthetic message derived from the key and ciphertext instead of an
+    /// error (OpenSSL 3.2+ implicit rejection).
+    fn pkcs1_type2_implicit(&self, ct: &[u8], em: &[u8]) -> Option<Vec<u8>> {
+        let flen = em.len();
+        let kdk = self.implicit_rejection_kdk(ct)?;
+        let synthetic = Self::implicit_rejection_prf(&kdk, b"message", flen);
+        let cands = Self::implicit_rejection_prf(&kdk, b"length", 256);
+        let max_sep_offset = (flen - 10) as u16;
+        let mut mask = max_sep_offset;
+        mask |= mask >> 1;
+        mask |= mask >> 2;
+        mask |= mask >> 4;
+        mask |= mask >> 8;
+        let mut synthetic_length = 0usize;
+        for c in cands.chunks(2) {
+            let l = u16::from_be_bytes([c[0], c[1]]) & mask;
+            if l < max_sep_offset {
+                synthetic_length = l as usize;
+            }
+        }
+        let good_hdr = em[0] == 0 && em[1] == 2;
+        let zero = em[2..].iter().position(|&b| b == 0).map(|z| z + 2);
+        match zero {
+            Some(z) if good_hdr && z >= 10 => Some(em[z + 1..].to_vec()),
+            _ => Some(synthetic[flen - synthetic_length..].to_vec()),
+        }
+    }
+
     /// RSA private decrypt (EVP_PKEY_decrypt).
     pub fn decrypt(&self, data: &[u8], padding: i64, oaep_md: Md) -> Option<Vec<u8>> {
         let k = self.k();
-        if !matches!(
-            padding,
-            RSA_PKCS1_PADDING | RSA_NO_PADDING | RSA_PKCS1_OAEP_PADDING
-        ) {
-            err::push(err::LIB_PROV, 165, "illegal or unsupported padding mode");
-            return None;
-        }
         if data.len() > k {
             rsa_err(108, "data greater than mod len");
             return None;
@@ -1395,20 +1445,8 @@ impl Rsa {
         let em = self.private_op(&bn(data))?;
         match padding {
             RSA_NO_PADDING => Some(em),
-            RSA_PKCS1_PADDING => {
-                if em[0] != 0 || em[1] != 2 {
-                    rsa_err(159, "pkcs decoding error");
-                    return None;
-                }
-                match em[2..].iter().position(|&b| b == 0) {
-                    Some(z) if z >= 8 => Some(em[2 + z + 1..].to_vec()),
-                    _ => {
-                        rsa_err(159, "pkcs decoding error");
-                        None
-                    }
-                }
-            }
-            _ => {
+            RSA_PKCS1_PADDING => self.pkcs1_type2_implicit(data, &em),
+            RSA_PKCS1_OAEP_PADDING => {
                 let hlen = oaep_md.size();
                 if k < 2 * hlen + 2 {
                     rsa_err(121, "oaep decoding error");
@@ -1436,6 +1474,10 @@ impl Rsa {
                         None
                     }
                 }
+            }
+            _ => {
+                rsa_err(118, "unknown padding type");
+                None
             }
         }
     }
@@ -1489,21 +1531,7 @@ impl Rsa {
         if padding == RSA_NO_PADDING {
             return Some(em);
         }
-        if em[0] != 0 || em[1] != 1 {
-            rsa_err(106, "block type is not 01");
-            rsa_err(114, "padding check failed");
-            return None;
-        }
-        let mut i = 2;
-        while i < em.len() && em[i] == 0xff {
-            i += 1;
-        }
-        if i >= em.len() || em[i] != 0 || i - 2 < 8 {
-            rsa_err(113, "bad fixed header decrypt");
-            rsa_err(114, "padding check failed");
-            return None;
-        }
-        Some(em[i + 1..].to_vec())
+        Self::check_pkcs1_type1(&em).map(|t| t.to_vec())
     }
 
     fn digest_info(md: Md, hash: &[u8]) -> Vec<u8> {
@@ -1560,62 +1588,129 @@ impl Rsa {
         self.private_op(&bn(&em))
     }
 
-    pub fn verify_digest(&self, md: Md, hash: &[u8], sig: &[u8], pss: bool) -> bool {
+    /// rsa_ossl_public_decrypt() without the padding removal: s^e mod n as
+    /// `k` bytes (shorter inputs are accepted, as for RSA_NO_PADDING).
+    fn public_decrypt_raw(&self, sig: &[u8]) -> Option<Vec<u8>> {
         let k = self.k();
-        if sig.len() != k {
-            return false;
+        if sig.len() > k {
+            rsa_err(108, "data greater than mod len");
+            return None;
         }
         let s = bn(sig);
         if s >= self.n {
-            return false;
+            rsa_err(132, "data too large for modulus");
+            return None;
         }
-        let Some(nm) = Modulus::new(&self.n) else {
-            return false;
+        let nm = Modulus::new(&self.n)?;
+        Some(pad_be(
+            &Bn::from_box(&nm.pow_public(&s.to_box(), &self.e.to_box())),
+            k,
+        ))
+    }
+
+    /// RSA_padding_check_PKCS1_type_1() on a `k`-byte block, raising the
+    /// reason and then rsa_ossl_public_decrypt()'s "padding check failed".
+    fn check_pkcs1_type1(em: &[u8]) -> Option<&[u8]> {
+        let fail = |reason: u32, s: &str| {
+            rsa_err(reason, s);
+            rsa_err(114, "padding check failed");
+            None
         };
-        let em_full = nm.to_bytes(&nm.pow_public(&s.to_box(), &self.e.to_box()));
+        if em.len() < 11 {
+            rsa_err(114, "padding check failed");
+            return None;
+        }
+        if em[0] != 0 {
+            return fail(138, "invalid padding");
+        }
+        if em[1] != 1 {
+            return fail(106, "block type is not 01");
+        }
+        let body = &em[2..];
+        let mut i = 0;
+        while i < body.len() && body[i] == 0xff {
+            i += 1;
+        }
+        if i == body.len() {
+            return fail(113, "null before block missing");
+        }
+        if body[i] != 0 {
+            return fail(102, "bad fixed header decrypt");
+        }
+        if i < 8 {
+            return fail(103, "bad pad byte count");
+        }
+        Some(&body[i + 1..])
+    }
+
+    /// RSA_verify() (PKCS#1 v1.5) or the PSS provider path; errors are
+    /// queued the way OpenSSL raises them (the caller adds "RSA lib").
+    pub fn verify_digest(&self, md: Md, hash: &[u8], sig: &[u8], pss: bool) -> bool {
+        let k = self.k();
         if pss {
-            let hlen = md.size();
-            let embits = self.n.bits() - 1;
-            let emlen = embits.div_ceil(8);
-            let em = &em_full[k - emlen..];
-            if k > emlen && em_full[0] != 0 {
-                return false;
-            }
-            if emlen < hlen + 2 || *em.last().unwrap() != 0xbc {
-                return false;
-            }
-            let mut db = em[..emlen - hlen - 1].to_vec();
-            let h = &em[emlen - hlen - 1..emlen - 1];
-            let zbits = 8 * emlen - embits;
-            if db[0] & !(0xffu8 >> zbits) != 0 {
-                return false;
-            }
-            let mask = Self::mgf1(md, h, emlen - hlen - 1);
-            for (a, b) in db.iter_mut().zip(mask) {
-                *a ^= b;
-            }
-            db[0] &= 0xff >> zbits;
-            let Some(i) = db.iter().position(|&b| b != 0) else {
+            // RSA_public_decrypt(RSA_NO_PADDING) then
+            // ossl_rsa_verify_PKCS1_PSS_mgf1_ex() with an automatic salt.
+            let Some(em_full) = self.public_decrypt_raw(sig) else {
                 return false;
             };
+            let hlen = md.size();
+            let msbits = (self.n.bits() - 1) & 7;
+            if em_full[0] & (0xffu8 << msbits) != 0 {
+                rsa_err(133, "first octet invalid");
+                return false;
+            }
+            let em = if msbits == 0 { &em_full[1..] } else { &em_full[..] };
+            let emlen = em.len();
+            if emlen < hlen + 2 {
+                rsa_err(109, "data too large");
+                return false;
+            }
+            if em[emlen - 1] != 0xbc {
+                rsa_err(134, "last octet invalid");
+                return false;
+            }
+            let masked_len = emlen - hlen - 1;
+            let h = &em[masked_len..emlen - 1];
+            let mut db = Self::mgf1(md, h, masked_len);
+            for (a, b) in db.iter_mut().zip(&em[..masked_len]) {
+                *a ^= b;
+            }
+            if msbits != 0 {
+                db[0] &= 0xff >> (8 - msbits);
+            }
+            let mut i = 0;
+            while db[i] == 0 && i < masked_len - 1 {
+                i += 1;
+            }
             if db[i] != 1 {
+                rsa_err(135, "slen recovery failed");
                 return false;
             }
             let salt = &db[i + 1..];
             let mut mp = vec![0u8; 8];
             mp.extend_from_slice(hash);
             mp.extend_from_slice(salt);
-            return md.digest(&mp) == h;
+            if md.digest(&mp) != h {
+                rsa_err(104, "bad signature");
+                return false;
+            }
+            return true;
         }
-        let t = Self::digest_info(md, hash);
-        if t.len() + 11 > k {
+        if sig.len() != k {
+            rsa_err(119, "wrong signature length");
             return false;
         }
-        let mut em = vec![0u8, 1];
-        em.extend(std::iter::repeat_n(0xffu8, k - 3 - t.len()));
-        em.push(0);
-        em.extend(t);
-        em == em_full
+        let Some(em) = self.public_decrypt_raw(sig) else {
+            return false;
+        };
+        let Some(t) = Self::check_pkcs1_type1(&em) else {
+            return false;
+        };
+        if t != Self::digest_info(md, hash).as_slice() {
+            rsa_err(104, "bad signature");
+            return false;
+        }
+        true
     }
 }
 
@@ -1651,17 +1746,68 @@ pub enum SignErr {
     Failed,
 }
 
+/// ossl_digest_rsa_sign_get_md_nid(): the digests RSA signatures take.
+fn rsa_md_allowed(md: Md) -> bool {
+    !matches!(
+        md,
+        Md::Shake128 | Md::Shake256 | Md::Blake2b512 | Md::Blake2s256 | Md::Whirlpool
+    )
+}
+
+/// ossl_digest_get_approved_nid(): SHA-1, SHA-2 and SHA-3 only.
+fn dsa_md_allowed(md: Md) -> bool {
+    matches!(
+        md,
+        Md::Sha1
+            | Md::Sha224
+            | Md::Sha256
+            | Md::Sha384
+            | Md::Sha512
+            | Md::Sha512_224
+            | Md::Sha512_256
+            | Md::Sha3_224
+            | Md::Sha3_256
+            | Md::Sha3_384
+            | Md::Sha3_512
+    )
+}
+
+fn prov_digest_not_allowed() {
+    err::push(err::LIB_PROV, 174, "digest not allowed");
+}
+
+fn prov_invalid_digest() {
+    err::push(err::LIB_PROV, 122, "invalid digest");
+}
+
+/// The RSA provider's ERR_raise(ERR_LIB_PROV, ERR_R_RSA_LIB) after a
+/// failed RSA_*() call.
+pub fn prov_rsa_lib() {
+    err::push(err::LIB_PROV, err::RFLAG_COMMON | 4, "RSA lib");
+}
+
 impl PKey {
     /// EVP_DigestSign()
     pub fn sign(&self, md: Option<Md>, data: &[u8], pss: bool) -> Result<Vec<u8>, SignErr> {
         match self {
             PKey::Rsa(r) => {
                 let md = md.unwrap_or(Md::Sha256);
+                if !rsa_md_allowed(md) {
+                    prov_digest_not_allowed();
+                    return Err(SignErr::Failed);
+                }
                 let hash = md.digest(data);
-                r.sign_digest(md, &hash, pss).ok_or(SignErr::Failed)
+                r.sign_digest(md, &hash, pss).ok_or_else(|| {
+                    prov_rsa_lib();
+                    SignErr::Failed
+                })
             }
             PKey::Dsa(f) => {
                 let md = md.unwrap_or(Md::Sha256);
+                if !dsa_md_allowed(md) {
+                    prov_digest_not_allowed();
+                    return Err(SignErr::Failed);
+                }
                 let hash = md.digest(data);
                 let (q, x) = match (&f.q, &f.priv_key) {
                     (Some(q), Some(x)) => (q, x),
@@ -1683,14 +1829,18 @@ impl PKey {
             }
             PKey::Ec(e) => {
                 let d = e.priv_key.as_ref().ok_or(SignErr::Failed)?;
-                let md = md.unwrap_or(if e.sm2 { Md::Sm3 } else { Md::Sha256 });
+                let md = md.unwrap_or(Md::Sha256);
+                if md.is_xof() {
+                    prov_invalid_digest();
+                    return Err(SignErr::Failed);
+                }
                 let hash = md.digest(data);
                 let (r, s) = e.group.ecdsa_sign(d, &hash).ok_or(SignErr::Failed)?;
                 Ok(dsa_sig_der(&r, &s))
             }
             PKey::Ecx(x) => {
                 if md.is_some() || !x.kind.is_signature() {
-                    err::push(err::LIB_PROV, 133, "invalid digest");
+                    prov_invalid_digest();
                     return Err(SignErr::Failed);
                 }
                 ecx::sign(x.kind, x.priv_key.as_deref().ok_or(SignErr::Failed)?, data)
@@ -1707,27 +1857,45 @@ impl PKey {
         }
     }
 
-    /// EVP_DigestVerify(): 1 ok, 0 mismatch, -1 error.
+    /// EVP_DigestVerify(): 1 ok, 0 mismatch, -1 error. A mismatch the
+    /// provider did not explain leaves "provider signature failure".
     pub fn verify(&self, md: Option<Md>, data: &[u8], sig: &[u8], pss: bool) -> i64 {
+        let queued = err::mark().len();
+        let r = self.verify_inner(md, data, sig, pss);
+        if r == 0 && err::mark().len() == queued {
+            err::push(err::LIB_EVP, 234, "provider signature failure");
+        }
+        r
+    }
+
+    fn verify_inner(&self, md: Option<Md>, data: &[u8], sig: &[u8], pss: bool) -> i64 {
         match self {
             PKey::Rsa(r) => {
                 let md = md.unwrap_or(Md::Sha256);
+                if !rsa_md_allowed(md) {
+                    prov_digest_not_allowed();
+                    return -1;
+                }
                 let hash = md.digest(data);
                 if r.verify_digest(md, &hash, sig, pss) {
                     1
                 } else {
-                    err::push(err::LIB_RSA, 0x68, "bad signature");
+                    prov_rsa_lib();
                     0
                 }
             }
             PKey::Dsa(f) => {
                 let md = md.unwrap_or(Md::Sha256);
+                if !dsa_md_allowed(md) {
+                    prov_digest_not_allowed();
+                    return -1;
+                }
                 let hash = md.digest(data);
                 let (Some(q), Some(y)) = (&f.q, &f.pub_key) else {
                     return -1;
                 };
                 let Some((r, s)) = parse_dsa_sig(sig) else {
-                    return 0;
+                    return -1;
                 };
                 if r.is_zero() || s.is_zero() || &r >= q || &s >= q {
                     return 0;
@@ -1751,12 +1919,21 @@ impl PKey {
                 }
             }
             PKey::Ec(e) => {
-                let md = md.unwrap_or(if e.sm2 { Md::Sm3 } else { Md::Sha256 });
+                let md = md.unwrap_or(Md::Sha256);
+                if md.is_xof() {
+                    prov_invalid_digest();
+                    return -1;
+                }
                 let hash = md.digest(data);
                 let Some(q) = &e.pub_key else { return -1 };
                 let Some((r, s)) = parse_dsa_sig(sig) else {
-                    return 0;
+                    return -1;
                 };
+                if r.is_zero() || s.is_zero() || r >= e.group.n || s >= e.group.n {
+                    // ossl_ecdsa_simple_verify_sig()
+                    err::push(err::LIB_EC, 156, "bad signature");
+                    return 0;
+                }
                 if e.group.ecdsa_verify(q, &hash, &r, &s) {
                     1
                 } else {
@@ -1765,7 +1942,7 @@ impl PKey {
             }
             PKey::Ecx(x) => {
                 if md.is_some() || !x.kind.is_signature() {
-                    err::push(err::LIB_PROV, 133, "invalid digest");
+                    prov_invalid_digest();
                     return -1;
                 }
                 if ecx::verify(x.kind, &x.pub_key, data, sig) {
