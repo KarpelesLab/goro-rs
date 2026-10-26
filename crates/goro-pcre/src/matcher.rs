@@ -1778,6 +1778,9 @@ impl<'a> Matcher<'a> {
                                 if F!().eptr == self.frames[p].eptr
                                     && self.last_used_ptr == self.frames[p].recurse_last_used
                                     && (self.moptions & PCRE2_DISABLE_RECURSELOOP_CHECK) == 0
+                                    // The JIT has no loop check: it recurses until
+                                    // its stack runs out.
+                                    && !self.jit
                                 {
                                     return Act::Ret(PCRE2_ERROR_RECURSELOOP);
                                 }
