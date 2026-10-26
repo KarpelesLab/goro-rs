@@ -1085,6 +1085,10 @@ fn fetch_w_container(
         OperandType::Tmp(i) => match tmps.get(i as usize)? {
             Value::Undef if depth > 0 => {
                 let before = op_array.ops.get(at.checked_sub(1)?)?;
+                // (`$o->p[k][j] = v`: the property's array)
+                if before.opcode == OpCode::PropertyGetW && before.result == op.op1 {
+                    return fetch_w_prop_array(before, cvs, literals);
+                }
                 if before.opcode != OpCode::ArrayGetW
                     || before.result != op.op1
                     || before.op1 == before.result
@@ -1150,6 +1154,57 @@ fn fast_str_offset_isset(op: &Op, len: usize, cvs: &[Value], tmps: &mut [Value])
     }
 }
 
+/// QM_ASSIGN (LOAD_CONST: the copy `list(...) = $v` destructures) of a
+/// defined value into a temporary, and FETCH_LIST_R of an element an array
+/// has (`$globals`: the symbol table, left to the general handlers).
+#[inline(never)]
+fn fast_list_ops(
+    op: &Op,
+    cvs: &[Value],
+    tmps: &mut [Value],
+    literals: &[Value],
+    globals: &Rc<RefCell<crate::array::PhpArray>>,
+) -> Fast {
+    if !matches!(op.result, OperandType::Tmp(_)) || !tmp_writable(&op.result, tmps) {
+        return Fast::No;
+    }
+    let Some(v) = defined_operand(&op.op1, cvs, tmps, literals) else {
+        return Fast::No;
+    };
+    if matches!(&v, Value::Array(a) if Rc::ptr_eq(a, globals)) {
+        return Fast::No;
+    }
+    let v = if op.opcode == OpCode::ListGet {
+        let Value::Array(a) = &v else {
+            return Fast::No;
+        };
+        if matches!(op.op2, OperandType::Unused) {
+            return Fast::No;
+        }
+        let Some(k) = dim_key(&op.op2, cvs, tmps, literals) else {
+            return Fast::No;
+        };
+        let Ok(a) = a.try_borrow() else {
+            return Fast::No;
+        };
+        match a.get(&k) {
+            Some(Value::Reference(r)) => match r.try_borrow() {
+                Ok(e) if !matches!(*e, Value::Undef) => e.clone(),
+                _ => return Fast::No,
+            },
+            Some(Value::Undef) | None => return Fast::No,
+            Some(e) => e.clone(),
+        }
+    } else {
+        v
+    };
+    if store_tmp(&op.result, v, tmps) {
+        Fast::Done
+    } else {
+        Fast::No
+    }
+}
+
 /// ASSIGN_REF of a variable to a variable (`$a = &$b`) whose previous
 /// value has nothing to release: `$b` becomes a reference (null when
 /// undefined) that `$a` is bound to, as the general handler binds them.
@@ -1199,6 +1254,48 @@ fn fast_assign_ref_cv(op: &Op, cvs: &mut [Value], tmps: &mut [Value]) -> Fast {
         }
     }
     Fast::Done
+}
+
+/// The array property a FETCH_OBJ_W (`before`, `$cv->p` by a constant
+/// name) of a plain object fetched: as fetched_container() finds it.
+fn fetch_w_prop_array(
+    before: &Op,
+    cvs: &[Value],
+    literals: &[Value],
+) -> Option<Rc<RefCell<crate::array::PhpArray>>> {
+    let obj = match before.op1 {
+        OperandType::Cv(i) => match cvs.get(i as usize)? {
+            Value::Object(o) => o.clone(),
+            Value::Reference(r) => match &*r.try_borrow().ok()? {
+                Value::Object(o) => o.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let OperandType::Const(n) = before.op2 else {
+        return None;
+    };
+    let Some(Value::String(name)) = literals.get(n as usize) else {
+        return None;
+    };
+    let ob = obj.try_borrow().ok()?;
+    if ob.native.is_some() || ob.properties.has_internal() {
+        return None;
+    }
+    let (_, v) = ob
+        .properties
+        .iter()
+        .find(|(k, _)| key_eq(k, name.as_bytes()))?;
+    match v {
+        Value::Array(a) => Some(a.clone()),
+        Value::Reference(r) => match r.try_borrow().as_deref() {
+            Ok(Value::Array(a)) => Some(a.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// ARRAY_NEW (`[]`, the start of an array literal) into a temporary.
@@ -2090,6 +2187,8 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::DeclareFunction
             | OpCode::MakeClosure
             | OpCode::AssignRef
+            | OpCode::LoadConst
+            | OpCode::ListGet
             // (a call whose arguments the general handlers sent: a lean
             // call, or a builtin's, see the DO_FCALL arm of run_fast_ops)
             | OpCode::DoFCall
@@ -2601,6 +2700,22 @@ impl crate::vm::Vm {
                     Some(next) => Fast::Jump(next),
                     None => break 'run ip,
                 },
+                // `list(...) = $v` (see fast_list_ops)
+                OpCode::LoadConst | OpCode::ListGet => {
+                    let Some(rel) = consumed_tmps(
+                        free_mask.get(),
+                        ops,
+                        ip,
+                        op,
+                        tmps,
+                        no_release,
+                        &self.globals,
+                    ) else {
+                        break 'run ip;
+                    };
+                    let f = fast_list_ops(op, cvs, tmps, literals, &self.globals);
+                    release_consumed(rel, f, op, tmps)
+                }
                 // `$a = &$b` (see fast_assign_ref_cv)
                 OpCode::AssignRef if bound.is_none() => fast_assign_ref_cv(op, cvs, tmps),
                 // The creation of a closure (see closure.rs).
