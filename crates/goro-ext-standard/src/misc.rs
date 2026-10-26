@@ -5786,6 +5786,25 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if key == b"precision" {
         goro_core::value::set_php_precision(ini_precision_atol(&value).unwrap_or(14));
     }
+    // OnUpdateLong (zend_ini_parse_quantity_warn()): a malformed quantity
+    // warns and is used as interpreted.
+    if matches!(
+        key.as_slice(),
+        b"unserialize_max_depth"
+            | b"default_socket_timeout"
+            | b"error_log_mode"
+            | b"xmlrpc_error_number"
+    ) {
+        let vs = value.to_php_string();
+        let (_, err) = goro_core::ini_quantity::parse_quantity(vs.as_bytes(), true);
+        if let Some(e) = err {
+            vm.emit_warning(&format!(
+                "Invalid \"{}\" setting. {}",
+                String::from_utf8_lossy(&key),
+                e
+            ));
+        }
+    }
     // OnUpdateFiberStackSize
     if key == b"fiber.stack_size" {
         let vs = value.to_php_string();
