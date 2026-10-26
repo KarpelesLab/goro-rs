@@ -10756,7 +10756,7 @@ fn array_first_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(arr
             .iter()
             .next()
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v.deref())
             .unwrap_or(Value::Null))
     } else {
         Ok(Value::Null)
@@ -10768,7 +10768,7 @@ fn array_last_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(arr
             .iter()
             .last()
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v.deref())
             .unwrap_or(Value::Null))
     } else {
         Ok(Value::Null)
