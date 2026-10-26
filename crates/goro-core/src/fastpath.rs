@@ -1966,6 +1966,46 @@ pub(crate) fn special_call_index(lower: &[u8]) -> u8 {
         .map_or(0, |i| i as u8 + 1)
 }
 
+/// What Vm::plain_public_prop() answered (by plain_prop_key()), for the
+/// request of SITE_EPOCH `epoch`, with `handlers` native class handlers
+/// registered.
+#[derive(Debug, Default)]
+pub(crate) struct PlainPropMemo {
+    epoch: u32,
+    handlers: usize,
+    map: crate::fxhash::FxHashMap<Box<[u8]>, u8>,
+}
+
+/// The PlainPropMemo key of a plain_public_prop() question, in `buf`
+/// (None: too long).
+fn plain_prop_key<'b>(
+    buf: &'b mut [u8; 256],
+    class_name: &[u8],
+    prop: &[u8],
+    write: bool,
+    scope: Option<&[u8]>,
+) -> Option<&'b [u8]> {
+    let scope_len = scope.map_or(0, |s| s.len() + 1);
+    let n = 3 + class_name.len() + scope.map_or(0, |s| s.len()) + prop.len();
+    if n > buf.len() || class_name.len() > 255 || scope_len > 255 {
+        return None;
+    }
+    buf[0] = u8::from(write);
+    buf[1] = class_name.len() as u8;
+    let mut i = 2;
+    buf[i..i + class_name.len()].copy_from_slice(class_name);
+    i += class_name.len();
+    // (no scope: 0; a scope: its length + 1, then its name)
+    buf[i] = scope_len as u8;
+    i += 1;
+    if let Some(s) = scope {
+        buf[i..i + s.len()].copy_from_slice(s);
+        i += s.len();
+    }
+    buf[i..i + prop.len()].copy_from_slice(prop);
+    Some(&buf[..i + prop.len()])
+}
+
 /// Whether run_fast_ops() may handle an opcode (a superset of what the
 /// dispatch loop's own fast attempt handles).
 #[inline(always)]
@@ -3877,6 +3917,57 @@ impl crate::vm::Vm {
     /// only consulted for inaccessible or missing properties, and the
     /// caller checks the object holds an initialized slot for `prop`.
     fn plain_public_prop(
+        &self,
+        class_name: &[u8],
+        prop: &[u8],
+        write: bool,
+        scope: Option<&[u8]>,
+    ) -> u8 {
+        // (the answer for a class does not change once it is declared: the
+        // call sites, which only remember the class they saw last, ask
+        // again for each class and request)
+        let mut kbuf = [0u8; 256];
+        let key = plain_prop_key(&mut kbuf, class_name, prop, write, scope);
+        if let Some(k) = key {
+            if let Some(p) = self.plain_prop_memo_get(k) {
+                return p;
+            }
+        }
+        let p = self.plain_public_prop_uncached(class_name, prop, write, scope);
+        if let Some(k) = key {
+            self.plain_prop_memo_put(k, p);
+        }
+        p
+    }
+
+    /// The memo of plain_public_prop() (for this request and these native
+    /// class handlers).
+    #[inline(never)]
+    fn plain_prop_memo_get(&self, key: &[u8]) -> Option<u8> {
+        let m = self.plain_prop_memo.try_borrow().ok()?;
+        if m.epoch != crate::opcode::site_epoch() || m.handlers != self.native_class_handlers.len()
+        {
+            return None;
+        }
+        m.map.get(key).copied()
+    }
+
+    #[inline(never)]
+    fn plain_prop_memo_put(&self, key: &[u8], p: u8) {
+        let Ok(mut m) = self.plain_prop_memo.try_borrow_mut() else {
+            return;
+        };
+        let epoch = crate::opcode::site_epoch();
+        let handlers = self.native_class_handlers.len();
+        if m.epoch != epoch || m.handlers != handlers {
+            m.map.clear();
+            m.epoch = epoch;
+            m.handlers = handlers;
+        }
+        m.map.insert(key.into(), p);
+    }
+
+    fn plain_public_prop_uncached(
         &self,
         class_name: &[u8],
         prop: &[u8],

@@ -1688,6 +1688,9 @@ pub struct Vm {
     /// JmpZ) by the PropertyGet of the same property: the pair is one
     /// FETCH_OBJ_IS, which runs the hook once. `(object id, value)`.
     pub(crate) isset_get_cache: Option<(u64, Value)>,
+    /// What plain_public_prop() answered in this request (see
+    /// Vm::plain_prop_memo).
+    pub(crate) plain_prop_memo: RefCell<crate::fastpath::PlainPropMemo>,
     /// EG(record_errors): non-fatal errors raised while linking a class are
     /// recorded here (type, message, line) instead of being raised.
     pub(crate) recorded_errors: Option<Vec<(i64, String, u32)>>,
@@ -2255,6 +2258,7 @@ impl Vm {
             last_return_line: 0,
             last_call_by_ref: false,
             isset_get_cache: None,
+            plain_prop_memo: Default::default(),
             recorded_errors: None,
             incdec_skip_set: false,
             builtin_frame_named: Vec::new(),

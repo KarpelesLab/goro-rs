@@ -660,6 +660,12 @@ thread_local! {
     static SITE_EPOCH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
+/// The current SITE_EPOCH.
+#[inline]
+pub(crate) fn site_epoch() -> u32 {
+    SITE_EPOCH.with(|e| e.get())
+}
+
 /// A new request starts (see SITE_EPOCH).
 pub fn new_site_epoch() {
     SITE_EPOCH.with(|e| e.set(e.get().wrapping_add(1)));
