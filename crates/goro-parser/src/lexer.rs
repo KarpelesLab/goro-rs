@@ -136,12 +136,32 @@ impl<'a> Lexer<'a> {
     /// Skip whitespace and comments (see skip_trivia()).
     #[inline(always)]
     fn skip_whitespace(&mut self) {
-        if matches!(
+        if !self.preserve_trivia {
+            // (skip_trivia()'s first whitespace run, the commonest trivia,
+            // which it would not record; it then looks for a comment)
+            let src = self.source;
+            let mut p = self.pos;
+            let mut nl = 0;
+            while let Some(&ch) = src.get(p) {
+                match ch {
+                    b' ' | b'\t' | b'\r' => {}
+                    b'\n' => nl += 1,
+                    _ => break,
+                }
+                p += 1;
+            }
+            self.pos = p;
+            self.line += nl;
+            if !matches!(src.get(p), Some(b'/' | b'#')) {
+                return;
+            }
+        } else if !matches!(
             self.source.get(self.pos),
             Some(b' ' | b'\t' | b'\r' | b'\n' | b'/' | b'#')
         ) {
-            self.skip_trivia();
+            return;
         }
+        self.skip_trivia();
     }
 
     fn skip_trivia(&mut self) {
@@ -1567,8 +1587,13 @@ impl<'a> Lexer<'a> {
                 TokenKind::At
             }
             b'(' => {
-                // Try cast first
-                if let Some(cast) = self.try_scan_cast() {
+                // Try cast first (which needs a space, tab or letter next)
+                if let Some(cast) = self
+                    .peek_at(1)
+                    .is_some_and(|c| c == b' ' || c == b'\t' || c.is_ascii_alphabetic())
+                    .then(|| self.try_scan_cast())
+                    .flatten()
+                {
                     cast
                 } else {
                     self.advance();
