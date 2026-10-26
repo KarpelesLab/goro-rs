@@ -21924,6 +21924,15 @@ impl Vm {
         if snapshot && !self.next_arg_by_value() {
             return false;
         }
+        // (a builtin's parameter a call's array result goes to as it is:
+        // all but the first of the builtins taking an `array &$array`,
+        // which the general handler separates it for)
+        let builtin_takes = matches!(op.op1, OperandType::Tmp(_))
+            && matches!(op.result, OperandType::Const(_))
+            && self.pending_calls.last().is_some_and(|c| {
+                c.target.builtin.is_some()
+                    && !self.builtin_array_ref_call_arg(&op.op1, &op.result, c.args.len())
+            });
         let Some(call) = self.pending_calls.last_mut() else {
             return false;
         };
@@ -21967,7 +21976,8 @@ impl Vm {
                 Some(Value::Array(_))
                     if matches!(op.result, OperandType::Const(_))
                         && !by_value_builtin
-                        && !user_target =>
+                        && !user_target
+                        && !builtin_takes =>
                 {
                     return false;
                 }

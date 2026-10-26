@@ -1775,6 +1775,7 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::SaveHandlerDepth
             | OpCode::FreeLoopVar
             | OpCode::ArrayGetIncDec
+            | OpCode::ArrayGetWUnset
             | OpCode::CastInt
             | OpCode::CastString
             | OpCode::InitCvNull
@@ -1959,6 +1960,13 @@ impl crate::vm::Vm {
                         && fetched_container(op_array, ip, cvs, tmps, literals);
                     let f = self.fast_dim_op(op, cvs, tmps, literals, tmp_container);
                     release_consumed(rel, f, op, tmps)
+                }
+                // `unset($a[k][j])` (see fast_dim_unset_pair)
+                OpCode::ArrayGetWUnset if no_release => {
+                    match self.fast_dim_unset_pair(op_array, ip, cvs, tmps) {
+                        Some(next) => Fast::Jump(next),
+                        None => break 'run ip,
+                    }
                 }
                 // `$a[k]++` of an int element (see fast_dim_incdec)
                 OpCode::ArrayGetIncDec => match self.fast_dim_incdec(op_array, ip, cvs, tmps) {
@@ -3150,6 +3158,87 @@ impl crate::vm::Vm {
             tmps[r as usize] = Value::Long(if post { old } else { new });
         }
         Some(ip + 3)
+    }
+
+    /// `unset($a[k][j])` of an array variable's element: FETCH_DIM_UNSET
+    /// at `ip` and the UNSET_DIM of what it fetched, run at once as the
+    /// general handlers would run them when both keys need no conversion
+    /// and what goes only frees memory: an element array held elsewhere
+    /// too is separated first; a missing or null element has nothing to
+    /// unset. Returns the index of the opcode after the UNSET_DIM, or None
+    /// (nothing done).
+    #[inline(never)]
+    pub(crate) fn fast_dim_unset_pair(
+        &self,
+        op_array: &crate::opcode::OpArray,
+        ip: usize,
+        cvs: &[Value],
+        tmps: &[Value],
+    ) -> Option<usize> {
+        let ops = &op_array.ops[..];
+        let literals = &op_array.literals[..];
+        let op = &ops[ip];
+        let (OperandType::Cv(c), OperandType::Tmp(t)) = (op.op1, op.result) else {
+            return None;
+        };
+        let unset = ops.get(ip + 1)?;
+        if unset.opcode != OpCode::ArrayUnset
+            || unset.op1 != OperandType::Tmp(t)
+            || self.has_release_work()
+            || crate::gc::gc_pending()
+        {
+            return None;
+        }
+        let arr = match cvs.get(c as usize)? {
+            Value::Array(a) => a.clone(),
+            Value::Reference(r) => match &*r.try_borrow().ok()? {
+                Value::Array(a) => a.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if Rc::ptr_eq(&arr, &self.globals) {
+            return None;
+        }
+        let k1 = dim_key(&op.op2, cvs, tmps, literals)?;
+        let k2 = dim_key(&unset.op2, cvs, tmps, literals)?;
+        // (what goes must only free memory: looked at before anything
+        // changes)
+        {
+            let a = arr.try_borrow().ok()?;
+            match a.get(&k1) {
+                None | Some(Value::Null) => return Some(ip + 2),
+                Some(Value::Array(e)) => match e.try_borrow().ok()?.get(&k2) {
+                    None => {}
+                    Some(v) if is_plain_scalar(v) => {}
+                    Some(v @ (Value::Array(_) | Value::Object(_)))
+                        if drops_quietly_deep(v, &mut 256, &self.globals) => {}
+                    _ => return None,
+                },
+                _ => return None,
+            }
+        }
+        // The element array, separated from its other holders (the
+        // container's storage first: a copy of the container shares it).
+        let elem = {
+            let mut a = arr.try_borrow_mut().ok()?;
+            let slot = a.get_mut(&k1)?;
+            let Value::Array(e) = slot else {
+                return None;
+            };
+            if Rc::strong_count(e) > 1 {
+                let sep = Rc::new(RefCell::new(e.try_borrow().ok()?.clone()));
+                let old = std::mem::replace(slot, Value::Array(sep.clone()));
+                crate::gc::on_value_replaced(&old, slot);
+                drop(old);
+                sep
+            } else {
+                e.clone()
+            }
+        };
+        let mut e = elem.try_borrow_mut().ok()?;
+        e.remove(&k2);
+        Some(ip + 2)
     }
 
     /// FETCH_DIM_W (the container fetch of `$a[k][...] = v`, `$a[][...] =
