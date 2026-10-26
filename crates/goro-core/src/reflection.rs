@@ -10603,11 +10603,20 @@ fn reflection_parameter_method_body(
         }
         b"hasdefaultvalue" | b"isdefaultvalueavailable" => {
             if let Some(op_array) = resolved_op_array.as_ref() {
-                Some(if param_idx >= op_array.required_param_count as usize {
-                    Value::True
+                // (a user parameter has one when it declares one and is
+                // optional: a variadic has none, nor a defaulted parameter
+                // before a required one)
+                let has = if op_array.internal_sig.is_none() {
+                    op_array
+                        .param_has_default
+                        .get(type_idx)
+                        .copied()
+                        .unwrap_or(false)
+                        && param_idx >= op_array.required_param_count as usize
                 } else {
-                    Value::False
-                })
+                    param_idx >= op_array.required_param_count as usize
+                };
+                Some(if has { Value::True } else { Value::False })
             } else {
                 Some(Value::False)
             }
