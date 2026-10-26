@@ -4655,29 +4655,11 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     vm.current_exception = Some(exc);
                     return Some(Value::Null);
                 }
-                let parent_arg = args.get(1)?;
-                if matches!(parent_arg, Value::Null) {
-                    vm.emit_deprecated_at(
-                        "ReflectionClass::isSubclassOf(): Passing null to parameter #1 ($class) of type ReflectionClass|string is deprecated",
-                        vm.current_line,
-                    );
-                }
-                let parent_name = match parent_arg {
-                    Value::Object(o) => {
-                        let ob = o.borrow();
-                        // ReflectionClass/ReflectionObject (and other reflectors
-                        // that subclass them) carry the target class in `name`.
-                        let cn = &ob.class_name;
-                        if cn.eq_ignore_ascii_case(b"ReflectionClass")
-                            || cn.eq_ignore_ascii_case(b"ReflectionObject")
-                            || cn.eq_ignore_ascii_case(b"ReflectionEnum")
-                        {
-                            ob.get_property(b"name").to_php_string().to_string_lossy()
-                        } else {
-                            String::from_utf8_lossy(&ob.class_name).to_string()
-                        }
-                    }
-                    _ => parent_arg.to_php_string().to_string_lossy(),
+                let parent_arg = args.get(1)?.clone();
+                let Some(parent_name) =
+                    reflection_class_or_str_arg(vm, &parent_arg, "isSubclassOf", "class")
+                else {
+                    return Some(Value::Null);
                 };
                 let parent_lower: Vec<u8> = parent_name
                     .as_bytes()
@@ -4720,24 +4702,11 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     vm.current_exception = Some(exc);
                     return Some(Value::Null);
                 }
-                let iface_arg = args.get(1)?;
-                // Null triggers deprecation, then becomes ""
-                if matches!(iface_arg, Value::Null) {
-                    vm.emit_deprecated_at(
-                        "ReflectionClass::implementsInterface(): Passing null to parameter #1 ($interface) of type ReflectionClass|string is deprecated",
-                        vm.current_line,
-                    );
-                }
-                let iface_name = match iface_arg {
-                    Value::Object(o) => {
-                        let ob = o.borrow();
-                        if ob.class_name.eq_ignore_ascii_case(b"ReflectionClass") {
-                            ob.get_property(b"name").to_php_string().to_string_lossy()
-                        } else {
-                            String::from_utf8_lossy(&ob.class_name).to_string()
-                        }
-                    }
-                    _ => iface_arg.to_php_string().to_string_lossy(),
+                let iface_arg = args.get(1)?.clone();
+                let Some(iface_name) =
+                    reflection_class_or_str_arg(vm, &iface_arg, "implementsInterface", "interface")
+                else {
+                    return Some(Value::Null);
                 };
                 let iface_lower: Vec<u8> = iface_name
                     .as_bytes()
@@ -17719,4 +17688,68 @@ pub fn class_all_interface_names(vm: &Vm, class_lower: &[u8]) -> Vec<String> {
         out
     }
     compute(vm, class_lower, 0)
+}
+
+/// Z_PARAM_OBJ_OF_CLASS_OR_STR(reflection_class_ptr) of
+/// ReflectionClass::isSubclassOf()/implementsInterface(): a ReflectionClass
+/// (or subclass) gives its class name, anything else is parsed as a string.
+/// None when an error (TypeError, an exception from __toString()) is pending.
+#[inline(never)]
+fn reflection_class_or_str_arg(
+    vm: &mut Vm,
+    arg: &Value,
+    method: &str,
+    pname: &str,
+) -> Option<String> {
+    let arg = arg.deref();
+    if vm.obj_instanceof(&arg, b"reflectionclass") {
+        if let Value::Object(o) = &arg {
+            return Some(
+                o.borrow()
+                    .get_property(b"name")
+                    .to_php_string()
+                    .to_string_lossy(),
+            );
+        }
+    }
+    let type_error = |vm: &mut Vm, v: &Value| {
+        let msg = format!(
+            "ReflectionClass::{}(): Argument #1 (${}) must be of type ReflectionClass|string, {} given",
+            method,
+            pname,
+            Vm::value_type_name(v)
+        );
+        let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        None
+    };
+    match &arg {
+        Value::Null | Value::Undef => {
+            vm.emit_deprecated_at(
+                &format!(
+                    "ReflectionClass::{}(): Passing null to parameter #1 (${}) of type ReflectionClass|string is deprecated",
+                    method, pname
+                ),
+                vm.current_line,
+            );
+            Some(String::new())
+        }
+        Value::String(s) => Some(s.to_string_lossy()),
+        Value::Long(_) | Value::Double(_) | Value::True | Value::False => {
+            vm.warn_nan_coercion(&arg, "string", vm.current_line);
+            Some(arg.to_php_string().to_string_lossy())
+        }
+        Value::Object(o) => {
+            let cl = o.borrow().class_name.to_ascii_lowercase();
+            if !vm.class_implements_interface(&cl, b"stringable") {
+                return type_error(vm, &arg);
+            }
+            let s = vm.value_to_string(&arg);
+            if vm.current_exception.is_some() {
+                return None;
+            }
+            Some(s.to_string_lossy())
+        }
+        other => type_error(vm, other),
+    }
 }
