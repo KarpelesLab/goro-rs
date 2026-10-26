@@ -5,6 +5,7 @@ pub mod ast_export;
 pub mod ast_walk;
 pub mod basedir;
 pub mod callable;
+pub mod child_proc;
 pub mod class_table;
 pub mod clone;
 pub mod closure;

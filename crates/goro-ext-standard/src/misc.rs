@@ -20754,11 +20754,13 @@ fn php_exec(
     let cmd_os = std::ffi::OsString::from(String::from_utf8_lossy(cmd).into_owned());
     // Output written so far reaches the terminal before the child's.
     vm.flush_cli_output();
-    let child = std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(cmd_os)
-        .stdout(std::process::Stdio::piped())
-        .spawn();
+    let child = goro_core::child_proc::prepare_command(
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(cmd_os)
+            .stdout(std::process::Stdio::piped()),
+    )
+    .spawn();
     let mut child = match child {
         Ok(c) => c,
         Err(_) => {
@@ -20874,11 +20876,13 @@ fn shell_exec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         ));
     }
     vm.flush_cli_output();
-    let child = std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(std::ffi::OsStr::from_bytes(cmd.as_bytes()))
-        .stdout(std::process::Stdio::piped())
-        .spawn();
+    let child = goro_core::child_proc::prepare_command(
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(std::ffi::OsStr::from_bytes(cmd.as_bytes()))
+            .stdout(std::process::Stdio::piped()),
+    )
+    .spawn();
     let mut child = match child {
         Ok(c) => c,
         Err(_) => {
@@ -22807,19 +22811,21 @@ fn popen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // written straight to it, collect the child's and emit it at pclose().
     let capture_stdout = !mode_str.contains('r') && !vm.cli_direct_output;
     let child = if mode_str.contains('r') {
-        Command::new("sh")
-            .arg("-c")
-            .arg(&*cmd_str)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
+        goro_core::child_proc::prepare_command(
+            Command::new("sh")
+                .arg("-c")
+                .arg(&*cmd_str)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit()),
+        )
+        .spawn()
     } else {
         let mut c = Command::new("sh");
         c.arg("-c").arg(&*cmd_str).stdin(Stdio::piped());
         if capture_stdout {
             c.stdout(Stdio::piped());
         }
-        c.spawn()
+        goro_core::child_proc::prepare_command(&mut c).spawn()
     };
     match child {
         Ok(mut child) => {

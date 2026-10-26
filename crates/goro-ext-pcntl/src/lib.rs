@@ -588,6 +588,10 @@ fn pcntl_exec(vm: &mut Vm, args: &[Value]) -> R {
     let mut av: Vec<*const libc::c_char> = argv.iter().map(|c| c.as_ptr()).collect();
     av.push(std::ptr::null());
     let cpath = CString::new(path).unwrap_or_default();
+    // The new image does not keep goro's own RLIMIT_AS cap.
+    let mut saved_as: libc::rlimit = unsafe { std::mem::zeroed() };
+    let have_as = unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut saved_as) } == 0;
+    goro_core::child_proc::ChildState::capture().restore_rlimit_as();
     let r = match &envp {
         Some(env) => {
             let mut ep: Vec<*const libc::c_char> = env.iter().map(|c| c.as_ptr()).collect();
@@ -598,6 +602,9 @@ fn pcntl_exec(vm: &mut Vm, args: &[Value]) -> R {
     };
     if r == -1 {
         let e = errno();
+        if have_as {
+            unsafe { libc::setrlimit(libc::RLIMIT_AS, &saved_as) };
+        }
         set_last_error(e);
         warn(
             vm,

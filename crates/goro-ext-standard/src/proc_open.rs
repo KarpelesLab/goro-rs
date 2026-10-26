@@ -660,6 +660,7 @@ pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .collect();
 
     super::flush_cli_output(vm);
+    let child_state = goro_core::child_proc::ChildState::capture();
     let pid = unsafe { libc::fork() };
     if pid == 0 {
         // Child: only async-signal-safe calls from here on.
@@ -685,11 +686,9 @@ pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     libc::close(childend);
                 }
             }
-            // Signal dispositions and the mask are inherited; reset them.
-            let mut set: libc::sigset_t = std::mem::zeroed();
-            libc::sigemptyset(&mut set);
-            libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
-            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            // As with PHP's posix_spawn(): the ignored signals (SIGPIPE) are
+            // inherited, the mask is cleared, goro's RLIMIT_AS is not kept.
+            child_state.apply_in_child();
             if let Some(c) = &cwd_c {
                 if libc::chdir(c.as_ptr()) != 0 {
                     fail(errno());

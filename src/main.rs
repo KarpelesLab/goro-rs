@@ -72,6 +72,7 @@ fn main() {
         let limit: u64 = 2 * 1024 * 1024 * 1024; // 2GB
         let mut cur: [u64; 2] = [u64::MAX, u64::MAX];
         getrlimit(9, &mut cur); // 9 = RLIMIT_AS on Linux
+        goro_core::child_proc::record_startup_rlimit_as(cur[0], cur[1]);
         let rlim: [u64; 2] = [limit.min(cur[1]), cur[1]]; // [soft, hard]
         setrlimit(9, &rlim);
         // Ignore SIGPIPE so that writes to closed sockets/pipes fail

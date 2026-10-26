@@ -677,11 +677,13 @@ pub fn php_mail(
     let cmd_s = String::from_utf8_lossy(&cmd).to_string();
     // Output written so far reaches stdout before the mailer's.
     vm.flush_cli_output();
-    let child = std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(&cmd_s)
-        .stdin(std::process::Stdio::piped())
-        .spawn();
+    let child = goro_core::child_proc::prepare_command(
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&cmd_s)
+            .stdin(std::process::Stdio::piped()),
+    )
+    .spawn();
     match child {
         Ok(mut c) => {
             if let Some(mut stdin) = c.stdin.take() {

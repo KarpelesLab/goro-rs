@@ -903,6 +903,9 @@ fn posix_setrlimit(vm: &mut Vm, args: &[Value]) -> R {
     if unsafe { libc::setrlimit(res as i32 as libc::__rlimit_resource_t, &rl) } == -1 {
         return fail();
     }
+    if res == libc::RLIMIT_AS as i64 {
+        goro_core::child_proc::note_user_rlimit_as();
+    }
     Ok(Value::True)
 }
 
