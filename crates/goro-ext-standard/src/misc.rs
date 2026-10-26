@@ -1605,10 +1605,23 @@ fn call_inaccessible_via_trampoline(
     cb.push(Value::String(PhpString::from_bytes(magic)));
     let cb = Value::Array(Rc::new(RefCell::new(cb)));
     let name = Value::String(PhpString::from_vec(m.clone()));
-    Some(call_user_func(
+    // (the trampoline's deprecation names the called method, not the
+    // magic method the call below reaches)
+    if let Some(md) = class.get_method(&magic.to_ascii_lowercase()).cloned() {
+        if vm.trampoline_deprecation(&md, m) {
+            return Some(Err(VmError {
+                message: "Uncaught exception".into(),
+                line: vm.current_line,
+            }));
+        }
+    }
+    vm.skip_callback_deprecation = true;
+    let r = call_user_func(
         vm,
         &[cb, name, Value::Array(Rc::new(RefCell::new(args)))],
-    ))
+    );
+    vm.skip_callback_deprecation = false;
+    Some(r)
 }
 
 /// forward_static_call(): like call_user_func(), but a static method of a
@@ -2496,6 +2509,12 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         }
                         // Method not found or not accessible - check for __call magic method
                         if let Some(call_method) = call_magic.as_ref() {
+                            if vm.trampoline_deprecation(call_method, method_name.as_bytes()) {
+                                return Err(VmError {
+                                    message: "Uncaught exception".into(),
+                                    line: vm.current_line,
+                                });
+                            }
                             let op = call_method.op_array.clone();
                             // __call($name, $arguments) - pack call_args into an array for the second param
                             let mut args_array = goro_core::array::PhpArray::new();

@@ -2383,6 +2383,10 @@ pub struct Vm {
     /// The next user function call is made by Closure::__invoke()
     /// (`[$closure, '__invoke']`): its errors name that method.
     pub closure_invoke_call: bool,
+    /// The next user-function deprecation check is skipped: a __call()
+    /// trampoline's caller reported the called method (see
+    /// trampoline_deprecation()).
+    pub skip_callback_deprecation: bool,
     /// The call being type-checked is made by Closure::__invoke().
     pub(crate) pending_call_via_invoke: bool,
     /// The `$this` of the call whose arguments are being type-checked (the
@@ -3786,6 +3790,7 @@ impl Vm {
             ucf_strict: false,
             release_call_at: None,
             closure_invoke_call: false,
+            skip_callback_deprecation: false,
             pending_call_via_invoke: false,
             recv_this: None,
             ephemeral_closures: Vec::new(),
@@ -5783,6 +5788,40 @@ impl Vm {
         }
     }
 
+    /// A #[\Deprecated] __call()/__callStatic() reached as the trampoline of
+    /// `method_name` (zend_get_call_trampoline_func() keeps its flags): the
+    /// called method is deprecated. True when the error handler threw.
+    #[inline(never)]
+    pub fn trampoline_deprecation(
+        &mut self,
+        magic: &crate::object::MethodDef,
+        method_name: &[u8],
+    ) -> bool {
+        let attrs = if magic.attributes.is_empty() {
+            &magic.op_array.attributes
+        } else {
+            &magic.attributes
+        };
+        if attrs.is_empty() {
+            return false;
+        }
+        let attrs = attrs.clone();
+        let decl = self
+            .classes
+            .get(&magic.declaring_class.to_ascii_lowercase())
+            .map(|c| crate::value::display_class_name(&c.name))
+            .unwrap_or_else(|| crate::value::display_class_name(&magic.declaring_class));
+        if let Some(custom) = self.get_deprecated_message(&attrs) {
+            let msg = self.format_deprecated_message(
+                &format!("Method {}::{}()", decl, String::from_utf8_lossy(method_name)),
+                &custom,
+            );
+            let line = self.current_line;
+            self.emit_user_deprecated_at(&msg, line);
+        }
+        self.current_exception.is_some()
+    }
+
     /// The __callStatic() trampoline of a callable `called::method`
     /// (zend_get_call_trampoline_func()): it runs in its declaring class's
     /// scope with `called` as the called scope (static::), and gets the
@@ -5796,6 +5835,12 @@ impl Vm {
         args: &[Value],
         named: Vec<(Vec<u8>, Value)>,
     ) -> Result<Value, VmError> {
+        if self.trampoline_deprecation(cs_method, method_name) {
+            return Err(VmError {
+                message: "Uncaught exception".into(),
+                line: self.current_line,
+            });
+        }
         let op = cs_method.op_array.clone();
         let mut arr = crate::array::PhpArray::new();
         for a in args {
@@ -6016,6 +6061,12 @@ impl Vm {
                         }
                         // Trampoline through __call().
                         if let Some(call) = class.methods.get(b"__call".as_slice()) {
+                            if self.trampoline_deprecation(call, method_name.as_bytes()) {
+                                return Err(VmError {
+                                    message: "Uncaught exception".into(),
+                                    line: self.current_line,
+                                });
+                            }
                             let op = call.op_array.clone();
                             let mut arr = crate::array::PhpArray::new();
                             for a in args {
@@ -7355,6 +7406,9 @@ impl Vm {
         line: u32,
         force_fallback: bool,
     ) {
+        if std::mem::take(&mut self.skip_callback_deprecation) {
+            return;
+        }
         if op_array.attributes.is_empty() {
             return;
         }
