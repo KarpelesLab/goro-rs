@@ -174,6 +174,25 @@ impl Nf {
         }
     }
 
+    /// RuleBasedNumberFormat::setDefaultRuleSet(): false (nothing changed)
+    /// unless `name` is one of the public rule sets.
+    pub fn set_default_ruleset(&mut self, name: &str) -> bool {
+        let Kind::Rbnf(style, custom, _) = &self.kind else {
+            return false;
+        };
+        let (style, custom) = (*style, custom.clone());
+        let sets = match rbnf_rules(self, style, custom.as_deref()) {
+            Some(rules) => crate::rbnf::public_sets(rules),
+            None => vec!["%duration".to_string()],
+        };
+        if sets.iter().any(|n| n == name) {
+            self.rb_ruleset = Some(name.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn df_mut(&mut self) -> Option<&mut DecimalFormat> {
         match &mut self.kind {
             Kind::Decimal(d) => Some(d),

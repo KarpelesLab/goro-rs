@@ -285,18 +285,16 @@ impl MsgFmt {
                 };
                 Ok((sub, FType::Date))
             }
-            Some(3) => Ok((
-                Sub::Number(Box::new(Nf::open(vm, locale, formatter::SPELLOUT, None)?)),
-                FType::Double,
-            )),
-            Some(4) => Ok((
-                Sub::Number(Box::new(Nf::open(vm, locale, formatter::ORDINAL, None)?)),
-                FType::Double,
-            )),
-            Some(5) => Ok((
-                Sub::Number(Box::new(Nf::open(vm, locale, formatter::DURATION, None)?)),
-                FType::Double,
-            )),
+            Some(t @ 3..=5) => {
+                // makeRBNF(): the (trimmed) style names the default rule
+                // set; one it is not leaves the default
+                let style_k = [formatter::SPELLOUT, formatter::ORDINAL, formatter::DURATION][t - 3];
+                let mut nf = Nf::open(vm, locale, style_k, None)?;
+                if !style.trim().is_empty() {
+                    nf.set_default_ruleset(style.trim());
+                }
+                Ok((Sub::Number(Box::new(nf)), FType::Double))
+            }
             _ => Err(error::U_ILLEGAL_ARGUMENT_ERROR),
         }
     }
