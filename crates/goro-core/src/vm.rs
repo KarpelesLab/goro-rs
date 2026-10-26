@@ -59517,7 +59517,8 @@ impl Vm {
                             Some(format!("Cannot instantiate {} {}", kind, c.name))
                         })
                     }
-                    .or_else(|| no_direct_construct_msg(&name_lower).map(str::to_string));
+                    .or_else(|| no_direct_construct_msg(&name_lower).map(str::to_string))
+                    .or_else(|| self.internal_private_ctor_error(&name_lower));
                     if let Some(err_msg) = inst_err {
                         let exc = self.create_exception(b"Error", &err_msg, op.line);
                         self.current_exception = Some(exc);
@@ -69063,6 +69064,40 @@ const UNDOTTED_INI_ENTRIES: &[&[u8]] = &[
 /// its storage's elements.
 fn array_as_props(obj: &Rc<RefCell<PhpObject>>) -> bool {
     matches!(obj.borrow().get_property(b"__spl_flags"), Value::Long(f) if f & 2 != 0)
+}
+
+impl Vm {
+    /// `new C` of an internal class whose stub constructor is private
+    /// (InternalIterator, HashContext, ...): zend_std_get_constructor()'s
+    /// visibility error.
+    #[inline(never)]
+    fn internal_private_ctor_error(&self, class_lower: &[u8]) -> Option<String> {
+        if self.classes.contains_key(class_lower) || class_lower == b"closure" {
+            return None;
+        }
+        self.internal_class(class_lower)?;
+        let (c, m) = crate::stubs::find_method(class_lower, b"__construct")?;
+        if m.flags & crate::stubs::F_PRIVATE == 0 {
+            return None;
+        }
+        let scope = match self.scope_top() {
+            Some(s) if !s.is_empty() => format!(
+                "scope {}",
+                crate::string::msg_str(
+                    &self
+                        .classes
+                        .get(s.as_slice())
+                        .map(|c| c.name.clone())
+                        .unwrap_or_else(|| s.clone())
+                )
+            ),
+            _ => "global scope".to_string(),
+        };
+        Some(format!(
+            "Call to private {}::__construct() from {}",
+            c.name, scope
+        ))
+    }
 }
 
 /// The get_constructor() error of the internal classes only their
