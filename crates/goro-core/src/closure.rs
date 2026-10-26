@@ -279,7 +279,7 @@ impl Vm {
         for i in 0..count {
             let cv = i + skip;
             if let Some(n) = op.cv_names.get(cv) {
-                let by_ref = op.by_ref_params.get(i).copied().unwrap_or(false);
+                let by_ref = op.by_ref_params.get(cv).copied().unwrap_or(false);
                 let mut d = if by_ref {
                     b"&$".to_vec()
                 } else {

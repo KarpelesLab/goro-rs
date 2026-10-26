@@ -746,12 +746,16 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                     format!("{}object(Closure)#{} ({}) {{\n", prefix, oid, props.len()).as_bytes(),
                 );
                 seen.insert(oid);
+                // (the get_debug_info() table built for the dump is the
+                // only holder of its arrays)
+                let bias = ZVAL_BIAS.with(|b| b.replace(0));
                 for (k, v) in &props {
                     vm.write_output(
                         format!("{}  [\"{}\"]=>\n", prefix, String::from_utf8_lossy(k)).as_bytes(),
                     );
                     var_dump_value(vm, v, indent + 2, seen);
                 }
+                ZVAL_BIAS.with(|b| b.set(bias));
                 vm.write_output(format!("{}}}\n", prefix).as_bytes());
                 seen.remove(&oid);
                 return;
