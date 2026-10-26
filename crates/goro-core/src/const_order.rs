@@ -3128,9 +3128,8 @@ pub fn add_unlisted_module_constants(
     ext: &str,
     arr: &mut crate::array::PhpArray,
 ) {
-    for (name, val) in &vm.constants {
-        if crate::vm::is_ini_entry_key(name)
-            || vm.constant_files.contains_key(name)
+    for (name, val) in vm.constants.consts() {
+        if vm.constant_files.contains_key(name)
             || vm.module_constants.iter().any(|(_, n)| n.contains(name))
             || !fallback_constant_module(name).eq_ignore_ascii_case(ext)
         {

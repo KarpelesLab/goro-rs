@@ -11311,16 +11311,17 @@ pub(crate) fn reflection_constant_resolve(
     let stripped = name.strip_prefix(b"\\").unwrap_or(name);
     let key = normalize_const_key(stripped);
     let disp = String::from_utf8_lossy(stripped).to_string();
-    if vm.constants.contains_key(stripped) {
+    if vm.constants.const_contains(stripped) {
         return Some((disp, Some(stripped.to_vec())));
     }
-    if vm.constants.contains_key(key.as_slice()) {
+    if vm.constants.const_contains(key.as_slice()) {
         return Some((disp, Some(key)));
     }
     if stripped.contains(&b'\\') {
         // Extension constants registered with their namespace's own case.
         let found = vm
             .constants
+            .consts()
             .keys()
             .find(|k| k.contains(&b'\\') && normalize_const_key(k) == key)
             .cloned();
@@ -11344,7 +11345,7 @@ pub(crate) fn reflection_constant_resolve(
 /// The value of a constant resolved by reflection_constant_resolve().
 fn reflection_constant_value(vm: &Vm, name: &[u8]) -> Value {
     match reflection_constant_resolve(vm, name) {
-        Some((_, Some(k))) => vm.constants.get(&k).cloned().unwrap_or(Value::Null),
+        Some((_, Some(k))) => vm.constants.const_get(&k).cloned().unwrap_or(Value::Null),
         Some((n, None)) => match n.as_str() {
             "TRUE" => Value::True,
             "FALSE" => Value::False,

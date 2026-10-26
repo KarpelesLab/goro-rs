@@ -1865,11 +1865,11 @@ impl Vm {
             }
             return self.get_builtin_class_constant(cl, cname).filter(scalar);
         }
-        // (INI entries share the table: lowercase names)
+        // (only engine constants: their names are uppercase)
         if name.iter().any(|b| b.is_ascii_lowercase()) {
             return None;
         }
-        let v = self.constants.get(name)?;
+        let v = self.constants.const_get(name)?;
         if !scalar(v) || crate::stubs::find_constant(name).is_some_and(|c| c.flags & 0x20000 != 0) {
             return None;
         }

@@ -1051,7 +1051,7 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Normalize namespace part (lowercase) while keeping constant name case-sensitive
     let normalized = normalize_ns_const_name(&name_bytes);
     // Check if constant is already defined
-    if vm.constants.contains_key(&normalized) {
+    if vm.constants.const_contains(&normalized) {
         // (zend_register_constant(): the name with its namespace lowercased)
         let name_str = goro_core::string::msg_str(&normalized).to_string();
         vm.emit_warning(&format!(
@@ -1084,7 +1084,7 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     vm.constant_files.insert(normalized.clone(), file);
     vm.user_constant_names
         .push((normalized.clone(), name_bytes.to_vec()));
-    vm.constants.insert(normalized, value);
+    vm.constants.const_insert(normalized, value);
     Ok(Value::True)
 }
 
@@ -1289,11 +1289,14 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         name.as_bytes()
     };
-    if let Some(val) = vm
-        .constants
-        .get(lookup_name)
-        .filter(|_| !is_ini_entry_name(lookup_name))
-        .cloned()
+    let found = vm.constants.const_get(lookup_name).cloned().or_else(|| {
+        // (a namespaced constant is stored with its namespace lowercased)
+        lookup_name
+            .contains(&b'\\')
+            .then(|| vm.constants.const_get(&normalize_ns_const_name(lookup_name)).cloned())
+            .flatten()
+    });
+    if let Some(val) = found
     {
         if let Some(m) = vm.internal_deprecated_constants.get(lookup_name).cloned() {
             vm.emit_deprecated_at(&m, vm.current_line);
@@ -16215,7 +16218,7 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         {
             let core = bucket(&mut buckets, "Core");
             for n in goro_core::reflection::CORE_CONSTANT_ORDER {
-                if let Some(v) = vm.constants.get(n.as_bytes()) {
+                if let Some(v) = vm.constants.const_get(n.as_bytes()) {
                     core.set(key(n.as_bytes()), v.clone());
                 }
             }
@@ -16224,15 +16227,12 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
             let m = String::from_utf8_lossy(module).into_owned();
             let arr = bucket(&mut buckets, &m);
             for n in names {
-                if let Some(v) = vm.constants.get(n) {
+                if let Some(v) = vm.constants.const_get(n) {
                     arr.set(key(n), v.clone());
                 }
             }
         }
-        for (name, val) in &vm.constants {
-            if is_ini_entry_name(name) {
-                continue;
-            }
+        for (name, val) in vm.constants.consts() {
             if vm.module_constants.iter().any(|(_, n)| n.contains(name)) {
                 continue;
             }
@@ -16274,7 +16274,7 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         }
         let mut user = PhpArray::new();
         for (key, name) in &vm.user_constant_names {
-            if let Some(v) = vm.constants.get(key) {
+            if let Some(v) = vm.constants.const_get(key) {
                 user.set(
                     goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
                     v.clone(),
@@ -16289,8 +16289,8 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
             );
         }
     } else {
-        for (name, val) in &vm.constants {
-            if is_ini_entry_name(name) || vm.constant_files.contains_key(name) {
+        for (name, val) in vm.constants.consts() {
+            if vm.constant_files.contains_key(name) {
                 continue;
             }
             result.set(
@@ -16300,7 +16300,7 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         }
         // User constants last, in definition order, named as defined.
         for (key, name) in &vm.user_constant_names {
-            if let Some(v) = vm.constants.get(key) {
+            if let Some(v) = vm.constants.const_get(key) {
                 result.set(
                     goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
                     v.clone(),
@@ -19557,10 +19557,7 @@ fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         return Ok(Value::False);
     }
-    if is_ini_entry_name(name_bytes) {
-        return Ok(Value::False);
-    }
-    if vm.constants.contains_key(name_bytes) {
+    if vm.constants.const_contains(name_bytes) {
         Ok(Value::True)
     } else {
         // Also check with stripped leading backslash for FQN
@@ -19569,12 +19566,12 @@ fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         } else {
             name_bytes
         };
-        if vm.constants.contains_key(check_bytes) {
+        if vm.constants.const_contains(check_bytes) {
             return Ok(Value::True);
         }
         // Normalize namespace prefix for case-insensitive lookup
         let normalized = normalize_ns_const_name(check_bytes);
-        if vm.constants.contains_key(&normalized) {
+        if vm.constants.const_contains(&normalized) {
             return Ok(Value::True);
         }
         Ok(Value::False)

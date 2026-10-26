@@ -1324,7 +1324,13 @@ pub fn child_main(fpm: &mut Fpm, wp: usize) -> ! {
     let mut ini = sapi_ini_defaults();
     ini.extend(fpm.php_ini.iter().cloned());
     let probe = engine::new_vm(&ini, SAPI_NAME);
-    let mut known: std::collections::HashSet<Vec<u8>> = probe.constants.keys().cloned().collect();
+    let mut known: std::collections::HashSet<Vec<u8>> = probe
+        .constants
+        .ini()
+        .keys()
+        .chain(probe.constants.consts().keys())
+        .cloned()
+        .collect();
     for k in [
         "cgi.rfc2616_headers",
         "cgi.nph",

@@ -1603,7 +1603,7 @@ pub struct Vm {
     /// Whether we're executing the top-level script (vs a function)
     pub is_global_scope: bool,
     /// User-defined constants (from define())
-    pub constants: crate::fxhash::FxIndexMap<Vec<u8>, Value>,
+    pub constants: crate::const_table::ConstTable,
     /// Attributes attached to user-defined constants
     pub constant_attributes:
         crate::fxhash::FxHashMap<Vec<u8>, Vec<crate::object::RuntimeAttribute>>,
@@ -2441,7 +2441,7 @@ impl Vm {
             fcc_scoped_arrays: Vec::new(),
             shutdown_functions: Vec::new(),
             constants: {
-                let mut c = crate::fxhash::FxIndexMap::default();
+                let mut c = crate::const_table::ConstTable::default();
                 // Default ini values
                 c.insert(
                     b"arg_separator.output".to_vec(),
@@ -37020,7 +37020,7 @@ impl Vm {
                                                 } else {
                                                     stripped.as_bytes().to_vec()
                                                 };
-                                                let exists = self.constants.contains_key(&lookup_bytes)
+                                                let exists = self.constants.const_contains(&lookup_bytes)
                                                     || crate::reflection::reflection_constant_resolve(
                                                         self,
                                                         const_name.as_bytes(),
@@ -44243,7 +44243,7 @@ impl Vm {
                         // Redefinition behavior: PHP keeps the original
                         // attributes on a constant — even if a redefinition
                         // has different attributes (or none at all).
-                        if !self.constants.contains_key(&key)
+                        if !self.constants.const_contains(&key)
                             && !self.constant_attributes.contains_key(&key)
                         {
                             self.constant_attributes.insert(key, attrs.clone());
@@ -46350,11 +46350,7 @@ impl Vm {
                         .to_php_string();
                     let name_bytes = name.as_bytes();
                     // Look up in constants table
-                    let val = if let Some(v) = self
-                        .constants
-                        .get(name_bytes)
-                        .filter(|_| !is_ini_entry_key(name_bytes))
-                    {
+                    let val = if let Some(v) = self.constants.const_get(name_bytes) {
                         Some(v.clone())
                     } else if name_bytes.contains(&b'\\') {
                         // For namespaced constants, namespace prefix is case-insensitive
@@ -46370,7 +46366,7 @@ impl Vm {
                             } else {
                                 name_bytes.to_vec()
                             };
-                        if let Some(v) = self.constants.get(&normalized) {
+                        if let Some(v) = self.constants.const_get(&normalized) {
                             Some(v.clone())
                         } else if !matches!(op.op2, OperandType::Unused) {
                             // A qualified / imported name: no global fallback.
@@ -46379,10 +46375,7 @@ impl Vm {
                             // Namespace fallback: try the unqualified (global) name
                             if let Some(last_sep) = name_bytes.iter().rposition(|&b| b == b'\\') {
                                 let global_name = &name_bytes[last_sep + 1..];
-                                self.constants
-                                    .get(global_name)
-                                    .filter(|_| !is_ini_entry_key(global_name))
-                                    .cloned()
+                                self.constants.const_get(global_name).cloned()
                             } else {
                                 None
                             }
@@ -64698,21 +64691,21 @@ impl Vm {
     /// expression's bare `NAME` / `Ns\NAME`): the namespaced constant
     /// (stored with a lowercase namespace), then the global one.
     pub(crate) fn deferred_global_const(&self, name: &[u8]) -> Option<&Value> {
-        if let Some(v) = self.constants.get(name) {
+        if let Some(v) = self.constants.const_get(name) {
             return Some(v);
         }
         let sep = name.iter().rposition(|&b| b == b'\\')?;
         let mut key = name[..sep].to_ascii_lowercase();
         key.extend_from_slice(&name[sep..]);
         self.constants
-            .get(&key)
-            .or_else(|| self.constants.get(&name[sep + 1..]))
+            .const_get(&key)
+            .or_else(|| self.constants.const_get(&name[sep + 1..]))
     }
 
     /// Look up a constant value
     pub fn lookup_constant(&self, name: &[u8]) -> Value {
         self.constants
-            .get(name)
+            .const_get(name)
             .cloned()
             .unwrap_or_else(|| Value::String(PhpString::from_vec(name.to_vec())))
     }
