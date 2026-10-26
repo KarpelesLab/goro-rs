@@ -621,6 +621,15 @@ pub fn reflection_parameter_construct(vm: &mut Vm, args: &[Value], line: u32) ->
                 .set_property(b"__reflection_param_trampoline".to_vec(), Value::True);
         }
     }
+    // A closure's parameter: getDeclaringFunction() reflects that closure.
+    if ok && !invoke {
+        if let (Some(Value::Object(o)), Some(c)) = (args.first(), args.get(1).map(|v| v.deref())) {
+            if c.is_closure_obj() {
+                o.borrow_mut()
+                    .set_property(b"__reflection_param_closure".to_vec(), c);
+            }
+        }
+    }
     ok
 }
 
@@ -5884,6 +5893,24 @@ pub fn reflection_method_method(
     // underlying user-defined function by rewriting the class/method keys
     // to look up in vm.user_functions.
     if let Some(ref fn_lower) = closure_fn {
+        let closure = obj.borrow().get_property(b"__reflection_closure_obj");
+        if matches!(closure, Value::Object(_)) {
+            match method {
+                b"getclosurethis" => return Some(vm.closure_this(&closure).unwrap_or(Value::Null)),
+                b"getclosurescopeclass" | b"getclosurecalledclass" => {
+                    let scope = if method == b"getclosurecalledclass" {
+                        vm.closure_called_class(&closure)
+                    } else {
+                        vm.closure_scope(&closure)
+                    };
+                    return Some(match scope {
+                        Some(n) => create_reflection_class(vm, &String::from_utf8_lossy(&n)),
+                        None => Value::Null,
+                    });
+                }
+                _ => {}
+            }
+        }
         match method {
             // (ZEND_ACC_DEPRECATED is kept from the closure's function)
             b"isdeprecated" => {
@@ -7869,6 +7896,17 @@ pub fn reflection_function_method(
                 if !matches!(closure, Value::Null | Value::Undef) {
                     let scope = vm.closure_scope(&closure);
                     set_attr_scope(&list, scope, b"__reflection_param_attr_scope");
+                    // (getDeclaringFunction() reflects the closure itself)
+                    if let Value::Array(a) = &list {
+                        for (_, p) in a.borrow().iter() {
+                            if let Value::Object(po) = p {
+                                po.borrow_mut().set_property(
+                                    b"__reflection_param_closure".to_vec(),
+                                    closure.clone(),
+                                );
+                            }
+                        }
+                    }
                 }
                 Some(list)
             } else {
@@ -10920,6 +10958,10 @@ fn reflection_parameter_method_body(
                         b"__reflection_closure_fn".to_vec(),
                         Value::String(func_target.clone()),
                     );
+                    let closure = obj.borrow().get_property(b"__reflection_param_closure");
+                    if matches!(closure, Value::Object(_)) {
+                        rm.set_property(b"__reflection_closure_obj".to_vec(), closure);
+                    }
                     return Some(Value::Object(Rc::new(RefCell::new(rm))));
                 }
             }
