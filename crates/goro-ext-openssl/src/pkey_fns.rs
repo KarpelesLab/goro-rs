@@ -1261,7 +1261,7 @@ pub fn openssl_seal(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if keys.is_empty() {
         return Err(zpp::must_not_be_empty(vm, f, 4, "public_key"));
     }
-    let Some(spec) = crate::cipher::by_name(&method.to_string_lossy()) else {
+    let Some(spec) = crate::cipher::fetch(&method.to_string_lossy()) else {
         vm.emit_warning(&format!("{}(): Unknown cipher algorithm", f));
         return Ok(Value::False);
     };
@@ -1306,14 +1306,7 @@ pub fn openssl_seal(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             None => return Ok(Value::False),
         }
     }
-    if spec.is_aead() {
-        err::push(
-            err::LIB_EVP,
-            150,
-            "operation not supported for this keytype",
-        );
-        return Ok(Value::False);
-    }
+    // An AEAD cipher seals fine (the tag is simply not kept).
     let op = crate::cipher::Op {
         spec,
         key: &sym,
@@ -1357,7 +1350,7 @@ pub fn openssl_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         ));
         return Ok(Value::False);
     };
-    let Some(spec) = crate::cipher::by_name(&method.to_string_lossy()) else {
+    let Some(spec) = crate::cipher::fetch(&method.to_string_lossy()) else {
         vm.emit_warning(&format!("{}(): Unknown cipher algorithm", f));
         return Ok(Value::False);
     };
@@ -1397,8 +1390,13 @@ pub fn openssl_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         padding: true,
         aad: &[],
         tag_len: 16,
-        tag: None,
+        // No tag is ever set: ChaCha20-Poly1305 then verifies nothing,
+        // the other AEAD modes fail.
+        tag: (spec.algo == crate::cipher::Algo::ChaCha20Poly1305).then_some(&[][..]),
     };
+    if spec.is_aead() && op.tag.is_none() {
+        return Ok(Value::False);
+    }
     match crate::cipher::run(&op, data.as_bytes()) {
         Ok((o, _)) if !o.is_empty() => {
             zpp::set_ref(args, 1, zpp::bytes(o));

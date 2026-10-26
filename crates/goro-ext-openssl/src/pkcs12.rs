@@ -341,7 +341,7 @@ fn verify_mac(auth_safe: &[u8], mac_data: &Tlv, pass: Option<&[u8]>) -> bool {
 /// d2i_PKCS12_bio() + PKCS12_parse(): (key, cert, ca certificates)
 fn parse(der: &[u8], pass: &[u8]) -> Option<(Option<PKey>, Option<Cert>, Vec<Cert>)> {
     let Some(pfx) = asn1::parse_one(der).and_then(|t| t.children()) else {
-        err::push(err::LIB_ASN1, 142, "header too long");
+        err::push(err::LIB_ASN1, 142, "not enough data");
         return None;
     };
     let auth = pfx.get(1)?.children()?;
@@ -497,10 +497,7 @@ fn export_prologue(
         }
         return Ok(None);
     };
-    if key.spki_der() != cert.spki {
-        if to_file {
-            err::push(err::LIB_X509, 116, "key values mismatch");
-        }
+    if !x509::check_private_key(&cert.spki, &key) {
         vm.emit_warning(&format!("{}(): Private key does not correspond to cert", f));
         return Ok(None);
     }

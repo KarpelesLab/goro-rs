@@ -179,7 +179,7 @@ pub fn parse(vm: &mut Vm, args: Option<&PhpArray>) -> Option<Req> {
         if dn == "null" {
             md_null = true;
         } else {
-            md = Md::by_name(dn);
+            md = crate::digest::fetch(dn);
         }
     }
     if md.is_none() && !md_null {

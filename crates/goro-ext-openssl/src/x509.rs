@@ -1188,7 +1188,7 @@ pub fn openssl_x509_check_private_key(vm: &mut Vm, args: &[Value]) -> Result<Val
 }
 
 /// X509_check_private_key()
-fn check_private_key(spki: &[u8], k: &PKey) -> bool {
+pub(crate) fn check_private_key(spki: &[u8], k: &PKey) -> bool {
     let theirs = k.spki_der();
     let ok = theirs == spki;
     if !ok {
@@ -1707,7 +1707,10 @@ fn csr_make(
                     return Ok(None);
                 }
             }
-            None => vm.emit_warning(&format!("{}(): dn: {} is not a recognized name", f, kname)),
+            None => {
+                err::obj_unknown_name(&kname);
+                vm.emit_warning(&format!("{}(): dn: {} is not a recognized name", f, kname))
+            }
         }
     }
     for (name_, value) in &dn_sk {
@@ -1731,7 +1734,10 @@ fn csr_make(
             }
         }
         let Some(o) = o else {
-            err::push(err::LIB_X509, 109, "unknown nid");
+            // OBJ_txt2nid(), then X509_NAME_add_entry_by_txt()
+            err::obj_unknown_name(ty);
+            err::obj_unknown_name(ty);
+            err::push(err::LIB_X509, 119, "invalid field name");
             vm.emit_warning(&format!(
                 "{}(): add_entry_by_txt {} -> {} (failed)",
                 f, ty, value
@@ -1794,10 +1800,13 @@ fn csr_make(
                         }
                     }
                 }
-                None => vm.emit_warning(&format!(
-                    "{}(): attributes: {} is not a recognized attribute name",
-                    f, kname
-                )),
+                None => {
+                    err::obj_unknown_name(&kname);
+                    vm.emit_warning(&format!(
+                        "{}(): attributes: {} is not a recognized attribute name",
+                        f, kname
+                    ))
+                }
             }
         }
         if let Some(sk) = &attr_sk {
@@ -1815,7 +1824,10 @@ fn csr_make(
                             name::push_str_err(&e);
                         }),
                     None => {
-                        err::push(err::LIB_X509, 109, "unknown nid");
+                        // OBJ_txt2nid(), then X509_REQ_add1_attr_by_txt()
+                        err::obj_unknown_name(n);
+                        err::obj_unknown_name(n);
+                        err::push(err::LIB_X509, 119, "invalid field name");
                         Err(())
                     }
                 };
@@ -2045,29 +2057,43 @@ pub fn openssl_csr_get_public_key(vm: &mut Vm, args: &[Value]) -> Result<Value, 
 }
 
 /// a2i_ASN1_INTEGER() on a single string.
-fn parse_hex_serial(s: &[u8]) -> Option<Vec<u8>> {
-    let mut i = s.len();
-    while i > 0 && (s[i - 1] == b'\n' || s[i - 1] == b'\r') {
+/// a2i_ASN1_INTEGER() on the first line; Err(reason) as it raises.
+fn parse_hex_serial(s: &[u8]) -> Result<Vec<u8>, (u32, &'static str)> {
+    const SHORT: (u32, &str) = (150, "short line");
+    let line = &s[..s.iter().position(|&c| c == b'\n').map_or(s.len(), |p| p + 1)];
+    let mut i = line.len();
+    if i > 0 && line[i - 1] == b'\n' {
         i -= 1;
     }
-    let mut j = 0;
-    while j < i && s[j].is_ascii_hexdigit() {
-        j += 1;
+    if i == 0 {
+        return Err(SHORT);
     }
-    let mut buf = &s[..j];
+    if line[i - 1] == b'\r' {
+        i -= 1;
+    }
+    if i == 0 {
+        return Err(SHORT);
+    }
+    let again = line[i - 1] == b'\\';
+    let j = line[..i].iter().take_while(|c| c.is_ascii_hexdigit()).count();
+    let mut buf = &line[..j];
     if buf.len() < 2 {
-        return None;
+        return Err(SHORT);
     }
     if buf[0] == b'0' && buf[1] == b'0' {
         buf = &buf[2..];
     }
+    if again {
+        // a continued line has no next line here (one-line BIO)
+        return Err(SHORT);
+    }
     if !buf.len().is_multiple_of(2) {
-        return None;
+        return Err((145, "odd number of chars"));
     }
-    let mut out = Vec::new();
-    for c in buf.chunks(2) {
-        out.push(u8::from_str_radix(std::str::from_utf8(c).ok()?, 16).ok()?);
-    }
+    let out: Vec<u8> = buf
+        .chunks(2)
+        .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap_or("0"), 16).unwrap_or(0))
+        .collect();
     let mut b = Bn::from_be(&out).to_vec();
     if b.is_empty() {
         b.push(0);
@@ -2075,7 +2101,7 @@ fn parse_hex_serial(s: &[u8]) -> Option<Vec<u8>> {
     if b[0] & 0x80 != 0 {
         b.insert(0, 0);
     }
-    Some(b)
+    Ok(b)
 }
 
 fn int_content(v: i64) -> Vec<u8> {
@@ -2165,9 +2191,9 @@ pub fn openssl_csr_sign(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::False);
         }
         match parse_hex_serial(h.as_bytes()) {
-            Some(s) => s,
-            None => {
-                err::push(err::LIB_ASN1, 145, "odd number of chars");
+            Ok(s) => s,
+            Err((reason, text)) => {
+                err::push(err::LIB_ASN1, reason, text);
                 vm.emit_warning(&format!("{}(): Error parsing serial number", f));
                 return Ok(Value::False);
             }
@@ -2242,9 +2268,67 @@ struct Spki {
     sig: Vec<u8>,
 }
 
+/// EVP_DecodeBlock(): leading blanks and trailing non-base64 bytes are
+/// trimmed, the rest must be whole 4-character groups ('=' decodes as 0).
+fn evp_decode_block(f: &[u8]) -> Option<Vec<u8>> {
+    fn val(c: u8) -> u8 {
+        match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => 0,
+            b'\t' | b' ' => 0xE0,
+            b'\n' => 0xF0,
+            b'\r' => 0xF1,
+            b'-' => 0xF2,
+            _ => 0xFF,
+        }
+    }
+    let mut f = f;
+    while !f.is_empty() && val(f[0]) == 0xE0 {
+        f = &f[1..];
+    }
+    let mut n = f.len();
+    while n > 3 && (val(f[n - 1]) | 0x13) == 0xF3 {
+        n -= 1;
+    }
+    if n % 4 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(n / 4 * 3);
+    for g in f[..n].chunks(4) {
+        let v: Vec<u8> = g.iter().map(|&c| val(c)).collect();
+        if (v[0] | v[1] | v[2] | v[3]) & 0x80 != 0 {
+            return None;
+        }
+        let l = (v[0] as u32) << 18 | (v[1] as u32) << 12 | (v[2] as u32) << 6 | v[3] as u32;
+        out.extend_from_slice(&[(l >> 16) as u8, (l >> 8) as u8, l as u8]);
+    }
+    if n >= 4 {
+        let pad = (f[n - 1] == b'=') as usize + (f[n - 2] == b'=') as usize;
+        out.truncate(out.len() - pad);
+    }
+    Some(out)
+}
+
 fn spki_decode(b64: &[u8]) -> Option<Spki> {
-    let der = crate::base64_decode(&String::from_utf8_lossy(b64))?;
-    let t = asn1::parse_one(&der)?;
+    let Some(der) = evp_decode_block(b64) else {
+        // NETSCAPE_SPKI_b64_decode()
+        err::push(err::LIB_X509, 118, "base64 decode error");
+        return None;
+    };
+    let r = spki_parse(&der);
+    if r.is_none() {
+        err::push(err::LIB_ASN1, err::R_UNSUPPORTED, "unsupported");
+    }
+    r
+}
+
+/// d2i_NETSCAPE_SPKI()
+fn spki_parse(der: &[u8]) -> Option<Spki> {
+    let t = asn1::parse_one(der)?;
     let c = t.children()?;
     if c.len() != 3 {
         return None;
@@ -2321,7 +2405,6 @@ fn spki_input(vm: &mut Vm, args: &[Value], f: &str) -> Result<Option<Spki>, VmEr
     match spki_decode(&cleaned) {
         Some(x) => Ok(Some(x)),
         None => {
-            err::push(err::LIB_ASN1, 0x8010c & 0x7fffff, "unsupported");
             let msg = if f == "openssl_spki_export_challenge" {
                 "Unable to decode SPKAC"
             } else {

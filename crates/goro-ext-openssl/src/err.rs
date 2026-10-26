@@ -12,6 +12,7 @@ pub const LIB_BN: u32 = 3;
 pub const LIB_RSA: u32 = 4;
 pub const LIB_DH: u32 = 5;
 pub const LIB_EVP: u32 = 6;
+pub const LIB_OBJ: u32 = 8;
 pub const LIB_PEM: u32 = 9;
 pub const LIB_DSA: u32 = 10;
 pub const LIB_X509: u32 = 11;
@@ -39,6 +40,7 @@ fn lib_string(lib: u32) -> &'static str {
         LIB_RSA => "rsa routines",
         LIB_DH => "Diffie-Hellman routines",
         LIB_EVP => "digital envelope routines",
+        LIB_OBJ => "object identifier routines",
         LIB_PEM => "PEM routines",
         LIB_DSA => "dsa routines",
         LIB_X509 => "x509 certificate routines",
@@ -139,6 +141,14 @@ pub fn bio_new_file_failed(e: &std::io::Error) {
         push(LIB_BIO, 128, "no such file");
     } else {
         push(LIB_BIO, R_SYS_LIB, "system lib");
+    }
+}
+
+/// OBJ_txt2obj() on a name that is neither a known short/long name nor
+/// dotted digits.
+pub fn obj_unknown_name(name: &str) {
+    if !name.starts_with(|c: char| c.is_ascii_digit()) {
+        push(LIB_OBJ, 103, "unknown object name");
     }
 }
 
