@@ -3157,6 +3157,8 @@ impl Parser {
 
                 self.expect(&TokenKind::Assign)?;
                 let value = self.parse_expression()?;
+                // (backup_doc_comment after each element's value)
+                let const_doc = self.take_doc_comment().or(const_doc);
 
                 // Handle comma-separated constants: const TYPE A = 1, B = 2;
                 self.pending_extra_constants.clear();
@@ -3175,6 +3177,7 @@ impl Parser {
                     };
                     self.expect(&TokenKind::Assign)?;
                     let extra_value = self.parse_expression()?;
+                    let extra_doc = self.take_doc_comment();
                     self.pending_extra_constants
                         .push(ClassMember::ClassConstant {
                             name: extra_name,
@@ -3183,7 +3186,7 @@ impl Parser {
                             is_final,
                             attributes: member_attributes.clone(),
                             type_hint: const_type.clone(),
-                            doc_comment: const_doc.clone(),
+                            doc_comment: extra_doc,
                             group_continues: true,
                         });
                 }
