@@ -28611,6 +28611,7 @@ impl Vm {
                         }
                     }
                     // A static `A::m()` call (constant "A::m" name) autoloads A.
+                    let mut autoloaded_static = false;
                     if let (OperandType::Const(_), Value::String(s)) = (&op.op1, &name_val) {
                         let b = s.as_bytes();
                         if let Some(p) = b.windows(2).position(|w| w == b"::") {
@@ -28625,6 +28626,7 @@ impl Vm {
                             {
                                 let cls = cls.to_vec();
                                 let had_exc = self.current_exception.is_some();
+                                autoloaded_static = true;
                                 self.try_autoload_class(&cls);
                                 // An exception thrown by the autoloader fails the
                                 // lookup (zend_lookup_class), even when the class
@@ -29142,6 +29144,7 @@ impl Vm {
                             // before the arguments are evaluated
                             // (ZEND_INIT_STATIC_METHOD_CALL).
                             if matches!(op.op1, OperandType::Const(_))
+                                && !autoloaded_static
                                 && !matches!(cls_lower.as_slice(), b"self" | b"parent" | b"static")
                                 && !self.classes.contains_key(&cls_lower)
                                 && !self.class_aliases.contains_key(&cls_lower)

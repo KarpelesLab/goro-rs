@@ -19495,6 +19495,18 @@ fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             },
             _ => {}
         }
+        // zend_get_class_constant_ex(): the class is looked up (aliases,
+        // then the autoloader).
+        if !vm.classes.contains_key(&class_lower) && vm.internal_class(&class_lower).is_none() {
+            if let Some(real) = vm.class_aliases.get(&class_lower) {
+                class_lower = real.to_ascii_lowercase();
+            } else if !class_lower.is_empty() {
+                vm.try_autoload_class(class_name_stripped.as_bytes());
+                if vm.current_exception.is_some() {
+                    return Ok(Value::False);
+                }
+            }
+        }
         if let Some(class) = vm.classes.get(&class_lower) {
             // Trait constants cannot be accessed directly.
             if class.is_trait {
