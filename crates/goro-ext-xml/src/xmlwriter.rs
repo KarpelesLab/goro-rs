@@ -959,7 +959,13 @@ fn resolve_uri(source: &[u8]) -> Option<(Vec<u8>, bool)> {
 /// The output side of php_libxml_output_buffer_create_filename ("wb").
 fn open_uri_sink(vm: &mut Vm, ctx: &Ctx, path: &[u8], local: bool) -> Option<Sink> {
     if !local {
-        return match call_builtin(vm, b"fopen", &[s(path), s(b"wb")]) {
+        // (php_libxml_streams_IO_open_wrapper(): the libxml streams context)
+        let mut fargs = vec![s(path), s(b"wb")];
+        if let Some(c) = crate::libxml::streams_context() {
+            fargs.push(Value::False);
+            fargs.push(c);
+        }
+        return match call_builtin(vm, b"fopen", &fargs) {
             Some(v @ Value::Resource(_)) => {
                 // The writer owns it: not fclose()-able from PHP code.
                 goro_core::value::set_resource_no_fclose(v.resource_id(), true);
