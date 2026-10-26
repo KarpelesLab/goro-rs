@@ -17556,7 +17556,14 @@ impl Compiler {
                             return Ok(r);
                         }
                     }
-                    if unqualified == b"get_defined_vars" && args.is_empty() {
+                    // (`get_defined_vars(...[])`: no arguments either)
+                    if unqualified == b"get_defined_vars"
+                        && args.iter().all(|a| {
+                            a.unpack
+                                && a.name.is_none()
+                                && matches!(&a.value.kind, ExprKind::Array(e) if e.is_empty())
+                        })
+                    {
                         // Reads the calling scope's variables.
                         let tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
