@@ -52654,6 +52654,9 @@ impl Vm {
                                 // Also: if the child plain prop inherits hooks from the parent,
                                 // mark has_get_hook/has_set_hook accordingly so property access
                                 // continues to dispatch through the hooks.
+                                // A backed hooked property implicitly implements the
+                                // hooks it doesn't define (inherit_property_hook()).
+                                drop_backed_abstract_hooks(&mut class);
                                 let child_plain_props: Vec<(Vec<u8>, bool)> = class
                                     .properties
                                     .iter()
@@ -54484,6 +54487,7 @@ impl Vm {
                         // Exception: readonly plain properties only satisfy the `get` hook,
                         // not `set`, because readonly properties cannot be set externally.
                         if !class.is_abstract && !class.is_interface && !class.is_trait {
+                            drop_backed_abstract_hooks(&mut class);
                             let child_plain_props: Vec<(Vec<u8>, bool)> = class
                                 .properties
                                 .iter()
@@ -54541,13 +54545,23 @@ impl Vm {
                                     .collect();
                                 let iface_methods = iface.methods.clone();
                                 for ip in &iface_props {
-                                    let Some(cp) = class
-                                        .properties
-                                        .iter()
-                                        .find(|p| p.name == ip.name && !p.is_static)
+                                    let Some(cp) =
+                                        class.properties.iter().find(|p| p.name == ip.name)
                                     else {
                                         continue;
                                     };
+                                    if cp.is_static {
+                                        return Err(VmError {
+                                            message: format!(
+                                                "Cannot redeclare non static {}::${} as static {}::${}",
+                                                iface_display,
+                                                crate::string::msg_str(&ip.name),
+                                                crate::string::msg_str(&class.name),
+                                                crate::string::msg_str(&cp.name),
+                                            ),
+                                            line: op.line,
+                                        });
+                                    }
                                     let level = |v: Visibility| match v {
                                         Visibility::Public => 0,
                                         Visibility::Protected => 1,
@@ -67099,4 +67113,27 @@ fn vm_is_valid_timezone(tz_name: &str) -> bool {
 #[inline(never)]
 fn own_prop_order(props: &[crate::object::PropertyDef]) -> Vec<Vec<u8>> {
     props.iter().map(|p| p.name.clone()).collect()
+}
+
+/// Backed properties are considered to always implicitly implement get and
+/// set when they don't define them (zend_inheritance.c inherit_property_hook()):
+/// drop the inherited abstract hook methods of a backed hooked property.
+#[inline(never)]
+fn drop_backed_abstract_hooks(class: &mut crate::object::ClassEntry) {
+    let names: Vec<Vec<u8>> = class
+        .properties
+        .iter()
+        .filter(|p| {
+            !p.is_abstract && !p.is_virtual && !p.is_static && (p.has_get_hook || p.has_set_hook)
+        })
+        .map(|p| p.name.to_ascii_lowercase())
+        .collect();
+    for n in names {
+        for pre in [b"__property_get_".as_slice(), b"__property_set_".as_slice()] {
+            let key = [pre, n.as_slice()].concat();
+            if class.methods.get(&key).is_some_and(|m| m.is_abstract) {
+                class.methods.swap_remove(&key);
+            }
+        }
+    }
 }
