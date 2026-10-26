@@ -1529,6 +1529,15 @@ pub fn handle_random_docall(
 
         // ---- Randomizer ----
         (RANDOMIZER, b"__construct") => {
+            // (zpp: at most the engine)
+            if args.len() > 2 {
+                let msg = format!(
+                    "Random\\Randomizer::__construct() expects at most 1 argument, {} given",
+                    args.len() - 1
+                );
+                throw(vm, b"ArgumentCountError", &msg);
+                return null;
+            }
             let engine = if arg_is_null(args, 1) {
                 let id = vm.alloc_object_id();
                 let o = PhpObject::new(b"Random\\Engine\\Secure".to_vec(), id);

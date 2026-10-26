@@ -453,6 +453,21 @@ fn soap_header_construct(vm: &mut Vm, f: &Func, this: &Obj, args: &[Value]) -> S
 }
 
 fn soap_fault_construct(vm: &mut Vm, f: &Func, this: &Obj, args: &[Value]) -> SR<Value> {
+    // (zpp's argument count first: $code, $string, then 5 optional)
+    if args.len() < 2 || args.len() > 7 {
+        let msg = if args.len() < 2 {
+            format!(
+                "SoapFault::__construct() expects at least 2 arguments, {} given",
+                args.len()
+            )
+        } else {
+            format!(
+                "SoapFault::__construct() expects at most 7 arguments, {} given",
+                args.len()
+            )
+        };
+        return Err(zpp::throw(vm, b"ArgumentCountError", &msg));
+    }
     // Z_PARAM_ARRAY_HT_OR_STR_OR_NULL(code)
     let code_arg = args.first().map(|v| v.deref());
     let mut checked = args.to_vec();
