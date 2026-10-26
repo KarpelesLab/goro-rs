@@ -1993,7 +1993,7 @@ pub fn register(vm: &mut Vm) {
         ("XML_ATTRIBUTE_ID", 2),
         ("XML_ATTRIBUTE_IDREF", 3),
         ("XML_ATTRIBUTE_IDREFS", 4),
-        ("XML_ATTRIBUTE_ENTITY", 5),
+        ("XML_ATTRIBUTE_ENTITY", 6), // (@cvalue XML_ATTRIBUTE_ENTITIES)
         ("XML_ATTRIBUTE_NMTOKEN", 7),
         ("XML_ATTRIBUTE_NMTOKENS", 8),
         ("XML_ATTRIBUTE_ENUMERATION", 9),

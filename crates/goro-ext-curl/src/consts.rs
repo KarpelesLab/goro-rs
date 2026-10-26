@@ -250,8 +250,8 @@ pub static CONSTANTS: &[(&[u8], i64, bool)] = &[
     (b"CURL_VERSION_SSL", 4, false),
     (b"CURL_VERSION_SSPI", 2048, false),
     (b"CURLOPT_HTTPAUTH", 107, false),
-    (b"CURLAUTH_ANY", 4294967279, false),
-    (b"CURLAUTH_ANYSAFE", 4294967278, false),
+    (b"CURLAUTH_ANY", -17, false),
+    (b"CURLAUTH_ANYSAFE", -18, false),
     (b"CURLAUTH_BASIC", 1, false),
     (b"CURLAUTH_DIGEST", 2, false),
     (b"CURLAUTH_GSSNEGOTIATE", 4, false),
@@ -350,8 +350,8 @@ pub static CONSTANTS: &[(&[u8], i64, bool)] = &[
     (b"CURLOPT_CRLFILE", 10169, false),
     (b"CURLOPT_ISSUERCERT", 10170, false),
     (b"CURLOPT_KEYPASSWD", 10026, false),
-    (b"CURLSSH_AUTH_ANY", 4294967295, false),
-    (b"CURLSSH_AUTH_DEFAULT", 4294967295, false),
+    (b"CURLSSH_AUTH_ANY", -1, false),
+    (b"CURLSSH_AUTH_DEFAULT", -1, false),
     (b"CURLSSH_AUTH_HOST", 4, false),
     (b"CURLSSH_AUTH_KEYBOARD", 8, false),
     (b"CURLSSH_AUTH_NONE", 0, false),
@@ -375,7 +375,7 @@ pub static CONSTANTS: &[(&[u8], i64, bool)] = &[
     (b"CURLOPT_SOCKS5_GSSAPI_NEC", 180, false),
     (b"CURLOPT_SOCKS5_GSSAPI_SERVICE", 10179, false),
     (b"CURLOPT_TFTP_BLKSIZE", 178, false),
-    (b"CURLPROTO_ALL", 4294967295, false),
+    (b"CURLPROTO_ALL", -1, false),
     (b"CURLPROTO_DICT", 512, false),
     (b"CURLPROTO_FILE", 1024, false),
     (b"CURLPROTO_FTP", 4, false),
@@ -944,8 +944,8 @@ pub mod c {
     pub const CURL_VERSION_SSL: i64 = 4;
     pub const CURL_VERSION_SSPI: i64 = 2048;
     pub const CURLOPT_HTTPAUTH: i64 = 107;
-    pub const CURLAUTH_ANY: i64 = 4294967279;
-    pub const CURLAUTH_ANYSAFE: i64 = 4294967278;
+    pub const CURLAUTH_ANY: i64 = -17;
+    pub const CURLAUTH_ANYSAFE: i64 = -18;
     pub const CURLAUTH_BASIC: i64 = 1;
     pub const CURLAUTH_DIGEST: i64 = 2;
     pub const CURLAUTH_GSSNEGOTIATE: i64 = 4;
@@ -1044,8 +1044,8 @@ pub mod c {
     pub const CURLOPT_CRLFILE: i64 = 10169;
     pub const CURLOPT_ISSUERCERT: i64 = 10170;
     pub const CURLOPT_KEYPASSWD: i64 = 10026;
-    pub const CURLSSH_AUTH_ANY: i64 = 4294967295;
-    pub const CURLSSH_AUTH_DEFAULT: i64 = 4294967295;
+    pub const CURLSSH_AUTH_ANY: i64 = -1;
+    pub const CURLSSH_AUTH_DEFAULT: i64 = -1;
     pub const CURLSSH_AUTH_HOST: i64 = 4;
     pub const CURLSSH_AUTH_KEYBOARD: i64 = 8;
     pub const CURLSSH_AUTH_NONE: i64 = 0;
@@ -1069,7 +1069,7 @@ pub mod c {
     pub const CURLOPT_SOCKS5_GSSAPI_NEC: i64 = 180;
     pub const CURLOPT_SOCKS5_GSSAPI_SERVICE: i64 = 10179;
     pub const CURLOPT_TFTP_BLKSIZE: i64 = 178;
-    pub const CURLPROTO_ALL: i64 = 4294967295;
+    pub const CURLPROTO_ALL: i64 = -1;
     pub const CURLPROTO_DICT: i64 = 512;
     pub const CURLPROTO_FILE: i64 = 1024;
     pub const CURLPROTO_FTP: i64 = 4;
