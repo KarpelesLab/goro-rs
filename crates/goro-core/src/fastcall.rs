@@ -767,7 +767,10 @@ impl Vm {
                 s.reg_gen = fn_gen;
             }
         }
-        let plain = !(fname[sep + 2..].eq_ignore_ascii_case(b"tokenize") || fname[0] == b'_');
+        // (a name with one leading underscore is a plain one: the engine's
+        // own start with two, see fast_fcall_target)
+        let plain =
+            !(fname[sep + 2..].eq_ignore_ascii_case(b"tokenize") || fname.starts_with(b"__"));
         let fn_gen = self.user_functions.len() + 1;
         // The call is built in place (see push_resolved_call), and $this
         // stored into its slot there: a value built apart and moved in is
