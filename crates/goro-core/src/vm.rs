@@ -6401,6 +6401,35 @@ impl Vm {
             .set_property(name.as_bytes().to_vec(), val.deref());
     }
 
+    /// Run `__call()` / `__callStatic()` serving an inaccessible method
+    /// in a frame of its own (`Class->__call('m', Array)`).
+    #[inline(never)]
+    fn magic_fallback_frame(
+        &mut self,
+        magic: &OpArray,
+        fn_cvs: Vec<Value>,
+        declaring_lower: &[u8],
+        instance: bool,
+        line: u32,
+    ) -> Result<Value, VmError> {
+        let class = self
+            .classes
+            .get(declaring_lower)
+            .map(|c| String::from_utf8_lossy(&c.name).into_owned())
+            .unwrap_or_else(|| String::from_utf8_lossy(declaring_lower).into_owned());
+        let (name, args) = if instance {
+            (format!("{}::__call", class), fn_cvs.get(1..3))
+        } else {
+            (format!("{}::__callStatic", class), fn_cvs.get(0..2))
+        };
+        let args = args.map(|a| a.to_vec()).unwrap_or_default();
+        self.call_stack
+            .push((name, self.current_file.clone(), line, args, instance));
+        let r = self.execute_op_array_vm(magic, fn_cvs);
+        self.call_stack.pop();
+        r
+    }
+
     /// Release the temporaries an instruction consumed (its TMP operands).
     fn release_tmp_operands(op: &crate::opcode::Op, tmps: &mut [Value]) {
         for o in [&op.op1, &op.op2] {
@@ -34827,7 +34856,16 @@ impl Vm {
                                                 // Use the original case class name from call.name
                                                 let orig_bytes = call.name.as_bytes();
                                                 let class_display = &orig_bytes[..sep_pos];
-                                                let caller_scope = self.current_class_scope();
+                                                // (a call trampoline forwards to
+                                                // __callStatic())
+                                                let caller_scope = if op_array
+                                                    .name
+                                                    .starts_with(b"__closure_fcc_tramp_")
+                                                {
+                                                    None
+                                                } else {
+                                                    self.current_class_scope()
+                                                };
                                                 if let Some(err_msg) = self.check_visibility(
                                                     method_vis,
                                                     &method_declaring,
@@ -34853,6 +34891,16 @@ impl Vm {
                                                             c.get_method(b"__call").is_some()
                                                         })
                                                         .unwrap_or(false);
+                                                    // (the $this an instance method's call
+                                                    // carries is no argument)
+                                                    let magic_skip = usize::from(
+                                                        !method.is_static
+                                                            && matches!(
+                                                                (call.args.first(), cvs.first()),
+                                                                (Some(Value::Object(a)), Some(Value::Object(b)))
+                                                                    if Rc::ptr_eq(a, b)
+                                                            ),
+                                                    );
                                                     if has_callstatic || has_call {
                                                         // Clone needed values before borrowing ends
                                                         let class_part_owned: Vec<u8> =
@@ -34907,7 +34955,7 @@ impl Vm {
                                                                     }
                                                                     if fn_cvs.len() > 1 {
                                                                         let mut args_arr = crate::array::PhpArray::new();
-                                                                        for arg in &call.args {
+                                                                        for arg in call.args.iter().skip(magic_skip) {
                                                                             args_arr.push(
                                                                                 arg.clone(),
                                                                             );
@@ -34923,12 +34971,11 @@ impl Vm {
                                                                             class_display_owned
                                                                                 .clone(),
                                                                         );
+                                                                    let cs_declaring_frame =
+                                                                        cs_declaring.clone();
                                                                     self.class_scope_stack
                                                                         .push(cs_declaring);
-                                                                    let r = self
-                                                                        .execute_op_array_vm(
-                                                                            &cs_op, fn_cvs,
-                                                                        );
+                                                                    let r = self.magic_fallback_frame(&cs_op, fn_cvs, &cs_declaring_frame, false, op.line);
                                                                     self.called_class_stack
                                                                         .pop();
                                                                     self.class_scope_stack
@@ -34976,7 +35023,7 @@ impl Vm {
                                                                     }
                                                                     if fn_cvs.len() > 2 {
                                                                         let mut args_arr = crate::array::PhpArray::new();
-                                                                        for arg in &call.args {
+                                                                        for arg in call.args.iter().skip(magic_skip) {
                                                                             args_arr.push(
                                                                                 arg.clone(),
                                                                             );
@@ -34987,17 +35034,21 @@ impl Vm {
                                                                         )),
                                                                     );
                                                                     }
+                                                                    // (the called scope of __call()
+                                                                    // is its $this's class)
+                                                                    let this_class = match &cvs[0] {
+                                                                        Value::Object(o) => {
+                                                                            o.borrow().class_name.clone()
+                                                                        }
+                                                                        _ => class_display_owned.clone(),
+                                                                    };
                                                                     self.called_class_stack
-                                                                        .push(
-                                                                            class_display_owned
-                                                                                .clone(),
-                                                                        );
+                                                                        .push(this_class);
+                                                                    let call_declaring_frame =
+                                                                        call_declaring.clone();
                                                                     self.class_scope_stack
                                                                         .push(call_declaring);
-                                                                    let r = self
-                                                                        .execute_op_array_vm(
-                                                                            &call_op, fn_cvs,
-                                                                        );
+                                                                    let r = self.magic_fallback_frame(&call_op, fn_cvs, &call_declaring_frame, true, op.line);
                                                                     self.called_class_stack
                                                                         .pop();
                                                                     self.class_scope_stack
@@ -35039,7 +35090,7 @@ impl Vm {
                                                                     }
                                                                     if fn_cvs.len() > 1 {
                                                                         let mut args_arr = crate::array::PhpArray::new();
-                                                                        for arg in &call.args {
+                                                                        for arg in call.args.iter().skip(magic_skip) {
                                                                             args_arr.push(
                                                                                 arg.clone(),
                                                                             );
@@ -35055,12 +35106,11 @@ impl Vm {
                                                                             class_display_owned
                                                                                 .clone(),
                                                                         );
+                                                                    let cs_declaring_frame =
+                                                                        cs_declaring.clone();
                                                                     self.class_scope_stack
                                                                         .push(cs_declaring);
-                                                                    let r = self
-                                                                        .execute_op_array_vm(
-                                                                            &cs_op, fn_cvs,
-                                                                        );
+                                                                    let r = self.magic_fallback_frame(&cs_op, fn_cvs, &cs_declaring_frame, false, op.line);
                                                                     self.called_class_stack
                                                                         .pop();
                                                                     self.class_scope_stack
@@ -35236,7 +35286,9 @@ impl Vm {
                         // (a static closure has no $this, even if its body uses it)
                         let is_instance = user_fn.cv_names.first().map(|n| n.as_slice())
                             == Some(b"this")
-                            && !user_fn.is_static_closure;
+                            && !user_fn.is_static_closure
+                            // (an instance call trampoline: its object comes first)
+                            || user_fn.name.starts_with(b"__closure_fcc_tramp_i");
                         // Capture args for stack trace (skip $this for methods)
                         let trace_args = {
                             // Closures: captured values are not arguments.
@@ -63087,7 +63139,14 @@ impl Vm {
                                     let method_declaring = method.declaring_class.clone();
                                     let method_display_name =
                                         crate::string::msg_str(&method.name).to_string();
-                                    let caller_scope = self.current_class_scope();
+                                    // (a call trampoline forwards to __call():
+                                    // the method was not callable where it was made)
+                                    let caller_scope =
+                                        if op_array.name.starts_with(b"__closure_fcc_tramp_") {
+                                            None
+                                        } else {
+                                            self.current_class_scope()
+                                        };
                                     self.check_visibility(
                                         method_vis,
                                         &method_declaring,

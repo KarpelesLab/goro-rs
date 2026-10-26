@@ -4096,9 +4096,7 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 // hierarchy (including inherited private). Those are not
                 // "dynamic" for purposes of hasProperty visibility.
                 let has_dynamic = if !has {
-                    let ob = obj.borrow();
-                    let self_obj = ob.get_property(b"__reflection_object");
-                    drop(ob);
+                    let self_obj = reflected_instance(vm, obj);
                     if let Value::Object(inst) = &self_obj {
                         let io = inst.borrow();
                         let on_instance = io.has_property(prop_name.as_bytes())
@@ -4559,9 +4557,7 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 // instance, but those are NOT dynamic — only treat a property
                 // as dynamic when it's not declared anywhere on the hierarchy.
                 let has_dynamic = if prop_info.is_none() {
-                    let ob = obj.borrow();
-                    let self_obj = ob.get_property(b"__reflection_object");
-                    drop(ob);
+                    let self_obj = reflected_instance(vm, obj);
                     if let Value::Object(inst) = &self_obj {
                         let io = inst.borrow();
                         let on_inst = io.has_property(prop_name.as_bytes());
@@ -4684,9 +4680,7 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                             Vec::new()
                         };
                     let dyn_names: Vec<Vec<u8>> = {
-                        let ob = obj.borrow();
-                        let self_obj = ob.get_property(b"__reflection_object");
-                        drop(ob);
+                        let self_obj = reflected_instance(vm, obj);
                         if let Value::Object(inst) = &self_obj {
                             // The dynamic entries of its property table
                             // (a DateTime's date/timezone are only views).
@@ -7613,6 +7607,11 @@ pub fn reflection_function_method(
     let target = ob.get_property(b"__reflection_target").to_php_string();
     let func_lower = target.as_bytes().to_vec();
     drop(ob);
+    if func_lower.starts_with(b"__closure_fcc_tramp_") {
+        if let Some(r) = trampoline_function_method(vm, method, &func_lower) {
+            return Some(r);
+        }
+    }
     // Closure::fromCallable() of a __call()/__callStatic() trampoline: the
     // fake closure's function has no arginfo.
     if func_lower.starts_with(b"__closure_fcc_tramp_")
@@ -14529,6 +14528,55 @@ pub fn create_reflection_class_constant(
 
 /// Whether the class or an ancestor is an extension class constructed by
 /// an object_construct_handler (no user __construct overriding it).
+/// ReflectionFunction of a __call()/__callStatic() trampoline closure
+/// (zend_get_call_trampoline_func()): an internal function named after the
+/// called method; `...$arguments` when made by `$o->m(...)`.
+#[inline(never)]
+fn trampoline_function_method(vm: &Vm, method: &[u8], func_lower: &[u8]) -> Option<Value> {
+    let op = vm.user_functions.get(func_lower)?;
+    let target = op.fcc_target_name.as_ref()?;
+    let name = match target.windows(2).rposition(|w| w == b"::") {
+        Some(p) => &target[p + 2..],
+        None => target.as_slice(),
+    };
+    let fcc = func_lower.starts_with(b"__closure_fcc_tramp_ip_")
+        || func_lower.starts_with(b"__closure_fcc_tramp_sp_");
+    let is_static = func_lower.starts_with(b"__closure_fcc_tramp_s");
+    Some(match method {
+        b"getname" | b"getshortname" => Value::String(PhpString::from_vec(name.to_vec())),
+        b"isinternal" => Value::True,
+        b"isuserdefined" => Value::False,
+        b"getfilename" | b"getstartline" | b"getendline" | b"getdoccomment" => Value::False,
+        b"__tostring" => {
+            let mut out = format!(
+                "Closure [ <internal> {}public method {} ] {{\n",
+                if is_static { "static " } else { "" },
+                String::from_utf8_lossy(name)
+            );
+            if fcc {
+                out.push_str(
+                    "\n  - Parameters [1] {\n    Parameter #0 [ <optional> mixed ...$arguments ]\n  }\n",
+                );
+            }
+            out.push_str("}\n");
+            Value::String(PhpString::from_string(out))
+        }
+        _ => return None,
+    })
+}
+
+/// intern->obj of a class reflector: the object a ReflectionObject
+/// reflects (a ReflectionClass made from an object keeps none).
+fn reflected_instance(vm: &Vm, refl: &Rc<RefCell<PhpObject>>) -> Value {
+    let ob = refl.borrow();
+    let cl = ob.class_name.to_ascii_lowercase();
+    if cl == b"reflectionobject" || vm.class_extends(&cl, b"reflectionobject") {
+        ob.get_property(b"__reflection_object")
+    } else {
+        Value::Null
+    }
+}
+
 /// The get_constructor() handler errors of internal classes (thrown
 /// before the constructor's visibility is checked).
 #[inline(never)]

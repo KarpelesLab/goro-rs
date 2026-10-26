@@ -427,6 +427,10 @@ impl Vm {
         if m.is_empty() || (m.starts_with(b"__") && !is_ctor) {
             return false;
         }
+        // (a call trampoline forwards to __call(): the general handler)
+        if op_array.ops.len() <= 4 && op_array.name.starts_with(b"__closure_fcc_tramp_") {
+            return false;
+        }
         // The object operand (as read_operand() reads it).
         let obj = match op.op1 {
             OperandType::Cv(i) => match cvs.get(i as usize) {

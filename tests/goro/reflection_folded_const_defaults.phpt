@@ -60,5 +60,3 @@ string(3) "NAN"
 bool(true)
 
 Fatal error: Declaration of Q::m() must be compatible with P::m($e = PHP_INT_MAX, $f = E_ALL) in %s : eval()'d code on line 1
-Stack trace:
-#0 {main}

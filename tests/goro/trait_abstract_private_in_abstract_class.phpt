@@ -7,5 +7,3 @@ abstract class A { use T; }
 --EXPECTF--
 
 Fatal error: Class A must implement 2 abstract methods (A::m, A::n) in %s on line 3
-Stack trace:
-#0 {main}
