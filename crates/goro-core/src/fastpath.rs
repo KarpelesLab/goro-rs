@@ -2001,6 +2001,9 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::PropertyGetIncDec
             | OpCode::PropertyGetRW
             | OpCode::PropertyGetWUnset
+            | OpCode::PropertyGetIs
+            | OpCode::PropertyGetWObj
+            | OpCode::PropertyGetWObjRW
             | OpCode::PropertyIsset
             | OpCode::PropertyIssetFetch
             | OpCode::ArrayIsset
@@ -2202,6 +2205,9 @@ impl crate::vm::Vm {
                 | OpCode::PropertyGetW
                 | OpCode::PropertyGetIncDec
                 | OpCode::PropertyGetRW
+                | OpCode::PropertyGetIs
+                | OpCode::PropertyGetWObj
+                | OpCode::PropertyGetWObjRW
                 | OpCode::PropertyIsset
                 | OpCode::PropertyIssetFetch => {
                     if self.isset_get_cache.is_some() {
@@ -4110,6 +4116,9 @@ impl crate::vm::Vm {
         let w_fetch = opc == OpCode::PropertyGetW;
         // (the read of `$o->p op= v`: of a property its write may change)
         let rw = opc == OpCode::PropertyGetRW;
+        // The fetch of the object `$o->a` holds for `$o->a->b = v` /
+        // `$o->a->b op= v` (FETCH_OBJ_W / RW): the object, as a read.
+        let obj_fetch = matches!(opc, OpCode::PropertyGetWObj | OpCode::PropertyGetWObjRW);
         // (the object of a variable is borrowed from it: nothing here
         // changes the variables)
         let held;
@@ -4126,15 +4135,10 @@ impl crate::vm::Vm {
                 },
                 _ => return Fast::No,
             },
-            // `$a->b->c`, `f()->p`: a read of an object held by a temporary
-            // (one held elsewhere too: releasing the temporary then destroys
-            // nothing)
-            OperandType::Tmp(ti)
-                if matches!(
-                    opc,
-                    OpCode::PropertyGet | OpCode::PropertyIsset | OpCode::PropertyIssetFetch
-                ) =>
-            {
+            // `$a->b->c`, `f()->p`, `$a->b->c = v`: an object held by a
+            // temporary (one held elsewhere too: releasing the temporary
+            // then destroys nothing)
+            OperandType::Tmp(ti) if opc != OpCode::PropertyGetIncDec => {
                 match tmps.get(ti as usize) {
                     Some(Value::Object(obj)) if Rc::strong_count(obj) > 1 => {
                         held = obj.clone();
@@ -4281,6 +4285,8 @@ impl crate::vm::Vm {
         // it): only an array of a few plain values is overwritten.
         let ok = if write {
             self.prop_overwrite_quiet(cur)
+        } else if obj_fetch {
+            matches!(cur, Value::Object(_))
         } else if w_fetch {
             matches!(cur, Value::Array(_))
         } else if (opc == OpCode::PropertyGetIncDec || rw) && matches!(cur, Value::Object(_)) {
@@ -4307,7 +4313,12 @@ impl crate::vm::Vm {
                 p
             }
             None => {
-                let p = self.plain_public_prop(&ob.class_name, name, write || w_fetch || rw, scope);
+                let p = self.plain_public_prop(
+                    &ob.class_name,
+                    name,
+                    write || w_fetch || rw || obj_fetch,
+                    scope,
+                );
                 if let Some(c) = sites.as_mut().and_then(|g| {
                     g.get_or_insert_with(Default::default)
                         .prop_slot(&op_array.ops, ip)
@@ -4333,7 +4344,7 @@ impl crate::vm::Vm {
                 &ob,
                 idx,
                 plain,
-                write || w_fetch || rw,
+                write || w_fetch || rw || obj_fetch,
                 scope,
                 name,
             );
@@ -4498,6 +4509,13 @@ impl crate::vm::Vm {
             // (++/-- of an object: the general handler checks readonly)
             OpCode::PropertyGetIncDec | OpCode::PropertyGetRW
                 if matches!(cur, Value::Object(_)) =>
+            {
+                return None;
+            }
+            // (the object of `$o->a->b = v`: only an object is fetched as
+            // a read)
+            OpCode::PropertyGetWObj | OpCode::PropertyGetWObjRW
+                if !matches!(cur, Value::Object(_)) =>
             {
                 return None;
             }

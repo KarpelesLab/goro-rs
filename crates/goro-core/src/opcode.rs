@@ -717,14 +717,17 @@ impl PropIcs {
             .map(|o| {
                 // (a read of a temporary's object too)
                 let (name, tmp_ok) = match o.opcode {
-                    OpCode::PropertyGet | OpCode::PropertyIsset | OpCode::PropertyIssetFetch => {
-                        (&o.op2, true)
-                    }
+                    OpCode::PropertyGet
+                    | OpCode::PropertyGetIs
+                    | OpCode::PropertyIsset
+                    | OpCode::PropertyIssetFetch => (&o.op2, true),
                     OpCode::PropertySet => (&o.result, false),
                     // (the fetches of `$cv->p++` and `$cv->p[k] = v`)
-                    OpCode::PropertyGetIncDec | OpCode::PropertyGetW | OpCode::PropertyGetRW => {
-                        (&o.op2, false)
-                    }
+                    OpCode::PropertyGetIncDec
+                    | OpCode::PropertyGetW
+                    | OpCode::PropertyGetRW
+                    | OpCode::PropertyGetWObj
+                    | OpCode::PropertyGetWObjRW => (&o.op2, false),
                     _ => return u16::MAX,
                 };
                 if (matches!(o.op1, OperandType::Cv(_))
