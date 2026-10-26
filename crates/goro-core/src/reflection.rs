@@ -8561,6 +8561,190 @@ fn op_array_promotes(op: &OpArray, name: &[u8]) -> bool {
 
 /// Find a property declaration (static or not) on `class_lower` or its
 /// ancestors.
+/// reflection_property_get_effective_prop(): the property of the object's
+/// class when it redeclares one that is not private in the reflected class
+/// (the redeclaration may add hooks or change flags).
+fn effective_prop(
+    vm: &Vm,
+    class_lower: &[u8],
+    obj: &Rc<RefCell<PhpObject>>,
+    prop: &[u8],
+) -> Option<crate::object::PropertyDef> {
+    let r = class_prop_info(vm, class_lower, prop);
+    let ocl = obj.borrow().class_name.to_ascii_lowercase();
+    if ocl.as_slice() != class_lower && !r.as_ref().is_some_and(|d| d.visibility == Visibility::Private)
+    {
+        return class_prop_info(vm, &ocl, prop);
+    }
+    r
+}
+
+/// The properties_info entry `prop` of class `class_lower`: its own
+/// declaration before an inherited private one of the same name.
+fn class_prop_info(
+    vm: &Vm,
+    class_lower: &[u8],
+    prop: &[u8],
+) -> Option<crate::object::PropertyDef> {
+    let c = vm.classes.get(class_lower)?;
+    let mut it = c.properties.iter().filter(|p| p.name == prop);
+    let first = it.clone().next();
+    it.find(|p| p.declaring_class.eq_ignore_ascii_case(class_lower) || p.visibility != Visibility::Private)
+        .or(first)
+        .cloned()
+        .or_else(|| find_prop_decl(vm, class_lower, prop))
+}
+
+/// The storage key of `prop` in `obj` as seen from class `scope`.
+fn raw_prop_key(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, prop: &[u8], scope: &[u8]) -> Vec<u8> {
+    vm.class_scope_stack.push(scope.to_ascii_lowercase());
+    let k = vm.prop_access_key(obj, prop);
+    vm.class_scope_stack.pop();
+    k.unwrap_or_else(|| prop.to_vec())
+}
+
+/// The storage key of declared property `d` in `obj` (a private one may be
+/// stored under its mangled name).
+fn backing_key(
+    vm: &mut Vm,
+    obj: &Rc<RefCell<PhpObject>>,
+    prop: &[u8],
+    d: &crate::object::PropertyDef,
+) -> Vec<u8> {
+    if d.visibility == Visibility::Private {
+        let decl = rcls(vm, &d.declaring_class.to_ascii_lowercase())
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| d.declaring_class.clone());
+        let mut mk = vec![0u8];
+        mk.extend_from_slice(&decl);
+        mk.push(0);
+        mk.extend_from_slice(prop);
+        if obj.borrow().has_property(&mk) {
+            return mk;
+        }
+    }
+    raw_prop_key(vm, obj, prop, &d.declaring_class)
+}
+
+/// Whether property `d` (of class `cl`) has a `kind` ("get"/"set") hook.
+fn prop_has_hook(vm: &Vm, d: &crate::object::PropertyDef, kind: &str, prop: &str) -> bool {
+    if if kind == "get" { d.has_get_hook } else { d.has_set_hook } {
+        return true;
+    }
+    let mut m = format!("__property_{}_", kind).into_bytes();
+    m.extend(prop.bytes().map(|b| b.to_ascii_lowercase()));
+    rcls(vm, &d.declaring_class.to_ascii_lowercase()).is_some_and(|c| c.get_method(&m).is_some())
+}
+
+/// ReflectionProperty::getRawValue() on the effective property: None when
+/// the plain read applies (no get hook).
+#[inline(never)]
+fn raw_value_effective_get(
+    vm: &mut Vm,
+    class_lower: &[u8],
+    obj: &Rc<RefCell<PhpObject>>,
+    prop: &str,
+) -> Option<Value> {
+    let pn = prop.as_bytes();
+    let eff = effective_prop(vm, class_lower, obj, pn);
+    if eff.as_ref().is_some_and(|d| d.is_static) {
+        let exc = vm.create_exception(
+            b"ReflectionException",
+            "May not use getRawValue on static properties",
+            vm.current_line,
+        );
+        vm.current_exception = Some(exc);
+        return Some(Value::Null);
+    }
+    let d = eff?;
+    if !prop_has_hook(vm, &d, "get", prop) {
+        // The reflected class's view of the slot (a private of an ancestor).
+        if d.visibility == Visibility::Private && !d.declaring_class.eq_ignore_ascii_case(class_lower)
+        {
+            return None;
+        }
+        let key = raw_prop_key(vm, obj, pn, class_lower);
+        if key.as_slice() == pn {
+            return None;
+        }
+        return Some(obj.borrow().get_property(&key));
+    }
+    if d.is_virtual {
+        let msg = format!(
+            "Must not read from virtual property {}::${}",
+            class_display(vm, &d.declaring_class),
+            prop
+        );
+        let exc = vm.create_exception(b"Error", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Some(Value::Null);
+    }
+    // The get hook's own access: the backing value.
+    let key = backing_key(vm, obj, pn, &d);
+    Some(obj.borrow().get_property(&key))
+}
+
+/// ReflectionProperty::setRawValue() on the effective property: false when
+/// the older path applies.
+#[inline(never)]
+fn raw_value_effective_set(
+    vm: &mut Vm,
+    class_lower: &[u8],
+    obj: &Rc<RefCell<PhpObject>>,
+    prop: &str,
+    value: &Value,
+) -> bool {
+    let pn = prop.as_bytes();
+    let eff = effective_prop(vm, class_lower, obj, pn);
+    if eff.as_ref().is_some_and(|d| d.is_static) {
+        let exc = vm.create_exception(
+            b"ReflectionException",
+            "May not use setRawValue on static properties",
+            vm.current_line,
+        );
+        vm.current_exception = Some(exc);
+        return true;
+    }
+    let ocl = obj.borrow().class_name.to_ascii_lowercase();
+    let hooked = eff
+        .as_ref()
+        .is_some_and(|d| prop_has_hook(vm, d, "set", prop));
+    if ocl.as_slice() == class_lower && !hooked {
+        return false;
+    }
+    match eff {
+        Some(d) if prop_has_hook(vm, &d, "set", prop) => {
+            if d.is_virtual {
+                let msg = format!(
+                    "Must not write to virtual property {}::${}",
+                    class_display(vm, &d.declaring_class),
+                    prop
+                );
+                let exc = vm.create_exception(b"Error", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return true;
+            }
+            let key = backing_key(vm, obj, pn, &d);
+            obj.borrow_mut().set_property(key, value.clone());
+            true
+        }
+        _ => {
+            // write_property() with the reflected class as scope.
+            let _ = run_snippet_in_scope(
+                vm,
+                "$__o->{$__n} = $__v;",
+                &[
+                    ("__o", Value::Object(obj.clone())),
+                    ("__n", Value::String(PhpString::from_string(prop.to_string()))),
+                    ("__v", value.clone()),
+                ],
+                class_lower,
+            );
+            true
+        }
+    }
+}
+
 fn find_prop_decl(vm: &Vm, class_lower: &[u8], prop: &[u8]) -> Option<crate::object::PropertyDef> {
     let mut cur = class_lower.to_vec();
     for _ in 0..64 {
@@ -8992,6 +9176,11 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
             b"getrawvalue" => {
                 // getRawValue($obj): read the property without triggering lazy init.
                 let target = args.get(1).cloned().unwrap_or(Value::Null);
+                if let Value::Object(o) = &target {
+                    if let Some(v) = raw_value_effective_get(vm, &class_lower, o, &prop_name) {
+                        return Some(v);
+                    }
+                }
                 if let Some(d) = find_prop_decl(vm, &class_lower, prop_name.as_bytes()) {
                     if d.is_virtual && (d.has_get_hook || d.has_set_hook) {
                         let msg = format!(
@@ -9054,7 +9243,7 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                 };
                 let tobj = vm.proxy_redirect(&tobj);
                 let pn = prop_name.as_bytes();
-                let decl = find_prop_decl(vm, &class_lower, pn);
+                let decl = effective_prop(vm, &class_lower, &tobj, pn);
                 if !reflection_property_check_lazy_compatible(vm, &decl, &class_lower, pn, mname) {
                     return Some(Value::Null);
                 }
@@ -9122,7 +9311,8 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                         set_prop_lazy_flag(&tobj, pn, true);
                     }
                 } else {
-                    tobj.borrow_mut().set_property(pn.to_vec(), value);
+                    let key = raw_prop_key(vm, &tobj, pn, &decl.declaring_class);
+                    tobj.borrow_mut().set_property(key, value);
                 }
                 // Object becomes non-lazy if this was the last lazy prop
                 if prop_was_lazy
@@ -9209,6 +9399,11 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                 // hooks and type checks (best-effort in our VM).
                 let target = args.get(1).cloned().unwrap_or(Value::Null);
                 let value = args.get(2).cloned().unwrap_or(Value::Null);
+                if let Value::Object(o) = &target {
+                    if raw_value_effective_set(vm, &class_lower, o, &prop_name, &value) {
+                        return Some(Value::Null);
+                    }
+                }
                 if let Some(d) = find_prop_decl(vm, &class_lower, prop_name.as_bytes()) {
                     // reflection_property_set_raw_value(): without a set
                     // hook on the effective property (the object class's,
