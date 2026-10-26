@@ -23861,11 +23861,11 @@ impl Compiler {
                 if target_lower == self_lower {
                     // Look up the constant in the class being compiled
                     if let Some(val) = class.constants.get(constant) {
-                        // Make sure the value isn't a deferred marker
-                        if let Value::String(s) = val {
-                            if s.as_bytes().starts_with(b"__deferred_const__::") {
-                                return None;
-                            }
+                        // Make sure the value isn't (or holds) a deferred
+                        // marker (a constant, a thunk, an operation
+                        // evaluated later)
+                        if value_has_marker(val) {
+                            return None;
                         }
                         return Some(val.clone());
                     }
@@ -23920,10 +23920,8 @@ impl Compiler {
                     .collect();
                 if target_lower == self_lower {
                     if let Some(val) = class.constants.get(&const_name_str) {
-                        if let Value::String(s) = val {
-                            if s.as_bytes().starts_with(b"__deferred_const__::") {
-                                return None;
-                            }
+                        if value_has_marker(val) {
+                            return None;
                         }
                         return Some(val.clone());
                     }
