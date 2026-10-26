@@ -6207,14 +6207,10 @@ impl Vm {
         if class_name.is_empty() {
             return false;
         }
-        let valid_first =
-            |b: u8| -> bool { b == b'_' || b == b'\\' || b.is_ascii_alphabetic() || b >= 0x80 };
-        let valid_rest =
+        // (zend_is_valid_class_name(): a leading digit is fine)
+        let valid =
             |b: u8| -> bool { b == b'_' || b == b'\\' || b.is_ascii_alphanumeric() || b >= 0x80 };
-        if !valid_first(class_name[0]) {
-            return false;
-        }
-        if !class_name[1..].iter().copied().all(valid_rest) {
+        if !class_name.iter().copied().all(valid) {
             return false;
         }
         let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
