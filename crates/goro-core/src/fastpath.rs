@@ -2053,9 +2053,9 @@ fn is_plain_value(v: &Value) -> bool {
 }
 
 /// FreeTmps (run_fast_ops()) of temporaries from the first one holding
-/// something else than a plain value or a string on: an array or object
-/// held elsewhere too only loses a holder; one held here alone is freed
-/// when it holds a few plain values (nothing to destroy). (No object with a
+/// something else than a plain value or a string on: an array, object or
+/// reference held elsewhere too only loses a holder; one held here alone is
+/// freed when it holds a few plain values (nothing to destroy). (No object with a
 /// destructor exists: `no_release`.) False (nothing done): the general
 /// handler releases them (they are not all such, or the cycle collector is
 /// due).
@@ -2075,7 +2075,9 @@ fn fast_free_containers(
             | Value::Long(_)
             | Value::Double(_)
             | Value::String(_) => {}
-            Value::Array(_) | Value::Object(_) => {
+            // (a reference, `&$a[k]`'s: as the general handler, its slot
+            // is emptied, no possible root buffered)
+            Value::Array(_) | Value::Object(_) | Value::Reference(_) => {
                 if !drops_quietly_deep(v, &mut 256, globals) {
                     return false;
                 }
@@ -2090,7 +2092,9 @@ fn fast_free_containers(
     for slot in range {
         match slot {
             Value::Undef => {}
-            Value::Array(_) | Value::Object(_) | Value::String(_) => *slot = Value::Undef,
+            Value::Array(_) | Value::Object(_) | Value::Reference(_) | Value::String(_) => {
+                *slot = Value::Undef
+            }
             // (plain values: nothing to drop)
             v => std::mem::forget(std::mem::replace(v, Value::Undef)),
         }
