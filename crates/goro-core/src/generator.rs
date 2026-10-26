@@ -766,6 +766,23 @@ impl PhpGenerator {
         (name, is_instance)
     }
 
+    /// Record the value/key this generator holds while it runs.
+    #[inline(never)]
+    fn push_running_values(&self, vm: &mut Vm) {
+        let vals = (self.state != GeneratorState::Created)
+            .then(|| (self.current_value.clone(), self.current_key.clone()));
+        vm.running_gen_values
+            .push((self as *const PhpGenerator as usize, vals));
+    }
+
+    #[inline(never)]
+    fn pop_running_values(&self, vm: &mut Vm) {
+        let addr = self as *const PhpGenerator as usize;
+        if let Some(i) = vm.running_gen_values.iter().rposition(|(a, _)| *a == addr) {
+            vm.running_gen_values.remove(i);
+        }
+    }
+
     fn resume_single(&mut self, vm: &mut Vm) -> Result<bool, VmError> {
         if self.state == GeneratorState::Completed {
             return Ok(false);
@@ -841,6 +858,7 @@ impl PhpGenerator {
         let fname = vm.generator_function_name_of(self);
         vm.running_generators
             .push((self as *const PhpGenerator as usize, fname, self.object_id));
+        self.push_running_values(vm);
         let cv_frame = vm.register_cv_frame(&self.op_array);
         if cv_frame {
             vm.set_cv_frame_vars(&self.cvs);
@@ -860,6 +878,7 @@ impl PhpGenerator {
         self.is_running = false;
         vm.gc_frames.pop();
         vm.running_generators.pop();
+        self.pop_running_values(vm);
 
         // Pop the call_stack entry (with the frames of the calls an
         // exception left)
@@ -2481,6 +2500,7 @@ impl PhpGenerator {
         let fname = vm.generator_function_name_of(self);
         vm.running_generators
             .push((self as *const PhpGenerator as usize, fname, self.object_id));
+        self.push_running_values(vm);
         let cv_frame = vm.register_cv_frame(&self.op_array);
         if cv_frame {
             vm.set_cv_frame_vars(&self.cvs);
@@ -2500,6 +2520,7 @@ impl PhpGenerator {
         self.is_running = false;
         vm.gc_frames.pop();
         vm.running_generators.pop();
+        self.pop_running_values(vm);
 
         vm.call_stack
             .truncate(self.frame_depth + vm.fiber_call_base());
@@ -2865,6 +2886,42 @@ impl Vm {
         r
     }
 
+    /// A method of a generator called while it runs: the value and key it
+    /// yielded last are still there; anything that would run it (also
+    /// running it to its first yield) is "already running".
+    #[inline(never)]
+    fn running_generator_method(
+        &mut self,
+        g: &GenRc,
+        method: &[u8],
+        line: u32,
+    ) -> Result<Value, VmError> {
+        let addr = RefCell::as_ptr(g) as usize;
+        let vals = self
+            .running_gen_values
+            .iter()
+            .rev()
+            .find(|(a, _)| *a == addr)
+            .and_then(|(_, v)| v.clone());
+        let Some((value, key)) = vals else {
+            return Err(PhpGenerator::running_error(self));
+        };
+        let msg = match method {
+            b"next" | b"send" | b"throw" => return Err(PhpGenerator::running_error(self)),
+            b"valid" => return Ok(Value::True),
+            b"current" => return Ok(value),
+            b"key" => return Ok(key),
+            b"rewind" => "Cannot rewind a generator that was already run",
+            _ => "Cannot get return value of a generator that hasn't returned",
+        };
+        let exc = self.create_exception(b"Exception", msg, line);
+        self.current_exception = Some(exc);
+        Err(VmError {
+            message: format!("Uncaught Exception: {}", msg),
+            line,
+        })
+    }
+
     fn generator_method_inner(
         &mut self,
         g: &GenRc,
@@ -2883,13 +2940,7 @@ impl Vm {
             });
         }
         if running {
-            match method {
-                b"next" | b"send" | b"throw" | b"rewind" => {
-                    return Err(PhpGenerator::running_error(self));
-                }
-                // The value it had when it started running.
-                _ => return Ok(Value::Null),
-            }
+            return self.running_generator_method(g, method, line);
         }
         self.generator_ensure_initialized(g)?;
         if self.current_exception.is_some() {

@@ -1694,6 +1694,10 @@ pub struct Vm {
     pub(crate) forced_close_generators: Vec<usize>,
     /// Generators executing now (address, function name for var_dump()).
     pub(crate) running_generators: Vec<(usize, String, u64)>,
+    /// The generators executing now (address) with the value and key they
+    /// yielded last (None before their first yield): what valid() /
+    /// current() / key() see while they run.
+    pub(crate) running_gen_values: Vec<(usize, Option<(Value, Value)>)>,
     /// Closure objects being called: (pending_calls index of the call, the
     /// Closure) until the call's frame is pushed.
     pub(crate) closure_call_objs: Vec<(usize, std::rc::Weak<RefCell<PhpObject>>)>,
@@ -2396,6 +2400,7 @@ impl Vm {
             finally_generators: Vec::new(),
             forced_close_generators: Vec::new(),
             running_generators: Vec::new(),
+            running_gen_values: Vec::new(),
             closure_call_objs: Vec::new(),
             closure_frames: Vec::new(),
             callback_closure: None,
