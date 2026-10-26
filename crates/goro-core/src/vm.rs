@@ -64085,8 +64085,16 @@ impl Vm {
                 if !method_cvs.is_empty() {
                     method_cvs[0] = val.clone();
                 }
-                // Push class scope so `parent::`/`self::` resolves inside __toString.
-                self.class_scope_stack.push(class_lower.clone());
+                // Push class scope so `parent::`/`self::` resolves inside
+                // __toString: the declaring class's (its private properties
+                // are the ones $this-> reaches).
+                let scope = self
+                    .classes
+                    .get(&class_lower)
+                    .and_then(|c| c.get_method(b"__tostring"))
+                    .map(|m| m.declaring_class.to_ascii_lowercase())
+                    .unwrap_or_else(|| class_lower.clone());
+                self.class_scope_stack.push(scope);
                 self.called_class_stack.push(class_lower.clone());
                 // __toString() runs as a frame of its own.
                 let frame = {
