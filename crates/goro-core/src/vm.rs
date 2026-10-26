@@ -2188,6 +2188,10 @@ pub struct Vm {
     /// Deprecations of `callable` type checks (see callable.rs), raised by
     /// flush_callable_deprecations() after the check.
     pub(crate) pending_callable_deprecations: RefCell<Vec<String>>,
+    /// Set by internal code calling a callback it already checked (with a
+    /// zend_fcall_info_cache in php-src): the next zend_is_callable_ex()
+    /// does not raise the callable's deprecations again (one-shot).
+    pub mute_callable_deprecations: bool,
     /// Line of a direct call_user_func() call, for its callee's frame.
     pub ucf_call_line: Option<u32>,
     /// The direct call_user_func() that set `ucf_call_line` was made from
@@ -3578,6 +3582,7 @@ impl Vm {
             gc_frames: Vec::new(),
             gc_call_args: std::ptr::null(),
             pending_callable_deprecations: RefCell::new(Vec::new()),
+            mute_callable_deprecations: false,
             ucf_call_line: None,
             ucf_strict: false,
             release_call_at: None,

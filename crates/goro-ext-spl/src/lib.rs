@@ -681,6 +681,7 @@ fn iterator_apply_iterate(
     }
     let mut count = 0i64;
     let call_user_func = vm.functions.get(b"call_user_func".as_slice()).copied();
+    let deprecated_form = !vm.is_callable_pure(callback, 0).deprecations.is_empty();
     while vm.it_valid(it) {
         if vm.current_exception.is_some() {
             return Ok(Value::Null);
@@ -694,11 +695,15 @@ fn iterator_apply_iterate(
                     call_fn_args.push(v.clone());
                 }
             }
-            let result = cuf(vm, &call_fn_args)?;
+            // (the callback was checked once, before the iteration)
+            vm.mute_callable_deprecations = deprecated_form;
+            let result = cuf(vm, &call_fn_args);
+            vm.mute_callable_deprecations = false;
+            let result = result?;
             if vm.current_exception.is_some() {
                 return Ok(Value::Null);
             }
-            if !result.is_truthy() {
+            if !vm.is_true(&result) {
                 break;
             }
         }

@@ -850,8 +850,11 @@ impl Vm {
         }
         let mut r = self.is_callable_pure(&callable, flags);
         let line = self.current_line;
-        for d in std::mem::take(&mut r.deprecations) {
-            self.emit_deprecated_at(&d, line);
+        let deprecations = std::mem::take(&mut r.deprecations);
+        if !deprecations.is_empty() && !std::mem::take(&mut self.mute_callable_deprecations) {
+            for d in deprecations {
+                self.emit_deprecated_at(&d, line);
+            }
         }
         r
     }

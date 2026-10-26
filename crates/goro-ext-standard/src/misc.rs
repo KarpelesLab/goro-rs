@@ -15802,6 +15802,7 @@ fn http_response_code_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 }
 
 fn array_all_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    zpp_func_deprecations(vm, args, 1);
     if let Some(Value::Array(arr)) = args.first() {
         let arr_data: Vec<(ArrayKey, Value)> = arr
             .borrow()
@@ -15835,6 +15836,7 @@ fn array_all_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn array_any_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    zpp_func_deprecations(vm, args, 1);
     if let Some(Value::Array(arr)) = args.first() {
         let arr_data: Vec<(ArrayKey, Value)> = arr
             .borrow()
@@ -15953,6 +15955,17 @@ fn user_sort_compare(
     }
 }
 
+/// The deprecations of Z_PARAM_FUNC's zend_is_callable_ex() for the
+/// callback argument `idx` (the generic zpp layer checked it, quietly).
+#[inline(never)]
+fn zpp_func_deprecations(vm: &mut Vm, args: &[Value], idx: usize) {
+    if let Some(cb) = args.get(idx) {
+        if !matches!(cb.deref(), Value::Null | Value::Undef) {
+            let _ = vm.callable_error(cb);
+        }
+    }
+}
+
 fn php_user_sort(
     vm: &mut Vm,
     args: &[Value],
@@ -15960,6 +15973,7 @@ fn php_user_sort(
     by_key: bool,
     renumber: bool,
 ) -> Result<Value, VmError> {
+    zpp_func_deprecations(vm, args, 1);
     let first = args.first().unwrap_or(&Value::Null);
     // (by reference: the variable gets the sorted copy, php_usort())
     let holder = match first {
@@ -16042,6 +16056,7 @@ fn uksort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn array_reduce_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    zpp_func_deprecations(vm, args, 1);
     let arr = match args.first() {
         Some(Value::Array(a)) => a.borrow(),
         _ => return Ok(Value::Null),
@@ -18191,6 +18206,7 @@ fn unwrap_rc1_ref(v: &Value) -> Value {
 }
 
 fn array_find_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    zpp_func_deprecations(vm, args, 1);
     let arr = match args.first() {
         Some(Value::Array(arr)) => arr.clone(),
         _ => return Ok(Value::Null),
@@ -18218,6 +18234,7 @@ fn array_find_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn array_find_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    zpp_func_deprecations(vm, args, 1);
     let arr = match args.first() {
         Some(Value::Array(arr)) => arr.clone(),
         _ => return Ok(Value::Null),
