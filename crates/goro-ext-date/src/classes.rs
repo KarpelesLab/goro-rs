@@ -617,6 +617,12 @@ fn restore_custom_props(vm: &mut Vm, o: &Obj, a: &PhpArray, internal: &[&[u8]]) 
     // declare: "Creation of dynamic property" (unless it allows them).
     let cl = o.borrow().class_name.to_ascii_lowercase();
     let mut dynamic: Vec<Vec<u8>> = Vec::new();
+    // (a class with __set() gets the undeclared ones through it)
+    let has_set = vm
+        .classes
+        .get(&cl)
+        .is_some_and(|c| c.get_method(b"__set").is_some());
+    let mut via_set: Vec<(Vec<u8>, Value)> = Vec::new();
     {
         let ob = o.borrow();
         for (k, v) in a.iter() {
@@ -638,7 +644,9 @@ fn restore_custom_props(vm: &mut Vm, o: &Obj, a: &PhpArray, internal: &[&[u8]]) 
                     allows |= ce.allow_dynamic_properties;
                     cur = ce.parent.as_ref().map(|p| p.to_ascii_lowercase());
                 }
-                if !declared && !allows {
+                if !declared && has_set {
+                    via_set.push((nb.to_vec(), v.clone()));
+                } else if !declared && !allows {
                     dynamic.push(nb.to_vec());
                 }
             }
@@ -674,12 +682,22 @@ fn restore_custom_props(vm: &mut Vm, o: &Obj, a: &PhpArray, internal: &[&[u8]]) 
                     continue;
                 }
                 ob.set_property(prop, v.clone());
-            } else {
+            } else if !via_set.iter().any(|(n, _)| n.as_slice() == nb) {
                 ob.set_property(nb.to_vec(), v.clone());
             }
         }
     }
     drop(ob);
+    for (n, v) in via_set {
+        vm.call_object_method(
+            &Value::Object(o.clone()),
+            b"__set",
+            &[Value::String(goro_core::string::PhpString::from_vec(n)), v],
+        );
+        if vm.current_exception.is_some() {
+            return;
+        }
+    }
     // The engine-provided properties are shown after the restored ones.
     prop_added(o);
 }
