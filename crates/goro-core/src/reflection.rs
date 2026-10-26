@@ -1861,7 +1861,12 @@ fn magic_call_trampoline(vm: &Vm, closure: &Value) -> Option<(Vec<u8>, Vec<u8>)>
                 if matches!(a.borrow().get_int(0).map(|v| v.deref()), Some(Value::String(s))
                     if s.as_bytes().windows(2).any(|w| w == b"::")) =>
             {
-                a.borrow().get_int(0)?.deref().to_php_string().as_bytes().to_vec()
+                a.borrow()
+                    .get_int(0)?
+                    .deref()
+                    .to_php_string()
+                    .as_bytes()
+                    .to_vec()
             }
             Value::Array(a) => {
                 let a = a.borrow();
@@ -7572,7 +7577,7 @@ pub fn reflection_function_method(
         match method {
             b"getparameters" => return Some(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
             b"getnumberofparameters" | b"getnumberofrequiredparameters" => {
-                return Some(Value::Long(0))
+                return Some(Value::Long(0));
             }
             b"isvariadic" => return Some(Value::False),
             _ => {}

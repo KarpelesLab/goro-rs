@@ -51189,9 +51189,7 @@ impl Vm {
                                 }
                                 (obj.borrow().get_property(&pkey), false)
                             };
-                            if ref_error.is_some() {
-                                Value::Null
-                            } else if self.current_exception.is_some() {
+                            if ref_error.is_some() || self.current_exception.is_some() {
                                 Value::Null
                             } else if by_ref && matches!(v, Value::Reference(_)) {
                                 v

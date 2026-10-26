@@ -14499,8 +14499,7 @@ impl Compiler {
         fn find(e: &Expr, line: &mut Option<u32>) -> bool {
             match &e.kind {
                 ExprKind::Isset(_) => false,
-                ExprKind::ArrayAccess { array, index: None }
-                    if matches!(&array.kind, ExprKind::Variable(n) if n == b"GLOBALS") =>
+                ExprKind::ArrayAccess { array, index: None } if matches!(&array.kind, ExprKind::Variable(n) if n == b"GLOBALS") =>
                 {
                     *line = Some(e.span.line);
                     true
