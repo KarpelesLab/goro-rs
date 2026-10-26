@@ -8816,8 +8816,28 @@ fn get_meta_tags_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
+/// _php_stream_copy_to_mem(): its first read asks for the stat size
+/// (when positive) plus a chunk, e.g. on a directory.
+fn copy_to_mem_first_read(path: &str) -> u64 {
+    match std::fs::metadata(path) {
+        Ok(m) if m.len() > 0 => m.len() + STREAM_CHUNK_SIZE as u64,
+        _ => STREAM_CHUNK_SIZE as u64,
+    }
+}
+
+/// php_stream_open_wrapper_ex(): "Path must not be empty".
+fn empty_path_error(vm: &mut Vm) -> VmError {
+    let msg = "Path must not be empty";
+    let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+    vm.current_exception = Some(exc);
+    VmError {
+        message: msg.to_string(),
+        line: vm.current_line,
+    }
+}
+
 /// Z_PARAM_PATH: a ValueError for a path with NUL bytes.
-fn path_arg_nul_error(
+pub(crate) fn path_arg_nul_error(
     vm: &mut Vm,
     path: &[u8],
     func: &str,
@@ -8994,7 +9014,10 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         goro_core::value::alloc_resource_id();
         let line = vm.current_line;
         vm.emit_notice_at(
-            "file_get_contents(): Read of 8192 bytes failed with errno=21 Is a directory",
+            &format!(
+                "file_get_contents(): Read of {} bytes failed with errno=21 Is a directory",
+                copy_to_mem_first_read(&path_str)
+            ),
             line,
         );
         return Ok(Value::String(PhpString::empty()));
@@ -9005,8 +9028,16 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let start = if offset >= 0 {
                 offset as usize
             } else {
-                let from_end = (-offset) as usize;
-                data.len().saturating_sub(from_end)
+                let from_end = offset.unsigned_abs() as usize;
+                // php_stream_seek(SEEK_END) before the start fails.
+                if from_end > data.len() {
+                    vm.emit_warning(&format!(
+                        "file_get_contents(): Failed to seek to position {} in the stream",
+                        offset
+                    ));
+                    return Ok(Value::False);
+                }
+                data.len() - from_end
             };
             if start >= data.len() && start > 0 {
                 return Ok(Value::String(PhpString::empty()));
@@ -17091,6 +17122,12 @@ fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             message: msg,
             line: vm.current_line,
         });
+    }
+    if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), "file", 1, "filename") {
+        return Err(e);
+    }
+    if path.as_bytes().is_empty() {
+        return Err(empty_path_error(vm));
     }
     let ignore_new_lines = flags & 2 != 0; // FILE_IGNORE_NEW_LINES
     let skip_empty = flags & 4 != 0; // FILE_SKIP_EMPTY_LINES
