@@ -3924,44 +3924,48 @@ impl crate::vm::Vm {
                 decl = Some(p);
             }
         }
-        let Some(p) = decl else {
-            return false;
-        };
-        let in_scope = |c: &[u8]| scope.is_some_and(|s| s.eq_ignore_ascii_case(c));
-        let accessible = match p.visibility {
-            crate::object::Visibility::Public => true,
-            crate::object::Visibility::Private => {
-                p.declaring_class.eq_ignore_ascii_case(class_name) && in_scope(&p.declaring_class)
+        // (a property the class does not declare: a dynamic one the object
+        // holds is public, without hooks; magic methods are only consulted
+        // for one it does not hold)
+        if let Some(p) = decl {
+            let in_scope = |c: &[u8]| scope.is_some_and(|s| s.eq_ignore_ascii_case(c));
+            let accessible = match p.visibility {
+                crate::object::Visibility::Public => true,
+                crate::object::Visibility::Private => {
+                    p.declaring_class.eq_ignore_ascii_case(class_name)
+                        && in_scope(&p.declaring_class)
+                }
+                crate::object::Visibility::Protected => {
+                    in_scope(&p.declaring_class) || in_scope(class_name)
+                }
+            };
+            if p.is_static
+                || !accessible
+                || p.has_get_hook
+                || p.has_set_hook
+                || p.is_virtual
+                || (write
+                    && (p.is_readonly || p.property_type.is_some() || p.set_visibility.is_some()))
+            {
+                return false;
             }
-            crate::object::Visibility::Protected => {
-                in_scope(&p.declaring_class) || in_scope(class_name)
+            // Hooks are compiled to `__property_get_<name>` / `__property_set_<name>`.
+            let mut hbuf = [0u8; 160];
+            let prefix: &[u8] = if write {
+                b"__property_set_"
+            } else {
+                b"__property_get_"
+            };
+            let Some(h) = hbuf.get_mut(..prefix.len() + prop.len()) else {
+                return false;
+            };
+            h[..prefix.len()].copy_from_slice(prefix);
+            for (o, c) in h[prefix.len()..].iter_mut().zip(prop) {
+                *o = c.to_ascii_lowercase();
             }
-        };
-        if p.is_static
-            || !accessible
-            || p.has_get_hook
-            || p.has_set_hook
-            || p.is_virtual
-            || (write && (p.is_readonly || p.property_type.is_some() || p.set_visibility.is_some()))
-        {
-            return false;
-        }
-        // Hooks are compiled to `__property_get_<name>` / `__property_set_<name>`.
-        let mut hbuf = [0u8; 160];
-        let prefix: &[u8] = if write {
-            b"__property_set_"
-        } else {
-            b"__property_get_"
-        };
-        let Some(h) = hbuf.get_mut(..prefix.len() + prop.len()) else {
-            return false;
-        };
-        h[..prefix.len()].copy_from_slice(prefix);
-        for (o, c) in h[prefix.len()..].iter_mut().zip(prop) {
-            *o = c.to_ascii_lowercase();
-        }
-        if ce.methods.contains_key(&*h) {
-            return false;
+            if ce.methods.contains_key(&*h) {
+                return false;
+            }
         }
         if self.native_class_handlers.contains_key(lower) {
             return false;
