@@ -51772,12 +51772,8 @@ impl Vm {
                                     for (key, display, mut m) in copies {
                                         if let Some(existing) = class.methods.get(&key) {
                                             // Same function reached through different traits: no conflict.
-                                            let same_fn = existing.op_array.decl_line
-                                                == m.op_array.decl_line
-                                                && existing.op_array.end_line
-                                                    == m.op_array.end_line
-                                                && existing.op_array.filename
-                                                    == m.op_array.filename
+                                            let same_fn = existing.op_array.origin_id
+                                                == m.op_array.origin_id
                                                 && existing.name.eq_ignore_ascii_case(&m.name);
                                             if same_fn
                                                 && existing.visibility == m.visibility

@@ -566,6 +566,10 @@ pub struct OpArray {
     /// For closures without a bound $this: the called class (static::)
     /// captured when the closure was created.
     pub closure_called_class: Option<Vec<u8>>,
+    /// Identifies the compiled function across copies (a trait method
+    /// reached through several traits is the same function: the opcodes
+    /// zend_add_trait_method() compares).
+    pub origin_id: u32,
     /// What this code's call sites and property accesses found (allocated
     /// on first use: an OpArray stays small, the compiler keeps some in
     /// its recursive frames).
@@ -1009,6 +1013,10 @@ impl OpArray {
             closure_params: Vec::new(),
             fcc_desc: None,
             closure_called_class: None,
+            origin_id: {
+                static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            },
             sites: Default::default(),
             cv_info: Default::default(),
             free_mask: Default::default(),
