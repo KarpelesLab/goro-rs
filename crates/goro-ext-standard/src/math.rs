@@ -80,8 +80,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_builtin_param_types(b"sqrt", vec![f()]);
     vm.register_builtin_param_types(b"intdiv", vec![i(), i()]);
     vm.register_builtin_param_types(b"fmod", vec![f(), f()]);
-    vm.register_builtin_param_types(b"rand", vec![i(), i()]);
-    vm.register_builtin_param_types(b"mt_rand", vec![i(), i()]);
     vm.register_builtin_param_types(b"random_int", vec![i(), i()]);
     vm.register_builtin_param_types(b"sin", vec![f()]);
     vm.register_builtin_param_types(b"cos", vec![f()]);
@@ -954,45 +952,10 @@ fn rand_args(vm: &mut Vm, fname: &str, args: &[Value]) -> Result<Option<(i64, i6
             .map(|_| None);
         }
     }
-    // Z_PARAM_LONG(min) / Z_PARAM_LONG(max): the diagnostics of the
-    // accepted conversions (null, fractional floats) are emitted by the
-    // builtin parameter types already.
-    let fits =
-        |d: f64| !d.is_nan() && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d);
-    let mut out = [0i64; 2];
-    for (i, name) in ["min", "max"].iter().enumerate() {
-        let v = args[i].deref();
-        let n = match &v {
-            Value::Null | Value::Undef | Value::False => Some(0),
-            Value::True => Some(1),
-            Value::Long(n) => Some(*n),
-            Value::Double(d) if fits(*d) => Some(*d as i64),
-            Value::String(s) => match goro_core::value::parse_numeric_str(s.as_bytes(), false) {
-                Some((goro_core::value::NumStr::Long(n), _)) => Some(n),
-                Some((goro_core::value::NumStr::Double(d), _)) if fits(d) => Some(d as i64),
-                _ => None,
-            },
-            _ => None,
-        };
-        match n {
-            Some(n) => out[i] = n,
-            None => {
-                return throw_err(
-                    vm,
-                    b"TypeError",
-                    format!(
-                        "{}(): Argument #{} (${}) must be of type int, {} given",
-                        fname,
-                        i + 1,
-                        name,
-                        Vm::value_type_name(&v)
-                    ),
-                )
-                .map(|_| None);
-            }
-        }
-    }
-    Ok(Some((out[0], out[1])))
+    // ZEND_PARSE_PARAMETERS_START(2, 2) Z_PARAM_LONG(min) Z_PARAM_LONG(max),
+    // once the count is checked
+    let args = vm.zpp_self_check(fname.as_bytes(), args)?;
+    Ok(Some((args[0].to_long(), args[1].to_long())))
 }
 
 fn rand_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
