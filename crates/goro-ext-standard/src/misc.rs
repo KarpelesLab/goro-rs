@@ -5598,6 +5598,7 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 );
             }
             let size = crate::math::php_math_round(calc, 0, 1) as u64;
+            array_init_size_check(vm, size as u32 as usize, true)?;
             let mut i = 0u64;
             loop {
                 // (the first element is start itself: -0.0 stays -0.0)
@@ -5652,6 +5653,7 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     ),
                 );
             }
+            array_init_size_check(vm, (calc + 1) as usize, true)?;
             for i in 0..=calc {
                 let off = i.wrapping_mul(ustep);
                 let v = if dec {
