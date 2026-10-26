@@ -28,17 +28,16 @@ const LIST_SYNTAX_LONG: u8 = 3;
 
 pub struct Parser {
     /// Syntax of array literals by (start, end) span: LIST_SYNTAX_*.
-    array_syntax: std::collections::HashMap<(u32, u32), u8>,
+    array_syntax: std::collections::HashMap<(u32, u32), u8, SpanHash>,
     /// Nesting of `[...]` / `list(...)` literals being parsed.
     array_literal_depth: u32,
     /// Parsing a foreach target (destructuring without `=`).
     in_foreach_target: bool,
     tokens: Vec<Token>,
-    /// Doc comment attached to the token at the same index, if any. The
-    /// comment immediately precedes the token in source (with only whitespace
-    /// between). When a declaration starts at index N, the parser may consume
-    /// the doc comment via `take_doc_comment_at(N)`.
-    token_doc_comments: Vec<Option<Vec<u8>>>,
+    /// Doc comments by the index of the token they are attached to (in
+    /// increasing order). A comment immediately precedes its token in source
+    /// (with only whitespace between); `take_doc_comment()` consumes them.
+    token_doc_comments: Vec<(u32, Option<Vec<u8>>)>,
     /// take_doc_comment() cleared every doc comment up to this token.
     doc_floor: usize,
     pos: usize,
@@ -81,9 +80,39 @@ pub struct Parser {
     /// `( expr )` (not a call's argument list): an expression ending there
     /// is not a `variable` in PHP's grammar, so it cannot be assigned to.
     last_group_close: usize,
+    /// Nesting of parse_expression() / parse_unary(): every
+    /// STACK_CHECK_EVERY-th level makes sure of native stack room.
+    stack_nesting: u32,
 }
 
+/// See Parser::stack_nesting: the levels in between use far less than the
+/// room a check leaves.
+const STACK_CHECK_EVERY: u32 = 4;
+
 const MAX_PARSE_DEPTH: u32 = 512;
+
+/// Hasher of the (start, end) span keys of Parser::array_syntax.
+#[derive(Default)]
+struct SpanHasher(u64);
+
+impl std::hash::Hasher for SpanHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(b as u64);
+        }
+    }
+    fn write_u32(&mut self, n: u32) {
+        self.write_u64(n as u64);
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
+type SpanHash = std::hash::BuildHasherDefault<SpanHasher>;
 
 /// Runs a closure with enough native stack: the engine installs one that
 /// continues on a fresh stack segment when the current one runs low
@@ -120,7 +149,7 @@ impl Parser {
     /// or `\`-qualified) to the byte offset right after the statement.
     fn apply_halt_compiler(
         tokens: &mut Vec<Token>,
-        docs: &mut Vec<Option<Vec<u8>>>,
+        docs: &mut Vec<(u32, Option<Vec<u8>>)>,
         halt_map: Option<std::rc::Rc<dyn Fn(u32) -> u32>>,
     ) {
         let mut depth: i32 = 0;
@@ -166,10 +195,9 @@ impl Parser {
         if let Some(eof) = tokens.last().cloned() {
             if tokens.len() > hi + 4 {
                 tokens.truncate(hi + 4);
-                docs.truncate(hi + 4);
+                docs.retain(|&(i, _)| (i as usize) < hi + 4);
                 if eof.kind == TokenKind::Eof {
                     tokens.push(eof);
-                    docs.push(None);
                 }
             }
         }
@@ -203,18 +231,22 @@ impl Parser {
 
     pub fn new(tokens: Vec<Token>) -> Self {
         // Strip DocComment tokens out of the stream and attach each to the
-        // *next* non-doc token. token_doc_comments[i] is the (last) doc comment
+        // *next* non-doc token: (i, doc) is the (last) doc comment
         // immediately preceding tokens[i].
         let mut filtered = tokens;
-        let mut doc_comments: Vec<Option<Vec<u8>>> = Vec::with_capacity(filtered.len());
+        let mut doc_comments: Vec<(u32, Option<Vec<u8>>)> = Vec::new();
         let mut pending_doc: Option<Vec<u8>> = None;
+        let mut index = 0u32;
         filtered.retain_mut(|tok| {
             if let TokenKind::DocComment(bytes) = &mut tok.kind {
                 // Keep the most recent doc-comment if multiple appear in a row
                 pending_doc = Some(std::mem::take(bytes));
                 return false;
             }
-            doc_comments.push(pending_doc.take());
+            if pending_doc.is_some() {
+                doc_comments.push((index, pending_doc.take()));
+            }
+            index += 1;
             true
         });
         let halt_map = crate::multibyte::take_halt_offset_map();
@@ -240,10 +272,11 @@ impl Parser {
             class_name_stack: Vec::new(),
             is_interface_stack: Vec::new(),
             stmt_nesting: 0,
-            array_syntax: std::collections::HashMap::new(),
+            array_syntax: std::collections::HashMap::default(),
             array_literal_depth: 0,
             in_foreach_target: false,
             last_group_close: usize::MAX,
+            stack_nesting: 0,
         }
     }
 
@@ -251,37 +284,43 @@ impl Parser {
     /// lexed so far that no declaration took yet and no `}` (or namespace
     /// declaration) reset since; the ones before it are dropped with it.
     fn take_doc_comment(&mut self) -> Option<Vec<u8>> {
-        let end = self.pos.min(self.token_doc_comments.len().checked_sub(1)?);
-        let mut found: Option<Vec<u8>> = None;
+        let end = self.pos.min(self.tokens.len().checked_sub(1)?);
+        // (the scanner resets it as it lexes `}` or a namespace name)
         let mut i = end;
-        loop {
-            // (an older one was overwritten by the newer: dropped too)
-            if let Some(d) = self.token_doc_comments[i].take() {
-                if found.is_none() {
-                    found = Some(d);
-                }
-            }
-            // (the scanner resets it as it lexes `}` or a namespace name)
-            if i == 0
-                || (i <= self.doc_floor && i < end)
-                || matches!(
-                    self.tokens.get(i - 1).map(|t| &t.kind),
-                    Some(TokenKind::CloseBrace | TokenKind::Namespace)
-                )
-            {
-                self.doc_floor = self.doc_floor.max(end);
-                return found;
-            }
+        while !(i == 0
+            || (i <= self.doc_floor && i < end)
+            || matches!(
+                self.tokens.get(i - 1).map(|t| &t.kind),
+                Some(TokenKind::CloseBrace | TokenKind::Namespace)
+            ))
+        {
             i -= 1;
         }
+        self.doc_floor = self.doc_floor.max(end);
+        // The newest of those attached to tokens i..=end; an older one was
+        // overwritten by the newer: dropped too.
+        let first = self
+            .token_doc_comments
+            .partition_point(|&(k, _)| (k as usize) < i);
+        let mut found: Option<Vec<u8>> = None;
+        for (k, d) in &mut self.token_doc_comments[first..] {
+            if *k as usize > end {
+                break;
+            }
+            if let Some(d) = d.take() {
+                found = Some(d);
+            }
+        }
+        found
     }
 
     /// Peek the doc comment at the current token without consuming it.
-    #[allow(dead_code)]
     fn peek_doc_comment(&self) -> Option<&Vec<u8>> {
-        self.token_doc_comments
-            .get(self.pos)
-            .and_then(|d| d.as_ref())
+        let docs = &self.token_doc_comments;
+        let i = docs.partition_point(|&(k, _)| (k as usize) < self.pos);
+        docs.get(i)
+            .filter(|(k, _)| *k as usize == self.pos)
+            .and_then(|(_, d)| d.as_ref())
     }
 
     /// Attach a doc comment to a freshly-parsed Statement that represents a
@@ -437,6 +476,10 @@ impl Parser {
     /// line of the token that overflowed the stack).
     fn parser_stack_exhausted(&self) -> Option<u32> {
         const YYMAXDEPTH: usize = 10000;
+        // (as deep a nesting takes as many tokens)
+        if self.tokens.len() < YYMAXDEPTH {
+            return None;
+        }
         let mut depth = 0usize;
         for tok in &self.tokens {
             match tok.kind {
@@ -559,17 +602,19 @@ impl Parser {
                 }
             }
         }
-        let nesting = self.first_nesting_error();
         let result = self.parse_program();
-        match (result, nesting) {
+        match result {
             // The scanner raises its error when the parser fetches that token:
             // it wins over a syntax error found at or after it.
-            (Err(e), Some((idx, message, line))) if idx <= self.pos => {
-                let mut span = e.span;
-                span.line = line;
-                Err(ParseError { message, span })
-            }
-            (r, _) => r,
+            Err(e) => match self.first_nesting_error() {
+                Some((idx, message, line)) if idx <= self.pos => {
+                    let mut span = e.span;
+                    span.line = line;
+                    Err(ParseError { message, span })
+                }
+                _ => Err(e),
+            },
+            r => r,
         }
     }
 
@@ -3989,15 +4034,34 @@ impl Parser {
 
     pub fn parse_expression(&mut self) -> ParseResult<Expr> {
         self.enter_depth()?;
+        let result = self.with_room(Self::parse_logical_or_low);
+        self.leave_depth();
+        result
+    }
+
+    /// Run `f` with room on the native stack (checked at every
+    /// STACK_CHECK_EVERY-th nesting level).
+    #[inline(always)]
+    fn with_room(&mut self, f: fn(&mut Self) -> ParseResult<Expr>) -> ParseResult<Expr> {
+        self.stack_nesting += 1;
+        let result = if self.stack_nesting % STACK_CHECK_EVERY == 1 {
+            self.with_room_checked(f)
+        } else {
+            f(self)
+        };
+        self.stack_nesting -= 1;
+        result
+    }
+
+    #[inline(never)]
+    fn with_room_checked(&mut self, f: fn(&mut Self) -> ParseResult<Expr>) -> ParseResult<Expr> {
         let span = self.current().span;
-        let result = with_stack(|| self.parse_logical_or_low()).unwrap_or_else(|| {
+        with_stack(|| f(self)).unwrap_or_else(|| {
             Err(ParseError {
                 message: "Maximum nesting depth exceeded".into(),
                 span,
             })
-        });
-        self.leave_depth();
-        result
+        })
     }
 
     /// Low-precedence 'or' (lower than assignment)
@@ -4019,6 +4083,7 @@ impl Parser {
     }
 
     /// Low-precedence 'xor' (lower than assignment, higher than 'or')
+    #[inline(always)]
     fn parse_logical_xor_low(&mut self) -> ParseResult<Expr> {
         let mut left = self.parse_logical_and_low()?;
         while matches!(self.peek(), TokenKind::Xor) {
@@ -4037,6 +4102,7 @@ impl Parser {
     }
 
     /// Low-precedence 'and' (lower than assignment, higher than 'xor')
+    #[inline(always)]
     fn parse_logical_and_low(&mut self) -> ParseResult<Expr> {
         let mut left = self.parse_assignment()?;
         while matches!(self.peek(), TokenKind::And) {
@@ -4066,6 +4132,7 @@ impl Parser {
         )
     }
 
+    #[inline(always)]
     fn parse_assignment(&mut self) -> ParseResult<Expr> {
         let e = self.parse_assignment_inner()?;
         // `@$x .= v` is `@($x .= v)`: the silence operator does not stop the
@@ -4518,6 +4585,7 @@ impl Parser {
         Ok(left)
     }
 
+    #[inline(always)]
     fn parse_logical_or(&mut self) -> ParseResult<Expr> {
         self.parse_binary(1)
     }
@@ -4620,13 +4688,7 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> ParseResult<Expr> {
-        let span = self.span();
-        with_stack(|| self.parse_unary_inner()).unwrap_or_else(|| {
-            Err(ParseError {
-                message: "Maximum nesting depth exceeded".into(),
-                span,
-            })
-        })
+        self.with_room(Self::parse_unary_inner)
     }
 
     fn parse_unary_inner(&mut self) -> ParseResult<Expr> {

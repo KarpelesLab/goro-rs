@@ -469,8 +469,11 @@ fn scan_encoding_declares(tokens: &[Token], settings: Option<&Settings>) {
     let mut out = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
-        if tokens[i].kind != TokenKind::Declare
-            || tokens.get(i + 1).map(|t| &t.kind) != Some(&TokenKind::OpenParen)
+        if !matches!(tokens[i].kind, TokenKind::Declare)
+            || !matches!(
+                tokens.get(i + 1).map(|t| &t.kind),
+                Some(TokenKind::OpenParen)
+            )
         {
             i += 1;
             continue;
