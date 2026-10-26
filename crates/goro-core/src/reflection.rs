@@ -1856,6 +1856,13 @@ fn magic_call_trampoline(vm: &Vm, closure: &Value) -> Option<(Vec<u8>, Vec<u8>)>
         None => match closure.closure_inner()? {
             Value::String(s) => s.as_bytes().to_vec(),
             // [$object or "Class", "method"]
+            // ["Class::method", $this] (a method bound to an object)
+            Value::Array(a)
+                if matches!(a.borrow().get_int(0).map(|v| v.deref()), Some(Value::String(s))
+                    if s.as_bytes().windows(2).any(|w| w == b"::")) =>
+            {
+                a.borrow().get_int(0)?.deref().to_php_string().as_bytes().to_vec()
+            }
             Value::Array(a) => {
                 let a = a.borrow();
                 let mut t = match a.get_int(0)?.deref() {
@@ -7556,6 +7563,21 @@ pub fn reflection_function_method(
     let target = ob.get_property(b"__reflection_target").to_php_string();
     let func_lower = target.as_bytes().to_vec();
     drop(ob);
+    // Closure::fromCallable() of a __call()/__callStatic() trampoline: the
+    // fake closure's function has no arginfo.
+    if func_lower.starts_with(b"__closure_fcc_tramp_")
+        && !func_lower.starts_with(b"__closure_fcc_tramp_ip_")
+        && !func_lower.starts_with(b"__closure_fcc_tramp_sp_")
+    {
+        match method {
+            b"getparameters" => return Some(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+            b"getnumberofparameters" | b"getnumberofrequiredparameters" => {
+                return Some(Value::Long(0))
+            }
+            b"isvariadic" => return Some(Value::False),
+            _ => {}
+        }
+    }
 
     match method {
         b"getname" => {
@@ -7735,6 +7757,7 @@ pub fn reflection_function_method(
                 // (a closure of a method: the method's parameters)
                 let list = if func_lower.windows(2).any(|w| w == b"::")
                     && op_array.scope_class.is_some()
+                    && !func_lower.starts_with(b"__closure_fcc_")
                 {
                     let is_static = method_this_hidden(&func_lower, &op_array) == 0;
                     create_reflection_parameters_method(vm, &op_array, is_static)
@@ -14537,8 +14560,18 @@ pub fn create_reflection_parameters(vm: &mut Vm, op_array: &OpArray) -> Value {
         .map(|b| b.to_ascii_lowercase())
         .collect();
     // A closure's leading CVs ($this, the use variables) are not parameters.
-    let hidden = closure_hidden_params(op_array);
-    for i in 0..(op_array.param_count as usize).saturating_sub(hidden) {
+    let mut hidden = closure_hidden_params(op_array);
+    let mut count = (op_array.param_count as usize).saturating_sub(hidden);
+    // A first-class callable's forwarding closure / call trampoline:
+    // `...$arguments` after its captured value.
+    if let (true, Some(v)) = (
+        op_array.name.starts_with(b"__closure_fcc_"),
+        op_array.variadic_param,
+    ) {
+        hidden = v as usize;
+        count = 1;
+    }
+    for i in 0..count {
         let cv = i + hidden;
         let param_name = if cv < op_array.cv_names.len() {
             String::from_utf8_lossy(&op_array.cv_names[cv]).to_string()

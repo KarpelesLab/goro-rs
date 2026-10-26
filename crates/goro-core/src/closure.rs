@@ -447,7 +447,12 @@ impl Vm {
                     props.push((b"static".to_vec(), Value::Array(Rc::new(RefCell::new(sa)))));
                 }
             }
-            if let Some((_, sm)) = internal {
+            if name.starts_with(b"__closure_fcc_tramp_ip_")
+                || name.starts_with(b"__closure_fcc_tramp_sp_")
+            {
+                // (a __call()/__callStatic() trampoline: `mixed ...$arguments`)
+                params = vec![(b"$arguments".to_vec(), true)];
+            } else if let Some((_, sm)) = internal {
                 let required = sm.required_args();
                 params = sm
                     .args
@@ -831,7 +836,8 @@ impl Vm {
             v if v.is_closure_obj() => Ok(callable.clone()),
             Value::String(s) => {
                 let b = s.as_bytes().to_vec();
-                if let Some(p) = b.windows(2).position(|w| w == b"::") {
+                // (zend_init_dynamic_call_string() splits at the last "::")
+                if let Some(p) = b.windows(2).rposition(|w| w == b"::") {
                     by_name_class_check(&b[..p])?;
                     return self.fcc_static(&b[..p], &b[p + 2..], None, wrapper, scope);
                 }
@@ -1148,12 +1154,10 @@ impl Vm {
         });
         let has_call = ce.get_method(b"__call").is_some();
         let canon = ce.name.clone();
+        // (a __call() trampoline: zend_get_call_trampoline_func())
+        let _ = dynamic;
         let magic = |vm: &mut Vm| -> FccResult {
-            if dynamic {
-                Ok(vm.magic_call_closure(&canon, m, Some(obj.clone())))
-            } else {
-                Ok(vm.make_closure_object(wrapper.clone()))
-            }
+            Ok(vm.magic_call_closure(&canon, m, Some(obj.clone()), true))
         };
         match method {
             Some((is_static, vis, decl, mname)) => {
@@ -1318,8 +1322,11 @@ impl Vm {
                     false,
                     scope.as_deref(),
                 ) {
-                    if has_call_static || (has_call && bound_this.is_some()) {
-                        return Ok(self.make_closure_object(wrapper));
+                    if has_call && bound_this.is_some() {
+                        return Ok(self.magic_call_closure(&canon, m, bound_this, true));
+                    }
+                    if has_call_static {
+                        return Ok(self.magic_call_closure(&canon, m, None, true));
                     }
                     return Err((b"Error", msg));
                 }
@@ -1384,9 +1391,10 @@ impl Vm {
                     )),
                 }
             }
-            None if has_call_static || (has_call && bound_this.is_some()) => {
-                Ok(self.make_closure_object(wrapper))
+            None if has_call && bound_this.is_some() => {
+                Ok(self.magic_call_closure(&canon, m, bound_this, true))
             }
+            None if has_call_static => Ok(self.magic_call_closure(&canon, m, None, true)),
             // An enum's from() / tryFrom() / cases()
             None if ce.is_enum
                 && (ml == b"cases"
@@ -1413,11 +1421,14 @@ impl Vm {
 impl Vm {
     /// A closure forwarding to `__call`/`__callStatic` for `method`
     /// (the closure PHP builds over a call trampoline).
+    /// `fcc`: a first-class callable (whose debug info lists the
+    /// trampoline's `$arguments`), not Closure::fromCallable().
     fn magic_call_closure(
         &mut self,
         class_canon: &[u8],
         method: &[u8],
         obj: Option<Value>,
+        fcc: bool,
     ) -> Value {
         use crate::opcode::Op;
         let mut target = class_canon.to_vec();
@@ -1425,8 +1436,9 @@ impl Vm {
         target.extend_from_slice(method);
         // One trampoline per (target, instance/static): equal closures compare equal.
         let name = format!(
-            "__closure_fcc_tramp_{}_{}",
+            "__closure_fcc_tramp_{}{}_{}",
             if obj.is_some() { "i" } else { "s" },
+            if fcc { "p" } else { "" },
             String::from_utf8_lossy(&lower(&target))
         )
         .into_bytes();
@@ -1735,10 +1747,10 @@ impl Vm {
                     scope.as_deref(),
                 ) {
                     if obj.is_some() && has_call {
-                        return Ok(self.magic_call_closure(&canon, m, obj));
+                        return Ok(self.magic_call_closure(&canon, m, obj, false));
                     }
                     if obj.is_none() && has_call_static {
-                        return Ok(self.magic_call_closure(&canon, m, None));
+                        return Ok(self.magic_call_closure(&canon, m, None, false));
                     }
                     // "Call to private method A::m() from scope B" -> "cannot access private method A::m()"
                     let vis_s = match vis {
@@ -1809,10 +1821,10 @@ impl Vm {
                     return Ok(self.make_closure_object(Value::Array(Rc::new(RefCell::new(arr)))));
                 }
                 if obj.is_some() && has_call {
-                    return Ok(self.magic_call_closure(&canon, m, obj));
+                    return Ok(self.magic_call_closure(&canon, m, obj, false));
                 }
                 if has_call_static {
-                    return Ok(self.magic_call_closure(&canon, m, None));
+                    return Ok(self.magic_call_closure(&canon, m, None, false));
                 }
                 Err(format!(
                     "class {} does not have a method \"{}\"",
