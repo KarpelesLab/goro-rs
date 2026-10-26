@@ -22579,8 +22579,15 @@ fn error_log_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
         }
+        // (straight to the SAPI logger: the CLI's writes to stderr, after
+        // what was printed so far)
         4 => {
             use std::io::Write;
+            if let Some(log) = vm.sapi_log_message {
+                log(&message.to_string_lossy());
+                return Ok(Value::True);
+            }
+            vm.flush_cli_output();
             let mut m = message.as_bytes().to_vec();
             m.push(b'\n');
             let _ = std::io::stderr().write_all(&m);
