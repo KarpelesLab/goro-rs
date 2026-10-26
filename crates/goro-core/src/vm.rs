@@ -1348,6 +1348,10 @@ pub struct Vm {
     /// fetch (FETCH_DIM_W chain), not of the final assignment: a reference
     /// to false it reaches is converted to an array silently.
     pub(crate) dim_w_chain: bool,
+    /// The write fetch of `$a[k]` sent as the array of a builtin taking
+    /// `array &$array` (sort($a[k])): a missing element is created null,
+    /// not as the array a nested write would need (SEND_REF of FETCH_DIM_W).
+    pub(crate) dim_w_array_ref_send: bool,
     /// The address of a binary / assign-op opcode that threw and jumped
     /// to a catch or finally block of its frame (see compound_op_failed).
     pub(crate) compound_fail_at: usize,
@@ -2034,6 +2038,7 @@ impl Vm {
             str_wb_obj_ctx: false,
             str_wb_ref_ctx: false,
             dim_w_chain: false,
+            dim_w_array_ref_send: false,
             compound_fail_at: 0,
             compound_fail_exc: 0,
             dim_w_cv_ref: false,
@@ -4664,6 +4669,22 @@ impl Vm {
         self.called_class_stack.pop();
         self.class_scope_stack.pop();
         r
+    }
+
+    /// See dim_w_array_ref_send.
+    #[inline(never)]
+    fn dim_w_feeds_array_ref_send(
+        &self,
+        op: &crate::opcode::Op,
+        next: Option<&crate::opcode::Op>,
+    ) -> bool {
+        matches!(next, Some(n) if n.opcode == OpCode::SendVal && n.op1 == op.result)
+            && self.pending_calls.last().is_some_and(|c| {
+                c.args.is_empty()
+                    && self
+                        .pending_builtin_name(c)
+                        .is_some_and(|n| crate::compiler::Compiler::is_array_ref_builtin(Some(&n)))
+            })
     }
 
     /// Whether the dimension write fetch `op` is the container of the next
@@ -48708,6 +48729,9 @@ impl Vm {
                     );
                     let abort_before = self.dim_rw_abort;
                     self.dim_w_chain = Self::dim_w_feeds_fetch(op, op_array.ops.get(ip));
+                    self.dim_w_array_ref_send = op.opcode == OpCode::ArrayGetW
+                        && !self.dim_w_chain
+                        && self.dim_w_feeds_array_ref_send(op, op_array.ops.get(ip));
                     let fetched = match op.op1 {
                         OperandType::Cv(ci) => {
                             let i = ci as usize;
@@ -56182,6 +56206,9 @@ impl Vm {
                             | OpCode::PropertyGetWObj
                             | OpCode::PropertyGetWObjRW
                     );
+                    // (sort($o->p): the builtin gets the null property)
+                    let array_ref_send = op.opcode == OpCode::PropertyGetW
+                        && self.dim_w_feeds_array_ref_send(op, op_array.ops.get(ip));
                     if !is_w_fetch {
                         self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
                     } else if let OperandType::Tmp(t) = op.result {
@@ -57323,8 +57350,11 @@ impl Vm {
                                         && !unset_fetch
                                         && pt.as_ref().map(param_type_accepts_array).unwrap_or(true)
                                     {
-                                        let arr =
-                                            Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+                                        let arr = if array_ref_send {
+                                            Value::Null
+                                        } else {
+                                            Value::Array(Rc::new(RefCell::new(PhpArray::new())))
+                                        };
                                         obj.borrow_mut()
                                             .set_property(storage_key.clone(), arr.clone());
                                         prop = arr;
@@ -57384,7 +57414,7 @@ impl Vm {
                                             self.emit_deprecated(&format!("Creation of dynamic property {}::${} is deprecated", class_display, prop_name.to_msg_string()));
                                         }
                                     }
-                                    let arr = if unset_fetch {
+                                    let arr = if unset_fetch || array_ref_send {
                                         Value::Null
                                     } else {
                                         Value::Array(Rc::new(RefCell::new(PhpArray::new())))

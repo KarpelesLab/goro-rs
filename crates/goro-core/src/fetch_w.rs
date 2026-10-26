@@ -977,6 +977,20 @@ impl Vm {
                 Some(v) => v.deref(),
             });
         }
+        // (sort($a[k]): the builtin gets the null element)
+        if std::mem::take(&mut self.dim_w_array_ref_send) && mode == DimFetch::W {
+            match existing {
+                None | Some(Value::Undef) => {
+                    arr.borrow_mut().set(k, Value::Null);
+                    return Some(Value::Null);
+                }
+                Some(Value::Null) => return Some(Value::Null),
+                Some(Value::Reference(r)) if matches!(&*r.borrow(), Value::Null | Value::Undef) => {
+                    return Some(Value::Null);
+                }
+                _ => {}
+            }
+        }
         match existing {
             None | Some(Value::Undef) => {
                 if mode == DimFetch::Unset {

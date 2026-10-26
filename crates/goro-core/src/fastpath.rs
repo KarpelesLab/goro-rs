@@ -2976,6 +2976,11 @@ impl crate::vm::Vm {
         let OperandType::Tmp(rt) = op.result else {
             return Fast::No;
         };
+        // (sort($a[k]): the general handler creates the element null)
+        if matches!(op_array.ops.get(ip + 1), Some(n) if n.opcode == OpCode::SendVal && n.op1 == op.result)
+        {
+            return Fast::No;
+        }
         let arr = match op.op1 {
             OperandType::Cv(i) => match cvs.get(i as usize) {
                 Some(Value::Array(a)) => a.clone(),
