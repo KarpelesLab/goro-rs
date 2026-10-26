@@ -4747,6 +4747,8 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 };
                 let parent_lower: Vec<u8> = parent_name
                     .as_bytes()
+                    .strip_prefix(b"\\")
+                    .unwrap_or(parent_name.as_bytes())
                     .iter()
                     .map(|b| b.to_ascii_lowercase())
                     .collect();
@@ -4803,6 +4805,8 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 };
                 let iface_lower: Vec<u8> = iface_name
                     .as_bytes()
+                    .strip_prefix(b"\\")
+                    .unwrap_or(iface_name.as_bytes())
                     .iter()
                     .map(|b| b.to_ascii_lowercase())
                     .collect();
@@ -4825,7 +4829,11 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     let exists = vm.classes.contains_key(&iface_lower)
                         || vm.is_known_builtin_class(&iface_lower);
                     if exists {
-                        let err_msg = format!("{} is not an interface", iface_name);
+                        // (named as declared)
+                        let shown = rcls(vm, &iface_lower)
+                            .map(|c| String::from_utf8_lossy(&c.name).into_owned())
+                            .unwrap_or_else(|| vm.builtin_canonical_name(&iface_lower));
+                        let err_msg = format!("{} is not an interface", shown);
                         let exc =
                             vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
                         vm.current_exception = Some(exc);
