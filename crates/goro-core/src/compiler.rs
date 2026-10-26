@@ -10667,6 +10667,7 @@ impl Compiler {
                         }
                         ClassMember::EnumCase {
                             name: case_name,
+                            line: case_line,
                             value,
                             attributes: case_attributes,
                             doc_comment: case_doc_comment,
@@ -10698,6 +10699,13 @@ impl Compiler {
                                         crate::string::msg_str(name)
                                     ),
                                     line: stmt.span.line,
+                                });
+                            }
+                            // zend_declare_typed_class_constant()
+                            if case_name.eq_ignore_ascii_case(b"class") {
+                                return Err(CompileError {
+                                    message: "A class constant must not be called 'class'; it is reserved for class name fetching".to_string(),
+                                    line: *case_line,
                                 });
                             }
                             // Enum cases: store the backing value for backed enums
