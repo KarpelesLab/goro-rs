@@ -1041,6 +1041,9 @@ fn default_display(oa: &OpArray, cv: u32) -> String {
         }
         match asg.op2 {
             OperandType::Const(c) => {
+                if let Some(n) = crate::reflection::folded_default_const_name(oa, cv as usize) {
+                    return n;
+                }
                 if let Some(v) = oa.literals.get(c as usize) {
                     return value_display(v);
                 }

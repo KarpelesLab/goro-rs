@@ -10174,6 +10174,24 @@ fn eval_static_const_init(
 /// Returns Some("global:<NAME>") for a global constant default
 /// (emitted by ConstLookup), Some("class:<Class>::<CONST>") for a class
 /// constant default (StaticPropGet with class+name), or None.
+/// A default naming a global constant the compiler folded to its value
+/// (PHP_INT_MAX, E_ALL, NAN...): the AST still is a ZEND_AST_CONSTANT.
+#[inline(never)]
+pub(crate) fn folded_default_const_name(op_array: &crate::opcode::OpArray, cv_idx: usize) -> Option<String> {
+    let r = op_array.param_default_repr.get(cv_idx)?.as_ref()?;
+    let r = r.trim_start_matches('\\');
+    let first = r.chars().next()?;
+    if !(first.is_ascii_alphabetic() || first == '_' || !first.is_ascii())
+        || !r.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '\\' || !c.is_ascii())
+    {
+        return None;
+    }
+    if matches!(r.to_ascii_lowercase().as_str(), "true" | "false" | "null") {
+        return None;
+    }
+    Some(r.to_string())
+}
+
 pub(crate) fn extract_param_default_constant(
     op_array: &crate::opcode::OpArray,
     cv_idx: u32,
@@ -11007,7 +11025,9 @@ fn reflection_parameter_method_body(
         }
         b"isdefaultvalueconstant" => {
             if let Some(op_array) = resolved_op_array.as_ref() {
-                if extract_param_default_constant(op_array, type_idx as u32).is_some() {
+                if extract_param_default_constant(op_array, type_idx as u32).is_some()
+                    || folded_default_const_name(op_array, type_idx).is_some()
+                {
                     return Some(Value::True);
                 }
             }
@@ -11015,6 +11035,11 @@ fn reflection_parameter_method_body(
         }
         b"getdefaultvalueconstantname" => {
             if let Some(op_array) = resolved_op_array.as_ref() {
+                if extract_param_default_constant(op_array, type_idx as u32).is_none() {
+                    if let Some(n) = folded_default_const_name(op_array, type_idx) {
+                        return Some(Value::String(PhpString::from_string(n)));
+                    }
+                }
                 if let Some(name) = extract_param_default_constant(op_array, type_idx as u32) {
                     // The AST rendering keeps the name as written (self::X).
                     if let Some(Some(r)) = op_array.param_default_repr.get(type_idx) {
