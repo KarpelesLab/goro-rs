@@ -123,6 +123,23 @@ fn fill_undef(v: &mut Vec<Value>, n: usize) {
     unsafe { v.set_len(n) };
 }
 
+/// Fill `v` with undefined values up to `n` of them.
+#[inline(always)]
+fn fill_undef_to(v: &mut Vec<Value>, n: usize) {
+    let len = v.len();
+    if n <= len {
+        return;
+    }
+    v.reserve(n - len);
+    let p = v.as_mut_ptr();
+    for i in len..n {
+        // SAFETY: within the capacity reserved.
+        unsafe { p.add(i).write(Value::Undef) };
+    }
+    // SAFETY: the values up to `n` were written.
+    unsafe { v.set_len(n) };
+}
+
 /// Release the values of `slots` in order, as a frame's end does.
 #[inline]
 fn release_slots(slots: &mut Vec<Value>) {
@@ -347,10 +364,17 @@ impl Vm {
         }
         let mut call = self.pop_lean_call();
         let nargs = call.args.len();
+        let keep = lead(sep);
+        // (a plain function's arguments are its first variables: they keep
+        // their buffer, the call is left none, as when they move)
+        if keep == 0 && f.variadic_param.is_none() {
+            let mut slots = std::mem::take(&mut call.args);
+            fill_undef_to(&mut slots, f.cv_names.len());
+            return self.lean_run(op_array, ip, f, sep, slots, nargs, call, cvs, tmps, false);
+        }
         // The parameters move to the callee's variables; `$this` stays
         // (DO_FCALL's fast path, move_args()).
-        let mut slots = self.take_values(f.cv_names.len());
-        let keep = lead(sep);
+        let mut slots = self.take_slots(f.cv_names.len());
         if keep == 1 {
             slots[0] = call.args[0].clone();
         }
