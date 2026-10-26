@@ -228,8 +228,11 @@ static TOKEN_CLASS: [u16; g::YYMAXUTOK as usize + 1] = {
     t
 };
 
-/// Per rule: its length (bits 0..8), its left-hand side as a nonterminal
-/// index (bits 8..16) and whether it is in SPECIAL_RULE (bit 16).
+const NSTATES: usize = g::YYPACT.len();
+const NNTS: usize = g::YYPGOTO.len();
+
+/// Per rule: its length (bits 0..8), whether it is in SPECIAL_RULE (bit 8)
+/// and the GOTO row of its left-hand side (bits 9..).
 static RULE_INFO: [u32; g::YYR2.len()] = {
     let mut t = [0u32; g::YYR2.len()];
     let mut i = 0;
@@ -237,22 +240,36 @@ static RULE_INFO: [u32; g::YYR2.len()] = {
         let lhs = g::YYR1[i] as i32 - g::YYNTOKENS;
         // (rules 0 and 1 have no real left-hand side)
         let lhs = if lhs < 0 { 0 } else { lhs as u32 };
-        t[i] = (g::YYR2[i] as u8 as u32) | (lhs << 8) | ((SPECIAL_RULE[i] as u32) << 16);
+        t[i] = (g::YYR2[i] as u8 as u32)
+            | ((SPECIAL_RULE[i] as u32) << 8)
+            | ((lhs * NSTATES as u32) << 9);
         i += 1;
     }
     t
 };
 
-/// The state after reducing to nonterminal `lhs` with `top` uncovered.
-#[inline(always)]
-fn goto_state(lhs: usize, top: i32) -> i32 {
-    let yyi = g::YYPGOTO[lhs] as i32 + top;
-    if (0..=g::YYLAST).contains(&yyi) && g::YYCHECK[yyi as usize] as i32 == top {
-        g::YYTABLE[yyi as usize] as i32
-    } else {
-        g::YYDEFGOTO[lhs] as i32
+/// GOTO[lhs * NSTATES + top]: the state after reducing to nonterminal
+/// `lhs` with state `top` uncovered (yacc.c's yypgoto / yydefgoto lookup,
+/// for every pair).
+static GOTO: [u16; NNTS * NSTATES] = {
+    let mut t = [0u16; NNTS * NSTATES];
+    let mut lhs = 0;
+    while lhs < NNTS {
+        let mut top = 0;
+        while top < NSTATES {
+            let yyi = g::YYPGOTO[lhs] as i32 + top as i32;
+            t[lhs * NSTATES + top] =
+                if yyi >= 0 && yyi <= g::YYLAST && g::YYCHECK[yyi as usize] as i32 == top as i32 {
+                    g::YYTABLE[yyi as usize] as u16
+                } else {
+                    g::YYDEFGOTO[lhs] as u16
+                };
+            top += 1;
+        }
+        lhs += 1;
     }
-}
+    t
+};
 
 fn parse(
     src: &[u8],
@@ -336,10 +353,18 @@ fn parse(
         }
         // reduce by rule yyn
         let info = RULE_INFO[yyn as usize];
+        if info & 0x1ff == 1 {
+            // (the commonest: a plain rule of one symbol, whose entry
+            // keeps its first token)
+            let top = stack[sp - 2].0;
+            state = GOTO[(info >> 9) as usize + top as usize] as i32;
+            stack[sp - 1].0 = state;
+            continue;
+        }
         let len = (info & 0xff) as usize;
         let base = sp - len;
         let first_val = if len > 0 { stack[base].1 } else { u32::MAX };
-        if info >> 16 != 0 {
+        if info & 0x100 != 0 {
             if let Some(r) = special_reduction(
                 yyn,
                 &stack[base..sp],
@@ -353,7 +378,7 @@ fn parse(
             }
         }
         let top = stack[base - 1].0;
-        state = goto_state((info >> 8 & 0xff) as usize, top);
+        state = GOTO[(info >> 9) as usize + top as usize] as i32;
         if base == stack.len() {
             stack.resize(base * 2, (0, u32::MAX));
         }
