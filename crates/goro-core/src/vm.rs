@@ -51354,8 +51354,16 @@ impl Vm {
                             } else {
                                 // PHP 8 raises an Error (catchable) with the format:
                                 // Uncaught Error: Trait "name" not found
+                                // (an internal class that isn't a trait: "cannot use")
                                 let trait_display = crate::string::msg_str(trait_name).to_string();
-                                let err_msg = format!("Trait \"{}\" not found", trait_display);
+                                let err_msg = match self.internal_class(&trait_lower) {
+                                    Some(pc) => format!(
+                                        "{} cannot use {} - it is not a trait",
+                                        crate::string::msg_str(&class.name),
+                                        pc.name
+                                    ),
+                                    None => format!("Trait \"{}\" not found", trait_display),
+                                };
                                 let exc = self.create_exception(b"Error", &err_msg, op.line);
                                 self.current_exception = Some(exc);
                                 if let Some((catch_target, _, _, _, saved_pc)) =
@@ -53916,6 +53924,19 @@ impl Vm {
                                     }
                                 }
                             } else {
+                                if let Some(pc) = self
+                                    .internal_class(&iface_lower)
+                                    .filter(|pc| pc.kind != crate::stubs::K_INTERFACE)
+                                {
+                                    return Err(VmError {
+                                        message: format!(
+                                            "{} cannot implement {} - it is not an interface",
+                                            crate::value::display_class_name(&class.name),
+                                            pc.name
+                                        ),
+                                        line: op.line,
+                                    });
+                                }
                                 // Check if this is a known built-in interface that we don't explicitly register
                                 let known_builtin_interfaces: &[&[u8]] = &[
                                     b"unitenum",
@@ -54040,6 +54061,34 @@ impl Vm {
                                         line: op.line,
                                     });
                                 }
+                                let extends_exc = class.parent.as_ref().is_some_and(|p| {
+                                    let pl = p.to_ascii_lowercase();
+                                    pl == b"exception"
+                                        || pl == b"error"
+                                        || self.class_extends_any(&pl, &[b"exception", b"error"])
+                                });
+                                if !class.is_interface
+                                    && !extends_exc
+                                    && iface_lower != b"throwable"
+                                    && self.class_implements_interface(&iface_lower, b"throwable")
+                                {
+                                    // zend_implement_throwable(), through an
+                                    // interface extending Throwable.
+                                    return Err(VmError {
+                                        message: if class.is_enum {
+                                            format!(
+                                                "Enum {} cannot implement interface Throwable",
+                                                class_display
+                                            )
+                                        } else {
+                                            format!(
+                                                "Class {} cannot implement interface Throwable, extend Exception or Error instead",
+                                                class_display
+                                            )
+                                        },
+                                        line: op.line,
+                                    });
+                                }
                                 match iface_lower.as_slice() {
                                     b"unitenum" => {
                                         if !class.is_enum {
@@ -54117,7 +54166,7 @@ impl Vm {
                                             line: op.line,
                                         });
                                     }
-                                    b"throwable" => {
+                                    b"throwable" if !extends_exc => {
                                         // Throwable cannot be implemented by user classes/enums
                                         let kind = if class.is_enum { "Enum" } else { "Class" };
                                         return Err(VmError {
