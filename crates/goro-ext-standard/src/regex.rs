@@ -29,13 +29,13 @@ const PHP_PCRE_BAD_UTF8_ERROR: i64 = 4;
 const PHP_PCRE_BAD_UTF8_OFFSET_ERROR: i64 = 5;
 const PHP_PCRE_JIT_STACKLIMIT_ERROR: i64 = 6;
 
-/// The match depth at which the emulated JIT runs out of its stack.
 /// goro-pcre is an interpreter: pcre.jit=1 (the default, like a PHP built
 /// with PCRE JIT support) gives JIT semantics instead, where
-/// pcre.recursion_limit does not apply and a match nesting deeper than
-/// about what PHP's 192 KiB JIT stack holds (some 10000 repetitions of a
-/// capturing group) fails with PREG_JIT_STACKLIMIT_ERROR.
-const JIT_DEPTH_LIMIT: u32 = 20_000;
+/// pcre.recursion_limit does not apply and a backtracking path that needs
+/// more than PHP's 192 KiB JIT stack fails with PREG_JIT_STACKLIMIT_ERROR
+/// (goro-pcre counts the JIT's stack use). This depth only bounds the
+/// interpreter's own frames for constructs that use no JIT stack.
+const JIT_DEPTH_LIMIT: u32 = 250_000;
 
 const PCRE_CACHE_SIZE: usize = 4096;
 

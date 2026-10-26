@@ -71,6 +71,55 @@ static REP_TYP: [u32; 12] = [
     REPTYPE_POS,
 ];
 
+/// The words (8 bytes) of PHP's JIT stack (PCRE_JIT_STACK_MAX_SIZE, 192 KiB).
+const JIT_STACK_WORDS: u32 = 192 * 1024 / 8;
+
+/// The opcodes Matcher::jit_charge() counts JIT stack for.
+static JIT_COST_OPS: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut op = OP_STAR;
+    while op <= OP_TYPEPOSUPTO {
+        t[op as usize] = true;
+        op += 1;
+    }
+    let ops = [
+        OP_CLASS,
+        OP_NCLASS,
+        OP_XCLASS,
+        OP_REF,
+        OP_REFI,
+        OP_DNREF,
+        OP_DNREFI,
+        OP_BRA,
+        OP_SBRA,
+        OP_CBRA,
+        OP_SCBRA,
+        OP_ONCE,
+        OP_SCRIPT_RUN,
+        OP_COND,
+        OP_SCOND,
+        OP_BRAZERO,
+        OP_BRAMINZERO,
+        OP_RECURSE,
+        OP_MARK,
+        OP_SKIP,
+        OP_SET_SOM,
+        OP_ASSERT,
+        OP_ASSERT_NOT,
+        OP_ASSERTBACK,
+        OP_ASSERTBACK_NOT,
+        OP_KET,
+        OP_KETRMAX,
+        OP_KETRMIN,
+    ];
+    let mut i = 0;
+    while i < ops.len() {
+        t[ops[i] as usize] = true;
+        i += 1;
+    }
+    t
+};
+
 // Resume ids (the RMxx labels of the C code).
 const RM_BRA_ALT: u8 = 1;
 const RM_GROUPLOOP: u8 = 2;
@@ -144,6 +193,13 @@ struct Frame {
     // Locals of the C match() that we keep per frame where the C code
     // relies on them not being changed by nested calls.
     proptype: i32,
+    /// JIT emulation: the words of JIT stack the backtracking path up to
+    /// here would use (see Matcher::jit_charge).
+    jit_words: u32,
+    /// JIT emulation: the bracket about to run is a further iteration of a
+    /// repeated group (its "before the first alternative" words are
+    /// already counted).
+    jit_loop: bool,
 }
 
 impl Default for Frame {
@@ -169,6 +225,8 @@ impl Default for Frame {
             last_group_offset: UNSET,
             offset_top: 0,
             proptype: -1,
+            jit_words: 0,
+            jit_loop: false,
         }
     }
 }
@@ -328,6 +386,148 @@ impl<'a> Matcher<'a> {
     #[inline]
     fn sb(&self, i: usize) -> u32 {
         self.subj[i] as u32
+    }
+
+    /// The KET of the bracket starting at `bracode`.
+    fn jit_ket(&self, bracode: usize) -> usize {
+        let mut k = bracode;
+        loop {
+            k += get(self.code, k + 1);
+            if self.cb(k) != OP_ALT {
+                return k;
+            }
+        }
+    }
+
+    /// The JIT stack words of a repeat whose quantifier opcode (OP_CR*) is
+    /// at `p`: none for a fixed or possessive repeat, one for a minimizing
+    /// repeat or `?`, two for a greedy one.
+    fn jit_cr_cost(&self, p: usize) -> u32 {
+        match self.cb(p) {
+            OP_CRSTAR | OP_CRPLUS => 2,
+            OP_CRMINSTAR | OP_CRMINPLUS | OP_CRQUERY | OP_CRMINQUERY => 1,
+            OP_CRRANGE | OP_CRMINRANGE => {
+                if get2(self.code, p + 1) == get2(self.code, p + 1 + IMM2_SIZE) {
+                    0
+                } else if self.cb(p) == OP_CRRANGE {
+                    2
+                } else {
+                    1
+                }
+            }
+            _ => 0,
+        }
+    }
+
+    /// The words an atomic group pushes on entry (`pre`) and keeps once it
+    /// has matched (`kept`): a group with captures saves them in a frame
+    /// that stays, one without only keeps its start pointer while it runs.
+    fn jit_once_cost(&self, bracode: usize, ket: usize, alts: bool) -> (u32, u32) {
+        let mut caps = 0u32;
+        let mut p = bracode + op_len(self.code[bracode]);
+        while p < ket {
+            let c = self.cb(p);
+            match c {
+                OP_XCLASS => p += get(self.code, p + 1),
+                OP_CALLOUT_STR => p += get(self.code, p + 1 + 2 * LINK_SIZE),
+                OP_CBRA | OP_SCBRA | OP_CBRAPOS | OP_SCBRAPOS | OP_RECURSE => {
+                    caps += 1;
+                    p += op_len(c as u8);
+                }
+                _ => p = skip_simple_item(self.code, p, self.utf),
+            }
+        }
+        let kop = self.cb(ket);
+        if caps > 0 {
+            let pre = 3 * caps + 2 + (kop != OP_KET || alts) as u32;
+            (pre, pre)
+        } else if kop == OP_KETRMIN {
+            (2, 0)
+        } else {
+            ((kop == OP_KETRMAX || alts) as u32, 0)
+        }
+    }
+
+    /// PCRE2 JIT stack emulation (pcre.jit=1): add the words of JIT stack
+    /// the opcode at `ecode` allocates, as pcre2_jit_compile.c lays out the
+    /// backtracking data of brackets, iterators and recursions, to the
+    /// current path's count. The count lives in the frame, so backtracking
+    /// to an older frame frees what the abandoned path used, as on the JIT
+    /// stack. True when PHP's 192 KiB JIT stack would overflow.
+    #[inline(never)]
+    fn jit_charge(&mut self, ecode: usize, op: u32) -> bool {
+        // STAR MINSTAR PLUS MINPLUS QUERY MINQUERY UPTO MINUPTO EXACT POS*
+        const ITER: [u32; 13] = [2, 1, 2, 1, 1, 1, 2, 1, 0, 0, 0, 0, 0];
+        let f = self.f;
+        let w = match op {
+            OP_STAR..=OP_TYPEPOSUPTO => ITER[((op - OP_STAR) % 13) as usize],
+            OP_CLASS | OP_NCLASS => self.jit_cr_cost(ecode + 1 + 32),
+            OP_XCLASS => self.jit_cr_cost(ecode + get(self.code, ecode + 1)),
+            OP_REF | OP_REFI => self.jit_cr_cost(ecode + 1 + IMM2_SIZE),
+            OP_DNREF | OP_DNREFI => self.jit_cr_cost(ecode + 1 + 2 * IMM2_SIZE),
+            OP_BRA | OP_SBRA | OP_CBRA | OP_SCBRA | OP_ONCE | OP_SCRIPT_RUN | OP_COND
+            | OP_SCOND => {
+                if ecode == self.start_code {
+                    return false;
+                }
+                let ket = self.jit_ket(ecode);
+                let alts = self.cb(ecode + get(self.code, ecode + 1)) == OP_ALT;
+                // A loop starts with a zero marker.
+                let before = (matches!(self.cb(ket), OP_KETRMAX | OP_KETRMIN)
+                    && !self.frames[f].jit_loop) as u32;
+                self.frames[f].jit_loop = false;
+                before
+                    + match op {
+                        OP_CBRA | OP_SCBRA => 2,
+                        OP_SBRA | OP_SCRIPT_RUN | OP_SCOND => 1,
+                        OP_COND => 2 * alts as u32,
+                        OP_ONCE => self.jit_once_cost(ecode, ket, alts).0,
+                        _ => alts as u32,
+                    }
+            }
+            OP_BRAZERO | OP_BRAMINZERO => {
+                let ket = self.jit_ket(ecode + 1);
+                1 + matches!(self.cb(ket), OP_KETRMAX | OP_KETRMIN) as u32
+            }
+            OP_RECURSE => {
+                let bracode = self.start_code + get(self.code, ecode + 1);
+                3 + (self.cb(bracode + get(self.code, bracode + 1)) == OP_ALT) as u32
+            }
+            OP_MARK | OP_SKIP | OP_SET_SOM => 1,
+            // The assertion's start pointer, freed when it completes.
+            OP_ASSERT | OP_ASSERT_NOT | OP_ASSERTBACK | OP_ASSERTBACK_NOT => 1,
+            OP_KET | OP_KETRMAX | OP_KETRMIN => {
+                let bracode = ecode - get(self.code, ecode + 1);
+                if bracode == self.start_code {
+                    return false;
+                }
+                let bop = self.cb(bracode);
+                let alts = self.cb(bracode + get(self.code, bracode + 1)) == OP_ALT;
+                if matches!(bop, OP_ONCE | OP_ASSERT | OP_ASSERTBACK) {
+                    // What the group's body pushed is dropped once it has
+                    // matched.
+                    let n = self.frames[f].last_group_offset;
+                    if n != UNSET && n > 0 {
+                        let mut base = self.frames[n - 1].jit_words;
+                        if bop == OP_ONCE {
+                            let (pre, kept) = self.jit_once_cost(bracode, ecode, alts);
+                            base = base.saturating_sub(pre) + kept;
+                        } else {
+                            base = base.saturating_sub(1);
+                        }
+                        self.frames[f].jit_words = base;
+                    }
+                }
+                let zero = matches!(self.cb(bracode - 1), OP_BRAZERO | OP_BRAMINZERO);
+                (op != OP_KET || zero) as u32
+                    + (alts && matches!(bop, OP_BRA | OP_SBRA | OP_CBRA | OP_SCBRA | OP_COND))
+                        as u32
+            }
+            _ => return false,
+        };
+        let total = self.frames[f].jit_words + w;
+        self.frames[f].jit_words = total;
+        total > JIT_STACK_WORDS
     }
 
     /// IS_NEWLINE(p) (NLBLOCK = mb, PSEND = end_subject).
@@ -697,6 +897,7 @@ impl<'a> Matcher<'a> {
                             .copy_within(f * self.ovs..(f + 1) * self.ovs, n * self.ovs);
                     }
                     self.frames[n].rdepth = self.frames[f].rdepth + 1;
+                    self.frames[n].jit_loop = id == RM_KETRMAX || id == RM_BRAZERO;
                     self.f = n;
                     self.new_frame(ecode, gft)
                 }
@@ -761,6 +962,9 @@ impl<'a> Matcher<'a> {
             let ecode = F!().ecode;
             let op = self.code[ecode] as u32;
             F!().op = op as u8;
+            if self.jit && JIT_COST_OPS[op as usize] && self.jit_charge(ecode, op) {
+                return Act::Ret(PCRE2_ERROR_JIT_STACKLIMIT);
+            }
             match op {
                 OP_CLOSE => {
                     if F!().current_recurse == RECURSE_UNSET {
@@ -2536,6 +2740,9 @@ impl<'a> Matcher<'a> {
                 }
                 // ASSERT_NOT_FAILED
                 F!().ecode += 1 + LINK_SIZE;
+                if self.jit {
+                    F!().jit_words = F!().jit_words.saturating_sub(1);
+                }
                 Act::Next
             }
             RM_COND_ASSERT => {
@@ -2576,10 +2783,20 @@ impl<'a> Matcher<'a> {
                 nomatch_unless_ok!();
                 let ec = F!().ecode;
                 F!().ecode -= get(self.code, ec + 1);
+                F!().jit_loop = true;
                 Act::Next
             }
             RM_KETRMAX => {
                 nomatch_unless_ok!();
+                if self.jit {
+                    // Leaving a loop entered without BRAZERO frees the last
+                    // iteration's start pointer.
+                    let ec = F!().ecode;
+                    let bracode = ec - get(self.code, ec + 1);
+                    if !matches!(self.cb(bracode - 1), OP_BRAZERO | OP_BRAMINZERO) {
+                        F!().jit_words = F!().jit_words.saturating_sub(1);
+                    }
+                }
                 F!().ecode += 1 + LINK_SIZE;
                 Act::Next
             }
@@ -2642,6 +2859,7 @@ impl<'a> Matcher<'a> {
             RM_BRAMINZERO => {
                 nomatch_unless_ok!();
                 F!().ecode += 1;
+                F!().jit_loop = true;
                 Act::Next
             }
             RM_RECURSE => {
