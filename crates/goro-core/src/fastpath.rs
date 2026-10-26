@@ -1950,6 +1950,32 @@ fn consumed_tmps_of(
     Some(rel)
 }
 
+/// `===` / `!==` (op) whose temporary operand holds an object or an array
+/// (released by the caller after it, see consumed_tmps()): an object is
+/// identical to itself only, an array to no value of another type (two
+/// arrays are compared element by element: the general handler's).
+#[inline(never)]
+fn fast_identical_tmp(op: &Op, cvs: &[Value], tmps: &mut [Value], literals: &[Value]) -> Fast {
+    let Some(a) = defined_operand(&op.op1, cvs, tmps, literals) else {
+        return Fast::No;
+    };
+    let Some(b) = defined_operand(&op.op2, cvs, tmps, literals) else {
+        return Fast::No;
+    };
+    let same = match (&a, &b) {
+        (Value::Array(_), Value::Array(_)) => return Fast::No,
+        (Value::Object(x), Value::Object(y)) => Rc::ptr_eq(x, y),
+        (Value::Array(_) | Value::Object(_), _) | (_, Value::Array(_) | Value::Object(_)) => false,
+        _ => a.identical(&b),
+    };
+    let r = bool_val(same == (op.opcode == OpCode::Identical));
+    if store_tmp(&op.result, r, tmps) {
+        Fast::Done
+    } else {
+        Fast::No
+    }
+}
+
 /// After the opcode `op` ran (`fast` is not Fast::No), the temporaries
 /// consumed_tmps() found (`rel`) are released, as the dispatch loop would
 /// right after it.
@@ -2667,8 +2693,32 @@ impl crate::vm::Vm {
                 OpCode::GreaterEqual => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::Equal => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::NotEqual => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
-                OpCode::Identical => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
-                OpCode::NotIdentical => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::Identical | OpCode::NotIdentical => {
+                    match fast_op(op, cvs, tmps, literals, refs_ok, no_release) {
+                        // (a temporary object or array the opcode consumes,
+                        // held elsewhere too: `null === self::$instance`)
+                        Fast::No
+                            if no_release
+                                && (matches!(op.op1, OperandType::Tmp(_))
+                                    || matches!(op.op2, OperandType::Tmp(_))) =>
+                        {
+                            let Some(rel) = consumed_tmps(
+                                free_mask.get(),
+                                ops,
+                                ip,
+                                op,
+                                tmps,
+                                no_release,
+                                &self.globals,
+                            ) else {
+                                break 'run ip;
+                            };
+                            let f = fast_identical_tmp(op, cvs, tmps, literals);
+                            release_consumed(rel, f, op, tmps)
+                        }
+                        f => f,
+                    }
+                }
                 OpCode::Spaceship => fast_spaceship(op, cvs, tmps, literals),
                 OpCode::AssignAdd => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::AssignSub => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
