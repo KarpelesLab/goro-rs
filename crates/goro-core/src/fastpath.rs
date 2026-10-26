@@ -1862,6 +1862,8 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::CastInt
             | OpCode::CastString
             | OpCode::InitCvNull
+            | OpCode::StaticVarInit
+            | OpCode::StaticVarInitOrJmp
             // (a call whose arguments the general handlers sent: a lean
             // call, or a builtin's, see the DO_FCALL arm of run_fast_ops)
             | OpCode::DoFCall
@@ -2355,6 +2357,10 @@ impl crate::vm::Vm {
                 },
                 // (a frame bound to a symbol table rebinds itself: the general handler)
                 OpCode::BindGlobal if bound.is_none() => self.fast_bind_global(op, cvs, literals),
+                // A `static $v` (see leancall.rs).
+                OpCode::StaticVarInit | OpCode::StaticVarInitOrJmp if bound.is_none() => {
+                    self.fast_static_var(op_array, ip, cvs, tmps)
+                }
                 // A call of a plain user function: its callee's opcodes run
                 // here too, without a frame (see leancall.rs).
                 OpCode::DoFCall => {

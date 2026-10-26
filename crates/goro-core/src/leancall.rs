@@ -28,7 +28,7 @@ use super::{
     ForeachState, PendingCall, Vm, VmError, arg_by_ref, arg_cv_bound, move_args, new_foreach_state,
     push_lossy,
 };
-use crate::fastpath::{FeView, is_plain_scalar, store_tmp, tmp_writable};
+use crate::fastpath::{Fast, FeView, is_plain_scalar, store_tmp, tmp_writable};
 use crate::opcode::{Op, OpArray, OpCode, OperandType};
 use crate::value::Value;
 
@@ -1184,6 +1184,134 @@ impl Vm {
             || self.exit_requested
             || self.fatal_bailout
             || self.current_exception.is_some()
+    }
+
+    /// The declaration of a static variable at `ip` of `op_array` (BIND_STATIC:
+    /// StaticVarInit; or the check of BIND_INIT_STATIC_OR_JMP that skips a
+    /// non-constant initializer once the variable exists:
+    /// StaticVarInitOrJmp), as the general handler makes it, run by
+    /// run_fast_ops() (a frame without a symbol table): the variable bound
+    /// to the static's cell, which the declaration remembers (see
+    /// OpArray::static_sites) rather than building and looking up the
+    /// static's key each time. Only when the variable holds nothing to
+    /// release, and a new static's initial value is a plain one.
+    #[inline(never)]
+    pub(crate) fn fast_static_var(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        cvs: &mut [Value],
+        tmps: &[Value],
+    ) -> Fast {
+        let op = &op_array.ops[ip];
+        let (OperandType::Cv(ci), OperandType::Const(k)) = (op.op1, op.result) else {
+            return Fast::No;
+        };
+        let Some(Value::String(key)) = op_array.literals.get(k as usize) else {
+            return Fast::No;
+        };
+        let init = op.opcode == OpCode::StaticVarInit;
+        if init
+            && !matches!(
+                cvs.get(ci as usize),
+                Some(
+                    Value::Undef
+                        | Value::Null
+                        | Value::False
+                        | Value::True
+                        | Value::Long(_)
+                        | Value::Double(_)
+                )
+            )
+        {
+            return Fast::No;
+        }
+        let generation = self.static_gen;
+        let cached = op_array
+            .static_sites()
+            .borrow()
+            .iter()
+            .find(|s| s.ip == ip as u32)
+            .filter(|s| s.generation == generation && s.key.ptr_eq(key))
+            .and_then(|s| s.cell.upgrade());
+        let cell = match cached {
+            Some(c) => c,
+            None => {
+                let full = Self::static_var_key(op_array, key.as_bytes());
+                let cell = match self.static_vars.get(&full) {
+                    Some(Value::Reference(r)) => Rc::clone(r),
+                    Some(_) => return Fast::No,
+                    // (the initializer runs: see the general handler)
+                    None if !init => return Fast::Done,
+                    None => {
+                        let default = match op.op2 {
+                            OperandType::Const(d) => match op_array.literals.get(d as usize) {
+                                Some(Value::Array(a)) => {
+                                    Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
+                                }
+                                Some(v) => v.clone(),
+                                None => Value::Null,
+                            },
+                            // (a temporary the general handler's opcode
+                            // releases after it: a plain one only)
+                            OperandType::Tmp(t) => match tmps.get(t as usize) {
+                                Some(Value::Undef) | None => Value::Null,
+                                Some(
+                                    v @ (Value::Null
+                                    | Value::False
+                                    | Value::True
+                                    | Value::Long(_)
+                                    | Value::Double(_)),
+                                ) => v.clone(),
+                                Some(_) => return Fast::No,
+                            },
+                            _ => return Fast::No,
+                        };
+                        let cell = Rc::new(RefCell::new(default));
+                        let old = self
+                            .static_vars
+                            .insert(full, Value::Reference(Rc::clone(&cell)));
+                        debug_assert!(old.is_none());
+                        cell
+                    }
+                };
+                self.remember_static_site(op_array, ip, key, &cell);
+                cell
+            }
+        };
+        if init {
+            cvs[ci as usize] = Value::Reference(cell);
+            Fast::Done
+        } else {
+            match op.op2 {
+                OperandType::JmpTarget(t) => Fast::Jump(t as usize),
+                _ => Fast::Done,
+            }
+        }
+    }
+
+    /// fast_static_var(): the declaration at `ip` of `op_array` (by the key
+    /// literal `key`) found `cell`.
+    #[cold]
+    #[inline(never)]
+    fn remember_static_site(
+        &self,
+        op_array: &OpArray,
+        ip: usize,
+        key: &crate::string::PhpString,
+        cell: &Rc<RefCell<Value>>,
+    ) {
+        let site = crate::opcode::StaticSite {
+            ip: ip as u32,
+            generation: self.static_gen,
+            key: key.clone(),
+            cell: Rc::downgrade(cell),
+        };
+        let mut sites = op_array.static_sites().borrow_mut();
+        match sites.iter_mut().find(|s| s.ip == ip as u32) {
+            Some(s) => *s = site,
+            None => sites.push(site),
+        }
     }
 
     /// Whether the DO_FCALL at `ip` of `op_array` handed over a lean call

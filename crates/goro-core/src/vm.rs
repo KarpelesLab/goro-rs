@@ -217,6 +217,13 @@ fn move_args(cvs: &mut [Value], args: &mut [Value], n: usize, keep: usize) {
     }
 }
 
+/// A static_vars generation number (see Vm::static_gen), unique across
+/// the VMs of the process.
+pub(crate) fn fresh_static_gen() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Is the argument at `index` (counted like the CVs: $this and closure
 /// captures first) of a call to `f` passed by reference? Arguments past
 /// the declared parameters go to the variadic one.
@@ -1378,6 +1385,11 @@ pub struct Vm {
     pub(crate) pending_calls: Vec<PendingCall>,
     /// Static variable storage (keyed by "funcname::varname")
     pub(crate) static_vars: crate::fxhash::FxHashMap<Vec<u8>, Value>,
+    /// Changes when an entry of static_vars is replaced or removed (a
+    /// number no other VM has: see fresh_static_gen()), so that what a
+    /// static variable's declaration remembers of its cell holds while it
+    /// does not (see OpArray::static_sites).
+    pub(crate) static_gen: u64,
     /// The global symbol table (also the value of `$GLOBALS`, see symtab.rs)
     pub(crate) globals: Rc<RefCell<PhpArray>>,
     /// Class table (preserves insertion order)
@@ -2070,6 +2082,7 @@ impl Vm {
             user_functions: Default::default(),
             pending_calls: Vec::new(),
             static_vars: Default::default(),
+            static_gen: fresh_static_gen(),
             globals: Rc::new(RefCell::new({
                 // EG(symbol_table) is preallocated by the engine.
                 let mut t = PhpArray::new();
@@ -12488,7 +12501,13 @@ impl Vm {
             return v.clone();
         }
         let cell = Value::Reference(Rc::new(RefCell::new(default)));
-        self.static_vars.insert(key.to_vec(), cell.clone());
+        if self
+            .static_vars
+            .insert(key.to_vec(), cell.clone())
+            .is_some()
+        {
+            self.static_gen = fresh_static_gen();
+        }
         cell
     }
 
@@ -43287,7 +43306,9 @@ impl Vm {
                             v => v,
                         };
                         let cell = Value::Reference(Rc::new(RefCell::new(default)));
-                        self.static_vars.insert(key.clone(), cell.clone());
+                        if self.static_vars.insert(key.clone(), cell.clone()).is_some() {
+                            self.static_gen = fresh_static_gen();
+                        }
                         cell
                     };
 
@@ -62770,7 +62791,9 @@ impl Vm {
                 }
                 // If this CV is a static variable, persist the value
                 if let Some(key) = static_cv_keys.get(idx) {
-                    self.static_vars.insert(key.clone(), value);
+                    if self.static_vars.insert(key.clone(), value).is_some() {
+                        self.static_gen = fresh_static_gen();
+                    }
                 }
             }
             OperandType::Tmp(idx) => {
@@ -63656,8 +63679,13 @@ impl Vm {
                 *r.borrow_mut() = value;
             }
             _ => {
-                self.static_vars
-                    .insert(key, Value::Reference(Rc::new(RefCell::new(value))));
+                if self
+                    .static_vars
+                    .insert(key, Value::Reference(Rc::new(RefCell::new(value))))
+                    .is_some()
+                {
+                    self.static_gen = fresh_static_gen();
+                }
             }
         }
     }

@@ -421,6 +421,7 @@ impl Vm {
         self.bump_globals_gen();
         self.global_ref_names.clear();
         self.static_vars.clear();
+        self.static_gen = crate::vm::fresh_static_gen();
         self.enum_case_cache.clear();
         self.constants = constants_before;
         self.included_files = saved_included.0;

@@ -594,6 +594,19 @@ pub struct OpArray {
     prop_ics: FreshOnClone<PropIcs>,
     /// See OpArray::fused_sends().
     fused_sends: FreshOnClone<Box<[u8]>>,
+    /// See OpArray::static_sites().
+    static_sites: FreshOnClone<std::cell::RefCell<Vec<StaticSite>>>,
+}
+
+/// The cell of a static variable a declaration of it (StaticVarInit, at
+/// `ip`) found, while static_vars keeps it: in the VM's `generation`
+/// of static_vars (see Vm::static_gen), for the key literal `key`.
+#[derive(Debug)]
+pub(crate) struct StaticSite {
+    pub(crate) ip: u32,
+    pub(crate) generation: u64,
+    pub(crate) key: crate::string::PhpString,
+    pub(crate) cell: std::rc::Weak<std::cell::RefCell<Value>>,
 }
 
 /// A value an OpArray computes from itself on first use, which a copy of
@@ -867,8 +880,7 @@ impl OpArray {
     /// vm::leancall): 1 for a function, 2 for an instance method (its first
     /// variable is `$this`), 0 when its frame has to check or set up
     /// something (a by-reference return, a generator, variadics,
-    /// attributes, static variables, `$GLOBALS` or auto-globals, internal
-    /// code, a closure); plus 4 when it has typed parameters, 8 a return
+    /// attributes, `$GLOBALS` or auto-globals, internal code, a closure); plus 4 when it has typed parameters, 8 a return
     /// type (checked per call, see vm::leancall), 16 a parameter by
     /// reference.
     #[inline]
@@ -895,7 +907,6 @@ impl OpArray {
                     .is_none_or(|v| !self.by_ref_params.get(v as usize).copied().unwrap_or(false))
                 && self.attributes.is_empty()
                 && self.internal_sig.is_none()
-                && self.static_defaults.is_none()
                 && !self.name.is_empty()
                 && !crate::closure::is_closure_fn_name(&self.name)
                 && self.cv_name_info().plain_cvs;
@@ -934,6 +945,14 @@ impl OpArray {
                 .map(|ip| fused_sends_at(&self.ops, ip).map_or(u8::MAX, |n| n as u8))
                 .collect()
         })
+    }
+
+    /// The cells the declarations of static variables found (see
+    /// StaticSite; a copy of the code starts without them: its keys may
+    /// differ).
+    #[inline]
+    pub(crate) fn static_sites(&self) -> &std::cell::RefCell<Vec<StaticSite>> {
+        self.static_sites.0.get_or_init(Default::default)
     }
 
     /// Which of the CVs are `$GLOBALS` and the auto globals (`cv_names`
@@ -1163,6 +1182,7 @@ impl OpArray {
             lean_kind: Default::default(),
             prop_ics: Default::default(),
             fused_sends: Default::default(),
+            static_sites: Default::default(),
         }
     }
 
