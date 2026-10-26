@@ -560,10 +560,13 @@ pub(crate) fn fast_op(
             let Some(b) = defined_operand(&op.op2, cvs, tmps, literals) else {
                 return Fast::No;
             };
-            if matches!(a, Value::Array(_)) || matches!(b, Value::Array(_)) {
-                return Fast::No;
-            }
             let same = match (&a, &b) {
+                (Value::Array(_), Value::Array(_)) => return Fast::No,
+                // (an array is identical to no other type; a temporary's is
+                // released after the opcode: the general handler's)
+                (Value::Array(_), _) if !matches!(op.op1, OperandType::Tmp(_)) => false,
+                (_, Value::Array(_)) if !matches!(op.op2, OperandType::Tmp(_)) => false,
+                (Value::Array(_), _) | (_, Value::Array(_)) => return Fast::No,
                 (Value::Object(x), Value::Object(y)) => Rc::ptr_eq(x, y),
                 _ => a.identical(&b),
             };

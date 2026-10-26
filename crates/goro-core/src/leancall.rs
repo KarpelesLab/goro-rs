@@ -367,12 +367,11 @@ impl Vm {
                         Some(Value::Array(a)) => !Rc::ptr_eq(a, &self.globals),
                         Some(_) => true,
                     },
+                    // (a call's array result too: the parameter is by
+                    // value, see send_val_fast)
                     OperandType::Tmp(t) => match tmps.get(t as usize) {
                         Some(Value::Reference(_)) => false,
-                        Some(Value::Array(a)) => {
-                            !Rc::ptr_eq(a, &self.globals)
-                                && !matches!(s.result, OperandType::Const(_))
-                        }
+                        Some(Value::Array(a)) => !Rc::ptr_eq(a, &self.globals),
                         _ => true,
                     },
                     OperandType::Const(_) => true,

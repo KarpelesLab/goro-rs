@@ -21936,6 +21936,12 @@ impl Vm {
         {
             return false;
         }
+        // (a plain function: its parameters count from the first argument)
+        let user_target = call.target.user.is_some()
+            && call.target.method.is_none()
+            && call.target.forward.is_none()
+            && !call.target.closure
+            && call.name.as_bytes().first() != Some(&b'\\');
         let v = match op.op1 {
             OperandType::Cv(i) => match cvs.get(i as usize) {
                 None | Some(Value::Undef) => return false,
@@ -21954,8 +21960,12 @@ impl Vm {
                 // (a call's array result sent where a reference may be
                 // taken: the general handler separates it; not to a builtin
                 // whose parameters are all by value)
+                // (a user function the call was resolved to: its by-value
+                // parameter takes the result as it is)
                 Some(Value::Array(_))
-                    if matches!(op.result, OperandType::Const(_)) && !by_value_builtin =>
+                    if matches!(op.result, OperandType::Const(_))
+                        && !by_value_builtin
+                        && !user_target =>
                 {
                     return false;
                 }
