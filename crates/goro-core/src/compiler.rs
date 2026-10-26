@@ -13706,7 +13706,7 @@ impl Compiler {
             return OperandType::Const(self.op_array.add_literal(v));
         }
         if opcode == OpCode::BoolXor {
-            if let Some(v) = self.ct_eval_xor(&l, &r, line) {
+            if let Some(v) = self.ct_eval_xor(left, right, &l, &r, line) {
                 return OperandType::Const(self.op_array.add_literal(v));
             }
         }
@@ -13733,17 +13733,31 @@ impl Compiler {
     /// zend_try_ct_eval_binary_op() of `xor` (boolean_xor_function(): each
     /// operand's zend_is_true(), a NAN warning while compiling).
     #[inline(never)]
-    fn ct_eval_xor(&self, l: &OperandType, r: &OperandType, line: u32) -> Option<Value> {
-        let (OperandType::Const(a), OperandType::Const(b)) = (l, r) else {
-            return None;
+    fn ct_eval_xor(
+        &self,
+        left: &Expr,
+        right: &Expr,
+        l: &OperandType,
+        r: &OperandType,
+        line: u32,
+    ) -> Option<Value> {
+        // (a literal, or an array literal zend_try_ct_eval_array() makes a
+        // constant)
+        let value = |e: &Expr, o: &OperandType| -> Option<Value> {
+            match o {
+                OperandType::Const(i) => match self.op_array.literals.get(*i as usize)? {
+                    Value::Resource(_) => None,
+                    v => Some(v.clone()),
+                },
+                _ if matches!(e.kind, ExprKind::Array(_)) && Self::is_const_evaluable(e) => {
+                    Self::eval_const_expr(e)
+                }
+                _ => None,
+            }
         };
-        let lits = &self.op_array.literals;
-        let (a, b) = (lits.get(*a as usize)?, lits.get(*b as usize)?);
-        if matches!(a, Value::Resource(_)) || matches!(b, Value::Resource(_)) {
-            return None;
-        }
-        let x = self.ct_truthy(a, line);
-        let y = self.ct_truthy(b, line);
+        let (a, b) = (value(left, l)?, value(right, r)?);
+        let x = self.ct_truthy(&a, line);
+        let y = self.ct_truthy(&b, line);
         Some(if x != y { Value::True } else { Value::False })
     }
 
@@ -13843,7 +13857,6 @@ impl Compiler {
         if !ok(a) || !ok(b) {
             return None;
         }
-        let nan = |v: &Value| matches!(v, Value::Double(f) if f.is_nan());
         let bool_v = |c: bool| if c { Value::True } else { Value::False };
         match opcode {
             OpCode::Add => Some(a.add(b)),
@@ -13863,13 +13876,14 @@ impl Compiler {
             },
             OpCode::Identical => Some(bool_v(a.identical(b))),
             OpCode::NotIdentical => Some(bool_v(!a.identical(b))),
-            _ if nan(a) || nan(b) => None,
+            // (zend_compare(): an unordered NAN pair compares as 1, and
+            // `a > b` is compiled as `b < a`)
             OpCode::Equal => Some(bool_v(a.compare_zend(b) == 0)),
             OpCode::NotEqual => Some(bool_v(a.compare_zend(b) != 0)),
             OpCode::Less => Some(bool_v(a.compare_zend(b) < 0)),
             OpCode::LessEqual => Some(bool_v(a.compare_zend(b) <= 0)),
-            OpCode::Greater => Some(bool_v(a.compare_zend(b) > 0)),
-            OpCode::GreaterEqual => Some(bool_v(a.compare_zend(b) >= 0)),
+            OpCode::Greater => Some(bool_v(b.compare_zend(a) < 0)),
+            OpCode::GreaterEqual => Some(bool_v(b.compare_zend(a) <= 0)),
             OpCode::Spaceship => Some(Value::Long(a.compare_zend(b).signum())),
             _ => None,
         }
