@@ -194,6 +194,26 @@ pub(crate) struct Target {
     pub proxy: Option<ProxyInfo>,
     pub tunnel: bool,
     pub proxy_user_passwd: bool,
+    /// conn->conn_to_host (CURLOPT_CONNECT_TO)
+    pub conn_to_host: Option<String>,
+    /// conn->conn_to_port (CURLOPT_CONNECT_TO)
+    pub conn_to_port: Option<u16>,
+}
+
+/// curlx_str_number() on a decimal prefix: at least one digit, value <= max
+fn dec_prefix(s: &[u8], max: u64) -> Option<u64> {
+    let n = s.iter().take_while(|c| c.is_ascii_digit()).count();
+    if n == 0 {
+        return None;
+    }
+    let mut v: u64 = 0;
+    for &c in &s[..n] {
+        v = v.checked_mul(10)?.checked_add((c - b'0') as u64)?;
+        if v > max {
+            return None;
+        }
+    }
+    Some(v)
 }
 
 /// How a request ended, for the follow logic
@@ -592,13 +612,146 @@ impl Easy {
             proxy: None,
             tunnel: self.set.tunnel_proxy,
             proxy_user_passwd: false,
+            conn_to_host: None,
+            conn_to_port: None,
         };
         if protocol != proto::FILE {
             self.setup_proxy(cb, &mut t)?;
         }
+        self.parse_connect_to_slist(cb, &mut t)?;
         self.info.conn_scheme = Some(t.tu.handler.name.to_string());
         self.info.conn_protocol = protocol;
         Ok(t)
+    }
+
+    /// parse_connect_to_slist(): the first CURLOPT_CONNECT_TO entry matching
+    /// the URL's host and port picks the host and/or port to connect to
+    fn parse_connect_to_slist(
+        &mut self,
+        cb: &mut dyn Callbacks,
+        t: &mut Target,
+    ) -> Result<(), CurlCode> {
+        let Some(list) = self.set.slists.get(&opt::CONNECT_TO).cloned() else {
+            return Ok(());
+        };
+        for line in &list {
+            let line = &line[..line.iter().position(|&c| c == 0).unwrap_or(line.len())];
+            let (host, port) = self.parse_connect_to_string(cb, t, line)?;
+            match host.filter(|h| !h.is_empty()) {
+                Some(h) => {
+                    self.infof(cb, &format!("Connecting to hostname: {h}"));
+                    t.conn_to_host = Some(h);
+                }
+                None => t.conn_to_host = None,
+            }
+            match port {
+                Some(p) => {
+                    self.infof(cb, &format!("Connecting to port: {p}"));
+                    t.conn_to_port = Some(p);
+                }
+                None => t.conn_to_port = None,
+            }
+            if t.conn_to_host.is_some() || t.conn_to_port.is_some() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// parse_connect_to_string()
+    fn parse_connect_to_string(
+        &mut self,
+        cb: &mut dyn Callbacks,
+        t: &Target,
+        line: &[u8],
+    ) -> Result<(Option<String>, Option<u16>), CurlCode> {
+        let mut ptr = 0usize;
+        let host_match;
+        if line.first() == Some(&b':') {
+            host_match = true;
+            ptr += 1;
+        } else {
+            let m = if t.ipv6 {
+                format!("[{}]", t.host)
+            } else {
+                t.host.clone()
+            };
+            let m = m.as_bytes();
+            host_match = line.len() >= m.len()
+                && line[..m.len()].eq_ignore_ascii_case(m)
+                && line.get(m.len()) == Some(&b':');
+            ptr = m.len() + 1;
+        }
+        let mut port_match = false;
+        if host_match {
+            let rest = line.get(ptr..).unwrap_or_default();
+            if rest.first() == Some(&b':') {
+                port_match = true;
+                ptr += 1;
+            } else if let Some(i) = rest.iter().position(|&c| c == b':') {
+                port_match = dec_prefix(rest, 0xffff) == Some(t.port as u64);
+                ptr += i + 1;
+            }
+        }
+        if !(host_match && port_match) {
+            return Ok((None, None));
+        }
+        // parse_connect_to_host_port()
+        let hp = line.get(ptr..).unwrap_or_default();
+        if hp.is_empty() {
+            return Ok((None, None));
+        }
+        let (host, portpart): (&[u8], &[u8]) = if hp[0] == b'[' {
+            let mut i = 1;
+            while i < hp.len() && (hp[i].is_ascii_hexdigit() || hp[i] == b':' || hp[i] == b'.') {
+                i += 1;
+            }
+            if i < hp.len() && hp[i] == b'%' {
+                if !hp[i..].starts_with(b"%25") {
+                    self.infof(cb, "Please URL encode % as %25, see RFC 6874.");
+                }
+                i += 1;
+                while i < hp.len()
+                    && (hp[i].is_ascii_alphanumeric() || matches!(hp[i], b'-' | b'.' | b'_' | b'~'))
+                {
+                    i += 1;
+                }
+            }
+            if i < hp.len() && hp[i] == b']' {
+                (&hp[1..i], &hp[i + 1..])
+            } else {
+                self.infof(cb, "Invalid IPv6 address format");
+                (&hp[1..], &hp[i..])
+            }
+        } else {
+            (hp, hp)
+        };
+        let same = std::ptr::eq(host.as_ptr(), portpart.as_ptr());
+        let (host, port) = match portpart.iter().position(|&c| c == b':') {
+            Some(i) => {
+                let num = &portpart[i + 1..];
+                let host = if same { &host[..i] } else { host };
+                if num.is_empty() {
+                    (host, None)
+                } else {
+                    match dec_prefix(num, 0xffff) {
+                        Some(n) => (host, Some(n as u16)),
+                        None => {
+                            self.failf(
+                                cb,
+                                &format!(
+                                    "No valid port number in connect to host string ({})",
+                                    lossy(num)
+                                ),
+                            );
+                            return Err(code::SETOPT_OPTION_SYNTAX);
+                        }
+                    }
+                }
+            }
+            None => (host, None),
+        };
+        Ok((Some(lossy(host)), port))
     }
 
     /// create_conn_helper_init_proxy()
@@ -904,6 +1057,7 @@ impl Easy {
                     let same = c.scheme == t.scheme
                         && c.host.eq_ignore_ascii_case(&t.host)
                         && c.port == t.port
+                        && c.conn_to == (t.conn_to_host.clone(), t.conn_to_port)
                         && c.proxy
                             .as_ref()
                             .map(|(h, po, tu)| (h.to_ascii_lowercase(), *po, *tu))
@@ -976,7 +1130,11 @@ impl Easy {
         self.info.conn_remote_port = t.port as i64;
         let (chost, cport, peertype) = match &t.proxy {
             Some(p) => (p.host.clone(), p.port, "proxy"),
-            None => (t.host.clone(), t.port, "host"),
+            None => (
+                t.conn_to_host.clone().unwrap_or_else(|| t.host.clone()),
+                t.conn_to_port.unwrap_or(t.port),
+                "host",
+            ),
         };
         // resolve
         let mut addrs = self.resolve_host(cb, &chost, cport, peertype, id)?;
@@ -1023,11 +1181,12 @@ impl Easy {
             proxy_ntlm: Default::default(),
             reused: false,
             tls_err: None,
+            conn_to: (t.conn_to_host.clone(), t.conn_to_port),
         };
         let disp = if t.proxy.is_some() {
             chost.clone()
         } else {
-            t.host.clone()
+            t.conn_to_host.clone().unwrap_or_else(|| t.host.clone())
         };
         // proxy tunnel
         if t.proxy.is_some() && t.tunnel {

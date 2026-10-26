@@ -295,6 +295,8 @@ pub(crate) struct Conn {
     pub reused: bool,
     /// the CURLcode and message of the last TLS read error
     pub tls_err: Option<(u32, String)>,
+    /// CURLOPT_CONNECT_TO host and port override (part of the reuse key)
+    pub conn_to: (Option<String>, Option<u16>),
 }
 
 impl Conn {
