@@ -44396,13 +44396,9 @@ impl Vm {
                                 if s.as_bytes().starts_with(b"__deferred_closure__::") {
                                     let closure_name =
                                         &s.as_bytes()[b"__deferred_closure__::".len()..];
-                                    // Find the closure in the class's const_closures
-                                    let closure_op = self.classes.get(&class_lower).and_then(|c| {
-                                        c.const_closures
-                                            .iter()
-                                            .find(|op| op.name == closure_name)
-                                            .cloned()
-                                    });
+                                    // Find the closure in the declaring class's const_closures
+                                    let closure_op =
+                                        self.find_const_closure_op(&class_lower, closure_name);
                                     if let Some(op_array) = closure_op {
                                         // Register as a user function and return the closure name
                                         let closure_val = self.instantiate_const_closure(op_array);
@@ -44420,13 +44416,11 @@ impl Vm {
                                             });
                                         }
                                         // Evaluated once: later reads see the same Closure.
-                                        if let Some(c) = self.classes.get_mut(&class_lower) {
-                                            if let Some(slot) =
-                                                c.constants.get_mut(prop_name.as_bytes())
-                                            {
-                                                *slot = closure_val.clone();
-                                            }
-                                        }
+                                        self.store_evaluated_const_marker(
+                                            prop_name.as_bytes(),
+                                            s.as_bytes(),
+                                            &closure_val,
+                                        );
                                         self.write_operand(
                                             &op.result,
                                             closure_val,
@@ -55555,35 +55549,6 @@ impl Vm {
                                 }
                             }
                         }
-                        // Resolve deferred closures in class constants
-                        {
-                            let const_keys3: Vec<Vec<u8>> =
-                                class.constants.keys().cloned().collect();
-                            for const_name in const_keys3 {
-                                if let Some(Value::String(s)) = class.constants.get(&const_name) {
-                                    if s.as_bytes().starts_with(b"__deferred_closure__::") {
-                                        let closure_name = s.as_bytes()
-                                            [b"__deferred_closure__::".len()..]
-                                            .to_vec();
-                                        // A first-class callable resolves its target
-                                        // (possibly this very class) when the constant
-                                        // is first read.
-                                        let closure_op = class
-                                            .const_closures
-                                            .iter()
-                                            .find(|op| op.name == closure_name)
-                                            .filter(|op| op.fcc_desc.is_none())
-                                            .cloned();
-                                        if let Some(op_array) = closure_op {
-                                            let name_copy = op_array.name.clone();
-                                            let _ = (name_copy, closure_name);
-                                            let c = self.instantiate_const_closure(op_array);
-                                            class.constants.insert(const_name, c);
-                                        }
-                                    }
-                                }
-                            }
-                        }
                         // Resolve deferred binary operation expressions in property defaults
                         {
                             let mut prop_binop_updates: Vec<(usize, Value)> = Vec::new();
@@ -55646,54 +55611,6 @@ impl Vm {
                                             } else {
                                                 prop.default = val;
                                             }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // Resolve deferred closures in property defaults
-                        for prop in &mut class.properties {
-                            if let Value::String(s) = &prop.default {
-                                if s.as_bytes().starts_with(b"__deferred_closure__::") {
-                                    let closure_name =
-                                        &s.as_bytes()[b"__deferred_closure__::".len()..];
-                                    // First-class callables resolve on instantiation.
-                                    let closure_op = class
-                                        .const_closures
-                                        .iter()
-                                        .find(|op| op.name == closure_name)
-                                        .filter(|op| op.fcc_desc.is_none())
-                                        .cloned();
-                                    if let Some(op_array) = closure_op {
-                                        let name = op_array.name.clone();
-                                        let _ = name;
-                                        prop.default = self.instantiate_const_closure(op_array);
-                                    }
-                                }
-                            }
-                        }
-                        // Resolve deferred closures in static properties
-                        {
-                            let static_keys: Vec<Vec<u8>> =
-                                class.static_properties.keys().cloned().collect();
-                            for prop_name in static_keys {
-                                if let Some(Value::String(s)) =
-                                    class.static_properties.get(&prop_name)
-                                {
-                                    if s.as_bytes().starts_with(b"__deferred_closure__::") {
-                                        let closure_name = s.as_bytes()
-                                            [b"__deferred_closure__::".len()..]
-                                            .to_vec();
-                                        let closure_op = class
-                                            .const_closures
-                                            .iter()
-                                            .find(|op| op.name == closure_name)
-                                            .cloned();
-                                        if let Some(op_array) = closure_op {
-                                            let name = op_array.name.clone();
-                                            let _ = (name, closure_name);
-                                            let c = self.instantiate_const_closure(op_array);
-                                            class.static_properties.insert(prop_name, c);
                                         }
                                     }
                                 }

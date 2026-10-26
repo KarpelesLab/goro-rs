@@ -601,6 +601,27 @@ impl Vm {
             }
         }
         if matches!(&deferred, Value::String(s) if s.as_bytes().starts_with(b"__deferred_")) {
+            // zend_update_class_constants() of the class holding the slot:
+            // its constants and defaults are all evaluated now.
+            if lazy_marker(&deferred).is_some() {
+                if let Some(owner) = self.classes.get_index(slot.owner).map(|(k, _)| k.clone()) {
+                    if self.update_class_constants(&owner).is_err() {
+                        return Err(SpErr::Pending);
+                    }
+                }
+            }
+        }
+        let deferred = match deferred {
+            Value::String(s) if s.as_bytes().starts_with(b"__deferred_") => {
+                match self.sp_cell(&slot, name) {
+                    None => return Ok(Value::Null),
+                    Some(Value::Reference(r)) => r.borrow().clone(),
+                    Some(v) => v.clone(),
+                }
+            }
+            v => v,
+        };
+        if matches!(&deferred, Value::String(s) if s.as_bytes().starts_with(b"__deferred_")) {
             // A thunk runs in the scope of the class holding the slot (a
             // trait's default: the class using it).
             let resolved = match (
@@ -1196,7 +1217,7 @@ impl Vm {
                 .constants
                 .iter()
                 .filter_map(|(k, v)| {
-                    thunk_marker_name(v).map(|n| {
+                    lazy_marker(v).map(|n| {
                         let decl = c
                             .constants_meta
                             .get(k)
@@ -1214,18 +1235,28 @@ impl Vm {
                 .classes
                 .get(class_lower)
                 .and_then(|c| c.constants.get(&cname))
-                .is_some_and(|v| thunk_marker_name(v).is_some());
+                .is_some_and(|v| lazy_marker(v).is_some());
             if !still {
                 continue;
             }
-            let v = self.eval_const_thunk(&thunk, Some(&decl), "")?;
+            // An inherited constant the declaring class evaluated already.
+            let done = self
+                .classes
+                .get(&decl)
+                .and_then(|c| c.constants.get(&cname))
+                .filter(|v| lazy_marker(v).is_none())
+                .cloned();
+            let v = match done {
+                Some(v) if decl.as_slice() != class_lower => v,
+                _ => self.eval_lazy_marker(&thunk, Some(&decl))?,
+            };
             for k in [&decl[..], class_lower] {
                 if let Some(slot) = self
                     .classes
                     .get_mut(k)
                     .and_then(|c| c.constants.get_mut(&cname))
                 {
-                    if thunk_marker_name(slot) == Some(&thunk[..]) {
+                    if lazy_marker(slot) == Some(&thunk[..]) {
                         *slot = v.clone();
                     }
                 }
@@ -1236,8 +1267,9 @@ impl Vm {
                 .properties
                 .iter()
                 .enumerate()
+                .filter(|(_, p)| !p.is_static || thunk_marker_name(&p.default).is_some())
                 .filter_map(|(i, p)| {
-                    thunk_marker_name(&p.default).map(|n| {
+                    lazy_marker(&p.default).map(|n| {
                         (
                             i,
                             n.to_vec(),
@@ -1250,7 +1282,7 @@ impl Vm {
             None => return Ok(()),
         };
         for (i, thunk, pname, decl) in pending {
-            let mut v = self.eval_const_thunk(&thunk, Some(&decl), "")?;
+            let mut v = self.eval_lazy_marker(&thunk, Some(&decl))?;
             self.verify_default_type(class_lower, i, &mut v)?;
             if let Some(p) = self
                 .classes
@@ -1262,7 +1294,7 @@ impl Vm {
             if decl.as_slice() != class_lower {
                 if let Some(c) = self.classes.get_mut(&decl) {
                     for p in c.properties.iter_mut() {
-                        if p.name == pname && thunk_marker_name(&p.default) == Some(&thunk[..]) {
+                        if p.name == pname && lazy_marker(&p.default) == Some(&thunk[..]) {
                             p.default = v.clone();
                         }
                     }
@@ -1326,18 +1358,26 @@ impl Vm {
             .map(|c| {
                 c.static_properties
                     .iter()
-                    .filter_map(|(k, v)| thunk_marker_name(v).map(|n| (k.clone(), n.to_vec())))
+                    .filter_map(|(k, v)| lazy_marker(v).map(|n| (k.clone(), n.to_vec())))
                     .collect()
             })
             .unwrap_or_default();
         for (pname, thunk) in statics {
-            let v = self.eval_const_thunk(&thunk, Some(class_lower), "")?;
-            if let Some(slot) = self
-                .classes
-                .get_mut(class_lower)
-                .and_then(|c| c.static_properties.get_mut(&pname))
-            {
-                if thunk_marker_name(slot) == Some(&thunk[..]) {
+            let v = self.eval_lazy_marker(&thunk, Some(class_lower))?;
+            let Some(c) = self.classes.get_mut(class_lower) else {
+                continue;
+            };
+            // (a closure default: the declaration's entry gets the same one)
+            if thunk.starts_with(b"__deferred_closure__::") {
+                for p in c.properties.iter_mut() {
+                    if p.is_static && p.name == pname && lazy_marker(&p.default) == Some(&thunk[..])
+                    {
+                        p.default = v.clone();
+                    }
+                }
+            }
+            if let Some(slot) = c.static_properties.get_mut(&pname) {
+                if lazy_marker(slot) == Some(&thunk[..]) {
                     *slot = v;
                 }
             }
@@ -1357,14 +1397,90 @@ impl Vm {
         let Some(c) = self.classes.get(class_lower) else {
             return false;
         };
-        c.constants.values().any(|v| thunk_marker_name(v).is_some())
+        c.constants.values().any(|v| lazy_marker(v).is_some())
             || c.properties.iter().any(|p| {
-                thunk_marker_name(&p.default).is_some()
+                lazy_marker(&p.default).is_some()
                     || matches!(&p.default, Value::String(s) if s.as_bytes().starts_with(GC))
             })
             || c.static_properties
                 .values()
-                .any(|v| thunk_marker_name(v).is_some())
+                .any(|v| lazy_marker(v).is_some())
+    }
+}
+
+/// An unevaluated constant expression of a class table: a thunk or a
+/// closure marker (the whole marker).
+pub(crate) fn lazy_marker(v: &Value) -> Option<&[u8]> {
+    match v {
+        Value::String(s)
+            if s.as_bytes().starts_with(b"__deferred_thunk__::")
+                || s.as_bytes().starts_with(b"__deferred_closure__::") =>
+        {
+            Some(s.as_bytes())
+        }
+        _ => None,
+    }
+}
+
+impl Vm {
+    /// Evaluate a lazy_marker(): run the thunk, or create the closure (a
+    /// closure of a constant expression is created when the class's
+    /// constants are updated, like any other constant expression).
+    #[inline(never)]
+    fn eval_lazy_marker(&mut self, marker: &[u8], owner: Option<&[u8]>) -> Result<Value, ()> {
+        if let Some(name) = marker.strip_prefix(b"__deferred_thunk__::") {
+            return self.eval_const_thunk(name, owner, "");
+        }
+        let name = &marker[b"__deferred_closure__::".len()..];
+        let op = owner
+            .and_then(|o| self.classes.get(o))
+            .and_then(|c| c.const_closures.iter().find(|op| op.name == name).cloned())
+            .or_else(|| {
+                self.classes.values().find_map(|c| {
+                    c.const_closures.iter().find(|op| op.name == name).cloned()
+                })
+            });
+        let Some(op) = op else {
+            return Ok(Value::Null);
+        };
+        let v = self.instantiate_const_closure(op);
+        if self.current_exception.is_some() {
+            return Err(());
+        }
+        Ok(v)
+    }
+}
+
+impl Vm {
+    /// The op array of constant-expression closure `name`, compiled with
+    /// class `class_lower` or (for an inherited constant) another class.
+    #[inline(never)]
+    pub(crate) fn find_const_closure_op(
+        &self,
+        class_lower: &[u8],
+        name: &[u8],
+    ) -> Option<crate::opcode::OpArray> {
+        let find = |c: &crate::object::ClassEntry| {
+            c.const_closures.iter().find(|op| op.name == name).cloned()
+        };
+        self.classes
+            .get(class_lower)
+            .and_then(find)
+            .or_else(|| self.classes.values().find_map(find))
+    }
+
+    /// A class constant evaluated on first access is stored back in every
+    /// class table still holding its marker (the declaring class and the
+    /// classes inheriting it share one value).
+    #[inline(never)]
+    pub(crate) fn store_evaluated_const_marker(&mut self, cname: &[u8], marker: &[u8], v: &Value) {
+        for c in self.classes.values_mut() {
+            if let Some(slot) = c.constants.get_mut(cname) {
+                if matches!(slot, Value::String(s) if s.as_bytes() == marker) {
+                    *slot = v.clone();
+                }
+            }
+        }
     }
 }
 
