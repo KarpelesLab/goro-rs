@@ -264,6 +264,8 @@ std::thread_local! {
     /// (the key of the last deferral and a count of deferrals, so a parent
     /// whose descendants deferred during its own release follows them)
     static LAST_DEFER: std::cell::Cell<(usize, u64)> = const { std::cell::Cell::new((0, 0)) };
+    /// Entries in DEFERRED_OBJECT_IDS (a drop skips the list when none).
+    static DEFERRED_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A destructible child `v` of an object being freed that only the
@@ -756,6 +758,7 @@ impl Drop for PhpObject {
             }
             if let Some(k) = defer_on {
                 let _ = DEFERRED_OBJECT_IDS.try_with(|d| d.borrow_mut().push((k, self.object_id)));
+                let _ = DEFERRED_COUNT.try_with(|c| c.set(c.get() + 1));
                 let _ = LAST_DEFER.try_with(|c| c.set((k, c.get().1.wrapping_add(1))));
             } else {
                 // Use try_with so we don't panic during thread-local
@@ -765,6 +768,9 @@ impl Drop for PhpObject {
             }
         }
         // Handles deferred on this object follow its own.
+        if DEFERRED_COUNT.try_with(|c| c.get()).unwrap_or(0) == 0 {
+            return;
+        }
         let me = self as *const PhpObject as usize;
         let _ = DEFERRED_OBJECT_IDS.try_with(|d| {
             let mut d = d.borrow_mut();
@@ -775,6 +781,7 @@ impl Drop for PhpObject {
             while i < d.len() {
                 if d[i].0 == me {
                     let (_, id) = d.remove(i);
+                    let _ = DEFERRED_COUNT.try_with(|c| c.set(c.get().saturating_sub(1)));
                     let _ = FREED_OBJECT_IDS.try_with(|ids| ids.borrow_mut().push(id));
                 } else {
                     i += 1;
