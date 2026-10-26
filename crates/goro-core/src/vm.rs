@@ -28741,9 +28741,12 @@ impl Vm {
                                                     && self.internal_method_of(&cl, &ml).is_none()
                                             }
                                             // (an internal class: its stub's methods)
+                                            // (an incomplete object's get_method()
+                                            // throws its own Error: see below)
                                             None => {
                                                 cl == b"stdclass"
-                                                    || !(cl == b"closure" && ml == b"__invoke")
+                                                    || cl != b"__php_incomplete_class"
+                                                        && !(cl == b"closure" && ml == b"__invoke")
                                                         && crate::stubs::find_class_lower(&cl)
                                                             .is_some()
                                                         && self
