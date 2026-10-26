@@ -20,6 +20,8 @@
 //! the lean call itself: the caller's DO_FCALL dispatches it.
 
 use super::{BuiltinFn, ForeachState, OpArray, PendingCall, Vm, VmError, push_lossy};
+use std::rc::Rc;
+
 use crate::fastpath::{store_tmp, tmp_writable};
 use crate::opcode::OperandType;
 use crate::value::Value;
@@ -320,6 +322,186 @@ impl Vm {
         }
         if mask & 4 != 0 {
             // (the result's last user is the call: released at once)
+            let heap = matches!(result, Value::Object(_) | Value::Array(_));
+            drop(result);
+            if heap && self.has_release_work() {
+                self.current_line = op.line;
+                self.run_pending_destructors();
+                if self.current_exception.is_some() {
+                    let message = "Uncaught exception from destructor".to_string();
+                    return Some(self.fast_call_fail(op_array, ip, message, args));
+                }
+            }
+        } else {
+            store_tmp(&op.result, result, tmps);
+        }
+        self.recycle_arg_vec(args);
+        Some(true)
+    }
+
+    /// Whether the top pending call may be a direct call_user_func() or
+    /// call_user_func_array() fast_ucf_dofcall() makes (it checks the rest).
+    #[inline]
+    pub(crate) fn ucf_candidate(&self) -> bool {
+        self.pending_calls.last().is_some_and(|c| {
+            let t = &c.target;
+            t.has_builtin
+                && t.builtin.is_none()
+                && t.user.is_none()
+                && c.named_args.is_empty()
+                && c.name.len() >= 14
+        })
+    }
+
+    /// The DO_FCALL at `ip` of `op_array` (run by run_fast_ops(): see
+    /// ucf_candidate), of a direct call_user_func() or
+    /// call_user_func_array() (php-src compiles them to INIT_USER_CALL: no
+    /// frame of their own) whose callback fast_user_callback() calls,
+    /// made as the general handler makes it. Some(true): done, its result
+    /// stored. Some(false): the call failed (see fast_call_failed): the run
+    /// stops there. None: nothing was done. In the callee of a lean call,
+    /// with the frames it would have (see lean_builtin_dofcall).
+    #[inline(never)]
+    pub(crate) fn fast_ucf_dofcall(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        tmps: &mut [Value],
+        internal_code: bool,
+        free_mask: &[u8],
+    ) -> Option<bool> {
+        let op = &op_array.ops[ip];
+        // (an unused result: the callback's #[\NoDiscard] is checked, see
+        // the general handler)
+        if matches!(op.op1, OperandType::Const(_))
+            || self.observer.is_some()
+            || !self.builtin_dofcall_ok(op_array, ip, tmps, free_mask)
+        {
+            return None;
+        }
+        let top = self.pending_calls.len().checked_sub(1)?;
+        let call = &self.pending_calls[top];
+        if !crate::fastpath::is_direct_ucf(call) || self.closure_pending_calls.last() == Some(&top)
+        {
+            return None;
+        }
+        let array = call.name.len() == 20;
+        match (array, call.args.len(), call.args.get(1)) {
+            (false, 1.., _) => {}
+            (true, 2, Some(Value::Array(a))) => {
+                // (named arguments: the general path)
+                let a = a.try_borrow().ok()?;
+                if a.iter()
+                    .any(|(k, _)| matches!(k, crate::array::ArrayKey::String(_)))
+                {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+        if self.lean_depth == 0 {
+            return self.fast_ucf_call(op_array, ip, tmps, internal_code, free_mask, array);
+        }
+        let saved = self.enter_lean_frames(op_array)?;
+        let r = self.fast_ucf_call(op_array, ip, tmps, internal_code, free_mask, array);
+        self.leave_lean_frames(saved);
+        r
+    }
+
+    /// fast_ucf_dofcall(): the call (`array`: call_user_func_array()'s).
+    fn fast_ucf_call(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        tmps: &mut [Value],
+        internal_code: bool,
+        free_mask: &[u8],
+        array: bool,
+    ) -> Option<bool> {
+        let op = &op_array.ops[ip];
+        let mask = free_mask.get(ip).copied().unwrap_or(0);
+        let top = self.pending_calls.len() - 1;
+        let mut args = std::mem::take(&mut self.pending_calls[top].args);
+        // The callback's arguments.
+        let mut cargs = self.take_values(0);
+        if array {
+            if let Some(Value::Array(a)) = args.get(1) {
+                cargs.extend(a.borrow().values().cloned());
+            }
+        } else {
+            cargs.extend_from_slice(&args[1..]);
+        }
+        let saved_line = self.current_line;
+        if !internal_code {
+            self.current_line = op.line;
+        }
+        // (what the general handler sets up for the callee's frame)
+        self.ucf_call_line = Some(op.line);
+        self.ucf_strict = op_array.strict_types;
+        let closure = match &args[0] {
+            Value::Object(o) if o.borrow().closure.is_some() => Some(Rc::downgrade(o)),
+            _ => None,
+        };
+        self.callback_closure = closure.clone();
+        self.caller_strict_types = op_array.strict_types;
+        self.reset_named_skipped();
+        let mark = self.gc_pin(&args);
+        let r = self.fast_user_callback(&args[0], &cargs);
+        self.gc_unpin(mark);
+        self.callback_closure = None;
+        super::clear_values(&mut cargs);
+        self.recycle_values(cargs);
+        let Some(r) = r else {
+            // (nothing was done: the general handler makes the call)
+            self.ucf_call_line = None;
+            self.ucf_strict = false;
+            self.current_line = saved_line;
+            self.pending_calls[top].args = args;
+            return None;
+        };
+        self.ucf_call_line = None;
+        self.ucf_strict = false;
+        // (the call is done with: its name is all that is left of it)
+        self.pending_calls.truncate(top);
+        self.note_call_result(op, b"call_user_func");
+        // zend_call_function() of a closure releases it (ZEND_CALL_CLOSURE).
+        if let Some(o) = closure.and_then(|w| w.upgrade()) {
+            crate::gc::possible_root_object(&o);
+        }
+        let result = match r {
+            Ok(result) => {
+                if self.current_exception.is_some() {
+                    let message = self.uncaught_exception_message();
+                    return Some(self.fast_call_fail(op_array, ip, message, args));
+                }
+                result
+            }
+            Err(e) => {
+                if self.current_exception.is_some() && self.has_release_work() {
+                    args.clear();
+                    self.current_line = op.line;
+                    self.run_pending_destructors();
+                }
+                return Some(self.fast_call_fail(op_array, ip, e.message, args));
+            }
+        };
+        // The arguments are released when the call returns.
+        if self.has_release_work() {
+            args.clear();
+            self.current_line = op.line;
+            self.run_pending_destructors();
+            if self.current_exception.is_some() {
+                drop(result);
+                let message = "Uncaught exception from destructor".to_string();
+                return Some(self.fast_call_fail(op_array, ip, message, args));
+            }
+        }
+        match &result {
+            Value::Object(o) => crate::gc::track_object(o),
+            Value::Generator(g) => crate::gc::track_generator(g),
+            _ => {}
+        }
+        if mask & 4 != 0 {
             let heap = matches!(result, Value::Object(_) | Value::Array(_));
             drop(result);
             if heap && self.has_release_work() {

@@ -2299,6 +2299,8 @@ impl crate::vm::Vm {
                 OpCode::SendVal => {
                     let snapshot = send_snapshot(op_array, ip, op, cvs);
                     if self.send_val_fast(op, cvs, tmps, literals, snapshot, false)
+                        || (matches!(op.op1, OperandType::Tmp(_))
+                            && self.send_val_ucf(op, cvs, tmps, literals, snapshot))
                         || (bound.is_none() && self.send_ref_cv_fast(op_array, op, cvs))
                     {
                         Fast::Done
@@ -2830,6 +2832,28 @@ impl crate::vm::Vm {
                     {
                         // The callee of a lean call (see builtincall.rs).
                         match self.lean_builtin_dofcall(op_array, ip, tmps, free_mask.get()) {
+                            Some(true) if self.has_release_work() => {
+                                last = ip;
+                                break 'run ip + 1;
+                            }
+                            Some(true) => Fast::Done,
+                            Some(false) => break 'run ip,
+                            None => return ip,
+                        }
+                    } else if no_release
+                        && (self.lean_depth >= 1 || bound.is_none())
+                        && self.lean_resume.is_empty()
+                        && self.ucf_candidate()
+                    {
+                        // A direct call_user_func[_array]() (see
+                        // builtincall.rs).
+                        match self.fast_ucf_dofcall(
+                            op_array,
+                            ip,
+                            tmps,
+                            internal_code,
+                            free_mask.get(),
+                        ) {
                             Some(true) if self.has_release_work() => {
                                 last = ip;
                                 break 'run ip + 1;
@@ -5277,6 +5301,25 @@ fn native_plain_base(
         && handlers.get(lower).is_none_or(|h| {
             h.prop_read.is_none() && h.prop_write.is_none() && h.prop_added.is_none()
         })
+}
+
+impl crate::vm::Vm {
+    /// SEND_VAL of a temporary send_val_fast() did not send: one of a
+    /// direct call_user_func[_array]() (see is_direct_ucf), whose arguments
+    /// are all by value (a call's array result goes as it is).
+    #[cold]
+    #[inline(never)]
+    fn send_val_ucf(
+        &mut self,
+        op: &Op,
+        cvs: &[Value],
+        tmps: &mut [Value],
+        literals: &[Value],
+        snapshot: bool,
+    ) -> bool {
+        self.pending_calls.last().is_some_and(is_direct_ucf)
+            && self.send_val_fast(op, cvs, tmps, literals, snapshot, true)
+    }
 }
 
 /// Whether `c` is a call of call_user_func() or call_user_func_array() by
