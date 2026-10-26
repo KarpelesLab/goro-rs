@@ -15798,6 +15798,23 @@ impl Compiler {
                 if let ExprKind::Identifier(n) = &name.kind {
                     let func_lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
                     let unqualified = func_lower.strip_prefix(b"\\").unwrap_or(&func_lower);
+                    // (php-src's special compilation of a call it resolves
+                    // at compile time: global code or a qualified name)
+                    if (self.current_namespace.is_empty() || func_lower.starts_with(b"\\"))
+                        && matches!(unqualified, b"defined" | b"in_array")
+                    {
+                        if let Some(args) = ct_special_call_args(unqualified, args) {
+                            self.is_discarding_result = discard_result;
+                            let call = Expr {
+                                kind: ExprKind::FunctionCall {
+                                    name: name.clone(),
+                                    args,
+                                },
+                                span: expr.span,
+                            };
+                            return self.compile_expr(&call);
+                        }
+                    }
                     if unqualified == b"get_defined_vars" && args.is_empty() {
                         // Reads the calling scope's variables.
                         let tmp = self.op_array.alloc_temp();
@@ -24630,4 +24647,70 @@ fn extract_call_args(args: &[goro_parser::ast::Argument]) -> Option<Vec<Option<&
         return None;
     }
     Some(slots[..=last].to_vec())
+}
+
+/// The arguments of a defined() / in_array() call php-src compiles to an
+/// opcode with the literal argument it cannot pass wrongly typed
+/// (zend_compile_func_defined(): the name literal converted to a string;
+/// zend_compile_func_in_array(): $strict as the bool of its literal, for a
+/// constant haystack it can index), as the equivalent call; None when it
+/// is compiled as a plain call (or the arguments are that already).
+#[inline(never)]
+fn ct_special_call_args(
+    lname: &[u8],
+    args: &[goro_parser::ast::Argument],
+) -> Option<Vec<goro_parser::ast::Argument>> {
+    if args.iter().any(|a| a.name.is_some() || a.unpack) {
+        return None;
+    }
+    let literal = |e: &Expr| -> Option<Value> {
+        Some(match &e.kind {
+            ExprKind::Int(n) => Value::Long(*n),
+            ExprKind::Float(f) => Value::Double(*f),
+            ExprKind::String(b) => Value::String(PhpString::from_vec(b.clone())),
+            _ => return None,
+        })
+    };
+    let mut out = args.to_vec();
+    match lname {
+        b"defined" if args.len() == 1 => {
+            let v = literal(&args[0].value)?;
+            if matches!(v, Value::String(_)) {
+                return None;
+            }
+            out[0].value.kind = ExprKind::String(v.to_php_string().as_bytes().to_vec());
+            Some(out)
+        }
+        b"in_array" if args.len() == 3 => {
+            let strict = match &args[2].value.kind {
+                ExprKind::True | ExprKind::False => return None,
+                ExprKind::Null => false,
+                _ => literal(&args[2].value)?.is_truthy(),
+            };
+            let ExprKind::Array(elems) = &args[1].value.kind else {
+                return None;
+            };
+            for el in elems {
+                if el.unpack || el.key.as_ref().is_some_and(|k| literal(k).is_none()) {
+                    return None;
+                }
+                // (strict: string and int elements; else non-numeric strings)
+                let ok = match &el.value.kind {
+                    ExprKind::Int(_) => strict,
+                    ExprKind::String(b) => strict || crate::value::parse_numeric_str(b, false).is_none(),
+                    _ => false,
+                };
+                if !ok {
+                    return None;
+                }
+            }
+            out[2].value.kind = if strict {
+                ExprKind::True
+            } else {
+                ExprKind::False
+            };
+            Some(out)
+        }
+        _ => None,
+    }
 }
