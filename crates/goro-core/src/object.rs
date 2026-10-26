@@ -1012,7 +1012,13 @@ impl PhpObject {
     }
 
     pub fn has_property(&self, name: &[u8]) -> bool {
-        self.properties.iter().any(|(k, _)| k == name)
+        // (an internal state marker: only in a table that has one)
+        if name.starts_with(b"__") && !self.properties.has_internal() {
+            return false;
+        }
+        self.properties
+            .iter()
+            .any(|(k, _)| crate::string::bytes_eq(k, name))
     }
 
     pub fn remove_property(&mut self, name: &[u8]) {

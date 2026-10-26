@@ -10,6 +10,34 @@ fn zstr_size(len: usize) -> usize {
     crate::value::zend_mm_size(len + 25)
 }
 
+/// `a == b` of short byte strings without a call of memcmp: a few word
+/// loads (a name, an array key or a property name is usually short).
+#[inline]
+pub fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    let n = a.len();
+    if n != b.len() {
+        return false;
+    }
+    let w = |s: &[u8], at: usize| u64::from_ne_bytes(s[at..at + 8].try_into().unwrap());
+    if (8..=16).contains(&n) {
+        return w(a, 0) == w(b, 0) && w(a, n - 8) == w(b, n - 8);
+    }
+    if (17..=32).contains(&n) {
+        return w(a, 0) == w(b, 0)
+            && w(a, 8) == w(b, 8)
+            && w(a, n - 16) == w(b, n - 16)
+            && w(a, n - 8) == w(b, n - 8);
+    }
+    if (4..8).contains(&n) {
+        let w = |s: &[u8], at: usize| u32::from_ne_bytes(s[at..at + 4].try_into().unwrap());
+        return w(a, 0) == w(b, 0) && w(a, n - 4) == w(b, n - 4);
+    }
+    if n < 4 {
+        return n == 0 || (a[0] == b[0] && a[n / 2] == b[n / 2] && a[n - 1] == b[n - 1]);
+    }
+    a == b
+}
+
 /// PHP binary-safe string with cached hash
 #[derive(Clone)]
 pub struct PhpString {

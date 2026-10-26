@@ -1112,22 +1112,7 @@ fn prop_fetch_w(
 /// through a bcmp() call).
 #[inline(always)]
 fn key_eq(k: &[u8], name: &[u8]) -> bool {
-    let n = k.len();
-    if n != name.len() {
-        return false;
-    }
-    if (8..=16).contains(&n) {
-        let w = |s: &[u8], at: usize| u64::from_ne_bytes(s[at..at + 8].try_into().unwrap());
-        return w(k, 0) == w(name, 0) && w(k, n - 8) == w(name, n - 8);
-    }
-    if (4..8).contains(&n) {
-        let w = |s: &[u8], at: usize| u32::from_ne_bytes(s[at..at + 4].try_into().unwrap());
-        return w(k, 0) == w(name, 0) && w(k, n - 4) == w(name, n - 4);
-    }
-    if n < 4 {
-        return n == 0 || (k[0] == name[0] && k[n / 2] == name[n / 2] && k[n - 1] == name[n - 1]);
-    }
-    k == name
+    crate::string::bytes_eq(k, name)
 }
 
 /// The isset() check of a value (`??`, isset($v)): whether it is not null.

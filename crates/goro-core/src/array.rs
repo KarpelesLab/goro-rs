@@ -838,7 +838,7 @@ impl PhpArray {
                 }
                 let pos = (slot - 1) as usize;
                 if let ArrayKey::String(s) = &entries[pos].0 {
-                    if s.as_bytes() == key {
+                    if crate::string::bytes_eq(s.as_bytes(), key) {
                         return Some(pos);
                     }
                 }
@@ -848,7 +848,7 @@ impl PhpArray {
         let head = self.head as usize;
         self.live()
             .iter()
-            .position(|(k, _)| matches!(k, ArrayKey::String(s) if s.as_bytes() == key))
+            .position(|(k, _)| matches!(k, ArrayKey::String(s) if crate::string::bytes_eq(s.as_bytes(), key)))
             .map(|p| p + head)
     }
 
@@ -871,7 +871,7 @@ impl PhpArray {
                 }
                 let pos = (slot - 1) as usize;
                 if let ArrayKey::String(s) = &entries[pos].0 {
-                    if s.ptr_eq(key) || s.as_bytes() == key.as_bytes() {
+                    if s.ptr_eq(key) || crate::string::bytes_eq(s.as_bytes(), key.as_bytes()) {
                         return Some(pos);
                     }
                 }
@@ -883,7 +883,7 @@ impl PhpArray {
         self.live()
             .iter()
             .position(
-                |(k, _)| matches!(k, ArrayKey::String(s) if s.ptr_eq(key) || s.as_bytes() == kb),
+                |(k, _)| matches!(k, ArrayKey::String(s) if s.ptr_eq(key) || crate::string::bytes_eq(s.as_bytes(), kb)),
             )
             .map(|p| p + head)
     }

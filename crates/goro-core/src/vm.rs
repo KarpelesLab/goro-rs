@@ -22008,7 +22008,7 @@ impl Vm {
         else {
             return false;
         };
-        if c.fn_gen != fn_gen || c.name != name {
+        if c.fn_gen != fn_gen || !crate::string::bytes_eq(&c.name, name) {
             return false;
         }
         let user = match &c.user {
@@ -22040,7 +22040,7 @@ impl Vm {
     ) -> Option<(BuiltinFn, u8)> {
         let sites = op_array.sites().borrow();
         let c = sites.as_ref()?.call_targets.get(&(ip as u32))?;
-        if c.special == 0 || c.fn_gen != fn_gen || c.name != name {
+        if c.special == 0 || c.fn_gen != fn_gen || !crate::string::bytes_eq(&c.name, name) {
             return None;
         }
         Some((c.builtin?.0, c.special))

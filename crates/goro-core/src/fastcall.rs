@@ -434,8 +434,14 @@ impl Vm {
             match sites
                 .as_ref()
                 .and_then(|s| s.method_sites.get(&(ip as u32)))
-                .filter(|s| s.class_name == ob.class_name && s.scope.as_deref() == scope)
-            {
+                .filter(|s| {
+                    crate::string::bytes_eq(&s.class_name, &ob.class_name)
+                        && match (s.scope.as_deref(), scope) {
+                            (None, None) => true,
+                            (Some(a), Some(b)) => crate::string::bytes_eq(a, b),
+                            _ => false,
+                        }
+                }) {
                 Some(s) if s.fallback => return false,
                 Some(s) => match &s.method {
                     Some(w) => w.upgrade().map(|m| {
