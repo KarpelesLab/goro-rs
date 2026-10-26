@@ -1488,6 +1488,21 @@ fn m_lookup_namespace_uri(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
 fn m_get_node_path(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     args(a).count(vm, 0, 0)?;
     let n = this_node(vm, o)?;
+    // (xmlGetNodePath() has no step for a document fragment: NULL for it
+    // and what it holds)
+    let in_frag = tree::with(|t| {
+        let mut cur = Some(n);
+        while let Some(c) = cur {
+            if t.nodes[c].t == tree::NType::DocumentFrag {
+                return true;
+            }
+            cur = t.nodes[c].parent;
+        }
+        false
+    });
+    if in_frag {
+        return Ok(Value::Null);
+    }
     Ok(s(&tree::with(|t| t.node_path(n))))
 }
 
