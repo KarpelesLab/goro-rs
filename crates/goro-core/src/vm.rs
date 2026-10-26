@@ -51975,13 +51975,16 @@ impl Vm {
                             .unwrap_or(0),
                         _ => 0,
                     };
-                    let mut class_opt = if class_idx_raw < 0 {
-                        op_array
-                            .local_classes
-                            .get((-class_idx_raw - 1) as usize)
-                            .cloned()
+                    // (the compiled declaration is copied once it is
+                    // declared: not for a hoisted class's source position
+                    // when it was early bound, nor for an early binding
+                    // attempt that is deferred)
+                    let pending: Rc<Vec<ClassEntry>>;
+                    let mut src: Option<&ClassEntry> = if class_idx_raw < 0 {
+                        op_array.local_classes.get((-class_idx_raw - 1) as usize)
                     } else {
-                        self.pending_classes.get(class_idx_raw as usize).cloned()
+                        pending = self.pending_classes.clone();
+                        pending.get(class_idx_raw as usize)
                     };
                     if decl_flag == 2 {
                         let lname: Vec<u8> = name_val
@@ -51991,11 +51994,11 @@ impl Vm {
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
                         if !variance::take_deferred(&lname) {
-                            class_opt = None;
+                            src = None;
                         }
                     }
                     let is_early_attempt = decl_flag == 1 || decl_flag == 3;
-                    if let Some(class) = &class_opt {
+                    if let Some(class) = src {
                         if self.defer_anon_class(class) {
                             return Ok(Flow::Next);
                         }
@@ -52021,7 +52024,7 @@ impl Vm {
                             return Ok(Flow::Continue);
                         }
                     }
-                    if let Some(mut class) = class_opt {
+                    if let Some(mut class) = src.cloned() {
                         // The class entry owns its array defaults (the
                         // compiled declaration's copy is not a holder).
                         Self::own_array_defaults(&mut class);
