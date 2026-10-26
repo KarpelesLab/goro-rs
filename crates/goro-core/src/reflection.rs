@@ -5893,6 +5893,25 @@ pub fn reflection_method_method(
     // underlying user-defined function by rewriting the class/method keys
     // to look up in vm.user_functions.
     if let Some(ref fn_lower) = closure_fn {
+        // (a closure's method of its scope class, not Closure::__invoke)
+        let scoped = !class_lower.eq_ignore_ascii_case(b"closure");
+        if scoped {
+            match method {
+                b"getdoccomment" => {
+                    return Some(
+                        rfunc(vm, fn_lower)
+                            .and_then(|op| op.doc_comment.as_ref())
+                            .map(|d| Value::String(PhpString::from_bytes(d)))
+                            .unwrap_or(Value::False),
+                    );
+                }
+                b"isstatic" => {
+                    let st = rfunc(vm, fn_lower).is_some_and(|op| op.is_static_closure);
+                    return Some(if st { Value::True } else { Value::False });
+                }
+                _ => {}
+            }
+        }
         let closure = obj.borrow().get_property(b"__reflection_closure_obj");
         if matches!(closure, Value::Object(_)) {
             match method {
@@ -5950,7 +5969,7 @@ pub fn reflection_method_method(
                     };
                     // Closure::__invoke is an internal trampoline with
                     // userland arginfo: defaults are not retrievable.
-                    if let Value::Array(a) = &params {
+                    if let (false, Value::Array(a)) = (scoped, &params) {
                         for (_, p) in a.borrow().iter() {
                             if let Value::Object(po) = p {
                                 po.borrow_mut().set_property(
