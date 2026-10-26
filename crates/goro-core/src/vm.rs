@@ -52568,6 +52568,10 @@ impl Vm {
                             let gen_clone = gen_rc.clone();
                             let mut pairs: Vec<(ArrayKey, Value)> = Vec::new();
                             let mut spread_err: Option<String> = None;
+                            // (resumed from the spread's line)
+                            let prev_caller = self
+                                .generator_caller
+                                .replace((self.current_file.clone(), op.line));
                             // zend_generator_get_iterator() + rewind
                             let _iter_handle = self.foreach_iterator_handle();
                             if !self.generator_traverse_start(&source) {
@@ -52599,11 +52603,10 @@ impl Vm {
                                     let (arr_key_opt, key_err) = match &key_val {
                                         Value::Long(n) => (Some(ArrayKey::Int(*n)), None),
                                         Value::String(s) => {
-                                            let s_str = s.to_string_lossy();
-                                            let k = if let Ok(n) = s_str.parse::<i64>() {
-                                                ArrayKey::Int(n)
-                                            } else {
-                                                ArrayKey::String(s.clone())
+                                            // (a canonical integer string is an int key)
+                                            let k = match canonical_int_key(s.as_bytes()) {
+                                                Some(n) => ArrayKey::Int(n),
+                                                None => ArrayKey::String(s.clone()),
                                             };
                                             (Some(k), None)
                                         }
@@ -52638,6 +52641,7 @@ impl Vm {
                                     }
                                 }
                             }
+                            self.generator_caller = prev_caller;
                             // (raised while the generator's iterator is alive)
                             let spread_err = match spread_err {
                                 Some(e) if !e.is_empty() => {
