@@ -349,7 +349,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_extension(NAME);
     register_classes(vm);
     let mut names: Vec<Vec<u8>> = Vec::new();
-    password::minit(vm, &mut names);
+    password::minit(vm);
     for (name, v) in funcs::constants() {
         vm.constants.insert(name.as_bytes().to_vec(), v);
         names.push(name.as_bytes().to_vec());

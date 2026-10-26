@@ -1,5 +1,9 @@
-//! sodium_pwhash.c: the argon2i / argon2id password_hash() algorithms
-//! ext/sodium registers with ext/standard, and their constants.
+//! The argon2i / argon2id password_hash() algorithms and their constants.
+//!
+//! The reference PHP build links libargon2 (HAVE_ARGON2LIB), so they are
+//! ext/standard's (password.c, PASSWORD_ARGON2_PROVIDER "standard", any
+//! number of threads, a 16-character salt) and ext/sodium's own
+//! (sodium_pwhash.c) is not registered. The argon2 core is shared.
 
 use goro_core::array::{ArrayKey, PhpArray};
 use goro_core::string::PhpString;
@@ -7,7 +11,7 @@ use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
 use goro_ext_standard::crypt::{
     PasswordAlgoHandler, PasswordOptions, option_long, password_algo_register,
-    password_algo_registered,
+    password_algo_registered, password_make_salt,
 };
 
 use crate::pwhash;
@@ -24,61 +28,51 @@ fn value_error(vm: &mut Vm, msg: &str) {
     vm.current_exception = Some(e);
 }
 
-/// get_options(): (memlimit in bytes, opslimit), or None after the
-/// ValueError.
-fn get_options(vm: &mut Vm, options: PasswordOptions) -> Option<(u64, u64)> {
-    let mut opslimit = OPSLIMIT as u64;
-    let mut memlimit = (MEMLIMIT as u64) << 10;
-    if options.is_none() {
-        return Some((memlimit, opslimit));
-    }
-    if let Some(m) = option_long(vm, options, b"memory_cost") {
-        if m < 0
-            || (m as u64) < pwhash::MEMLIMIT_MIN >> 10
-            || (m as u64) > pwhash::MEMLIMIT_MAX >> 10
-        {
-            value_error(vm, "Memory cost is outside of allowed memory range");
-            return None;
-        }
-        memlimit = (m as u64) << 10;
-    }
-    if let Some(t) = option_long(vm, options, b"time_cost") {
-        opslimit = t as u64;
-        if opslimit < pwhash::OPSLIMIT_MIN as u64 || opslimit > pwhash::OPSLIMIT_MAX {
-            value_error(vm, "Time cost is outside of allowed time range");
-            return None;
-        }
-    }
-    if let Some(p) = option_long(vm, options, b"threads") {
-        if p != 1 {
-            value_error(
-                vm,
-                "A thread value other than 1 is not supported by this implementation",
-            );
-            return None;
-        }
-    }
-    Some((memlimit, opslimit))
-}
-
-/// php_sodium_argon2_hash()
+/// php_password_argon2_hash() (libargon2)
 fn argon2_hash(
     vm: &mut Vm,
     password: &[u8],
     options: PasswordOptions,
     alg: i64,
 ) -> Result<Option<Vec<u8>>, VmError> {
-    if password.len() as u64 >= 0xffff_ffff {
+    // (size_t: a negative value is out of range)
+    let memory_cost = option_long(vm, options, b"memory_cost").unwrap_or(MEMLIMIT) as u64;
+    if memory_cost > 0xffff_ffff || memory_cost < 8 {
+        value_error(vm, "Memory cost is outside of allowed memory range");
+        return Ok(None);
+    }
+    let time_cost = option_long(vm, options, b"time_cost").unwrap_or(OPSLIMIT) as u64;
+    if time_cost > 0xffff_ffff || time_cost < 1 {
+        value_error(vm, "Time cost is outside of allowed time range");
+        return Ok(None);
+    }
+    let threads = option_long(vm, options, b"threads").unwrap_or(THREADS) as u64;
+    if threads > 0xff_ffff || threads == 0 {
+        value_error(vm, "Invalid number of threads");
+        return Ok(None);
+    }
+    // php_password_get_salt()
+    if options.is_some_and(|o| o.borrow().get_str(b"salt").is_some()) {
+        vm.emit_warning(
+            "password_hash(): The \"salt\" option has been ignored, since providing a custom salt is no longer supported",
+        );
+    }
+    let salt = password_make_salt(vm, 16)?;
+    if password.len() as u64 > 0xffff_ffff {
         value_error(vm, "Password is too long");
         return Ok(None);
     }
-    let Some((memlimit, opslimit)) = get_options(vm, options) else {
-        return Ok(None);
-    };
-    match pwhash::pwhash_str(password, opslimit, memlimit, alg) {
+    match pwhash::argon2_hash_encoded(
+        alg,
+        time_cost as u32,
+        memory_cost as u32,
+        threads as u32,
+        password,
+        &salt,
+    ) {
         Ok(h) => Ok(Some(h)),
-        Err(()) => {
-            value_error(vm, "Unexpected failure hashing password");
+        Err(msg) => {
+            value_error(vm, msg);
             Ok(None)
         }
     }
@@ -100,7 +94,7 @@ fn argon2id_hash(
     argon2_hash(vm, password, options, pwhash::ALG_ARGON2ID13)
 }
 
-/// php_sodium_argon2_verify()
+/// argon2_verify()
 fn argon2_verify(password: &[u8], hash: &[u8]) -> bool {
     if password.len() as u64 >= 0xffff_ffff || hash.len() as u64 >= 0xffff_ffff {
         return false;
@@ -108,12 +102,35 @@ fn argon2_verify(password: &[u8], hash: &[u8]) -> bool {
     pwhash::str_verify(hash, password)
 }
 
-/// php_sodium_argon2_needs_rehash()
+/// php_password_argon2_needs_rehash()
 fn argon2_needs_rehash(vm: &mut Vm, hash: &[u8], options: PasswordOptions) -> bool {
-    let Some((memlimit, opslimit)) = get_options(vm, options) else {
-        return true;
+    let new_memory = option_long(vm, options, b"memory_cost").unwrap_or(MEMLIMIT);
+    let new_time = option_long(vm, options, b"time_cost").unwrap_or(OPSLIMIT);
+    let new_threads = option_long(vm, options, b"threads").unwrap_or(THREADS);
+    // extract_argon2_parameters(): v, m, t, p start at 0
+    let mut vals = [0i64; 4];
+    if let Some(p) = argon2_params(hash) {
+        scan_params(p, &mut vals);
+    }
+    new_time != vals[2] || new_memory != vals[1] || new_threads != vals[3]
+}
+
+/// The text after "$argon2i$" / "$argon2id$" (extract_argon2_parameters()).
+fn argon2_params(hash: &[u8]) -> Option<&[u8]> {
+    if hash.len() < b"$argon2id$".len() + 1 {
+        return None;
+    }
+    let p = if hash.starts_with(b"$argon2i$") {
+        &hash[b"$argon2i$".len()..]
+    } else if hash.starts_with(b"$argon2id$") {
+        &hash[b"$argon2id$".len()..]
+    } else {
+        return None;
     };
-    pwhash::str_needs_rehash(hash, opslimit, memlimit) != 0
+    Some(match p.iter().position(|&c| c == 0) {
+        Some(n) => &p[..n],
+        None => p,
+    })
 }
 
 /// sscanf(p, "v=%ld$m=%ld,t=%ld,p=%ld", ...): the conversions up to the
@@ -163,24 +180,12 @@ fn scan_params(p: &[u8], out: &mut [i64; 4]) {
     }
 }
 
-/// php_sodium_argon2_get_info()
+/// php_password_argon2_get_info()
 fn argon2_get_info(options: &mut PhpArray, hash: &[u8]) {
-    if hash.len() < b"$argon2id$".len() + 1 {
-        return;
+    let mut vals = [0, MEMLIMIT, OPSLIMIT, THREADS];
+    if let Some(p) = argon2_params(hash) {
+        scan_params(p, &mut vals);
     }
-    let p = if hash.starts_with(b"$argon2i$") {
-        &hash[b"$argon2i$".len()..]
-    } else if hash.starts_with(b"$argon2id$") {
-        &hash[b"$argon2id$".len()..]
-    } else {
-        return;
-    };
-    let p = match p.iter().position(|&c| c == 0) {
-        Some(n) => &p[..n],
-        None => p,
-    };
-    let mut vals = [0, MEMLIMIT, OPSLIMIT, 1];
-    scan_params(p, &mut vals);
     let key = |s: &[u8]| ArrayKey::String(PhpString::from_bytes(s));
     options.set(key(b"memory_cost"), Value::Long(vals[1]));
     options.set(key(b"time_cost"), Value::Long(vals[2]));
@@ -203,23 +208,25 @@ static ARGON2ID: PasswordAlgoHandler = PasswordAlgoHandler {
     get_info: argon2_get_info,
 };
 
-/// PHP_MINIT_FUNCTION(sodium_password_hash)
-pub fn minit(vm: &mut Vm, constants: &mut Vec<Vec<u8>>) {
+/// PHP_MINIT_FUNCTION(password)'s HAVE_ARGON2LIB part: the algorithms and
+/// their constants, which belong to ext/standard (no module list claims
+/// them: get_defined_constants(true) files them under "standard").
+pub fn minit(vm: &mut Vm) {
     // (registered once per process; the constants for every VM)
     if !password_algo_registered(b"argon2i") {
         password_algo_register(b"argon2i", &ARGON2I);
         password_algo_register(b"argon2id", &ARGON2ID);
     }
     let s = |b: &[u8]| Value::String(PhpString::from_bytes(b));
-    for (name, v) in [
+    let consts = [
         ("PASSWORD_ARGON2I", s(b"argon2i")),
         ("PASSWORD_ARGON2ID", s(b"argon2id")),
+        ("PASSWORD_ARGON2_PROVIDER", s(b"standard")),
         ("PASSWORD_ARGON2_DEFAULT_MEMORY_COST", Value::Long(MEMLIMIT)),
         ("PASSWORD_ARGON2_DEFAULT_TIME_COST", Value::Long(OPSLIMIT)),
         ("PASSWORD_ARGON2_DEFAULT_THREADS", Value::Long(THREADS)),
-        ("PASSWORD_ARGON2_PROVIDER", s(b"sodium")),
-    ] {
+    ];
+    for (name, v) in consts {
         vm.constants.insert(name.as_bytes().to_vec(), v);
-        constants.push(name.as_bytes().to_vec());
     }
 }

@@ -142,6 +142,31 @@ fn b64(b: &[u8]) -> Vec<u8> {
     codecs::bin2base64(b, 3)
 }
 
+/// libargon2's argon2_hash() with an encoded output, as ext/standard's
+/// password_hash() calls it (32-byte hash): Err("Memory cost is too small")
+/// and the like (argon2_error_message()).
+pub fn argon2_hash_encoded(
+    alg: i64,
+    t_cost: u32,
+    m_cost: u32,
+    lanes: u32,
+    passwd: &[u8],
+    salt: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    let v = Variant::of_alg(alg).ok_or("Unknown argon2 type")?;
+    if (m_cost as u64) < 8 * lanes as u64 {
+        return Err("Memory cost is too small");
+    }
+    let mut hash = [0u8; 32];
+    argon2_raw(v, t_cost, m_cost, lanes, passwd, salt, &mut hash).map_err(|_| "Encoding failed")?;
+    let mut out = v.prefix().to_vec();
+    out.extend_from_slice(format!("$v=19$m={},t={},p={}$", m_cost, t_cost, lanes).as_bytes());
+    out.extend_from_slice(&b64(salt));
+    out.push(b'$');
+    out.extend_from_slice(&b64(&hash));
+    Ok(out)
+}
+
 /// crypto_pwhash_str_alg()
 pub fn pwhash_str(passwd: &[u8], opslimit: u64, memlimit: u64, alg: i64) -> Result<Vec<u8>, ()> {
     let v = Variant::of_alg(alg).ok_or(())?;

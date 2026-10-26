@@ -1691,7 +1691,7 @@ fn base64_encode(input: &[u8]) -> Vec<u8> {
 }
 
 /// php_password_make_salt()
-fn password_make_salt(vm: &mut Vm, length: usize) -> Result<Vec<u8>, VmError> {
+pub fn password_make_salt(vm: &mut Vm, length: usize) -> Result<Vec<u8>, VmError> {
     let mut buffer = vec![0u8; length * 3 / 4 + 1];
     if !os_random(&mut buffer) {
         return Err(throw(vm, b"ValueError", "Unable to generate salt"));
