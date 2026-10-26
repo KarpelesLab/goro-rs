@@ -19350,20 +19350,15 @@ impl Vm {
         }
     }
 
-    /// A class declaration failed with a fatal error (a link error): it is
-    /// raised now, while the frames' arguments are still there for its
-    /// backtrace (the top level would report it after the frames unwound).
+    /// A class declaration failed with a fatal error (a link error), which
+    /// the top level reports once the frames unwound: their arguments are
+    /// copied into them now, for its backtrace.
     #[inline(never)]
     fn declare_class_fatal(&mut self, e: VmError) -> VmError {
-        if self.current_exception.is_some()
-            || self.fatal_emitted
-            || self.exit_requested
-            || e.message.is_empty()
-            || e.message.starts_with("Uncaught ")
-        {
-            return e;
+        if self.current_exception.is_none() && !self.fatal_emitted && !self.exit_requested {
+            self.sync_frame_args();
         }
-        self.emit_fatal_at(&e.message, e.line)
+        e
     }
 
     /// Before the user exception handler runs: the frames the uncaught
