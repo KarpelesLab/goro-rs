@@ -1348,6 +1348,24 @@ impl Value {
 
     /// PHP == comparison
     pub fn equals(&self, other: &Value) -> bool {
+        // Two strings that are not both numeric-looking compare as bytes
+        // (zendi_smart_streq(); a numeric string starts with whitespace, a
+        // sign, a dot or a digit).
+        if let (Value::String(a), Value::String(b)) = (self, other) {
+            let (a, b) = (a.as_bytes(), b.as_bytes());
+            if a == b {
+                return true;
+            }
+            let may_be_numeric = |s: &[u8]| {
+                matches!(
+                    s.first(),
+                    Some(b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c | b'+' | b'-' | b'.' | b'0'..=b'9')
+                )
+            };
+            if !may_be_numeric(a) || !may_be_numeric(b) {
+                return false;
+            }
+        }
         let depth = COMPARE_DEPTH.with(|d| {
             let n = d.get();
             d.set(n + 1);
