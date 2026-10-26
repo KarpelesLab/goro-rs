@@ -368,6 +368,48 @@ fn defined_operand(
     (!matches!(v, Value::Undef | Value::Reference(_))).then_some(v)
 }
 
+/// `<`, `<=`, `>`, `>=` of two defined scalars (strings, null, bools,
+/// numbers) not both numbers: compared as the general handlers compare
+/// them (`a > b` is `b < a`), which has no side effect for scalars.
+#[inline(never)]
+fn fast_scalar_cmp(op: &Op, cvs: &[Value], tmps: &mut [Value], literals: &[Value]) -> Fast {
+    let scalar = |v: &Value| {
+        matches!(
+            v,
+            Value::Null
+                | Value::False
+                | Value::True
+                | Value::Long(_)
+                | Value::Double(_)
+                | Value::String(_)
+        )
+    };
+    let Some(a) = defined_operand(&op.op1, cvs, tmps, literals) else {
+        return Fast::No;
+    };
+    let Some(b) = defined_operand(&op.op2, cvs, tmps, literals) else {
+        return Fast::No;
+    };
+    if !scalar(&a) || !scalar(&b) || !tmp_writable(&op.result, tmps) {
+        return Fast::No;
+    }
+    let (x, y) = match op.opcode {
+        OpCode::Less | OpCode::LessEqual => (&a, &b),
+        _ => (&b, &a),
+    };
+    let c = x.compare(y);
+    let r = c != i64::MIN
+        && match op.opcode {
+            OpCode::Less | OpCode::Greater => c < 0,
+            _ => c <= 0,
+        };
+    if store_tmp(&op.result, bool_val(r), tmps) {
+        Fast::Done
+    } else {
+        Fast::No
+    }
+}
+
 /// i_zend_is_true() of a value whose conversion has no side effect (no
 /// object, no NAN, which warns).
 #[inline(always)]
@@ -542,8 +584,12 @@ pub(crate) fn fast_op(
             store!(arith(c, a, b))
         }
         OpCode::Less | OpCode::LessEqual | OpCode::Greater | OpCode::GreaterEqual => {
-            let a = num!(op.op1);
-            let b = num!(op.op2);
+            let (Some(a), Some(b)) = (
+                num_operand(&op.op1, cvs, tmps, literals),
+                num_operand(&op.op2, cvs, tmps, literals),
+            ) else {
+                return fast_scalar_cmp(op, cvs, tmps, literals);
+            };
             // `a > b` is `b < a` (ZEND_IS_SMALLER with swapped operands), as
             // in the general handlers.
             let r = match op.opcode {
@@ -1069,6 +1115,38 @@ fn fetch_w_container(
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// isset() of the offset `op.op2` (an int) of a string of `len` bytes (a
+/// temporary's: ISSET_ISEMPTY_DIM_OBJ / FETCH_DIM_IS): whether it is within
+/// the string, counting from its end when negative.
+#[inline(never)]
+fn fast_str_offset_isset(op: &Op, len: usize, cvs: &[Value], tmps: &mut [Value]) -> Fast {
+    let k = match op.op2 {
+        OperandType::Cv(i) => match cvs.get(i as usize) {
+            Some(Value::Long(k)) => *k,
+            _ => return Fast::No,
+        },
+        OperandType::Tmp(i) => match tmps.get(i as usize) {
+            Some(Value::Long(k)) => *k,
+            _ => return Fast::No,
+        },
+        _ => return Fast::No,
+    };
+    if !tmp_writable(&op.result, tmps) {
+        return Fast::No;
+    }
+    let len = len as i64;
+    let set = if k < 0 { k + len >= 0 } else { k < len };
+    if store_tmp(
+        &op.result,
+        if set { Value::True } else { Value::False },
+        tmps,
+    ) {
+        Fast::Done
+    } else {
+        Fast::No
     }
 }
 
@@ -3182,6 +3260,7 @@ impl crate::vm::Vm {
             },
             OperandType::Tmp(i) => match tmps.get(i as usize) {
                 Some(Value::Array(a)) => a.clone(),
+                Some(Value::String(s)) => return fast_str_offset_isset(op, s.len(), cvs, tmps),
                 _ => return Fast::No,
             },
             _ => return Fast::No,
