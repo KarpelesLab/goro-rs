@@ -4461,12 +4461,12 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let s = string_arg.to_php_string();
         // When replacement is array, use array[0] as the replacement
         let replacement = if let Value::Array(repl_arr) = replacement_arg {
-            let repl_arr = repl_arr.borrow();
-            repl_arr
-                .iter()
-                .next()
-                .map(|(_, v)| v.to_php_string())
-                .unwrap_or(PhpString::empty())
+            // zval_get_tmp_string() of its first element
+            let first = repl_arr.borrow().values().next().cloned();
+            match first {
+                Some(v) => zval_get_string(_vm, &v)?,
+                None => PhpString::empty(),
+            }
         } else {
             replacement_arg.to_php_string()
         };

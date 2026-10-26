@@ -6863,8 +6863,7 @@ fn array_column(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             // (php_array_column() keeps looping after the
                             // TypeError of array_set_zval_key())
                             if pending.is_none() {
-                                let msg =
-                                    format!("Cannot access offset of type {} on array", tn);
+                                let msg = format!("Cannot access offset of type {} on array", tn);
                                 let exc = vm.throw_type_error(msg.clone());
                                 vm.current_exception = Some(exc);
                                 pending = Some(VmError { message: msg, line });

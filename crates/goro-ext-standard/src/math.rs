@@ -268,7 +268,21 @@ fn check_int_arg_as(
         Value::String(s) => {
             // Numeric strings accepted, non-numeric rejected
             let bytes = s.as_bytes();
-            if let Some(n) = goro_core::value::parse_numeric_string(bytes) {
+            // (an integer string past the int range is a float string, which
+            // must fit in an int: zend_parse_arg_long_weak())
+            let fits = |n: f64| {
+                std::str::from_utf8(bytes)
+                    .ok()
+                    .and_then(|t| {
+                        t.trim_matches(|c: char| " \t\n\r\x0b\x0c".contains(c))
+                            .parse::<i64>()
+                            .ok()
+                    })
+                    .is_some()
+                    || (n.is_finite()
+                        && (-9223372036854775808.0..9223372036854775808.0).contains(&n))
+            };
+            if let Some(n) = goro_core::value::parse_numeric_string(bytes).filter(|n| fits(*n)) {
                 if n.fract() != 0.0 {
                     // Float string with fractional part - deprecated
                     let str_val = s.to_string_lossy();

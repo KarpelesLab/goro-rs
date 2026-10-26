@@ -43,6 +43,11 @@ fn throw(vm: &mut Vm, class: &[u8], msg: String) -> Result<Value, VmError> {
 }
 
 fn array_type_error(vm: &mut Vm, fname: &str, i: usize, v: &Value) -> Result<Value, VmError> {
+    // zend_argument_error() raises nothing over a pending exception (one a
+    // comparison callback threw while the earlier arrays were sorted).
+    if vm.current_exception.is_some() {
+        return Ok(Value::Null);
+    }
     let label = if i == 0 {
         "Argument #1 ($array)".to_string()
     } else {
@@ -341,7 +346,9 @@ fn sorted_diff(
         if !matches!(a, Value::Array(_)) {
             return array_type_error(vm, fname, i, a);
         }
-        let mut l = build_lists(std::slice::from_ref(a)).pop().unwrap_or_default();
+        let mut l = build_lists(std::slice::from_ref(a))
+            .pop()
+            .unwrap_or_default();
         sort_list(vm, &mut l, &mut f, behavior == NORMAL);
         lists.push(l);
     }
@@ -467,7 +474,9 @@ fn sorted_intersect(
         if !matches!(a, Value::Array(_)) {
             return array_type_error(vm, fname, i, a);
         }
-        let mut l = build_lists(std::slice::from_ref(a)).pop().unwrap_or_default();
+        let mut l = build_lists(std::slice::from_ref(a))
+            .pop()
+            .unwrap_or_default();
         sort_list(vm, &mut l, &mut f, behavior == NORMAL);
         lists.push(l);
     }
