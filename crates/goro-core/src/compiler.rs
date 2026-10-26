@@ -17839,6 +17839,9 @@ impl Compiler {
             }
 
             ExprKind::New { class, args } => {
+                if let ExprKind::Identifier(name) = &class.kind {
+                    self.check_class_ref_scope(name, class.span.line)?;
+                }
                 // Get class name
                 let mut is_self_new = false;
                 let class_name = match &class.kind {
@@ -17957,6 +17960,9 @@ impl Compiler {
 
             ExprKind::Instanceof { expr, class } => {
                 let obj = self.compile_expr(expr)?;
+                if let ExprKind::Identifier(name) = &class.kind {
+                    self.check_class_ref_scope(name, class.span.line)?;
+                }
                 let class_name = match &class.kind {
                     ExprKind::Identifier(name) => self.resolve_class_name(name),
                     _ => {
@@ -20893,6 +20899,9 @@ impl Compiler {
 
             ExprKind::FirstClassCallable(target) => {
                 if let CallableTarget::StaticMethod { class, method } = target {
+                    if let ExprKind::Identifier(name) = &class.kind {
+                        self.check_class_ref_scope(name, class.span.line)?;
+                    }
                     self.check_parent_hook_call(class, method, true, expr.span.line)?;
                 }
                 self.compile_first_class_callable(target, expr.span.line)
