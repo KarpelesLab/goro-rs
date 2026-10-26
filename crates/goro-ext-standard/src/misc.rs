@@ -5789,7 +5789,6 @@ fn key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 // === Misc ===
 
-
 fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     ini_set_as(vm, args, "ini_set")
 }
