@@ -46266,7 +46266,15 @@ impl Vm {
                     let plain_file = hooked_source.is_none();
                     // opcache: the file's cached compilation, if any.
                     let cached = if plain_file && !is_stream_path {
-                        crate::script_cache::lookup(&abs_path)
+                        crate::script_cache::lookup(&abs_path).or_else(|| {
+                            if !crate::script_cache::file_cache_enabled() {
+                                return None;
+                            }
+                            let c = crate::script_cache::file_cache_load(&abs_path)?;
+                            // (the file is opened as for a compile)
+                            crate::value::alloc_resource_id();
+                            Some(c)
+                        })
                     } else {
                         None
                     };
@@ -46319,6 +46327,7 @@ impl Vm {
                                             compiler.source_file = abs_path.as_bytes().to_vec();
                                             compiler.takes_rtd_keys = true;
                                             let _ct = crate::compiler::CtVmGuard::new(self);
+                                            crate::compiler::take_ct_user_dependency();
                                             compiler
                                                 .compile(&program)
                                                 .map(|(o, c, w)| (Ok((o, c)), w))

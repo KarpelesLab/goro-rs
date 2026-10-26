@@ -515,31 +515,113 @@ pub fn file_cache_bin_path(path: &str) -> Option<String> {
     })
 }
 
-/// zend_file_cache_script_store(): goro keeps no serialized opcodes, the
-/// entry records the script's timestamp and size (the script is compiled
-/// again when it is loaded).
-pub fn file_cache_store(path: &str) {
-    let read_only = CONFIG.with(|c| c.borrow().file_cache_read_only);
-    let Some(bin) = file_cache_bin_path(path) else {
-        return;
-    };
-    if read_only {
-        return;
+/// The entry recorded for a script the file cache does not hold the
+/// compiled form of (the main script, compiled by the SAPI): its
+/// timestamp and size.
+fn marker(mtime: i64, size: u64) -> Vec<u8> {
+    format!("OPCACHE\0{}\0{}\0", mtime, size).into_bytes()
+}
+
+/// The source's (mtime, size), if a script compiled now may be stored in
+/// the file cache (zend_file_cache_script_store()'s callers:
+/// file_update_protection, opcache.max_file_size, the blacklist).
+fn file_cache_storable(path: &str) -> Option<(String, i64, u64)> {
+    let bin = file_cache_bin_path(path)?;
+    let cfg = CONFIG.with(|c| c.borrow().clone());
+    if cfg.file_cache_read_only || is_blacklisted(path) {
+        return None;
     }
     use std::os::unix::fs::MetadataExt;
-    let Ok(meta) = std::fs::metadata(path) else {
-        return;
-    };
-    if let Some(dir) = std::path::Path::new(&bin).parent() {
+    let meta = std::fs::metadata(path).ok()?;
+    if cfg.max_file_size > 0 && meta.len() as i64 > cfg.max_file_size {
+        return None;
+    }
+    if cfg.file_update_protection > 0 && now() - meta.mtime() < cfg.file_update_protection {
+        return None;
+    }
+    Some((bin, meta.mtime(), meta.len()))
+}
+
+/// Writes a file cache entry: through a temporary file renamed over the
+/// entry, so a concurrent reader sees the old entry or the new one.
+fn file_cache_write(bin: &str, data: &[u8]) {
+    let dir = std::path::Path::new(bin).parent();
+    if let Some(dir) = dir {
         let _ = std::fs::create_dir_all(dir);
     }
-    let data = format!("OPCACHE\0{}\0{}\0", meta.mtime(), meta.len());
-    if let Err(e) = std::fs::write(&bin, data) {
+    let tmp = format!("{}.{}.tmp", bin, std::process::id());
+    let r = std::fs::write(&tmp, data).and_then(|()| std::fs::rename(&tmp, bin));
+    if let Err(e) = r {
+        let _ = std::fs::remove_file(&tmp);
         log(
             LOG_WARNING,
             &format!("opcache cannot write to file '{}': {}\n", bin, e),
         );
     }
+}
+
+/// zend_file_cache_script_store() for a script whose compilation the
+/// SAPI keeps (the main script): the entry records its timestamp and
+/// size only (it is compiled again in the next process).
+pub fn file_cache_store(path: &str) {
+    let Some((bin, mtime, size)) = file_cache_storable(path) else {
+        return;
+    };
+    file_cache_write(&bin, &marker(mtime, size));
+}
+
+/// zend_file_cache_script_store(): the compiled form of `path`, with its
+/// compile diagnostics (replayed when it is loaded). Not stored when it
+/// holds what another process could not use (see crate::file_cache).
+#[inline(never)]
+pub fn file_cache_store_compiled(
+    path: &str,
+    op_array: &OpArray,
+    classes: &[ClassEntry],
+    diags: &[Diag],
+) {
+    let Some((bin, mtime, size)) = file_cache_storable(path) else {
+        return;
+    };
+    match crate::file_cache::encode(path, mtime, size, op_array, classes, diags) {
+        Some(data) => file_cache_write(&bin, &data),
+        None => file_cache_write(&bin, &marker(mtime, size)),
+    }
+}
+
+/// Whether the file cache is in use (opcache.file_cache).
+#[inline]
+pub fn file_cache_enabled() -> bool {
+    CONFIG.with(|c| !c.borrow().file_cache.is_empty())
+}
+
+/// zend_file_cache_script_load(): the compiled form of `path` from the
+/// file cache, if it holds a valid one (for this build, and for the file
+/// as it is with opcache.validate_timestamps). The entry is also kept in
+/// the in-memory cache when that is enabled.
+#[inline(never)]
+pub fn file_cache_load(path: &str) -> Option<Rc<Compiled>> {
+    if crate::preload::active() || crate::preload::done() {
+        return None;
+    }
+    let bin = file_cache_bin_path(path)?;
+    let data = std::fs::read(&bin).ok()?;
+    let (mtime, size) = crate::file_cache::header(&data)?;
+    let cfg = CONFIG.with(|c| c.borrow().clone());
+    if cfg.validate_timestamps {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path).ok()?;
+        if meta.mtime() != mtime || meta.len() != size {
+            return None;
+        }
+    }
+    let compiled = Rc::new(crate::file_cache::decode(path, &data)?);
+    if cfg.enabled && (cfg.record_warnings || compiled.diags.is_empty()) && !is_blacklisted(path) {
+        let key = cache_key(path, &cfg);
+        let size = estimate_size(&compiled.op_array);
+        insert(&key, Some(compiled.clone()), mtime, size);
+    }
+    Some(compiled)
 }
 
 /// Whether the file cache holds an entry for `path` that is still valid.
@@ -550,15 +632,20 @@ pub fn in_file_cache(path: &str) -> bool {
     let Ok(data) = std::fs::read(&bin) else {
         return false;
     };
-    let validate = CONFIG.with(|c| c.borrow().validate_timestamps);
-    if !validate {
-        return data.starts_with(b"OPCACHE\0");
-    }
-    use std::os::unix::fs::MetadataExt;
-    let Ok(meta) = std::fs::metadata(path) else {
+    let entry = crate::file_cache::header(&data).or_else(|| {
+        let mut parts = data.strip_prefix(b"OPCACHE\0")?.split(|&c| c == 0);
+        let num = |p: Option<&[u8]>| std::str::from_utf8(p?).ok()?.parse::<i64>().ok();
+        Some((num(parts.next())?, num(parts.next())? as u64))
+    });
+    let Some((mtime, size)) = entry else {
         return false;
     };
-    data == format!("OPCACHE\0{}\0{}\0", meta.mtime(), meta.len()).into_bytes()
+    let validate = CONFIG.with(|c| c.borrow().validate_timestamps);
+    if !validate {
+        return true;
+    }
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).is_ok_and(|m| m.mtime() == mtime && m.len() == size)
 }
 
 /// The key of an included file: the path as resolved by the include
@@ -719,7 +806,18 @@ impl crate::vm::Vm {
             crate::preload::note_compiled(path, &compiled.op_array, &compiled.classes);
             return Rc::new(compiled);
         }
-        file_cache_store(path);
+        if file_cache_enabled() {
+            if crate::compiler::take_ct_user_dependency() {
+                file_cache_store(path);
+            } else {
+                file_cache_store_compiled(
+                    path,
+                    &compiled.op_array,
+                    &compiled.classes,
+                    &merged_compile_diags(lex_diags, warnings),
+                );
+            }
+        }
         if !enabled() {
             return Rc::new(compiled);
         }
@@ -821,6 +919,7 @@ impl crate::vm::Vm {
         compiler.source_file = path.as_bytes().to_vec();
         compiler.takes_rtd_keys = true;
         let saved_file = std::mem::replace(&mut self.current_file, path.into());
+        crate::compiler::take_ct_user_dependency();
         let r = match compiler.compile(&program) {
             Ok((mut op_array, classes, warnings)) => {
                 let implicit_ret = op_array

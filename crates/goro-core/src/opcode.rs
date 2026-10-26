@@ -55,7 +55,9 @@ pub struct Op {
 }
 
 /// Opcode types
+/// (numbered in declaration order: see OpCode::from_u8)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum OpCode {
     /// No operation
     Nop,
@@ -480,6 +482,22 @@ pub enum OpCode {
     /// Like PropertyGetW for `unset($o->p[k])` (FETCH_OBJ_UNSET): a missing
     /// property is created as null instead of an array.
     PropertyGetWUnset,
+    // (new opcodes go above: LAST_OPCODE names the last one)
+}
+
+/// The opcode numbered highest (the last declared).
+const LAST_OPCODE: OpCode = OpCode::PropertyGetWUnset;
+
+impl OpCode {
+    /// The opcode numbered `n` (`op as u8`), as the file cache stores it.
+    pub fn from_u8(n: u8) -> Option<OpCode> {
+        if n > LAST_OPCODE as u8 {
+            return None;
+        }
+        // SAFETY: OpCode is a fieldless repr(u8) enum without explicit
+        // discriminants, numbered 0..=LAST_OPCODE.
+        Some(unsafe { std::mem::transmute::<u8, OpCode>(n) })
+    }
 }
 
 /// A compiled function / script

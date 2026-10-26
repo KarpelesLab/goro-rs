@@ -41,6 +41,7 @@ pub mod recv_fast;
 pub mod reflection;
 pub mod rfc1867;
 pub mod sapi_headers;
+pub mod file_cache;
 pub mod script_cache;
 pub mod smalloc;
 pub mod spl;

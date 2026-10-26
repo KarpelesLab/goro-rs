@@ -792,8 +792,16 @@ fn system_id(vm: &Vm) -> String {
         .get(b"PHP_VERSION".as_slice())
         .map(|v| v.to_php_string().to_string_lossy())
         .unwrap_or_default();
+    let sapi = vm
+        .constants
+        .get(b"PHP_SAPI".as_slice())
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_default();
+    // (goro's: the build and the SAPI, which compiled scripts depend on,
+    // see goro_core::file_cache)
+    let build = goro_core::file_cache::build_id();
     let mut h: u128 = 0x6c62272e07bb014262b821756295c58d;
-    for b in format!("{}API{}goro", version, "20250925").bytes() {
+    for b in format!("{}API{}goro{}{:x}", version, "20250925", sapi, build).bytes() {
         h ^= b as u128;
         h = h.wrapping_mul(0x0000000001000000000000000000013B);
     }

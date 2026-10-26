@@ -321,7 +321,44 @@ fn persistent_ct_const(name: &[u8]) -> Option<Value> {
     }
     // SAFETY: the guard's VM outlives it and is not changed while the
     // compile runs.
-    unsafe { &*p }.ct_constant(name)
+    let vm = unsafe { &*p };
+    let v = vm.ct_constant(name)?;
+    note_ct_user_dependency(vm, name);
+    Some(v)
+}
+
+thread_local! {
+    /// A compile substituted a constant of user code (define(), a class
+    /// of another file): its result holds what the running request had
+    /// (see take_ct_user_dependency()).
+    static CT_USER_DEP: Cell<bool> = const { Cell::new(false) };
+}
+
+#[inline(never)]
+fn note_ct_user_dependency(vm: &crate::vm::Vm, name: &[u8]) {
+    let user = match name.windows(2).position(|w| w == b"::") {
+        Some(sep) => vm
+            .classes
+            .get(&name[..sep])
+            .is_some_and(|c| c.filename.is_some()),
+        None => vm.constant_files.contains_key(name),
+    };
+    if user {
+        CT_USER_DEP.with(|d| d.set(true));
+    }
+}
+
+/// Whether the compiles since the last call substituted a constant of
+/// user code: their result is only valid for this request's state, so it
+/// is not written to the file cache.
+pub fn take_ct_user_dependency() -> bool {
+    CT_USER_DEP.with(|d| d.replace(false))
+}
+
+/// The number of the next top-level static variable key (`\0main#N`).
+pub(crate) fn next_main_static_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 thread_local! {
@@ -589,7 +626,7 @@ pub const CONST_THUNK_PREFIX: &str = "__const_thunk_";
 /// Reserved variable names standing for the operands of a pipe (`|>`).
 const PIPE_ALIAS_PREFIX: &[u8] = b"\0pipe";
 
-fn next_closure_id() -> u64 {
+pub(crate) fn next_closure_id() -> u64 {
     CLOSURE_COUNTER.with(|c| {
         let id = c.get();
         c.set(id + 1);
@@ -6487,10 +6524,7 @@ impl Compiler {
                         // Top-level code of a file or eval()'d string: its
                         // own op_array, so its own statics.
                         if self.main_static_id == 0 {
-                            static NEXT: std::sync::atomic::AtomicU64 =
-                                std::sync::atomic::AtomicU64::new(1);
-                            self.main_static_id =
-                                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            self.main_static_id = next_main_static_id();
                         }
                         key.extend_from_slice(format!("\0main#{}", self.main_static_id).as_bytes());
                     }
@@ -23649,6 +23683,11 @@ pub fn set_sapi_name(name: &[u8]) {
 
 fn sapi_name_value() -> Value {
     SAPI_NAME.with(|s| Value::String(PhpString::from_bytes(&s.borrow())))
+}
+
+/// PHP_SAPI as the compiler substitutes it (see crate::file_cache).
+pub(crate) fn sapi_name_bytes() -> Vec<u8> {
+    SAPI_NAME.with(|s| s.borrow().clone())
 }
 
 /// Collect all variable names referenced in an expression (for arrow function capture)
