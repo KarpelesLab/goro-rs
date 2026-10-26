@@ -13660,6 +13660,56 @@ impl Compiler {
         }
     }
 
+    /// `isset($v[k])` of a plain variable by a literal key: the one
+    /// ISSET_ISEMPTY_DIM_OBJ php-src emits. (ArrayIsset reads
+    /// its key unsilenced and the dimension quietly itself: the silenced
+    /// region the general isset() compiles around it changes nothing then.)
+    /// None: not such an isset() (nothing was emitted).
+    #[inline(never)]
+    fn compile_simple_dim_isset(
+        &mut self,
+        e: &Expr,
+        line: u32,
+    ) -> CompileResult<Option<OperandType>> {
+        let plain = |n: &[u8]| {
+            !matches!(n, b"this" | b"GLOBALS" | b"http_response_header")
+                && !crate::vm::is_auto_global_name(n)
+        };
+        let ExprKind::ArrayAccess {
+            array,
+            index: Some(index),
+        } = &e.kind
+        else {
+            return Ok(None);
+        };
+        let ok_base = matches!(&array.kind, ExprKind::Variable(n) if plain(n));
+        // (a variable key's diagnostics depend on the silence)
+        let ok_key = matches!(&index.kind, ExprKind::Int(_) | ExprKind::String(_));
+        if !ok_base || !ok_key {
+            return Ok(None);
+        }
+        let before = self.op_array.ops.len();
+        let arr = self.compile_expr(array)?;
+        let key = self.compile_expr(index)?;
+        if self.op_array.ops.len() != before
+            || !matches!(arr, OperandType::Cv(_))
+            || !matches!(key, OperandType::Const(_))
+        {
+            // (cannot happen: a plain variable and a literal emit nothing)
+            self.op_array.ops.truncate(before);
+            return Ok(None);
+        }
+        let tmp = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::ArrayIsset,
+            op1: arr,
+            op2: key,
+            result: OperandType::Tmp(tmp),
+            line,
+        });
+        Ok(Some(OperandType::Tmp(tmp)))
+    }
+
     /// Operand of isset() / empty(): `$this` itself is checked quietly
     /// (ZEND_ISSET_ISEMPTY_THIS).
     fn compile_isset_operand(&mut self, e: &Expr) -> CompileResult<OperandType> {
@@ -17088,6 +17138,9 @@ impl Compiler {
                     return self.compile_expr(&chain);
                 }
                 self.mark_is_fetch_base(&exprs[0]);
+                if let Some(r) = self.compile_simple_dim_isset(&exprs[0], expr.span.line)? {
+                    return Ok(r);
+                }
                 // Uses IssetCheck opcode that checks for both Undef and Null
                 // Suppress warnings during isset check (e.g., Undefined array key)
                 self.op_array.emit(Op {
