@@ -6786,6 +6786,9 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                 Some(list)
             }
             b"getclosure" => {
+                if opt_object_arg_error(vm, "ReflectionMethod::getClosure", args.get(1)) {
+                    return Some(Value::Null);
+                }
                 // Build a Closure value referring to this method. In this VM,
                 // closures are represented as strings ("Class::method") or
                 // arrays ([callable, $this]). For static methods return the
@@ -8997,6 +9000,9 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                     vm.current_exception = Some(exc);
                     return Some(Value::Null);
                 }
+                if opt_object_arg_error(vm, "ReflectionProperty::getValue", args.get(1)) {
+                    return Some(Value::Null);
+                }
                 if !is_static {
                     match args.get(1) {
                         Some(Value::Object(o)) => {
@@ -9183,6 +9189,14 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                             &decl,
                         );
                     }
+                } else {
+                    // (an instance property needs the object and the value)
+                    let msg = format!(
+                        "ReflectionProperty::setValue() expects exactly 2 arguments, {} given",
+                        args.len().saturating_sub(1)
+                    );
+                    let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+                    vm.current_exception = Some(exc);
                 }
                 Some(Value::Null)
             }
@@ -9211,6 +9225,22 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
             b"getrawvalue" => {
                 // getRawValue($obj): read the property without triggering lazy init.
                 let target = args.get(1).cloned().unwrap_or(Value::Null);
+                // (the object must be an instance of the declaring class)
+                if let Value::Object(o) = &target {
+                    let ol = o.borrow().class_name.to_ascii_lowercase();
+                    let decl = rprop(vm, &class_lower, prop_name.as_bytes())
+                        .map(|p| p.declaring_class.to_ascii_lowercase())
+                        .unwrap_or_else(|| class_lower.clone());
+                    if ol != decl && !vm.class_extends(&ol, &decl) {
+                        let exc = vm.create_exception(
+                            b"ReflectionException",
+                            "Given object is not an instance of the class this property was declared in",
+                            vm.current_line,
+                        );
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
+                }
                 if let Value::Object(o) = &target {
                     if let Some(v) = raw_value_effective_get(vm, &class_lower, o, &prop_name) {
                         return Some(v);
@@ -14925,6 +14955,26 @@ fn param_type_name(pt: &crate::opcode::ParamType) -> String {
             names.join("&")
         }
     }
+}
+
+/// zpp "o!" of a method's optional object argument: "must be of type
+/// ?object" (true when it threw).
+#[inline(never)]
+fn opt_object_arg_error(vm: &mut Vm, method: &str, v: Option<&Value>) -> bool {
+    let Some(v) = v.map(|v| v.deref()) else {
+        return false;
+    };
+    if matches!(v, Value::Null | Value::Object(_)) {
+        return false;
+    }
+    let msg = format!(
+        "{}(): Argument #1 ($object) must be of type ?object, {} given",
+        method,
+        Vm::value_type_name(&v)
+    );
+    let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+    vm.current_exception = Some(exc);
+    true
 }
 
 /// Create a PHP array of ReflectionAttribute objects from a slice of RuntimeAttributes.
