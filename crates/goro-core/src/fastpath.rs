@@ -2183,15 +2183,21 @@ impl crate::vm::Vm {
                 },
                 _ => return ip,
             };
-            ip = match fast {
-                Fast::No => return ip,
-                Fast::Done => ip + 1,
-                Fast::Jump(t) => t,
-            };
             line = Some(op.line);
-            if crate::value::memory_exhausted() != 0
-                || crate::value::VM_INTERRUPT.load(std::sync::atomic::Ordering::Relaxed)
-            {
+            match fast {
+                Fast::No => return ip,
+                Fast::Done => ip += 1,
+                // EG(vm_interrupt) is looked at where control jumps (loops
+                // and calls, as php-src's ZEND_VM_LOOP_INTERRUPT_CHECK):
+                // straight runs of opcodes end soon enough.
+                Fast::Jump(t) => {
+                    ip = t;
+                    if crate::value::VM_INTERRUPT.load(std::sync::atomic::Ordering::Relaxed) {
+                        break 'run ip;
+                    }
+                }
+            }
+            if crate::value::memory_exhausted() != 0 {
                 break 'run ip;
             }
         };

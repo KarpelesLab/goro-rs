@@ -17196,8 +17196,9 @@ fn push_lossy(dst: &mut String, b: &[u8]) {
 /// drop glue for the ones that hold nothing to release.
 #[inline]
 pub(crate) fn clear_values(v: &mut Vec<Value>) {
-    for x in v.drain(..) {
-        if matches!(
+    // (in place, in order: what is left holds nothing to drop)
+    for x in v.iter_mut() {
+        if !matches!(
             x,
             Value::Undef
                 | Value::Null
@@ -17206,11 +17207,11 @@ pub(crate) fn clear_values(v: &mut Vec<Value>) {
                 | Value::Long(_)
                 | Value::Double(_)
         ) {
-            std::mem::forget(x);
-        } else {
-            drop(x);
+            *x = Value::Undef;
         }
     }
+    // SAFETY: every element left is a plain value without drop glue to run.
+    unsafe { v.set_len(0) }
 }
 
 /// The function name of an INIT_FCALL by a constant name that is a plain
