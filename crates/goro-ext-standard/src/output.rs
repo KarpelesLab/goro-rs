@@ -2120,8 +2120,18 @@ fn var_export_escape(buf: &mut Vec<u8>, s: &[u8], nul_concat: bool) {
 /// Port of php_var_export_ex().
 fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
     match val {
-        Value::Null | Value::Undef | Value::Resource(_) | Value::Generator(_) => {
-            buf.extend_from_slice(b"NULL")
+        Value::Null | Value::Undef | Value::Resource(_) => buf.extend_from_slice(b"NULL"),
+        // (an object without properties)
+        Value::Generator(_) => {
+            if level > 1 {
+                buf.push(b'\n');
+                var_export_spaces(buf, level - 1);
+            }
+            buf.extend_from_slice(b"\\Generator::__set_state(array(\n");
+            if level > 1 {
+                var_export_spaces(buf, level - 1);
+            }
+            buf.extend_from_slice(b"))");
         }
         Value::True => buf.extend_from_slice(b"true"),
         Value::False => buf.extend_from_slice(b"false"),
