@@ -250,7 +250,6 @@ fn iterator_to_array_impl(
     args: &[Value],
     take_handle: bool,
 ) -> Result<Value, VmError> {
-    let use_keys = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
     // Type check first argument
     if let Some(first) = args.first() {
         let type_name = match first {
@@ -273,6 +272,17 @@ fn iterator_to_array_impl(
             return Ok(Value::Null);
         }
     }
+    // (bool $preserve_keys, parsed after the iterator)
+    let coerced;
+    let args = if args.len() > 1 && !matches!(args[1].deref(), Value::True | Value::False) {
+        use goro_core::arginfo::{CHECK_ARITY, CHECK_PAST_STOP, CHECK_TYPES};
+        let flags = CHECK_ARITY | CHECK_TYPES | CHECK_PAST_STOP;
+        coerced = vm.zpp_self_check_flags(b"iterator_to_array", args, flags)?;
+        &coerced[..]
+    } else {
+        args
+    };
+    let use_keys = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
     match args.first() {
         Some(Value::Array(arr)) => {
             if use_keys {

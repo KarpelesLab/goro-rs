@@ -180,6 +180,18 @@ pub fn register_standard_functions(vm: &mut Vm) {
         "dns_get_mx",
         "getmxrr",
         "dns_get_record",
+        "ob_get_clean",
+        "ob_implicit_flush",
+        "ob_get_status",
+        "ob_get_contents",
+        "ob_end_clean",
+        "ob_end_flush",
+        "ob_flush",
+        "ob_clean",
+        "ob_get_level",
+        "ob_get_length",
+        "ob_get_flush",
+        "ob_list_handlers",
     ] {
         vm.zpp_extension_verified.insert(
             name.as_bytes().to_vec(),
