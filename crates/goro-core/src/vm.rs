@@ -40822,6 +40822,31 @@ impl Vm {
                         op_array,
                         op.line,
                     );
+                    // (zend_illegal_container_offset())
+                    if let (Value::Array(_), Value::Array(_) | Value::Object(_)) =
+                        (&arr_val, key_val.deref())
+                    {
+                        let t = match key_val.deref() {
+                            Value::Object(o) => {
+                                crate::value::display_class_name(&o.borrow().class_name)
+                            }
+                            _ => "array".to_string(),
+                        };
+                        let msg = format!("Cannot access offset of type {} on array", t);
+                        let exc = self.create_exception(b"TypeError", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            return Ok(Flow::Continue);
+                        }
+                        return Err(VmError {
+                            message: self.uncaught_exception_message(),
+                            line: op.line,
+                        });
+                    }
                     let result = if let Value::Array(arr) = &arr_val {
                         let key = self.value_to_array_key_checked(&key_val, op.line);
                         // (an element that is a reference is destructured
