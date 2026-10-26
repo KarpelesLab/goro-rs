@@ -3709,6 +3709,57 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
             .collect();
         drop(ob);
 
+        // Z_PARAM_OBJ_OF_CLASS(object, intern->ce)
+        let lazy_obj_method = match method {
+            b"getlazyinitializer" => Some("getLazyInitializer"),
+            b"initializelazyobject" => Some("initializeLazyObject"),
+            b"isuninitializedlazyobject" => Some("isUninitializedLazyObject"),
+            b"marklazyobjectasinitialized" => Some("markLazyObjectAsInitialized"),
+            _ => None,
+        };
+        if let Some(m) = lazy_obj_method {
+            let target = args.get(1).map(|v| v.deref()).unwrap_or(Value::Null);
+            let ok = match &target {
+                Value::Object(o) => {
+                    let ol = o.borrow().class_name.to_ascii_lowercase();
+                    ol == class_lower || vm.class_extends(&ol, &class_lower)
+                }
+                _ => false,
+            };
+            if !ok {
+                let given = match &target {
+                    Value::Object(o) => crate::value::display_class_name(&o.borrow().class_name),
+                    other => Vm::value_type_name(other),
+                };
+                let msg = format!(
+                    "ReflectionClass::{}(): Argument #1 ($object) must be of type {}, {} given",
+                    m,
+                    class_display(vm, &class_lower),
+                    given
+                );
+                let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Some(Value::Null);
+            }
+        }
+        // ReflectionClass|string arguments
+        if matches!(method, b"implementsinterface" | b"issubclassof") {
+            if let Some(Value::Array(_)) = args.get(1).map(|v| v.deref()) {
+                let (m, p) = if method == b"implementsinterface" {
+                    ("implementsInterface", "interface")
+                } else {
+                    ("isSubclassOf", "class")
+                };
+                let msg = format!(
+                    "ReflectionClass::{}(): Argument #1 (${}) must be of type ReflectionClass|string, array given",
+                    m, p
+                );
+                let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Some(Value::Null);
+            }
+        }
+
         match method {
             b"hasmethod" => {
                 if !check_arg_count(vm, args, 1, "ReflectionClass::hasMethod") {
@@ -8804,7 +8855,7 @@ fn class_display(vm: &Vm, class_lower: &[u8]) -> String {
     vm.classes
         .get(class_lower)
         .map(|c| crate::value::display_class_name(&c.name))
-        .unwrap_or_else(|| String::from_utf8_lossy(class_lower).to_string())
+        .unwrap_or_else(|| vm.builtin_canonical_name(class_lower))
 }
 
 /// Z_PARAM_OBJ_OF_CLASS(object, intern->ce) for ReflectionProperty methods.
@@ -9150,6 +9201,25 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                 } else if args.len() >= 3 {
                     let target = args[1].clone();
                     let value = args[2].clone();
+                    // (zpp "oz" of an instance property)
+                    if args.len() > 3 {
+                        let msg = format!(
+                            "ReflectionProperty::setValue() expects exactly 2 arguments, {} given",
+                            args.len() - 1
+                        );
+                        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
+                    if !matches!(target.deref(), Value::Object(_)) {
+                        let msg = format!(
+                            "ReflectionProperty::setValue(): Argument #1 ($objectOrValue) must be of type object, {} given",
+                            Vm::value_type_name(&target.deref())
+                        );
+                        let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
                     if let Value::Object(_) = &target {
                         // A Stringable object assigned to a string-typed
                         // property coerces to string (bug #79683).
@@ -9415,6 +9485,9 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
             b"isinitialized" => {
                 // isInitialized($obj): returns true if the property has been
                 // assigned a value (or has a default) on the object.
+                if opt_object_arg_error(vm, "ReflectionProperty::isInitialized", args.get(1)) {
+                    return Some(Value::Null);
+                }
                 let target = args.get(1).cloned().unwrap_or(Value::Null);
                 if is_static {
                     let initialized = vm
@@ -14955,6 +15028,53 @@ fn param_type_name(pt: &crate::opcode::ParamType) -> String {
             names.join("&")
         }
     }
+}
+
+/// zend_wrong_parameters_count_error() of a Reflection* instance method
+/// called with `n` arguments, from its stub (true when it threw).
+#[inline(never)]
+pub fn reflection_stub_arity_error(
+    vm: &mut Vm,
+    class_lower: &[u8],
+    method: &[u8],
+    n: usize,
+) -> bool {
+    use crate::stubs::{A_VARIADIC, F_DEPRECATED, F_STATIC};
+    let Some((c, f)) = crate::stubs::find_method(class_lower, method) else {
+        return false;
+    };
+    // (a deprecated method's deprecation comes before: left to the method)
+    if f.flags & (F_STATIC | F_DEPRECATED) != 0 {
+        return false;
+    }
+    let min = f.required_args();
+    let max = if f.args.last().is_some_and(|a| a.flags & A_VARIADIC != 0) {
+        None
+    } else {
+        Some(f.args.len())
+    };
+    if n >= min && max.is_none_or(|m| n <= m) {
+        return false;
+    }
+    let (kind, k) = if max == Some(min) {
+        ("exactly", min)
+    } else if n < min {
+        ("at least", min)
+    } else {
+        ("at most", max.unwrap_or(min))
+    };
+    let msg = format!(
+        "{}::{}() expects {} {} argument{}, {} given",
+        c.name,
+        f.name,
+        kind,
+        k,
+        if k == 1 { "" } else { "s" },
+        n
+    );
+    let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+    vm.current_exception = Some(exc);
+    true
 }
 
 /// zpp "o!" of a method's optional object argument: "must be of type

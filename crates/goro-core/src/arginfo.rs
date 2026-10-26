@@ -447,6 +447,23 @@ fn verified_method(key: &str) -> Option<(&'static FuncInfo, u8)> {
             let mut info = FuncInfo::from_stub(f);
             info.name = Box::leak(format!("{}::{}", c.name, f.name).into_boxed_str());
             info.module = c.ext;
+            // Z_PARAM_OBJ_OF_CLASS(obj, intern->ce): the type its error
+            // names is the reflected class, which the stub cannot tell (the
+            // methods check it themselves).
+            let flags = if matches!(
+                k,
+                "reflectionclass::getlazyinitializer"
+                    | "reflectionclass::initializelazyobject"
+                    | "reflectionclass::isuninitializedlazyobject"
+                    | "reflectionclass::marklazyobjectasinitialized"
+                    | "reflectionproperty::islazy"
+                    | "reflectionproperty::setrawvaluewithoutlazyinitialization"
+                    | "reflectionproperty::skiplazyinitialization"
+            ) {
+                flags & CHECK_ARITY
+            } else {
+                flags
+            };
             map.insert(k, (info, flags));
         }
         map

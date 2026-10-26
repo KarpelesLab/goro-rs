@@ -16646,6 +16646,21 @@ impl Vm {
                         _ => None,
                     }
                 }
+                // (zpp's argument count of the method's stub comes first)
+                c if c.starts_with(b"reflection")
+                    && method != b"__construct"
+                    && !(c == b"reflectionproperty" && method == b"setvalue")
+                    // (an abstract method is reported before the arguments)
+                    && !(c == b"reflectionmethod" && matches!(method, b"invoke" | b"invokeargs"))
+                    && crate::reflection::reflection_stub_arity_error(
+                        self,
+                        c,
+                        method,
+                        args.len().saturating_sub(1),
+                    ) =>
+                {
+                    Some(Value::Null)
+                }
                 b"reflectionclass" | b"reflectionobject" | b"reflectionenum" => {
                     crate::reflection::reflection_class_docall(self, method, args)
                 }
