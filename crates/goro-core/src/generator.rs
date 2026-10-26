@@ -114,6 +114,8 @@ pub struct PhpGenerator {
     /// Calls whose arguments were being evaluated when the generator yielded
     /// (`f($a, yield)`); restored onto the VM's call stack on resume.
     pub(crate) saved_calls: Vec<crate::vm::PendingCall>,
+    /// The function name shown for it while it runs (computed once).
+    pub(crate) running_name: Option<Rc<str>>,
     /// Registered with the cycle collector.
     pub(crate) gc_tracked: std::cell::Cell<bool>,
     /// The collector already ran this generator's destructor
@@ -273,6 +275,7 @@ impl PhpGenerator {
             has_returned: false,
             advanced_past_first: false,
             saved_calls: Vec::new(),
+            running_name: None,
             gc_tracked: std::cell::Cell::new(false),
             gc_dtor_called: std::cell::Cell::new(false),
             current_ref: None,
@@ -768,18 +771,47 @@ impl PhpGenerator {
 
     /// Record the value/key this generator holds while it runs.
     #[inline(never)]
-    fn push_running_values(&self, vm: &mut Vm) {
-        let vals = (self.state != GeneratorState::Created)
-            .then(|| (self.current_value.clone(), self.current_key.clone()));
+    /// generator_function_name_of() of this generator, kept for its next
+    /// runs.
+    fn running_function_name(&mut self, vm: &Vm) -> Rc<str> {
+        if let Some(n) = &self.running_name {
+            return n.clone();
+        }
+        let n: Rc<str> = Rc::from(vm.generator_function_name_of(self));
+        self.running_name = Some(n.clone());
+        n
+    }
+
+    /// (moved there while it runs: the body does not read them, a yield
+    /// replaces them)
+    fn push_running_values(&mut self, vm: &mut Vm) {
+        let vals = (self.state != GeneratorState::Created).then(|| {
+            (
+                std::mem::replace(&mut self.current_value, Value::Undef),
+                std::mem::replace(&mut self.current_key, Value::Undef),
+            )
+        });
         vm.running_gen_values
             .push((self as *const PhpGenerator as usize, vals));
     }
 
+    /// The values return to a generator that did not yield new ones.
     #[inline(never)]
-    fn pop_running_values(&self, vm: &mut Vm) {
+    fn pop_running_values(&mut self, vm: &mut Vm) {
         let addr = self as *const PhpGenerator as usize;
-        if let Some(i) = vm.running_gen_values.iter().rposition(|(a, _)| *a == addr) {
-            vm.running_gen_values.remove(i);
+        let entry = match vm.running_gen_values.last() {
+            Some((a, _)) if *a == addr => vm.running_gen_values.pop(),
+            _ => match vm.running_gen_values.iter().rposition(|(a, _)| *a == addr) {
+                Some(i) => Some(vm.running_gen_values.remove(i)),
+                None => None,
+            },
+        };
+        if let Some((_, Some((v, k)))) = entry {
+            if matches!(self.current_value, Value::Undef) && self.state != GeneratorState::Completed
+            {
+                self.current_value = v;
+                self.current_key = k;
+            }
         }
     }
 
@@ -855,7 +887,7 @@ impl PhpGenerator {
         self.is_running = true;
         // The running frame's values (a fiber suspended inside it owns them).
         vm.gc_frames.push(crate::gc::GcFrame::for_generator(self));
-        let fname = vm.generator_function_name_of(self);
+        let fname = self.running_function_name(vm);
         vm.running_generators
             .push((self as *const PhpGenerator as usize, fname, self.object_id));
         self.push_running_values(vm);
@@ -2497,7 +2529,7 @@ impl PhpGenerator {
         self.is_running = true;
         // The running frame's values (a fiber suspended inside it owns them).
         vm.gc_frames.push(crate::gc::GcFrame::for_generator(self));
-        let fname = vm.generator_function_name_of(self);
+        let fname = self.running_function_name(vm);
         vm.running_generators
             .push((self as *const PhpGenerator as usize, fname, self.object_id));
         self.push_running_values(vm);
@@ -2628,7 +2660,7 @@ impl Vm {
                     .iter()
                     .rev()
                     .find(|(a, _, _)| *a == addr)
-                    .map(|(_, n, _)| n.clone())
+                    .map(|(_, n, _)| n.to_string())
                     .unwrap_or_default()
             }
         }
@@ -2638,7 +2670,10 @@ impl Vm {
     /// is on the running stack too.
     #[inline(never)]
     fn push_delegating_generator(&mut self, g: &PhpGenerator) {
-        let fname = self.generator_function_name_of(g);
+        let fname: Rc<str> = match &g.running_name {
+            Some(n) => n.clone(),
+            None => Rc::from(self.generator_function_name_of(g)),
+        };
         self.running_generators
             .push((g as *const PhpGenerator as usize, fname, g.object_id));
     }

@@ -1693,7 +1693,7 @@ pub struct Vm {
     /// fiber: force-closed when they run again (see PhpGenerator::force_closed).
     pub(crate) forced_close_generators: Vec<usize>,
     /// Generators executing now (address, function name for var_dump()).
-    pub(crate) running_generators: Vec<(usize, String, u64)>,
+    pub(crate) running_generators: Vec<(usize, Rc<str>, u64)>,
     /// The generators executing now (address) with the value and key they
     /// yielded last (None before their first yield): what valid() /
     /// current() / key() see while they run.
