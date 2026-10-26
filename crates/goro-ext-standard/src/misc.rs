@@ -2143,6 +2143,12 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut vals: Vec<Value> = arr_borrow.values().cloned().collect();
         if let Some(v) = vals.first_mut() {
             *v = v.deref();
+            // (zend_lookup_class() drops one leading `\` of a class name)
+            if let Value::String(c) = v {
+                if let Some(rest) = c.as_bytes().strip_prefix(b"\\") {
+                    *v = Value::String(PhpString::from_vec(rest.to_vec()));
+                }
+            }
         }
         let is_closure = matches!(vals.first(), Some(Value::String(n))
             if goro_core::closure::is_closure_fn_name(n.as_bytes())

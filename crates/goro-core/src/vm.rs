@@ -5698,6 +5698,12 @@ impl Vm {
         mut vals: Vec<Value>,
         args: &[Value],
     ) -> Result<Value, VmError> {
+        // (zend_lookup_class() drops one leading `\` of a class name)
+        if let Some(Value::String(c)) = vals.first() {
+            if let Some(rest) = c.as_bytes().strip_prefix(b"\\") {
+                vals[0] = Value::String(PhpString::from_vec(rest.to_vec()));
+            }
+        }
         if vals.len() >= 2 {
             let method_name = vals[1].to_php_string();
             let method_lower: Vec<u8> = method_name
@@ -29570,13 +29576,18 @@ impl Vm {
                             if !Self::is_closure_value(&name_val)
                                 && !matches!(op.op1, OperandType::Const(_)) =>
                         {
+                            // (zend_init_dynamic_call_string(): split at the
+                            // last ':' when a ':' precedes it)
                             let b = s.as_bytes();
-                            b.windows(2).position(|w| w == b"::").map(|p| {
-                                let mut a = PhpArray::new();
-                                a.push(Value::String(PhpString::from_vec(b[..p].to_vec())));
-                                a.push(Value::String(PhpString::from_vec(b[p + 2..].to_vec())));
-                                Value::Array(Rc::new(RefCell::new(a)))
-                            })
+                            b.iter()
+                                .rposition(|&c| c == b':')
+                                .filter(|&p| p > 0 && b[p - 1] == b':')
+                                .map(|p| {
+                                    let mut a = PhpArray::new();
+                                    a.push(Value::String(PhpString::from_vec(b[..p - 1].to_vec())));
+                                    a.push(Value::String(PhpString::from_vec(b[p + 1..].to_vec())));
+                                    Value::Array(Rc::new(RefCell::new(a)))
+                                })
                         }
                         _ => None,
                     };
@@ -29697,8 +29708,11 @@ impl Vm {
                                     }
                                     (Value::Object(_), _) => None,
                                     (Value::String(cn), Value::String(m)) => {
+                                        // (zend_lookup_class() drops one leading `\`)
                                         let cl: Vec<u8> = cn
                                             .as_bytes()
+                                            .strip_prefix(b"\\")
+                                            .unwrap_or(cn.as_bytes())
                                             .iter()
                                             .map(|b| b.to_ascii_lowercase())
                                             .collect();
@@ -29904,6 +29918,15 @@ impl Vm {
                             line: op.line,
                         });
                     }
+                    // ("\C::m": zend_lookup_class() drops the leading `\`)
+                    let name_val = match &name_val {
+                        Value::String(s)
+                            if static_str_callable.is_some() && s.as_bytes().starts_with(b"\\") =>
+                        {
+                            Value::String(PhpString::from_vec(s.as_bytes()[1..].to_vec()))
+                        }
+                        _ => name_val,
+                    };
                     if matches!(&name_val, Value::Array(_)) && !is_closure_array {
                         // Dispatch through call_user_func (handles every array-callable form).
                         let mut target = CallTarget::NONE;
@@ -40328,7 +40351,11 @@ impl Vm {
                                         )
                                     }
                                 } else {
-                                    format!("Call to undefined function {}()", func_display)
+                                    // (zend_undefined_function() prints it with %s: a NUL ends it)
+                                    format!(
+                                        "Call to undefined function {}()",
+                                        func_display.split('\0').next().unwrap_or_default()
+                                    )
                                 };
                                 // An exception thrown by the autoloader while looking
                                 // up the class propagates instead (even when the
