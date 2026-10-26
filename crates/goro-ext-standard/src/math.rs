@@ -1556,6 +1556,10 @@ fn intval_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             ));
             return Ok(Value::Long(1));
         }
+        Value::Generator(_) => {
+            vm.emit_warning("Object of class Generator could not be converted to int");
+            return Ok(Value::Long(1));
+        }
         Value::Double(d) => {
             // zval_get_long(): zend_dval_to_lval() warns for a float out of
             // range (and wraps it)

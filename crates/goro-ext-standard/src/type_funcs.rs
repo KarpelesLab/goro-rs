@@ -112,6 +112,9 @@ fn strval(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::String(v.to_php_string()));
         }
     }
+    if let Value::Generator(_) = &derefed {
+        return vm.value_to_string_checked(&derefed).map(Value::String);
+    }
     // Object without a __toString hook is not convertible — PHP throws Error.
     if let Value::Object(obj) = &derefed {
         let class_name_bytes = obj.borrow().class_name.clone();
@@ -213,7 +216,7 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if matches!(&current, Value::Array(_)) {
                     _vm.emit_warning("Array to string conversion");
                 }
-                if let Value::Object(_) = &current {
+                if let Value::Object(_) | Value::Generator(_) = &current {
                     match _vm.value_to_string_checked(&current) {
                         Ok(s) => Value::String(s),
                         Err(e) => {

@@ -2166,6 +2166,10 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 return r;
             }
 
+            // [$generator, 'method']
+            if let Value::Generator(_) = &vals[0] {
+                return vm.call_callback(callback, &call_args);
+            }
             // Check if first element is a class name (string) or object
             match &vals[0] {
                 Value::String(class_name) => {
@@ -6727,6 +6731,9 @@ fn get_declared_interfaces_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmE
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(a) = generator_as_class_name(args) {
+        return method_exists(vm, &a);
+    }
     let class_or_obj = args.first().unwrap_or(&Value::Null);
     let method_name = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let method_lower: Vec<u8> = method_name
@@ -10521,6 +10528,9 @@ fn gc_enable_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
 }
 fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Generator(_)) = args.first() {
+        return Ok(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(PhpArray::new()))));
+    }
     if let Some(Value::Object(outer)) = args.first() {
         if let Some(f) = goro_core::vm::native_handlers(outer).and_then(|h| h.get_properties) {
             if let Some(a) = f(vm, outer, 1) {
@@ -10994,7 +11004,27 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::False)
     }
 }
+/// A Generator object given where a class name or object is taken: the
+/// arguments with it replaced by its class name (it has no properties).
+#[inline(never)]
+fn generator_as_class_name(args: &[Value]) -> Option<Vec<Value>> {
+    if !matches!(args.first().map(|v| v.deref()), Some(Value::Generator(_))) {
+        return None;
+    }
+    let mut a = args.to_vec();
+    a[0] = Value::String(PhpString::from_bytes(b"Generator"));
+    Some(a)
+}
+
 fn is_a_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let (Some(Value::Generator(_)), Some(Value::String(s))) = (args.first(), args.get(1)) {
+        let mut a = args.to_vec();
+        a[0] = Value::String(PhpString::from_bytes(b"Generator"));
+        a[1] = Value::String(s.clone());
+        a.truncate(2);
+        a.push(Value::True);
+        return is_a_fn(vm, &a);
+    }
     let (class_name, check_name) = match (args.first(), args.get(1)) {
         (Some(Value::Object(obj)), Some(Value::String(s))) => {
             (obj.borrow().class_name.clone(), s.as_bytes().to_vec())
@@ -11018,6 +11048,14 @@ fn is_a_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn is_subclass_of_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let (Some(Value::Generator(_)), Some(Value::String(s))) = (args.first(), args.get(1)) {
+        let mut a = args.to_vec();
+        a[0] = Value::String(PhpString::from_bytes(b"Generator"));
+        a[1] = Value::String(s.clone());
+        a.truncate(2);
+        a.push(Value::True);
+        return is_subclass_of_fn(vm, &a);
+    }
     let (class_name, check_name) = match (args.first(), args.get(1)) {
         (Some(Value::Object(obj)), Some(Value::String(s))) => {
             (obj.borrow().class_name.clone(), s.as_bytes().to_vec())
@@ -11149,6 +11187,9 @@ fn class_is_a_interface(vm: &Vm, iface_name: &[u8], check_name: &[u8]) -> bool {
     false
 }
 fn get_parent_class_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(a) = generator_as_class_name(args) {
+        return get_parent_class_fn(vm, &a);
+    }
     let class_name = match args.first().map(|v| v.deref()) {
         Some(Value::Object(obj)) => obj.borrow().class_name.clone(),
         Some(Value::String(s)) => {
@@ -16100,6 +16141,9 @@ fn throw_type_error_msg(vm: &mut Vm, msg: String) -> VmError {
 }
 
 fn get_class_methods_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(a) = generator_as_class_name(args) {
+        return get_class_methods_fn(vm, &a);
+    }
     let val = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
     let class_name = match &val {
         Value::String(s) => {
@@ -20351,6 +20395,9 @@ fn enum_declared_props(vm: &Vm, class_lower: &[u8]) -> &'static [&'static [u8]] 
 }
 
 fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(a) = generator_as_class_name(args) {
+        return property_exists_fn(vm, &a);
+    }
     let obj_or_class = args.first().unwrap_or(&Value::Null);
     let prop_name = args
         .get(1)
@@ -20450,6 +20497,9 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn get_mangled_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Generator(_)) = args.first() {
+        return Ok(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(PhpArray::new()))));
+    }
     if let Some(Value::Object(outer)) = args.first() {
         // For initialized lazy proxy, redirect to the real backing object.
         let obj_rc = vm.proxy_redirect(outer);

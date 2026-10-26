@@ -2779,6 +2779,7 @@ impl Vm {
             b"throw" => "throw",
             b"getreturn" => "getReturn",
             b"__wakeup" => "__wakeup",
+            b"__debuginfo" => "__debugInfo",
             _ => {
                 let msg = format!(
                     "Call to undefined method Generator::{}()",
@@ -2930,6 +2931,16 @@ impl Vm {
         line: u32,
     ) -> Result<Value, VmError> {
         let running = g.try_borrow().map(|b| b.is_running).unwrap_or(true);
+        if method == b"__debuginfo" {
+            // ["function" => the generator function's name]
+            let name = self.generator_function_name(g);
+            let mut arr = crate::array::PhpArray::new();
+            arr.set(
+                crate::array::ArrayKey::String(PhpString::from_bytes(b"function")),
+                Value::String(PhpString::from_string(name)),
+            );
+            return Ok(Value::Array(Rc::new(RefCell::new(arr))));
+        }
         if method == b"__wakeup" {
             let msg = "Unserialization of 'Generator' is not allowed";
             let exc = self.create_exception(b"Exception", msg, line);

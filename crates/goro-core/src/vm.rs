@@ -5632,6 +5632,11 @@ impl Vm {
                 .map(|b| b.to_ascii_lowercase())
                 .collect();
             match &vals[0] {
+                Value::Generator(g) => {
+                    let (g, this) = (g.clone(), vals[0].clone());
+                    let line = self.current_line;
+                    return self.generator_method(&g, &this, &method_lower, args, line);
+                }
                 Value::Object(obj) => {
                     let class_lower: Vec<u8> = obj
                         .borrow()
@@ -6681,6 +6686,15 @@ impl Vm {
                         "Object of class {} could not be converted to float",
                         class_name
                     ),
+                    line,
+                );
+            }
+            (Value::Generator(_), Value::Long(_)) | (Value::Long(_), Value::Generator(_)) => {
+                self.emit_notice_at("Object of class Generator could not be converted to int", line);
+            }
+            (Value::Generator(_), Value::Double(_)) | (Value::Double(_), Value::Generator(_)) => {
+                self.emit_notice_at(
+                    "Object of class Generator could not be converted to float",
                     line,
                 );
             }
@@ -40288,6 +40302,11 @@ impl Vm {
                                 ),
                                 op.line,
                             );
+                        } else if let Value::Generator(_) = &val {
+                            self.emit_warning_at(
+                                "Object of class Generator could not be converted to int",
+                                op.line,
+                            );
                         }
                         if let Value::Double(d) = val {
                             self.float_to_int_cast(d, op.line)
@@ -47985,6 +48004,7 @@ impl Vm {
                             Value::Object(obj) => {
                                 Value::String(PhpString::from_vec(obj.borrow().class_name.clone()))
                             }
+                            Value::Generator(_) => Value::String(PhpString::from_bytes(b"Generator")),
                             other => {
                                 let msg = format!(
                                     "Cannot use \"::class\" on {}",
@@ -51909,12 +51929,13 @@ impl Vm {
                         let mut empty_skip_get = false;
                         let result = if let Value::Array(arr) = &arr_val {
                             let kd = key_val.deref();
-                            if matches!(kd, Value::Array(_) | Value::Object(_)) {
+                            if matches!(kd, Value::Array(_) | Value::Object(_) | Value::Generator(_)) {
                                 // zend_isset_dim_slow(): an illegal offset type throws.
                                 let t = match &kd {
                                     Value::Object(o) => {
                                         crate::value::display_class_name(&o.borrow().class_name)
                                     }
+                                    Value::Generator(_) => "Generator".to_string(),
                                     _ => "array".to_string(),
                                 };
                                 let msg = if op.opcode == OpCode::ArrayIssetFetch {
@@ -60134,10 +60155,13 @@ impl Vm {
                         // zend_wrong_property_read()
                         let type_name = Self::value_type_name(&obj_val);
                         let prop_str = prop_name.to_string_lossy();
-                        self.emit_warning_at(
-                            &format!("Attempt to read property \"{}\" on {}", prop_str, type_name),
-                            op.line,
-                        );
+                        let msg = if matches!(obj_val, Value::Generator(_)) {
+                            // (an object without properties)
+                            format!("Undefined property: Generator::${}", prop_str)
+                        } else {
+                            format!("Attempt to read property \"{}\" on {}", prop_str, type_name)
+                        };
+                        self.emit_warning_at(&msg, op.line);
                         Value::Null
                     };
                     if let Some((rid, pname)) = propagate_get_guard_to_real {
@@ -63610,6 +63634,15 @@ impl Vm {
         // Check for closures stored as strings/arrays
         if Self::is_closure_value(val) {
             let msg = "Object of class Closure could not be converted to string";
+            let exc = self.create_exception(b"Error", msg, self.current_line);
+            self.current_exception = Some(exc);
+            return Err(VmError {
+                message: format!("Uncaught Error: {}", msg),
+                line: self.current_line,
+            });
+        }
+        if let Value::Generator(_) = val {
+            let msg = "Object of class Generator could not be converted to string";
             let exc = self.create_exception(b"Error", msg, self.current_line);
             self.current_exception = Some(exc);
             return Err(VmError {

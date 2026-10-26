@@ -716,6 +716,7 @@ fn class_arg(vm: &mut Vm, fname: &str, args: &[Value]) -> Result<Option<(Vec<u8>
     let (class_name, from_string) = match args.first().map(|v| v.deref()).unwrap_or(Value::Null) {
         Value::String(s) => (s.as_bytes().to_vec(), true),
         Value::Object(obj) => (obj.borrow().class_name.clone(), false),
+        Value::Generator(_) => (b"Generator".to_vec(), false),
         other => {
             let msg = format!(
                 "{}(): Argument #1 ($object_or_class) must be of type object|string, {} given",
