@@ -12844,6 +12844,7 @@ impl Vm {
             (Value::Long(a), Value::Long(b)) => a == b,
             (Value::Double(a), Value::Double(b)) => a == b,
             (Value::String(a), Value::String(b)) => a.as_bytes() == b.as_bytes(),
+            (Value::Array(_), Value::Array(_)) => a.identical(b),
             _ => false,
         }
     }
