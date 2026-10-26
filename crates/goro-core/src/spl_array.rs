@@ -290,16 +290,7 @@ impl Vm {
                 self.emit_warning(&msg);
                 ArrayKey::Int(r.id())
             }
-            Value::Double(d) => {
-                if d.is_finite() && d.fract() != 0.0 {
-                    let msg = format!(
-                        "Implicit conversion from float {} to int loses precision",
-                        crate::value::format_php_float_repr(d)
-                    );
-                    self.emit_deprecated(&msg);
-                }
-                ArrayKey::Int(if d.is_finite() { d as i64 } else { 0 })
-            }
+            Value::Double(d) => ArrayKey::Int(self.dval_to_lval_safe(d)),
             Value::False => ArrayKey::Int(0),
             Value::True => ArrayKey::Int(1),
             Value::Long(n) => ArrayKey::Int(n),
