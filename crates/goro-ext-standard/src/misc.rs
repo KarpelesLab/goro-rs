@@ -12216,7 +12216,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .to_string_lossy();
     // Empty filename → ValueError, matching PHP's behavior.
     if filename.is_empty() {
-        let msg = "fopen(): Argument #1 ($filename) cannot be empty";
+        let msg = "Path must not be empty";
         let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
         vm.current_exception = Some(exc);
         return Err(VmError {
@@ -12323,7 +12323,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     // php://filter/<chain>/resource=<inner_url> (php_stream_url_wrap_php).
-    if filename.len() > 13 && filename[..13].eq_ignore_ascii_case("php://filter/") {
+    if filename.len() >= 13 && filename[..13].eq_ignore_ascii_case("php://filter/") {
         let rest = &filename[12..];
         let mut mode_rw = 0;
         if mode.contains('r') || mode.contains('+') {
@@ -13390,7 +13390,7 @@ fn fwrite_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     });
     if let Some(ref m) = stream_mode {
-        let clean: String = m.chars().filter(|&c| c != 'b' && c != 't').collect();
+        let clean = canon_fopen_mode(m);
         // 'r' (read-only) without '+' is not writable.
         if clean == "r" {
             if !is_special {
@@ -13486,11 +13486,21 @@ pub(crate) fn stream_raw_mode(fid: i64) -> Option<String> {
     FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.mode.clone()))
 }
 
+/// php_stream_parse_fopen_modes(): only the first character and a '+'
+/// anywhere decide what a mode allows ("rw" is read-only, "we" is "w").
+fn canon_fopen_mode(m: &str) -> String {
+    let mut c: String = m.chars().take(1).collect();
+    if m.contains('+') {
+        c.push('+');
+    }
+    c
+}
+
 fn stream_mode_clean(fid: i64) -> Option<String> {
     FILE_HANDLES.with(|h| {
         h.borrow()
             .get(&fid)
-            .map(|fh| fh.mode.chars().filter(|&c| c != 'b' && c != 't').collect())
+            .map(|fh| canon_fopen_mode(&fh.mode))
     })
 }
 
@@ -13610,7 +13620,7 @@ fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Emit notice and return false if underlying stream is write-only.
     let stream_mode = FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.mode.clone()));
     if let Some(m) = stream_mode {
-        let clean: String = m.chars().filter(|&c| c != 'b' && c != 't').collect();
+        let clean = canon_fopen_mode(&m);
         if matches!(clean.as_str(), "w" | "a" | "x" | "c") {
             let line = vm.current_line;
             vm.emit_notice_at(
@@ -13950,7 +13960,6 @@ fn fseek_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 fh.special,
                 SpecialStream::Stdout | SpecialStream::Stderr | SpecialStream::Output
             ) || (fh.is_dup_descriptor() && !fh.seekable);
-            fh.eof = false;
             // The read buffer is discarded; SEEK_CUR is relative to the
             // logical position (before the buffered bytes).
             // (_php_stream_seek(): SEEK_CUR is relative to stream->position)
@@ -13972,8 +13981,12 @@ fn fseek_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if is_unseekable_special {
                 return Err(true); // emit warning
             }
+            // (_php_stream_seek(): only a successful seek clears EOF)
             match fh.file.seek(seek) {
-                Ok(_) => Ok(0i64),
+                Ok(_) => {
+                    fh.eof = false;
+                    Ok(0i64)
+                }
                 Err(_) => Ok(-1),
             }
         } else {
@@ -19205,7 +19218,7 @@ fn fgetc_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // PHP emits a notice if the underlying mode is write-only.
     let stream_mode = FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.mode.clone()));
     if let Some(m) = stream_mode {
-        let clean: String = m.chars().filter(|&c| c != 'b' && c != 't').collect();
+        let clean = canon_fopen_mode(&m);
         if matches!(clean.as_str(), "w" | "a" | "x" | "c") {
             let line = vm.current_line;
             vm.emit_notice_at(
