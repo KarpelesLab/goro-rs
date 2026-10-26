@@ -55,7 +55,7 @@ impl Vm {
             b"from" | b"tryfrom" | b"cases" => self
                 .classes
                 .get(class)
-                .is_some_and(|c| c.is_enum)
+                .is_some_and(|c| c.is_enum && (method == b"cases" || c.enum_backing_type.is_some()))
                 .then(|| name_lower.to_vec()),
             _ => {
                 // The internal class: walk up from a user class that does
@@ -469,6 +469,7 @@ impl Vm {
     /// itself (user methods, closures and relative class names are left to
     /// the callers).
     pub fn internal_static_target(&mut self, callback: &Value) -> Option<InternalStaticTarget> {
+        let mut on_object = false;
         let (class, method): (Vec<u8>, Vec<u8>) = match callback {
             Value::String(s) => {
                 let b = s.as_bytes();
@@ -481,14 +482,22 @@ impl Vm {
                     return None;
                 }
                 let mut it = a.values();
-                let (Value::String(c), Value::String(m)) = (it.next()?.deref(), it.next()?.deref())
-                else {
+                let (c, Value::String(m)) = (it.next()?.deref(), it.next()?.deref()) else {
                     return None;
                 };
                 if m.as_bytes().windows(2).any(|w| w == b"::") {
                     return None;
                 }
-                (c.as_bytes().to_vec(), m.as_bytes().to_vec())
+                let c = match c {
+                    Value::String(c) => c.as_bytes().to_vec(),
+                    // [$case, 'cases'] (an enum's static methods on a case)
+                    Value::Object(o) => {
+                        on_object = true;
+                        o.borrow().class_name.to_vec()
+                    }
+                    _ => return None,
+                };
+                (c, m.as_bytes().to_vec())
             }
             _ => return None,
         };
@@ -497,6 +506,17 @@ impl Vm {
             .unwrap_or(&class)
             .to_ascii_lowercase();
         let method_lower = method.to_ascii_lowercase();
+        if on_object
+            && !self.classes.get(&class_lower).is_some_and(|c| {
+                c.is_enum
+                    && !c.methods.contains_key(method_lower.as_slice())
+                    && (method_lower == b"cases"
+                        || (c.enum_backing_type.is_some()
+                            && matches!(method_lower.as_slice(), b"from" | b"tryfrom")))
+            })
+        {
+            return None;
+        }
         if class_lower.is_empty()
             || matches!(class_lower.as_slice(), b"self" | b"parent" | b"static")
             || class_lower.starts_with(b"__")

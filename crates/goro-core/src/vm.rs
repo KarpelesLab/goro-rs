@@ -29890,6 +29890,13 @@ impl Vm {
                                                     && c.get_method(&ml).is_none()
                                                     && c.get_method(b"__call").is_none()
                                                     && !(cl == b"closure" && ml == b"__invoke")
+                                                    && !(c.is_enum
+                                                        && (ml == b"cases"
+                                                            || (c.enum_backing_type.is_some()
+                                                                && matches!(
+                                                                    ml.as_slice(),
+                                                                    b"from" | b"tryfrom"
+                                                                ))))
                                                     && self.internal_method_of(&cl, &ml).is_none()
                                             }
                                             // (an internal class: its stub's methods)
@@ -63385,9 +63392,22 @@ impl Vm {
                                 let mut func_name = class_name_orig.clone();
                                 func_name.extend_from_slice(b"::");
                                 func_name.extend_from_slice(method_name.as_bytes());
+                                // An enum's static cases()/from()/tryFrom() called
+                                // on a case: no $this.
+                                let enum_static = class.is_enum
+                                    && (method_name_lower == b"cases"
+                                        || (class.enum_backing_type.is_some()
+                                            && matches!(
+                                                method_name_lower.as_slice(),
+                                                b"from" | b"tryfrom"
+                                            )));
                                 self.pending_calls.push(PendingCall {
                                     name: PhpString::from_vec(func_name),
-                                    args: vec![obj_val.clone()],
+                                    args: if enum_static {
+                                        Vec::new()
+                                    } else {
+                                        vec![obj_val.clone()]
+                                    },
                                     named_args: Vec::new(),
                                     target: CallTarget::NONE,
                                 });
