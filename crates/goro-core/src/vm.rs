@@ -36507,6 +36507,9 @@ impl Vm {
                                         .class_extends(&raw_class_lower, b"dateperiod")
                                     {
                                         b"dateperiod".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"phptoken") {
+                                        // (nikic/php-parser's Token extends PhpToken)
+                                        b"phptoken".to_vec()
                                     } else if self
                                         .class_extends(&raw_class_lower, b"reflectionenum")
                                     {
@@ -64201,8 +64204,8 @@ impl Vm {
                     _ => PhpString::empty(),
                 };
             }
-            // Built-in __toString for PhpToken
-            if class_lower == b"phptoken" {
+            // Built-in __toString for PhpToken (and subclasses)
+            if class_lower == b"phptoken" || self.class_extends(&class_lower, b"phptoken") {
                 let obj_borrow = obj.borrow();
                 return obj_borrow.get_property(b"text").to_php_string();
             }
@@ -64388,7 +64391,8 @@ impl Vm {
             let is_reflection = class_lower.starts_with(b"reflection");
             let is_gmp = class_lower == b"gmp";
             let is_simplexml = class_lower == b"simplexmlelement";
-            let is_phptoken = class_lower == b"phptoken";
+            let is_phptoken =
+                class_lower == b"phptoken" || self.class_extends(&class_lower, b"phptoken");
             let is_spl_str = self.spl_has_builtin_tostring(&class_lower);
             let is_native_str = native_handlers(obj)
                 .map(|h| h.cast.is_some())
