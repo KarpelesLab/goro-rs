@@ -315,11 +315,13 @@ pub fn set_memory_limit(bytes: i64) {
     let limit = if bytes <= 0 { 0 } else { bytes as usize };
     MEMORY_LIMIT.with(|l| l.set(limit));
     // The binary caps its address space (RLIMIT_AS, 2 GiB) as a safety net
-    // for memory the accounting does not see; a larger memory_limit lifts
-    // that cap so the script reaches memory_limit first.
+    // for memory the accounting does not see; a memory_limit of 1 GiB or
+    // more lifts that cap so the script reaches memory_limit first (the
+    // memory in use can be about twice what is accounted: allocator and
+    // container overhead, e.g. the traces of a deep recursion's errors).
     #[cfg(unix)]
-    if limit > 1 << 30 {
-        let want = (limit as u64).saturating_add(1 << 30);
+    if limit >= 1 << 30 {
+        let want = (limit as u64).saturating_mul(2).saturating_add(1 << 30);
         unsafe {
             let mut cur = libc::rlimit {
                 rlim_cur: 0,
