@@ -5726,6 +5726,12 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 .to_string(),
         ));
     }
+    // zval_get_tmp_string(): a float is converted with the precision in
+    // effect before the new value applies.
+    let value = match value {
+        Value::Double(_) => Value::String(value.to_php_string()),
+        v => v,
+    };
     let key = name.as_bytes().to_vec();
     // ini_set() returns the old value as a string.
     let old = vm
@@ -5752,6 +5758,11 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     {
         return Ok(Value::False);
     }
+    if matches!(key.as_slice(), b"precision" | b"serialize_precision")
+        && ini_precision_atol(&value).is_none()
+    {
+        return Ok(Value::False);
+    }
     ini_remember(vm, &key);
     // Extension-registered INI validators (e.g. date.timezone)
     if let Some(validate) = vm.ini_validators.get(&key).copied() {
@@ -5770,15 +5781,10 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if key == b"max_execution_time" {
         set_execution_timeout(value.to_long());
     }
-    // Handle precision specially to update thread-local
+    // OnSetPrecision / OnSetSerializePrecision: ZEND_ATOL() of the value,
+    // refused below -1.
     if key == b"precision" {
-        if let Value::Long(p) = &value {
-            goro_core::value::set_php_precision(*p as i32);
-        } else if let Value::String(s) = &value {
-            if let Ok(p) = s.to_string_lossy().parse::<i32>() {
-                goro_core::value::set_php_precision(p);
-            }
-        }
+        goro_core::value::set_php_precision(ini_precision_atol(&value).unwrap_or(14));
     }
     // OnUpdateFiberStackSize
     if key == b"fiber.stack_size" {
@@ -5864,13 +5870,7 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     // Handle serialize_precision
     if key == b"serialize_precision" {
-        if let Value::Long(p) = &value {
-            goro_core::value::set_php_serialize_precision(*p as i32);
-        } else if let Value::String(s) = &value {
-            if let Ok(p) = s.to_string_lossy().parse::<i32>() {
-                goro_core::value::set_php_serialize_precision(p);
-            }
-        }
+        goro_core::value::set_php_serialize_precision(ini_precision_atol(&value).unwrap_or(-1));
     }
     // Handle zend.assertions: warn when trying to change it if currently -1 (only allowed in php.ini)
     // Also warn when trying to set it to -1 at runtime
@@ -18315,6 +18315,33 @@ pub fn set_ini_opened_path(path: Option<String>) {
     INI_OPENED_PATH.with(|p| *p.borrow_mut() = path);
 }
 
+/// The value of a precision/serialize_precision INI setting: ZEND_ATOL()
+/// (strtol: leading blanks, a sign, the digits up to the first other byte),
+/// None (refused) below -1.
+#[inline(never)]
+fn ini_precision_atol(value: &Value) -> Option<i32> {
+    let s = value.to_php_string();
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        i += 1;
+    }
+    let neg = i < b.len() && b[i] == b'-';
+    if i < b.len() && matches!(b[i], b'-' | b'+') {
+        i += 1;
+    }
+    let mut n: i64 = 0;
+    while i < b.len() && b[i].is_ascii_digit() {
+        n = n.saturating_mul(10).saturating_add((b[i] - b'0') as i64);
+        i += 1;
+    }
+    let n = if neg { -n } else { n };
+    if n < -1 {
+        return None;
+    }
+    Some(n.min(i32::MAX as i64) as i32)
+}
+
 /// The INI entries in effect at startup: every directive from php.ini, the
 /// SAPI's built-in settings and `-d` (or a phpt --INI-- section), in the
 /// order they apply, goes through the same handling (php_init_config() then
@@ -18328,12 +18355,16 @@ pub fn apply_startup_ini(vm: &mut Vm, ini: &[(String, String)]) -> Vec<u8> {
         register_cfg_var(key, value);
         match key.as_str() {
             "precision" => {
-                if let Ok(p) = value.trim().parse::<i32>() {
+                if let Some(p) =
+                    ini_precision_atol(&Value::String(PhpString::from_string(value.clone())))
+                {
                     goro_core::value::set_php_precision(p);
                 }
             }
             "serialize_precision" => {
-                if let Ok(p) = value.trim().parse::<i32>() {
+                if let Some(p) =
+                    ini_precision_atol(&Value::String(PhpString::from_string(value.clone())))
+                {
                     goro_core::value::set_php_serialize_precision(p);
                 }
             }
