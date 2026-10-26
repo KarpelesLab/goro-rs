@@ -146,14 +146,28 @@ fn hash_int(n: i64) -> u64 {
     x
 }
 
+/// The hash of a string key (cached by PhpString::hash_value()): eight
+/// bytes at a time, then mixed so that the low bits the index uses depend
+/// on all of them.
 #[inline]
-fn hash_bytes(b: &[u8]) -> u64 {
-    // FNV-1a
-    let mut h: u64 = 0xcbf29ce484222325;
-    for &c in b {
-        h ^= c as u64;
-        h = h.wrapping_mul(0x100000001b3);
+pub(crate) fn hash_bytes(b: &[u8]) -> u64 {
+    const K: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut h: u64 = (b.len() as u64).wrapping_mul(K);
+    let mut chunks = b.chunks_exact(8);
+    for c in &mut chunks {
+        let w = u64::from_le_bytes(c.try_into().unwrap());
+        h = (h ^ w).wrapping_mul(K).rotate_left(29);
     }
+    let r = chunks.remainder();
+    if !r.is_empty() {
+        let mut buf = [0u8; 8];
+        buf[..r.len()].copy_from_slice(r);
+        h = (h ^ u64::from_le_bytes(buf))
+            .wrapping_mul(K)
+            .rotate_left(29);
+    }
+    h ^= h >> 32;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
     h ^ (h >> 29)
 }
 
@@ -161,7 +175,7 @@ fn hash_bytes(b: &[u8]) -> u64 {
 fn hash_key(k: &ArrayKey) -> u64 {
     match k {
         ArrayKey::Int(n) => hash_int(*n),
-        ArrayKey::String(s) => hash_bytes(s.as_bytes()),
+        ArrayKey::String(s) => s.hash_value(),
     }
 }
 
@@ -838,11 +852,47 @@ impl PhpArray {
             .map(|p| p + head)
     }
 
+    /// find_str() of a key held as a string (its hash cached with it, and
+    /// the same string as the entry's found without comparing bytes).
+    #[inline]
+    fn find_pstr(&self, key: &PhpString) -> Option<usize> {
+        if self.packed {
+            return None;
+        }
+        let index = self.idx();
+        let entries = self.ents();
+        if !index.is_empty() {
+            let mask = index.len() - 1;
+            let mut i = (key.hash_value() as usize) & mask;
+            loop {
+                let slot = index[i];
+                if slot == 0 {
+                    return None;
+                }
+                let pos = (slot - 1) as usize;
+                if let ArrayKey::String(s) = &entries[pos].0 {
+                    if s.ptr_eq(key) || s.as_bytes() == key.as_bytes() {
+                        return Some(pos);
+                    }
+                }
+                i = (i + 1) & mask;
+            }
+        }
+        let head = self.head as usize;
+        let kb = key.as_bytes();
+        self.live()
+            .iter()
+            .position(
+                |(k, _)| matches!(k, ArrayKey::String(s) if s.ptr_eq(key) || s.as_bytes() == kb),
+            )
+            .map(|p| p + head)
+    }
+
     #[inline]
     fn find(&self, key: &ArrayKey) -> Option<usize> {
         match key {
             ArrayKey::Int(n) => self.find_int(*n),
-            ArrayKey::String(s) => self.find_str(s.as_bytes()),
+            ArrayKey::String(s) => self.find_pstr(s),
         }
     }
 

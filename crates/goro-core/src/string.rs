@@ -175,14 +175,20 @@ impl PhpString {
         self.inner.valid_utf8.set(true);
     }
 
-    /// Get the hash, computing and caching it on first access
+    /// The hash of the string as an array key (see PhpArray), computed on
+    /// first use and kept with the string (zend_string's h): a key looked
+    /// up again, or a table rebuilt, does not hash it again.
+    #[inline]
     pub fn hash_value(&self) -> u64 {
-        if let Some(h) = self.inner.hash.get() {
-            return h;
+        match self.inner.hash.get() {
+            Some(h) => h,
+            None => self.hash_slow(),
         }
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.inner.data.hash(&mut hasher);
-        let h = hasher.finish();
+    }
+
+    #[inline(never)]
+    fn hash_slow(&self) -> u64 {
+        let h = crate::array::hash_bytes(&self.inner.data);
         self.inner.hash.set(Some(h));
         h
     }
