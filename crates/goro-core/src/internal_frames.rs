@@ -447,9 +447,11 @@ impl Vm {
             // check holds for every internal function, even those whose
             // types the generic layer doesn't check yet. (Not the "+" / "*"
             // zend_parse_parameters() ones, whose stubs' counts differ:
-            // array_udiff() needs 2 arguments, they check it themselves.)
+            // array_udiff() needs 2 arguments, they check it themselves; nor
+            // strtr()'s: its parsing blocks by argument count have their own
+            // message.)
             if let Some(msg) = crate::arginfo::lookup(lname)
-                .filter(|i| !crate::arginfo::legacy_zpp_variadic(i.name))
+                .filter(|i| !crate::arginfo::legacy_zpp_variadic(i.name) && lname != b"strtr")
                 .and_then(|i| i.arity_error(args.len()))
             {
                 let line = self.current_line;
