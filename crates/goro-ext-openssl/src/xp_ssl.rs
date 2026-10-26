@@ -768,7 +768,7 @@ fn setup(vm: &mut Vm, p: &CryptoSetup<'_>) -> Option<Box<dyn CryptoStream>> {
     let ciphers = opt_bytes(opts, "ciphers").map(|b| cstr(&b));
     let cipher_suites = match &ciphers {
         Some(list) => parse_cipher_list(list)?,
-        None => None,
+        None => Some(DEFAULT_SUITES.to_vec()),
     };
 
     let mut security_level = DEFAULT_SECURITY_LEVEL;
@@ -1184,6 +1184,38 @@ fn load_cafile(vm: &mut Vm, f: &str, cafile: &str) -> Option<Vec<Rc<Cert>>> {
 
 /// SSL_CTX_set_cipher_list(): the IANA suites an OpenSSL cipher string
 /// selects. Some(None): the engine's default set; None: nothing matched.
+/// The offer (and TLS 1.3 server preference) without a "ciphers" option:
+/// OpenSSL's default TLS 1.3 ciphersuites, then what purecrypto implements
+/// of OPENSSL_DEFAULT_STREAM_CIPHERS (php_openssl.h), in that order.
+/// Suites purecrypto does not offer for the negotiated range are skipped.
+const DEFAULT_SUITES: &[u16] = &[
+    0x1302, // TLS_AES_256_GCM_SHA384
+    0x1303, // TLS_CHACHA20_POLY1305_SHA256
+    0x1301, // TLS_AES_128_GCM_SHA256
+    0xC02F, // ECDHE-RSA-AES128-GCM-SHA256
+    0xC02B, // ECDHE-ECDSA-AES128-GCM-SHA256
+    0xC030, // ECDHE-RSA-AES256-GCM-SHA384
+    0xC02C, // ECDHE-ECDSA-AES256-GCM-SHA384
+    0xC027, // ECDHE-RSA-AES128-SHA256
+    0xC023, // ECDHE-ECDSA-AES128-SHA256
+    0xC013, // ECDHE-RSA-AES128-SHA
+    0xC009, // ECDHE-ECDSA-AES128-SHA
+    0xC028, // ECDHE-RSA-AES256-SHA384
+    0xC024, // ECDHE-ECDSA-AES256-SHA384
+    0xC014, // ECDHE-RSA-AES256-SHA
+    0xC00A, // ECDHE-ECDSA-AES256-SHA
+    0x009C, // AES128-GCM-SHA256
+    0x009D, // AES256-GCM-SHA384
+    0x003C, // AES128-SHA256
+    0x002F, // AES128-SHA
+    0x003D, // AES256-SHA256
+    0x0035, // AES256-SHA
+    0xCCA9, // ECDHE-ECDSA-CHACHA20-POLY1305 (HIGH)
+    0xCCA8, // ECDHE-RSA-CHACHA20-POLY1305 (HIGH)
+    0xC012, // ECDHE-RSA-DES-CBC3-SHA
+    0x000A, // DES-CBC3-SHA
+];
+
 fn parse_cipher_list(list: &str) -> Option<Option<Vec<u16>>> {
     const NAMED: &[(&str, u16)] = &[
         ("ECDHE-ECDSA-AES128-GCM-SHA256", 0xC02B),
