@@ -41358,6 +41358,8 @@ impl Vm {
                     };
                     let mut stack: Vec<usize> = Vec::new();
                     let tab = fsym.as_ref().map(|f| f.tab.clone());
+                    // (compact()'s own frame, for errors raised in it)
+                    self.push_builtin_frame(b"compact", &top, op.line);
                     for (i, entry) in top.iter().enumerate() {
                         self.compact_var(
                             &mut result,
@@ -41373,6 +41375,7 @@ impl Vm {
                             break;
                         }
                     }
+                    self.pop_builtin_frame();
                     if self.current_exception.is_some() {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
