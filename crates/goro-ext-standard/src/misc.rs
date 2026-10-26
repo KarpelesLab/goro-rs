@@ -12427,10 +12427,29 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if let Some(ctx) = args.get(3) {
             inner_args.push(ctx.clone());
         }
-        let inner = call_registered(vm, b"fopen", fopen_fn, &inner_args)?;
+        // (the inner open runs without REPORT_ERRORS: its failure is this
+        // URL's "operation failed")
+        let saved = vm.warning_capture.replace(Vec::new());
+        let inner = call_registered(vm, b"fopen", fopen_fn, &inner_args);
+        let captured = std::mem::replace(&mut vm.warning_capture, saved).unwrap_or_default();
+        let inner = inner?;
+        let open_failed = captured.iter().any(|w| w.contains("Failed to open stream"));
+        for w in captured {
+            if !w.contains("Failed to open stream") {
+                vm.emit_warning(&w);
+            }
+        }
         let inner_fid = match inner {
             Value::Resource(n) => n.id(),
-            _ => return Ok(Value::False),
+            _ => {
+                if open_failed {
+                    vm.emit_warning(&format!(
+                        "{}({}): Failed to open stream: operation failed",
+                        fopen_caller, filename
+                    ));
+                }
+                return Ok(Value::False);
+            }
         };
         for seg in chain_str.split('/').filter(|p| !p.is_empty()) {
             let lower = seg.to_ascii_lowercase();
