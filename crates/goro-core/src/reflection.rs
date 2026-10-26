@@ -1606,6 +1606,20 @@ fn reflection_method_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> b
     true
 }
 
+/// The attributes (and their scope) of the function behind a closure
+/// (`__reflection_closure_fn`: "class::method" or a function name).
+fn closure_fn_attributes(vm: &Vm, fn_lower: &[u8]) -> (Vec<RuntimeAttribute>, Option<Vec<u8>>) {
+    if let Some(p) = fn_lower.windows(2).position(|w| w == b"::") {
+        if let Some(m) = rmethod(vm, &fn_lower[..p], &fn_lower[p + 2..]) {
+            return (m.attributes.clone(), Some(m.declaring_class.clone()));
+        }
+    }
+    match rfunc(vm, fn_lower) {
+        Some(op) => (op.attributes.clone(), op.scope_class.clone()),
+        None => (Vec::new(), None),
+    }
+}
+
 thread_local! {
     /// Set while constructing the Closure::__invoke of a closure object.
     static CLOSURE_INVOKE_CTOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -5238,6 +5252,19 @@ pub fn reflection_method_method(
     // to look up in vm.user_functions.
     if let Some(ref fn_lower) = closure_fn {
         match method {
+            // (ZEND_ACC_DEPRECATED is kept from the closure's function)
+            b"isdeprecated" => {
+                let dep = match fn_lower.windows(2).position(|w| w == b"::") {
+                    Some(p) => rmethod(vm, &fn_lower[..p], &fn_lower[p + 2..])
+                        .map(|m| op_array_is_deprecated(&m.op_array, &m.attributes)),
+                    None => None,
+                }
+                .or_else(|| {
+                    rfunc(vm, fn_lower).map(|op| op_array_is_deprecated(op, &op.attributes))
+                })
+                .unwrap_or(false);
+                return Some(if dep { Value::True } else { Value::False });
+            }
             b"getnumberofparameters" => {
                 let count = rfunc(vm, fn_lower.as_slice())
                     .map(|op| {
@@ -6363,12 +6390,21 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                 }
             }
             b"getattributes" => {
-                let (mut attrs, decl) = rcls(vm, &class_lower)
-                    .and_then(|c| {
-                        c.get_method(method_lower_bytes.as_bytes())
-                            .map(|m| (m.attributes.clone(), Some(m.declaring_class.clone())))
-                    })
-                    .unwrap_or_default();
+                let closure_fn = match obj.borrow().get_property(b"__reflection_closure_fn") {
+                    Value::String(s) => Some(s.as_bytes().to_vec()),
+                    _ => None,
+                };
+                // (a closure's Closure::__invoke carries its function's
+                // attributes: zend_get_closure_invoke_method copies common)
+                let (mut attrs, decl) = match closure_fn {
+                    Some(f) => closure_fn_attributes(vm, &f),
+                    None => rcls(vm, &class_lower)
+                        .and_then(|c| {
+                            c.get_method(method_lower_bytes.as_bytes())
+                                .map(|m| (m.attributes.clone(), Some(m.declaring_class.clone())))
+                        })
+                        .unwrap_or_default(),
+                };
                 // (an internal method: its stub's #[\Deprecated])
                 if attrs.is_empty() {
                     if let Some(d) = decl
