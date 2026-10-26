@@ -1354,6 +1354,11 @@ impl PhpGenerator {
                         let err_msg = "Cannot yield from finally in a force-closed generator";
                         let exc = vm.create_exception(b"Error", err_msg, op.line);
                         vm.current_exception = Some(exc);
+                        // (the try/finally blocks around it still run)
+                        if let Some(t) = self.dispatch_exception() {
+                            ip = t;
+                            continue;
+                        }
                         self.state = GeneratorState::Completed;
                         self.current_value = Value::Null;
                         self.ip = ip;
@@ -1433,6 +1438,11 @@ impl PhpGenerator {
                         let err_msg = "Cannot use \"yield from\" in a force-closed generator";
                         let exc = vm.create_exception(b"Error", err_msg, op.line);
                         vm.current_exception = Some(exc);
+                        // (the try/finally blocks around it still run)
+                        if let Some(t) = self.dispatch_exception() {
+                            ip = t;
+                            continue;
+                        }
                         self.state = GeneratorState::Completed;
                         self.current_value = Value::Null;
                         self.ip = ip;
