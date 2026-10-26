@@ -1443,6 +1443,19 @@ fn call_method(
         b"__debuginfo" => return Value::Array(Rc::new(RefCell::new(debug_properties(&o)))),
         _ => {}
     }
+    // The withers and resolve() parse their (scalar) parameters with zpp.
+    let checked;
+    let args = if m.starts_with(b"with") || m == b"resolve" {
+        match vm.zpp_method_self_check(class, &m, args) {
+            Ok(a) => {
+                checked = a;
+                &checked[..]
+            }
+            Err(_) => return Value::Null,
+        }
+    } else {
+        args
+    };
     // (borrowed for the call: the handlers only read it, the withers
     // modify a clone)
     let st_rc = state_of(&o);
