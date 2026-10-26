@@ -4154,7 +4154,7 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         } else {
             // No callback - filter falsy values
             for (key, val) in &arr_data {
-                if vm.is_true(&val) {
+                if vm.is_true(val) {
                     result.set(key.clone(), val.clone());
                 }
             }
