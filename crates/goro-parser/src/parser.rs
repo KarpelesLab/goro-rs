@@ -6482,6 +6482,20 @@ impl Parser {
                         self.advance();
                         continue;
                     }
+                    // `array(...$x)`: a spread element, as in `[...$x]`
+                    if self.eat(&TokenKind::Ellipsis) {
+                        let value = self.parse_expression()?;
+                        elements.push(ArrayElement {
+                            key: None,
+                            value,
+                            unpack: true,
+                            by_ref: false,
+                        });
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                        continue;
+                    }
                     let is_ref = self.eat(&TokenKind::Ampersand);
                     let first = self.parse_expression()?;
                     if self.eat(&TokenKind::DoubleArrow) {

@@ -384,8 +384,9 @@ impl Vm {
                 return Value::Null;
             }
             if !self.obj_instanceof(&r, b"traversable") {
+                // (zend_user_it_get_new_iterator())
                 let msg = format!(
-                    "{}::getIterator() must return an object that implements Traversable",
+                    "Objects returned by {}::getIterator() must be traversable or implement interface Iterator",
                     cls
                 );
                 self.spl_throw(b"Exception", &msg);
