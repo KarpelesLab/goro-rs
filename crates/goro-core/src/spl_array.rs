@@ -96,6 +96,11 @@ impl Vm {
                 b"datetimeimmutable",
                 b"datetimezone",
                 b"dateperiod",
+                // (get_properties_for or a get_properties handler)
+                b"weakmap",
+                b"sensitiveparametervalue",
+                b"pdorow",
+                b"ziparchive",
             ],
         )
         .is_some()
