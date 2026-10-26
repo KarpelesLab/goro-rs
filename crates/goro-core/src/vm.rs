@@ -44349,6 +44349,8 @@ impl Vm {
                         if pos == 0 {
                             let val = gen_borrow.current_value.clone();
                             let r = gen_borrow.current_ref.clone();
+                            // (the key, for ForeachKey)
+                            foreach_gen_keys.insert(iter_idx, gen_borrow.current_key.clone());
                             drop(gen_borrow);
                             match (r, &op.result) {
                                 (Some(r), OperandType::Cv(i)) => {
@@ -44378,6 +44380,8 @@ impl Vm {
                                 Ok(true) => {
                                     let val = gen_borrow.current_value.clone();
                                     let r = gen_borrow.current_ref.clone();
+                                    foreach_gen_keys
+                                        .insert(iter_idx, gen_borrow.current_key.clone());
                                     drop(gen_borrow);
                                     match (r, &op.result) {
                                         (Some(r), OperandType::Cv(i)) => {
