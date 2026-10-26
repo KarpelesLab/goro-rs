@@ -3951,6 +3951,32 @@ impl Compiler {
         self.op_array.temp_next = start;
     }
 
+    /// The release of an if / elseif condition's temporaries, on either
+    /// path from its test: none of them is live past it (marked STMT_END,
+    /// see compute_free_mask).
+    #[inline(never)]
+    fn free_cond_tmps(&mut self, (start, end): (u32, u32), line: u32) {
+        if end > start {
+            self.op_array.emit(Op {
+                opcode: OpCode::FreeTmps,
+                op1: OperandType::Tmp(start),
+                op2: OperandType::Tmp(end),
+                result: crate::opcode::STMT_END,
+                line,
+            });
+        }
+    }
+
+    /// The end of an if statement whose temporaries start at `start`: when
+    /// `clean` (each body gave its temporaries back, the conditions' were
+    /// released at their tests), the next statements reuse them.
+    #[inline(never)]
+    fn end_if_tmps(&mut self, start: u32, clean: bool) {
+        if clean {
+            self.op_array.temp_next = start;
+        }
+    }
+
     /// The end of the temporaries a region of statements (a try block)
     /// may have used, from where it started on: the most used so far (the
     /// statements reused theirs); the next temporaries are allocated past
@@ -4449,9 +4475,9 @@ impl Compiler {
                 elseif_clauses,
                 else_body,
             } => {
-                let cond_tmps = self.op_array.temp_next;
+                let if_tmps = self.op_array.temp_next;
                 let cond = self.compile_expr(condition)?;
-                let cond_tmps = (cond_tmps, self.op_array.temp_next);
+                let cond_tmps = (if_tmps, self.op_array.temp_next);
 
                 // Jump past body if condition is false
                 let jmp_false = self.op_array.emit(Op {
@@ -4463,12 +4489,16 @@ impl Compiler {
                 });
                 // The condition's temporaries die once it is tested (e.g. the
                 // object of `if (!$x = f())`), on both paths.
-                self.emit_free_tmps(cond_tmps, stmt.span.line);
+                self.free_cond_tmps(cond_tmps, stmt.span.line);
 
                 // Compile body
+                // (whether every temporary the statement used is released
+                // by the end of it, see end_if_tmps)
+                let mut clean = true;
                 for s in body {
                     self.compile_stmt(s)?;
                 }
+                clean &= self.op_array.temp_next == cond_tmps.1;
 
                 // After body: jump past else/elseif
                 let mut end_jumps = Vec::new();
@@ -4486,7 +4516,7 @@ impl Compiler {
                 // Patch false jump to here
                 let after_body = self.op_array.current_offset();
                 self.op_array.patch_jump(jmp_false, after_body);
-                self.emit_free_tmps(cond_tmps, stmt.span.line);
+                self.free_cond_tmps(cond_tmps, stmt.span.line);
 
                 // Elseif clauses
                 for (elseif_cond, elseif_body) in elseif_clauses {
@@ -4500,10 +4530,11 @@ impl Compiler {
                         result: OperandType::Unused,
                         line: stmt.span.line,
                     });
-                    self.emit_free_tmps(cond_tmps, stmt.span.line);
+                    self.free_cond_tmps(cond_tmps, stmt.span.line);
                     for s in elseif_body {
                         self.compile_stmt(s)?;
                     }
+                    clean &= self.op_array.temp_next == cond_tmps.1;
                     let jmp_end = self.op_array.emit(Op {
                         opcode: OpCode::Jmp,
                         op1: OperandType::JmpTarget(0),
@@ -4514,14 +4545,16 @@ impl Compiler {
                     end_jumps.push(jmp_end);
                     let after_elseif = self.op_array.current_offset();
                     self.op_array.patch_jump(jmp_false, after_elseif);
-                    self.emit_free_tmps(cond_tmps, stmt.span.line);
+                    self.free_cond_tmps(cond_tmps, stmt.span.line);
                 }
 
                 // Else body
                 if let Some(else_stmts) = else_body {
+                    let before = self.op_array.temp_next;
                     for s in else_stmts {
                         self.compile_stmt(s)?;
                     }
+                    clean &= self.op_array.temp_next == before;
                 }
 
                 // Patch all end jumps to here
@@ -4529,6 +4562,7 @@ impl Compiler {
                 for jmp in end_jumps {
                     self.op_array.patch_jump(jmp, end);
                 }
+                self.end_if_tmps(if_tmps, clean);
 
                 Ok(())
             }
