@@ -47583,6 +47583,14 @@ impl Vm {
                     if let Some((rid, pname)) = propagate_isset_guard_to_real {
                         self.magic_prop_guards.remove(&(rid, pname, 1u8));
                     }
+                    // (__isset() threw)
+                    native_exc_check!(
+                        self,
+                        exception_handlers,
+                        pending_calls_catch_depth,
+                        ip,
+                        op.line
+                    );
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     Ok(Flow::Next)
                 })? {
