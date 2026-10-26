@@ -19623,7 +19623,14 @@ fn get_extension_funcs_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
         name
     };
     let mut arr = PhpArray::new();
+    // (the module's function table order)
+    for f in goro_core::reflection::extension_function_names(vm, &name) {
+        arr.push(Value::String(PhpString::from_string(f)));
+    }
     for f in goro_core::stub_sigs::FUNCTIONS {
+        if !arr.is_empty() {
+            break;
+        }
         if f.ext.eq_ignore_ascii_case(&name)
             && vm
                 .functions

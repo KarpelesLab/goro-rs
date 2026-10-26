@@ -12252,7 +12252,7 @@ fn function_listed_ext(name: &str) -> Option<&'static str> {
 
 /// The defined functions of extension `ext` (lowercase), in the module's
 /// registration order.
-fn extension_function_names(vm: &Vm, ext: &str) -> Vec<String> {
+pub fn extension_function_names(vm: &Vm, ext: &str) -> Vec<String> {
     let Some((_, list)) = crate::ext_order::EXT_FUNCTIONS
         .iter()
         .find(|(e, _)| *e == ext)
