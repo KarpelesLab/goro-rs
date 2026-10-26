@@ -17,6 +17,7 @@ pub const LIB_DSA: u32 = 10;
 pub const LIB_X509: u32 = 11;
 pub const LIB_ASN1: u32 = 13;
 pub const LIB_CONF: u32 = 14;
+pub const LIB_CRYPTO: u32 = 15;
 pub const LIB_EC: u32 = 16;
 pub const LIB_BIO: u32 = 32;
 pub const LIB_PKCS7: u32 = 33;
@@ -43,6 +44,7 @@ fn lib_string(lib: u32) -> &'static str {
         LIB_X509 => "x509 certificate routines",
         LIB_ASN1 => "asn1 encoding routines",
         LIB_CONF => "configuration file routines",
+        LIB_CRYPTO => "common libcrypto routines",
         LIB_EC => "elliptic curve routines",
         LIB_BIO => "BIO routines",
         LIB_PKCS7 => "PKCS7 routines",

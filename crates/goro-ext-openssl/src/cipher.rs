@@ -1360,7 +1360,7 @@ fn chacha20_poly1305(op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail> {
     } else {
         let tag = poly1305_tag(&otk, op.aad, data);
         match op.tag {
-            Some(t) if !t.is_empty() && t.len() <= 16 && tag[..t.len()] == *t => {}
+            Some(t) if t.len() <= 16 && tag[..t.len()] == *t => {}
             _ => return Err(Fail::Silent),
         }
         Ok((chacha_stream(op.key, 1, &nonce, data), Vec::new()))
@@ -1496,7 +1496,10 @@ fn ccm(blk: &dyn Block, op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail
         let tag: Vec<u8> = (0..m).map(|i| t[i] ^ s0[i]).collect();
         match op.tag {
             Some(g) if g == tag.as_slice() => Ok((pt, Vec::new())),
-            _ => Err(Fail::Silent),
+            _ => {
+                err::push(err::LIB_PROV, 102, "cipher operation failed");
+                Err(Fail::Silent)
+            }
         }
     }
 }
@@ -1641,6 +1644,7 @@ fn xts(op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail> {
         return Err(Fail::Silent);
     }
     if data.len() < 16 {
+        err::push(err::LIB_PROV, 102, "cipher operation failed");
         return Err(Fail::Silent);
     }
     let (c1, c2) = match (make_block(op.spec.algo, k1), make_block(op.spec.algo, k2)) {
@@ -1746,6 +1750,19 @@ fn unwrap_core(blk: &dyn Block, a: [u8; 8], r: &mut [[u8; 8]]) -> [u8; 8] {
     a.to_be_bytes()
 }
 
+/// The wrap provider rejects the input, then EVP_CipherUpdate() fails.
+fn wrap_invalid_input() {
+    err::push(err::LIB_PROV, 230, "invalid input length");
+    err::push(err::LIB_EVP, 189, "update error");
+}
+
+/// CRYPTO_128_(un)wrap(_pad)() failed (short input, integrity check).
+fn wrap_failed() -> Fail {
+    err::push(err::LIB_PROV, 102, "cipher operation failed");
+    err::push(err::LIB_EVP, 189, "update error");
+    Fail::Silent
+}
+
 fn wrap(blk: &dyn Block, op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail> {
     if data.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -1760,9 +1777,12 @@ fn wrap(blk: &dyn Block, op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fai
             p.resize(data.len().div_ceil(8) * 8, 0);
             (aiv, p)
         } else {
-            if !data.len().is_multiple_of(8) || data.len() < 16 {
-                err::push(err::LIB_PROV, 230, "invalid input length");
+            if !data.len().is_multiple_of(8) {
+                wrap_invalid_input();
                 return Err(Fail::Silent);
+            }
+            if data.len() < 16 {
+                return Err(wrap_failed());
             }
             let mut aiv = [0u8; 8];
             aiv.copy_from_slice(&op.iv[..8]);
@@ -1784,9 +1804,12 @@ fn wrap(blk: &dyn Block, op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fai
         }
         Ok((out, Vec::new()))
     } else {
-        if !data.len().is_multiple_of(8) || data.len() < if pad { 16 } else { 24 } {
-            err::push(err::LIB_PROV, 230, "invalid input length");
+        if !data.len().is_multiple_of(8) || data.len() < 16 {
+            wrap_invalid_input();
             return Err(Fail::Silent);
+        }
+        if !pad && data.len() < 24 {
+            return Err(wrap_failed());
         }
         let (a, plain) = if data.len() == 16 {
             let mut b = [0u8; 16];
@@ -1804,16 +1827,16 @@ fn wrap(blk: &dyn Block, op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fai
         };
         if pad {
             if a[..4] != op.iv[..4] {
-                return Err(Fail::Silent);
+                return Err(wrap_failed());
             }
             let mli = u32::from_be_bytes(a[4..].try_into().unwrap()) as usize;
             if mli > plain.len() || mli + 8 <= plain.len() || plain[mli..].iter().any(|&b| b != 0) {
-                return Err(Fail::Silent);
+                return Err(wrap_failed());
             }
             Ok((plain[..mli].to_vec(), Vec::new()))
         } else {
             if a[..] != op.iv[..8] {
-                return Err(Fail::Silent);
+                return Err(wrap_failed());
             }
             Ok((plain, Vec::new()))
         }

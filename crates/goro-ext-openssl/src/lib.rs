@@ -361,21 +361,46 @@ pub(crate) fn base64_decode(data: &str) -> Option<Vec<u8>> {
 
 const OPENSSL_DONT_ZERO_PAD_KEY: i64 = 4;
 
-/// Valid AEAD IV lengths (EVP_CTRL_AEAD_SET_IVLEN).
-fn aead_ivlen_ok(spec: &cipher::CipherSpec, ivlen: usize) -> bool {
+/// EVP_CTRL_AEAD_SET_IVLEN as OpenSSL 3.5's providers implement it: the
+/// GCM, CCM and ChaCha20-Poly1305 providers raise "invalid iv length",
+/// OCB's just fails.
+fn aead_set_ivlen(spec: &cipher::CipherSpec, ivlen: usize) -> bool {
     use cipher::{Algo, Mode};
-    if spec.algo == Algo::ChaCha20Poly1305 {
-        return (1..=12).contains(&ivlen);
+    let ok = if spec.algo == Algo::ChaCha20Poly1305 {
+        ivlen == 12
+    } else {
+        match spec.mode {
+            Mode::Gcm => (1..=128).contains(&ivlen),
+            Mode::Ccm => (7..=13).contains(&ivlen),
+            Mode::Ocb => return (1..=15).contains(&ivlen),
+            _ => true,
+        }
+    };
+    if !ok {
+        err::push(err::LIB_PROV, 109, "invalid iv length");
     }
-    match spec.mode {
-        Mode::Gcm => (1..=128).contains(&ivlen),
-        Mode::Ccm => (7..=13).contains(&ivlen),
-        Mode::Ocb => (1..=15).contains(&ivlen),
-        _ => true,
+    ok
+}
+
+fn prov_invalid_tag_length() {
+    err::push(err::LIB_PROV, 118, "invalid tag length");
+}
+
+/// The error a failed EVP_CIPHER_CTX_set_key_length() leaves: ciphers whose
+/// provider has a settable key length reject it themselves (ChaCha20 and
+/// OCB with an error, XTS silently); for the others the EVP layer refuses
+/// it.
+fn key_length_error(spec: &cipher::CipherSpec) {
+    use cipher::{Algo, Mode};
+    if matches!(spec.algo, Algo::ChaCha20 | Algo::ChaCha20Poly1305) || spec.mode == Mode::Ocb {
+        err::push(err::LIB_PROV, 105, "invalid key length");
+    } else if spec.mode != Mode::Xts {
+        err::evp_invalid_key_length();
     }
 }
 
-/// Shared implementation of php_openssl_encrypt()/php_openssl_decrypt().
+/// Shared implementation of php_openssl_encrypt()/php_openssl_decrypt(),
+/// following php_openssl_cipher_init()/_update() step by step.
 #[allow(clippy::too_many_arguments)]
 fn php_openssl_cipher(
     vm: &mut Vm,
@@ -390,19 +415,23 @@ fn php_openssl_cipher(
     tag_len: i64,
     aad: &[u8],
 ) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
-    use cipher::Mode;
+    use cipher::{Algo, Mode};
     let fname = if enc {
         "openssl_encrypt"
     } else {
         "openssl_decrypt"
     };
     let Some(spec) = cipher::by_name(method) else {
+        // EVP_CIPHER_fetch() failure.
+        err::push(err::LIB_EVP, err::R_UNSUPPORTED, "unsupported");
         vm.emit_warning(&format!("{}(): Unknown cipher algorithm", fname));
         return None;
     };
     let is_aead = spec.is_aead();
     let is_ccm = spec.mode == Mode::Ccm;
     let is_ocb = spec.mode == Mode::Ocb;
+    let is_gcm = spec.mode == Mode::Gcm;
+    let is_chacha_poly = spec.algo == Algo::ChaCha20Poly1305;
 
     let decoded;
     let data: &[u8] = if !enc && options & OPENSSL_RAW_DATA == 0 {
@@ -422,7 +451,7 @@ fn php_openssl_cipher(
     }
     // php_openssl_validate_iv()
     let iv_vec: Vec<u8> = if is_aead {
-        if !aead_ivlen_ok(spec, iv.len()) {
+        if !aead_set_ivlen(spec, iv.len()) {
             vm.emit_warning(&format!(
                 "{}(): Setting of IV length for AEAD mode failed",
                 fname
@@ -453,22 +482,26 @@ fn php_openssl_cipher(
         ));
         iv[..max_iv_len].to_vec()
     };
-    // Tag length: always for OCB, when encrypting for CCM.
+    // The provider's tag length: CCM defaults to 12, the others to 16;
+    // ChaCha20-Poly1305 decryption without a tag verifies nothing.
     let mut eff_tag_len: usize = if is_ccm { 12 } else { 16 };
+    // EVP_CTRL_AEAD_SET_TAG with no data (the int is seen as a size_t).
     if is_ocb || (enc && is_ccm) {
+        let sz = tag_len as i32 as isize as usize;
         let ok = if is_ocb {
-            (0..=16).contains(&tag_len)
+            sz <= 16
         } else {
-            (4..=16).contains(&tag_len) && tag_len % 2 == 0
+            sz % 2 == 0 && (4..=16).contains(&sz)
         };
         if !ok {
+            prov_invalid_tag_length();
             vm.emit_warning(&format!(
                 "{}(): Setting tag length for AEAD cipher failed",
                 fname
             ));
             return None;
         }
-        eff_tag_len = tag_len as usize;
+        eff_tag_len = sz;
     }
     let mut tag_set: Option<Vec<u8>> = None;
     if !enc {
@@ -479,12 +512,29 @@ fn php_openssl_cipher(
                     fname
                 ));
             } else {
-                let ok = if is_ccm {
-                    t.len() % 2 == 0 && (4..=16).contains(&t.len())
+                let ok = if is_gcm {
+                    if t.len() > 16 {
+                        // OSSL_PARAM_get_octet_string() into a 16-byte buffer.
+                        err::push(err::LIB_CRYPTO, 116, "too small buffer");
+                        err::push(err::LIB_PROV, 103, "failed to get parameter");
+                        false
+                    } else {
+                        true
+                    }
+                } else if is_ccm {
+                    let ok = t.len() % 2 == 0 && (4..=16).contains(&t.len());
+                    if !ok {
+                        prov_invalid_tag_length();
+                    }
+                    ok
                 } else if is_ocb {
                     t.len() == eff_tag_len
                 } else {
-                    t.len() <= 16
+                    let ok = t.len() <= 16;
+                    if !ok {
+                        prov_invalid_tag_length();
+                    }
+                    ok
                 };
                 if !ok {
                     vm.emit_warning(&format!(
@@ -493,9 +543,7 @@ fn php_openssl_cipher(
                     ));
                     return None;
                 }
-                if is_ccm {
-                    eff_tag_len = t.len();
-                }
+                eff_tag_len = t.len();
                 tag_set = Some(t.to_vec());
             }
         }
@@ -505,7 +553,7 @@ fn php_openssl_cipher(
     let dont_pad = options & OPENSSL_DONT_ZERO_PAD_KEY != 0;
     let key: Vec<u8> = if key_len > password.len() {
         if dont_pad && !spec.var_key {
-            err::evp_invalid_key_length();
+            key_length_error(spec);
             vm.emit_warning(&format!(
                 "{}(): Key length cannot be set for the cipher algorithm",
                 fname
@@ -523,7 +571,7 @@ fn php_openssl_cipher(
         if spec.var_key {
             password.to_vec()
         } else {
-            err::evp_invalid_key_length();
+            key_length_error(spec);
             password[..key_len].to_vec()
         }
     } else {
@@ -531,9 +579,36 @@ fn php_openssl_cipher(
     };
     let padding = options & OPENSSL_ZERO_PADDING == 0;
 
-    // AEAD decryption without a tag cannot verify.
-    if !enc && is_aead && tag_set.is_none() {
+    // php_openssl_cipher_update(): CCM's data length comes first.
+    if is_ccm {
+        let l = 15 - iv_vec.len();
+        if l < 8 && (data.len() as u64) >> (8 * l) != 0 {
+            err::push(err::LIB_PROV, 0x6E, "invalid data length");
+            vm.emit_warning(&format!("{}(): Setting of data length failed", fname));
+            return None;
+        }
+    }
+    // OCB refuses any update (the AAD one first) with a zero tag length.
+    if is_ocb && eff_tag_len == 0 {
+        vm.emit_warning(&format!(
+            "{}(): Setting of additional application data failed",
+            fname
+        ));
         return None;
+    }
+    if !enc && is_aead && tag_set.is_none() {
+        if is_ccm {
+            // The single-shot CCM update cannot verify without a tag.
+            err::push(err::LIB_PROV, 102, "cipher operation failed");
+            return None;
+        }
+        if is_chacha_poly {
+            // A zero-length tag compares equal.
+            tag_set = Some(Vec::new());
+        } else {
+            // GCM's final fails, untagged.
+            return None;
+        }
     }
     let op = cipher::Op {
         spec,
@@ -557,16 +632,23 @@ fn php_openssl_cipher(
         return Some((out, None));
     }
     if is_aead && tag_wanted {
+        // EVP_CTRL_AEAD_GET_TAG
+        let sz = tag_len as i32 as isize as usize;
         let ok = if is_ccm || is_ocb {
-            tag_len >= 0 && tag_len as usize == eff_tag_len && eff_tag_len > 0
+            sz == eff_tag_len
         } else {
-            (1..=16).contains(&tag_len)
+            (1..=16).contains(&sz)
         };
         if !ok {
+            if is_gcm {
+                err::push(err::LIB_PROV, 110, "invalid tag");
+            } else {
+                prov_invalid_tag_length();
+            }
             vm.emit_warning(&format!("{}(): Retrieving verification tag failed", fname));
             return None;
         }
-        let t = full_tag[..tag_len as usize].to_vec();
+        let t = full_tag[..sz].to_vec();
         return Some((out, Some(t)));
     } else if is_aead && !tag_wanted {
         vm.emit_warning(&format!(
@@ -605,6 +687,17 @@ fn openssl_encrypt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         16
     };
     let tag_given = matches!(args.get(5), Some(Value::Reference(_)));
+    // PHP_OPENSSL_CHECK_*_TO_INT_NULL_RETURN()
+    for (len, name) in [
+        (data.len() as i64, "data"),
+        (password.len() as i64, "password"),
+        (aad.len() as i64, "aad"),
+        (tag_len, "tag_len"),
+    ] {
+        if i32::try_from(len).is_err() {
+            return Err(zpp::value_error(vm, format!("{} is too long", name)));
+        }
+    }
     match php_openssl_cipher(
         vm,
         true,
