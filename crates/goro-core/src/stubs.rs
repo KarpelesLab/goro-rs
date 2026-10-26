@@ -301,6 +301,13 @@ fn stub_table() -> &'static StubTable {
     })
 }
 
+/// A stub "class" that only carries a PDO driver's extra methods
+/// (PDO_SQLite_Ext, PDO_PGSql_Ext: "This is not a real class"): never
+/// declared.
+pub fn is_pseudo_class(name: &str) -> bool {
+    name.starts_with("PDO_") && name.ends_with("_Ext")
+}
+
 /// Allocation-free stub lookup by an already lowercased name (no leading
 /// backslash).
 pub fn find_class_lower(lower: &[u8]) -> Option<&'static StubClass> {

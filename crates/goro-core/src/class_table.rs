@@ -85,7 +85,7 @@ impl Vm {
     /// enabled (lowercased name, no leading backslash).
     pub fn internal_class(&self, lower: &[u8]) -> Option<&'static StubClass> {
         let c = stubs::find_class_lower(lower)?;
-        self.stub_ext_enabled(c.ext).then_some(c)
+        (self.stub_ext_enabled(c.ext) && !stubs::is_pseudo_class(c.name)).then_some(c)
     }
 
     /// zend_lookup_class() without autoloading, by lowercased name (a leading
@@ -133,7 +133,10 @@ impl Vm {
         let bound = ANON_BOUND.with(|b| b.borrow().clone());
         let mut out = Vec::new();
         for c in crate::stub_sigs::CLASSES {
-            if want.contains(&ClassKind::of_stub(c)) && self.stub_ext_enabled(c.ext) {
+            if want.contains(&ClassKind::of_stub(c))
+                && self.stub_ext_enabled(c.ext)
+                && !stubs::is_pseudo_class(c.name)
+            {
                 let l = c.name.to_ascii_lowercase();
                 if !self.classes.contains_key(l.as_bytes()) {
                     out.push(c.name.as_bytes().to_vec());

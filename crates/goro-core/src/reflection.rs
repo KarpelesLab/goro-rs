@@ -12608,6 +12608,7 @@ fn extension_class_names(ext: &str) -> Vec<&'static str> {
             out.push(c.name);
         }
     }
+    out.retain(|c| !crate::stubs::is_pseudo_class(c));
     out
 }
 

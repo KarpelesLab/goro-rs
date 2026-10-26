@@ -598,7 +598,6 @@ final class StreamBucket {
     vm.register_function(b"array_key_exists", array_key_exists_fn2);
     vm.register_function(b"set_include_path", set_include_path_fn);
     vm.register_function(b"get_include_path", get_include_path_fn);
-    vm.register_function(b"restore_include_path", restore_include_path_fn);
     vm.register_function(b"get_resource_type", get_resource_type_fn);
     vm.register_function(b"link", link_fn);
     vm.register_function(b"unlink", ctx_unlink_fn2_entry);
@@ -17449,10 +17448,6 @@ fn get_include_path_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
         .unwrap_or_else(|| Value::String(PhpString::from_bytes(b"."))))
 }
 
-fn restore_include_path_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    ini_restore(vm, &[Value::String(PhpString::from_bytes(b"include_path"))])
-}
-
 fn get_resource_type_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     resource_param(vm, val, "get_resource_type")?;
@@ -19865,8 +19860,9 @@ fn get_extension_funcs_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
     for f in goro_core::reflection::extension_function_names(vm, &name) {
         arr.push(Value::String(PhpString::from_string(f)));
     }
+    let listed = !arr.is_empty();
     for f in goro_core::stub_sigs::FUNCTIONS {
-        if !arr.is_empty() {
+        if listed {
             break;
         }
         if f.ext.eq_ignore_ascii_case(&name)
