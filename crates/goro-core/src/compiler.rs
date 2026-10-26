@@ -22494,8 +22494,17 @@ fn stmt_contains_yield(stmt: &Statement) -> bool {
                 || update.iter().any(expr_contains_yield)
                 || stmts_contain_yield(body)
         }
-        StmtKind::Foreach { expr, body, .. } => {
-            expr_contains_yield(expr) || stmts_contain_yield(body)
+        StmtKind::Foreach {
+            expr,
+            key,
+            value,
+            body,
+            ..
+        } => {
+            expr_contains_yield(expr)
+                || key.as_deref().is_some_and(expr_contains_yield)
+                || expr_contains_yield(value)
+                || stmts_contain_yield(body)
         }
         StmtKind::Switch { expr, cases } => {
             expr_contains_yield(expr)
@@ -22517,7 +22526,14 @@ fn stmt_contains_yield(stmt: &Statement) -> bool {
                     .is_some_and(|b| stmts_contain_yield(b))
         }
         StmtKind::Throw(expr) => expr_contains_yield(expr),
-        StmtKind::Unset(exprs) => exprs.iter().any(expr_contains_yield),
+        StmtKind::Unset(exprs) | StmtKind::GlobalDynamic(exprs) => {
+            exprs.iter().any(expr_contains_yield)
+        }
+        StmtKind::Declare {
+            body: Some(body),
+            is_const: false,
+            ..
+        } => stmts_contain_yield(body),
         // Don't recurse into nested function/class declarations
         StmtKind::FunctionDecl { .. } | StmtKind::ClassDecl { .. } => false,
         _ => false,
@@ -22793,6 +22809,54 @@ fn expr_contains_yield(expr: &Expr) -> bool {
         ExprKind::Instanceof { expr, class } => {
             expr_contains_yield(expr) || expr_contains_yield(class)
         }
+        _ => expr_contains_yield_more(expr),
+    }
+}
+
+/// The rest of expr_contains_yield(): the other expressions with operands
+/// (closures and arrow functions are their own functions).
+#[inline(never)]
+fn expr_contains_yield_more(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Pipe { value, callable } => {
+            expr_contains_yield(value) || expr_contains_yield(callable)
+        }
+        ExprKind::Isset(es) => es.iter().any(expr_contains_yield),
+        ExprKind::Empty(e)
+        | ExprKind::Suppress(e)
+        | ExprKind::Eval(e)
+        | ExprKind::ShellExec(e)
+        | ExprKind::DynamicVariable(e) => expr_contains_yield(e),
+        ExprKind::Exit(e) => e.as_ref().is_some_and(|e| expr_contains_yield(e)),
+        ExprKind::InterpolatedString(parts) => parts.iter().any(|p| match p {
+            StringPart::Expr(e) => expr_contains_yield(e),
+            StringPart::Literal(_) => false,
+        }),
+        ExprKind::StaticPropertyAccess { class, .. } | ExprKind::ClassConstAccess { class, .. } => {
+            expr_contains_yield(class)
+        }
+        ExprKind::DynamicStaticPropertyAccess { class, property } => {
+            expr_contains_yield(class) || expr_contains_yield(property)
+        }
+        ExprKind::DynamicClassConstAccess { class, constant } => {
+            expr_contains_yield(class) || expr_contains_yield(constant)
+        }
+        ExprKind::DynamicStaticMethodCall {
+            class,
+            method,
+            args,
+        } => {
+            expr_contains_yield(class)
+                || expr_contains_yield(method)
+                || args.iter().any(|a| expr_contains_yield(&a.value))
+        }
+        ExprKind::FirstClassCallable(t) => match t {
+            CallableTarget::Function(e) => expr_contains_yield(e),
+            CallableTarget::Method { object, method, .. } => {
+                expr_contains_yield(object) || expr_contains_yield(method)
+            }
+            CallableTarget::StaticMethod { class, .. } => expr_contains_yield(class),
+        },
         _ => false,
     }
 }
