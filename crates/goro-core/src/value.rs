@@ -2071,27 +2071,10 @@ impl Value {
             // Object vs int/float: convert object to int/float, compare numerically
             (Value::Object(_), _) | (_, Value::Object(_)) => {
                 // PHP 8 converts object to int (1) for numeric comparisons
-                let a = self.to_double();
-                let b = other.to_double();
-                if a < b {
-                    -1
-                } else if a > b {
-                    1
-                } else {
-                    0
-                }
+                // (ZEND_THREEWAY_COMPARE(): a NAN is unordered, 1)
+                float_threeway(self.to_double(), other.to_double())
             }
-            _ => {
-                let a = self.to_double();
-                let b = other.to_double();
-                if a < b {
-                    -1
-                } else if a > b {
-                    1
-                } else {
-                    0
-                }
-            }
+            _ => float_threeway(self.to_double(), other.to_double()),
         }
     }
 }
