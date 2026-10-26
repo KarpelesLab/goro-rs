@@ -2077,8 +2077,8 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let callback_v = args[0].closure_callable();
     let callback = &callback_v;
     if let Value::String(s) = callback {
-        if let Some(msg) = Vm::forbidden_dynamic_call(s.as_bytes()) {
-            let exc = vm.create_exception(b"Error", &msg, vm.current_line);
+        if let Some((cls, msg)) = vm.forbidden_dynamic_call_error(s.as_bytes(), args.len() - 1) {
+            let exc = vm.create_exception(cls, &msg, vm.current_line);
             vm.current_exception = Some(exc);
             return Err(VmError {
                 message: format!("Uncaught Error: {}", msg),

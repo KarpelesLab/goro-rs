@@ -4616,6 +4616,62 @@ impl Vm {
             .map(|l| format!("Cannot call {}() dynamically", String::from_utf8_lossy(l)))
     }
 
+    /// A dynamic call (`$f()`) of a scope-introspection builtin: throws
+    /// (with the function's frame) and returns true when it is forbidden.
+    #[inline(never)]
+    fn dynamic_forbidden_call_check(&mut self, lname: &[u8], args: &[Value], line: u32) -> bool {
+        let Some((cls, msg)) = self.forbidden_dynamic_call_error(lname, args.len()) else {
+            return false;
+        };
+        self.push_builtin_frame(lname, args, line);
+        let exc = self.create_exception(cls, &msg, line);
+        self.pop_builtin_frame();
+        self.current_exception = Some(exc);
+        true
+    }
+
+    /// zend_forbid_dynamic_call() in a scope-introspection function called
+    /// dynamically: its zpp runs first, so a wrong argument count is the
+    /// ArgumentCountError; else "Cannot call compact() dynamically".
+    #[inline(never)]
+    pub fn forbidden_dynamic_call_error(
+        &self,
+        name: &[u8],
+        n: usize,
+    ) -> Option<(&'static [u8], String)> {
+        let msg = Self::forbidden_dynamic_call(name)?;
+        let lname = name.strip_prefix(b"\\").unwrap_or(name).to_ascii_lowercase();
+        // (min, max) argument counts
+        let (min, max) = match lname.as_slice() {
+            b"func_get_arg" => (1, Some(1)),
+            b"compact" => (1, None),
+            b"extract" => (1, Some(3)),
+            _ => (0, Some(0)),
+        };
+        let arity = if n < min {
+            Some((if max == Some(min) { "exactly" } else { "at least" }, min))
+        } else {
+            match max {
+                Some(m) if n > m => Some((if m == min { "exactly" } else { "at most" }, m)),
+                _ => None,
+            }
+        };
+        Some(match arity {
+            Some((q, k)) => (
+                b"ArgumentCountError",
+                format!(
+                    "{}() expects {} {} argument{}, {} given",
+                    String::from_utf8_lossy(&lname),
+                    q,
+                    k,
+                    if k == 1 { "" } else { "s" },
+                    n
+                ),
+            ),
+            None => (b"Error", msg),
+        })
+    }
+
     /// zend_forbid_dynamic_call() in a method of `forbid_dynamic_call_methods`
     /// called through the [class-or-object, method] callable `callable`.
     fn forbidden_dynamic_method(&self, callable: &Value) -> Option<String> {
@@ -5168,47 +5224,8 @@ impl Vm {
         let callback = &callback;
         match callback {
             Value::String(s) => {
-                if let Some(msg) = Self::forbidden_dynamic_call(s.as_bytes()) {
-                    let lname = s.as_bytes().to_ascii_lowercase();
-                    // zpp runs first: (min, max) argument counts.
-                    let (min, max) = match lname.as_slice() {
-                        b"func_get_arg" => (1, Some(1)),
-                        b"compact" => (1, None),
-                        b"extract" => (1, Some(3)),
-                        _ => (0, Some(0)),
-                    };
-                    let n = args.len();
-                    let arity = if n < min {
-                        Some((
-                            if max == Some(min) {
-                                "exactly"
-                            } else {
-                                "at least"
-                            },
-                            min,
-                        ))
-                    } else {
-                        match max {
-                            Some(m) if n > m => {
-                                Some((if m == min { "exactly" } else { "at most" }, m))
-                            }
-                            _ => None,
-                        }
-                    };
-                    let (cls, msg): (&[u8], String) = match arity {
-                        Some((q, k)) => (
-                            b"ArgumentCountError",
-                            format!(
-                                "{}() expects {} {} argument{}, {} given",
-                                String::from_utf8_lossy(&lname),
-                                q,
-                                k,
-                                if k == 1 { "" } else { "s" },
-                                n
-                            ),
-                        ),
-                        None => (b"Error", msg),
-                    };
+                if let Some((cls, msg)) = self.forbidden_dynamic_call_error(s.as_bytes(), args.len()) {
+                    let lname = s.as_bytes().strip_prefix(b"\\").unwrap_or(s.as_bytes()).to_ascii_lowercase();
                     self.push_builtin_frame(&lname, args, 0);
                     let exc = self.create_exception(cls, &msg, self.current_line);
                     self.pop_builtin_frame();
@@ -28410,6 +28427,9 @@ impl Vm {
                     };
                     let dyn_check_val = static_str_callable.as_ref().unwrap_or(&name_val);
                     let dyn_err: Option<(&'static [u8], String)> = match dyn_check_val {
+                        // (a plain function name: the call itself reports it,
+                        // after its zpp; see dynamic_forbidden_call_check)
+                        Value::String(_) if static_str_callable.is_none() => None,
                         Value::String(s)
                             if !matches!(op.op1, OperandType::Const(_)) && {
                                 let l: Vec<u8> = s
@@ -32733,6 +32753,19 @@ impl Vm {
                                     line: op.line,
                                 });
                             }
+                        }
+                        if call.target.dynamic
+                            && self.dynamic_forbidden_call_check(&func_name_lower, &call.args, op.line)
+                        {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: "Uncaught exception".to_string(),
+                                line: op.line,
+                            });
                         }
                         self.caller_strict_types = op_array.strict_types;
                         self.builtin_named_skipped = named_skipped_args;
