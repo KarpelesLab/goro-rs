@@ -436,7 +436,7 @@ impl Vm {
     /// The name of a callback's frame (as execute_fn_with_named_args()
     /// names it).
     #[inline]
-    fn push_callback_display(&self, f: &crate::opcode::OpArray, out: &mut String) {
+    pub(crate) fn push_callback_display(&self, f: &crate::opcode::OpArray, out: &mut String) {
         if !f.display_name.is_empty() {
             // (a closure is qualified by its scope: Class::{closure:...})
             if let Some(sc) = f.scope_class.as_ref().filter(|_| {
@@ -464,5 +464,14 @@ impl Vm {
         } else {
             push_lossy(out, &f.name);
         }
+    }
+
+    #[inline(never)]
+    fn push_closure_scope(&self, scope: &[u8], out: &mut String) {
+        match self.classes.get(scope) {
+            Some(c) => push_lossy(out, &c.name),
+            None => out.push_str(&self.builtin_canonical_name(scope)),
+        }
+        out.push_str("::");
     }
 }
