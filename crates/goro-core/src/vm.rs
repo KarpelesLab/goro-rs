@@ -6271,7 +6271,13 @@ impl Vm {
         let mut na = ea.clone();
         let mut nb = eb.clone();
         for (i, (k, va)) in ea.iter().enumerate() {
-            let Some(j) = eb.iter().position(|(kb, _)| kb == k) else {
+            // (the same position when both have the same keys in order)
+            let same_pos = eb.get(i).is_some_and(|(kb, _)| kb == k);
+            let Some(j) = (if same_pos {
+                Some(i)
+            } else {
+                eb.iter().position(|(kb, _)| kb == k)
+            }) else {
                 continue;
             };
             let vb = &eb[j].1;
