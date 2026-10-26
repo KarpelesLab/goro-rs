@@ -1,4 +1,4 @@
-use crate::token::{Span, Token, TokenKind, keyword_or_identifier};
+use crate::token::{Span, Token, TokenKind, keyword_or_identifier_owned};
 
 /// Lexer state (PHP has multiple scanning modes)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,9 +189,9 @@ impl<'a> Lexer<'a> {
                         );
                     // (up to the first `*/`, the newlines counted in one pass)
                     let rest = &self.source[self.pos..];
-                    let end = rest.windows(2).position(|w| w == b"*/");
+                    let end = memchr::memmem::find(rest, b"*/");
                     let body = &rest[..end.map_or(rest.len(), |e| e + 2)];
-                    self.line += body.iter().filter(|&&c| c == b'\n').count() as u32;
+                    self.line += memchr::memchr_iter(b'\n', body).count() as u32;
                     self.pos += body.len();
                     if end.is_none() {
                         crate::push_lexer_error(
@@ -246,17 +246,22 @@ impl<'a> Lexer<'a> {
 
     fn scan_identifier(&mut self) -> Vec<u8> {
         let start = self.pos;
+        self.skip_label();
+        self.source[start..self.pos].to_vec()
+    }
+
+    /// scan_identifier() without the copy of the name.
+    fn skip_label(&mut self) {
         let src = self.source;
-        let mut p = start;
+        let mut p = self.pos;
         while let Some(&ch) = src.get(p) {
-            if ch.is_ascii_alphanumeric() || ch == b'_' || ch >= 0x80 {
+            if LABEL_CHAR[ch as usize] {
                 p += 1;
             } else {
                 break;
             }
         }
         self.pos = p;
-        src[start..p].to_vec()
     }
 
     /// Consume any `("\\"{LABEL})+` continuing the label just scanned;
@@ -265,7 +270,7 @@ impl<'a> Lexer<'a> {
         let mut any = false;
         while self.peek() == Some(b'\\') && self.peek_at(1).is_some_and(is_label_start) {
             self.advance();
-            self.scan_identifier();
+            self.skip_label();
             any = true;
         }
         any
@@ -1261,7 +1266,7 @@ impl<'a> Lexer<'a> {
                         TokenKind::Identifier(ident.clone())
                     }
                 } else {
-                    keyword_or_identifier(&ident)
+                    keyword_or_identifier_owned(ident)
                 }
             }
 
@@ -1577,7 +1582,7 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 // `"\\"{LABEL}("\\"{LABEL})*`: T_NAME_FULLY_QUALIFIED.
                 if self.peek().is_some_and(is_label_start) {
-                    self.scan_identifier();
+                    self.skip_label();
                     self.scan_name_tail();
                     TokenKind::NameFullyQualified(self.source[start..self.pos].to_vec())
                 } else {
@@ -2149,7 +2154,7 @@ impl<'a> Lexer<'a> {
         let mut prev_member = false;
         loop {
             let token = self.next_token();
-            if token.kind == TokenKind::Eof {
+            if matches!(token.kind, TokenKind::Eof) {
                 tokens.push(token);
                 break;
             }
@@ -2434,14 +2439,27 @@ fn encode_unicode_escape(hex: &str, bad: bool, line: u32, out: &mut Vec<u8>) {
 
 /// Where a `//` or `#` comment starting before `p` ends: at the newline
 /// (not included) or at a `?>`, or at the end of `src`.
+/// The bytes of a label after its first ([a-zA-Z0-9_\x80-\xff]).
+pub(crate) static LABEL_CHAR: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut i = 0;
+    while i < 256 {
+        let c = i as u8;
+        t[i] = c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80;
+        i += 1;
+    }
+    t
+};
+
 fn line_comment_end(src: &[u8], mut p: usize) -> usize {
-    while let Some(&ch) = src.get(p) {
-        if ch == b'\n' || (ch == b'?' && src.get(p + 1) == Some(&b'>')) {
-            break;
+    while let Some(i) = src.get(p..).and_then(|r| memchr::memchr2(b'\n', b'?', r)) {
+        p += i;
+        if src[p] == b'\n' || src.get(p + 1) == Some(&b'>') {
+            return p;
         }
         p += 1;
     }
-    p
+    p.max(src.len())
 }
 
 #[cfg(test)]

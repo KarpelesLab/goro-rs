@@ -8,3 +8,4 @@ description = "PHP lexer and parser for goro-rs"
 workspace = true
 
 [dependencies]
+memchr = "2"

@@ -232,7 +232,7 @@ fn is_label_start(c: u8) -> bool {
 
 #[inline]
 fn is_label_char(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80
+    crate::lexer::LABEL_CHAR[c as usize]
 }
 
 #[inline]
@@ -579,20 +579,21 @@ impl<'a> Scanner<'a> {
     /// "#" / "//" comment body starting after the introducer.
     fn line_comment(&mut self, p: usize, intro: usize) -> Option<ScanToken> {
         let n = self.s.len();
-        let mut cur = p + intro;
-        while cur < n {
-            let ch = self.s[cur];
-            cur += 1;
-            match ch {
-                b'\r' | b'\n' => {
-                    cur -= 1;
+        let mut cur = (p + intro).min(n);
+        // (the first "\r", "\n" or "?>")
+        loop {
+            match memchr::memchr3(b'\r', b'\n', b'?', &self.s[cur..]) {
+                None => {
+                    cur = n;
                     break;
                 }
-                b'?' if self.at(cur) == b'>' => {
-                    cur -= 1;
-                    break;
+                Some(k) => {
+                    cur += k;
+                    if self.s[cur] != b'?' || self.at(cur + 1) == b'>' {
+                        break;
+                    }
+                    cur += 1;
                 }
-                _ => {}
             }
         }
         self.tok(T_COMMENT, p, cur)
@@ -608,17 +609,11 @@ impl<'a> Scanner<'a> {
                 yyleng += 1;
             }
         }
-        let mut cur = p + yyleng;
-        while cur < n {
-            let ch = self.s[cur];
-            cur += 1;
-            if ch == b'*' && self.at(cur) == b'/' {
-                break;
-            }
-        }
-        if cur < n {
-            cur += 1;
-        }
+        let from = (p + yyleng).min(n);
+        let cur = match memchr::memmem::find(&self.s[from..], b"*/") {
+            Some(k) => from + k + 2,
+            None => n.max(p + yyleng),
+        };
         self.tok(if doc { T_DOC_COMMENT } else { T_COMMENT }, p, cur)
     }
 

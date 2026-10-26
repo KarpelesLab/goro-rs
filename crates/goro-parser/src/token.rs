@@ -598,9 +598,30 @@ pub fn token_id_is_ignorable(id: i64) -> bool {
 
 /// Map identifier bytes to keyword token kind
 pub fn keyword_or_identifier(ident: &[u8]) -> TokenKind {
-    // Case-insensitive keyword matching (PHP keywords are case-insensitive)
-    let lower: Vec<u8> = ident.iter().map(|b| b.to_ascii_lowercase()).collect();
-    match lower.as_slice() {
+    keyword_kind(ident).unwrap_or_else(|| TokenKind::Identifier(ident.to_vec()))
+}
+
+/// keyword_or_identifier() of a name scanned into a buffer of its own
+/// (an identifier keeps it).
+pub fn keyword_or_identifier_owned(ident: Vec<u8>) -> TokenKind {
+    match keyword_kind(&ident) {
+        Some(k) => k,
+        None => TokenKind::Identifier(ident),
+    }
+}
+
+/// The keyword `ident` is (case-insensitively), if any.
+fn keyword_kind(ident: &[u8]) -> Option<TokenKind> {
+    // (keywords are 2 to 12 bytes long)
+    if !(2..=12).contains(&ident.len()) {
+        return None;
+    }
+    let mut buf = [0u8; 12];
+    let lower = &mut buf[..ident.len()];
+    for (d, s) in lower.iter_mut().zip(ident) {
+        *d = s.to_ascii_lowercase();
+    }
+    Some(match &*lower {
         b"abstract" => TokenKind::Abstract,
         b"and" => TokenKind::And,
         b"array" => TokenKind::Array,
@@ -673,6 +694,6 @@ pub fn keyword_or_identifier(ident: &[u8]) -> TokenKind {
         b"while" => TokenKind::While,
         b"xor" => TokenKind::Xor,
         b"yield" => TokenKind::YieldFrom, // handled specially in parser for "yield from"
-        _ => TokenKind::Identifier(ident.to_vec()),
-    }
+        _ => return None,
+    })
 }
