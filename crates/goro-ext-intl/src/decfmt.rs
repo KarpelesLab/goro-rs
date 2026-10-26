@@ -2112,15 +2112,33 @@ impl DecimalFormat {
                 (&m.affixes.pos_prefix, &m.affixes.pos_suffix)
             };
             let mut cur: Option<String> = None;
-            let Some(i) = self.match_affix(pre_p, &m, text, pos, &mut cur, true) else {
-                // (the error position is past the number, as ICU's
-                // lenient matchers get there)
-                if let Ok((_, j)) = self.parse_number(text, pos, &m) {
-                    furthest = furthest.max(j);
+            // (lenient parsing does not require the positive affixes:
+            // RequireAffixValidator is a strict mode matcher)
+            let optional = !neg && !self.props.parse_strict;
+            let i = match self.match_affix(pre_p, &m, text, pos, &mut cur, true) {
+                Some(i) => i,
+                None if optional => pos,
+                None => {
+                    // (the error position is past the number, as ICU's
+                    // lenient matchers get there)
+                    if let Ok((_, j)) = self.parse_number(text, pos, &m) {
+                        furthest = furthest.max(j);
+                    }
+                    continue;
                 }
-                continue;
             };
             furthest = furthest.max(i);
+            // (lenient parsing has a plus sign matcher of its own)
+            let i = if optional {
+                let k = skip_ignorables(text, i, false);
+                match match_str(text, k, &self.symbols[SYM_PLUS]) {
+                    Some(e) => e,
+                    None if text.get(k) == Some(&'+') => k + 1,
+                    None => i,
+                }
+            } else {
+                i
+            };
             let (mut q, j) = match self.parse_number(text, i, &m) {
                 Ok(x) => x,
                 Err(e) => {
@@ -2129,8 +2147,10 @@ impl DecimalFormat {
                 }
             };
             furthest = furthest.max(j);
-            let Some(k) = self.match_affix(suf_p, &m, text, j, &mut cur, false) else {
-                continue;
+            let k = match self.match_affix(suf_p, &m, text, j, &mut cur, false) {
+                Some(k) => k,
+                None if optional => j,
+                None => continue,
             };
             furthest = furthest.max(k);
             if want_currency && cur.is_none() {
@@ -2170,9 +2190,14 @@ impl DecimalFormat {
     ) -> Option<usize> {
         let toks = affix_tokens(p);
         let n = toks.len();
+        let strict = self.props.parse_strict;
+        let at = i;
         for (ti, t) in toks.into_iter().enumerate() {
-            i = skip_ignorables(text, i);
+            // (white space is ignorable when parsing leniently, in the text
+            // and in the affixes)
+            i = skip_ignorables(text, i, strict);
             let s: String = match t {
+                Tok::Lit(c) if !strict && is_lenient_space(c) => continue,
                 Tok::Lit(c) => c.to_string(),
                 Tok::Minus => {
                     if let Some(j) = match_str(text, i, &self.symbols[SYM_MINUS]) {
@@ -2208,7 +2233,12 @@ impl DecimalFormat {
             }
             i = match_str(text, i, &s)?;
         }
-        Some(skip_ignorables(text, i))
+        // (an affix of ignorables only takes nothing; trailing white space
+        // is not part of the match)
+        if i == at {
+            return Some(i);
+        }
+        Some(skip_ignorables(text, i, true))
     }
 
     fn match_currency(&self, text: &[char], i: usize, m: &Macros) -> Option<(String, usize)> {
@@ -2256,7 +2286,7 @@ impl DecimalFormat {
     /// The number (DecimalMatcher + ScientificMatcher): Err(start) when
     /// there is none or its grouping is invalid.
     fn parse_number(&self, text: &[char], start: usize, m: &Macros) -> Result<(Dq, usize), usize> {
-        let i = skip_ignorables(text, start);
+        let i = skip_ignorables(text, start, self.props.parse_strict);
         let currency_fmt = m.affixes.is_currency;
         let dec_sym = if currency_fmt {
             &self.symbols[SYM_MONETARY_SEPARATOR]
@@ -2484,13 +2514,22 @@ fn is_minus_sign(c: char) -> bool {
 }
 
 /// Skip the parse ignorables (bidi controls, variation selectors).
-fn skip_ignorables(text: &[char], mut i: usize) -> usize {
+/// unisets STRICT_IGNORABLES (bidi controls, variation selectors), and in
+/// lenient mode DEFAULT_IGNORABLES (also [:Zs:] and tab).
+fn skip_ignorables(text: &[char], mut i: usize, strict: bool) -> usize {
     while i < text.len()
-        && matches!(text[i], '\u{200e}' | '\u{200f}' | '\u{61c}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{fe00}'..='\u{fe0f}')
+        && (matches!(text[i], '\u{200e}' | '\u{200f}' | '\u{61c}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{fe00}'..='\u{fe0f}')
+            || (!strict && is_lenient_space(text[i])))
     {
         i += 1;
     }
     i
+}
+
+/// [:Zs:] and tab.
+fn is_lenient_space(c: char) -> bool {
+    c == '\t'
+        || intl::unicode::general_category(c) == intl::unicode::GeneralCategory::SpaceSeparator
 }
 
 fn set_min(min: &mut i32, max: &mut i32, v: i32) {
