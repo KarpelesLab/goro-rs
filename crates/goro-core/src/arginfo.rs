@@ -1285,7 +1285,9 @@ impl Vm {
                         return Err(ZppError::Throw(b"TypeError", msg));
                     }
                 }
-                break;
+                // (the parameters after it are checked too: array_filter()'s
+                // $mode)
+                continue;
             }
             let mut v = args[i].deref();
             if p.by_ref == 0
