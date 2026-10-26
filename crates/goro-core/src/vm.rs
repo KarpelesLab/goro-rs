@@ -9812,16 +9812,21 @@ impl Vm {
     /// temporary objects it was passed (args[0] is $this) are released now,
     /// so their destructors run before the result is used.
     #[inline(never)]
-    fn release_internal_call_temps(&mut self, args: &mut [Value]) {
+    fn release_internal_call_temps(&mut self, args: &mut Vec<Value>) {
+        if args.len() < 2 {
+            return;
+        }
         let mut any = false;
-        for a in args.iter_mut().skip(1) {
+        for a in args.iter().skip(1) {
             if let Value::Object(o) = a {
                 if Rc::strong_count(o) == 2 && o.borrow().dtor_listed.get() {
-                    *a = Value::Null;
+                    crate::gc::note_dtor_candidate(o);
                     any = true;
                 }
             }
         }
+        // (the arguments go before $this, released with the call)
+        args.truncate(1);
         if any {
             self.run_pending_destructors();
         }

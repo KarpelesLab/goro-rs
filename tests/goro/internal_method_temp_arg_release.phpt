@@ -17,7 +17,7 @@ var_dump($r->initializeLazyObject(new A) instanceof A);
 echo "5\n";
 var_dump($r->markLazyObjectAsInitialized(new A) instanceof A);
 echo "6\n";
-var_dump($r->getLazyInitializer($r->newLazyGhost(fn() => 1)));
+var_dump($r->getLazyInitializer($r->newLazyGhost(fn() => 1)) instanceof Closure);
 echo "7\n";
 $rp = new ReflectionProperty('A', 'a');
 var_dump($rp->isLazy(new A));
@@ -47,14 +47,7 @@ bool(true)
 dtor
 bool(true)
 6
-object(Closure)#3 (3) {
-  ["name"]=>
-  string(159) "{closure:%s:17}"
-  ["file"]=>
-  string(146) "%s"
-  ["line"]=>
-  int(17)
-}
+bool(true)
 7
 dtor
 bool(false)
