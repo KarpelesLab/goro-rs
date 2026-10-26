@@ -7502,26 +7502,6 @@ fn validate_values_arg3(vm: &mut Vm, func_name: &str, values_arg: &Value) -> Res
     })
 }
 
-/// Validate that arg #1 is a resource (TypeError otherwise).
-fn validate_stream_arg1(vm: &mut Vm, func_name: &str, stream_arg: &Value) -> Result<(), VmError> {
-    // Z_PARAM_RESOURCE
-    let derefed = stream_arg.deref();
-    if matches!(derefed, Value::Resource(_)) {
-        return Ok(());
-    }
-    let msg = format!(
-        "{}(): Argument #1 ($stream) must be of type resource, {} given",
-        func_name,
-        Vm::value_type_name(&derefed)
-    );
-    let exc = vm.create_exception(b"TypeError", &msg, 0);
-    vm.current_exception = Some(exc);
-    Err(VmError {
-        message: msg,
-        line: vm.current_line,
-    })
-}
-
 fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // fprintf($handle, $format, ...$args) - write formatted to file handle
     if args.len() < 2 {
@@ -7536,7 +7516,7 @@ fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    validate_stream_arg1(vm, "fprintf", &args[0])?;
+    require_open_stream(vm, &args[0], "fprintf")?;
     validate_fmt_arg2(vm, "fprintf", &args[1])?;
     crate::strings::deprecate_null_format(vm, "fprintf", 2, args.get(1));
     let fid = args[0].to_long();
@@ -7568,7 +7548,7 @@ fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    validate_stream_arg1(vm, "vfprintf", &args[0])?;
+    require_open_stream(vm, &args[0], "vfprintf")?;
     validate_fmt_arg2(vm, "vfprintf", &args[1])?;
     crate::strings::deprecate_null_format(vm, "vfprintf", 2, args.get(1));
     validate_values_arg3(vm, "vfprintf", &args[2])?;
@@ -12108,6 +12088,44 @@ pub(crate) fn require_resource_arg(
     })
 }
 
+/// PHP_Z_PARAM_STREAM for argument `argn` named `pname`: a non-resource is
+/// a type error, a resource that is not an open stream "must be an open
+/// stream resource".
+pub(crate) fn require_open_stream_arg(
+    vm: &mut Vm,
+    val: &Value,
+    func_name: &str,
+    argn: u32,
+    pname: &str,
+) -> Result<i64, VmError> {
+    let v = val.deref();
+    let msg = if !matches!(v, Value::Resource(_)) {
+        format!(
+            "{}(): Argument #{} (${}) must be of type resource, {} given",
+            func_name,
+            argn,
+            pname,
+            Vm::value_type_name(&v)
+        )
+    } else {
+        let fid = v.to_long();
+        if FILE_HANDLES.with(|h| h.borrow().contains_key(&fid)) {
+            vm.flush_cli_output();
+            return Ok(fid);
+        }
+        format!(
+            "{}(): Argument #{} (${}) must be an open stream resource",
+            func_name, argn, pname
+        )
+    };
+    let exc = vm.throw_type_error(msg.clone());
+    vm.current_exception = Some(exc);
+    Err(VmError {
+        message: msg,
+        line: vm.current_line,
+    })
+}
+
 fn require_open_stream(vm: &mut Vm, val: &Value, func_name: &str) -> Result<i64, VmError> {
     require_resource_arg(vm, val, func_name)?;
     let fid = val.to_long();
@@ -12871,6 +12889,36 @@ fn stream_resource_dtor(vm: &mut Vm, id: i64) {
     }
 }
 
+/// fclose(): a resource that is not a stream (a context, ...) "must be an
+/// open stream resource".
+#[inline(never)]
+fn fclose_check_stream(vm: &mut Vm, fid: i64) -> Result<(), VmError> {
+    non_stream_resource_check(vm, fid, "fclose")
+}
+
+/// A resource of a non-stream type (a context, a filter, a process)
+/// "must be an open stream resource".
+#[inline(never)]
+fn non_stream_resource_check(vm: &mut Vm, fid: i64, func: &str) -> Result<(), VmError> {
+    let ty = goro_core::value::resource_type_of(fid);
+    if !matches!(
+        ty.as_deref(),
+        Some(b"stream-context" | b"stream filter" | b"process")
+    ) {
+        return Ok(());
+    }
+    let msg = format!(
+        "{}(): Argument #1 ($stream) must be an open stream resource",
+        called_as(vm, func)
+    );
+    let exc = vm.throw_type_error(msg.clone());
+    vm.current_exception = Some(exc);
+    Err(VmError {
+        message: msg,
+        line: vm.current_line,
+    })
+}
+
 pub(crate) fn fclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     require_resource_arg(
         vm,
@@ -12878,9 +12926,11 @@ pub(crate) fn fclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         &called_as(vm, "fclose"),
     )?;
     let fid = args.first().unwrap_or(&Value::Null).to_long();
+    fclose_check_stream(vm, fid)?;
     // PHP_STREAM_FLAG_NO_FCLOSE: a filter callback is running on it, or
-    // an object owns it.
+    // an object owns it (a directory stream: closedir() closes it).
     if crate::stream_filters::in_filter_callback(fid)
+        || DIR_HANDLES.with(|d| d.borrow().contains_key(&fid))
         || goro_core::value::is_resource_no_fclose(fid)
     {
         vm.emit_warning(
@@ -13817,6 +13867,7 @@ fn feof_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 line: vm.current_line,
             });
         }
+        non_stream_resource_check(vm, fid, "feof")?;
         return Ok(Value::True);
     }
     FILE_HANDLES.with(|handles| {
@@ -14057,6 +14108,7 @@ fn ftell_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 line: vm.current_line,
             });
         }
+        non_stream_resource_check(vm, fid, "ftell")?;
         return Ok(Value::False);
     }
     FILE_HANDLES.with(|handles| {
@@ -14088,7 +14140,7 @@ fn ftell_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn fflush_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    require_resource_arg(
+    require_open_stream(
         vm,
         args.first().unwrap_or(&Value::Null),
         &called_as(vm, "fflush"),
@@ -18168,7 +18220,7 @@ fn fpassthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn fpassthru_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    require_resource_arg(
+    require_open_stream(
         vm,
         args.first().unwrap_or(&Value::Null),
         &called_as(vm, "fpassthru"),
@@ -19522,7 +19574,7 @@ pub(crate) fn stream_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Valu
 }
 
 fn stream_get_contents_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    require_resource_arg(
+    require_open_stream(
         vm,
         args.first().unwrap_or(&Value::Null),
         &called_as(vm, "stream_get_contents"),
@@ -20403,10 +20455,20 @@ fn getopt_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 // Stream stubs
-fn stream_set_write_buffer_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0))
+fn stream_set_write_buffer_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let func = called_as(vm, "stream_set_write_buffer");
+    let fid = require_open_stream(vm, args.first().unwrap_or(&Value::Null), &func)?;
+    // PHP_STREAM_OPTION_WRITE_BUFFER: only a FILE*-backed stream (popen())
+    // has a write buffer to set; anything else answers EOF.
+    let popened = POPEN_CHILDREN.with(|p| p.borrow().contains_key(&fid));
+    Ok(Value::Long(if popened { 0 } else { -1 }))
 }
-fn stream_set_read_buffer_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn stream_set_read_buffer_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    require_open_stream(
+        vm,
+        args.first().unwrap_or(&Value::Null),
+        "stream_set_read_buffer",
+    )?;
     Ok(Value::Long(0))
 }
 
@@ -22030,7 +22092,13 @@ thread_local! {
 }
 
 fn pclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    let fid = require_open_stream_arg(
+        vm,
+        args.first().unwrap_or(&Value::Null),
+        "pclose",
+        1,
+        "handle",
+    )?;
     // Closing our end of the pipe lets the child finish.
     FILE_HANDLES.with(|h| h.borrow_mut().remove(&fid));
     goro_core::value::close_resource(fid);
@@ -22365,9 +22433,25 @@ fn unregister_tick_function_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
     Ok(Value::Null)
 }
 
-fn stream_isatty_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // In CLI mode, always return false (not a TTY)
-    Ok(Value::False)
+fn stream_isatty_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = require_open_stream(vm, args.first().unwrap_or(&Value::Null), "stream_isatty")?;
+    use std::os::unix::io::AsRawFd;
+    let fd = FILE_HANDLES.with(|h| {
+        h.borrow().get(&fid).and_then(|fh| match fh.special {
+            SpecialStream::Stdin => Some(0),
+            SpecialStream::Stdout => Some(1),
+            SpecialStream::Stderr => Some(2),
+            SpecialStream::None if fh.sock.is_none() && fh.user_wrapper.is_none() => {
+                Some(fh.file.as_raw_fd())
+            }
+            _ => None,
+        })
+    });
+    Ok(if fd.is_some_and(|fd| unsafe { libc::isatty(fd) } == 1) {
+        Value::True
+    } else {
+        Value::False
+    })
 }
 
 thread_local! {
@@ -22782,8 +22866,10 @@ fn time_sleep_until_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
 
-fn set_file_buffer_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0)) // success
+fn set_file_buffer_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = require_open_stream(vm, args.first().unwrap_or(&Value::Null), "set_file_buffer")?;
+    let popened = POPEN_CHILDREN.with(|p| p.borrow().contains_key(&fid));
+    Ok(Value::Long(if popened { 0 } else { -1 }))
 }
 
 fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

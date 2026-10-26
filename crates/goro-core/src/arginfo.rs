@@ -360,6 +360,44 @@ fn zpp_number_param(info: &FuncInfo, i: usize) -> bool {
     i == 0 && info.name == "number_format"
 }
 
+/// PHP_Z_PARAM_STREAM: the resource parameters of these functions must be
+/// open streams, checked in order with the other parameters.
+#[inline(never)]
+fn zpp_stream_param(info: &FuncInfo, i: usize, v: &Value) -> Option<ZppError> {
+    const STREAM_PARAMS: &[&str] = &[
+        "fprintf",
+        "stream_copy_to_stream",
+        "stream_socket_enable_crypto",
+        "stream_socket_get_name",
+        "stream_socket_recvfrom",
+        "stream_socket_sendto",
+        "vfprintf",
+    ];
+    let Value::Resource(r) = v else {
+        return None;
+    };
+    if !STREAM_PARAMS.contains(&info.name) {
+        return None;
+    }
+    // (stream_socket_enable_crypto()'s session_stream is the 4th)
+    if info.name == "stream_socket_enable_crypto" && i != 0 && i != 3 {
+        return None;
+    }
+    let id = r.id();
+    if crate::value::is_open_resource(id)
+        && matches!(
+            crate::value::resource_type_of(id).as_deref(),
+            Some(b"stream" | b"persistent stream")
+        )
+    {
+        return None;
+    }
+    Some(ZppError::Throw(
+        b"TypeError",
+        format!("{} must be an open stream resource", info.arg_prefix(i)),
+    ))
+}
+
 /// Why a call to an internal function failed before it ran.
 pub enum ZppError {
     /// Throw a new `class` exception with this message.
@@ -1173,6 +1211,9 @@ impl Vm {
                             value_name(&v)
                         ),
                     )));
+                }
+                if let Some(e) = zpp_stream_param(info, i, &v) {
+                    return Some(Err(e));
                 }
             }
             return Some(Ok(()));

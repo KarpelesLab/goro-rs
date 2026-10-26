@@ -1648,7 +1648,7 @@ pub(crate) fn stream_socket_server(vm: &mut Vm, args: &[Value]) -> Result<Value,
 pub(crate) fn stream_socket_accept(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     const F: &str = "stream_socket_accept";
     check_arity(vm, F, args, 1, 3)?;
-    let fid = require_open_stream(vm, &args[0], F)?;
+    let fid = require_open_stream_arg(vm, &args[0], F, 1, "socket")?;
     let timeout = match args.get(1) {
         Some(v) => zpp_double(vm, F, 2, "timeout", v, true)?,
         None => None,
@@ -1733,7 +1733,7 @@ pub(crate) fn stream_socket_accept(vm: &mut Vm, args: &[Value]) -> Result<Value,
 pub(crate) fn stream_socket_get_name(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     const F: &str = "stream_socket_get_name";
     check_arity(vm, F, args, 2, 2)?;
-    let fid = require_open_stream(vm, &args[0], F)?;
+    let fid = require_open_stream_arg(vm, &args[0], F, 1, "socket")?;
     let want_peer = zpp_bool(vm, F, 2, "remote", &args[1])?;
     let Some((_, fd)) = sock_of(fid) else {
         return Ok(Value::False);
@@ -1856,7 +1856,7 @@ fn parse_network_address(vm: &mut Vm, func: &str, addr: &[u8]) -> Option<SockAdd
 pub(crate) fn stream_socket_sendto(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     const F: &str = "stream_socket_sendto";
     check_arity(vm, F, args, 2, 4)?;
-    let fid = require_open_stream(vm, &args[0], F)?;
+    let fid = require_open_stream_arg(vm, &args[0], F, 1, "socket")?;
     let data = zpp_string(vm, F, 2, "data", &args[1])?;
     let flags = match args.get(2) {
         Some(v) => zpp_long(vm, F, 3, "flags", v, false)?.unwrap_or(0),
@@ -1922,7 +1922,7 @@ pub(crate) fn stream_socket_sendto(vm: &mut Vm, args: &[Value]) -> Result<Value,
 pub(crate) fn stream_socket_recvfrom(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     const F: &str = "stream_socket_recvfrom";
     check_arity(vm, F, args, 2, 4)?;
-    let fid = require_open_stream(vm, &args[0], F)?;
+    let fid = require_open_stream_arg(vm, &args[0], F, 1, "socket")?;
     let len = zpp_long(vm, F, 2, "length", &args[1], false)?.unwrap_or(0);
     let flags = match args.get(2) {
         Some(v) => zpp_long(vm, F, 3, "flags", v, false)?.unwrap_or(0),
