@@ -2607,7 +2607,11 @@ impl crate::vm::Vm {
             .then_some(false);
         };
         if t.method.is_some() {
-            t.method_info.as_ref()?;
+            if t.method_info.is_none() {
+                // (a forwarding call: see forward_arg_by_ref)
+                t.forward.as_ref()?;
+                return Some(self.forward_arg_by_ref(call, f));
+            }
         } else if call.name.as_bytes().windows(2).any(|w| w == b"::") {
             return None;
         }
@@ -2616,6 +2620,24 @@ impl crate::vm::Vm {
             Some(b) => *b,
             None => f.variadic_param.is_some() && f.by_ref_params.last().copied().unwrap_or(false),
         })
+    }
+
+    /// fast_arg_by_ref() of a forwarding call (`self::m()`, `static::m()`,
+    /// `parent::m()`: see push_forward_call) of method `f`: what the general
+    /// handler finds, its native ancestors' method asked too.
+    #[cold]
+    #[inline(never)]
+    fn forward_arg_by_ref(
+        &self,
+        call: &crate::vm::PendingCall,
+        f: &crate::opcode::OpArray,
+    ) -> bool {
+        let idx = call.args.len();
+        let by_ref = match f.by_ref_params.get(idx) {
+            Some(b) => *b,
+            None => f.variadic_param.is_some() && f.by_ref_params.last().copied().unwrap_or(false),
+        };
+        by_ref || self.native_method_arg_by_ref(call, idx)
     }
 
     /// INIT_FCALL by a constant plain function name or static method name
