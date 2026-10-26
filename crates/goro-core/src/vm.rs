@@ -4248,9 +4248,20 @@ impl Vm {
         cl: &[u8],
         ml: &[u8],
         this_in_scope: bool,
+        closure: bool,
     ) -> Option<String> {
         let c = self.classes.get(cl)?;
         let meth = c.get_method(ml)?;
+        // (a Closure of the method was created where it is accessible)
+        if closure {
+            return (!meth.is_static).then(|| {
+                format!(
+                    "Non-static method {}::{}() cannot be called statically",
+                    crate::string::msg_str(&c.name),
+                    crate::string::msg_str(&meth.name)
+                )
+            });
+        }
         if meth.visibility != Visibility::Public {
             let scope = self.current_class_scope();
             if let Some(e) = self.check_visibility(
@@ -29756,7 +29767,7 @@ impl Vm {
                                                     if { let ocl: Vec<u8> = o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect(); ocl == cl || self.class_extends(&ocl, &cl) });
                                             match c.get_method(&ml) {
                                                 Some(_) => self
-                                                    .dyn_static_callable_error(&cl, &ml, this_in_scope)
+                                                    .dyn_static_callable_error(&cl, &ml, this_in_scope, from_closure)
                                                     .map(|e| (b"Error".as_slice(), e)),
                                                 None if c.get_method(b"__callstatic").is_some() => {
                                                     None
