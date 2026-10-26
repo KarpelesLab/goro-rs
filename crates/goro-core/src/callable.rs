@@ -464,7 +464,8 @@ impl Vm {
         } else {
             *error = Some(format!(
                 "function \"{}\" not found or invalid function name",
-                crate::string::msg_str(callable)
+                // (printed with %s: a NUL ends it)
+                crate::string::msg_str(callable.split(|&c| c == 0).next().unwrap_or_default())
             ));
             return false;
         }
