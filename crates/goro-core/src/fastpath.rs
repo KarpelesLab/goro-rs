@@ -96,6 +96,52 @@ pub(crate) fn set_plain(slot: &mut Value, v: Value) {
     }
 }
 
+/// The positions of a frame's running foreach loops by the temporary of
+/// their iterator: a few at a time, so a vector looked through (a hash
+/// map's insert, each ForeachNext, cost more).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PosMap(Vec<(u32, usize)>);
+
+impl PosMap {
+    #[inline]
+    pub(crate) fn get(&self, k: &u32) -> Option<&usize> {
+        self.0.iter().find(|(t, _)| t == k).map(|(_, p)| p)
+    }
+
+    #[inline]
+    pub(crate) fn insert(&mut self, k: u32, v: usize) -> Option<usize> {
+        match self.0.iter_mut().find(|(t, _)| *t == k) {
+            Some((_, p)) => Some(std::mem::replace(p, v)),
+            None => {
+                self.0.push((k, v));
+                None
+            }
+        }
+    }
+
+    #[inline]
+    pub(crate) fn remove(&mut self, k: &u32) -> Option<usize> {
+        let i = self.0.iter().position(|(t, _)| t == k)?;
+        Some(self.0.swap_remove(i).1)
+    }
+
+    #[inline]
+    pub(crate) fn contains_key(&self, k: &u32) -> bool {
+        self.0.iter().any(|(t, _)| t == k)
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[inline]
+    pub(crate) fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+
+}
+
 /// Store into a temporary result slot whose current content is a plain
 /// scalar.  Returns false (and stores nothing) otherwise.
 #[inline(always)]
@@ -1632,7 +1678,7 @@ impl FeTmps {
 /// run_fast_ops() reads (FreeTmps) and advances (FE_FETCH of an array
 /// iterated live): see vm::ForeachState.
 pub(crate) struct FeView<'a> {
-    pub(crate) positions: &'a mut crate::fxhash::FxHashMap<u32, usize>,
+    pub(crate) positions: &'a mut PosMap,
     pub(crate) snap: &'a crate::fxhash::FxHashMap<u32, Vec<(crate::array::ArrayKey, Value)>>,
     pub(crate) obj:
         &'a crate::fxhash::FxHashMap<u32, std::rc::Weak<RefCell<crate::object::PhpObject>>>,

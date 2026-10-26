@@ -805,7 +805,7 @@ pub(crate) enum RecvFail {
 /// iterator tmp.
 #[derive(Debug, Default)]
 pub(crate) struct ForeachState {
-    pub(crate) positions: crate::fxhash::FxHashMap<u32, usize>,
+    pub(crate) positions: crate::fastpath::PosMap,
     /// Object handles held by the internal iterators of running foreach
     /// loops over Traversables (zend_iterator_init allocates one); released
     /// with the loop.
@@ -5012,7 +5012,7 @@ impl Vm {
         cell: &Rc<RefCell<Value>>,
         arrays: &mut crate::fxhash::FxHashMap<u32, Rc<RefCell<PhpArray>>>,
         iters: &mut crate::fxhash::FxHashMap<u32, Rc<std::cell::Cell<usize>>>,
-        positions: &mut crate::fxhash::FxHashMap<u32, usize>,
+        positions: &mut crate::fastpath::PosMap,
         cur_ref: &mut crate::fxhash::FxHashMap<u32, std::rc::Weak<RefCell<Value>>>,
         line: u32,
     ) -> bool {
