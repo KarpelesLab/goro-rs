@@ -841,7 +841,9 @@ fn php_str_replace_common(
         }
     };
     let result = match subject {
-        StrOrArr::Str(subj) => Value::String(PhpString::from_vec(in_subject(vm, subj, &mut count)?)),
+        StrOrArr::Str(subj) => {
+            Value::String(PhpString::from_vec(in_subject(vm, subj, &mut count)?))
+        }
         StrOrArr::Arr(vals, keys) => {
             let mut out = PhpArray::new();
             for (k, v) in keys.into_iter().zip(vals) {
@@ -1178,7 +1180,11 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
 
     let values: Vec<Value> = arr.borrow().values().cloned().collect();
     // (do_alloca() of the pieces table: on the heap past 32 KiB)
-    let tmp = if values.len() > 1 { values.len() * 16 } else { 0 };
+    let tmp = if values.len() > 1 {
+        values.len() * 16
+    } else {
+        0
+    };
     let tmp = if tmp > 32 * 1024 { tmp } else { 0 };
     if tmp > 0 && !goro_core::value::memory_alloc(tmp) {
         return Err(vm.memory_limit_fatal());
@@ -1501,7 +1507,12 @@ fn php_conv_fp(format: u8, num: f64, precision: usize, dec_point: u8) -> (Vec<u8
 /// zend_string_safe_alloc(n, m, l)'s block: n * m bytes plus the aligned
 /// zend_string of l bytes; the memory limit may refuse it (a fatal error).
 #[inline(never)]
-pub(crate) fn zstr_safe_alloc_check(vm: &mut Vm, n: usize, m: usize, l: usize) -> Result<(), VmError> {
+pub(crate) fn zstr_safe_alloc_check(
+    vm: &mut Vm,
+    n: usize,
+    m: usize,
+    l: usize,
+) -> Result<(), VmError> {
     if goro_core::value::memory_get_limit() == 0 {
         return Ok(());
     }
@@ -2300,7 +2311,9 @@ fn chunk_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // zend_string_safe_alloc(chunks, endlen, srclen) (or (srclen, 1,
         // endlen) for a single short chunk)
         let need = if chunklen > bytes.len() {
-            bytes.len().saturating_add((end.len() + 25).next_multiple_of(8))
+            bytes
+                .len()
+                .saturating_add((end.len() + 25).next_multiple_of(8))
         } else {
             bytes
                 .len()
@@ -4297,7 +4310,10 @@ fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .saturating_mul(brk_bytes.len())
             .saturating_add((bytes.len() + 25).next_multiple_of(8))
     } else {
-        bytes.len().saturating_mul(brk_bytes.len() + 1).saturating_add(32)
+        bytes
+            .len()
+            .saturating_mul(brk_bytes.len() + 1)
+            .saturating_add(32)
     };
     if goro_core::value::memory_get_limit() > 0 {
         vm.memory_check(alloc_size)?;

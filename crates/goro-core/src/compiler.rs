@@ -13829,7 +13829,9 @@ impl Compiler {
         if is_and != t {
             // (the result is zend_is_true() of the left operand once more)
             let t = if is_and { t } else { self.ct_truthy(&lv, line) };
-            let idx = self.op_array.add_literal(if t { Value::True } else { Value::False });
+            let idx = self
+                .op_array
+                .add_literal(if t { Value::True } else { Value::False });
             return Ok(Some(OperandType::Const(idx)));
         }
         let r = self.compile_expr(right)?;
@@ -13837,7 +13839,9 @@ impl Compiler {
             if let Some(rv) = self.op_array.literals.get(i as usize).cloned() {
                 if !matches!(rv, Value::Resource(_)) {
                     let t = self.ct_truthy(&rv, line);
-                    let idx = self.op_array.add_literal(if t { Value::True } else { Value::False });
+                    let idx = self
+                        .op_array
+                        .add_literal(if t { Value::True } else { Value::False });
                     return Ok(Some(OperandType::Const(idx)));
                 }
             }
@@ -14110,14 +14114,14 @@ impl Compiler {
                 2
             } else if Self::zend_ct_value(e, false).is_some()
                 || matches!(o, OperandType::Const(i)
-                    if !matches!(literals.get(*i as usize), Some(Value::Resource(_)))
-                        && matches!(
-                            e.kind,
-                            ExprKind::ConstantAccess(_)
-                                | ExprKind::Identifier(_)
-                                | ExprKind::ClassConstAccess { .. }
-                                | ExprKind::InterpolatedString(_)
-                        ))
+                if !matches!(literals.get(*i as usize), Some(Value::Resource(_)))
+                    && matches!(
+                        e.kind,
+                        ExprKind::ConstantAccess(_)
+                            | ExprKind::Identifier(_)
+                            | ExprKind::ClassConstAccess { .. }
+                            | ExprKind::InterpolatedString(_)
+                    ))
             {
                 1
             } else if matches!(o, OperandType::Cv(_)) {
@@ -14185,7 +14189,9 @@ impl Compiler {
                         Some(k) => {
                             let key = match Self::zend_ct_value(k, true)? {
                                 Value::Long(n) => crate::array::ArrayKey::Int(n),
-                                Value::String(s) => crate::vm::Vm::value_to_array_key(Value::String(s)),
+                                Value::String(s) => {
+                                    crate::vm::Vm::value_to_array_key(Value::String(s))
+                                }
                                 Value::True => crate::array::ArrayKey::Int(1),
                                 Value::False => crate::array::ArrayKey::Int(0),
                                 _ => return None,
@@ -14273,9 +14279,10 @@ impl Compiler {
                     (Value::Array(a), Value::Long(n)) => {
                         a.borrow().get(&crate::array::ArrayKey::Int(n)).cloned()
                     }
-                    (Value::Array(a), Value::String(k)) => {
-                        a.borrow().get(&crate::vm::Vm::value_to_array_key(Value::String(k))).cloned()
-                    }
+                    (Value::Array(a), Value::String(k)) => a
+                        .borrow()
+                        .get(&crate::vm::Vm::value_to_array_key(Value::String(k)))
+                        .cloned(),
                     (Value::String(s), d) => {
                         let off = match d {
                             Value::Long(n) => n,
@@ -14291,11 +14298,14 @@ impl Compiler {
                                     .iter()
                                     .enumerate()
                                     .position(|(i, c)| {
-                                        !(c.is_ascii_digit() || (i == 0 && matches!(c, b'-' | b'+')))
+                                        !(c.is_ascii_digit()
+                                            || (i == 0 && matches!(c, b'-' | b'+')))
                                     })
                                     .unwrap_or(t.len());
                                 let digits = &t[..end];
-                                if digits.is_empty() || matches!(t.get(end), Some(b'.' | b'e' | b'E')) {
+                                if digits.is_empty()
+                                    || matches!(t.get(end), Some(b'.' | b'e' | b'E'))
+                                {
                                     return None;
                                 }
                                 std::str::from_utf8(digits).ok()?.parse::<i64>().ok()?
@@ -14306,7 +14316,9 @@ impl Compiler {
                         if off < 0 || off as usize >= bytes.len() {
                             return None;
                         }
-                        Some(Value::String(PhpString::from_vec(vec![bytes[off as usize]])))
+                        Some(Value::String(PhpString::from_vec(vec![
+                            bytes[off as usize],
+                        ])))
                     }
                     _ => None,
                 }
@@ -14322,7 +14334,11 @@ impl Compiler {
             return None;
         }
         match ty {
-            CastType::Bool => Some(if v.is_truthy() { Value::True } else { Value::False }),
+            CastType::Bool => Some(if v.is_truthy() {
+                Value::True
+            } else {
+                Value::False
+            }),
             CastType::Int => match v {
                 Value::Double(f) if !crate::value::php_double_fits_long(f) => None,
                 v => Some(Value::Long(v.to_long())),
@@ -14391,7 +14407,9 @@ impl Compiler {
                 for (k, v) in a.borrow().iter() {
                     let key = match k {
                         crate::array::ArrayKey::Int(n) => ExprKind::Int(*n),
-                        crate::array::ArrayKey::String(s) => ExprKind::String(s.as_bytes().to_vec()),
+                        crate::array::ArrayKey::String(s) => {
+                            ExprKind::String(s.as_bytes().to_vec())
+                        }
                     };
                     elems.push(goro_parser::ast::ArrayElement {
                         key: Some(Expr { kind: key, span }),
@@ -14416,14 +14434,15 @@ impl Compiler {
             | ExprKind::True
             | ExprKind::False
             | ExprKind::Null => Self::eval_const_expr(e),
-            ExprKind::Array(elems) if elems.iter().all(|el| {
-                !el.by_ref
-                    && !el.unpack
-                    && Self::ast_zval(&el.value).is_some()
-                    && el.key.as_ref().is_none_or(|k| {
-                        matches!(Self::ast_zval(k), Some(Value::Long(_) | Value::String(_)))
-                    })
-            }) =>
+            ExprKind::Array(elems)
+                if elems.iter().all(|el| {
+                    !el.by_ref
+                        && !el.unpack
+                        && Self::ast_zval(&el.value).is_some()
+                        && el.key.as_ref().is_none_or(|k| {
+                            matches!(Self::ast_zval(k), Some(Value::Long(_) | Value::String(_)))
+                        })
+                }) =>
             {
                 Self::eval_const_expr(e)
             }
@@ -14450,13 +14469,15 @@ impl Compiler {
             });
             return None;
         }
-        let r = crate::stack::with_room(|| self.zend_eval_const_expr_ast_inner(e)).unwrap_or_else(|_| {
-            self.prepass_error = Some(CompileError {
-                message: "Maximum nesting depth exceeded".into(),
-                line: e.span.line,
-            });
-            None
-        });
+        let r = crate::stack::with_room(|| self.zend_eval_const_expr_ast_inner(e)).unwrap_or_else(
+            |_| {
+                self.prepass_error = Some(CompileError {
+                    message: "Maximum nesting depth exceeded".into(),
+                    line: e.span.line,
+                });
+                None
+            },
+        );
         crate::stack::leave_compile();
         r
     }
@@ -14471,7 +14492,10 @@ impl Compiler {
             // the namespace's)
             ExprKind::Identifier(n)
                 if self.current_namespace.is_empty()
-                    || matches!(n.to_ascii_lowercase().as_slice(), b"true" | b"false" | b"null") =>
+                    || matches!(
+                        n.to_ascii_lowercase().as_slice(),
+                        b"true" | b"false" | b"null"
+                    ) =>
             {
                 let v = Self::eval_const_expr(e)?;
                 fold(v)
@@ -14559,7 +14583,8 @@ impl Compiler {
                 }
             }
             ExprKind::UnaryOp {
-                op: op @ (UnaryOp::BooleanNot | UnaryOp::BitwiseNot | UnaryOp::Negate | UnaryOp::Plus),
+                op:
+                    op @ (UnaryOp::BooleanNot | UnaryOp::BitwiseNot | UnaryOp::Negate | UnaryOp::Plus),
                 operand,
                 prefix,
             } => {
@@ -14592,7 +14617,9 @@ impl Compiler {
                         Value::String(s) => Some(Value::String(PhpString::from_vec(
                             s.as_bytes().iter().map(|c| !c).collect(),
                         ))),
-                        Value::Double(f) if f.is_finite() && f.fract() == 0.0 && f.abs() < 9.2e18 => {
+                        Value::Double(f)
+                            if f.is_finite() && f.fract() == 0.0 && f.abs() < 9.2e18 =>
+                        {
                             Some(Value::Long(!(f as i64)))
                         }
                         _ => None,
@@ -14754,7 +14781,10 @@ impl Compiler {
         if is_arr(a) || is_arr(b) {
             return (op == BinaryOp::Add && is_arr(a) && is_arr(b)).then(|| a.add(b));
         }
-        let bitwise = matches!(op, BinaryOp::BitwiseAnd | BinaryOp::BitwiseOr | BinaryOp::BitwiseXor);
+        let bitwise = matches!(
+            op,
+            BinaryOp::BitwiseAnd | BinaryOp::BitwiseOr | BinaryOp::BitwiseXor
+        );
         if bitwise && matches!(a, Value::String(_)) && matches!(b, Value::String(_)) {
             let (x, y) = (a.to_php_string(), b.to_php_string());
             let (x, y) = (x.as_bytes(), y.as_bytes());
@@ -14768,9 +14798,13 @@ impl Compiler {
                             Some(q) if op == BinaryOp::BitwiseOr => p | q,
                             Some(q) => p ^ q,
                             None if op == BinaryOp::BitwiseOr => *p,
-                            None => return 0,
+                            None => 0,
                         })
-                        .take(if op == BinaryOp::BitwiseXor { short.len() } else { long.len() })
+                        .take(if op == BinaryOp::BitwiseXor {
+                            short.len()
+                        } else {
+                            long.len()
+                        })
                         .collect()
                 }
             };
@@ -14779,7 +14813,11 @@ impl Compiler {
         if !numeric(a) || !numeric(b) {
             return None;
         }
-        let int_op = bitwise || matches!(op, BinaryOp::Mod | BinaryOp::ShiftLeft | BinaryOp::ShiftRight);
+        let int_op = bitwise
+            || matches!(
+                op,
+                BinaryOp::Mod | BinaryOp::ShiftLeft | BinaryOp::ShiftRight
+            );
         if int_op && (!long_ok(a) || !long_ok(b)) {
             return None;
         }
@@ -14801,7 +14839,13 @@ impl Compiler {
                 Some(Value::Long(match op {
                     BinaryOp::ShiftLeft if n >= 64 => 0,
                     BinaryOp::ShiftLeft => x.wrapping_shl(n as u32),
-                    _ if n >= 64 => if x < 0 { -1 } else { 0 },
+                    _ if n >= 64 => {
+                        if x < 0 {
+                            -1
+                        } else {
+                            0
+                        }
+                    }
                     _ => x >> n,
                 }))
             }
@@ -24064,8 +24108,7 @@ fn substitute_self_parent_types(class: &mut crate::object::ClassEntry) {
     let parent = parent.as_deref();
     for m in class.methods.values_mut() {
         let needs = m.op_array.return_type.as_ref().is_some_and(has)
-            || m
-                .op_array
+            || m.op_array
                 .param_types
                 .iter()
                 .any(|p| p.as_ref().is_some_and(|p| has(&p.param_type)));

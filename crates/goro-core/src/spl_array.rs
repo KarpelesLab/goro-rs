@@ -833,7 +833,10 @@ impl Vm {
     }
 
     /// Current (index, entry) of the iterator, resolving a stale index by key.
-    pub(crate) fn ao_current(&self, obj: &Rc<RefCell<PhpObject>>) -> Option<(usize, ArrayKey, Value)> {
+    pub(crate) fn ao_current(
+        &self,
+        obj: &Rc<RefCell<PhpObject>>,
+    ) -> Option<(usize, ArrayKey, Value)> {
         let t = self.ao_table(obj);
         let (mut idx, mut pos_key, pos_epoch) = {
             let ob = obj.borrow();

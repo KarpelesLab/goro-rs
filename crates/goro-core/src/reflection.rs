@@ -6710,11 +6710,7 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                             let total = (m.op_array.param_count as usize)
                                 .saturating_sub(skip)
                                 .saturating_sub(usize::from(m.op_array.variadic_param.is_some()));
-                            let descriptor = if total == req {
-                                "exactly"
-                            } else {
-                                "at least"
-                            };
+                            let descriptor = if total == req { "exactly" } else { "at least" };
                             let msg = format!(
                                 "Too few arguments to function {}::{}(), {} passed and {} {} expected",
                                 canonical,
@@ -10267,12 +10263,17 @@ fn eval_static_const_init(
 /// A default naming a global constant the compiler folded to its value
 /// (PHP_INT_MAX, E_ALL, NAN...): the AST still is a ZEND_AST_CONSTANT.
 #[inline(never)]
-pub(crate) fn folded_default_const_name(op_array: &crate::opcode::OpArray, cv_idx: usize) -> Option<String> {
+pub(crate) fn folded_default_const_name(
+    op_array: &crate::opcode::OpArray,
+    cv_idx: usize,
+) -> Option<String> {
     let r = op_array.param_default_repr.get(cv_idx)?.as_ref()?;
     let r = r.trim_start_matches('\\');
     let first = r.chars().next()?;
     if !(first.is_ascii_alphabetic() || first == '_' || !first.is_ascii())
-        || !r.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '\\' || !c.is_ascii())
+        || !r
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '\\' || !c.is_ascii())
     {
         return None;
     }
@@ -11409,7 +11410,9 @@ fn op_static_var_names(op: &OpArray) -> Vec<Vec<u8>> {
                 let b = s.as_bytes();
                 // (a method's statics are keyed `Class::method::name`)
                 let n = b.strip_prefix(prefix.as_slice()).or_else(|| {
-                    let at = b.windows(prefix.len()).position(|w| w == prefix.as_slice())?;
+                    let at = b
+                        .windows(prefix.len())
+                        .position(|w| w == prefix.as_slice())?;
                     (at >= 2 && &b[at - 2..at] == b"::" && !b[..at - 2].contains(&b':'))
                         .then(|| &b[at + prefix.len()..])
                 });

@@ -456,7 +456,9 @@ impl Vm {
             // count, the "+" / "*" zend_parse_parameters() ones whose stubs'
             // counts differ: array_udiff() & co.)
             if let Some(msg) = crate::arginfo::lookup(lname)
-                .filter(|i| !own_arity_message(lname) && !crate::arginfo::legacy_zpp_variadic(i.name))
+                .filter(|i| {
+                    !own_arity_message(lname) && !crate::arginfo::legacy_zpp_variadic(i.name)
+                })
                 .and_then(|i| i.arity_error(args.len()))
             {
                 let line = self.current_line;

@@ -866,9 +866,9 @@ impl Vm {
                     if matches!(props[i].1, Value::Undef) && !slot.has_get_hook {
                         if hooked_null
                             && self.classes.get(&slot.decl).is_some_and(|c| {
-                                c.properties.iter().any(|p| {
-                                    p.name == slot.name && !p.is_static && p.has_set_hook
-                                })
+                                c.properties
+                                    .iter()
+                                    .any(|p| p.name == slot.name && !p.is_static && p.has_set_hook)
                             })
                         {
                             out.push(PropEntry {

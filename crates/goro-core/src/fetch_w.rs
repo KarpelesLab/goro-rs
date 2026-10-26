@@ -153,7 +153,11 @@ impl Vm {
         let c = bytes[0];
         // (the padded string's zend_string: header, bytes and NUL, aligned)
         if offset >= s.len() {
-            let size = offset.saturating_add(1).saturating_add(25).saturating_add(7) & !7;
+            let size = offset
+                .saturating_add(1)
+                .saturating_add(25)
+                .saturating_add(7)
+                & !7;
             if let Err(e) = self.memory_check(size) {
                 return StrOffsetAssign::Fatal(e);
             }

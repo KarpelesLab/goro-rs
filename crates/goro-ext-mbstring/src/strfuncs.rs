@@ -833,7 +833,7 @@ fn mb_str_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if char_len != 0 {
         let chunk_len = char_len * split_len;
         // (php's rounding of the number of chunks)
-        vm.array_init_size_check((s.len() / chunk_len + split_len - 1) / split_len, true)?;
+        vm.array_init_size_check((s.len() / chunk_len).div_ceil(split_len), true)?;
         for c in s.chunks(chunk_len) {
             arr.push(pstr(c));
             if bail(&arr) {

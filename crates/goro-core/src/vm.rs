@@ -22799,7 +22799,7 @@ impl Vm {
                 fn_gen: self.user_functions.len() + 1,
                 via_invoke: false,
                 dynamic: false,
-                    };
+            };
         }
         let builtin = match found {
             Some(f)
@@ -22836,7 +22836,7 @@ impl Vm {
             fn_gen: self.user_functions.len() + 1,
             via_invoke: false,
             dynamic: false,
-            }
+        }
     }
 
     /// Give `class` its own copy of the array defaults it shares with the

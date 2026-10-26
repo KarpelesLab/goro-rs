@@ -912,7 +912,11 @@ fn php_html_entities(
         );
     }
     // (php_escape_html_entities_ex()'s buffer: twice the length)
-    let maxlen = if bytes.len() < 64 { 128 } else { bytes.len().saturating_mul(2) };
+    let maxlen = if bytes.len() < 64 {
+        128
+    } else {
+        bytes.len().saturating_mul(2)
+    };
     crate::strings::zstr_safe_alloc_check(vm, 0, 0, maxlen)?;
     let out = encode_html(&bytes, cs, flags, double_encode, all);
     Ok(Value::String(PhpString::from_vec(out)))
