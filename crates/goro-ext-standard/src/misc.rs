@@ -2040,6 +2040,18 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
     r
 }
 
+/// Whether `name` holds "::".
+fn has_double_colon(name: &[u8]) -> bool {
+    let mut i = 0;
+    while let Some(p) = memchr::memchr(b':', &name[i..]) {
+        if name.get(i + p + 1) == Some(&b':') {
+            return true;
+        }
+        i += p + 1;
+    }
+    false
+}
+
 fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() {
         return Ok(Value::Null);
@@ -2534,10 +2546,11 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Handle closure callback (stored as string name or array with captures)
     if let Value::String(s) = callback {
         let func_name = s.as_bytes().to_vec();
-        let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let func_lower: Vec<u8> = func_name.to_ascii_lowercase();
+        let looks_like_class_method = has_double_colon(&func_lower);
         // zend_is_callable_check_func(): a function named with a leading
         // `\` (not "\\Class::method", resolved below).
-        let fn_lower: &[u8] = if func_lower.windows(2).any(|w| w == b"::") {
+        let fn_lower: &[u8] = if looks_like_class_method {
             &func_lower
         } else {
             func_lower.strip_prefix(b"\\").unwrap_or(&func_lower)
@@ -2549,7 +2562,6 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
 
         // Try user function (but not "Class::method" strings - those need proper LSB handling below)
-        let looks_like_class_method = func_lower.windows(2).any(|w| w == b"::");
         if !looks_like_class_method {
             if let Some(user_fn) = vm.user_functions.get(fn_lower).cloned() {
                 if !user_fn.attributes.is_empty() {
@@ -2947,7 +2959,7 @@ fn php_array_merge_wrapper(
     fname: &str,
     recursive: bool,
 ) -> Result<Value, VmError> {
-    let mut arrays: Vec<Rc<RefCell<PhpArray>>> = Vec::new();
+    let mut arrays: Vec<Rc<RefCell<PhpArray>>> = Vec::with_capacity(args.len());
     let mut count: u64 = 0;
     for (i, arg) in args.iter().enumerate() {
         match arg.deref() {
@@ -2998,15 +3010,13 @@ fn php_array_merge_wrapper(
                 return Ok(Value::Null);
             }
         } else {
-            let entries: Vec<(ArrayKey, Value)> = src
-                .borrow()
-                .iter()
-                .map(|(k, v)| (k.clone(), merge_copy_entry(v)))
-                .collect();
+            // (`dest` is a new array: none of the sources)
+            let src = src.borrow();
             let mut d = dest.borrow_mut();
-            for (k, v) in entries {
+            for (k, v) in src.iter() {
+                let v = merge_copy_entry(v);
                 match k {
-                    ArrayKey::String(_) => d.set(k, v),
+                    ArrayKey::String(_) => d.set(k.clone(), v),
                     ArrayKey::Int(_) => d.push(v),
                 }
             }
