@@ -105,6 +105,9 @@ pub trait Callbacks {
     /// CURLOPT_HEADERFUNCTION: one complete header line at a time, CRLF
     /// included (status line, each header, the empty line).
     fn header(&mut self, data: &[u8]) -> usize;
+    /// The handle doing the transfer, for curl_getinfo() from within a
+    /// callback (null once the callback returned).
+    fn live_easy(&mut self, _easy: *const Easy) {}
     /// CURLOPT_READFUNCTION: upload data, at most `max` bytes.
     fn read(&mut self, max: usize) -> ReadResult;
     /// CURLOPT_SEEKFUNCTION; return CURL_SEEKFUNC_* (0 ok, 1 fail, 2 cantseek)

@@ -104,6 +104,9 @@ pub(crate) struct CurlObj {
     /// None while a transfer is running (curl_easy_perform has the handle).
     pub easy: RefCell<Option<Easy>>,
     pub st: RefCell<CurlState>,
+    /// The handle while a transfer runs one of its write/header callbacks
+    /// (curl_getinfo() from the callback sees the transfer's progress).
+    pub live: std::cell::Cell<*const Easy>,
 }
 
 impl Drop for CurlObj {
@@ -162,6 +165,7 @@ fn new_curl_object(vm: &mut Vm, easy: Easy, st: CurlState) -> (Value, Rc<CurlObj
     let c = Rc::new(CurlObj {
         easy: RefCell::new(Some(easy)),
         st: RefCell::new(st),
+        live: std::cell::Cell::new(std::ptr::null()),
     });
     obj.native = Some(NativeData {
         data: c.clone() as Rc<dyn std::any::Any>,
@@ -322,6 +326,10 @@ impl Transfer<'_> {
 }
 
 impl engine::Callbacks for Transfer<'_> {
+    fn live_easy(&mut self, easy: *const Easy) {
+        self.c.live.set(easy);
+    }
+
     fn write(&mut self, data: &[u8]) -> usize {
         let (method, fcc, stream) = {
             let st = self.c.st.borrow();
@@ -603,6 +611,7 @@ fn arg_curl(a: &Arg) -> (Value, Rc<CurlObj>) {
         Rc::new(CurlObj {
             easy: RefCell::new(Some(Easy::new())),
             st: RefCell::new(new_state()),
+            live: std::cell::Cell::new(std::ptr::null()),
         })
     });
     (Value::Object(o), c)
@@ -751,6 +760,7 @@ fn curl_clone_obj(vm: &mut Vm, src: &Rc<RefCell<PhpObject>>, clone: &Rc<RefCell<
     let nc = Rc::new(CurlObj {
         easy: RefCell::new(Some(easy)),
         st: RefCell::new(st),
+        live: std::cell::Cell::new(std::ptr::null()),
     });
     clone.borrow_mut().native = Some(NativeData {
         data: nc.clone() as Rc<dyn std::any::Any>,
@@ -1762,7 +1772,15 @@ fn curl_getinfo(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
     let (_, c) = arg_curl(&a[0]);
     let easy_ref = c.easy.borrow();
     let fallback = Easy::new();
-    let e = easy_ref.as_ref().unwrap_or(&fallback);
+    let live = c.live.get();
+    let e = match easy_ref.as_ref() {
+        Some(e) => e,
+        // SAFETY: set only while the transfer, suspended in one of its
+        // callbacks, holds no other borrow of the handle (cleared before the
+        // callback's caller goes on).
+        None if !live.is_null() => unsafe { &*live },
+        None => &fallback,
+    };
     if !a[1].is_given() {
         let mut r = PhpArray::new();
         let s = |r: &mut PhpArray, k: &str, info: i64| {

@@ -2135,7 +2135,10 @@ impl Easy {
             return false;
         }
         let p = &self.progress;
-        let r = cb.progress(p.dl_total, p.dl_cur, p.ul_total, p.ul_cur);
+        let (dt, dc, ut, uc) = (p.dl_total, p.dl_cur, p.ul_total, p.ul_cur);
+        cb.live_easy(self as *const Easy);
+        let r = cb.progress(dt, dc, ut, uc);
+        cb.live_easy(std::ptr::null());
         if r != super::PROGRESSFUNC_CONTINUE && r != 0 {
             self.failf(cb, "Callback aborted");
             return true;
@@ -2174,11 +2177,14 @@ impl Easy {
                 data.len().min(CURL_MAX_WRITE_SIZE)
             };
             let chunk = &data[..wlen];
+            // (curl_getinfo() from the callback reads this handle)
+            cb.live_easy(self as *const Easy);
             let n = if hds {
                 cb.header(chunk)
             } else {
                 cb.write(chunk)
             };
+            cb.live_easy(std::ptr::null());
             if n == WRITEFUNC_PAUSE {
                 // a blocking transfer cannot pause: call again shortly
                 std::thread::sleep(Duration::from_millis(1));
