@@ -25576,9 +25576,6 @@ impl Vm {
                     if matches!(&a, Value::Array(_)) {
                         self.emit_warning_at("Array to string conversion", op.line);
                     }
-                    if matches!(&b, Value::Array(_)) {
-                        self.emit_warning_at("Array to string conversion", op.line);
-                    }
                     let a_str = match self.value_to_string_checked(&a) {
                         Ok(s) => s,
                         Err(e) => {
@@ -25599,6 +25596,10 @@ impl Vm {
                             return Err(e);
                         }
                     };
+                    // (concat_function() converts op1 before op2)
+                    if matches!(&b, Value::Array(_)) {
+                        self.emit_warning_at("Array to string conversion", op.line);
+                    }
                     let b_str = match self.value_to_string_checked(&b) {
                         Ok(s) => s,
                         Err(e) => {
