@@ -19317,6 +19317,18 @@ impl Vm {
 
     /// End of the main script: uncaught exception handling and display,
     /// shutdown functions, destructors and module request shutdown.
+    /// Before the user exception handler runs: the frames the uncaught
+    /// exception left are gone.
+    #[inline(never)]
+    fn unwind_frames_for_exception_handler(&mut self) {
+        let base = self.fiber_call_base();
+        if base == 0 {
+            self.call_stack.clear();
+            self.class_scope_stack.clear();
+            self.called_class_stack.clear();
+        }
+    }
+
     pub fn finish_request(&mut self, result: Result<Value, VmError>) -> Result<Value, VmError> {
         // The Return path in global scope force-closes outstanding generator CVs
         // so their finally blocks can run on shutdown. If any such finally raised
@@ -19362,6 +19374,9 @@ impl Vm {
                 {
                     let handler = self.exception_handler.take().unwrap();
                     let exc = self.current_exception.take().unwrap();
+                    // The exception left every frame (zend_user_exception_handler()
+                    // runs from the top level).
+                    self.unwind_frames_for_exception_handler();
                     // PHP shows the user exception handler in stack traces as a frame
                     // called from "[internal function]". Push a frame so any trace
                     // captured during the handler reflects the call site.
