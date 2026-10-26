@@ -170,6 +170,30 @@ fn check_path(vm: &mut Vm, func: &str, path: &[u8], what: &str) -> Option<String
 }
 
 /// The certificates of a PEM file, leaf first (SSL_CTX_use_certificate_chain_file()).
+/// The error queue of SSL_CTX_use_certificate_chain_file() /
+/// SSL_CTX_use_PrivateKey_file() for a file that cannot be read or does not
+/// hold what is expected (`decode_err`).
+fn pem_file_errors(path: &str, decode_err: &str) {
+    match std::fs::File::open(path) {
+        Err(e) => {
+            let errno = e.raw_os_error().unwrap_or(libc::ENOENT);
+            let text = std::io::Error::from_raw_os_error(errno).to_string();
+            let text = text.split(" (os error").next().unwrap_or("").to_string();
+            crate::err::push_str(format!(
+                "error:FFFFFFFF{:08X}:system library::{}",
+                0x8000_0000u32 | errno as u32,
+                text
+            ));
+            crate::err::push_str("error:10080002:BIO routines::system lib");
+            crate::err::push_str("error:0A080002:SSL routines::system lib");
+        }
+        Ok(_) => {
+            crate::err::push_str(format!("error:{decode_err}"));
+            crate::err::push_str("error:0A080009:SSL routines::PEM lib");
+        }
+    }
+}
+
 fn read_cert_chain(path: &str) -> Option<Vec<Rc<Cert>>> {
     let certs = x509::load_pem_certs(path)?;
     if certs.is_empty() { None } else { Some(certs) }
@@ -814,6 +838,7 @@ fn setup(vm: &mut Vm, p: &CryptoSetup<'_>) -> Option<Box<dyn CryptoStream>> {
             return None;
         };
         let Some(chain) = read_cert_chain(&cert_path) else {
+            pem_file_errors(&cert_path, "0480006C:PEM routines::no start line");
             vm.emit_warning(&format!(
                 "{}(): Unable to set local cert chain file `{}'; Check that your cafile/capath settings include details of your certificate and its issuer",
                 f,
@@ -837,6 +862,7 @@ fn setup(vm: &mut Vm, p: &CryptoSetup<'_>) -> Option<Box<dyn CryptoStream>> {
         }
         let key = read_private_key(&key_path, &passphrase);
         let Some(sk) = key.as_ref().and_then(signing_key) else {
+            pem_file_errors(&key_path, "1E08010C:DECODER routines::unsupported");
             vm.emit_warning(&format!(
                 "{}(): Unable to set private key file `{}'",
                 f, key_path
@@ -846,7 +872,15 @@ fn setup(vm: &mut Vm, p: &CryptoSetup<'_>) -> Option<Box<dyn CryptoStream>> {
         let ders: Vec<Vec<u8>> = chain.iter().map(|c| c.der.clone()).collect();
         let id = purecrypto::tls::Identity::new(ders.clone(), sk.clone());
         if id.check_key_matches_leaf().is_err() {
-            vm.emit_warning(&format!("{}(): Private key does not match certificate!", f));
+            // OpenSSL 3's ssl_set_pkey() refuses a key that does not match
+            // the certificate (X509_check_private_key()), so
+            // SSL_CTX_use_PrivateKey_file() fails.
+            crate::err::push_str("error:05800074:x509 certificate routines::key values mismatch");
+            vm.emit_warning(&format!(
+                "{}(): Unable to set private key file `{}'",
+                f, key_path
+            ));
+            return None;
         }
         identity = Some((ders, sk));
     }
@@ -1161,10 +1195,7 @@ fn load_cafile(vm: &mut Vm, f: &str, cafile: &str) -> Option<Vec<Rc<Cert>>> {
         std::fs::read(cafile).ok()
     };
     let Some(data) = data else {
-        vm.emit_warning(&format!(
-            "{}(): failed loading cafile stream: `{}'",
-            f, cafile
-        ));
+        vm.emit_warning(&format!("failed loading cafile stream: `{}'", cafile));
         return None;
     };
     let certs: Vec<Rc<Cert>> = asn1::pem_blocks(&data)
@@ -1173,10 +1204,7 @@ fn load_cafile(vm: &mut Vm, f: &str, cafile: &str) -> Option<Vec<Rc<Cert>>> {
         .filter_map(|b| Cert::parse(&b.der).map(Rc::new))
         .collect();
     if certs.is_empty() {
-        vm.emit_warning(&format!(
-            "{}(): no valid certs found cafile stream: `{}'",
-            f, cafile
-        ));
+        vm.emit_warning(&format!("no valid certs found cafile stream: `{}'", cafile));
         return None;
     }
     Some(certs)
@@ -1216,57 +1244,217 @@ const DEFAULT_SUITES: &[u16] = &[
     0x000A, // DES-CBC3-SHA
 ];
 
+/// The TLS 1.2 suites purecrypto implements, as OpenSSL describes them:
+/// (id, name, kx, auth, enc, mac). The order is the default strength order
+/// used when a keyword adds several suites at once.
+const SUITES12: &[(u16, &str, &str, &str, &str, &str)] = &[
+    (
+        0xC02C,
+        "ECDHE-ECDSA-AES256-GCM-SHA384",
+        "kECDHE",
+        "aECDSA",
+        "AES256GCM",
+        "AEAD",
+    ),
+    (
+        0xC030,
+        "ECDHE-RSA-AES256-GCM-SHA384",
+        "kECDHE",
+        "aRSA",
+        "AES256GCM",
+        "AEAD",
+    ),
+    (
+        0xCCA9,
+        "ECDHE-ECDSA-CHACHA20-POLY1305",
+        "kECDHE",
+        "aECDSA",
+        "CHACHA20",
+        "AEAD",
+    ),
+    (
+        0xCCA8,
+        "ECDHE-RSA-CHACHA20-POLY1305",
+        "kECDHE",
+        "aRSA",
+        "CHACHA20",
+        "AEAD",
+    ),
+    (
+        0xC02B,
+        "ECDHE-ECDSA-AES128-GCM-SHA256",
+        "kECDHE",
+        "aECDSA",
+        "AES128GCM",
+        "AEAD",
+    ),
+    (
+        0xC02F,
+        "ECDHE-RSA-AES128-GCM-SHA256",
+        "kECDHE",
+        "aRSA",
+        "AES128GCM",
+        "AEAD",
+    ),
+    (
+        0xC028,
+        "ECDHE-RSA-AES256-SHA384",
+        "kECDHE",
+        "aRSA",
+        "AES256",
+        "SHA384",
+    ),
+    (
+        0xC014,
+        "ECDHE-RSA-AES256-SHA",
+        "kECDHE",
+        "aRSA",
+        "AES256",
+        "SHA1",
+    ),
+    (
+        0xC027,
+        "ECDHE-RSA-AES128-SHA256",
+        "kECDHE",
+        "aRSA",
+        "AES128",
+        "SHA256",
+    ),
+    (
+        0xC013,
+        "ECDHE-RSA-AES128-SHA",
+        "kECDHE",
+        "aRSA",
+        "AES128",
+        "SHA1",
+    ),
+    (0x003D, "AES256-SHA256", "kRSA", "aRSA", "AES256", "SHA256"),
+    (0x0035, "AES256-SHA", "kRSA", "aRSA", "AES256", "SHA1"),
+    (0x003C, "AES128-SHA256", "kRSA", "aRSA", "AES128", "SHA256"),
+    (0x002F, "AES128-SHA", "kRSA", "aRSA", "AES128", "SHA1"),
+    (
+        0xC012,
+        "ECDHE-RSA-DES-CBC3-SHA",
+        "kECDHE",
+        "aRSA",
+        "3DES",
+        "SHA1",
+    ),
+    (0x000A, "DES-CBC3-SHA", "kRSA", "aRSA", "3DES", "SHA1"),
+];
+
+/// Whether `word` (one '+'-joined part of a cipher string element) selects
+/// the suite: an OpenSSL cipher name or alias, case-sensitive. `None` when
+/// the word is not something OpenSSL knows.
+fn cipher_word_matches(word: &str, s: &(u16, &str, &str, &str, &str, &str)) -> Option<bool> {
+    let (_, name, kx, au, enc, mac) = *s;
+    let aes = enc.starts_with("AES");
+    let tls12 = mac != "SHA1";
+    Some(match word {
+        "ALL" | "DEFAULT" => true,
+        "COMPLEMENTOFALL" | "COMPLEMENTOFDEFAULT" | "LOW" | "EXP" | "EXPORT" => false,
+        "HIGH" => enc != "3DES",
+        "MEDIUM" => enc == "3DES",
+        "kECDHE" | "kEECDH" | "ECDHE" | "EECDH" | "ECDH" => kx == "kECDHE",
+        "kRSA" | "RSA" => kx == "kRSA",
+        "aRSA" => au == "aRSA",
+        "aECDSA" | "ECDSA" => au == "aECDSA",
+        "AES" => aes,
+        "AES128" => enc == "AES128" || enc == "AES128GCM",
+        "AES256" => enc == "AES256" || enc == "AES256GCM",
+        "AESGCM" => enc.ends_with("GCM"),
+        "CHACHA20" => enc == "CHACHA20",
+        "3DES" => enc == "3DES",
+        "SHA1" | "SHA" => mac == "SHA1",
+        "SHA256" => mac == "SHA256" || enc == "AES128GCM" || enc == "CHACHA20",
+        "SHA384" => mac == "SHA384" || enc == "AES256GCM",
+        "TLSv1.2" => tls12,
+        "TLSv1" | "TLSv1.0" | "SSLv3" => !tls12,
+        "eNULL" | "NULL" | "aNULL" | "ADH" | "AECDH" | "kDHE" | "kEDH" | "DHE" | "EDH" | "DH"
+        | "kDHr" | "kDHd" | "aDSS" | "DSS" | "PSK" | "kPSK" | "kECDHEPSK" | "kDHEPSK"
+        | "kRSAPSK" | "aPSK" | "SRP" | "kSRP" | "aSRP" | "CAMELLIA" | "CAMELLIA128"
+        | "CAMELLIA256" | "ARIA" | "ARIA128" | "ARIA256" | "ARIAGCM" | "RC4" | "RC2" | "DES"
+        | "IDEA" | "SEED" | "MD5" | "AESCCM" | "AESCCM8" | "CHACHA20POLY1305" | "GOST94"
+        | "GOST89MAC" | "aGOST" | "kGOST" | "SUITEB128" | "SUITEB128ONLY" | "SUITEB192"
+        | "aNULL+" => false,
+        w if w == name => true,
+        w if w.len() > 3
+            && w.contains('-')
+            && w.bytes()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'-') =>
+        {
+            // another valid-looking OpenSSL suite name purecrypto lacks
+            false
+        }
+        _ => return None,
+    })
+}
+
+/// SSL_CTX_set_cipher_list(): evaluate an OpenSSL cipher string over the
+/// TLS 1.2 suites purecrypto implements. `None` (with "no cipher match" in
+/// the error queue) when nothing is selected; the TLS 1.3 suites, which
+/// OpenSSL configures separately, are always kept.
 fn parse_cipher_list(list: &str) -> Option<Option<Vec<u16>>> {
-    const NAMED: &[(&str, u16)] = &[
-        ("ECDHE-ECDSA-AES128-GCM-SHA256", 0xC02B),
-        ("ECDHE-ECDSA-AES256-GCM-SHA384", 0xC02C),
-        ("ECDHE-RSA-AES128-GCM-SHA256", 0xC02F),
-        ("ECDHE-RSA-AES256-GCM-SHA384", 0xC030),
-        ("ECDHE-RSA-CHACHA20-POLY1305", 0xCCA8),
-        ("ECDHE-ECDSA-CHACHA20-POLY1305", 0xCCA9),
-        ("DES-CBC3-SHA", 0x000A),
-        ("AES128-SHA", 0x002F),
-        ("AES256-SHA", 0x0035),
-        ("AES128-SHA256", 0x003C),
-        ("AES256-SHA256", 0x003D),
-        ("ECDHE-RSA-DES-CBC3-SHA", 0xC012),
-        ("ECDHE-RSA-AES128-SHA", 0xC013),
-        ("ECDHE-RSA-AES256-SHA", 0xC014),
-        ("ECDHE-RSA-AES128-SHA256", 0xC027),
-        ("ECDHE-RSA-AES256-SHA384", 0xC028),
-    ];
-    let mut explicit = Vec::new();
-    let mut generic = false;
-    for tok in list.split([':', ',', ' ']) {
-        let t = tok.trim();
-        if t.is_empty() || t.starts_with('!') || t.starts_with('-') || t.starts_with('@') {
+    let mut sel: Vec<u16> = Vec::new();
+    let mut banned: Vec<u16> = Vec::new();
+    for tok in list.split([':', ',', ' ', ';']) {
+        if tok.is_empty() || tok.starts_with('@') {
             continue;
         }
-        let t = t.trim_start_matches('+');
-        if let Some((_, id)) = NAMED.iter().find(|(n, _)| n.eq_ignore_ascii_case(t)) {
-            explicit.push(*id);
-        } else if t
-            .split('+')
-            .all(|w| w.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
-            && t.chars().any(|c| c.is_ascii_uppercase())
-            && !t.contains("NULL")
-            && !t.contains("RC4")
-            && !t.contains("MD5")
-            && !t.starts_with("EXP")
-        {
-            // Aliases and keywords (DEFAULT, HIGH, ECDHE, AESGCM, ...)
-            generic = true;
+        let (op, body) = match tok.as_bytes()[0] {
+            b'!' => ('!', &tok[1..]),
+            b'-' => ('-', &tok[1..]),
+            b'+' => ('+', &tok[1..]),
+            _ => (' ', tok),
+        };
+        let mut matched: Option<Vec<u16>> = None;
+        let mut known = true;
+        for s in SUITES12 {
+            let mut all = true;
+            for w in body.split('+') {
+                match cipher_word_matches(w, s) {
+                    Some(m) => all &= m,
+                    None => {
+                        known = false;
+                        all = false;
+                    }
+                }
+            }
+            if all {
+                matched.get_or_insert_with(Vec::new).push(s.0);
+            }
+        }
+        if !known {
+            continue;
+        }
+        let m = matched.unwrap_or_default();
+        match op {
+            '!' => {
+                sel.retain(|id| !m.contains(id));
+                banned.extend(&m);
+            }
+            '-' => sel.retain(|id| !m.contains(id)),
+            '+' => {
+                let moved: Vec<u16> = sel.iter().copied().filter(|id| m.contains(id)).collect();
+                sel.retain(|id| !m.contains(id));
+                sel.extend(moved);
+            }
+            _ => {
+                for id in m {
+                    if !sel.contains(&id) && !banned.contains(&id) {
+                        sel.push(id);
+                    }
+                }
+            }
         }
     }
-    if generic {
-        Some(None)
-    } else if explicit.is_empty() {
-        None
-    } else {
-        // TLS 1.3 suites are configured separately (ciphersuites); keep them.
-        explicit.extend_from_slice(&[0x1301, 0x1302, 0x1303]);
-        Some(Some(explicit))
+    if sel.is_empty() {
+        crate::err::push_str("error:0A0000B9:SSL routines::no cipher match");
+        return None;
     }
+    let mut out = vec![0x1302, 0x1303, 0x1301];
+    out.extend(sel);
+    Some(Some(out))
 }
 
 /// OpenSSL name, bits, version of a cipher suite.
