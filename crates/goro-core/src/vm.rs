@@ -10513,8 +10513,11 @@ impl Vm {
                 }
             }
             let mut variadic_arr = crate::array::PhpArray::new();
+            // (a by-value variadic gets the values of references a builtin
+            // passes, e.g. array_walk()'s element: ZEND_RECV_VARIADIC)
+            let by_ref = op_array.by_ref_params.get(vi).copied().unwrap_or(false);
             for arg in call.args.iter().skip(vi.saturating_sub(cv_shift)) {
-                variadic_arr.push(arg.clone());
+                variadic_arr.push(if by_ref { arg.clone() } else { arg.deref() });
             }
             // Add extra named args with string keys
             for (name, val) in call.named_args.drain(..) {
