@@ -1835,6 +1835,10 @@ pub struct Vm {
     /// handler replaced the container while the key was reported): the
     /// write-back of that frame (call depth) is skipped.
     pub(crate) dim_rw_abort: Option<u32>,
+    /// The exception an SPL read_dimension threw in `$obj[k] op= v`
+    /// (ArrayObject hands out uninitialized_zval): the operation goes on,
+    /// writes `null op v`, and raises it then (call depth, exception).
+    pub(crate) dim_rw_deferred: Option<(u32, Value)>,
     /// Current executing line number (updated during execution for warning/error reporting)
     pub current_line: u32,
     /// Cached enum case singleton objects: key = "classname_lower::CaseName"
@@ -2394,6 +2398,7 @@ impl Vm {
             builtin_frame_named: Vec::new(),
             dim_rw_key: None,
             dim_rw_abort: None,
+            dim_rw_deferred: None,
             current_line: 0,
             enum_case_cache: Default::default(),
             enum_cases_resolving: Vec::new(),
@@ -7345,6 +7350,25 @@ impl Vm {
             }
         }
         true
+    }
+
+    /// spl_array_get_property_ptr_ptr(): with ARRAY_AS_PROPS, a property
+    /// the object does not have is the storage's element (unless offsetGet()
+    /// is overridden). `mode` is b'w' (FETCH_OBJ_W), b'r' (RW) or b'&' (a
+    /// reference). None when the fetch is not routed.
+    #[inline(never)]
+    pub(crate) fn ao_props_ptr(&mut self, obj_val: &Value, name: &[u8], mode: u8) -> Option<Value> {
+        let Value::Object(obj) = obj_val else {
+            return None;
+        };
+        if !array_as_props(obj) || !self.ao_prop_as_dim(obj, name) || self.ao_user_has(obj, b"offsetget") {
+            return None;
+        }
+        let key = Value::String(PhpString::from_bytes(name));
+        if mode == b'&' {
+            return Some(self.ao_fetch_dim_ref(obj, &key).unwrap_or(Value::Null));
+        }
+        Some(self.ao_fetch_dim_w(obj, Some(&key), mode).unwrap_or(Value::Null))
     }
 
     /// An extension's get_property_ptr_ptr for a by-reference fetch of
@@ -40811,6 +40835,7 @@ impl Vm {
                                     format!("Cannot access offset of type {} on ArrayObject", t);
                                 let exc = self.create_exception(b"TypeError", &msg, op.line);
                                 self.current_exception = Some(exc);
+                                self.raise_dim_rw_deferred();
                                 if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                     exception_handlers.last()
                                 {
@@ -40820,7 +40845,7 @@ impl Vm {
                                     return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
-                                    message: format!("Uncaught TypeError: {}", msg),
+                                    message: self.uncaught_exception_message(),
                                     line: op.line,
                                 });
                             }
@@ -40835,6 +40860,9 @@ impl Vm {
                             // A value replaced in SPL storage is destroyed now.
                             if self.current_exception.is_none() && self.has_release_work() {
                                 self.run_pending_destructors();
+                            }
+                            if self.dim_rw_deferred.is_some() {
+                                self.raise_dim_rw_deferred();
                             }
                             if let Some(exc_val) = self.current_exception.take() {
                                 if let Some((catch_target, _, _, _, eh_pc_depth)) =
@@ -41759,6 +41787,12 @@ impl Vm {
                                 let msg =
                                     format!("Cannot access offset of type {} on ArrayObject", t);
                                 let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                if matches!(op.opcode, OpCode::ArrayGetRW)
+                                    && self.defer_dim_rw_exception(op, op_array, ip, &cvs, &tmps, &exc)
+                                {
+                                    self.write_operand(&op.result, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
+                                    return Ok(Flow::Next);
+                                }
                                 self.current_exception = Some(exc);
                                 if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                     exception_handlers.last()
@@ -41856,8 +41890,16 @@ impl Vm {
                         if let Some(mut exc_val) = self.current_exception.take() {
                             // zend_binary_assign_op_obj_dim(): no value read
                             // (offsetGet() threw) is zend_use_object_as_array().
+                            let never_null = self.spl_read_dim_never_null(obj, &class_lower);
                             if matches!(op.opcode, OpCode::ArrayGetRW)
-                                && !self.spl_read_dim_never_null(obj, &class_lower)
+                                && never_null
+                                && self.defer_dim_rw_exception(op, op_array, ip, &cvs, &tmps, &exc_val)
+                            {
+                                self.write_operand(&op.result, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
+                                return Ok(Flow::Next);
+                            }
+                            if matches!(op.opcode, OpCode::ArrayGetRW)
+                                && !never_null
                             {
                                 let msg = format!(
                                     "Cannot use object of type {} as array",
@@ -50641,7 +50683,10 @@ impl Vm {
                             line: op.line,
                         });
                     }
-                    if let Some(v) = self.native_prop_ptr(&obj_val, prop_name.as_bytes()) {
+                    if let Some(v) = self
+                        .native_prop_ptr(&obj_val, prop_name.as_bytes())
+                        .or_else(|| self.ao_props_ptr(&obj_val, prop_name.as_bytes(), b'&'))
+                    {
                         native_exc_check!(
                             self,
                             exception_handlers,
@@ -58137,6 +58182,20 @@ impl Vm {
                                 message: format!("Uncaught Error: {}", msg),
                                 line: op.line,
                             });
+                        }
+                    }
+                    if matches!(op.opcode, OpCode::PropertyGetW | OpCode::PropertyGetWRW) {
+                        let mode = if op.opcode == OpCode::PropertyGetW { b'w' } else { b'r' };
+                        if let Some(v) = self.ao_props_ptr(&obj_val_raw, prop_name.as_bytes(), mode) {
+                            native_exc_check!(
+                                self,
+                                exception_handlers,
+                                pending_calls_catch_depth,
+                                ip,
+                                op.line
+                            );
+                            self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
+                            return Ok(Flow::Next);
                         }
                     }
                     // `$o->magic[...] = v` with `function &__get()`: write through
@@ -66038,6 +66097,58 @@ impl Vm {
     /// zend_exception_set_previous(): append `prev` at the end of `exc`'s
     /// previous-chain, unless an exception of that chain already is an
     /// ancestor of `prev` (no cycles); graceful-exit objects are never chained.
+    /// `$obj[k] op= v` whose SPL read_dimension threw `exc`: when the next
+    /// ops are the binary operation on the read value and the write-back
+    /// (and `null op v` cannot throw), the exception is put aside for the
+    /// write-back to raise (zend_binary_assign_op_obj_dim() goes on).
+    #[inline(never)]
+    pub(crate) fn defer_dim_rw_exception(
+        &mut self,
+        op: &crate::opcode::Op,
+        op_array: &OpArray,
+        ip: usize,
+        cvs: &[Value],
+        tmps: &[Value],
+        exc: &Value,
+    ) -> bool {
+        let (Some(bin), Some(set)) = (op_array.ops.get(ip), op_array.ops.get(ip + 1)) else {
+            return false;
+        };
+        if bin.op1 != op.result
+            || !matches!(set.opcode, OpCode::ArraySet | OpCode::ArrayAppend)
+            || set.op1 != op.op1
+            || set.op2 != bin.result
+        {
+            return false;
+        }
+        let v = self.read_operand(&bin.op2, cvs, tmps, &op_array.literals);
+        if matches!(v.deref(), Value::Array(_) | Value::Object(_)) {
+            return false;
+        }
+        self.dim_rw_deferred = Some((self.call_depth, exc.clone()));
+        true
+    }
+
+    /// The write-back of `$obj[k] op= v` raises the exception its read put
+    /// aside, as the previous of one the write threw.
+    #[inline(never)]
+    pub(crate) fn raise_dim_rw_deferred(&mut self) {
+        let Some((depth, exc)) = self.dim_rw_deferred.take() else {
+            return;
+        };
+        if depth != self.call_depth {
+            self.dim_rw_deferred = Some((depth, exc));
+            return;
+        }
+        match self.current_exception.take() {
+            Some(new) => {
+                Self::exception_set_previous(&new, exc);
+                self.current_exception = Some(new);
+            }
+            None => self.current_exception = Some(exc),
+        }
+    }
+
     pub fn exception_set_previous(exc: &Value, prev: Value) {
         if Self::is_graceful_exit(&prev) {
             return;

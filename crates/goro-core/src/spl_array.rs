@@ -1036,6 +1036,19 @@ impl Vm {
                     set_prop(obj, b"__spl_array", Value::Object(o.clone()));
                 }
             }
+            g @ Value::Generator(_) => {
+                // (a Generator has no properties: the storage is empty)
+                let base = self.ao_base_name(obj);
+                let msg = format!(
+                    "{}(): Using an object as a backing array for {} is deprecated, as it allows violating class constraints and invariants",
+                    func, base
+                );
+                self.emit_deprecated(&msg);
+                if self.current_exception.is_some() {
+                    return false;
+                }
+                set_prop(obj, b"__spl_array", g);
+            }
             _ => {}
         }
         let flags = (ao_flags(obj) & !IS_SELF & !USE_OTHER) | ar_flags;
@@ -1070,7 +1083,7 @@ impl Vm {
             return true;
         }
         let array = args[0].deref();
-        if !matches!(array, Value::Array(_) | Value::Object(_)) {
+        if !matches!(array, Value::Array(_) | Value::Object(_) | Value::Generator(_)) {
             let msg = format!(
                 "{}(): Argument #1 ($array) must be of type array, {} given",
                 func,
@@ -1169,7 +1182,7 @@ impl Vm {
             return out;
         }
         let storage = match prop(obj, b"__spl_array") {
-            v @ (Value::Array(_) | Value::Object(_)) => v,
+            v @ (Value::Array(_) | Value::Object(_) | Value::Generator(_)) => v,
             _ => val_arr(PhpArray::new()),
         };
         let base = self.ao_base_name(obj);
