@@ -1438,16 +1438,19 @@ impl Vm {
         decl_line: u32,
     ) -> Result<(), (String, u32, bool)> {
         let cls_lower = class.name.to_ascii_lowercase();
-        let own: Vec<(Vec<u8>, crate::object::MethodDef)> = class
+        // In the parent's method order (do_inheritance() walks its
+        // function table).
+        let own: Vec<(Vec<u8>, crate::object::MethodDef, &crate::object::MethodDef)> = parent
             .methods
             .iter()
-            .filter(|(_, m)| m.declaring_class.eq_ignore_ascii_case(&cls_lower))
-            .map(|(k, m)| (k.clone(), m.clone()))
+            .filter_map(|(k, pm)| {
+                let m = class.methods.get(k)?;
+                m.declaring_class
+                    .eq_ignore_ascii_case(&cls_lower)
+                    .then(|| (k.clone(), m.clone(), pm))
+            })
             .collect();
-        for (key, mut child) in own {
-            let Some(pm) = parent.methods.get(&key) else {
-                continue;
-            };
+        for (key, mut child, pm) in own {
             // __toString() implicitly returns string.
             if key.as_slice() == b"__tostring" && child.op_array.return_type.is_none() {
                 std::rc::Rc::make_mut(&mut child.op_array).return_type =
