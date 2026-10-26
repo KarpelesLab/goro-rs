@@ -20387,11 +20387,15 @@ impl Vm {
         if result.is_err() {
             self.call_stack.clear();
         }
+        // (php_free_shutdown_functions() frees the callbacks, and what they
+        // hold, only after the destructors ran)
+        let mut spent_shutdown_fns: Vec<Vec<(Value, Vec<Value>)>> = Vec::new();
         'shutdown: loop {
             let shutdown_fns = std::mem::take(&mut self.shutdown_functions);
             if shutdown_fns.is_empty() {
                 break;
             }
+            spent_shutdown_fns.push(shutdown_fns.clone());
             for (callback, extra_args) in shutdown_fns {
                 if self.exit_requested {
                     break 'shutdown;
@@ -20445,6 +20449,7 @@ impl Vm {
         } else {
             self.run_shutdown_destructors();
         }
+        drop(spent_shutdown_fns);
         for hook in std::mem::take(&mut self.resource_shutdown_hooks) {
             hook(self);
         }
