@@ -23015,6 +23015,10 @@ impl Vm {
                 // (the timeout handler sets TIMED_OUT before VM_INTERRUPT)
                 if TIMED_OUT.load(Relaxed) {
                     VM_INTERRUPT.store(true, Relaxed);
+                    // (raised at the opcode about to run)
+                    if let Some(l) = op_array.ops.get(ip).map(|o| o.line).filter(|&l| l > 0) {
+                        self.current_line = l;
+                    }
                     return Err(self.timeout_fatal());
                 }
                 if let Some(hook) = self.interrupt_hook {
