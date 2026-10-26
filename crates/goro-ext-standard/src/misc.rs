@@ -1175,9 +1175,24 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             let dep_result = vm.get_deprecated_message(&meta.attributes);
                             vm.deprecation_in_progress.remove(&guard_key);
                             if let Some(custom_msg) = dep_result {
-                                let class_display =
-                                    goro_core::string::msg_str(&class.name).to_string();
-                                let prefix = format!("Constant {}::{}", class_display, const_name);
+                                // (named after the class declaring it)
+                                let class_display = goro_core::string::msg_str(
+                                    vm.classes
+                                        .get(&meta.declaring_class)
+                                        .map_or(&class.name[..], |c| &c.name[..]),
+                                )
+                                .to_string();
+                                let is_case = class.is_enum
+                                    && class
+                                        .enum_cases
+                                        .iter()
+                                        .any(|(n, _)| n == const_name.as_bytes());
+                                let prefix = format!(
+                                    "{} {}::{}",
+                                    if is_case { "Enum case" } else { "Constant" },
+                                    class_display,
+                                    const_name
+                                );
                                 let msg = vm.format_deprecated_message(&prefix, &custom_msg);
                                 vm.emit_user_deprecated_at(&msg, vm.current_line);
                             }
@@ -1238,6 +1253,13 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         if let Some(m) = goro_core::vm::builtin_constant_deprecation(lookup_name) {
             vm.emit_deprecated_at(&m, vm.current_line);
+        }
+        vm.user_constant_deprecation(lookup_name, vm.current_line);
+        if vm.current_exception.is_some() {
+            return Err(VmError {
+                message: vm.uncaught_exception_message(),
+                line: vm.current_line,
+            });
         }
         return Ok(val);
     }

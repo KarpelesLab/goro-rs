@@ -6082,6 +6082,21 @@ impl Vm {
     /// Used by the #[\Deprecated] attribute when calling user functions,
     /// methods and constants.
     pub fn emit_user_deprecated_at(&mut self, msg: &str, line: u32) {
+        // (a call made by internal code, e.g. ReflectionMethod::invoke():
+        // reported at the executing user code's line)
+        let line = if line != 0 || &*self.current_file == "Unknown" {
+            line
+        } else if self.current_line != 0 {
+            self.current_line
+        } else {
+            // (the internal function's frame: the line it was called on)
+            self.call_stack
+                .iter()
+                .rev()
+                .map(|f| f.2)
+                .find(|&l| l != 0)
+                .unwrap_or(0)
+        };
         self.raise_error(crate::errdisplay::E_USER_DEPRECATED, msg, line);
     }
 
@@ -6113,6 +6128,12 @@ impl Vm {
                     return None;
                 }
                 if let Value::Array(arr) = &args_val {
+                    // (the attribute's constructor call: zend_get_attribute_object())
+                    if let Some(msg) = Self::deprecated_attr_args_error(&arr.borrow()) {
+                        let exc = self.create_exception(msg.0, &msg.1, caller_line);
+                        self.current_exception = Some(exc);
+                        return None;
+                    }
                     let arr = arr.borrow();
                     // Resolve $message (positional 0 or named "message") and $since (positional 1 or named "since")
                     let msg_val = arr
@@ -6201,6 +6222,36 @@ impl Vm {
                 }
                 return Some(String::new());
             }
+        }
+        None
+    }
+
+    /// The error of binding #[\Deprecated]'s arguments to
+    /// Deprecated::__construct(?string $message = null, ?string $since = null).
+    #[inline(never)]
+    fn deprecated_attr_args_error(arr: &crate::array::PhpArray) -> Option<(&'static [u8], String)> {
+        let mut positional = 0usize;
+        for (k, _) in arr.iter() {
+            match k {
+                crate::array::ArrayKey::Int(_) => positional += 1,
+                crate::array::ArrayKey::String(s) => {
+                    if !matches!(s.as_bytes(), b"message" | b"since") {
+                        return Some((
+                            b"Error",
+                            format!("Unknown named parameter ${}", s.to_string_lossy()),
+                        ));
+                    }
+                }
+            }
+        }
+        if positional > 2 {
+            return Some((
+                b"ArgumentCountError",
+                format!(
+                    "Deprecated::__construct() expects at most 2 arguments, {} given",
+                    arr.len()
+                ),
+            ));
         }
         None
     }
@@ -18286,6 +18337,91 @@ impl Vm {
     }
 
     /// Call a method on an object by looking up the class method and executing it
+    /// "Class::method" named after the class declaring the method
+    /// (an inherited one called through a subclass).
+    #[inline(never)]
+    fn method_declaring_display(&self, display: String) -> String {
+        let Some(sep) = display.rfind("::") else {
+            return display;
+        };
+        let (cls, m) = (&display[..sep], &display[sep + 2..]);
+        let decl = self
+            .classes
+            .get(cls.to_ascii_lowercase().as_bytes())
+            .and_then(|c| c.get_method(m.to_ascii_lowercase().as_bytes()))
+            .and_then(|md| self.classes.get(&md.declaring_class))
+            .map(|d| crate::value::display_class_name(&d.name));
+        match decl {
+            Some(d) => format!("{}::{}", d, m),
+            None => display,
+        }
+    }
+
+    /// The #[\Deprecated] of global user constant `name` (as looked up),
+    /// for a fetch that is not a FETCH_CONSTANT (constant()).
+    #[inline(never)]
+    pub fn user_constant_deprecation(&mut self, name: &[u8], line: u32) {
+        let mut key = name.to_vec();
+        if !self.constant_attributes.contains_key(&key) {
+            let Some(pos) = name.iter().rposition(|&b| b == b'\\') else {
+                return;
+            };
+            key = name[..pos].to_ascii_lowercase();
+            key.extend_from_slice(&name[pos..]);
+        }
+        let Some(attrs) = self.constant_attributes.get(&key).cloned() else {
+            return;
+        };
+        if attrs.is_empty() || self.deprecation_in_progress.contains(&key) {
+            return;
+        }
+        self.deprecation_in_progress.insert(key.clone());
+        let dep = self.get_deprecated_message(&attrs);
+        self.deprecation_in_progress.remove(&key);
+        if let Some(custom) = dep {
+            let prefix = format!("Constant {}", String::from_utf8_lossy(&key));
+            let msg = self.format_deprecated_message(&prefix, &custom);
+            self.emit_user_deprecated_at(&msg, line);
+        }
+    }
+
+    /// The #[\Deprecated] of user method `method_lower` of `class_lower`,
+    /// called implicitly; true when the error handler threw.
+    #[inline(never)]
+    fn magic_method_deprecation(&mut self, class_lower: &[u8], method_lower: &[u8]) -> bool {
+        let Some((attrs, name)) = self.classes.get(class_lower).and_then(|c| {
+            let m = c.get_method(method_lower)?;
+            if m.attributes.is_empty() {
+                return None;
+            }
+            let decl = self
+                .classes
+                .get(&m.declaring_class)
+                .map(|d| crate::value::display_class_name(&d.name))
+                .unwrap_or_else(|| crate::value::display_class_name(&c.name));
+            Some((
+                m.attributes.clone(),
+                format!("{}::{}", decl, String::from_utf8_lossy(&m.name)),
+            ))
+        }) else {
+            return false;
+        };
+        let line = self.current_line;
+        // (not silenced by isset()'s own suppression)
+        let saved_er = self.error_reporting;
+        if saved_er == crate::errdisplay::ER_SILENT {
+            if let Some(&outer) = self.error_reporting_stack.last() {
+                self.error_reporting = outer;
+            }
+        }
+        if let Some(custom) = self.get_deprecated_message(&attrs) {
+            let msg = self.format_deprecated_message(&format!("Method {}()", name), &custom);
+            self.emit_user_deprecated_at(&msg, line);
+        }
+        self.error_reporting = saved_er;
+        self.current_exception.is_some()
+    }
+
     pub fn call_object_method(
         &mut self,
         obj_val: &Value,
@@ -18307,6 +18443,15 @@ impl Vm {
                 .collect();
             let method_lower: Vec<u8> =
                 method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            // The implicit __get()/__set()/__isset()/__unset() calls
+            // (zend_call_known_instance_method(): a deprecated one warns).
+            if matches!(
+                method_lower.as_slice(),
+                b"__get" | b"__set" | b"__isset" | b"__unset"
+            ) && self.magic_method_deprecation(&class_lower, &method_lower)
+            {
+                return None;
+            }
             if let Some(class_def) = self.classes.get(&class_lower) {
                 if let Some(method) = class_def.get_method(&method_lower) {
                     let method_op = method.op_array.clone();
@@ -30089,8 +30234,11 @@ impl Vm {
 
                     // call_user_func() compiles to INIT_USER_CALL + DO_FCALL: an
                     // unused result is checked against the callback's #[\NoDiscard].
+                    // (call_user_func_array() with two arguments too:
+                    // zend_compile_func_cufa())
                     if matches!(op.op1, OperandType::Const(_))
-                        && func_name_lower == b"call_user_func"
+                        && (func_name_lower == b"call_user_func"
+                            || func_name_lower == b"call_user_func_array" && call.args.len() == 2)
                     {
                         if let Some(cb) = call.args.first().cloned() {
                             if let Some((attrs, display)) = self.callback_attributes(&cb) {
@@ -32311,7 +32459,7 @@ impl Vm {
                                 let prefix = if fn_display.contains("::")
                                     && !fn_display.starts_with("{closure:")
                                 {
-                                    format!("Method {}()", fn_display)
+                                    format!("Method {}()", self.method_declaring_display(fn_display))
                                 } else {
                                     format!("Function {}()", fn_display)
                                 };
@@ -44153,12 +44301,17 @@ impl Vm {
                             // (only the references to constants with attributes)
                             let mut all_declared = true;
                             let mut had_refs = false;
+                            // (raised at the line of the constant's expression)
+                            let mut expr_line = op.line;
                             let refs: Vec<(Vec<u8>, Vec<u8>)> = self
                                 .classes
                                 .get(&class_lower)
                                 .and_then(|c| c.constants_meta.get(prop_name.as_bytes()))
                                 .map(|meta| {
                                     had_refs = !meta.referenced_constants.is_empty();
+                                    if meta.line > 0 {
+                                        expr_line = meta.line;
+                                    }
                                     meta.referenced_constants
                                         .iter()
                                         .filter(|(rc, rn)| match self.classes.get(rc) {
@@ -44178,15 +44331,16 @@ impl Vm {
                             // Once the referenced classes are all declared (their
                             // constants' attributes cannot change), keep only the
                             // references that matter for the next fetches.
+                            // The expression is evaluated once (the constant
+                            // is then updated): its deprecations are raised by
+                            // the first fetch only.
                             if had_refs && all_declared {
                                 if let Some(meta) = self
                                     .classes
                                     .get_mut(&class_lower)
                                     .and_then(|c| c.constants_meta.get_mut(prop_name.as_bytes()))
                                 {
-                                    if meta.referenced_constants.len() != refs.len() {
-                                        meta.referenced_constants = refs.clone();
-                                    }
+                                    meta.referenced_constants = Vec::new();
                                 }
                             }
                             for (ref_class_lower, ref_const_name) in &refs {
@@ -44242,7 +44396,7 @@ impl Vm {
                                         };
                                         let msg =
                                             self.format_deprecated_message(&prefix, &custom_msg);
-                                        self.emit_user_deprecated_at(&msg, op.line);
+                                        self.emit_user_deprecated_at(&msg, expr_line);
                                     }
                                     // Propagate exception if a throwing error handler turned the
                                     // deprecation into an ErrorException.
@@ -44309,8 +44463,8 @@ impl Vm {
                                 .get(&class_lower)
                                 .and_then(|c| c.constants_meta.get(prop_name.as_bytes()))
                                 .filter(|meta| !meta.attributes.is_empty())
-                                .map(|meta| meta.attributes.clone());
-                            if let Some(attrs) = dep_msg {
+                                .map(|meta| (meta.attributes.clone(), meta.declaring_class.clone()));
+                            if let Some((attrs, declaring)) = dep_msg {
                                 // GH-17711: guard against self-referential deprecation
                                 // messages causing infinite recursion (e.g. #[\Deprecated(self::X)] const X).
                                 // Canonicalize through class_aliases so Alias::X and D::X share a key.
@@ -44332,8 +44486,13 @@ impl Vm {
                                     let dep_result = self.get_deprecated_message(&attrs);
                                     self.deprecation_in_progress.remove(&guard_key);
                                     if let Some(custom_msg) = dep_result {
-                                        let class_display =
-                                            crate::string::msg_str(&resolved_class).to_string();
+                                        // (named after the class declaring it)
+                                        let class_display = crate::string::msg_str(
+                                            self.classes
+                                                .get(&declaring)
+                                                .map_or(&resolved_class[..], |c| &c.name[..]),
+                                        )
+                                        .to_string();
                                         let const_display = prop_name.to_msg_string();
                                         // Enum cases use "Enum case" instead of "Constant" in PHP's banner.
                                         let is_enum_case = self
@@ -46230,6 +46389,8 @@ impl Vm {
                                 (isset_obj_id, prop_name.as_bytes().to_vec(), 1u8);
                             let isset_already = self.magic_prop_guards.contains(&isset_guard_key);
                             if has_isset && !isset_already && self.magic_depth < 5 {
+                                // (a #[\Deprecated] magic method warns)
+                                self.magic_method_deprecation(&class_lower, b"__isset");
                                 self.magic_depth += 1;
                                 let magic_method_def = self
                                     .classes
@@ -47217,6 +47378,8 @@ impl Vm {
                                     3u8,
                                 ))
                             } {
+                                // (a #[\Deprecated] magic method warns)
+                                self.magic_method_deprecation(&class_lower, b"__unset");
                                 self.magic_depth += 1;
                                 let magic_method_def = self
                                     .classes
@@ -57090,6 +57253,8 @@ impl Vm {
                                     );
                                     return Ok(Flow::Continue);
                                 }
+                                // (a #[\Deprecated] magic method warns)
+                                self.magic_method_deprecation(&class_lower, b"__get");
                                 self.magic_depth += 1;
                                 let magic_method_def = self
                                     .classes
@@ -57546,6 +57711,8 @@ impl Vm {
                                         );
                                         return Ok(Flow::Continue);
                                     }
+                                    // (a #[\Deprecated] magic method warns)
+                                    self.magic_method_deprecation(&class_lower, b"__get");
                                     self.magic_depth += 1;
                                     let magic_method_def = self
                                         .classes
@@ -59074,6 +59241,8 @@ impl Vm {
                                 && self.magic_depth < 5
                                 && !already_setting
                             {
+                                // (a #[\Deprecated] magic method warns)
+                                self.magic_method_deprecation(&class_lower, b"__set");
                                 self.magic_depth += 1;
                                 let magic_method_def = self
                                     .classes

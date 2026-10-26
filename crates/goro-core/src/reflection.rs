@@ -6255,12 +6255,26 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                 }
             }
             b"getattributes" => {
-                let (attrs, decl) = rcls(vm, &class_lower)
+                let (mut attrs, decl) = rcls(vm, &class_lower)
                     .and_then(|c| {
                         c.get_method(method_lower_bytes.as_bytes())
                             .map(|m| (m.attributes.clone(), Some(m.declaring_class.clone())))
                     })
                     .unwrap_or_default();
+                // (an internal method: its stub's #[\Deprecated])
+                if attrs.is_empty() {
+                    if let Some(d) = decl
+                        .as_ref()
+                        .filter(|d| rcls(vm, d).is_none_or(|c| c.filename.is_none()))
+                    {
+                        let key = format!(
+                            "{}::{}",
+                            String::from_utf8_lossy(d).to_ascii_lowercase(),
+                            method_lower_bytes.to_string_lossy().to_ascii_lowercase()
+                        );
+                        attrs.extend(stub_deprecated_attr(1, &key));
+                    }
+                }
                 let filter_name = args.get(1).and_then(|v| {
                     if matches!(v, Value::Null) {
                         None
@@ -6517,6 +6531,10 @@ pub(crate) fn rfunc<'a>(vm: &'a Vm, lower: &[u8]) -> Option<&'a OpArray> {
             oa.param_attributes = d.param_attributes.clone();
             oa.doc_comment = d.doc_comment.clone();
         }
+        if oa.attributes.is_empty() {
+            oa.attributes
+                .extend(stub_deprecated_attr(0, &f.name.to_ascii_lowercase()));
+        }
         &*Box::leak(Box::new(oa))
     });
     // A builtin without a stub (registered from C code in php-src): its
@@ -6528,6 +6546,86 @@ pub(crate) fn rfunc<'a>(vm: &'a Vm, lower: &[u8]) -> Option<&'a OpArray> {
     });
     INTERNAL_FN_CACHE.with(|c| c.borrow_mut().insert(lower.to_vec(), built));
     built
+}
+
+#[path = "stub_deprecations.rs"]
+mod stub_deprecations;
+
+/// The #[\Deprecated] attribute of an internal declaration, from its stub
+/// (kind and key: see stub_deprecations.rs).
+fn stub_deprecated_attr(kind: u8, key: &str) -> Option<crate::object::RuntimeAttribute> {
+    let (_, _, args) = stub_deprecations::DEPRECATED
+        .iter()
+        .find(|(k, n, _)| *k == kind && *n == key)?;
+    Some(deprecated_attr_with(args))
+}
+
+/// A #[\Deprecated] attribute with these named arguments.
+fn deprecated_attr_with(args: &[(&str, &str)]) -> crate::object::RuntimeAttribute {
+    let lit = |v: &str| format!("'{}'", v.replace('\\', "\\\\").replace('\'', "\\'"));
+    let src = format!(
+        "<?php return [{}];",
+        args.iter()
+            .map(|(k, v)| format!("{} => {}", lit(k), lit(v)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let source = src.into_bytes();
+    let tokens = goro_parser::Lexer::new(&source).tokenize();
+    let args_op_array = goro_parser::Parser::new(tokens)
+        .parse()
+        .ok()
+        .and_then(|p| crate::compiler::Compiler::new().compile(&p).ok())
+        .map(|(oa, _, _)| oa)
+        .unwrap_or_else(OpArray::new);
+    crate::object::RuntimeAttribute {
+        name: b"Deprecated".to_vec(),
+        args_op_array,
+        validation_error: None,
+    }
+}
+
+/// The #[\Deprecated] of an internal class constant (its stub's, or the
+/// one an extension registers it with), added to its metadata.
+fn internal_const_deprecated_attr(
+    vm: &Vm,
+    const_name: &[u8],
+    meta: &mut Option<crate::object::ConstantMeta>,
+) {
+    let Some(m) = meta.as_mut() else {
+        return;
+    };
+    if !m.attributes.is_empty()
+        || rcls(vm, &m.declaring_class).is_some_and(|c| c.filename.is_some())
+    {
+        return;
+    }
+    let key = format!(
+        "{}::{}",
+        String::from_utf8_lossy(&m.declaring_class),
+        String::from_utf8_lossy(const_name)
+    );
+    if let Some(a) = stub_deprecated_attr(3, &key) {
+        m.attributes.push(a);
+    } else if let Some(msg) = vm.ext_class_constant_deprecation(&m.declaring_class, const_name) {
+        // "Constant C::K is deprecated[ since V][, message]"
+        let rest = msg.split_once(" is deprecated").map_or("", |(_, r)| r);
+        let (since, message) = match rest.strip_prefix(" since ") {
+            Some(r) => match r.split_once(", ") {
+                Some((v, m)) => (Some(v), Some(m)),
+                None => (Some(r), None),
+            },
+            None => (None, rest.strip_prefix(", ")),
+        };
+        let mut args = Vec::new();
+        if let Some(v) = since {
+            args.push(("since", v));
+        }
+        if let Some(v) = message {
+            args.push(("message", v));
+        }
+        m.attributes.push(deprecated_attr_with(&args));
+    }
 }
 
 /// Extension of an internal function, from its stub.
@@ -7453,8 +7551,17 @@ pub fn reflection_function_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
             b"invoke" => {
                 let invoke_args: Vec<Value> = args.iter().skip(1).cloned().collect();
                 if let Some(op_array) = vm.user_functions.get(&func_lower).cloned() {
-                    // (zend_call_function(): the function's own frame, which
-                    // func_get_args() reads)
+                    // (zend_call_function(): a deprecated function warns; the
+                    // function gets its own frame, which func_get_args() reads)
+                    let line = vm.current_line;
+                    vm.check_user_function_deprecation(
+                        &op_array,
+                        &String::from_utf8_lossy(&func_lower),
+                        line,
+                    );
+                    if vm.current_exception.is_some() {
+                        return Some(Value::Null);
+                    }
                     let result = vm
                         .execute_fn_with_named_args(&op_array, invoke_args, Vec::new(), None)
                         .unwrap_or(Value::Null);
@@ -7479,8 +7586,17 @@ pub fn reflection_function_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                     vec![]
                 };
                 if let Some(op_array) = vm.user_functions.get(&func_lower).cloned() {
-                    // (zend_call_function(): the function's own frame, which
-                    // func_get_args() reads)
+                    // (zend_call_function(): a deprecated function warns; the
+                    // function gets its own frame, which func_get_args() reads)
+                    let line = vm.current_line;
+                    vm.check_user_function_deprecation(
+                        &op_array,
+                        &String::from_utf8_lossy(&func_lower),
+                        line,
+                    );
+                    if vm.current_exception.is_some() {
+                        return Some(Value::Null);
+                    }
                     let result = vm
                         .execute_fn_with_named_args(&op_array, invoke_args, Vec::new(), None)
                         .unwrap_or(Value::Null);
@@ -11727,8 +11843,9 @@ pub fn reflection_class_constant_method(
         .collect();
 
     // Look up constant metadata
-    let meta =
+    let mut meta =
         rcls(vm, &class_lower).and_then(|ce| ce.constants_meta.get(const_name.as_bytes()).cloned());
+    internal_const_deprecated_attr(vm, const_name.as_bytes(), &mut meta);
 
     let visibility = meta
         .as_ref()
@@ -12038,8 +12155,9 @@ pub fn reflection_class_constant_docall(
 
         match method {
             b"getattributes" => {
-                let meta = rcls(vm, &class_lower)
+                let mut meta = rcls(vm, &class_lower)
                     .and_then(|ce| ce.constants_meta.get(const_name.as_bytes()).cloned());
+                internal_const_deprecated_attr(vm, const_name.as_bytes(), &mut meta);
                 let attrs = meta
                     .as_ref()
                     .map(|m| m.attributes.clone())

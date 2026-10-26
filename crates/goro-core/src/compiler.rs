@@ -10283,6 +10283,7 @@ impl Compiler {
                                     Ok(None) => {}
                                 }
                             }
+                            let deferred = matches!(&val, Value::String(s) if s.as_bytes().starts_with(b"__deferred_"));
                             class.constants.insert(const_name.clone(), val);
                             // Store constant metadata (visibility, final)
                             let const_vis = match const_visibility {
@@ -10311,14 +10312,17 @@ impl Compiler {
                             // Collect class constant references in the value expression so
                             // accessing this constant can re-emit #[\Deprecated] banners for
                             // any deprecated constants it depends on.
+                            // (a value evaluated at run time raises them itself)
                             let mut refs = Vec::new();
-                            Self::collect_class_const_refs(
-                                const_expr,
-                                &qualified_name,
-                                extends.as_deref(),
-                                self,
-                                &mut refs,
-                            );
+                            if !deferred {
+                                Self::collect_class_const_refs(
+                                    const_expr,
+                                    &qualified_name,
+                                    extends.as_deref(),
+                                    self,
+                                    &mut refs,
+                                );
+                            }
                             class.constants_meta.insert(
                                 const_name.clone(),
                                 crate::object::ConstantMeta {
@@ -10331,7 +10335,7 @@ impl Compiler {
                                         .as_ref()
                                         .map(|d| String::from_utf8_lossy(d).into_owned()),
                                     referenced_constants: refs,
-                                    line: 0,
+                                    line: const_expr.span.line,
                                 },
                             );
                             // Private constants cannot be final

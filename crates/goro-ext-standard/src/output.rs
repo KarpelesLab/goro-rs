@@ -2622,6 +2622,20 @@ pub fn materialize_print_r(
                         .iter()
                         .map(|(k, v)| (array_key_bytes(k), v.clone()))
                         .collect(),
+                    // zend_std_get_debug_info(): null is deprecated (an
+                    // empty table)
+                    Some(Value::Null) if vm.current_exception.is_none() => {
+                        let cname = goro_core::value::display_class_name(&o.borrow().class_name);
+                        let line = vm.current_line;
+                        vm.emit_deprecated_at(
+                            &format!(
+                                "Returning null from {}::__debugInfo() is deprecated, return an empty array instead",
+                                cname
+                            ),
+                            line,
+                        );
+                        Vec::new()
+                    }
                     _ => Vec::new(),
                 }
             } else if let Some(t) = vm.spl_debug_info(o) {
