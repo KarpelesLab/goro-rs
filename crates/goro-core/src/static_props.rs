@@ -779,7 +779,11 @@ impl Vm {
         if !strict {
             self.emit_implicit_float_to_int_if_needed(value, &pt, line);
         }
+        let was_nan = !strict && matches!(value, Value::Double(d) if d.is_nan());
         Self::coerce_value_to_type(value, &pt, strict);
+        if was_nan {
+            self.warn_nan_coerced_to(value, line);
+        }
         if self.value_matches_type_mode(value, &pt, true) {
             return Ok(());
         }

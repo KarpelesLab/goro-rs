@@ -9292,6 +9292,34 @@ impl Vm {
         }
     }
 
+    /// Make `user_fn`'s file the current one (when it differs) for the
+    /// diagnostics of its RECV; returns the file to restore.
+    #[inline(never)]
+    fn enter_recv_file(&mut self, user_fn: &OpArray) -> Option<crate::rcstr::RcStr> {
+        if user_fn.filename.is_empty() || user_fn.filename == self.current_file.as_bytes() {
+            return None;
+        }
+        Some(std::mem::replace(
+            &mut self.current_file,
+            user_fn.file_name(),
+        ))
+    }
+
+    /// A NAN coerced (weak mode) to a typed property's string or bool:
+    /// "unexpected NAN value was coerced to <type>".
+    #[inline(never)]
+    pub fn warn_nan_coerced_to(&mut self, coerced: &Value, line: u32) {
+        let target = match coerced {
+            Value::String(_) => "string",
+            Value::True | Value::False => "bool",
+            _ => return,
+        };
+        self.emit_warning_at(
+            &format!("unexpected NAN value was coerced to {}", target),
+            line,
+        );
+    }
+
     /// "unexpected NAN value was coerced to <type>" (zend_nan_coerced_to_type_warning).
     pub fn warn_nan_coercion(&mut self, v: &Value, type_name: &str, line: u32) {
         let is_nan = match v {
@@ -21490,6 +21518,8 @@ impl Vm {
             }
             return Err(RecvFail::TypeError(err_msg, def_line));
         }
+        // The callee's RECV reports these diagnostics: in its file.
+        let saved_recv_file = self.enter_recv_file(user_fn);
         // Emit implicit float-to-int deprecation for non-strict mode
         // BEFORE coercion truncates the value.
         if !caller_strict {
@@ -21517,6 +21547,9 @@ impl Vm {
             }
             // An error handler that throws aborts the call.
             if !had_exc && self.current_exception.is_some() {
+                if let Some(f) = saved_recv_file {
+                    self.current_file = f;
+                }
                 return Err(RecvFail::HandlerThrew);
             }
         }
@@ -21547,6 +21580,9 @@ impl Vm {
                 &format!("unexpected NAN value was coerced to {}", target),
                 recv_line,
             );
+        }
+        if let Some(f) = saved_recv_file {
+            self.current_file = f;
         }
         // Coerce Stringable objects to string for string-typed params
         // (zend_verify_weak_scalar_type_hint: a type with string
@@ -59586,6 +59622,8 @@ impl Vm {
                                     }
                                     if !skip_coercion {
                                         let before = std::mem::discriminant(&value);
+                                        let was_nan = !op_array.strict_types
+                                            && matches!(value, Value::Double(d) if d.is_nan());
                                         Self::coerce_value_to_type(
                                             &mut value,
                                             pt,
@@ -59593,6 +59631,9 @@ impl Vm {
                                         );
                                         coerced_for_result =
                                             before != std::mem::discriminant(&value);
+                                        if was_nan && coerced_for_result {
+                                            self.warn_nan_coerced_to(&value, op.line);
+                                        }
                                     }
                                     // Weak mode: a Stringable object for a type with
                                     // string that does not take the object as is.
