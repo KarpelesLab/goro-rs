@@ -495,8 +495,10 @@ pub enum ZppError {
 /// Variadic functions parsing their arguments with zend_parse_parameters()
 /// and a "*" / "+" spec (not the fast ZPP macros).
 fn legacy_zpp_variadic(name: &str) -> bool {
-    matches!(name, "register_shutdown_function" | "register_tick_function")
-        || name.starts_with("array_diff_")
+    matches!(
+        name,
+        "register_shutdown_function" | "register_tick_function"
+    ) || name.starts_with("array_diff_")
         || name.starts_with("array_udiff")
         || name.starts_with("array_intersect")
         || name.starts_with("array_uintersect")

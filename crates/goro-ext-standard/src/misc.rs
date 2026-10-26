@@ -5634,12 +5634,7 @@ fn obj_pointer_op(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, op: &str) -> Value 
 }
 
 /// obj_pointer_op() of a function called as `shown` (pos() is current())
-fn obj_pointer_op_as(
-    vm: &mut Vm,
-    obj: &Rc<RefCell<PhpObject>>,
-    op: &str,
-    shown: &str,
-) -> Value {
+fn obj_pointer_op_as(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, op: &str, shown: &str) -> Value {
     vm.emit_deprecated(&format!(
         "{}(): Calling {}() on an object is deprecated",
         shown, shown

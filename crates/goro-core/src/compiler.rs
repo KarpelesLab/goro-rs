@@ -15851,7 +15851,9 @@ impl Compiler {
                             let v = match a {
                                 Some(e) => self.compile_expr(e)?,
                                 // ($flags skipped for a named $prefix)
-                                None => OperandType::Const(self.op_array.add_literal(Value::Long(0))),
+                                None => {
+                                    OperandType::Const(self.op_array.add_literal(Value::Long(0)))
+                                }
                             };
                             self.op_array.emit(Op {
                                 opcode: OpCode::ArrayAppend,
@@ -24643,9 +24645,7 @@ fn extract_call_args(args: &[goro_parser::ast::Argument]) -> Option<Vec<Option<&
     }
     let last = slots.iter().rposition(|s| s.is_some())?;
     // (only $flags may be skipped: its default is EXTR_OVERWRITE)
-    if slots[0].is_none() {
-        return None;
-    }
+    slots[0]?;
     Some(slots[..=last].to_vec())
 }
 
@@ -24697,7 +24697,9 @@ fn ct_special_call_args(
                 // (strict: string and int elements; else non-numeric strings)
                 let ok = match &el.value.kind {
                     ExprKind::Int(_) => strict,
-                    ExprKind::String(b) => strict || crate::value::parse_numeric_str(b, false).is_none(),
+                    ExprKind::String(b) => {
+                        strict || crate::value::parse_numeric_str(b, false).is_none()
+                    }
                     _ => false,
                 };
                 if !ok {
