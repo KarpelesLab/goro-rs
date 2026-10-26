@@ -103,6 +103,32 @@ fn split_ids(id: &str) -> Vec<String> {
     out
 }
 
+/// An `A(B)` element (outside sets): (A, B), the parenthesized part
+/// closing the element.
+fn split_inverse(el: &str) -> Option<(String, String)> {
+    let t = el.trim();
+    let chars: Vec<char> = t.chars().collect();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 1,
+            '[' => depth += 1,
+            ']' => depth -= 1,
+            '(' if depth <= 0 => {
+                let close = chars[i + 1..].iter().position(|&c| c == ')')? + i + 1;
+                if chars[close + 1..].iter().any(|c| !c.is_whitespace()) {
+                    return None;
+                }
+                return Some((chars[..i].iter().collect(), chars[i + 1..close].iter().collect()));
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 /// The special inverses (TransliteratorIDParser::SPECIAL_INVERSES).
 fn special_inverse(target: &str) -> Option<&'static str> {
     Some(match target.to_ascii_lowercase().as_str() {
@@ -302,6 +328,32 @@ fn create_instance(id: &str) -> Result<Compiled, i32> {
             }
             continue;
         }
+        // `A(B)`, `A()`, `(B)`: A forward, B the inverse
+        if let Some((a, b)) = split_inverse(p) {
+            let ida = match a.trim() {
+                "" => None,
+                t => Some(parse_spec(t).ok_or(translit_rules::U_INVALID_ID)?),
+            };
+            let idb = match b.trim() {
+                "" => None,
+                t => Some(parse_spec(t).ok_or(translit_rules::U_INVALID_ID)?),
+            };
+            let canon = |sp: &Option<Spec>| sp.as_ref().map(|s| spec_ids(s).0).unwrap_or_default();
+            fwd_ids.push(format!("{}({})", canon(&ida), canon(&idb)));
+            inv_ids.push(format!("{}({})", canon(&idb), canon(&ida)));
+            let elem = match ida {
+                Some(sp) => {
+                    let k = lookup(&sp).ok_or(translit_rules::U_INVALID_ID)?;
+                    TElem {
+                        filter: sp.filter.map(Rc::new),
+                        k,
+                    }
+                }
+                None => el(K::Null),
+            };
+            elems.push(elem);
+            continue;
+        }
         let sp = parse_spec(p).ok_or(translit_rules::U_INVALID_ID)?;
         // a lone leading filter is the compound's filter
         if sp.target.is_empty() && sp.source == "Any" && !sp.saw_source {
@@ -347,6 +399,18 @@ fn create_instance(id: &str) -> Result<Compiled, i32> {
 
 // ---------------------------------------------------------------------------
 // Transforms
+
+thread_local! {
+    static LATIN_ASCII_RULES: std::cell::OnceCell<Option<Rc<RuleSet>>> = const { std::cell::OnceCell::new() };
+}
+
+/// A CLDR transform's rules, compiled once per thread.
+fn cldr_rules(
+    cell: &'static std::thread::LocalKey<std::cell::OnceCell<Option<Rc<RuleSet>>>>,
+    src: &str,
+) -> Option<Rc<RuleSet>> {
+    cell.with(|c| c.get_or_init(|| RuleSet::parse(src, true).ok().map(Rc::new)).clone())
+}
 
 fn apply(e: &TElem, t: Vec<char>) -> Vec<char> {
     let Some(f) = &e.filter else {
@@ -601,7 +665,13 @@ fn apply_k(k: &K, t: Vec<char>) -> Vec<char> {
             })
             .collect(),
         K::NameAny => name_any(&t),
-        K::LatinAscii => intl::translit::latin_ascii(&string_of(&t)).chars().collect(),
+        // (CLDR's rules, as ICU: Latin, Common and Inherited only; intl's
+        // latin_ascii() strips the marks of other scripts and leaves the
+        // compatibility characters)
+        K::LatinAscii => match cldr_rules(&LATIN_ASCII_RULES, crate::translit_cldr::LATIN_ASCII) {
+            Some(rs) => apply_k(&K::Rules(rs), t),
+            None => intl::translit::latin_ascii(&string_of(&t)).chars().collect(),
+        },
         K::AnyLatin => any_latin(&t),
         K::GreekLatin => td::greek_latin(&t),
         K::CyrLatin => intl::translit::cyrillic_to_latin(&string_of(&t))

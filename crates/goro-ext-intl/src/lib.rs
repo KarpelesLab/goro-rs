@@ -38,6 +38,7 @@ pub mod rbnf;
 mod rbnf_ordinal;
 // misc area helpers (break iterator rules, UnicodeSet patterns)
 pub mod breakiter_rules;
+mod translit_cldr;
 pub mod translit_data;
 pub mod translit_rules;
 pub mod uset;
