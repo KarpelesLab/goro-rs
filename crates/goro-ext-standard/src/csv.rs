@@ -65,7 +65,24 @@ fn opt_string(
 ) -> Result<Option<PhpString>, VmError> {
     match v {
         None => Ok(None),
-        Some(v) if matches!(v.deref(), Value::Null | Value::Undef) => Ok(None),
+        // Z_PARAM_STRING of a null: deprecated, the empty string ($eol is
+        // Z_PARAM_STR_OR_NULL).
+        Some(v) if matches!(v.deref(), Value::Null | Value::Undef) => {
+            if pname == "eol" {
+                return Ok(None);
+            }
+            vm.emit_deprecated(&format!(
+                "{}(): Passing null to parameter #{} (${}) of type string is deprecated",
+                func, argnum, pname
+            ));
+            if vm.current_exception.is_some() {
+                return Err(VmError {
+                    message: String::new(),
+                    line: vm.current_line,
+                });
+            }
+            Ok(Some(PhpString::empty()))
+        }
         Some(v) => zpp_string(vm, func, argnum, pname, v).map(Some),
     }
 }
