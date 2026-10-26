@@ -9808,6 +9808,25 @@ impl Vm {
         self.list_destructible(obj);
     }
 
+    /// zend_vm_stack_free_args() after an internal method returned: the
+    /// temporary objects it was passed (args[0] is $this) are released now,
+    /// so their destructors run before the result is used.
+    #[inline(never)]
+    fn release_internal_call_temps(&mut self, args: &mut [Value]) {
+        let mut any = false;
+        for a in args.iter_mut().skip(1) {
+            if let Value::Object(o) = a {
+                if Rc::strong_count(o) == 2 && o.borrow().dtor_listed.get() {
+                    *a = Value::Null;
+                    any = true;
+                }
+            }
+        }
+        if any {
+            self.run_pending_destructors();
+        }
+    }
+
     /// Add an object to the list of objects awaiting destruction.
     pub(crate) fn list_destructible(&mut self, obj: Value) {
         if let Value::Object(o) = &obj {
@@ -30085,7 +30104,7 @@ impl Vm {
                 OpCode::DoFCall if self.fast_splx_target(op) => match outlined(
                     || -> Result<Flow, VmError> {
                         self.last_call_by_ref = false;
-                        let call = self.pending_calls.pop().expect("pending call");
+                        let mut call = self.pending_calls.pop().expect("pending call");
                         while matches!(self.closure_pending_calls.last(), Some(&i) if i > self.pending_calls.len())
                         {
                             self.closure_pending_calls.pop();
@@ -30115,6 +30134,7 @@ impl Vm {
                             op.line,
                             op_array.strict_types,
                         );
+                        self.release_internal_call_temps(&mut call.args);
                         if self.fatal_emitted && self.current_exception.is_none() {
                             return Err(VmError {
                                 message: String::new(),
@@ -31600,6 +31620,7 @@ impl Vm {
                             op.line,
                             op_array.strict_types,
                         );
+                        self.release_internal_call_temps(&mut call.args);
                         if self.fatal_emitted && self.current_exception.is_none() {
                             return Err(VmError {
                                 message: String::new(),
@@ -31763,6 +31784,8 @@ impl Vm {
                                 };
                                 // Pop the call-stack frame we just pushed.
                                 self.call_stack.pop();
+                                drop(spl_args);
+                                self.release_internal_call_temps(&mut call.args);
                                 // Check if the SPL method set an exception
                                 if let Some(exc_val) = self.current_exception.take() {
                                     if let Some((catch_target, _, _, _, eh_pc_depth)) =
