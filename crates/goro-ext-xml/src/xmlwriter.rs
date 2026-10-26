@@ -119,6 +119,8 @@ fn put_writer(o: &Obj, writer: Box<PhpWriter>) {
                         seq,
                     },
                 );
+                // (objects are looked at as they go once a writer exists)
+                goro_core::object::OBJECT_FREE_HOOK.with(|h| h.set(Some(on_object_free)));
             }
         }
     });
@@ -1531,7 +1533,8 @@ pub fn register(vm: &mut Vm) {
     // A fresh VM: forget writers of a previous request on this thread.
     WRITERS.with(|w| w.borrow_mut().clear());
     DEFERRED.with(|d| d.borrow_mut().clear());
-    goro_core::object::OBJECT_FREE_HOOK.with(|h| h.set(Some(on_object_free)));
+    // (set as the first writer is made: see put_writer)
+    goro_core::object::OBJECT_FREE_HOOK.with(|h| h.set(None));
     vm.register_extension(b"xmlwriter");
     register_functions(vm);
     vm.classes.insert(
