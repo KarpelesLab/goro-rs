@@ -2004,6 +2004,20 @@ fn var_export(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if is_lazy {
             vm.maybe_run_lazy_init(&obj);
             if vm.current_exception.is_some() {
+                // (what php_var_export_ex() wrote before the properties
+                // table it fetched failed)
+                let name = obj.borrow().class_name.clone();
+                let mut buf = Vec::new();
+                if name.eq_ignore_ascii_case(b"stdClass") {
+                    buf.extend_from_slice(b"(object) array(\n)");
+                } else {
+                    buf.push(b'\\');
+                    buf.extend_from_slice(goro_core::value::display_class_name(&name).as_bytes());
+                    buf.extend_from_slice(b"::__set_state(array(\n))");
+                }
+                if !return_output {
+                    vm.write_output(&buf);
+                }
                 return Err(VmError {
                     message: "Uncaught exception".to_string(),
                     line: 0,

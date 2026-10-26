@@ -94,6 +94,9 @@ impl Vm {
         // Generic zpp (verified stub arginfo)
         let mut zpp_orig: Option<Vec<Value>> = None;
         if let Some((info, flags)) = zpp {
+            if !special {
+                self.zpp_frame_at = Some(op.line);
+            }
             if let Err(e) = self.zpp_check(
                 info,
                 flags,

@@ -423,6 +423,7 @@ impl Vm {
         let line = self.current_line;
         let mut owned = args.to_vec();
         let mut orig = None;
+        self.zpp_frame_at = Some(at);
         if let Err(e) = self.zpp_check(info, flags, &mut owned, &mut orig, strict, line) {
             if let crate::arginfo::ZppError::Throw(cls, msg) = e {
                 let shown = orig.unwrap_or_else(|| owned.clone());
@@ -603,6 +604,9 @@ impl Vm {
         let mut orig = None;
         if err.is_none() {
             if let Some((info, flags)) = self.zpp_info(lname) {
+                if !is_ucf && !special {
+                    self.zpp_frame_at = Some(line);
+                }
                 if let Err(e) = self.zpp_check(info, flags, &mut args, &mut orig, strict, line) {
                     err = Some((e, true));
                 }

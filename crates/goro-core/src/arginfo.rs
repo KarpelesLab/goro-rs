@@ -1189,6 +1189,7 @@ impl Vm {
         strict: bool,
         line: u32,
     ) -> Result<(), ZppError> {
+        let frame_at = self.zpp_frame_at.take();
         if flags & CHECK_ARITY != 0 {
             if let Some(msg) = info.arity_error(args.len()) {
                 return Err(ZppError::Throw(b"ArgumentCountError", msg));
@@ -1434,7 +1435,14 @@ impl Vm {
                 self.zpp_set_arg(args, orig, i, m, nv);
                 continue;
             }
-            match self.zpp_weak_coerce(m, &mut v, line) {
+            let coerced = match frame_at {
+                // (__toString() runs in the function's frame)
+                Some(at) if vt == T_OBJECT && m & T_STRING != 0 => {
+                    self.zpp_coerce_in_frame(info, args, orig, m, &mut v, line, at)
+                }
+                _ => self.zpp_weak_coerce(m, &mut v, line),
+            };
+            match coerced {
                 Ok(true) => self.zpp_set_arg(args, orig, i, m, v),
                 Ok(false) => return Err(self.zpp_type_error_n(info, i, p, &v, number)),
                 Err(e) => return Err(e),
@@ -1484,6 +1492,28 @@ impl Vm {
             Ok(false) => Ok(None),
             Err(_) => Err(()),
         }
+    }
+
+    /// zpp_weak_coerce() of an object argument under the frame of the
+    /// function `info` (from line `at`; its arguments as parsed so far).
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn zpp_coerce_in_frame(
+        &mut self,
+        info: &FuncInfo,
+        args: &[Value],
+        orig: &Option<Vec<Value>>,
+        m: u16,
+        v: &mut Value,
+        line: u32,
+        at: u32,
+    ) -> Result<bool, ZppError> {
+        let shown: Vec<Value> = orig.clone().unwrap_or_else(|| args.to_vec());
+        let name = info.name.to_ascii_lowercase();
+        self.push_builtin_frame(name.as_bytes(), &shown, at);
+        let r = self.zpp_weak_coerce(m, v, line);
+        self.pop_builtin_frame();
+        r
     }
 
     /// Store a coerced argument (see zpp_check about `orig`).

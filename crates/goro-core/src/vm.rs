@@ -1806,6 +1806,11 @@ pub struct Vm {
     /// Argument positions of the builtin being called that were skipped via
     /// named arguments (filled with null). Valid only at the start of the call.
     pub builtin_named_skipped: Vec<usize>,
+    /// The line of the frame the builtin whose arguments zpp_check() is
+    /// about to parse gets (0: called from internal code), when the caller
+    /// pushes it after the check: a __toString() run by the parsing runs
+    /// under it.
+    pub(crate) zpp_frame_at: Option<u32>,
     /// Builtins with verified stub arginfo (see arginfo.rs), rebuilt when
     /// the number of registered functions changes.
     pub(crate) zpp_map: crate::fxhash::FxHashMap<Vec<u8>, (&'static crate::arginfo::FuncInfo, u8)>,
@@ -3215,6 +3220,7 @@ impl Vm {
             builtin_param_types: Default::default(),
             builtin_self_coercing: std::collections::HashSet::new(),
             builtin_named_skipped: Vec::new(),
+            zpp_frame_at: None,
             zpp_map: Default::default(),
             zpp_map_fn_count: usize::MAX,
             zpp_extension_verified: Default::default(),
@@ -10720,8 +10726,12 @@ impl Vm {
         let this_val = Value::Object(obj.clone());
         let exc_before = self.current_exception.is_some();
         // The initializer appears in backtraces as called from the code that
-        // triggered initialization.
-        self.ucf_call_line = Some(self.current_line);
+        // triggered initialization ("[internal function]" for a builtin).
+        self.ucf_call_line = if self.caller_is_internal() {
+            None
+        } else {
+            Some(self.current_line)
+        };
         self.ucf_strict = false;
         // A properties table a view built while the object was lazy is shared
         // with the initialization snapshot: watch for its separation.
@@ -29932,6 +29942,9 @@ impl Vm {
                         // Generic zpp (verified stub arginfo)
                         let mut zpp_orig: Option<Vec<Value>> = None;
                         if let Some((info, flags)) = zpp {
+                            if !special {
+                                self.zpp_frame_at = Some(op.line);
+                            }
                             if let Err(e) = self.zpp_check(
                                 info,
                                 flags,
@@ -32145,6 +32158,9 @@ impl Vm {
                         let mut zpp_err_in_call = !named_extra.is_empty();
                         if zpp_err.is_none() {
                             if let Some((info, flags)) = zpp {
+                                if !special {
+                                    self.zpp_frame_at = Some(op.line);
+                                }
                                 if let Err(e) = self.zpp_check(
                                     info,
                                     flags,
@@ -61321,13 +61337,13 @@ impl Vm {
                         String::from_utf8_lossy(&decl.1)
                     )
                 };
-                self.call_stack.push((
-                    frame,
-                    self.current_file.clone(),
-                    self.current_line,
-                    Vec::new(),
-                    true,
-                ));
+                // ("[internal function]" when a builtin converts it)
+                let (file, line) = if self.caller_is_internal() {
+                    (RcStr::new(), 0)
+                } else {
+                    (self.current_file.clone(), self.current_line)
+                };
+                self.call_stack.push((frame, file, line, Vec::new(), true));
                 let result = self.execute_op_array(&method, method_cvs);
                 self.call_stack.pop();
                 self.class_scope_stack.pop();
