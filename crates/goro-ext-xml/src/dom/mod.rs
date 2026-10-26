@@ -926,6 +926,23 @@ impl<'a> Args<'a> {
             }
         }
     }
+    /// A ?bool parameter (its TypeError names ?bool)
+    pub fn opt_bool(&self, vm: &mut Vm, i: usize, name: &str) -> R<Option<bool>> {
+        match self.get(i) {
+            None | Some(Value::Null) => Ok(None),
+            Some(
+                v @ (Value::True
+                | Value::False
+                | Value::Long(_)
+                | Value::Double(_)
+                | Value::String(_)),
+            ) => Ok(Some(v.is_truthy())),
+            Some(v) => {
+                self.type_err(vm, i, name, "?bool", &v);
+                Err(())
+            }
+        }
+    }
     pub fn long(&self, vm: &mut Vm, i: usize, name: &str, def: i64) -> R<i64> {
         match self.get(i) {
             None => Ok(def),

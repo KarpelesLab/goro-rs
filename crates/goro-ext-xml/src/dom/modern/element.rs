@@ -414,7 +414,7 @@ fn m_toggle_attribute(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let qname = a.str(vm, 0, "qualifiedName")?;
     let force = match a.raw(1) {
         None | Some(Value::Null) => None,
-        Some(_) => Some(a.bool(vm, 1, "force", false)?),
+        Some(_) => a.opt_bool(vm, 1, "force")?,
     };
     let n = this_node(vm, o)?;
     if !is_valid_name(crate::dom::node::cstr(&qname)) {

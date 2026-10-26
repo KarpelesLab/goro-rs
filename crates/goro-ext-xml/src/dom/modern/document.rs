@@ -818,8 +818,14 @@ fn m_adopt_node(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
 fn m_register_node_class(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let a = args(a);
     a.count(vm, 2, 2)?;
-    let base = a.str(vm, 0, "baseClass")?;
-    let ext = a.opt_str(vm, 1, "extendedClass")?;
+    // zpp "CC!": the base class (try_convert_to_string()) first
+    let base = match a.raw(0) {
+        Some(Value::Array(_)) => {
+            vm.emit_warning("Array to string conversion");
+            "Array".to_string()
+        }
+        _ => a.str(vm, 0, "baseClass")?,
+    };
     let bl = base.trim_start_matches('\\').to_ascii_lowercase();
     if !vm.classes.contains_key(bl.as_bytes()) || !class_is(vm, bl.as_bytes(), "Dom\\Node") {
         throw_error(
@@ -832,6 +838,13 @@ fn m_register_node_class(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
         );
         return Err(());
     }
+    let ext = match a.raw(1) {
+        Some(Value::Array(_)) => {
+            vm.emit_warning("Array to string conversion");
+            Some("Array".to_string())
+        }
+        _ => a.opt_str(vm, 1, "extendedClass")?,
+    };
     if vm
         .classes
         .get(bl.as_bytes())

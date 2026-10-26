@@ -561,9 +561,14 @@ pub fn fragment_methods() -> Vec<(&'static str, MethodFn)> {
 fn m_has_feature(vm: &mut Vm, _o: &Obj, a: &[Value]) -> R<Value> {
     let a = args(a);
     a.count(vm, 2, 2)?;
-    let _f = a.str(vm, 0, "feature")?;
-    let _v = a.str(vm, 1, "version")?;
-    Ok(Value::True)
+    let f = a.str(vm, 0, "feature")?;
+    let v = a.str(vm, 1, "version")?;
+    // (dom_has_feature(), as isSupported())
+    Ok(if crate::dom::node::has_feature(&f, &v) {
+        Value::True
+    } else {
+        Value::False
+    })
 }
 
 fn m_create_document_type(vm: &mut Vm, _o: &Obj, a: &[Value]) -> R<Value> {

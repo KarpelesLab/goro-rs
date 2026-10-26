@@ -1266,7 +1266,7 @@ fn m_get_root_node(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     a.count(vm, 0, 1)?;
     if let Some(v) = a.raw(0) {
         if !matches!(v, Value::Array(_) | Value::Null) {
-            a.type_err(vm, 0, "options", "array", &v);
+            a.type_err(vm, 0, "options", "?array", &v);
             return Err(());
         }
     }

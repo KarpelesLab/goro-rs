@@ -510,12 +510,38 @@ struct Parser {
 type PErr = String;
 
 fn unexpected(t: &Token) -> PErr {
-    let s = if t.t == Tok::Eof {
-        "END-OF-FILE".to_string()
-    } else {
-        t.raw.clone()
+    let s = match t.t {
+        Tok::Eof => "END-OF-FILE".to_string(),
+        // (lexbor serializes a number token from its double value)
+        Tok::Number(v, _) => number_text(v),
+        _ => t.raw.clone(),
     };
     format!("Selectors. Unexpected token: {}", s)
+}
+
+/// The shortest round-trip digits of `v`, written out without an exponent
+/// below 1e21 (9223372036854775807 reads back as 9223372036854776000).
+fn number_text(v: f64) -> String {
+    if !v.is_finite() {
+        return v.to_string();
+    }
+    let e = format!("{:e}", v);
+    let (mant, exp) = e.split_once('e').unwrap_or((&e, "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let neg = mant.starts_with('-');
+    let digits: String = mant.chars().filter(|c| c.is_ascii_digit()).collect();
+    let n = digits.len() as i32;
+    let body = if !(-7..21).contains(&exp) {
+        return format!("{}e{}{}", mant, if exp < 0 { "-" } else { "+" }, exp.abs());
+    } else if exp >= n - 1 {
+        format!("{}{}", digits, "0".repeat((exp - (n - 1)) as usize))
+    } else if exp >= 0 {
+        let (a, b) = digits.split_at((exp + 1) as usize);
+        format!("{}.{}", a, b)
+    } else {
+        format!("0.{}{}", "0".repeat((-exp - 1) as usize), digits)
+    };
+    if neg { format!("-{}", body) } else { body }
 }
 
 fn not_supported(name: &str) -> PErr {

@@ -1270,7 +1270,7 @@ fn m_normalize(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     Ok(Value::Null)
 }
 
-fn has_feature(feature: &str, version: &str) -> bool {
+pub(crate) fn has_feature(feature: &str, version: &str) -> bool {
     (version == "1.0" || version == "2.0" || version.is_empty())
         && (feature.eq_ignore_ascii_case("XML")
             || (feature.eq_ignore_ascii_case("Core") && version == "1.0"))

@@ -421,7 +421,7 @@ fn m_toggle(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let tok = a.path_str(vm, 0, "token")?;
     let force = match a.raw(1) {
         None | Some(Value::Null) => None,
-        Some(_) => Some(a.bool(vm, 1, "force", false)?),
+        Some(_) => a.opt_bool(vm, 1, "force")?,
     };
     if !validate_token(vm, &tok) {
         return Err(());

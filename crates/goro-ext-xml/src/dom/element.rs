@@ -753,7 +753,17 @@ fn m_set_id_attribute(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
 fn m_set_id_attribute_ns(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let a = args(a);
     a.count(vm, 3, 3)?;
-    let uri = a.str(vm, 0, "namespace")?;
+    // (Dom\Element's stub declares ?string, its zpp "s": the null
+    // deprecation names ?string)
+    let uri = if a.f.starts_with("Dom\\") && matches!(a.raw(0), Some(Value::Null)) {
+        vm.emit_deprecated(&format!(
+            "{}(): Passing null to parameter #1 ($namespace) of type ?string is deprecated",
+            a.f
+        ));
+        String::new()
+    } else {
+        a.str(vm, 0, "namespace")?
+    };
     let name = a.str(vm, 1, "qualifiedName")?;
     let is_id = a.bool(vm, 2, "isId", false)?;
     let n = need_node(vm, o)?;
@@ -872,7 +882,7 @@ fn m_toggle_attribute(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let mut name = a.str(vm, 0, "qualifiedName")?;
     let force = match a.raw(1) {
         None | Some(Value::Null) => None,
-        Some(_) => Some(a.bool(vm, 1, "force", false)?),
+        Some(_) => a.opt_bool(vm, 1, "force")?,
     };
     let n = need_node(vm, o)?;
     if !is_valid_name(&name) {
