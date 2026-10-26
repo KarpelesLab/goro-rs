@@ -723,7 +723,15 @@ impl Vm {
             Value::String(_) if append => Some("[] operator not supported for strings".to_string()),
             Value::Object(o) => {
                 let cl: Vec<u8> = o.borrow().class_name.to_ascii_lowercase();
-                let array_access = cl == b"weakmap"
+                // An object whose handlers read dimensions only (DOMNodeList,
+                // DOMNamedNodeMap): zend_std_write_dimension() refuses it.
+                let read_only_dims = crate::vm::native_handlers(o).is_some_and(|h| {
+                    h.read_dimension.is_some()
+                        && h.write_dimension.is_none()
+                        && h.unset_dimension.is_none()
+                }) && !self.class_implements_interface(&cl, b"arrayaccess");
+                let array_access = !read_only_dims
+                    && (cl == b"weakmap"
                     || self
                         .classes
                         .get(&cl)
@@ -749,7 +757,7 @@ impl Vm {
                         h.write_dimension.is_some() || h.unset_dimension.is_some()
                     })
                     || Self::spl_iter_class(&cl)
-                    || crate::vm::get_builtin_parent(&cl).is_some();
+                    || crate::vm::get_builtin_parent(&cl).is_some());
                 if array_access {
                     None
                 } else {

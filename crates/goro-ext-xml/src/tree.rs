@@ -1289,13 +1289,10 @@ impl Tree {
     /// xmlNodeSetContent
     pub fn node_set_content(&mut self, id: NodeId, value: &str) {
         match self.nodes[id].t {
-            NType::Element
-            | NType::Attribute
-            | NType::DocumentFrag
-            | NType::Document
-            | NType::HtmlDocument => {
+            NType::Element | NType::Attribute | NType::DocumentFrag => {
                 self.set_children_text(id, value);
             }
+            // (xmlNodeSetContent() leaves a document as it is)
             NType::Text | NType::CData | NType::Comment | NType::Pi => {
                 self.nodes[id].content = value.to_string();
                 self.nodes[id].flags &= !F_NULL_CONTENT;
