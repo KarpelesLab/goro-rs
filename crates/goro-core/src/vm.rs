@@ -45749,7 +45749,18 @@ impl Vm {
                                                 self.observe_code = true;
                                                 self.execute_op_array_vm(inc_op_array, inc_cvs)
                                             };
-                                            self.call_stack.pop();
+                                            // (a fatal error still to be reported keeps
+                                            // the include frame for the backtrace, as
+                                            // the callers' frames are kept; one raised
+                                            // binding a class at compile time has none)
+                                            if exec_r.is_ok()
+                                                || self.current_exception.is_some()
+                                                || self.exit_requested
+                                                || self.fatal_emitted
+                                                || std::mem::take(&mut self.compile_time_binding)
+                                            {
+                                                self.call_stack.pop();
+                                            }
                                             let result = match exec_r {
                                                 Ok(v) => v,
                                                 Err(e) => {
