@@ -856,13 +856,25 @@ fn rlim_value(v: libc::rlim_t) -> Value {
     }
 }
 
+/// getrlimit(), with goro's own address-space cap hidden (child_proc).
+fn script_getrlimit(res: libc::__rlimit_resource_t, rl: &mut libc::rlimit) -> i32 {
+    let r = unsafe { libc::getrlimit(res, rl) };
+    if r == 0 && res == libc::RLIMIT_AS {
+        if let Some((soft, hard)) = goro_core::child_proc::script_rlimit_as() {
+            rl.rlim_cur = soft as libc::rlim_t;
+            rl.rlim_max = hard as libc::rlim_t;
+        }
+    }
+    r
+}
+
 fn posix_getrlimit(_vm: &mut Vm, args: &[Value]) -> R {
     match arg(args, 0) {
         Value::Undef | Value::Null => {
             let mut ret = PhpArray::new();
             for &(res, name) in LIMITS {
                 let mut rl: libc::rlimit = unsafe { std::mem::zeroed() };
-                if unsafe { libc::getrlimit(res, &mut rl) } < 0 {
+                if script_getrlimit(res, &mut rl) < 0 {
                     return fail();
                 }
                 set(&mut ret, &format!("soft {}", name), rlim_value(rl.rlim_cur));
@@ -873,7 +885,7 @@ fn posix_getrlimit(_vm: &mut Vm, args: &[Value]) -> R {
         v => {
             let mut rl: libc::rlimit = unsafe { std::mem::zeroed() };
             let res = v.to_long() as i32 as libc::__rlimit_resource_t;
-            if unsafe { libc::getrlimit(res, &mut rl) } < 0 {
+            if script_getrlimit(res, &mut rl) < 0 {
                 return fail();
             }
             let mut ret = PhpArray::new();

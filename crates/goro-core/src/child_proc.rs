@@ -29,6 +29,16 @@ pub fn note_user_rlimit_as() {
     AS_USER_SET.store(true, Ordering::Relaxed);
 }
 
+/// RLIMIT_AS as the script sees it (posix_getrlimit()): the limit goro
+/// started with, unless the script set one itself.
+pub fn script_rlimit_as() -> Option<(u64, u64)> {
+    if AS_RECORDED.load(Ordering::Acquire) && !AS_USER_SET.load(Ordering::Relaxed) {
+        Some((AS_SOFT.load(Ordering::Relaxed), AS_HARD.load(Ordering::Relaxed)))
+    } else {
+        None
+    }
+}
+
 /// What the child must be given back, captured in the parent before forking.
 #[cfg(unix)]
 #[derive(Clone, Copy)]

@@ -38,6 +38,10 @@ var_dump($st);
 
 // goro's own 2 GiB address-space cap is not passed on.
 var_dump(trim(shell_exec('ulimit -v')) !== '2097152');
+// nor does posix_getrlimit() show it
+$l = posix_getrlimit(POSIX_RLIMIT_AS)[0];
+$u = trim(shell_exec('ulimit -v'));
+var_dump($u === 'unlimited' ? $l === 'unlimited' : $l == $u * 1024);
 ?>
 --EXPECT--
 shell_exec: pipe-ignored=1 usr1-ignored=0 hup-blocked=0
@@ -48,4 +52,5 @@ after: pipe-ignored=1 usr1-ignored=1 hup-blocked=0
 after proc_open: pipe-ignored=1 usr1-ignored=1 hup-blocked=0
 dfl: pipe-ignored=0 usr1-ignored=1 hup-blocked=0
 int(7)
+bool(true)
 bool(true)
