@@ -4710,6 +4710,9 @@ fn array_chunk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .iter()
             .map(|(k, v)| (k.clone(), unwrap_rc1_ref(v)))
             .collect();
+        if !entries.is_empty() {
+            array_init_size_check(vm, (entries.len() - 1) / size + 1, true)?;
+        }
         let mut result = PhpArray::new();
         for chunk in entries.chunks(size) {
             let mut sub = PhpArray::new();
@@ -4890,6 +4893,12 @@ fn array_fill_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Value::Array(arr) = keys {
         // Clone iterator so we can call vm methods inside the loop (for __toString).
         let entries: Vec<Value> = arr.borrow().iter().map(|(_, v)| v.clone()).collect();
+        if let Some(first) = entries.first() {
+            // (the first key decides between a packed and a hash table)
+            let size = entries.len().next_power_of_two().max(8);
+            let packed = matches!(first.deref(), Value::Long(h) if h >= 0 && (h as usize) < size);
+            array_init_size_check(vm, entries.len(), packed)?;
+        }
         for raw in &entries {
             let val = raw.deref();
             // array_fill_keys uses PHP's key-coercion rules, which mirror how
@@ -7356,7 +7365,7 @@ fn str_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
     // PHP 8.3+: empty string returns empty array
     if !bytes.is_empty() {
-        vm.array_init_size_check((bytes.len() - 1) / len + 1)?;
+        array_init_size_check(vm, bytes.len().div_ceil(len), true)?;
         for chunk in bytes.chunks(len) {
             result.push(Value::String(PhpString::from_vec(chunk.to_vec())));
             if result.len() & 0x3ff == 0 && goro_core::value::memory_exhausted() != 0 {
