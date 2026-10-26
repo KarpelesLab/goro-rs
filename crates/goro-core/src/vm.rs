@@ -809,6 +809,29 @@ impl Vm {
             && get.op2 == set.result
     }
 
+    /// Whether this PropertySet is the write-back of an RW fetch whose
+    /// get_property_ptr_ptr() handed out a temporary (it is dropped).
+    #[inline(never)]
+    fn skip_prop_rw_writeback(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        op_array: &OpArray,
+        ip: usize,
+    ) -> bool {
+        let Some((depth, release)) = self.prop_rw_skip_set else {
+            return false;
+        };
+        if depth != self.call_depth {
+            return false;
+        }
+        self.prop_rw_skip_set = None;
+        if !Self::is_prop_rw_writeback(op_array, ip) {
+            return false;
+        }
+        release(self, obj);
+        true
+    }
+
     /// The extension's property write guard alone (not
     /// _reflection_write_property(), which get_property_ptr_ptr bypasses).
     pub fn native_handler_prop_write_allowed(
@@ -1853,6 +1876,14 @@ pub struct Vm {
     /// returned by value: the matching ArraySetIncDec must not call
     /// offsetSet() (the increment only affected a temporary).
     incdec_skip_set: bool,
+    /// Set by an extension's read_property (mode 1) when its
+    /// get_property_ptr_ptr() handed out a temporary (SimpleXML's newly
+    /// created element): `$o->p op= v` / `$o->p++` then writes nothing back,
+    /// the operation's result replacing the temporary (this releases it).
+    pub prop_ptr_temp: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>)>,
+    /// The call depth whose next RW write-back (PropertySet) is skipped,
+    /// with the release of the temporary.
+    prop_rw_skip_set: Option<(u32, fn(&mut Vm, &Rc<RefCell<PhpObject>>))>,
     /// The extra named arguments of the internal function call whose
     /// argument check is failing (call_stack index, name, value): its frame
     /// shows them (see call_builtin_at).
@@ -2425,6 +2456,8 @@ impl Vm {
             plain_prop_memo: Default::default(),
             recorded_errors: None,
             incdec_skip_set: false,
+            prop_ptr_temp: None,
+            prop_rw_skip_set: None,
             builtin_frame_named: Vec::new(),
             dim_rw_key: None,
             dim_rw_abort: None,
@@ -58327,7 +58360,14 @@ impl Vm {
                             } else {
                                 mode
                             };
-                            if let Some(v) = f(self, obj, prop_name.as_bytes(), mode) {
+                            self.prop_ptr_temp = None;
+                            let got = f(self, obj, prop_name.as_bytes(), mode);
+                            if let Some(release) = self.prop_ptr_temp.take() {
+                                if matches!(op.opcode, OpCode::PropertyGetRW | OpCode::PropertyGetIncDec) {
+                                    self.prop_rw_skip_set = Some((self.call_depth, release));
+                                }
+                            }
+                            if let Some(v) = got {
                                 native_exc_check!(
                                     self,
                                     exception_handlers,
@@ -59941,6 +59981,9 @@ impl Vm {
                     }
 
                     if let Value::Object(obj) = &obj_val_raw {
+                        if self.prop_rw_skip_set.is_some() && self.skip_prop_rw_writeback(obj, op_array, ip) {
+                            return Ok(Flow::Next);
+                        }
                         if let Some(f) = native_handlers(obj).and_then(|h| h.write_property) {
                             let v = value.deref();
                             // typed internal properties coerce per the writer's strict_types

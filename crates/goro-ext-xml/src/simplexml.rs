@@ -1180,6 +1180,15 @@ fn prop_dim_write(
 }
 
 /// sxe_property_get_adr: fetch for write (creates the element if missing).
+/// The result of `$sxe->new op= v` replaces sxe->tmp (the new element's
+/// object is released).
+fn release_tmp(_vm: &mut Vm, obj: &Obj) {
+    if let Some(s) = sxe_of(obj) {
+        let old = s.tmp.replace(None);
+        drop(old);
+    }
+}
+
 fn property_get_adr(vm: &mut Vm, obj: &Obj, name: &str) -> Option<Value> {
     let s = sxe_of(obj)?;
     let node = get_node(vm, &s)?;
@@ -1206,6 +1215,8 @@ fn property_get_adr(vm: &mut Vm, obj: &Obj, name: &str) -> Option<Value> {
     // (created first, then the previous sxe->tmp is released)
     let old = s.tmp.replace(Some(v.clone()));
     drop(old);
+    // (`$sxe->new op= v` operates on sxe->tmp: nothing is written back)
+    vm.prop_ptr_temp = Some(release_tmp);
     Some(v)
 }
 
