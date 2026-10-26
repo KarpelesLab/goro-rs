@@ -8343,6 +8343,16 @@ impl Compiler {
                                     line: *method_line,
                                 });
                             }
+                            if *is_abstract && method_body.is_some() && !modifiers.is_interface {
+                                return Err(CompileError {
+                                    message: format!(
+                                        "Abstract function {}::{}() cannot contain body",
+                                        crate::string::msg_str(name),
+                                        crate::string::msg_str(method_name)
+                                    ),
+                                    line: *method_line,
+                                });
+                            }
                             // Enums cannot have abstract methods
                             if modifiers.is_enum && *is_abstract {
                                 return Err(CompileError {
