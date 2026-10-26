@@ -238,6 +238,12 @@ fn is_numeric_string(s: &[u8]) -> bool {
 /// php_charmask(): the bytes a trim() character list names ("a..z"
 /// ranges), with its warnings for malformed ranges.
 fn expand_charlist_warn(input: &[u8], vm: &mut Vm, func_name: &str) -> Vec<u8> {
+    let mask = charlist_mask(input, vm, func_name);
+    (0..=255u8).filter(|&b| mask[b as usize]).collect()
+}
+
+/// expand_charlist_warn() as a table of the bytes named.
+fn charlist_mask(input: &[u8], vm: &mut Vm, func_name: &str) -> [bool; 256] {
     let mut mask = [false; 256];
     let end = input.len();
     let mut i = 0;
@@ -265,29 +271,39 @@ fn expand_charlist_warn(input: &[u8], vm: &mut Vm, func_name: &str) -> Vec<u8> {
         }
         i += 1;
     }
-    (0..=255u8).filter(|&b| mask[b as usize]).collect()
+    mask
+}
+
+/// The string trim(), ltrim() and rtrim() take and the table of the bytes
+/// they strip (by default " \t\n\r\0\x0B").
+fn trim_args(vm: &mut Vm, args: &[Value], func_name: &str) -> (PhpString, [bool; 256]) {
+    let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
+    let mask = match args.get(1) {
+        Some(v) => {
+            let chars = vm.value_to_string(v);
+            charlist_mask(chars.as_bytes(), vm, func_name)
+        }
+        None => {
+            let mut mask = [false; 256];
+            for &b in b" \t\n\r\0\x0B" {
+                mask[b as usize] = true;
+            }
+            mask
+        }
+    };
+    (s, mask)
 }
 
 fn trim(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let first = args.first().unwrap_or(&Value::Null);
-    let s = vm.value_to_string(first);
-    let bytes = s.as_bytes().to_vec();
-    let chars = args
-        .get(1)
-        .map(|v| {
-            let s = vm.value_to_string(v);
-            expand_charlist_warn(s.as_bytes(), vm, "trim")
-        })
-        .unwrap_or_else(|| b" \t\n\r\0\x0B".to_vec());
-    let bytes = bytes.as_slice();
-
+    let (s, mask) = trim_args(vm, args, "trim");
+    let bytes = s.as_bytes();
     let start = bytes
         .iter()
-        .position(|b| !chars.contains(b))
+        .position(|&b| !mask[b as usize])
         .unwrap_or(bytes.len());
     let end = bytes
         .iter()
-        .rposition(|b| !chars.contains(b))
+        .rposition(|&b| !mask[b as usize])
         .map(|i| i + 1)
         .unwrap_or(start);
     Ok(Value::String(PhpString::from_vec(
@@ -296,39 +312,21 @@ fn trim(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn ltrim(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let first = args.first().unwrap_or(&Value::Null);
-    let s = vm.value_to_string(first);
-    let bytes = s.as_bytes().to_vec();
-    let chars = args
-        .get(1)
-        .map(|v| {
-            let s = vm.value_to_string(v);
-            expand_charlist_warn(s.as_bytes(), vm, "ltrim")
-        })
-        .unwrap_or_else(|| b" \t\n\r\0\x0B".to_vec());
-    let bytes = bytes.as_slice();
+    let (s, mask) = trim_args(vm, args, "ltrim");
+    let bytes = s.as_bytes();
     let start = bytes
         .iter()
-        .position(|b| !chars.contains(b))
+        .position(|&b| !mask[b as usize])
         .unwrap_or(bytes.len());
     Ok(Value::String(PhpString::from_vec(bytes[start..].to_vec())))
 }
 
 fn rtrim(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let first = args.first().unwrap_or(&Value::Null);
-    let s = vm.value_to_string(first);
-    let bytes = s.as_bytes().to_vec();
-    let chars = args
-        .get(1)
-        .map(|v| {
-            let s = vm.value_to_string(v);
-            expand_charlist_warn(s.as_bytes(), vm, "rtrim")
-        })
-        .unwrap_or_else(|| b" \t\n\r\0\x0B".to_vec());
-    let bytes = bytes.as_slice();
+    let (s, mask) = trim_args(vm, args, "rtrim");
+    let bytes = s.as_bytes();
     let end = bytes
         .iter()
-        .rposition(|b| !chars.contains(b))
+        .rposition(|&b| !mask[b as usize])
         .map(|i| i + 1)
         .unwrap_or(0);
     Ok(Value::String(PhpString::from_vec(bytes[..end].to_vec())))
@@ -456,13 +454,10 @@ fn strpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::False);
     }
 
-    for i in offset..=end {
-        if &h[i..i + n.len()] == n {
-            return Ok(Value::Long(i as i64));
-        }
-    }
-
-    Ok(Value::False)
+    Ok(match memchr::memmem::find(&h[offset..], n) {
+        Some(i) => Value::Long((offset + i) as i64),
+        None => Value::False,
+    })
 }
 
 fn str_contains(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -480,13 +475,11 @@ fn str_contains(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::False);
     }
 
-    for i in 0..=(h.len() - n.len()) {
-        if &h[i..i + n.len()] == n {
-            return Ok(Value::True);
-        }
-    }
-
-    Ok(Value::False)
+    Ok(if memchr::memmem::find(h, n).is_some() {
+        Value::True
+    } else {
+        Value::False
+    })
 }
 
 fn str_starts_with(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -582,6 +575,39 @@ fn str_repeat(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 /// One php_str_to_str_ex / php_str_to_str_i_ex / php_char_to_str_ex pass.
+/// `subject` with each occurrence of `needle` (from the left, not
+/// overlapping) replaced by `repl` (`ci`: ASCII case-insensitively),
+/// counted in `count`.
+fn str_replace_in(
+    subject: Vec<u8>,
+    needle: &[u8],
+    repl: &[u8],
+    ci: bool,
+    count: &mut i64,
+) -> Vec<u8> {
+    let n = needle.len();
+    if n == 0 || subject.len() < n {
+        return subject;
+    }
+    if ci {
+        return str_replace_once(&subject, needle, repl, ci, count);
+    }
+    let mut found = memchr::memmem::find_iter(&subject, needle).peekable();
+    if found.peek().is_none() {
+        return subject;
+    }
+    let mut out = Vec::with_capacity(subject.len());
+    let mut last = 0;
+    for at in found {
+        out.extend_from_slice(&subject[last..at]);
+        out.extend_from_slice(repl);
+        *count += 1;
+        last = at + n;
+    }
+    out.extend_from_slice(&subject[last..]);
+    out
+}
+
 fn str_replace_once(
     subject: &[u8],
     needle: &[u8],
@@ -719,32 +745,33 @@ fn php_str_replace_common(
         }
         match &search {
             StrOrArr::Str(needle) => {
-                let repl = match &replace {
-                    StrOrArr::Str(r) => r.clone(),
-                    _ => Vec::new(),
+                let repl: &[u8] = match &replace {
+                    StrOrArr::Str(r) => r,
+                    _ => &[],
                 };
-                str_replace_once(&subj, needle, &repl, ci, count)
+                str_replace_in(subj, needle, repl, ci, count)
             }
             StrOrArr::Arr(needles, _) => {
                 let mut cur = subj;
                 let mut ridx = 0usize;
                 for nv in needles {
                     let needle = crate::misc::sort_cmp_string(vm, nv);
-                    let repl: Vec<u8> = match &replace {
-                        StrOrArr::Str(r) => r.clone(),
+                    let from_array;
+                    let repl: &[u8] = match &replace {
+                        StrOrArr::Str(r) => r,
                         StrOrArr::Arr(rs, _) => {
-                            let r = match rs.get(ridx) {
+                            from_array = match rs.get(ridx) {
                                 Some(rv) => crate::misc::sort_cmp_string(vm, rv),
                                 None => Vec::new(),
                             };
                             ridx += 1;
-                            r
+                            &from_array
                         }
                     };
                     if needle.is_empty() {
                         continue;
                     }
-                    cur = str_replace_once(&cur, &needle, &repl, ci, count);
+                    cur = str_replace_in(cur, &needle, repl, ci, count);
                     if cur.is_empty() {
                         break;
                     }
