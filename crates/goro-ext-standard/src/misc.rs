@@ -6486,6 +6486,14 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 return Ok(Value::False);
             }
+            // incomplete_class_get_method(): an Error.
+            if cn_lower == b"__php_incomplete_class" {
+                drop(obj);
+                if let Value::Object(o) = class_or_obj {
+                    crate::serialize::incomplete_method_error(vm, o);
+                }
+                return Ok(Value::False);
+            }
             obj.class_name
                 .iter()
                 .map(|c| c.to_ascii_lowercase())
@@ -19640,6 +19648,15 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // Extension-provided property handlers (has_property with ZEND_PROPERTY_EXISTS)
     if let Value::Object(obj) = obj_or_class {
+        // incomplete_class_has_property(): warns, false.
+        if obj
+            .borrow()
+            .class_name
+            .eq_ignore_ascii_case(b"__PHP_Incomplete_Class")
+        {
+            crate::serialize::incomplete_prop_warning(vm, obj, "property_exists");
+            return Ok(Value::False);
+        }
         if let Some(r) = vm.native_prop_read(obj, prop_bytes) {
             return Ok(if r.is_some() {
                 Value::True

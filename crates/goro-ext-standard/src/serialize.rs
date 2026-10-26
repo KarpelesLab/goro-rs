@@ -907,9 +907,20 @@ impl Serializer {
             display.clone()
         };
         let mut skip_magic = incomplete;
-        let items: Vec<(Vec<u8>, Value)> = props
+        let props: Vec<_> = props
             .into_iter()
             .filter(|e| !matches!(e.value, Value::Undef))
+            .collect();
+        // php_var_serialize_intern(): an incomplete object's count is one
+        // less (for the magic member, present or not); none written at 0.
+        let count = if incomplete {
+            props.len().saturating_sub(1)
+        } else {
+            props.len()
+        };
+        let items: Vec<(Vec<u8>, Value)> = props
+            .into_iter()
+            .filter(|_| count > 0)
             .filter(|e| {
                 if skip_magic && e.php_key == MAGIC_MEMBER {
                     skip_magic = false;
@@ -925,7 +936,7 @@ impl Serializer {
             .collect();
         push_class_name(&mut self.buf, &out_name);
         self.buf
-            .extend_from_slice(format!("{}:{{", items.len()).as_bytes());
+            .extend_from_slice(format!("{}:{{", count).as_bytes());
         for (k, item) in &items {
             push_str(&mut self.buf, k);
             self.serialize(vm, item, false);
@@ -3053,6 +3064,21 @@ fn incomplete_class_msg(what: &str, class: &str) -> String {
         "The script tried to {} on an incomplete object. Please ensure that the class definition \"{}\" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition",
         what, class
     )
+}
+
+/// The warning of a property access on an incomplete object, from the
+/// active function `func`.
+pub(crate) fn incomplete_prop_warning(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, func: &str) {
+    let msg = incomplete_class_msg("access a property", &incomplete_class_name(obj));
+    let line = vm.current_line;
+    vm.emit_warning_at(&format!("{}(): {}", func, msg), line);
+}
+
+/// incomplete_class_get_method(): the Error of a method lookup.
+pub(crate) fn incomplete_method_error(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>) {
+    let msg = incomplete_class_msg("call a method", &incomplete_class_name(obj));
+    let exc = vm.create_exception(b"Error", &msg, vm.current_line);
+    vm.current_exception = Some(exc);
 }
 
 /// incomplete_class_get_property() / has_property(): every access warns.
