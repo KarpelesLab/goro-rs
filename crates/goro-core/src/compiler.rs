@@ -8957,6 +8957,29 @@ impl Compiler {
                                             } else {
                                                 Value::Null
                                             };
+                                            if let Some(message) = Self::hook_body_presence_error(
+                                                false,
+                                                false,
+                                                param
+                                                    .get_hook
+                                                    .is_some()
+                                                    .then_some(param.get_hook_abstract),
+                                                param
+                                                    .set_hook
+                                                    .is_some()
+                                                    .then_some(param.set_hook_abstract),
+                                            ) {
+                                                let hl = param.hook_attrs.lines[!(param
+                                                    .get_hook
+                                                    .is_some()
+                                                    && param.get_hook_abstract)
+                                                    as usize]
+                                                    .0;
+                                                return Err(CompileError {
+                                                    message: message.to_string(),
+                                                    line: if hl > 0 { hl } else { param.line },
+                                                });
+                                            }
                                             let prom_has_get_hook = param.get_hook.is_some();
                                             let prom_has_set_hook = param.set_hook.is_some();
                                             // Determine if promoted property with hooks is virtual
