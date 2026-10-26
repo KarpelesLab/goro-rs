@@ -745,6 +745,7 @@ fn verify(
     indata: Option<&[u8]>,
     flags: i64,
     cms: bool,
+    written: &mut Option<Vec<u8>>,
 ) -> Option<(Vec<u8>, Vec<Rc<Cert>>)> {
     let lib = if cms { err::LIB_CMS } else { err::LIB_PKCS7 };
     let content: Vec<u8> = match (&sd.content, indata) {
@@ -796,6 +797,22 @@ fn verify(
             }
         }
     }
+    let text_out = |content: &[u8]| -> Option<Vec<u8>> {
+        if flags & F_TEXT != 0 {
+            match smime_text(content) {
+                Some(t) => Some(t),
+                None => {
+                    err::push(lib, r(cms, 129, 140), "smime text error");
+                    None
+                }
+            }
+        } else {
+            Some(content.to_vec())
+        }
+    };
+    if !cms {
+        *written = Some(text_out(&content)?);
+    }
     if flags & F_NOSIGS == 0 {
         for (si, c) in sd.signers.iter().zip(signers.iter()) {
             let Some(md) = Md::by_name(&si.digest_oid) else {
@@ -816,7 +833,9 @@ fn verify(
                         if cms {
                             err::push(lib, 158, "verification failure");
                         } else {
+                            // PKCS7_signatureVerify(), then PKCS7_verify()
                             err::push(lib, 101, "digest failure");
+                            err::push(lib, 105, "signature failure");
                         }
                         return None;
                     }
@@ -830,21 +849,15 @@ fn verify(
                     err::push(lib, 158, "verification failure");
                 } else {
                     err::push(lib, 105, "signature failure");
+                    err::push(lib, 105, "signature failure");
                 }
                 return None;
             }
         }
     }
-    let out = if flags & F_TEXT != 0 {
-        match smime_text(&content) {
-            Some(t) => t,
-            None => {
-                err::push(lib, r(cms, 129, 140), "smime text error");
-                return None;
-            }
-        }
-    } else {
-        content
+    let out = match written.take() {
+        Some(o) => o,
+        None => text_out(&content)?,
     };
     Some((out, signers))
 }
@@ -897,7 +910,13 @@ fn encrypt(
     let mut ris = Vec::new();
     for c in certs {
         let Some(PKey::Rsa(r)) = c.public_key() else {
-            err::push(lib, r(cms, 111, 154), "unsupported recipient type");
+            if cms {
+                err::push(lib, 154, "unsupported recipient type");
+            } else {
+                // pkcs7_encode_rinfo(), then PKCS7_add_recipient()
+                err::push(lib, 150, "encryption not supported for this key type");
+                err::push(lib, 120, "error adding recipient");
+            }
             return None;
         };
         let ek = r.encrypt(&key, RSA_PKCS1_PADDING, Md::Sha1)?;
@@ -1016,7 +1035,13 @@ fn decrypt(der: &[u8], key: &PKey, cert: &Cert, cms: bool) -> Option<Vec<u8>> {
     let ris = c.get(i)?.children()?;
     let eci = c.get(i + 1)?.children()?;
     let PKey::Rsa(rsa) = key else {
-        err::push(lib, r(cms, 111, 154), "unsupported recipient type");
+        if cms {
+            err::push(lib, 154, "unsupported recipient type");
+        } else {
+            // EVP_PKEY_decrypt_init() on a key that cannot decrypt
+            err::push(err::LIB_EVP, 150, "operation not supported for this keytype");
+            err::push(lib, 119, "decrypt error");
+        }
         return None;
     };
     let mut cek: Option<Vec<u8>> = None;
@@ -1273,7 +1298,15 @@ pub fn openssl_pkcs7_verify(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
             None => return Ok(Value::Long(-1)),
         }
     }
-    match verify(&sd, &others, &store, datain.as_deref(), flags, false) {
+    let mut written = None;
+    let res = verify(&sd, &others, &store, datain.as_deref(), flags, false, &mut written);
+    if res.is_none() {
+        // the content went out before the signatures were checked
+        if let (Some(p), Some(w)) = (&dataout, &written) {
+            let _ = std::fs::write(p, w);
+        }
+    }
+    match res {
         Some((content, signers)) => {
             let mut ret = Value::True;
             if let Some(p) = &dataout {
@@ -1391,6 +1424,10 @@ pub fn openssl_pkcs7_encrypt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
 pub fn openssl_pkcs7_read(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let f = "openssl_pkcs7_read";
     let data = zpp::str(vm, args, 0, f, "data")?;
+    if data.is_empty() {
+        // BIO_write() of nothing fails before any parsing
+        return Ok(Value::False);
+    }
     let Some(block) = asn1::pem_find(data.as_bytes(), &["PKCS7", "PKCS #7 SIGNED DATA"]) else {
         err::pem_no_start_line();
         return Ok(Value::False);
@@ -1493,7 +1530,19 @@ fn sign_common(vm: &mut Vm, args: &[Value], f: &str, cms: bool) -> Result<Value,
     };
     // PKCS7_sign() always produces a detachable structure; SMIME output of
     // a detached signature embeds the content as the first MIME part.
-    let Some((ci, md)) = sign(&cert, &key, &others, &input, flags) else {
+    // PKCS7_add_signature()/CMS_add1_signer() check the key first.
+    let key_ok = x509::check_private_key(&cert.spki, &key);
+    if !key_ok {
+        if cms {
+            err::push(err::LIB_CMS, 136, "private key does not match certificate");
+            err::push(err::LIB_CMS, 99, "add signer error");
+        } else {
+            err::push(err::LIB_PKCS7, 127, "private key does not match certificate");
+            err::push(err::LIB_PKCS7, 153, "pkcs7 add signer error");
+        }
+    }
+    let signed = if key_ok { sign(&cert, &key, &others, &input, flags) } else { None };
+    let Some((ci, md)) = signed else {
         let kind = if cms { "CMS" } else { "PKCS7" };
         vm.emit_warning(&format!("{}(): Error creating {} structure!", f, kind));
         return Ok(Value::False);
@@ -1799,7 +1848,7 @@ pub fn openssl_cms_verify(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
         err::push(err::LIB_CMS, 108, "content type not signed data");
         return Ok(Value::False);
     };
-    match verify(&sd, &others, &store, datain.as_deref(), flags, true) {
+    match verify(&sd, &others, &store, datain.as_deref(), flags, true, &mut None) {
         Some((content, signers)) => {
             let mut ret = Value::True;
             if let Some(p) = &dataout {
