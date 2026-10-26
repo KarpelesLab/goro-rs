@@ -166,6 +166,10 @@ impl Vm {
     /// Turn pending builtin frames into `call_stack` entries (all of them, or
     /// all but the innermost one, e.g. for debug_backtrace() itself).
     pub fn materialize_builtin_frames(&mut self, skip_top: bool) {
+        // (the frames of the lean callees below them first)
+        if self.lean_lazy.is_some() {
+            self.materialize_lazy_lean();
+        }
         let n = self.builtin_frames.len().saturating_sub(skip_top as usize);
         let first = self.builtin_frames[..n]
             .iter()
@@ -310,14 +314,36 @@ impl Vm {
     /// Whether sync_builtin_frames() has nothing to do.
     #[inline]
     pub(crate) fn builtin_frames_synced(&self) -> bool {
-        !self.builtin_frames.last().is_some_and(|f| !f.materialized)
+        self.lean_lazy.is_none() && !self.builtin_frames.last().is_some_and(|f| !f.materialized)
     }
 
-    /// Materialize pending builtin frames if there are any (cheap check).
+    /// Materialize pending builtin frames if there are any (cheap check),
+    /// and the frames of lean callees a builtin call left out (see
+    /// builtincall::LazyLean).
     #[inline]
     pub fn sync_builtin_frames(&mut self) {
-        if self.builtin_frames.last().is_some_and(|f| !f.materialized) {
+        if self.lean_lazy.is_some() || self.builtin_frames.last().is_some_and(|f| !f.materialized) {
             self.materialize_builtin_frames(false);
+        }
+    }
+
+    /// materialize_lazy_lean(): the CV frames pushed since the call started
+    /// go back above the lean callees' (their call_stack frames moved up
+    /// by `pushed`).
+    pub(crate) fn shift_cv_frames(&mut self, above: Vec<CvFrame>, pushed: usize) {
+        for mut f in above {
+            f.depth += pushed;
+            self.cv_frames.push(f);
+        }
+    }
+
+    /// materialize_lazy_lean(): the builtin frames located at call_stack
+    /// index `from` or above move up by `pushed`.
+    pub(crate) fn shift_builtin_frames(&mut self, from: usize, pushed: usize) {
+        for f in self.builtin_frames.iter_mut() {
+            if f.depth >= from {
+                f.depth += pushed;
+            }
         }
     }
 

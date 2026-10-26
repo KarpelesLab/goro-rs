@@ -1595,6 +1595,14 @@ pub struct Vm {
     /// How many of lean_frames (the outermost) have their frames (see
     /// enter_lean_frames).
     pub(crate) lean_framed: u32,
+    /// A builtin that looks at no frame is called by the innermost lean
+    /// callee, which has not been given its frames for it (see
+    /// builtincall::LazyLean): they are made once something looks at the
+    /// stack (sync_builtin_frames()).
+    pub(crate) lean_lazy: Option<builtincall::LazyLean>,
+    /// What enter_lean_frames() changed for the frames made so (see
+    /// lean_lazy), innermost last.
+    pub(crate) lean_lazy_saved: Vec<builtincall::LeanFramesSaved>,
     /// Lean calls running (their callees' opcodes in run_fast_ops()).
     pub(crate) lean_depth: u32,
     /// Emptied buffers of finished calls (locals, temporaries, backtrace
@@ -2224,6 +2232,8 @@ impl Vm {
             lean_frames: Vec::new(),
             lean_frames_pool: Vec::new(),
             lean_framed: 0,
+            lean_lazy: None,
+            lean_lazy_saved: Vec::new(),
             lean_depth: 0,
             value_pool: Vec::new(),
             foreach_pool: Vec::new(),

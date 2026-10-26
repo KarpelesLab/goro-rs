@@ -42,9 +42,120 @@ pub(crate) struct BuiltinDesc {
     /// compiled_special() of a call with N arguments: bit N (N < 3);
     /// SPECIAL_ALWAYS: every call (the in_array() opcode's builtin).
     special: u8,
+    /// One of FRAMELESS: called by a lean callee, it runs without the
+    /// callee's frames until something looks at the stack (see LazyLean).
+    pub(crate) frameless: bool,
 }
 
 const SPECIAL_ALWAYS: u8 = 0x80;
+
+/// Builtins that look at no frame of their caller themselves (its
+/// backtrace frame, variables, scope or called class; nothing but the
+/// current file and line): what they raise, and the user code they may
+/// run (__toString(), jsonSerialize(), destructors, error handlers), sees
+/// the stack once sync_builtin_frames() made it (see LazyLean). None takes
+/// a callback.
+const FRAMELESS: &[&[u8]] = &[
+    b"abs",
+    b"addslashes",
+    b"array_combine",
+    b"array_diff",
+    b"array_diff_key",
+    b"array_fill",
+    b"array_fill_keys",
+    b"array_flip",
+    b"array_intersect",
+    b"array_intersect_key",
+    b"array_is_list",
+    b"array_key_exists",
+    b"array_key_first",
+    b"array_key_last",
+    b"array_keys",
+    b"array_merge",
+    b"array_pop",
+    b"array_push",
+    b"array_replace",
+    b"array_reverse",
+    b"array_search",
+    b"array_shift",
+    b"array_slice",
+    b"array_unique",
+    b"array_unshift",
+    b"array_values",
+    b"basename",
+    b"ceil",
+    b"chr",
+    b"count",
+    b"current",
+    b"dirname",
+    b"end",
+    b"explode",
+    b"floor",
+    b"htmlspecialchars",
+    b"implode",
+    b"in_array",
+    b"intval",
+    b"is_array",
+    b"is_bool",
+    b"is_float",
+    b"is_int",
+    b"is_null",
+    b"is_numeric",
+    b"is_object",
+    b"is_scalar",
+    b"is_string",
+    b"join",
+    b"json_encode",
+    b"key",
+    b"key_exists",
+    b"lcfirst",
+    b"ltrim",
+    b"max",
+    b"mb_check_encoding",
+    b"md5",
+    b"min",
+    b"next",
+    b"number_format",
+    b"ord",
+    b"parse_url",
+    b"preg_match",
+    b"preg_match_all",
+    b"preg_quote",
+    b"preg_replace",
+    b"preg_split",
+    b"rawurlencode",
+    b"reset",
+    b"round",
+    b"rtrim",
+    b"sprintf",
+    b"str_contains",
+    b"str_ends_with",
+    b"str_pad",
+    b"str_repeat",
+    b"str_replace",
+    b"str_split",
+    b"str_starts_with",
+    b"strcspn",
+    b"strip_tags",
+    b"stripos",
+    b"stripslashes",
+    b"strlen",
+    b"strpos",
+    b"strrpos",
+    b"strspn",
+    b"strtolower",
+    b"strtoupper",
+    b"strtr",
+    b"strval",
+    b"substr",
+    b"substr_count",
+    b"trim",
+    b"ucfirst",
+    b"ucwords",
+    b"urlencode",
+    b"vsprintf",
+    b"wordwrap",
+];
 
 impl BuiltinDesc {
     /// The BuiltinDesc of builtin `func` by the lowercase name `lower`,
@@ -90,6 +201,7 @@ impl BuiltinDesc {
                 zpp,
                 lower: Box::leak(lower.to_vec().into_boxed_slice()),
                 special,
+                frameless: FRAMELESS.contains(&lower),
             }));
             list.push(desc);
             desc
@@ -130,6 +242,19 @@ pub(crate) struct LeanFramesSaved {
     saved_file: Option<crate::rcstr::RcStr>,
     was_global: bool,
     lean_depth: u32,
+}
+
+/// A FRAMELESS builtin called by the innermost running lean callee (see
+/// lean_builtin_dofcall) without the frames enter_lean_frames() gives
+/// the lean callees for a call: they are made, where they would have
+/// been, once something looks at the stack while the builtin runs (see
+/// Vm::materialize_lazy_lean, called by sync_builtin_frames()).
+pub(crate) struct LazyLean {
+    /// The callee's code (the innermost LeanFrame's).
+    op_array: *const OpArray,
+    /// The lengths of call_stack, cv_frames and gc_frames as the call
+    /// started (where the frames go).
+    at: (usize, usize, usize),
 }
 
 /// Where a running lean callee's frames (see enter_lean_frames) are: the
@@ -562,10 +687,101 @@ impl Vm {
         if !self.builtin_dofcall_ok(op_array, ip, tmps, free_mask) {
             return None;
         }
+        if self.lean_lazy.is_none()
+            && self
+                .pending_calls
+                .last()
+                .and_then(|c| c.target.builtin)
+                .is_some_and(|d| d.frameless)
+        {
+            return self.lazy_builtin_dofcall(op_array, ip, tmps, free_mask);
+        }
         let saved = self.enter_lean_frames(op_array)?;
         let r = self.fast_builtin_dofcall(op_array, ip, tmps, false, free_mask);
         self.leave_lean_frames(saved);
         r
+    }
+
+    /// lean_builtin_dofcall() of a FRAMELESS builtin: the lean callees
+    /// get their frames only if something looks at the stack while it
+    /// runs (see LazyLean); what enter_lean_frames() changes that the
+    /// builtin may see (the current file, the running code's frames) is
+    /// set as it would set it.
+    #[inline(never)]
+    fn lazy_builtin_dofcall(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        tmps: &mut [Value],
+        free_mask: &[u8],
+    ) -> Option<bool> {
+        // (what enter_lean_frames() needs)
+        let n = self.lean_frames.len();
+        if n == 0
+            || n != self.lean_depth as usize
+            || !std::ptr::eq(self.lean_frames[n - 1].f, op_array)
+        {
+            return None;
+        }
+        let at = (
+            self.call_stack.len(),
+            self.cv_frames.len(),
+            self.gc_frames.len(),
+        );
+        let outer_exec = std::mem::replace(&mut self.exec_frame_len, at.0);
+        let saved_file = self.enter_op_array_file(op_array);
+        let was_global = std::mem::replace(&mut self.is_global_scope, false);
+        self.lean_lazy = Some(LazyLean { op_array, at });
+        let r = self.fast_builtin_dofcall(op_array, ip, tmps, false, free_mask);
+        // (the frames were made: the callees keep them, as after
+        // enter_lean_frames())
+        if self.lean_lazy.take().is_none() {
+            if let Some(s) = self.lean_lazy_saved.pop() {
+                self.leave_lean_frames(s);
+            }
+        }
+        self.is_global_scope = was_global;
+        self.leave_op_array_file(saved_file);
+        self.exec_frame_len = outer_exec;
+        r
+    }
+
+    /// The frames a LazyLean call left out are made (as enter_lean_frames()
+    /// makes them, where it would have: below what was pushed since the
+    /// call started).
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn materialize_lazy_lean(&mut self) {
+        let Some(lz) = self.lean_lazy.take() else {
+            return;
+        };
+        let (c, v, g) = lz.at;
+        let above_c = if self.call_stack.len() > c {
+            self.call_stack.split_off(c)
+        } else {
+            Vec::new()
+        };
+        let above_v = if self.cv_frames.len() > v {
+            self.cv_frames.split_off(v)
+        } else {
+            Vec::new()
+        };
+        let above_g = if self.gc_frames.len() > g {
+            self.gc_frames.split_off(g)
+        } else {
+            Vec::new()
+        };
+        // SAFETY: the callee is running (the builtin call it made is).
+        let op_array = unsafe { &*lz.op_array };
+        let saved = self.enter_lean_frames(op_array);
+        let pushed = self.call_stack.len() - c;
+        self.call_stack.extend(above_c);
+        self.shift_cv_frames(above_v, pushed);
+        self.gc_frames.extend(above_g);
+        self.shift_builtin_frames(c, pushed);
+        if let Some(s) = saved {
+            self.lean_lazy_saved.push(s);
+        }
     }
 
     /// For a call the callee of the running lean calls makes (`op_array`,
