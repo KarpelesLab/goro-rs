@@ -50,7 +50,7 @@ pub struct Pce {
 }
 
 thread_local! {
-    static PCRE_CACHE: RefCell<HashMap<Vec<u8>, Rc<Pce>>> = RefCell::new(HashMap::new());
+    static PCRE_CACHE: RefCell<goro_core::fxhash::FxHashMap<Vec<u8>, Rc<Pce>>> = Default::default();
     /// Character tables per LC_CTYPE locale (the char_tables hash).
     static CHAR_TABLES: RefCell<HashMap<Vec<u8>, &'static [u8]>> = RefCell::new(HashMap::new());
 }
@@ -153,40 +153,42 @@ fn ini_strtol(v: &Value) -> i64 {
         Value::True => 1,
         Value::False | Value::Null | Value::Undef => 0,
         Value::Double(d) => *d as i64,
-        other => {
-            let s = other.to_php_string();
-            let b = s.as_bytes();
-            let mut i = 0;
-            while i < b.len() && c_isspace(b[i]) {
-                i += 1;
-            }
-            let mut neg = false;
-            if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
-                neg = b[i] == b'-';
-                i += 1;
-            }
-            let mut n: i64 = 0;
-            let mut overflow = false;
-            while i < b.len() && b[i].is_ascii_digit() {
-                let d = (b[i] - b'0') as i64;
-                match n.checked_mul(10).and_then(|x| {
-                    if neg {
-                        x.checked_sub(d)
-                    } else {
-                        x.checked_add(d)
-                    }
-                }) {
-                    Some(x) => n = x,
-                    None => overflow = true,
-                }
-                i += 1;
-            }
-            if overflow {
-                if neg { i64::MIN } else { i64::MAX }
+        Value::String(s) => strtol_bytes(s.as_bytes()),
+        other => strtol_bytes(other.to_php_string().as_bytes()),
+    }
+}
+
+/// ZEND_STRTOL(s, NULL, 10).
+fn strtol_bytes(b: &[u8]) -> i64 {
+    let mut i = 0;
+    while i < b.len() && c_isspace(b[i]) {
+        i += 1;
+    }
+    let mut neg = false;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        neg = b[i] == b'-';
+        i += 1;
+    }
+    let mut n: i64 = 0;
+    let mut overflow = false;
+    while i < b.len() && b[i].is_ascii_digit() {
+        let d = (b[i] - b'0') as i64;
+        match n.checked_mul(10).and_then(|x| {
+            if neg {
+                x.checked_sub(d)
             } else {
-                n
+                x.checked_add(d)
             }
+        }) {
+            Some(x) => n = x,
+            None => overflow = true,
         }
+        i += 1;
+    }
+    if overflow {
+        if neg { i64::MIN } else { i64::MAX }
+    } else {
+        n
     }
 }
 
@@ -230,15 +232,15 @@ fn make_subpats_table(re: &Code, num_subpats: usize) -> Vec<Option<PhpString>> {
 /// PHP pattern with delimiters and modifiers. Emits the PHP warnings.
 pub fn get_compiled_regex(vm: &mut Vm, regex: &[u8], fname: &str) -> Option<Rc<Pce>> {
     let ctype = ctype_string();
-    let key: Vec<u8> = match &ctype {
+    let with_ctype: Vec<u8>;
+    let key: &[u8] = match &ctype {
         Some(c) => {
-            let mut k = c.clone();
-            k.extend_from_slice(regex);
-            k
+            with_ctype = [c.as_slice(), regex].concat();
+            &with_ctype
         }
-        None => regex.to_vec(),
+        None => regex,
     };
-    if let Some(p) = PCRE_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+    if let Some(p) = PCRE_CACHE.with(|c| c.borrow().get(key).cloned()) {
         return Some(p);
     }
     let end = regex.len();
@@ -389,7 +391,7 @@ pub fn get_compiled_regex(vm: &mut Vm, regex: &[u8], fname: &str) -> Option<Rc<P
                 c.remove(&k);
             }
         }
-        c.insert(key, pce.clone());
+        c.insert(key.to_vec(), pce.clone());
     });
     Some(pce)
 }
