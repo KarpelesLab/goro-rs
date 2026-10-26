@@ -5933,6 +5933,27 @@ pub fn reflection_method_method(
                 _ => {}
             }
         }
+        // Closure::fromCallable() of a __call()/__callStatic() trampoline:
+        // its __invoke() has the trampoline's (empty) arginfo.
+        if fn_lower.starts_with(b"__closure_fcc_tramp_")
+            && !fn_lower.starts_with(b"__closure_fcc_tramp_ip_")
+            && !fn_lower.starts_with(b"__closure_fcc_tramp_sp_")
+        {
+            match method {
+                b"getnumberofparameters" | b"getnumberofrequiredparameters" => {
+                    return Some(Value::Long(0));
+                }
+                b"getparameters" => {
+                    return Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                }
+                b"__tostring" => {
+                    return Some(Value::String(PhpString::from_string(
+                        "Method [ <internal> public method __invoke ] {\n}\n".to_string(),
+                    )));
+                }
+                _ => {}
+            }
+        }
         match method {
             // (ZEND_ACC_DEPRECATED is kept from the closure's function)
             b"isdeprecated" => {
