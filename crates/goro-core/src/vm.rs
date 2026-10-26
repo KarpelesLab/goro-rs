@@ -8019,11 +8019,15 @@ impl Vm {
             Value::String(s) => match crate::value::parse_numeric_str(s.as_bytes(), true) {
                 Some((crate::value::NumStr::Long(n), _)) => n,
                 Some((crate::value::NumStr::Double(d), _)) => {
-                    let l = if d.is_nan() { 0 } else { d as i64 };
+                    // zend_dval_to_lval_cap(): non-finite gives 0
+                    let l = if !d.is_finite() { 0 } else { d as i64 };
                     if !d.is_finite() || (l as f64) != d {
+                        // (printed with %s: stops at a NUL byte)
+                        let b = s.as_bytes();
+                        let b = &b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())];
                         let msg = format!(
                             "Implicit conversion from float-string \"{}\" to int loses precision",
-                            s.to_msg_string()
+                            crate::string::PhpString::from_bytes(b).to_msg_string()
                         );
                         self.emit_deprecated(&msg);
                     }
