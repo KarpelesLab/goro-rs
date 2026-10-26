@@ -454,7 +454,7 @@ fn strpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::False);
     }
 
-    Ok(match memchr::memmem::find(&h[offset..], n) {
+    Ok(match find_bytes(&h[offset..], n) {
         Some(i) => Value::Long((offset + i) as i64),
         None => Value::False,
     })
@@ -475,7 +475,7 @@ fn str_contains(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::False);
     }
 
-    Ok(if memchr::memmem::find(h, n).is_some() {
+    Ok(if find_bytes(h, n).is_some() {
         Value::True
     } else {
         Value::False
@@ -574,10 +574,37 @@ fn str_repeat(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(repeated)))
 }
 
-/// One php_str_to_str_ex / php_str_to_str_i_ex / php_char_to_str_ex pass.
-/// `subject` with each occurrence of `needle` (from the left, not
-/// overlapping) replaced by `repl` (`ci`: ASCII case-insensitively),
-/// counted in `count`.
+/// The position of the first occurrence of `needle` in `haystack`
+/// (zend_memnstr()): the needle's first byte found with memchr, the rest
+/// compared; a long haystack is searched with memchr::memmem (whose
+/// searcher costs more to set up than a short one takes to scan).
+pub(crate) fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    let (&first, rest) = match needle.split_first() {
+        Some(s) => s,
+        None => return Some(0),
+    };
+    if rest.is_empty() {
+        return memchr::memchr(first, haystack);
+    }
+    let last = haystack.len().checked_sub(needle.len())?;
+    if haystack.len() >= 1024 {
+        return memchr::memmem::find(haystack, needle);
+    }
+    let mut i = 0;
+    while i <= last {
+        let at = i + memchr::memchr(first, &haystack[i..=last])?;
+        if &haystack[at + 1..at + needle.len()] == rest {
+            return Some(at);
+        }
+        i = at + 1;
+    }
+    None
+}
+
+/// One php_str_to_str_ex / php_char_to_str_ex pass (php_str_to_str_i_ex
+/// when `ci`: ASCII case-insensitively): `subject` with each occurrence of
+/// `needle` (from the left, not overlapping) replaced by `repl`, counted
+/// in `count`.
 fn str_replace_in(
     subject: Vec<u8>,
     needle: &[u8],
@@ -592,22 +619,26 @@ fn str_replace_in(
     if ci {
         return str_replace_once(&subject, needle, repl, ci, count);
     }
-    let mut found = memchr::memmem::find_iter(&subject, needle).peekable();
-    if found.peek().is_none() {
+    let Some(mut at) = find_bytes(&subject, needle) else {
         return subject;
-    }
+    };
     let mut out = Vec::with_capacity(subject.len());
     let mut last = 0;
-    for at in found {
+    loop {
         out.extend_from_slice(&subject[last..at]);
         out.extend_from_slice(repl);
         *count += 1;
         last = at + n;
+        match find_bytes(&subject[last..], needle) {
+            Some(i) => at = last + i,
+            None => break,
+        }
     }
     out.extend_from_slice(&subject[last..]);
     out
 }
 
+/// One php_str_to_str_ex / php_str_to_str_i_ex / php_char_to_str_ex pass.
 fn str_replace_once(
     subject: &[u8],
     needle: &[u8],
@@ -1006,10 +1037,23 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
 
     // php_implode()
     let values: Vec<Value> = arr.borrow().values().cloned().collect();
-    let mut result = Vec::new();
+    // (room for the strings, the others' text made as they come)
+    let cap = values
+        .iter()
+        .map(|v| match v {
+            Value::String(s) => s.len(),
+            _ => 0,
+        })
+        .sum::<usize>()
+        + glue.len() * values.len().saturating_sub(1);
+    let mut result = Vec::with_capacity(cap);
     for (i, v) in values.iter().enumerate() {
         if i > 0 {
             result.extend_from_slice(glue.as_bytes());
+        }
+        if let Value::String(s) = v {
+            result.extend_from_slice(s.as_bytes());
+            continue;
         }
         let v = v.deref();
         if matches!(v, Value::Array(_)) {
