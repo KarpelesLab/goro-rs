@@ -28740,7 +28740,19 @@ impl Vm {
                                                     && !(cl == b"closure" && ml == b"__invoke")
                                                     && self.internal_method_of(&cl, &ml).is_none()
                                             }
-                                            None => cl == b"stdclass",
+                                            // (an internal class: its stub's methods)
+                                            None => {
+                                                cl == b"stdclass"
+                                                    || !(cl == b"closure" && ml == b"__invoke")
+                                                        && crate::stubs::find_class_lower(&cl)
+                                                            .is_some()
+                                                        && self
+                                                            .internal_method_of(&cl, &ml)
+                                                            .is_none()
+                                                        && self
+                                                            .internal_method_of(&cl, b"__call")
+                                                            .is_none()
+                                            }
                                         };
                                         if missing {
                                             Some((
@@ -28854,6 +28866,40 @@ impl Vm {
                                                     String::from_utf8_lossy(m.as_bytes())
                                                 ),
                                             ))
+                                        } else if let Some(sc) = crate::stubs::find_class_lower(&cl) {
+                                            // (an internal class: its stub's methods)
+                                            use crate::stubs::{F_ABSTRACT, F_STATIC};
+                                            let ml = m.as_bytes().to_ascii_lowercase();
+                                            match self.internal_method_of(&cl, &ml) {
+                                                None if self
+                                                    .internal_method_of(&cl, b"__callstatic")
+                                                    .is_none() =>
+                                                {
+                                                    Some((
+                                                        b"Error",
+                                                        format!(
+                                                            "Call to undefined method {}::{}()",
+                                                            sc.name,
+                                                            String::from_utf8_lossy(m.as_bytes())
+                                                        ),
+                                                    ))
+                                                }
+                                                Some((dc, f)) if f.flags & F_ABSTRACT != 0 => Some((
+                                                    b"Error",
+                                                    format!(
+                                                        "Cannot call abstract method {}::{}()",
+                                                        dc.name, f.name
+                                                    ),
+                                                )),
+                                                Some((dc, f)) if f.flags & F_STATIC == 0 => Some((
+                                                    b"Error",
+                                                    format!(
+                                                        "Non-static method {}::{}() cannot be called statically",
+                                                        dc.name, f.name
+                                                    ),
+                                                )),
+                                                _ => None,
+                                            }
                                         } else {
                                             None
                                         }
