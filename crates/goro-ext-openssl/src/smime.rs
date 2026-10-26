@@ -891,6 +891,150 @@ fn cipher_params(spec: &CipherSpec, iv: &[u8]) -> Vec<u8> {
     }
 }
 
+const OID_EC_PUBKEY: &str = "1.2.840.10045.2.1";
+/// dhSinglePass-stdDH-sha1kdf-scheme, what CMS_encrypt() picks for ECDH.
+const OID_ECDH_STD_SHA1KDF: &str = "1.3.133.16.840.63.0.2";
+
+/// The X9.63 KDF digest of an ECDH key agreement algorithm (std or
+/// cofactor DH; the curves at hand have cofactor 1).
+fn kari_kdf_md(oid: &str) -> Option<Md> {
+    Some(match oid {
+        "1.3.133.16.840.63.0.2" | "1.3.133.16.840.63.0.3" => Md::Sha1,
+        "1.3.132.1.11.0" | "1.3.132.1.14.0" => Md::Sha224,
+        "1.3.132.1.11.1" | "1.3.132.1.14.1" => Md::Sha256,
+        "1.3.132.1.11.2" | "1.3.132.1.14.2" => Md::Sha384,
+        "1.3.132.1.11.3" | "1.3.132.1.14.3" => Md::Sha512,
+        _ => return None,
+    })
+}
+
+/// AES key wrap (RFC 3394, default IV) with a KEK of 16/24/32 bytes.
+fn aes_key_wrap(kek: &[u8], data: &[u8], enc: bool) -> Option<Vec<u8>> {
+    let name = match kek.len() {
+        16 => "id-aes128-wrap",
+        24 => "id-aes192-wrap",
+        32 => "id-aes256-wrap",
+        _ => return None,
+    };
+    let op = cipher::Op {
+        spec: cipher::by_name(name)?,
+        key: kek,
+        iv: &[0xA6; 8],
+        enc,
+        padding: false,
+        aad: &[],
+        tag_len: 0,
+        tag: None,
+    };
+    cipher::run(&op, data).ok().map(|(o, _)| o)
+}
+
+/// ANSI X9.63 KDF over the shared secret and the ECC-CMS-SharedInfo.
+fn x963_kdf(md: Md, z: &[u8], info: &[u8], len: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut ctr: u32 = 1;
+    while out.len() < len {
+        let mut m = z.to_vec();
+        m.extend_from_slice(&ctr.to_be_bytes());
+        m.extend_from_slice(info);
+        out.extend(md.digest(&m));
+        ctr += 1;
+    }
+    out.truncate(len);
+    out
+}
+
+/// CMS_SharedInfo_encode()
+fn cms_shared_info(wrap_alg: &[u8], ukm: Option<&[u8]>, kek_len: usize) -> Vec<u8> {
+    let mut items = vec![wrap_alg.to_vec()];
+    if let Some(u) = ukm {
+        items.push(asn1::explicit(0, &asn1::octet(u)));
+    }
+    items.push(asn1::explicit(2, &asn1::octet(&((kek_len * 8) as u32).to_be_bytes())));
+    asn1::seq(&items)
+}
+
+/// KeyAgreeRecipientInfo for an EC recipient (ecdh_cms_encrypt()): an
+/// ephemeral key on the recipient's curve, SHA-1 X9.63 KDF, AES wrap
+/// sized after the content key.
+fn kari_recipient(c: &Cert, e: &crate::pkey::EcKey, cek: &[u8]) -> Option<Vec<u8>> {
+    let peer = e.pub_key.as_ref()?;
+    let eph = crate::pkey::generate_ec(e.group.clone());
+    let z = e.group.ecdh(eph.priv_key.as_ref()?, peer)?;
+    let (woid, kek_len) = match cek.len() {
+        0..=16 => ("2.16.840.1.101.3.4.1.5", 16),
+        17..=24 => ("2.16.840.1.101.3.4.1.25", 24),
+        _ => ("2.16.840.1.101.3.4.1.45", 32),
+    };
+    let wrap_alg = asn1::seq(&[asn1::oid(woid)]);
+    let kek = x963_kdf(Md::Sha1, &z, &cms_shared_info(&wrap_alg, None, kek_len), kek_len);
+    let ek = aes_key_wrap(&kek, cek, true)?;
+    let orig_key = asn1::tlv(
+        0xa1,
+        &[
+            asn1::seq(&[asn1::oid(OID_EC_PUBKEY)]),
+            asn1::bitstr(&e.group.encode(eph.pub_key.as_ref()?, false)),
+        ]
+        .concat(),
+    );
+    let rek = asn1::seq(&[asn1::seq(&[
+        asn1::seq(&[c.issuer_der.clone(), c.serial_der()]),
+        asn1::octet(&ek),
+    ])]);
+    Some(asn1::tlv(
+        0xa1,
+        &[
+            asn1::int_i64(3),
+            asn1::explicit(0, &orig_key),
+            asn1::seq(&[asn1::oid(OID_ECDH_STD_SHA1KDF), wrap_alg]),
+            rek,
+        ]
+        .concat(),
+    ))
+}
+
+/// The content key from a KeyAgreeRecipientInfo addressed to `cert`:
+/// None when it is not ours, Some(None) when unwrapping fails.
+fn kari_decrypt(kari: &Tlv, e: &crate::pkey::EcKey, cert: &Cert) -> Option<Option<Vec<u8>>> {
+    let c = kari.children()?;
+    let orig = c.get(1)?.children()?;
+    let opk = orig.first()?;
+    if opk.tag != 0xa1 {
+        return None;
+    }
+    let opk = opk.children()?;
+    let peer = e.group.decode(opk.get(1)?.bits()?)?;
+    let mut i = 2;
+    let mut ukm = None;
+    if c.get(i)?.tag == 0xa1 {
+        ukm = Some(c.get(i)?.children()?.first()?.content.to_vec());
+        i += 1;
+    }
+    let kea = c.get(i)?.children()?;
+    let md = kari_kdf_md(&kea.first()?.oid()?)?;
+    let wrap_alg = kea.get(1)?;
+    let kek_len = match wrap_alg.children()?.first()?.oid()?.as_str() {
+        "2.16.840.1.101.3.4.1.5" => 16,
+        "2.16.840.1.101.3.4.1.25" => 24,
+        "2.16.840.1.101.3.4.1.45" => 32,
+        _ => return None,
+    };
+    for rek in c.get(i + 1)?.children()? {
+        let f = rek.children()?;
+        let Some(Sid::IssuerSerial(iss, ser)) = parse_sid(f.first()?) else {
+            continue;
+        };
+        let n = asn1::parse_one(&iss).and_then(|t| crate::name::Name::parse(&t));
+        if !(n.is_some_and(|n| n.eq_canon(&cert.issuer)) && ser == cert.serial) {
+            continue;
+        }
+        let z = e.group.ecdh(e.priv_key.as_ref()?, &peer)?;
+        let kek = x963_kdf(md, &z, &cms_shared_info(wrap_alg.raw, ukm.as_deref(), kek_len), kek_len);
+        return Some(aes_key_wrap(&kek, f.get(1)?.content, false));
+    }
+    None
+}
+
 /// PKCS7_encrypt()/CMS_encrypt(): ContentInfo DER.
 fn encrypt(
     certs: &[Rc<Cert>],
@@ -908,7 +1052,15 @@ fn encrypt(
     let mut iv = vec![0u8; if aead { 12 } else { spec.iv_len }];
     purecrypto::rng::OsRng.fill_bytes(&mut iv);
     let mut ris = Vec::new();
+    let mut has_kari = false;
     for c in certs {
+        if cms {
+            if let Some(PKey::Ec(e)) = c.public_key() {
+                ris.push(kari_recipient(c, &e, &key)?);
+                has_kari = true;
+                continue;
+            }
+        }
         let Some(PKey::Rsa(r)) = c.public_key() else {
             if cms {
                 err::push(lib, 154, "unsupported recipient type");
@@ -974,7 +1126,8 @@ fn encrypt(
     let ct = cipher::simple(&spec.name, &content, &key, &iv, true)?;
     let alg = asn1::algid(coid, Some(cipher_params(spec, &iv)));
     let eci = asn1::seq(&[asn1::oid(OID_DATA), alg, asn1::implicit(0, &ct)]);
-    let ed = asn1::seq(&[asn1::int_i64(0), asn1::set_of(&ris), eci]);
+    // cms_env_set_version(): 2 once a recipient is not a version 0 ktri
+    let ed = asn1::seq(&[asn1::int_i64(if has_kari { 2 } else { 0 }), asn1::set_of(&ris), eci]);
     Some(asn1::seq(&[
         asn1::oid(OID_ENVELOPED),
         asn1::explicit(0, &ed),
@@ -1034,6 +1187,22 @@ fn decrypt(der: &[u8], key: &PKey, cert: &Cert, cms: bool) -> Option<Vec<u8>> {
     }
     let ris = c.get(i)?.children()?;
     let eci = c.get(i + 1)?.children()?;
+    if let (true, PKey::Ec(e)) = (cms, key) {
+        let mut found = None;
+        for ri in &ris {
+            if ri.tag == 0xa1 {
+                if let Some(r) = kari_decrypt(ri, e, cert) {
+                    found = Some(r);
+                    break;
+                }
+            }
+        }
+        let Some(cek) = found.flatten() else {
+            err::push(lib, 132, "no matching recipient");
+            return None;
+        };
+        return decrypt_content(&c, i, &eci, &cek, auth, cms);
+    }
     let PKey::Rsa(rsa) = key else {
         if cms {
             err::push(lib, 154, "unsupported recipient type");
@@ -1070,7 +1239,12 @@ fn decrypt(der: &[u8], key: &PKey, cert: &Cert, cms: bool) -> Option<Vec<u8>> {
         } else {
             RSA_PKCS1_PADDING
         };
-        cek = rsa.decrypt(ek, pad, Md::Sha1);
+        // CMS/PKCS7 turn RSA implicit rejection off (cms_env.c, pk7_doit.c)
+        cek = if pad == RSA_PKCS1_PADDING {
+            rsa.decrypt_pkcs1_explicit(ek)
+        } else {
+            rsa.decrypt(ek, pad, Md::Sha1)
+        };
         break;
     }
     let Some(cek) = cek else {
@@ -1085,6 +1259,12 @@ fn decrypt(der: &[u8], key: &PKey, cert: &Cert, cms: bool) -> Option<Vec<u8>> {
         );
         return None;
     };
+    decrypt_content(&c, i, &eci, &cek, auth, cms)
+}
+
+/// EncryptedContentInfo / AuthEnvelopedData content decryption.
+fn decrypt_content(c: &[Tlv], i: usize, eci: &[Tlv], cek: &[u8], auth: bool, cms: bool) -> Option<Vec<u8>> {
+    let lib = if cms { err::LIB_CMS } else { err::LIB_PKCS7 };
     let alg = eci.get(1)?.children()?;
     let coid = alg.first()?.oid()?;
     let enc = eci.get(2).map(|t| {

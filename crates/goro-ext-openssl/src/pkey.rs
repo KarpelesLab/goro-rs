@@ -1387,6 +1387,26 @@ impl Rsa {
         self.public_op(&bn(&em))
     }
 
+    /// RSA_PKCS1_NO_IMPLICIT_REJECT_PADDING decryption
+    /// (RSA_padding_check_PKCS1_type_2()), as CMS and PKCS#7 key transport
+    /// use it.
+    pub fn decrypt_pkcs1_explicit(&self, data: &[u8]) -> Option<Vec<u8>> {
+        if data.len() > self.k() {
+            rsa_err(108, "data greater than mod len");
+            return None;
+        }
+        let em = self.private_op(&bn(data))?;
+        let zero = em.get(2..).and_then(|r| r.iter().position(|&b| b == 0)).map(|z| z + 2);
+        match zero {
+            Some(z) if em[0] == 0 && em[1] == 2 && z >= 10 => Some(em[z + 1..].to_vec()),
+            _ => {
+                rsa_err(159, "pkcs decoding error");
+                rsa_err(114, "padding check failed");
+                None
+            }
+        }
+    }
+
     /// The PKCS#1 v1.5 implicit-rejection key derivation key
     /// (rsa_ossl.c derive_kdk()): HMAC-SHA256 keyed with SHA256(d) over
     /// the ciphertext left-padded to the modulus size.
