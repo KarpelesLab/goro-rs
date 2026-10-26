@@ -78,6 +78,6 @@ default). `$_SERVER` has the usual CGI variables (`SCRIPT_NAME`,
 
 Each request runs in a fresh engine on one of the worker threads; the
 opcache script cache is per worker, so a worker's first requests compile
-WordPress (about 0.56 s for the front page) and later ones reuse it (about
-0.34 s; php 8.5 takes 0.12-0.17 s without opcache, 0.03 s with it). As the
+WordPress (about 0.45 s for the front page) and later ones reuse it (about
+0.28 s; php 8.5 takes 0.12-0.17 s without opcache, 0.03 s with it). As the
 timers of `max_execution_time` are per process, the limit is not enforced.
