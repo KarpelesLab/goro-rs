@@ -1396,7 +1396,7 @@ impl Vm {
             .and_then(|c| c.get_method(b"offsetget"))
             .map(|m| m.op_array.returns_by_ref)
             .unwrap_or(false);
-        let result = match self.handle_spl_docall(&class_lower, b"offsetget", &args) {
+        let result = match self.spl_dim_docall(&class_lower, b"offsetget", &args) {
             Some(v) => Some(v),
             None => {
                 if by_ref {

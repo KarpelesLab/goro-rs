@@ -39828,7 +39828,7 @@ impl Vm {
                             // write_dimension without offset
                             self.spl_throw(b"Error", "[] operator not supported for SplFixedArray");
                         } else if self
-                            .handle_spl_docall(&class_lower, b"offsetset", &spl_args)
+                            .spl_dim_docall(&class_lower, b"offsetset", &spl_args)
                             .is_none()
                         {
                             self.call_object_method(&arr_val, b"offsetset", &[Value::Null, val]);
@@ -40424,7 +40424,7 @@ impl Vm {
                             }
                             let spl_args = vec![arr_val.clone(), key_val.clone(), val.clone()];
                             if self
-                                .handle_spl_docall(&class_lower, b"offsetset", &spl_args)
+                                .spl_dim_docall(&class_lower, b"offsetset", &spl_args)
                                 .is_none()
                             {
                                 self.call_object_method(&arr_val, b"offsetset", &[key_val, val]);
@@ -41414,7 +41414,7 @@ impl Vm {
                         let args = vec![arr_val.clone(), key_val.clone()];
                         self.last_call_by_ref = false;
                         let offsetget_result = self
-                            .handle_spl_docall(&class_lower, b"offsetget", &args)
+                            .spl_dim_docall(&class_lower, b"offsetget", &args)
                             .unwrap_or_else(|| {
                                 // Try user-defined offsetGet method
                                 self.call_object_method(
@@ -41672,7 +41672,7 @@ impl Vm {
                         }
                         let args = vec![arr_val.clone(), key_val.clone()];
                         let offsetget_result2 = self
-                            .handle_spl_docall(&class_lower, b"offsetget", &args)
+                            .spl_dim_docall(&class_lower, b"offsetget", &args)
                             .unwrap_or_else(|| {
                                 self.call_object_method(
                                     &arr_val,
@@ -47818,7 +47818,7 @@ impl Vm {
                         }
                         let obj_val = Value::Object(obj);
                         let spl_args = vec![obj_val.clone(), key_val.clone()];
-                        if self.handle_spl_docall(&class_lower, b"offsetunset", &spl_args).is_none() {
+                        if self.spl_dim_docall(&class_lower, b"offsetunset", &spl_args).is_none() {
                             self.call_object_method(&obj_val, b"offsetunset", &[key_val]);
                         }
                         drop(spl_args);
@@ -51220,7 +51220,7 @@ impl Vm {
                                         .unwrap_or(crate::errdisplay::E_ALL);
                                 }
                                 let exists_result = self
-                                    .handle_spl_docall(&class_lower, b"offsetexists", &args)
+                                    .spl_dim_docall(&class_lower, b"offsetexists", &args)
                                     .unwrap_or_else(|| {
                                         self.call_object_method(
                                             &arr_val,

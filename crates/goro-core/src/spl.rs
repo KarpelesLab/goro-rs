@@ -1040,6 +1040,56 @@ impl Vm {
             .push((self.call_stack.len(), frame));
     }
 
+    /// handle_spl_docall() for an `$obj[...]` access. Classes without
+    /// native dimension handlers (SplDoublyLinkedList), and SplObjectStorage
+    /// given a non-object offset (zend_std_*_dimension), run the offset*()
+    /// method as a real call, which backtraces show.
+    #[inline(never)]
+    pub(crate) fn spl_dim_docall(
+        &mut self,
+        class: &[u8],
+        method: &[u8],
+        args: &[Value],
+    ) -> Option<Value> {
+        let decl = match class {
+            b"spldoublylinkedlist" | b"splstack" | b"splqueue" => "SplDoublyLinkedList",
+            b"splobjectstorage" if !matches!(args.get(1).map(Value::deref), Some(Value::Object(_))) => {
+                "SplObjectStorage"
+            }
+            _ => return self.handle_spl_docall(class, method, args),
+        };
+        let mdisp = match method {
+            b"offsetget" => "offsetGet",
+            b"offsetset" => "offsetSet",
+            b"offsetexists" => "offsetExists",
+            b"offsetunset" => "offsetUnset",
+            _ => return self.handle_spl_docall(class, method, args),
+        };
+        let frame = format!("{}->{}", decl, mdisp);
+        let line = self.current_line;
+        self.call_stack.push((
+            frame.clone(),
+            self.current_file.clone(),
+            line,
+            args.get(1..).unwrap_or(&[]).to_vec(),
+            true,
+        ));
+        self.spl_internal_frames.push((self.call_stack.len(), frame));
+        let mut r = self.handle_spl_docall(class, method, args);
+        if r.is_none() && self.current_exception.is_some() {
+            // (zpp failed: no fallback call)
+            r = Some(Value::Null);
+        }
+        let len = self.call_stack.len();
+        if matches!(self.spl_internal_frames.last(), Some((n, _)) if *n == len) {
+            self.spl_internal_frames.pop();
+        }
+        if let Some(f) = self.call_stack.pop() {
+            self.recycle_frame(f);
+        }
+        r
+    }
+
     /// Raise a fatal error from a built-in SPL method; the deferred call
     /// returns an error so execution stops.
     pub(crate) fn spl_fatal(&mut self, msg: &str) {
