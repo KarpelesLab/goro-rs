@@ -12,6 +12,25 @@ import os
 import re
 import sys
 
+def rs_str(s):
+    """A Rust string literal: backslashes, quotes and the characters clippy
+    finds invisible escaped."""
+    import unicodedata
+    out = []
+    for c in s:
+        if c == "\\":
+            out.append("\\\\")
+        elif c == '"':
+            out.append('\\"')
+        elif c == "\n":
+            out.append("\\n")
+        elif unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") or c in "\u00ad\u200b\u2060\ufeff":
+            out.append("\\u{%X}" % ord(c))
+        else:
+            out.append(c)
+    return '"' + "".join(out) + '"'
+
+
 D = sys.argv[1] if len(sys.argv) > 1 else "/usr/share/unicode/cldr/common/transforms"
 INDIC = ["Devanagari", "Bengali", "Gujarati", "Gurmukhi", "Kannada", "Malayalam", "Oriya", "Tamil", "Telugu"]
 FILES = (["Latin-ASCII", "Han-Latin", "Han-Spacedhan", "Arabic-Latin", "Hebrew-Latin", "Thai-Latin", "Thai-ThaiSemi",
@@ -100,7 +119,7 @@ for name, fwd, back, text in rows:
     print("pub static %s: Transform = Transform {" % const)
     print("    forward: &[%s]," % ", ".join(q(x) for x in fwd))
     print("    reverse: &[%s]," % ", ".join(q(x) for x in back))
-    print('    rules: r####"%s"####,' % text)
+    print('    rules: %s,' % rs_str(text))
     print("};")
 print("")
 print("/// Every transform.")

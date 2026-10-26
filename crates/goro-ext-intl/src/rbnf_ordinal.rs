@@ -68,7 +68,7 @@ pub static DIGITS_ORDINAL: &[(&str, &str)] = &[
         "ky",
         "%digits-ordinal: -x: −→→; 0: =#,##0==%%digits-ordinal-indicator=; %%digits-ordinal-indicator: 0: ''инчи;",
     ),
-    ("lo", "%digits-ordinal: -x: ที่−→#,##0→; 0: ที่​=#,##0=;"),
+    ("lo", "%digits-ordinal: -x: ที่−→#,##0→; 0: ที่\u{200B}=#,##0=;"),
     (
         "ms",
         "%digits-ordinal: -x: −ke-→#,##0→; 0: ke-=#,##0=; 1: No. 1; 2: ke-=#,##0=;",

@@ -11,6 +11,25 @@ import os
 import re
 import sys
 
+def rs_str(s):
+    """A Rust string literal: backslashes, quotes and the characters clippy
+    finds invisible escaped."""
+    import unicodedata
+    out = []
+    for c in s:
+        if c == "\\":
+            out.append("\\\\")
+        elif c == '"':
+            out.append('\\"')
+        elif c == "\n":
+            out.append("\\n")
+        elif unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") or c in "\u00ad\u200b\u2060\ufeff":
+            out.append("\\u{%X}" % ord(c))
+        else:
+            out.append(c)
+    return '"' + "".join(out) + '"'
+
+
 D = sys.argv[1] if len(sys.argv) > 1 else "/usr/share/unicode/cldr/common/rbnf"
 
 
@@ -64,6 +83,5 @@ print("")
 print("/// (locale, ICU rule text starting with %digits-ordinal), sorted by locale.")
 print("pub static DIGITS_ORDINAL: &[(&str, &str)] = &[")
 for loc, text in entries:
-    esc = text.replace("\\", "\\\\").replace('"', '\\"')
-    print('    ("%s", "%s"),' % (loc, esc))
+    print('    ("%s", %s),' % (loc, rs_str(text)))
 print("];")
