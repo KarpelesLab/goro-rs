@@ -7321,7 +7321,7 @@ fn deprecated_attr_with(args: &[(&str, &str)]) -> crate::object::RuntimeAttribut
         .unwrap_or_default();
     crate::object::RuntimeAttribute {
         name: b"Deprecated".to_vec(),
-        args_op_array,
+        args_op_array: std::rc::Rc::new(args_op_array),
         validation_error: None,
     }
 }
@@ -11412,7 +11412,7 @@ fn constant_attrs_or_internal(vm: &Vm, name: &[u8]) -> Vec<crate::object::Runtim
     if internal_constant_deprecated(vm, name) {
         return vec![crate::object::RuntimeAttribute {
             name: b"Deprecated".to_vec(),
-            args_op_array: OpArray::new(),
+            args_op_array: std::rc::Rc::new(OpArray::new()),
             validation_error: None,
         }];
     }
@@ -15389,7 +15389,7 @@ pub fn create_reflection_attributes(
         // like PHP; __toString() renders them unevaluated.
         let idx = ATTR_ARG_OPS.with(|r| {
             let mut r = r.borrow_mut();
-            r.push(attr.args_op_array.clone());
+            r.push((*attr.args_op_array).clone());
             r.len() - 1
         });
         obj.set_property(

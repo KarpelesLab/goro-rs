@@ -2206,7 +2206,7 @@ impl Compiler {
                 }
                 crate::object::RuntimeAttribute {
                     name,
-                    args_op_array: ac.op_array,
+                    args_op_array: std::rc::Rc::new(ac.op_array),
                     validation_error: validation_error.filter(|_| has_delayed),
                 }
             })
@@ -4099,7 +4099,7 @@ impl Compiler {
             let joined = a.name.join(&b'\\');
             class.attributes.push(crate::object::RuntimeAttribute {
                 name: self.resolve_class_name(&joined),
-                args_op_array: OpArray::new(),
+                args_op_array: std::rc::Rc::new(OpArray::new()),
                 validation_error: None,
             });
         }

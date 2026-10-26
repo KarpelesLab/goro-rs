@@ -946,7 +946,7 @@ fn internal_attribute_attr(name: &str) -> Option<crate::object::RuntimeAttribute
     oa.param_default_repr = vec![Some(repr.to_string())];
     Some(crate::object::RuntimeAttribute {
         name: b"Attribute".to_vec(),
-        args_op_array: oa,
+        args_op_array: std::rc::Rc::new(oa),
         validation_error: None,
     })
 }

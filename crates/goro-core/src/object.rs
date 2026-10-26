@@ -26,7 +26,7 @@ pub enum TraitAdaptation {
 #[derive(Debug, Clone)]
 pub struct RuntimeAttribute {
     pub name: Vec<u8>,
-    pub args_op_array: OpArray,
+    pub args_op_array: std::rc::Rc<OpArray>,
     /// A validator error delayed by #[\DelayedTargetValidation]
     /// (zend_attribute.validation_error), thrown by newInstance().
     pub validation_error: Option<String>,
