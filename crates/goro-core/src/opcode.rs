@@ -793,6 +793,30 @@ impl SiteCaches {
         self.prop_slots.get_mut(id as usize)
     }
 
+    /// A new request (SITE_EPOCH `epoch`): what the sites found is
+    /// forgotten, but for the call targets, which are checked again as a
+    /// call site meets them (see Vm::revalidate_call_target), and which
+    /// opcodes are property accesses.
+    #[cold]
+    #[inline(never)]
+    fn renew(&mut self, epoch: u32) {
+        let mut call_targets = std::mem::take(&mut self.call_targets);
+        for c in call_targets.0.iter_mut().flatten() {
+            c.set_stale();
+        }
+        let prop_ids = std::mem::take(&mut self.prop_ids);
+        *self = SiteCaches {
+            epoch,
+            call_targets,
+            ..Default::default()
+        };
+        if !prop_ids.is_empty() {
+            self.prop_ids = prop_ids;
+            let n = self.prop_ids.iter().filter(|&&i| i != u16::MAX).count();
+            self.prop_slots = vec![PropSlot::default(); n];
+        }
+    }
+
     #[cold]
     #[inline(never)]
     fn init_prop_ids(&mut self, ops: &[Op]) {
@@ -1193,14 +1217,15 @@ impl OpArray {
     /// What this code's call sites found in the current request.
     #[inline(always)]
     pub(crate) fn sites(&self) -> &std::cell::RefCell<Option<Box<SiteCaches>>> {
+        let epoch = SITE_EPOCH.with(|e| e.get());
         let stale = match self.sites.try_borrow() {
-            Ok(s) => s
-                .as_ref()
-                .is_some_and(|c| c.epoch != SITE_EPOCH.with(|e| e.get())),
+            Ok(s) => s.as_ref().is_some_and(|c| c.epoch != epoch),
             Err(_) => false,
         };
         if stale {
-            *self.sites.borrow_mut() = None;
+            if let Some(c) = self.sites.borrow_mut().as_mut() {
+                c.renew(epoch);
+            }
         }
         &self.sites
     }

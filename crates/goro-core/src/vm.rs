@@ -807,11 +807,84 @@ pub const OPEN_CTX_EXISTING: u8 = 2;
 /// Type alias for the class map (used by external crates)
 pub use crate::class_table::ClassMap;
 
+thread_local! {
+    /// Changed when a FnTable entry is replaced or removed (see FnTable).
+    static FN_TABLE_GEN: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
+}
+
+/// The current FN_TABLE_GEN (never 0).
+#[inline]
+pub(crate) fn fn_table_gen() -> u32 {
+    FN_TABLE_GEN.with(|g| g.get())
+}
+
+#[cold]
+#[inline(never)]
+fn fn_table_changed() {
+    FN_TABLE_GEN.with(|g| g.set(g.get().wrapping_add(1).max(1)));
+}
+
+/// The user function table (Vm::user_functions), by lowercase name: a map
+/// which tells the call sites when what a name names may have changed
+/// otherwise than by a function being added (an entry replaced or removed,
+/// or the table changed in place: FN_TABLE_GEN changes; see
+/// CachedCallTarget::stable_gen). Reads go to the map as it is; changes
+/// other than insert() and a vacant entry() count as such changes.
+#[derive(Debug, Default)]
+pub struct FnTable(crate::fxhash::FxHashMap<Vec<u8>, Rc<OpArray>>);
+
+impl std::ops::Deref for FnTable {
+    type Target = crate::fxhash::FxHashMap<Vec<u8>, Rc<OpArray>>;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for FnTable {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        fn_table_changed();
+        &mut self.0
+    }
+}
+
+impl FnTable {
+    /// HashMap::insert(): a function added, or one replaced (a change, but
+    /// for a method's entry).
+    #[inline]
+    pub fn insert(&mut self, name: Vec<u8>, f: Rc<OpArray>) -> Option<Rc<OpArray>> {
+        // (a method's `Class::m` entry is no plain name: see
+        // CachedCallTarget::stable_gen)
+        let plain = !name.contains(&b':');
+        let old = self.0.insert(name, f);
+        if old.is_some() && plain {
+            fn_table_changed();
+        }
+        old
+    }
+
+    /// HashMap::entry(): an occupied entry may be changed (counted as a
+    /// change), a vacant one only filled.
+    #[inline]
+    pub fn entry(
+        &mut self,
+        name: Vec<u8>,
+    ) -> std::collections::hash_map::Entry<'_, Vec<u8>, Rc<OpArray>> {
+        let plain = !name.contains(&b':');
+        let e = self.0.entry(name);
+        if plain && matches!(e, std::collections::hash_map::Entry::Occupied(_)) {
+            fn_table_changed();
+        }
+        e
+    }
+}
+
 /// What Vm::retire_tables() takes out of an engine (released when dropped).
 pub struct RetiredTables {
     pub classes: ClassMap,
     pub functions: crate::fxhash::FxHashMap<Vec<u8>, BuiltinFn>,
-    pub user_functions: crate::fxhash::FxHashMap<Vec<u8>, Rc<OpArray>>,
+    pub user_functions: FnTable,
     pub internal_function_decls: crate::fxhash::FxHashMap<Vec<u8>, Rc<OpArray>>,
 }
 
@@ -1160,6 +1233,48 @@ pub(crate) struct CachedCallTarget {
     /// The builtin is one php-src compiles into an opcode of its own (an
     /// index + 1 into fastpath::SPECIAL_CALLS; 0: not one).
     special: u8,
+    /// The request (opcode::site_epoch()) it was resolved or last checked
+    /// in (see Vm::revalidate_call_target).
+    epoch: u32,
+    /// Of a target no function declared later changes (a user function or
+    /// a builtin, by a plain name: see Vm::revalidate_call_target), the
+    /// fn_table_gen() it was found in: it stays while that one does, in
+    /// this request, whatever fn_gen is (0: none).
+    stable_gen: u32,
+    /// What revalidate_call_target() may check: a user function or a
+    /// builtin, by a plain name (no `:`, at most 64 bytes), not a method;
+    /// bit 1: the name is namespaced.
+    checkable: u8,
+}
+
+impl CachedCallTarget {
+    /// A new request: the target is checked again before it is used (see
+    /// Vm::revalidate_call_target; no fn_gen is 0).
+    pub(crate) fn set_stale(&mut self) {
+        self.fn_gen = 0;
+        self.stable_gen = 0;
+    }
+
+    /// Whether the target is what the site's name resolves to with
+    /// `fn_gen` (see stable_gen).
+    #[inline(always)]
+    fn usable(&self, fn_gen: usize) -> bool {
+        self.fn_gen == fn_gen || (self.stable_gen != 0 && self.stable_gen == fn_table_gen())
+    }
+
+    /// The `checkable` of a target (see there).
+    fn checkable_of(t: &CallTarget, name: &[u8]) -> u8 {
+        if (t.user.is_some() || t.has_builtin)
+            && t.method.is_none()
+            && t.method_info.is_none()
+            && name.len() <= 64
+            && !name.contains(&b':')
+        {
+            1 | (2 * u8::from(name.contains(&b'\\')))
+        } else {
+            0
+        }
+    }
 }
 
 // A pending call is moved on every call (pushed, popped): larger than this,
@@ -1461,7 +1576,7 @@ pub struct Vm {
     /// Parameter names for built-in functions (lowercase fn name -> list of param names)
     pub builtin_param_names: crate::fxhash::FxHashMap<Vec<u8>, Vec<Vec<u8>>>,
     /// User-defined functions (compiled op arrays)
-    pub user_functions: crate::fxhash::FxHashMap<Vec<u8>, Rc<OpArray>>,
+    pub user_functions: FnTable,
     /// Stack of pending function calls (supports nested calls)
     pub(crate) pending_calls: Vec<PendingCall>,
     /// Static variable storage (keyed by "funcname::varname")
@@ -2141,6 +2256,7 @@ impl Vm {
         crate::stack::install_parser_stack_grower();
         // (what call sites of cached code found belongs to earlier engines)
         crate::opcode::new_site_epoch();
+        fn_table_changed();
         let mut vm = Self {
             output: Vec::new(),
             cli_direct_output: false,
@@ -20357,7 +20473,10 @@ impl Vm {
         RetiredTables {
             classes,
             functions: std::mem::take(&mut self.functions),
-            user_functions: std::mem::take(&mut self.user_functions),
+            user_functions: {
+                fn_table_changed();
+                std::mem::take(&mut self.user_functions)
+            },
             internal_function_decls: std::mem::take(&mut self.internal_function_decls),
         }
     }
@@ -22619,7 +22738,7 @@ impl Vm {
         else {
             return false;
         };
-        if c.fn_gen != fn_gen || !crate::string::bytes_eq(&c.name, name) {
+        if !c.usable(fn_gen) || !crate::string::bytes_eq(&c.name, name) {
             return false;
         }
         let user = match &c.user {
@@ -22653,7 +22772,7 @@ impl Vm {
     ) -> Option<bool> {
         let sites = op_array.sites().borrow();
         let c = sites.as_ref()?.call_targets.get(&(ip as u32))?;
-        if c.fn_gen != fn_gen || !crate::string::bytes_eq(&c.name, name) {
+        if !c.usable(fn_gen) || !crate::string::bytes_eq(&c.name, name) {
             return None;
         }
         if c.has_builtin || c.method.is_some() || c.user.is_none() {
@@ -22681,7 +22800,7 @@ impl Vm {
     ) -> Option<(BuiltinFn, u8)> {
         let sites = op_array.sites().borrow();
         let c = sites.as_ref()?.call_targets.get(&(ip as u32))?;
-        if c.special == 0 || c.fn_gen != fn_gen {
+        if c.special == 0 || !c.usable(fn_gen) {
             return None;
         }
         Some((c.builtin?.func, c.special))
@@ -22819,6 +22938,13 @@ impl Vm {
         name: &[u8],
         ns_fallback: bool,
     ) -> CallTarget {
+        if self.revalidate_call_target(op_array, ip, name) {
+            let mut t = CallTarget::NONE;
+            let fn_gen = self.user_functions.len() + 1;
+            if Self::cached_call_target(op_array, ip, name, fn_gen, &mut t) {
+                return t;
+            }
+        }
         let global_name =
             if ns_fallback && name.contains(&b'\\') && !name.windows(2).any(|w| w == b"::") {
                 self.ns_call_global_name(op_array, ip as u32, name)
@@ -22836,6 +22962,7 @@ impl Vm {
             let name = PhpString::from_bytes_untracked(name);
             t.method_info = Some(Rc::new(self.method_call_info(f, &name, sep as usize)));
         }
+        let checkable = CachedCallTarget::checkable_of(&t, name);
         op_array
             .sites()
             .borrow_mut()
@@ -22857,9 +22984,136 @@ impl Vm {
                     } else {
                         0
                     },
+                    epoch: crate::opcode::site_epoch(),
+                    stable_gen: if checkable != 0 { fn_table_gen() } else { 0 },
+                    checkable,
                 },
             );
         t
+    }
+
+    /// Whether the target the INIT_FCALL at `ip` of `op_array` resolved
+    /// `name` to, kept while no function was declared (CachedCallTarget's
+    /// fn_gen), is still what plain_call_target_ns() would resolve it to,
+    /// now that one was or as a new request runs the code (the site then
+    /// uses it again: it is given the current fn_gen and request).
+    ///
+    /// In the request it was resolved in, a function found stays (functions
+    /// are not undeclared) and so does a builtin (a function declared later
+    /// cannot have its name), while what `name` resolved to is still in
+    /// user_functions (CachedCallTarget::stable_gen: checked here once the
+    /// table changed otherwise): for a function or a builtin, not for a
+    /// method (`Class::m`: its class may be declared since) nor for a
+    /// missing function (it may be declared since). In a later request (the code
+    /// kept by the script cache) the function tables are new: the target is
+    /// resolved again (resolve_call_target()) and has to be the same user
+    /// function (the same code: a file compiled again, or a function
+    /// declared otherwise, is another) or builtin; a namespaced name (its
+    /// fallback to the global function is per request) is not checked.
+    #[inline(never)]
+    fn revalidate_call_target(&mut self, op_array: &OpArray, ip: usize, name: &[u8]) -> bool {
+        let fn_gen = self.user_functions.len() + 1;
+        let epoch = crate::opcode::site_epoch();
+        let (user, builtin, has_builtin, ns_global, same_request) = {
+            let sites = op_array.sites().borrow();
+            let Some(c) = sites
+                .as_ref()
+                .and_then(|s| s.call_targets.get(&(ip as u32)))
+            else {
+                return false;
+            };
+            if c.checkable == 0 || c.usable(fn_gen) || !crate::string::bytes_eq(&c.name, name) {
+                return false;
+            }
+            let same_request = c.epoch == epoch;
+            if !same_request && (c.ns_global || c.checkable & 2 != 0) {
+                return false;
+            }
+            (
+                c.user.clone(),
+                c.builtin,
+                c.has_builtin,
+                c.ns_global,
+                same_request,
+            )
+        };
+        let same_user = |found: Option<&Rc<OpArray>>| match (found, &user) {
+            (None, None) => true,
+            (Some(f), Some(w)) => std::ptr::eq(Rc::as_ptr(f), w.as_ptr()),
+            _ => false,
+        };
+        if same_request {
+            // (what was resolved: the global function of a fallback)
+            let key = if ns_global {
+                match name.iter().rposition(|&b| b == b'\\') {
+                    Some(p) => &name[p + 1..],
+                    None => name,
+                }
+            } else {
+                name
+            };
+            let mut buf = [0u8; 64];
+            for (d, s) in buf.iter_mut().zip(key) {
+                *d = s.to_ascii_lowercase();
+            }
+            if !same_user(self.user_functions.get(&buf[..key.len()])) {
+                return false;
+            }
+        } else {
+            // (what resolve_call_target() finds, a plain name's)
+            let mut buf = [0u8; 64];
+            for (d, s) in buf.iter_mut().zip(name) {
+                *d = s.to_ascii_lowercase();
+            }
+            let lower = &buf[..name.len()];
+            if !same_user(self.user_functions.get(lower)) {
+                return false;
+            }
+            let found = self.functions.get(lower).copied();
+            if found.is_some() != has_builtin {
+                return false;
+            }
+            match (builtin, found) {
+                (None, None) => {}
+                // (the same BuiltinDesc: the same builtin, zpp info, and no
+                // legacy type checks unless zpp checks the types)
+                (Some(d), Some(f)) => {
+                    let zpp = self.zpp_info(lower);
+                    let same_zpp = match (zpp, d.zpp) {
+                        (None, None) => true,
+                        (Some((a, af)), Some((b, bf))) => std::ptr::eq(a, b) && af == bf,
+                        _ => false,
+                    };
+                    let zpp_types =
+                        matches!(zpp, Some((_, f)) if f & crate::arginfo::CHECK_TYPES != 0);
+                    if d.func as usize != f as usize
+                        || !same_zpp
+                        || !(zpp_types || !self.builtin_param_types.contains_key(lower))
+                    {
+                        return false;
+                    }
+                }
+                (None, Some(_)) => {
+                    if self.resolve_call_target(name).builtin.is_some() {
+                        return false;
+                    }
+                }
+                (Some(_), None) => return false,
+            }
+        }
+        let mut sites = op_array.sites().borrow_mut();
+        match sites
+            .as_mut()
+            .and_then(|s| s.call_targets.get_mut(&(ip as u32)))
+        {
+            Some(c) => {
+                c.fn_gen = fn_gen;
+                c.epoch = epoch;
+                c.stable_gen = fn_table_gen();
+                true
+            }
+            None => false,
+        }
     }
 
     /// The global function name an unqualified namespaced call `name` at
