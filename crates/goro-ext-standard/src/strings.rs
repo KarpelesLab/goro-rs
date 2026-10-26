@@ -3965,7 +3965,9 @@ fn strtok_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // strtok has two forms:
     // strtok(string, delimiters) - initializes with new string
     // strtok(delimiters) - continues tokenizing the current string
-    let delim = if args.len() >= 2 {
+    // (a null token is the one-argument form: the string is the token)
+    let two = args.len() >= 2 && !matches!(args[1].deref(), Value::Null | Value::Undef);
+    let delim = if two {
         // strtok(string, delimiters) - set new string
         let s = args[0].to_php_string();
         let d = args[1].to_php_string();
