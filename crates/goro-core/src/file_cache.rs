@@ -361,6 +361,18 @@ impl Dec for String {
     }
 }
 
+impl Enc for Rc<str> {
+    fn enc(&self, w: &mut W) -> Res<()> {
+        w.bytes(self.as_bytes());
+        Ok(())
+    }
+}
+impl Dec for Rc<str> {
+    fn dec(r: &mut R) -> Res<Self> {
+        Ok(Rc::from(String::dec(r)?))
+    }
+}
+
 impl<T: Enc> Enc for Option<T> {
     #[inline]
     fn enc(&self, w: &mut W) -> Res<()> {
@@ -755,7 +767,7 @@ impl Dec for RuntimeAttribute {
     fn dec(r: &mut R) -> Res<Self> {
         Ok(RuntimeAttribute {
             name: Vec::dec(r)?,
-            args_op_array: OpArray::dec(r)?,
+            args_op_array: Rc::new(OpArray::dec(r)?),
             validation_error: Option::dec(r)?,
         })
     }
