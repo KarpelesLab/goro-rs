@@ -388,6 +388,23 @@ impl Vm {
         false
     }
 
+    /// "Property C::$p is write-only" for a virtual property without a get
+    /// hook.
+    #[inline(never)]
+    pub(crate) fn write_only_prop_msg(&self, class_lower: &[u8], prop: &[u8]) -> Option<String> {
+        let c = self.classes.get(class_lower)?;
+        c.properties
+            .iter()
+            .any(|p| p.name == prop && !p.is_static && p.is_virtual && !p.has_get_hook)
+            .then(|| {
+                format!(
+                    "Property {}::${} is write-only",
+                    crate::value::display_class_name(&c.name),
+                    crate::string::msg_str(prop)
+                )
+            })
+    }
+
     /// The property's hooks `(has_get, has_set)` when accessed from outside
     /// its own hooks; `None` for a plain property or from inside a hook.
     pub(crate) fn prop_hooks_outside(

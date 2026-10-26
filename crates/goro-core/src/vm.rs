@@ -51085,9 +51085,16 @@ impl Vm {
                                 );
                                 (v, self.last_call_by_ref)
                             } else {
+                                if let Some(msg) =
+                                    self.write_only_prop_msg(&class_lower, prop_name.as_bytes())
+                                {
+                                    ref_error = Some(msg);
+                                }
                                 (obj.borrow().get_property(&pkey), false)
                             };
-                            if self.current_exception.is_some() {
+                            if ref_error.is_some() {
+                                Value::Null
+                            } else if self.current_exception.is_some() {
                                 Value::Null
                             } else if by_ref && matches!(v, Value::Reference(_)) {
                                 v
@@ -51247,6 +51254,14 @@ impl Vm {
                         ));
                         Value::Null
                     };
+                    // (a get hook / __get that threw)
+                    native_exc_check!(
+                        self,
+                        exception_handlers,
+                        pending_calls_catch_depth,
+                        ip,
+                        op.line
+                    );
                     if let Some(msg) = ref_error {
                         let exc = self.create_exception(b"Error", &msg, op.line);
                         self.current_exception = Some(exc);
