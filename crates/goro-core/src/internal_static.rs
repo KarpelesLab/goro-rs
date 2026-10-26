@@ -352,6 +352,9 @@ impl Vm {
             }
             return Value::Null;
         }
+        if self.init_backed_enum_cases(class_part).is_none() {
+            return Value::Null;
+        }
         let is_string = bt.eq_ignore_ascii_case(b"string");
         let lookup_arg = if is_string && !matches!(arg, Value::String(_)) {
             Value::String(arg.to_php_string())

@@ -18996,12 +18996,64 @@ impl Vm {
             return Some(val.clone());
         }
 
-        // Look up the class to get enum info
         let class = self.classes.get(class_lower)?.clone();
         if !class.is_enum {
             return None;
         }
+        self.create_enum_case(&class, case_name, cache_key)
+    }
 
+    /// Create every not yet created case object of backed enum
+    /// `class_lower`, in declaration order (what zend_update_class_constants()
+    /// does on a backed enum's first constant fetch or from()/tryFrom()).
+    /// None when a case's value could not be evaluated (exception pending).
+    #[inline(never)]
+    pub fn init_backed_enum_cases(&mut self, class_lower: &[u8]) -> Option<()> {
+        thread_local! {
+            // (a case's value expression fetching a constant of its enum
+            // does not start the update over: zend_ast_evaluate() looks the
+            // constant up directly)
+            static INITIALIZING: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+        }
+        let class = self.classes.get(class_lower)?.clone();
+        // (only a user enum: ce->type == ZEND_USER_CLASS)
+        if !class.is_enum
+            || class.enum_backing_type.is_none()
+            || (class.filename.is_none() && class.start_line == 0)
+        {
+            return Some(());
+        }
+        if INITIALIZING.with(|i| i.borrow().iter().any(|c| c == class_lower)) {
+            return Some(());
+        }
+        INITIALIZING.with(|i| i.borrow_mut().push(class_lower.to_vec()));
+        let mut ok = Some(());
+        for (name, _) in class.enum_cases.iter() {
+            let mut key = class_lower.to_vec();
+            key.extend_from_slice(b"::");
+            key.extend_from_slice(name);
+            if !self.enum_case_cache.contains_key(&key)
+                && self.create_enum_case(&class, name, key).is_none()
+            {
+                ok = None;
+                break;
+            }
+        }
+        INITIALIZING.with(|i| {
+            let mut i = i.borrow_mut();
+            if let Some(p) = i.iter().rposition(|c| c == class_lower) {
+                i.remove(p);
+            }
+        });
+        ok
+    }
+
+    fn create_enum_case(
+        &mut self,
+        class: &ClassEntry,
+        case_name: &[u8],
+        cache_key: Vec<u8>,
+    ) -> Option<Value> {
         // Find the case in enum_cases
         let case_entry = class.enum_cases.iter().find(|(n, _)| n == case_name)?;
         let backing_value = case_entry.1.clone();
@@ -44035,6 +44087,16 @@ impl Vm {
                                     line: op.line,
                                 });
                             }
+                        }
+                        if class_idx
+                            .and_then(|i| self.classes.get_index(i))
+                            .is_some_and(|(_, c)| {
+                                c.enum_backing_type.is_some()
+                                    && c.is_enum
+                                    && c.constants.contains_key(prop_name.as_bytes())
+                            })
+                        {
+                            self.init_backed_enum_cases(&class_lower);
                         }
                         let val = if let Some((_, class)) =
                             class_idx.and_then(|i| self.classes.get_index(i))
