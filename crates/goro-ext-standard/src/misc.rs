@@ -16069,19 +16069,21 @@ fn resolve_dir_handle(
     }
 }
 
+/// FETCH_DIRP(): null with no current dir handle. PHP throws "No resource
+/// supplied" as a TypeError after the deprecation notice.
+fn no_dir_resource(vm: &mut Vm) -> VmError {
+    let exc = vm.throw_type_error("No resource supplied".to_string());
+    vm.current_exception = Some(exc);
+    VmError {
+        message: "No resource supplied".to_string(),
+        line: vm.current_line,
+    }
+}
+
 fn closedir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let id = match resolve_dir_handle(vm, args, "closedir")? {
         Some(id) => id,
-        None => {
-            // Null with no current dir handle. PHP throws "No resource supplied"
-            // as a TypeError after the deprecation notice.
-            let exc = vm.throw_type_error("No resource supplied".to_string());
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: "No resource supplied".to_string(),
-                line: vm.current_line,
-            });
-        }
+        None => return Err(no_dir_resource(vm)),
     };
     DIR_HANDLES.with(|dh| {
         dh.borrow_mut().remove(&id);
@@ -16096,7 +16098,7 @@ fn closedir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn readdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let id = match resolve_dir_handle(vm, args, "readdir")? {
         Some(id) => id,
-        None => return Ok(Value::False),
+        None => return Err(no_dir_resource(vm)),
     };
     DIR_HANDLES.with(|dh| {
         let mut handles = dh.borrow_mut();
@@ -21829,7 +21831,7 @@ fn pclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn rewinddir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let id = match resolve_dir_handle(vm, args, "rewinddir")? {
         Some(id) => id,
-        None => return Ok(Value::Null),
+        None => return Err(no_dir_resource(vm)),
     };
     let glob = DIR_HANDLES.with(|dh| {
         let mut dh = dh.borrow_mut();
