@@ -17630,6 +17630,18 @@ pub fn class_all_interface_names(vm: &Vm, class_lower: &[u8]) -> Vec<String> {
         // User interfaces keep their first extended interface as `parent`.
         let mut declared: Vec<Vec<u8>> = Vec::new();
         declared.extend(ce.interfaces.iter().cloned());
+        // add_stringable_interface(): a class declaring __toString() gets
+        // Stringable after its declared interfaces, at compile time.
+        // (or using a trait's: zend_do_bind_traits())
+        if !ce.is_trait
+            && ce.methods.get(b"__tostring".as_slice()).is_some_and(|m| {
+                m.declaring_class.eq_ignore_ascii_case(lower)
+                    || rcls(vm, &m.declaring_class.to_ascii_lowercase()).is_some_and(|d| d.is_trait)
+            })
+            && !declared.iter().any(|i| i.eq_ignore_ascii_case(b"stringable"))
+        {
+            declared.push(b"Stringable".to_vec());
+        }
         if let Some(p) = &ce.parent {
             if ce.is_interface {
                 declared.insert(0, p.clone());
