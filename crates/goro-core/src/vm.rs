@@ -11457,7 +11457,11 @@ impl Vm {
         };
         let hidden_cvs =
             (op_array.param_count as usize).saturating_sub(op_array.param_attributes.len());
-        let lead = if this_cv == 1 && !matches!(call.args.first(), Some(Value::Object(_))) {
+        // (a closure capturing `$this` leads with it, null once unbound)
+        let lead = if this_cv == 1
+            && !matches!(call.args.first(), Some(Value::Object(_)))
+            && op_array.closure_capture_names.first().map(|n| n.as_slice()) != Some(b"this")
+        {
             hidden_cvs.saturating_sub(1)
         } else {
             hidden_cvs
