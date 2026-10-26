@@ -4885,9 +4885,27 @@ impl Vm {
     /// (with the function's frame) and returns true when it is forbidden.
     #[inline(never)]
     fn dynamic_forbidden_call_check(&mut self, lname: &[u8], args: &[Value], line: u32) -> bool {
-        let Some((cls, msg)) = self.forbidden_dynamic_call_error(lname, args.len()) else {
+        let Some((mut cls, mut msg)) = self.forbidden_dynamic_call_error(lname, args.len()) else {
             return false;
         };
+        // func_get_arg()/func_get_args()/func_num_args() check their
+        // $position and the calling scope before zend_forbid_dynamic_call().
+        if cls == b"Error" && lname.starts_with(b"func_") {
+            if lname == b"func_get_arg" && args.first().is_some_and(|a| a.deref().to_long() < 0) {
+                cls = b"ValueError";
+                msg = "func_get_arg(): Argument #1 ($position) must be greater than or equal to 0"
+                    .to_string();
+            } else if self.current_function_frame().is_none() {
+                msg = if lname == b"func_num_args" {
+                    "func_num_args() must be called from a function context".to_string()
+                } else {
+                    format!(
+                        "{}() cannot be called from the global scope",
+                        String::from_utf8_lossy(lname)
+                    )
+                };
+            }
+        }
         self.push_builtin_frame(lname, args, line);
         let exc = self.create_exception(cls, &msg, line);
         self.pop_builtin_frame();
