@@ -590,6 +590,8 @@ pub struct OpArray {
     free_mask: std::cell::OnceCell<FreeInfo>,
     /// See OpArray::lean_kind().
     lean_kind: FreshOnClone<u8>,
+    /// See OpArray::prop_ic().
+    prop_ics: FreshOnClone<PropIcs>,
 }
 
 /// A value an OpArray computes from itself on first use, which a copy of
@@ -642,6 +644,77 @@ pub(crate) struct PropSlot {
     pub(crate) plain: u8,
     pub(crate) slot: u32,
     pub(crate) set: bool,
+}
+
+/// What the read, isset() or write of a variable's object property (or
+/// the read of a temporary's) by a constant name at an opcode found last (see Vm::prop_ic_hit): the
+/// class_tag() of the object's class (0: nothing), whether the property is
+/// a plain one there (plain_public_prop()), in any class scope or only in
+/// `scope` (exact bytes), and the slot the object held it in (a hint,
+/// checked against the slot's key).
+#[derive(Debug, Default)]
+pub(crate) struct PropIc {
+    pub(crate) tag: std::cell::Cell<u32>,
+    pub(crate) slot: std::cell::Cell<u32>,
+    pub(crate) plain: std::cell::Cell<u8>,
+    pub(crate) any_scope: std::cell::Cell<bool>,
+    pub(crate) scope: std::cell::RefCell<Option<Box<[u8]>>>,
+}
+
+/// The PropIcs of an op array's property accesses by a constant name:
+/// the index of each opcode's (u16::MAX: none), made when the first one
+/// runs, for the request of SITE_EPOCH `epoch`.
+#[derive(Debug, Default)]
+pub(crate) struct PropIcs {
+    epoch: std::cell::Cell<u32>,
+    ids: Box<[u16]>,
+    ics: Box<[PropIc]>,
+}
+
+impl PropIcs {
+    #[cold]
+    #[inline(never)]
+    fn new(ops: &[Op]) -> PropIcs {
+        let mut n = 0usize;
+        let ids = ops
+            .iter()
+            .map(|o| {
+                // (a read of a temporary's object too)
+                let (name, tmp_ok) = match o.opcode {
+                    OpCode::PropertyGet | OpCode::PropertyIsset | OpCode::PropertyIssetFetch => {
+                        (&o.op2, true)
+                    }
+                    OpCode::PropertySet => (&o.result, false),
+                    _ => return u16::MAX,
+                };
+                if (matches!(o.op1, OperandType::Cv(_))
+                    || (tmp_ok && matches!(o.op1, OperandType::Tmp(_))))
+                    && matches!(name, OperandType::Const(_))
+                    && n < u16::MAX as usize
+                {
+                    n += 1;
+                    (n - 1) as u16
+                } else {
+                    u16::MAX
+                }
+            })
+            .collect();
+        PropIcs {
+            epoch: std::cell::Cell::new(SITE_EPOCH.with(|e| e.get())),
+            ids,
+            ics: (0..n).map(|_| PropIc::default()).collect(),
+        }
+    }
+
+    /// A new request: what the caches found is forgotten.
+    #[cold]
+    #[inline(never)]
+    fn renew(&self, epoch: u32) {
+        for ic in self.ics.iter() {
+            ic.tag.set(0);
+        }
+        self.epoch.set(epoch);
+    }
 }
 
 /// The opcodes fast_prop_op() handles.
@@ -847,6 +920,21 @@ impl OpArray {
         Some(calls[i].1)
     }
 
+    /// The PropIc of the property access at `ip` (see Vm::prop_ic_hit).
+    #[inline(always)]
+    pub(crate) fn prop_ic(&self, ip: usize) -> Option<&PropIc> {
+        let t = match self.prop_ics.0.get() {
+            Some(t) => t,
+            None => self.prop_ics.0.get_or_init(|| PropIcs::new(&self.ops)),
+        };
+        let epoch = SITE_EPOCH.with(|e| e.get());
+        if t.epoch.get() != epoch {
+            t.renew(epoch);
+        }
+        let id = *t.ids.get(ip)?;
+        t.ics.get(id as usize)
+    }
+
     pub(crate) fn cv_name_info(&self) -> &CvNameInfo {
         self.cv_info.get_or_init(|| CvNameInfo {
             globals: self
@@ -1035,6 +1123,7 @@ impl OpArray {
             cv_info: Default::default(),
             free_mask: Default::default(),
             lean_kind: Default::default(),
+            prop_ics: Default::default(),
         }
     }
 
