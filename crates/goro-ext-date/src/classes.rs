@@ -111,12 +111,63 @@ fn obj_arg(
 
 const DATE_BASES: &[Base] = &[Base::DateTime, Base::Immutable];
 
-fn clone_obj(vm: &mut Vm, o: &Obj) -> Obj {
+/// date_clone_immutable(): date_object_clone_date(), whose
+/// zend_objects_clone_members() runs a user __clone() before the time is
+/// copied (the clone is uninitialized while it runs).
+fn clone_obj(vm: &mut Vm, o: &Obj) -> R<Obj> {
     let id = vm.alloc_object_id();
-    let ob = o.borrow();
-    let mut n = PhpObject::new(ob.class_name.clone(), id);
-    n.properties = ob.properties.clone();
-    Rc::new(RefCell::new(n))
+    let (cls, props) = {
+        let ob = o.borrow();
+        (ob.class_name.clone(), ob.properties.clone())
+    };
+    let lower = cls.to_ascii_lowercase();
+    let (has_clone, has_dtor) = vm.classes.get(&lower).map_or((false, false), |c| {
+        (
+            c.get_method(b"__clone").is_some(),
+            c.get_method(b"__destruct").is_some(),
+        )
+    });
+    let mut n = PhpObject::new(cls, id);
+    n.properties = props;
+    let held: Vec<(Vec<u8>, Value)> = if has_clone {
+        let keys: Vec<Vec<u8>> = n
+            .properties
+            .iter()
+            .map(|(k, _)| k.clone())
+            .filter(|k| {
+                k.starts_with(b"__timestamp")
+                    || goro_core::foreach_obj::is_date_view_prop(&n, k)
+            })
+            .collect();
+        keys.into_iter()
+            .filter_map(|k| {
+                let v = n.get_property(&k);
+                n.remove_property(&k);
+                Some((k, v))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let rc = Rc::new(RefCell::new(n));
+    goro_core::gc::track_object(&rc);
+    if has_dtor {
+        vm.track_destructible(Value::Object(rc.clone()));
+    }
+    if has_clone {
+        vm.call_object_method(&Value::Object(rc.clone()), b"__clone", &[]);
+        if vm.current_exception.is_some() {
+            return Err(VmError {
+                message: String::new(),
+                line: vm.current_line,
+            });
+        }
+        let mut b = rc.borrow_mut();
+        for (k, v) in held {
+            b.set_property(k, v);
+        }
+    }
+    Ok(rc)
 }
 
 /// object_init_ex() refuses abstract classes
@@ -1356,7 +1407,7 @@ fn datetime_method(
             check_count(vm, &f, args, 1, 1)?;
             let modify = str_arg(vm, &f, args, 0, "modifier", false)?.unwrap_or_default();
             let target = if immutable {
-                clone_obj(vm, o)
+                clone_obj(vm, o)?
             } else {
                 o.clone()
             };
@@ -1380,7 +1431,7 @@ fn datetime_method(
             )?
             .unwrap();
             let target = if immutable {
-                clone_obj(vm, o)
+                clone_obj(vm, o)?
             } else {
                 o.clone()
             };
@@ -1405,7 +1456,7 @@ fn datetime_method(
             )?
             .unwrap();
             let target = if immutable {
-                clone_obj(vm, o)
+                clone_obj(vm, o)?
             } else {
                 o.clone()
             };
@@ -1436,7 +1487,7 @@ fn datetime_method(
             )?
             .unwrap();
             let target = if immutable {
-                clone_obj(vm, o)
+                clone_obj(vm, o)?
             } else {
                 o.clone()
             };
@@ -1464,7 +1515,7 @@ fn datetime_method(
             let s = long_arg(vm, &f, args, 2, "second", false)?.unwrap_or(0);
             let ms = long_arg(vm, &f, args, 3, "microsecond", false)?.unwrap_or(0);
             let target = if immutable {
-                clone_obj(vm, o)
+                clone_obj(vm, o)?
             } else {
                 o.clone()
             };
@@ -1485,7 +1536,7 @@ fn datetime_method(
             let mo = long_arg(vm, &f, args, 1, "month", false)?.unwrap_or(0);
             let d = long_arg(vm, &f, args, 2, "day", false)?.unwrap_or(0);
             let target = if immutable {
-                clone_obj(vm, o)
+                clone_obj(vm, o)?
             } else {
                 o.clone()
             };
@@ -1504,7 +1555,7 @@ fn datetime_method(
             let w = long_arg(vm, &f, args, 1, "week", false)?.unwrap_or(0);
             let d = long_arg(vm, &f, args, 2, "dayOfWeek", false)?.unwrap_or(1);
             let target = if immutable {
-                clone_obj(vm, o)
+                clone_obj(vm, o)?
             } else {
                 o.clone()
             };
@@ -1518,7 +1569,7 @@ fn datetime_method(
             check_count(vm, &f, args, 1, 1)?;
             let ts = long_arg(vm, &f, args, 0, "timestamp", false)?.unwrap_or(0);
             let target = if immutable {
-                clone_obj(vm, o)
+                clone_obj(vm, o)?
             } else {
                 o.clone()
             };
@@ -1543,7 +1594,7 @@ fn datetime_method(
             }
             let _ = need_date(vm, o)?;
             let target = if immutable {
-                clone_obj(vm, o)
+                clone_obj(vm, o)?
             } else {
                 o.clone()
             };

@@ -101,10 +101,18 @@ pub fn new_object(vm: &mut Vm, class_name: &[u8]) -> Rc<RefCell<PhpObject>> {
     let display = class_display(vm, class_name);
     let id = vm.alloc_object_id();
     let mut obj = PhpObject::new(display.into_bytes(), id);
-    if vm.classes.contains_key(&lower) {
+    let mut has_dtor = false;
+    if let Some(c) = vm.classes.get(&lower) {
+        has_dtor = c.get_method(b"__destruct").is_some();
         vm.apply_class_property_defaults(&mut obj, &lower);
     }
-    Rc::new(RefCell::new(obj))
+    let o = Rc::new(RefCell::new(obj));
+    goro_core::gc::track_object(&o);
+    // (a user subclass's destructor runs for the objects made internally)
+    if has_dtor {
+        vm.track_destructible(Value::Object(o.clone()));
+    }
+    o
 }
 
 // ---------------------------------------------------------------------------
