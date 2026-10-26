@@ -41340,6 +41340,7 @@ impl Vm {
                                         *slot = Value::Null;
                                     }
                                 }
+                                crate::fetch_w::StrOffsetAssign::Fatal(e) => return Err(e),
                                 crate::fetch_w::StrOffsetAssign::Threw => {
                                     if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                         exception_handlers.last()

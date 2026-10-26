@@ -53,6 +53,8 @@ pub(crate) enum StrOffsetAssign {
     Skipped,
     /// An exception is pending.
     Threw,
+    /// A fatal error (memory_limit) ended the script.
+    Fatal(crate::vm::VmError),
 }
 
 impl Vm {
@@ -149,6 +151,13 @@ impl Vm {
             }
         }
         let c = bytes[0];
+        // (the padded string's zend_string: header, bytes and NUL, aligned)
+        if offset >= s.len() {
+            let size = offset.saturating_add(1).saturating_add(25).saturating_add(7) & !7;
+            if let Err(e) = self.memory_check(size) {
+                return StrOffsetAssign::Fatal(e);
+            }
+        }
         let mut out = s.to_vec();
         if offset >= out.len() {
             out.resize(offset, b' ');
