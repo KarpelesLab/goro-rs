@@ -3365,7 +3365,39 @@ impl Compiler {
     /// First pass: process only namespace/use/function/class declarations for hoisting.
     /// For bracketed namespaces, recurse into the body.
     fn compile_hoisting_pass(&mut self, stmts: &[Statement]) -> CompileResult<()> {
+        // The hoisted declarations are compiled with the declare(ticks) in
+        // effect at their position (the second pass sets it again).
+        let saved_ticks = TICKS.with(|t| t.get());
+        let r = self.compile_hoisting_pass_inner(stmts);
+        TICKS.with(|t| t.set(saved_ticks));
+        r
+    }
+
+    /// declare(ticks=N) (without a block): N.
+    #[inline(never)]
+    fn declare_ticks_value(stmt: &Statement) -> Option<u32> {
+        let StmtKind::Declare {
+            directives,
+            body: None,
+            is_const: false,
+            ..
+        } = &stmt.kind
+        else {
+            return None;
+        };
+        let (_, v) = directives
+            .iter()
+            .rev()
+            .find(|(n, _)| n.eq_ignore_ascii_case(b"ticks"))?;
+        let n = Self::eval_const_expr(v).map(|v| v.to_long()).unwrap_or(0);
+        Some(n.clamp(0, u32::MAX as i64) as u32)
+    }
+
+    fn compile_hoisting_pass_inner(&mut self, stmts: &[Statement]) -> CompileResult<()> {
         for stmt in stmts {
+            if let Some(n) = Self::declare_ticks_value(stmt) {
+                TICKS.with(|t| t.set(n));
+            }
             match &stmt.kind {
                 StmtKind::NamespaceDecl { name, body } => {
                     // Set namespace state
@@ -3387,7 +3419,7 @@ impl Compiler {
 
                     if let Some(body_stmts) = body {
                         // Recurse into bracketed namespace body
-                        self.compile_hoisting_pass(body_stmts)?;
+                        self.compile_hoisting_pass_inner(body_stmts)?;
                         // Reset after block
                         self.current_namespace = Vec::new();
                         self.use_map = HashMap::new();
