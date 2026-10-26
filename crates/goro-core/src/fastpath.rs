@@ -1441,6 +1441,11 @@ fn dim_key(
 ) -> Option<crate::array::ArrayKey> {
     let of = |v: &Value| match v {
         Value::Long(n) => Some(crate::array::ArrayKey::Int(*n)),
+        // (a string that cannot be an integer's: as it is, see
+        // canonical_int_key())
+        Value::String(s) if !matches!(s.as_bytes().first(), Some(b'0'..=b'9' | b'-')) => {
+            Some(crate::array::ArrayKey::String(s.clone()))
+        }
         Value::String(s) => Some(crate::vm::Vm::value_to_array_key(Value::String(s.clone()))),
         _ => None,
     };
