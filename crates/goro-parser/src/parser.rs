@@ -6007,8 +6007,26 @@ impl Parser {
         Ok(expr)
     }
 
+    /// A primary expression: the commonest (a variable, a literal) here,
+    /// the others in parse_primary_other().
+    #[inline]
     fn parse_primary(&mut self) -> ParseResult<Expr> {
         let span = self.span();
+        let kind = match self.peek() {
+            TokenKind::Variable(_) => ExprKind::Variable(self.advance_take_bytes()),
+            TokenKind::ConstantString(_) => ExprKind::String(self.advance_take_bytes()),
+            TokenKind::LongNumber(n) => {
+                let n = *n;
+                self.advance();
+                ExprKind::Int(n)
+            }
+            _ => return self.parse_primary_other(span),
+        };
+        Ok(Expr { kind, span })
+    }
+
+    #[inline(never)]
+    fn parse_primary_other(&mut self, span: Span) -> ParseResult<Expr> {
         match self.peek() {
             TokenKind::AttributeOpen => {
                 let attr_doc = self.take_doc_comment();
@@ -6108,26 +6126,11 @@ impl Parser {
                     }),
                 }
             }
-            TokenKind::LongNumber(n) => {
-                let n = *n;
-                self.advance();
-                Ok(Expr {
-                    kind: ExprKind::Int(n),
-                    span,
-                })
-            }
             TokenKind::DoubleNumber(n) => {
                 let n = *n;
                 self.advance();
                 Ok(Expr {
                     kind: ExprKind::Float(n),
-                    span,
-                })
-            }
-            TokenKind::ConstantString(_) => {
-                let s = self.advance_take_bytes();
-                Ok(Expr {
-                    kind: ExprKind::String(s),
                     span,
                 })
             }
@@ -6319,13 +6322,6 @@ impl Parser {
                 self.advance();
                 Ok(Expr {
                     kind: ExprKind::Null,
-                    span,
-                })
-            }
-            TokenKind::Variable(_) => {
-                let name = self.advance_take_bytes();
-                Ok(Expr {
-                    kind: ExprKind::Variable(name),
                     span,
                 })
             }
