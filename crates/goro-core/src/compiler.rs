@@ -1574,6 +1574,9 @@ impl Compiler {
                 Value::String(PhpString::from_string(dir.to_string()))
             }
             b"__namespace__" => Value::String(PhpString::from_vec(self.current_namespace.clone())),
+            b"__trait__" if self.in_trait_body => {
+                Value::String(PhpString::from_vec(class_name.to_vec()))
+            }
             b"__trait__" => Value::String(PhpString::empty()),
             b"true" => Value::True,
             b"false" => Value::False,
