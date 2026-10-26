@@ -8204,6 +8204,24 @@ impl Compiler {
                                     },
                                 );
                             }
+                            // zend_verify_hooked_property() of a class without a
+                            // parent runs when its hooks are compiled (after the
+                            // last one); others' is checked when linking.
+                            if prop_is_virtual
+                                && default.is_some()
+                                && extends.is_none()
+                                && !modifiers.is_interface
+                            {
+                                let l = hook_attrs.lines[0].1.max(hook_attrs.lines[1].1);
+                                return Err(CompileError {
+                                    message: format!(
+                                        "Cannot specify default value for virtual hooked property {}::${}",
+                                        crate::string::msg_str(&qualified_name),
+                                        crate::string::msg_str(prop_name)
+                                    ),
+                                    line: if l > 0 { l } else { stmt.span.line },
+                                });
+                            }
                         }
                         ClassMember::Method {
                             name: method_name,
