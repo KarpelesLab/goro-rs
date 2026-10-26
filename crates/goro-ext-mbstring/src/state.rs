@@ -513,7 +513,12 @@ fn apply_ini(
     match key {
         "mbstring.language" => {
             let v = value.unwrap_or(b"neutral");
-            let v = if v.is_empty() { b"neutral".as_ref() } else { v };
+            // (a runtime "" is an unknown language: FAILURE)
+            let v = if v.is_empty() && startup {
+                b"neutral".as_ref()
+            } else {
+                v
+            };
             match name2language(v) {
                 Some(l) => {
                     st.language = l.no;

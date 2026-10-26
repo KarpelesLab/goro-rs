@@ -368,6 +368,14 @@ final class StreamBucket {
         b"zend.exception_string_param_max_len".to_vec(),
         on_set_exception_string_param_max_len,
     );
+    vm.ini_validators.insert(
+        b"pcre.backtrack_limit".to_vec(),
+        on_set_pcre_backtrack_limit,
+    );
+    vm.ini_validators.insert(
+        b"pcre.recursion_limit".to_vec(),
+        on_set_pcre_recursion_limit,
+    );
     // Stack limit settings (0 = detected from the system).
     for k in [
         &b"zend.max_allowed_stack_size"[..],
@@ -6051,28 +6059,23 @@ fn ini_set_as(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError
     if key == b"serialize_precision" {
         goro_core::value::set_php_serialize_precision(ini_precision_atol(&value).unwrap_or(-1));
     }
-    // Handle zend.assertions: warn when trying to change it if currently -1 (only allowed in php.ini)
-    // Also warn when trying to set it to -1 at runtime
+    // OnUpdateAssertions: the quantity (warning when malformed); switching
+    // between -1 and a non-negative value is only possible in php.ini
     if key == b"zend.assertions" {
-        let new_val = match &value {
-            Value::Long(n) => *n,
-            Value::String(s) => s.to_string_lossy().parse::<i64>().unwrap_or(0),
-            _ => value.to_long(),
-        };
+        let new_val = ini_quantity_warn(vm, "zend.assertions", &value.to_php_string().as_bytes());
         let cur_val = vm
             .constants
             .get(b"zend.assertions".as_ref())
-            .map(|v| v.to_long())
+            .map(|v| {
+                goro_core::ini_quantity::parse_quantity(&v.to_php_string().as_bytes(), true).0
+                    as i64
+            })
             .unwrap_or(1);
-        if new_val == -1 || cur_val == -1 {
+        if cur_val != new_val && (cur_val < 0 || new_val < 0) {
             vm.emit_warning(
                 "zend.assertions may be completely enabled or disabled only in php.ini",
             );
-            // When zend.assertions is -1 (set in php.ini), don't allow runtime changes.
-            // Keep the value as -1 so subsequent ini_set calls also warn.
-            if cur_val == -1 {
-                return Ok(old.unwrap_or(Value::False));
-            }
+            return Ok(Value::False);
         }
     }
     if let Some(msg) = ini_handler_deprecation(&key, &value) {
@@ -6409,20 +6412,27 @@ fn ini_parse_bool(v: &Value) -> bool {
         Value::False | Value::Null | Value::Undef => false,
         Value::Long(n) => *n != 0,
         other => {
-            let s = other.to_php_string().to_string_lossy();
-            let t = s.trim();
-            if t.eq_ignore_ascii_case("true")
-                || t.eq_ignore_ascii_case("yes")
-                || t.eq_ignore_ascii_case("on")
+            // zend_ini_parse_bool(): "true"/"yes"/"on", else
+            // ZEND_STRTOL(str) != 0 (saturating, so any digit run counts)
+            let ps = other.to_php_string();
+            let b = ps.as_bytes();
+            if b.eq_ignore_ascii_case(b"true")
+                || b.eq_ignore_ascii_case(b"yes")
+                || b.eq_ignore_ascii_case(b"on")
             {
-                true
-            } else {
-                let digits: String = t
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit() || *c == '-' || *c == '+')
-                    .collect();
-                digits.parse::<i64>().map(|n| n != 0).unwrap_or(false)
+                return true;
             }
+            let mut i = 0;
+            while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+                i += 1;
+            }
+            if i < b.len() && (b[i] == b'-' || b[i] == b'+') {
+                i += 1;
+            }
+            b[i..]
+                .iter()
+                .take_while(|c| c.is_ascii_digit())
+                .any(|&c| c != b'0')
         }
     }
 }
@@ -16832,6 +16842,32 @@ pub(crate) fn strip_os_error(msg: &str) -> String {
     }
 }
 
+/// zend_ini_parse_quantity_warn(): the quantity, warning about a malformed one.
+fn ini_quantity_warn(vm: &mut Vm, name: &str, value: &[u8]) -> i64 {
+    let (v, warn) = goro_core::ini_quantity::parse_quantity(value, true);
+    if let Some(w) = warn {
+        vm.emit_warning(&format!("Invalid \"{}\" setting. {}", name, w));
+    }
+    v as i64
+}
+
+/// pcre.backtrack_limit / pcre.recursion_limit: OnUpdateLong.
+pub(crate) fn on_set_pcre_backtrack_limit(vm: &mut Vm, value: &[u8], startup: bool) -> bool {
+    if startup {
+        return true;
+    }
+    ini_quantity_warn(vm, "pcre.backtrack_limit", value);
+    true
+}
+
+pub(crate) fn on_set_pcre_recursion_limit(vm: &mut Vm, value: &[u8], startup: bool) -> bool {
+    if startup {
+        return true;
+    }
+    ini_quantity_warn(vm, "pcre.recursion_limit", value);
+    true
+}
+
 /// OnSetExceptionStringParamMaxLen: 0 to 1000000 (ZEND_ATOL of the value).
 fn on_set_exception_string_param_max_len(vm: &mut Vm, value: &[u8], _startup: bool) -> bool {
     let s = String::from_utf8_lossy(value);
@@ -16840,7 +16876,19 @@ fn on_set_exception_string_param_max_len(vm: &mut Vm, value: &[u8], _startup: bo
         .char_indices()
         .find(|&(i, c)| !(c.is_ascii_digit() || (i == 0 && (c == '-' || c == '+'))))
         .map_or(t.len(), |(i, _)| i);
-    let n = t[..end].parse::<i64>().unwrap_or(0);
+    // (strtol saturates on overflow)
+    let digits = &t[..end];
+    let n = digits.parse::<i64>().unwrap_or_else(|_| {
+        if digits.bytes().any(|b| b.is_ascii_digit()) {
+            if digits.starts_with('-') {
+                i64::MIN
+            } else {
+                i64::MAX
+            }
+        } else {
+            0
+        }
+    });
     if (0..=1_000_000).contains(&n) {
         vm.exception_string_param_max_len = n as usize;
         true
