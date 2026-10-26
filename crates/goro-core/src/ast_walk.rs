@@ -24,7 +24,7 @@ pub fn stmts_any(stmts: &[Statement], pred: &mut dyn FnMut(&Expr) -> bool) -> bo
 }
 
 fn opt(e: &Option<Box<Expr>>, f: &mut dyn FnMut(&Expr) -> bool) -> bool {
-    e.as_deref().is_some_and(|e| f(e))
+    e.as_deref().is_some_and(f)
 }
 
 /// Calls `f` on the direct child expressions of `expr` (not entering
@@ -49,7 +49,7 @@ pub fn expr_any_child(expr: &Expr, f: &mut dyn FnMut(&Expr) -> bool) -> bool {
         }),
         E::Array(elems) => elems
             .iter()
-            .any(|el| el.key.as_ref().is_some_and(|k| f(k)) || f(&el.value)),
+            .any(|el| el.key.as_ref().is_some_and(&mut *f) || f(&el.value)),
         E::DynamicVariable(e)
         | E::Cast(_, e)
         | E::Print(e)
@@ -96,13 +96,13 @@ pub fn expr_any_child(expr: &Expr, f: &mut dyn FnMut(&Expr) -> bool) -> bool {
                 || arms.iter().any(|arm| {
                     arm.conditions
                         .as_ref()
-                        .is_some_and(|cs| cs.iter().any(|c| f(c)))
+                        .is_some_and(|cs| cs.iter().any(&mut *f))
                         || f(&arm.body)
                 })
         }
         E::Instanceof { expr, class } => f(expr) || f(class),
         E::Exit(e) => opt(e, f),
-        E::Isset(es) => es.iter().any(|e| f(e)),
+        E::Isset(es) => es.iter().any(&mut *f),
         E::Include { path, .. } => f(path),
         E::Yield(k, v) => opt(k, f) || opt(v, f),
         E::Pipe { value, callable } => f(value) || f(callable),
