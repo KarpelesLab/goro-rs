@@ -686,6 +686,9 @@ impl Vm {
                 Value::Undef => return None,
                 Value::Reference(rc) => match &*rc.try_borrow().ok()? {
                     Value::Undef => return None,
+                    // (a referenced array outlives the frame: the caller
+                    // gets its own copy, as the general handler's)
+                    v @ Value::Array(_) => self.dup_array_value(v.clone()),
                     v => v.clone(),
                 },
                 v => v.clone(),
