@@ -14617,7 +14617,72 @@ impl Compiler {
         })
     }
 
+    /// The commonest expressions (a variable, an int or string literal),
+    /// which none of compile_expr_other()'s checks before its match concern,
+    /// then the others.
     fn compile_expr_inner(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        match &expr.kind {
+            ExprKind::Int(n) => {
+                self.zend_lineno = expr.span.line;
+                self.chain_base = false;
+                Ok(OperandType::Const(
+                    self.op_array.add_literal(Value::Long(*n)),
+                ))
+            }
+            ExprKind::String(s) => {
+                self.zend_lineno = expr.span.line;
+                self.chain_base = false;
+                let idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(s.clone())));
+                Ok(OperandType::Const(idx))
+            }
+            ExprKind::Variable(name) => {
+                self.zend_lineno = expr.span.line;
+                self.chain_base = false;
+                self.compile_variable_read(expr, name)
+            }
+            _ => self.compile_expr_other(expr),
+        }
+    }
+
+    /// compile_expr_inner() of a variable.
+    #[inline(always)]
+    fn compile_variable_read(&mut self, expr: &Expr, name: &[u8]) -> CompileResult<OperandType> {
+        if !self.tmp_aliases.is_empty() {
+            if let Some((_, op)) = self.tmp_aliases.iter().rev().find(|(n, _)| n == name) {
+                return Ok(*op);
+            }
+        }
+        let cv = self.op_array.get_or_create_cv(name);
+        // zend_try_compile_cv(): reading the variable the http://
+        // wrapper used to set is deprecated (unless assigned first
+        // or a parameter).
+        if name == b"http_response_header"
+            && !self.hrh_assigned
+            && cv >= self.op_array.param_count
+            && self.hrh_is_base != expr as *const Expr as usize
+        {
+            push_compile_deprecated(
+                "The predefined locally scoped $http_response_header variable is deprecated, call http_get_last_response_headers() instead".to_string(),
+                expr.span.line,
+            );
+        }
+        if name == b"this" && !self.this_always_bound && !self.quiet_this {
+            // "Using $this when not in object context" unless bound.
+            self.op_array.emit(Op {
+                opcode: OpCode::CheckThis,
+                op1: OperandType::Cv(cv),
+                op2: OperandType::Unused,
+                result: OperandType::Unused,
+                line: expr.span.line,
+            });
+        }
+        Ok(OperandType::Cv(cv))
+    }
+
+    #[inline(never)]
+    fn compile_expr_other(&mut self, expr: &Expr) -> CompileResult<OperandType> {
         self.zend_lineno = expr.span.line;
         if !std::mem::take(&mut self.chain_base)
             && matches!(
@@ -14656,18 +14721,11 @@ impl Compiler {
             self.check_write_targets(expr)?;
         }
         match &expr.kind {
-            ExprKind::Int(n) => {
-                let idx = self.op_array.add_literal(Value::Long(*n));
-                Ok(OperandType::Const(idx))
+            ExprKind::Int(_) | ExprKind::String(_) | ExprKind::Variable(_) => {
+                unreachable!("compiled by compile_expr_inner()")
             }
             ExprKind::Float(f) => {
                 let idx = self.op_array.add_literal(Value::Double(*f));
-                Ok(OperandType::Const(idx))
-            }
-            ExprKind::String(s) => {
-                let idx = self
-                    .op_array
-                    .add_literal(Value::String(PhpString::from_vec(s.clone())));
                 Ok(OperandType::Const(idx))
             }
             ExprKind::True => {
@@ -14681,39 +14739,6 @@ impl Compiler {
             ExprKind::Null => {
                 let idx = self.op_array.add_literal(Value::Null);
                 Ok(OperandType::Const(idx))
-            }
-
-            ExprKind::Variable(name) => {
-                if !self.tmp_aliases.is_empty() {
-                    if let Some((_, op)) = self.tmp_aliases.iter().rev().find(|(n, _)| n == name) {
-                        return Ok(*op);
-                    }
-                }
-                let cv = self.op_array.get_or_create_cv(name);
-                // zend_try_compile_cv(): reading the variable the http://
-                // wrapper used to set is deprecated (unless assigned first
-                // or a parameter).
-                if name == b"http_response_header"
-                    && !self.hrh_assigned
-                    && cv >= self.op_array.param_count
-                    && self.hrh_is_base != expr as *const Expr as usize
-                {
-                    push_compile_deprecated(
-                        "The predefined locally scoped $http_response_header variable is deprecated, call http_get_last_response_headers() instead".to_string(),
-                        expr.span.line,
-                    );
-                }
-                if name == b"this" && !self.this_always_bound && !self.quiet_this {
-                    // "Using $this when not in object context" unless bound.
-                    self.op_array.emit(Op {
-                        opcode: OpCode::CheckThis,
-                        op1: OperandType::Cv(cv),
-                        op2: OperandType::Unused,
-                        result: OperandType::Unused,
-                        line: expr.span.line,
-                    });
-                }
-                Ok(OperandType::Cv(cv))
             }
 
             ExprKind::Assign { target, value } if matches!(&target.kind, ExprKind::DynamicVariable(i) if Self::static_dynvar_name(i).is_none()) => {
