@@ -792,7 +792,11 @@ impl Vm {
     /// order differs when a child gives storage to a property its parent
     /// left virtual. Other classes: object_prop_table().
     pub fn object_prop_table_info_order(&self, obj: &Rc<RefCell<PhpObject>>) -> Vec<PropEntry> {
-        let mut t = self.object_prop_table(obj);
+        let mut t = if lazy_ht_view(obj).is_none() {
+            self.object_prop_table_live_ex(obj, true)
+        } else {
+            self.object_prop_table(obj)
+        };
         let cl = obj.borrow().class_name.to_ascii_lowercase();
         let Some(ce) = self.classes.get(&cl) else {
             return t;
@@ -841,6 +845,17 @@ impl Vm {
     }
 
     fn object_prop_table_live(&self, obj: &Rc<RefCell<PhpObject>>) -> Vec<PropEntry> {
+        self.object_prop_table_live_ex(obj, false)
+    }
+
+    /// With `hooked_null`, an uninitialized backed property with only a set
+    /// hook is NULL (the silent zend_read_property_ex() of
+    /// zho_build_properties consumers: get_object_vars(), json_encode()...).
+    fn object_prop_table_live_ex(
+        &self,
+        obj: &Rc<RefCell<PhpObject>>,
+        hooked_null: bool,
+    ) -> Vec<PropEntry> {
         let ob = obj.borrow();
         let layout = self.class_layout_of(&ob.class_name);
         let props = &ob.properties;
@@ -849,6 +864,19 @@ impl Vm {
             match (slot, at) {
                 (Some(slot), Some(i)) => {
                     if matches!(props[i].1, Value::Undef) && !slot.has_get_hook {
+                        if hooked_null
+                            && self.classes.get(&slot.decl).is_some_and(|c| {
+                                c.properties.iter().any(|p| {
+                                    p.name == slot.name && !p.is_static && p.has_set_hook
+                                })
+                            })
+                        {
+                            out.push(PropEntry {
+                                key: slot.mangled(),
+                                value: Value::Null,
+                                slot: Some(slot.clone()),
+                            });
+                        }
                         continue;
                     }
                     out.push(PropEntry {

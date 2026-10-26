@@ -66547,6 +66547,10 @@ impl Vm {
             let v = obj.borrow().get_property(&key);
             if obj.borrow().has_property(&key) && !matches!(v, Value::Undef) {
                 out.push((key, v));
+            } else if d.has_set_hook {
+                // zend_read_property_ex(silent) of an uninitialized hooked
+                // property: EG(uninitialized_zval).
+                out.push((key, Value::Null));
             }
         }
         let ob = obj.borrow();
