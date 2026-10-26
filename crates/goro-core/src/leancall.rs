@@ -753,10 +753,10 @@ impl Vm {
             self.lean_frames.pop();
             self.lean_depth -= 1;
             if sep.is_some() {
-                for v in [self.called_class_stack.pop(), self.class_scope_stack.pop()]
-                    .into_iter()
-                    .flatten()
-                {
+                if let Some(v) = self.called_class_stack.pop() {
+                    self.recycle_bytes(v);
+                }
+                if let Some(v) = self.class_scope_stack.pop() {
                     self.recycle_bytes(v);
                 }
             } else {

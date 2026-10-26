@@ -217,6 +217,46 @@ fn move_args(cvs: &mut [Value], args: &mut [Value], n: usize, keep: usize) {
     }
 }
 
+/// Append the short byte string `src` (a class name) to the empty `dst`:
+/// as extend_from_slice(), without a call of memcpy() for up to 32 bytes.
+#[inline(always)]
+fn push_name_bytes(dst: &mut Vec<u8>, src: &[u8]) {
+    let n = src.len();
+    if !(1..=32).contains(&n) || !dst.is_empty() {
+        dst.extend_from_slice(src);
+        return;
+    }
+    dst.reserve(n);
+    let d = dst.as_mut_ptr();
+    let s = src.as_ptr();
+    // SAFETY: `dst` has room for `n` bytes and `src` has `n`: each copy
+    // is of a chunk within them (the chunks overlap when `n` is not a
+    // multiple of their size).
+    unsafe {
+        if n >= 16 {
+            let a = std::ptr::read_unaligned(s as *const u128);
+            let b = std::ptr::read_unaligned(s.add(n - 16) as *const u128);
+            std::ptr::write_unaligned(d as *mut u128, a);
+            std::ptr::write_unaligned(d.add(n - 16) as *mut u128, b);
+        } else if n >= 8 {
+            let a = std::ptr::read_unaligned(s as *const u64);
+            let b = std::ptr::read_unaligned(s.add(n - 8) as *const u64);
+            std::ptr::write_unaligned(d as *mut u64, a);
+            std::ptr::write_unaligned(d.add(n - 8) as *mut u64, b);
+        } else if n >= 4 {
+            let a = std::ptr::read_unaligned(s as *const u32);
+            let b = std::ptr::read_unaligned(s.add(n - 4) as *const u32);
+            std::ptr::write_unaligned(d as *mut u32, a);
+            std::ptr::write_unaligned(d.add(n - 4) as *mut u32, b);
+        } else {
+            *d = *s;
+            *d.add(n / 2) = *s.add(n / 2);
+            *d.add(n - 1) = *s.add(n - 1);
+        }
+        dst.set_len(n);
+    }
+}
+
 /// A static_vars generation number (see Vm::static_gen), unique across
 /// the VMs of the process.
 pub(crate) fn fresh_static_gen() -> u64 {
@@ -21339,21 +21379,21 @@ impl Vm {
         let mut called_class = self.bytes_pool.pop().unwrap_or_default();
         match call.args.first() {
             Some(Value::Object(obj)) if has_this => {
-                called_class.extend_from_slice(&obj.borrow().class_name)
+                push_name_bytes(&mut called_class, &obj.borrow().class_name)
             }
             _ if forwarding => match caller_this {
-                Some(obj) => called_class.extend_from_slice(&obj.borrow().class_name),
+                Some(obj) => push_name_bytes(&mut called_class, &obj.borrow().class_name),
                 None => match self.called_class_stack.last() {
                     Some(current) => called_class.extend_from_slice(current),
                     None => called_class.extend_from_slice(&call.name.as_bytes()[..sep]),
                 },
             },
-            _ => called_class.extend_from_slice(&call.name.as_bytes()[..sep]),
+            _ => push_name_bytes(&mut called_class, &call.name.as_bytes()[..sep]),
         }
         self.called_class_stack.push(called_class);
         if let Some(scope) = scope {
             let mut defining_class = self.bytes_pool.pop().unwrap_or_default();
-            defining_class.extend_from_slice(scope);
+            push_name_bytes(&mut defining_class, scope);
             self.class_scope_stack.push(defining_class);
             return;
         }
