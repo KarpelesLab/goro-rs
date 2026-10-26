@@ -33999,6 +33999,17 @@ impl Vm {
                                 }
                             }
                         }
+                        // `sort(array: $a)`: the array sent by reference is
+                        // handed over by handle, as a positional one is.
+                        if let Some(a0) = call.args.first() {
+                            if matches!(a0, Value::Reference(_)) {
+                                if let Some(arr) =
+                                    Self::array_ref_builtin_arg(&func_name_lower, 0, a0)
+                                {
+                                    call.args[0] = arr;
+                                }
+                            }
+                        }
                         // Generic zpp (verified stub arginfo): argument count and
                         // scalar parameter checks/coercion.
                         let zpp_types =

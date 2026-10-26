@@ -497,7 +497,7 @@ impl Vm {
     /// arrays by handle, see Compiler::is_array_ref_builtin): the referenced
     /// array, separated from other holders, so the change lands in it.
     #[inline(never)]
-    fn array_ref_builtin_arg(lname: &[u8], i: usize, a: &Value) -> Option<Value> {
+    pub(crate) fn array_ref_builtin_arg(lname: &[u8], i: usize, a: &Value) -> Option<Value> {
         let Value::Reference(r) = a else {
             return None;
         };
