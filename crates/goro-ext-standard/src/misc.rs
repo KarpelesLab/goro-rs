@@ -10533,7 +10533,9 @@ fn gc_enable_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Generator(_)) = args.first() {
-        return Ok(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(PhpArray::new()))));
+        return Ok(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
+            PhpArray::new(),
+        ))));
     }
     if let Some(Value::Object(outer)) = args.first() {
         if let Some(f) = goro_core::vm::native_handlers(outer).and_then(|h| h.get_properties) {
@@ -20502,7 +20504,9 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn get_mangled_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Generator(_)) = args.first() {
-        return Ok(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(PhpArray::new()))));
+        return Ok(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
+            PhpArray::new(),
+        ))));
     }
     if let Some(Value::Object(outer)) = args.first() {
         // For initialized lazy proxy, redirect to the real backing object.

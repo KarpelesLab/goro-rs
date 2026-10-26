@@ -225,7 +225,10 @@ impl Vm {
                     // __toString() threw, with no frame to catch it
                     // (zend_throw_exception_internal()): that exception is
                     // the one reported.
-                    if self.current_exception.as_ref().is_some_and(|x| !x.identical(&exc))
+                    if self
+                        .current_exception
+                        .as_ref()
+                        .is_some_and(|x| !x.identical(&exc))
                         && !self.uncaught_tostring_nested
                     {
                         self.uncaught_tostring_nested = true;

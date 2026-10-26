@@ -6700,7 +6700,10 @@ impl Vm {
                 );
             }
             (Value::Generator(_), Value::Long(_)) | (Value::Long(_), Value::Generator(_)) => {
-                self.emit_notice_at("Object of class Generator could not be converted to int", line);
+                self.emit_notice_at(
+                    "Object of class Generator could not be converted to int",
+                    line,
+                );
             }
             (Value::Generator(_), Value::Double(_)) | (Value::Double(_), Value::Generator(_)) => {
                 self.emit_notice_at(

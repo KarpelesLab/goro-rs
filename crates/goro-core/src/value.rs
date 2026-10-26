@@ -1422,7 +1422,9 @@ impl Value {
             // (zend_std_compare_objects()).
             (Value::Generator(_), Value::Generator(_)) => true,
             // (converted to a number: 1, with a notice)
-            (Value::Generator(_), Value::Long(n)) | (Value::Long(n), Value::Generator(_)) => *n == 1,
+            (Value::Generator(_), Value::Long(n)) | (Value::Long(n), Value::Generator(_)) => {
+                *n == 1
+            }
             (Value::Generator(_), Value::Double(f)) | (Value::Double(f), Value::Generator(_)) => {
                 *f == 1.0
             }
