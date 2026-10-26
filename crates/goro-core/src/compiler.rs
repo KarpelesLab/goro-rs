@@ -17390,7 +17390,9 @@ impl Compiler {
                     }
                     if unqualified == b"compact"
                         && !args.is_empty()
-                        && args.iter().all(|a| a.name.is_none() && !a.unpack)
+                        && (args.iter().all(|a| a.name.is_none() && !a.unpack)
+                            || matches!(args.as_slice(), [a] if !a.unpack
+                                && a.name.as_deref() == Some(b"var_name".as_slice())))
                     {
                         // Make sure literal variable names have CV slots.
                         fn collect_names(e: &Expr, out: &mut Vec<Vec<u8>>) {

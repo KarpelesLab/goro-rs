@@ -8949,7 +8949,8 @@ impl Vm {
                 .iter()
                 .find(|p| !p.variadic && p.name.as_bytes() == name)
             {
-                Some(p) => p.by_ref == 1,
+                // (ARG_SHOULD_BE_SENT_BY_REF(): prefer-ref parameters too)
+                Some(p) => p.by_ref != 0,
                 // (an unknown name goes to a by-reference variadic parameter)
                 None => info
                     .params
