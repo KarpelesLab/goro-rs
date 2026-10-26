@@ -770,6 +770,8 @@ pub struct Compiler {
     /// class constant / property default thunk): property fetches are only
     /// allowed on enums.
     in_const_expr: bool,
+    /// Compiling a parameter's default value (see compile_param_default_value).
+    in_param_default: bool,
     /// Compile-time fatal errors collected during attribute validation that
     /// should be raised before the script executes. The first one wins.
     pub deferred_fatal_errors: Vec<(String, u32)>,
@@ -1093,6 +1095,7 @@ impl Compiler {
             warnings: Vec::new(),
             is_discarding_result: false,
             in_const_expr: false,
+            in_param_default: false,
             assign_result_discarded: false,
             hrh_assigned: false,
             hrh_is_base: 0,
@@ -5906,7 +5909,7 @@ impl Compiler {
                             result: OperandType::Unused,
                             line: 0,
                         });
-                        let default_val = func_compiler.compile_const_expr_value(default_expr)?;
+                        let default_val = func_compiler.compile_param_default_value(default_expr)?;
                         if !matches!(default_expr.kind, ExprKind::Null) {
                             let pcv = func_compiler.op_array.get_or_create_cv(&param.name) as usize;
                             if let Some(Some(pti)) =
@@ -7327,6 +7330,7 @@ impl Compiler {
                 }
 
                 for member in body {
+                    Self::warn_nan_concat_member(member);
                     self.const_property_name = match member {
                         ClassMember::Property { name, .. } => name.clone(),
                         _ => Vec::new(),
@@ -10244,7 +10248,7 @@ impl Compiler {
                                                 line: 0,
                                             });
                                             if let Ok(default_val) =
-                                                dc.compile_const_expr_value(default_expr)
+                                                dc.compile_param_default_value(default_expr)
                                             {
                                                 dc.op_array.emit(Op {
                                                     opcode: OpCode::Assign,
@@ -13540,6 +13544,9 @@ impl Compiler {
             }
             Some(Value::Double(f)) => {
                 if f.is_nan() {
+                    if self.in_param_default {
+                        return o;
+                    }
                     push_compile_warning("unexpected NAN value was coerced to string".into(), line);
                 }
                 Value::Double(*f).to_php_string()
@@ -14172,9 +14179,54 @@ impl Compiler {
             &mut self.keep_relative_class_names,
             !self.is_in_trait && expr_has_relative_class_const(e),
         );
-        let r = self.compile_const_expr_value(e);
+        let r = self.compile_param_default_value(e);
         self.keep_relative_class_names = prev;
         r
+    }
+
+    /// A parameter's default (RECV_INIT): evaluated when the call needs it,
+    /// so a NAN concatenated in it warns then, not while compiling.
+    #[inline(never)]
+    fn compile_param_default_value(&mut self, e: &Expr) -> CompileResult<OperandType> {
+        let prev = std::mem::replace(&mut self.in_param_default, true);
+        let r = self.compile_const_expr_value(e);
+        self.in_param_default = prev;
+        r
+    }
+
+    /// zend_compile_class_const_decl() / zend_compile_prop_decl(): the
+    /// value is evaluated while compiling, so a NAN concatenated into a
+    /// class constant or a property default warns then.
+    #[inline(never)]
+    fn warn_nan_concat_member(member: &ClassMember) {
+        match member {
+            ClassMember::ClassConstant { value, .. } => Self::warn_nan_concat(value),
+            ClassMember::Property {
+                default: Some(e), ..
+            } => Self::warn_nan_concat(e),
+            _ => {}
+        }
+    }
+
+    fn warn_nan_concat(e: &Expr) {
+        if let ExprKind::BinaryOp {
+            left, op, right, ..
+        } = &e.kind
+        {
+            Self::warn_nan_concat(left);
+            Self::warn_nan_concat(right);
+            if *op == BinaryOp::Concat {
+                let is_nan = |x: &Expr| matches!(Self::eval_const_expr(x), Some(Value::Double(f)) if f.is_nan());
+                for side in [left, right] {
+                    if is_nan(side) {
+                        push_compile_warning(
+                            "unexpected NAN value was coerced to string".into(),
+                            e.span.line,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn compile_const_expr_value(&mut self, e: &Expr) -> CompileResult<OperandType> {
@@ -18471,7 +18523,7 @@ impl Compiler {
                             line: 0,
                         });
                         let default_val =
-                            closure_compiler.compile_const_expr_value(default_expr)?;
+                            closure_compiler.compile_param_default_value(default_expr)?;
                         if !matches!(default_expr.kind, ExprKind::Null) {
                             let pcv =
                                 closure_compiler.op_array.get_or_create_cv(&param.name) as usize;
@@ -18820,7 +18872,7 @@ impl Compiler {
                             line: 0,
                         });
                         let default_val =
-                            closure_compiler.compile_const_expr_value(default_expr)?;
+                            closure_compiler.compile_param_default_value(default_expr)?;
                         if !matches!(default_expr.kind, ExprKind::Null) {
                             let pcv =
                                 closure_compiler.op_array.get_or_create_cv(&param.name) as usize;
