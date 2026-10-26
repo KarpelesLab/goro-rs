@@ -205,18 +205,18 @@ impl Parser {
         // Strip DocComment tokens out of the stream and attach each to the
         // *next* non-doc token. token_doc_comments[i] is the (last) doc comment
         // immediately preceding tokens[i].
-        let mut filtered: Vec<Token> = Vec::with_capacity(tokens.len());
-        let mut doc_comments: Vec<Option<Vec<u8>>> = Vec::with_capacity(tokens.len());
+        let mut filtered = tokens;
+        let mut doc_comments: Vec<Option<Vec<u8>>> = Vec::with_capacity(filtered.len());
         let mut pending_doc: Option<Vec<u8>> = None;
-        for tok in tokens {
-            if let TokenKind::DocComment(bytes) = &tok.kind {
+        filtered.retain_mut(|tok| {
+            if let TokenKind::DocComment(bytes) = &mut tok.kind {
                 // Keep the most recent doc-comment if multiple appear in a row
-                pending_doc = Some(bytes.clone());
-                continue;
+                pending_doc = Some(std::mem::take(bytes));
+                return false;
             }
             doc_comments.push(pending_doc.take());
-            filtered.push(tok);
-        }
+            true
+        });
         let halt_map = crate::multibyte::take_halt_offset_map();
         Self::apply_halt_compiler(&mut filtered, &mut doc_comments, halt_map);
         Self {
