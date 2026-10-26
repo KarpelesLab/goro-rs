@@ -24295,6 +24295,46 @@ impl Vm {
         r
     }
 
+    /// SEND_UNPACK to an internal function: its by-reference parameters
+    /// (and prefer-ref ones: ARG_SHOULD_BE_SENT_BY_REF) bind to the unpacked
+    /// array's elements, as for a user function.
+    #[inline(never)]
+    fn unpack_builtin_by_ref(&self) -> (Option<Vec<bool>>, bool) {
+        let Some(call) = self.pending_calls.last() else {
+            return (None, false);
+        };
+        let name = call.name.as_bytes();
+        let name = name.strip_prefix(b"\\").unwrap_or(name);
+        if name.contains(&b':') || call.target.closure {
+            return (None, false);
+        }
+        let lower = name.to_ascii_lowercase();
+        if !self.functions.contains_key(&lower) {
+            return (None, false);
+        }
+        let Some(info) = crate::arginfo::lookup(&lower) else {
+            return (None, false);
+        };
+        // (an `array &$array` builtin is handed the array itself: see
+        // Compiler::is_array_ref_builtin)
+        let array_ref = crate::compiler::Compiler::is_array_ref_builtin(Some(&lower));
+        let by_ref: Vec<bool> = info
+            .params
+            .iter()
+            .filter(|p| !p.variadic)
+            .enumerate()
+            .map(|(i, p)| p.by_ref != 0 && !(i == 0 && array_ref))
+            .collect();
+        let variadic_ref = info
+            .params
+            .last()
+            .is_some_and(|p| p.variadic && p.by_ref != 0);
+        if !variadic_ref && !by_ref.contains(&true) {
+            return (None, false);
+        }
+        (Some(by_ref), variadic_ref)
+    }
+
     /// The argument list a DO_FCALL hands the callee's frame (gc_call_args),
     /// tagged in its low bit when the call's result is discarded (its op1
     /// set): the frame's GcFrame keeps it so (see discards_result()).
@@ -30858,7 +30898,7 @@ impl Vm {
                             })
                         })
                         .map(|(br, vr)| (Some(br), vr))
-                        .unwrap_or((None, false));
+                        .unwrap_or_else(|| self.unpack_builtin_by_ref());
                     // Get source array Rc for by-ref modifications
                     let source_arr_rc = if let Value::Array(arr) = &val {
                         Some(arr.clone())
