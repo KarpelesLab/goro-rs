@@ -6199,9 +6199,12 @@ pub fn reflection_method_method(
             if !is_user {
                 return Some(Value::False);
             }
-            // Use the class's filename if available
-            let filename = rcls(vm, &class_lower)
-                .and_then(|c| c.filename.clone())
+            // The file the method was declared in (a trait's file for an
+            // imported method), else the class's.
+            let filename = rmethod(vm, &class_lower, method_lower.as_bytes())
+                .map(|m| String::from_utf8_lossy(&m.op_array.filename).into_owned())
+                .filter(|f| !f.is_empty())
+                .or_else(|| rcls(vm, &class_lower).and_then(|c| c.filename.clone()))
                 .unwrap_or_else(|| vm.current_file.to_string());
             Some(Value::String(PhpString::from_string(filename)))
         }
