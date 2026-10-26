@@ -611,6 +611,46 @@ impl Vm {
                 }
             }
         }
+        // A native method called in static form ("Class::method") or a
+        // native constructor (`new Class(...)`, the object first).
+        if let Some(call) = self.pending_calls.last() {
+            let name = call.name.as_bytes();
+            if let Some(sep) = name.windows(2).position(|w| w == b"::") {
+                let class = name[..sep].to_ascii_lowercase();
+                let method = &name[sep + 2..];
+                let this_arg = usize::from(
+                    method.eq_ignore_ascii_case(b"__construct")
+                        && matches!(call.args.first(), Some(Value::Object(_))),
+                );
+                let class = class.strip_prefix(b"\\").unwrap_or(&class);
+                // (an internal class: no user declaration)
+                if !self.classes.get(class).is_some_and(|c| c.filename.is_some()) {
+                    if let Some((c, m)) = crate::stubs::find_method(class, &method.to_ascii_lowercase()) {
+                        let p = arg_index.saturating_sub(this_arg);
+                        let pname = m
+                            .args
+                            .get(p)
+                            .filter(|a| a.flags & crate::stubs::A_VARIADIC == 0)
+                            .map(|a| a.name);
+                        return match pname {
+                            Some(pn) => format!(
+                                "{}::{}(): Argument #{} (${}) could not be passed by reference",
+                                c.name,
+                                m.name,
+                                p + 1,
+                                pn
+                            ),
+                            None => format!(
+                                "{}::{}(): Argument #{} could not be passed by reference",
+                                c.name,
+                                m.name,
+                                p + 1
+                            ),
+                        };
+                    }
+                }
+            }
+        }
         self.cannot_pass_by_ref_user_msg(arg_index)
     }
 
