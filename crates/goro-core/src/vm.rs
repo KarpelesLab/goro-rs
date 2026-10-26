@@ -9799,7 +9799,78 @@ impl Vm {
         self.canonical_type_display(param_type)
     }
 
+    /// check_param_types_inner(); a `callable` parameter given a
+    /// "Class::method" string or [class, method] array whose class is not
+    /// loaded yet autoloads it (zend_is_callable() does) and is checked again.
     fn check_param_types_with_strict(
+        &mut self,
+        user_fn: &OpArray,
+        args: &[Value],
+        func_display_name: &str,
+        implicit_args: usize,
+        line: u32,
+        caller_strict: bool,
+    ) -> Option<String> {
+        let r = self.check_param_types_inner(
+            user_fn,
+            args,
+            func_display_name,
+            implicit_args,
+            line,
+            caller_strict,
+        );
+        if r.is_some() && self.autoload_callable_arg_classes(user_fn, args) {
+            return self.check_param_types_inner(
+                user_fn,
+                args,
+                func_display_name,
+                implicit_args,
+                line,
+                caller_strict,
+            );
+        }
+        r
+    }
+
+    /// Autoloads the classes named by string/array arguments passed to
+    /// `callable` parameters; true when one got loaded.
+    #[inline(never)]
+    fn autoload_callable_arg_classes(&mut self, user_fn: &OpArray, args: &[Value]) -> bool {
+        let mut loaded = false;
+        for (i, arg) in args.iter().enumerate() {
+            let ti = match user_fn.variadic_param {
+                Some(v) if i >= v as usize => v as usize,
+                _ => i,
+            };
+            let Some(Some(info)) = user_fn.param_types.get(ti) else {
+                continue;
+            };
+            let val = arg.deref();
+            if self.autoload_callable_for_type(&val, &info.param_type) {
+                loaded = true;
+            }
+        }
+        loaded
+    }
+
+    /// A string/array value checked against a type with `callable` in it:
+    /// autoloads the classes it names; true when one got loaded.
+    #[inline(never)]
+    fn autoload_callable_for_type(&mut self, val: &Value, ty: &ParamType) -> bool {
+        fn has_callable(t: &ParamType) -> bool {
+            match t {
+                ParamType::Simple(n) => n.eq_ignore_ascii_case(b"callable"),
+                ParamType::Nullable(inner) => has_callable(inner),
+                ParamType::Union(m) => m.iter().any(has_callable),
+                _ => false,
+            }
+        }
+        matches!(val, Value::String(_) | Value::Array(_))
+            && has_callable(ty)
+            && self.autoload_callable_classes(val)
+    }
+
+    fn check_param_types_inner(
         &self,
         user_fn: &OpArray,
         args: &[Value],
@@ -24228,8 +24299,15 @@ impl Vm {
         let mixed_implicit_mismatch = implicit_return
             && !op_array.is_generator
             && !matches!(ret_type, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"void"));
-        let ret_mismatch = mixed_implicit_mismatch
+        let mut ret_mismatch = mixed_implicit_mismatch
             || !self.value_matches_return_type(val, ret_type, op_array.strict_types);
+        if ret_mismatch && !mixed_implicit_mismatch {
+            let v = val.clone();
+            if self.autoload_callable_for_type(&v, ret_type) {
+                ret_mismatch =
+                    !self.value_matches_return_type(val, ret_type, op_array.strict_types);
+            }
+        }
         self.flush_callable_deprecations();
         if ret_mismatch {
             let raw_name = String::from_utf8_lossy(&op_array.name);

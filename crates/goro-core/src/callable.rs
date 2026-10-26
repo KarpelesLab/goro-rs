@@ -824,6 +824,23 @@ impl Vm {
         out
     }
 
+    /// Autoloads the not yet loaded classes a callable names; true when one
+    /// got loaded.
+    pub(crate) fn autoload_callable_classes(&mut self, callable: &Value) -> bool {
+        let mut loaded = false;
+        for c in Self::callable_classes_to_load(callable) {
+            let name = c.strip_prefix(b"\\").unwrap_or(&c).to_vec();
+            if !self.callable_class_exists(&lower(&name)) {
+                self.try_autoload_class(&name);
+                if self.current_exception.is_some() {
+                    return false;
+                }
+                loaded |= self.callable_class_exists(&lower(&name));
+            }
+        }
+        loaded
+    }
+
     /// zend_is_callable_ex(): autoloads the classes the callable names and
     /// raises the deprecations (unless IS_CALLABLE_SUPPRESS_DEPRECATIONS).
     /// When an autoloader throws, the check fails with the exception left
