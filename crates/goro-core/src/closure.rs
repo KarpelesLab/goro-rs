@@ -917,9 +917,19 @@ impl Vm {
             ) {
                 return Some(Err((b"Error", msg)));
             }
-            // (a closure of a protected method would be called as an array
-            // callable, which checks its visibility: keep the forwarding
-            // closure)
+            // (the closure is called as an array callable: from the scope
+            // it was created in)
+            if !sm.is_static() {
+                let arr = Rc::new(RefCell::new(PhpArray::new()));
+                arr.borrow_mut().push(obj.clone());
+                arr.borrow_mut().push(str_val(sm.name.as_bytes()));
+                self.fcc_scoped_arrays.retain(|(w, _)| w.strong_count() > 0);
+                self.fcc_scoped_arrays.push((
+                    Rc::downgrade(&arr),
+                    scope.map(lower).unwrap_or_default(),
+                ));
+                return Some(Ok(self.make_closure_object(Value::Array(arr))));
+            }
             return None;
         }
         if sm.is_static() {
@@ -951,6 +961,42 @@ impl Vm {
         n.extend_from_slice(sm.name.as_bytes());
         self.internal_static_target(&str_val(&n))?;
         Some(Ok(self.make_closure_object(str_val(&n))))
+    }
+
+    /// `parent::m(...)` (or `Internal::m(...)`) of an instance method of the
+    /// internal ancestor `cl` (lowercase) with a compatible `$this`: a
+    /// closure over the method bound to `$this`. None when the object's
+    /// class redeclares `m` (or no such method).
+    #[inline(never)]
+    fn fcc_internal_parent_method(
+        &mut self,
+        cl: &[u8],
+        m: &[u8],
+        this: Option<&Value>,
+        scope: &Option<Vec<u8>>,
+    ) -> Option<FccResult> {
+        let Some(t @ Value::Object(o)) = this else {
+            return None;
+        };
+        let ocl = lower(&o.borrow().class_name);
+        if !self.class_extends(&ocl, cl) {
+            return None;
+        }
+        let ml = lower(m);
+        // (a user redeclaration would be what [$this, 'm'] calls)
+        let redeclared = self.classes.get(&ocl).is_some_and(|c| {
+            c.get_method(&ml).is_some_and(|md| {
+                self.classes
+                    .get(&lower(&md.declaring_class))
+                    .is_some_and(|dc| dc.filename.is_some())
+            })
+        });
+        let (_, sm) = self.internal_method_of(cl, &ml)?;
+        if redeclared || sm.is_static() {
+            return None;
+        }
+        let t = t.clone();
+        self.fcc_internal_method(&t, &ocl, m, scope.as_deref())
     }
 
     /// Whether the first internal class up the parent chain of the user
@@ -1192,6 +1238,10 @@ impl Vm {
                     ));
                 }
                 if self.is_known_builtin_class(&cl) {
+                    if let Some(r) = self.fcc_internal_parent_method(&cl, m, this.as_ref(), &scope)
+                    {
+                        return r;
+                    }
                     return Ok(self.fcc_internal_static(&cl, m, wrapper));
                 }
                 return Err((

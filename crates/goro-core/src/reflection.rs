@@ -2012,8 +2012,30 @@ fn internal_method_rf(
             let b = s.to_php_string();
             match b.as_bytes().strip_prefix(b"Method [") {
                 Some(rest) => {
+                    // The closure's function has no class context (no
+                    // inherits/overwrites), and a fake closure's flags have
+                    // ZEND_ACC_PUBLIC added to a non-public method's.
+                    let text = String::from_utf8_lossy(rest).into_owned();
+                    let (head, tail) = text.split_once('\n').unwrap_or((&text, ""));
+                    let mut head = head.to_string();
+                    for kw in [", inherits ", ", overwrites "] {
+                        if let Some(i) = head.find(kw) {
+                            let end = head[i + 2..]
+                                .find([',', '>'])
+                                .map(|j| i + 2 + j)
+                                .unwrap_or(head.len());
+                            head.replace_range(i..end, "");
+                        }
+                    }
+                    for v in ["> protected method ", "> private method "] {
+                        head = head.replacen(v, "> <visibility error> method ", 1);
+                    }
                     let mut out = b"Closure [".to_vec();
-                    out.extend_from_slice(rest);
+                    out.extend_from_slice(head.as_bytes());
+                    if text.contains('\n') {
+                        out.push(b'\n');
+                        out.extend_from_slice(tail.as_bytes());
+                    }
                     Some(Value::String(PhpString::from_vec(out)))
                 }
                 None => Some(s),
@@ -16131,7 +16153,8 @@ pub(crate) fn function_string(vm: &Vm, ctx: &FnStrCtx, indent: &str) -> String {
             }
         }
     }
-    if let (Some(m), Some(scope)) = (ctx.method, ctx.scope) {
+    // (a closure's function has no class context here)
+    if let (Some(m), Some(scope), false) = (ctx.method, ctx.scope, ctx.is_closure) {
         let decl = m.declaring_class.to_ascii_lowercase();
         if decl != scope.to_ascii_lowercase() {
             let dn = rcls(vm, &decl)
@@ -16173,6 +16196,8 @@ pub(crate) fn function_string(vm: &Vm, ctx: &FnStrCtx, indent: &str) -> String {
             s.push_str("static ");
         }
         s.push_str(match m.visibility {
+            // (a fake closure's flags have ZEND_ACC_PUBLIC added)
+            _ if ctx.is_closure && m.visibility != Visibility::Public => "<visibility error> ",
             Visibility::Public => "public ",
             Visibility::Protected => "protected ",
             Visibility::Private => "private ",
@@ -16182,7 +16207,18 @@ pub(crate) fn function_string(vm: &Vm, ctx: &FnStrCtx, indent: &str) -> String {
         if op.is_static_closure {
             s.push_str("static ");
         }
-        s.push_str("public method ");
+        // A closure over a non-public method (`$this->m(...)`).
+        let non_public = op.scope_class.as_ref().is_some_and(|sc| {
+            !crate::closure::is_closure_fn_name(&op.name)
+                && rmethod(vm, sc, &op.name).is_some_and(|m| {
+                    m.visibility != Visibility::Public && m.op_array.name == op.name
+                })
+        });
+        s.push_str(if non_public {
+            "<visibility error> method "
+        } else {
+            "public method "
+        });
     } else {
         if ctx.is_closure && op.is_static_closure {
             s.push_str("static ");

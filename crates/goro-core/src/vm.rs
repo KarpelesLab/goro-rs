@@ -1709,6 +1709,10 @@ pub struct Vm {
     pub user_constant_names: Vec<(Vec<u8>, Vec<u8>)>,
     /// Methods (lowercase class, method) that call zend_forbid_dynamic_call().
     pub forbid_dynamic_call_methods: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The `[$obj, 'method']` arrays of closures over non-public internal
+    /// methods (`$this->compare(...)`), with the scope they were created in:
+    /// calling the closure checks the method's visibility from there.
+    pub(crate) fcc_scoped_arrays: Vec<(std::rc::Weak<RefCell<PhpArray>>, Vec<u8>)>,
     /// Shutdown functions registered via register_shutdown_function
     pub shutdown_functions: Vec<(Value, Vec<Value>)>,
     /// Object operator overloading handler (e.g., GMP)
@@ -2197,6 +2201,7 @@ impl Vm {
             open_basedir_resolved: None,
             user_constant_names: Vec::new(),
             forbid_dynamic_call_methods: Vec::new(),
+            fcc_scoped_arrays: Vec::new(),
             shutdown_functions: Vec::new(),
             constants: {
                 let mut c = crate::fxhash::FxIndexMap::default();
