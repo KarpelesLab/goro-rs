@@ -255,6 +255,33 @@ std::thread_local! {
 }
 
 std::thread_local! {
+    /// Handles of freed objects that held an object awaiting its destructor
+    /// (the `PhpObject` address they wait on, the handle): php-src runs that
+    /// destructor and frees the child while freeing the parent, so the
+    /// child's handle is recycled first. Released after the child's.
+    static DEFERRED_OBJECT_IDS: std::cell::RefCell<Vec<(usize, u64)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// (the key of the last deferral and a count of deferrals, so a parent
+    /// whose descendants deferred during its own release follows them)
+    static LAST_DEFER: std::cell::Cell<(usize, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// A destructible child `v` of an object being freed that only the
+/// destructor list will hold after it: its address.
+#[inline]
+fn pending_dtor_child(v: &Value) -> Option<usize> {
+    match v {
+        Value::Object(o)
+            if std::rc::Rc::strong_count(o) == 2
+                && o.try_borrow().is_ok_and(|b| b.dtor_listed.get()) =>
+        {
+            Some(o.as_ptr() as usize)
+        }
+        _ => None,
+    }
+}
+
+std::thread_local! {
     /// Extension hook run when an object is freed, with the address of the
     /// `PhpObject` (`Rc::as_ptr`). Used by ext/xmlwriter to flush output when
     /// the writer object goes away, as PHP's object dtor does.
@@ -695,9 +722,14 @@ impl Drop for PhpObject {
         if let Ok(Some(hook)) = OBJECT_FREE_HOOK.try_with(|h| h.get()) {
             hook(self as *const PhpObject as usize);
         }
+        let mut defer_on: Option<usize> = None;
         for (_, v) in self.properties.iter() {
             crate::gc::on_child_released(v);
+            if let Some(k) = pending_dtor_child(v) {
+                defer_on = Some(k);
+            }
         }
+        let defers_before = LAST_DEFER.try_with(|c| c.get().1).unwrap_or(0);
         if let Some(c) = &self.closure {
             crate::gc::on_child_released(c);
         }
@@ -714,11 +746,41 @@ impl Drop for PhpObject {
         drop(self.closure.take());
         // Don't recycle the sentinel zero id.
         if self.object_id != 0 && !weak_target {
-            // Use try_with so we don't panic during thread-local
-            // destruction (when other TLS holding PhpObject Rcs may be
-            // torn down after FREED_OBJECT_IDS).
-            let _ = FREED_OBJECT_IDS.try_with(|ids| ids.borrow_mut().push(self.object_id));
+            if defer_on.is_none() {
+                // (a descendant released with us deferred its handle)
+                defer_on = LAST_DEFER
+                    .try_with(|c| c.get())
+                    .ok()
+                    .filter(|&(_, n)| n != defers_before)
+                    .map(|(k, _)| k);
+            }
+            if let Some(k) = defer_on {
+                let _ = DEFERRED_OBJECT_IDS.try_with(|d| d.borrow_mut().push((k, self.object_id)));
+                let _ = LAST_DEFER.try_with(|c| c.set((k, c.get().1.wrapping_add(1))));
+            } else {
+                // Use try_with so we don't panic during thread-local
+                // destruction (when other TLS holding PhpObject Rcs may be
+                // torn down after FREED_OBJECT_IDS).
+                let _ = FREED_OBJECT_IDS.try_with(|ids| ids.borrow_mut().push(self.object_id));
+            }
         }
+        // Handles deferred on this object follow its own.
+        let me = self as *const PhpObject as usize;
+        let _ = DEFERRED_OBJECT_IDS.try_with(|d| {
+            let mut d = d.borrow_mut();
+            if d.is_empty() || !d.iter().any(|(k, _)| *k == me) {
+                return;
+            }
+            let mut i = 0;
+            while i < d.len() {
+                if d[i].0 == me {
+                    let (_, id) = d.remove(i);
+                    let _ = FREED_OBJECT_IDS.try_with(|ids| ids.borrow_mut().push(id));
+                } else {
+                    i += 1;
+                }
+            }
+        });
     }
 }
 
