@@ -157,6 +157,12 @@ impl Parser {
         docs: &mut Vec<(u32, Option<Vec<u8>>)>,
         halt_map: Option<std::rc::Rc<dyn Fn(u32) -> u32>>,
     ) {
+        // (most scripts have none)
+        if !tokens.iter().any(
+            |t| matches!(&t.kind, TokenKind::Identifier(n) if n.eq_ignore_ascii_case(b"__halt_compiler")),
+        ) {
+            return;
+        }
         let mut depth: i32 = 0;
         let mut halt: Option<(usize, u32)> = None;
         for i in 0..tokens.len() {
