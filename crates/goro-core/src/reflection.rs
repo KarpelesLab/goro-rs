@@ -3294,6 +3294,45 @@ pub fn reflection_class_method(
                 b"mysqli",
                 b"mysqli_result",
                 b"mysqli_stmt",
+                b"addressinfo",
+                b"curlmultihandle",
+                b"curlsharehandle",
+                b"curlsharepersistenthandle",
+                b"deflatecontext",
+                b"dom\\dtdnamednodemap",
+                b"dom\\htmlcollection",
+                b"dom\\implementation",
+                b"dom\\namednodemap",
+                b"dom\\nodelist",
+                b"dom\\tokenlist",
+                b"dom\\xpath",
+                b"domnamednodemap",
+                b"domnodelist",
+                b"domxpath",
+                b"filter\\filterexception",
+                b"filter\\filterfailedexception",
+                b"ftp\\connection",
+                b"inflatecontext",
+                b"internaliterator",
+                b"opensslasymmetrickey",
+                b"opensslcertificate",
+                b"opensslcertificatesigningrequest",
+                b"pdo",
+                b"pdorow",
+                b"pdostatement",
+                b"pharexception",
+                b"shmop",
+                b"soap\\sdl",
+                b"soap\\url",
+                b"soapfault",
+                b"soapserver",
+                b"socket",
+                b"sodiumexception",
+                b"sysvmessagequeue",
+                b"sysvsemaphore",
+                b"sysvsharedmemory",
+                b"xmlreader",
+                b"xsltprocessor",
             ];
             if cloneable
                 && UNCLONEABLE
@@ -3638,24 +3677,67 @@ pub fn reflection_class_method(
         }
         b"newinstancewithoutconstructor" => {
             // Internal final classes cannot be created without their ctor.
+            // (zend_class_entry: ZEND_INTERNAL_CLASS, ZEND_ACC_FINAL and a
+            // create_object handler)
             let no_ctorless: &[&[u8]] = &[
-                b"generator",
-                b"fiber",
-                b"closure",
-                b"weakreference",
-                b"weakmap",
-                b"dom\\htmldocument",
-                b"dom\\xmldocument",
-                b"uri\\rfc3986\\uri",
-                b"uri\\whatwg\\url",
-                b"gmp",
+                b"__php_incomplete_class",
+                b"addressinfo",
                 b"bcmath\\number",
+                b"closure",
+                b"curlhandle",
+                b"curlmultihandle",
+                b"curlsharehandle",
+                b"curlsharepersistenthandle",
+                b"deflatecontext",
+                b"dom\\domexception",
+                b"dom\\htmldocument",
+                b"dom\\tokenlist",
+                b"dom\\xmldocument",
+                b"dom\\xpath",
+                b"domexception",
+                b"ffi",
+                b"ffi\\cdata",
+                b"ffi\\ctype",
+                b"ffi\\parserexception",
+                b"fiber",
+                b"fibererror",
+                b"ftp\\connection",
+                b"generator",
                 b"hashcontext",
-                b"random\\randomizer",
+                b"inflatecontext",
+                b"internaliterator",
+                b"opensslasymmetrickey",
+                b"opensslcertificate",
+                b"opensslcertificatesigningrequest",
+                b"pdorow",
                 b"random\\engine\\mt19937",
                 b"random\\engine\\pcgoneseq128xslrr64",
-                b"random\\engine\\xoshiro256starstar",
                 b"random\\engine\\secure",
+                b"random\\engine\\xoshiro256starstar",
+                b"random\\randomizer",
+                b"reflectionfiber",
+                b"reflectiongenerator",
+                b"reflectionreference",
+                b"shmop",
+                b"soap\\sdl",
+                b"soap\\url",
+                b"socket",
+                b"sysvmessagequeue",
+                b"sysvsemaphore",
+                b"sysvsharedmemory",
+                b"uri\\rfc3986\\uri",
+                b"uri\\whatwg\\url",
+                b"weakmap",
+                b"weakreference",
+                b"xmlparser",
+                b"gmp",
+                b"dba\\connection",
+                b"ldap\\connection",
+                b"ldap\\result",
+                b"ldap\\resultentry",
+                b"pgsql\\connection",
+                b"pgsql\\result",
+                b"pgsql\\lob",
             ];
             if no_ctorless.contains(&class_lower.as_slice()) {
                 let canonical = rcls(vm, &class_lower)
@@ -4775,19 +4857,8 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
             b"newinstance" => {
                 // (extra named arguments, see spl_place_named_args())
                 let fwd_named = std::mem::take(&mut vm.pending_named_args);
-                // Internal types that cannot be created via reflection at all.
-                let no_new: &[(&[u8], &str)] = &[(b"generator", "Generator"), (b"fiber", "Fiber")];
-                if let Some((_, name)) = no_new.iter().find(|(c, _)| *c == class_lower.as_slice()) {
-                    let err_msg = format!(
-                        "The \"{}\" class is reserved for internal use and cannot be manually instantiated",
-                        name
-                    );
-                    let exc = vm.create_exception(b"Error", &err_msg, vm.current_line);
-                    vm.current_exception = Some(exc);
-                    return Some(Value::Null);
-                }
-                if let Some(msg) = crate::vm::no_direct_construct_msg(&class_lower) {
-                    let exc = vm.create_exception(b"Error", msg, vm.current_line);
+                if let Some(msg) = internal_get_constructor_error(&class_lower) {
+                    let exc = vm.create_exception(b"Error", &msg, vm.current_line);
                     vm.current_exception = Some(exc);
                     return Some(Value::Null);
                 }
@@ -4882,8 +4953,8 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 ))
             }
             b"newinstanceargs" => {
-                if let Some(msg) = crate::vm::no_direct_construct_msg(&class_lower) {
-                    let exc = vm.create_exception(b"Error", msg, vm.current_line);
+                if let Some(msg) = internal_get_constructor_error(&class_lower) {
+                    let exc = vm.create_exception(b"Error", &msg, vm.current_line);
                     vm.current_exception = Some(exc);
                     return Some(Value::Null);
                 }
@@ -7633,7 +7704,37 @@ pub fn reflection_function_method(
             // its static_variables table.
             let closure = obj.borrow().get_property(b"__reflection_closure_obj");
             let mut result = if matches!(closure, Value::Object(_)) {
-                vm.closure_used_vars(&closure)
+                // zval_add_ref(): a reference only the closure holds is
+                // copied as its value.
+                // (this reflector keeps a copy of the captured values)
+                let held = match obj.borrow().get_property(b"__reflection_closure_captured") {
+                    Value::Array(a) => a
+                        .borrow()
+                        .values()
+                        .filter_map(|v| match v {
+                            Value::Reference(r) => Some(Rc::as_ptr(r) as usize),
+                            _ => None,
+                        })
+                        .collect::<Vec<usize>>(),
+                    _ => Vec::new(),
+                };
+                let mut used = PhpArray::new();
+                for (k, v) in vm.closure_used_vars(&closure).iter() {
+                    let v = match v {
+                        Value::Reference(r)
+                            if Rc::strong_count(r)
+                                <= 2 + held
+                                    .iter()
+                                    .filter(|p| **p == Rc::as_ptr(r) as usize)
+                                    .count() =>
+                        {
+                            r.borrow().clone()
+                        }
+                        v => v.clone(),
+                    };
+                    used.set(k.clone(), v);
+                }
+                used
             } else {
                 PhpArray::new()
             };
@@ -8150,18 +8251,8 @@ pub fn reflection_function_method(
             };
             let mut out = function_string(vm, &ctx, "");
             // Bound variables (closure `use` vars) go right after the @@ line.
-            if is_closure && !bound.is_empty() {
-                let mut bv = format!("\n  - Bound Variables [{}] {{\n", bound.len());
-                for (i, n) in bound.iter().enumerate() {
-                    bv.push_str(&format!("      Variable #{} [ ${} ]\n", i, n));
-                }
-                bv.push_str("  }\n");
-                if let Some(pos) = out.find('\n') {
-                    if let Some(pos2) = out[pos + 1..].find('\n') {
-                        let at = pos + 1 + pos2 + 1;
-                        out.insert_str(at, &bv);
-                    }
-                }
+            if is_closure {
+                insert_bound_variables(&mut out, &bound);
             }
             Some(Value::String(PhpString::from_string(out)))
         }
@@ -11316,7 +11407,14 @@ fn op_static_var_names(op: &OpArray) -> Vec<Vec<u8>> {
         }
         if let crate::opcode::OperandType::Const(idx) = o.result {
             if let Some(Value::String(s)) = op.literals.get(idx as usize) {
-                if let Some(n) = s.as_bytes().strip_prefix(prefix.as_slice()) {
+                let b = s.as_bytes();
+                // (a method's statics are keyed `Class::method::name`)
+                let n = b.strip_prefix(prefix.as_slice()).or_else(|| {
+                    let at = b.windows(prefix.len()).position(|w| w == prefix.as_slice())?;
+                    (at >= 2 && &b[at - 2..at] == b"::" && !b[..at - 2].contains(&b':'))
+                        .then(|| &b[at + prefix.len()..])
+                });
+                if let Some(n) = n {
                     if !out.iter().any(|x| x.as_slice() == n) {
                         out.push(n.to_vec());
                     }
@@ -14431,10 +14529,36 @@ pub fn create_reflection_class_constant(
 
 /// Whether the class or an ancestor is an extension class constructed by
 /// an object_construct_handler (no user __construct overriding it).
+/// The get_constructor() handler errors of internal classes (thrown
+/// before the constructor's visibility is checked).
+#[inline(never)]
+fn internal_get_constructor_error(class_lower: &[u8]) -> Option<String> {
+    match class_lower {
+        b"closure" => Some("Instantiation of class Closure is not allowed".to_string()),
+        b"generator" | b"fibererror" => Some(format!(
+            "The \"{}\" class is reserved for internal use and cannot be manually instantiated",
+            if class_lower == b"generator" {
+                "Generator"
+            } else {
+                "FiberError"
+            }
+        )),
+        _ => crate::vm::no_direct_construct_msg(class_lower).map(str::to_string),
+    }
+}
+
 fn native_ctor_in_chain(vm: &Vm, class_lower: &[u8]) -> bool {
     let mut cur = class_lower.to_vec();
     for _ in 0..64 {
         if vm.object_construct_handlers.contains_key(cur.as_slice()) {
+            return true;
+        }
+        // (an extension class whose native handler serves __construct)
+        if vm
+            .native_class_handlers
+            .get(cur.as_slice())
+            .is_some_and(|h| (h.has_method)(&cur, b"__construct", false))
+        {
             return true;
         }
         let Some(c) = vm.classes.get(&cur) else {
@@ -16597,6 +16721,24 @@ fn user_param_default_suffix(op: &OpArray, cv_idx: usize) -> String {
         format!(" = {}", format_reflection_default(&v))
     } else {
         String::new()
+    }
+}
+
+/// `- Bound Variables [n]` of a closure, right after the `@@` line.
+fn insert_bound_variables(out: &mut String, bound: &[String]) {
+    if bound.is_empty() {
+        return;
+    }
+    let mut bv = format!("\n  - Bound Variables [{}] {{\n", bound.len());
+    for (i, n) in bound.iter().enumerate() {
+        bv.push_str(&format!("      Variable #{} [ ${} ]\n", i, n));
+    }
+    bv.push_str("  }\n");
+    if let Some(pos) = out.find('\n') {
+        if let Some(pos2) = out[pos + 1..].find('\n') {
+            let at = pos + 1 + pos2 + 1;
+            out.insert_str(at, &bv);
+        }
     }
 }
 
