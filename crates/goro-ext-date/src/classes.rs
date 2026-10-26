@@ -2411,9 +2411,25 @@ fn period_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Value
         }
         b"getiterator" => {
             check_count(vm, "DatePeriod::getIterator", args, 0, 0)?;
+            // foreach uses date_object_period_get_iterator() directly: the
+            // zend_object_iterator is the one object. getIterator() wraps it
+            // in an InternalIterator: two handles, the iterator's first.
+            let handle = if vm.foreach_native_iter == 1 {
+                vm.foreach_native_iter = 2;
+                None
+            } else {
+                let id = vm.alloc_object_id();
+                Some(Rc::new(RefCell::new(goro_core::object::PhpObject::new(
+                    b"\0iterator".to_vec(),
+                    id,
+                ))))
+            };
             let it = new_object(vm, b"InternalIterator");
             {
                 let mut ib = it.borrow_mut();
+                if let Some(h) = handle {
+                    ib.set_property(ITER_HANDLE.to_vec(), Value::Object(h));
+                }
                 ib.set_property(
                     b"__timestamp_iter_period".to_vec(),
                     Value::Object(o.clone()),
@@ -2602,6 +2618,9 @@ fn base_date_class(vm: &Vm, ce: &[u8]) -> &'static [u8] {
     }
 }
 
+const ITER_HANDLE: &[u8] = b"__timestamp_iter_handle";
+const ITER_CURRENT: &[u8] = b"__timestamp_iter_current";
+
 fn iterator_method(vm: &mut Vm, method: &[u8], it: &Obj) -> R<Value> {
     let period = match it.borrow().get_property(b"__timestamp_iter_period") {
         Value::Object(o) => o,
@@ -2638,6 +2657,7 @@ fn iterator_method(vm: &mut Vm, method: &[u8], it: &Obj) -> R<Value> {
             let mut ib = it.borrow_mut();
             ib.set_property(b"__timestamp_iter_index".to_vec(), Value::Long(0));
             ib.set_property(b"__timestamp_iter_started".to_vec(), Value::True);
+            ib.set_property(ITER_CURRENT.to_vec(), Value::Null);
             Ok(Value::Null)
         }
         b"valid" => {
@@ -2660,10 +2680,17 @@ fn iterator_method(vm: &mut Vm, method: &[u8], it: &Obj) -> R<Value> {
             };
             Ok(if r { Value::True } else { Value::False })
         }
+        // (date_period_it_current_data(): the iterator holds the object
+        // it hands out until it moves, and makes a new one on each call)
         b"current" => match &p.current {
             Some(c) => {
+                it.borrow_mut()
+                    .set_property(ITER_CURRENT.to_vec(), Value::Null);
                 let cls = base_date_class(vm, &p.start_ce);
-                Ok(copy_date_obj(vm, c, cls))
+                let v = copy_date_obj(vm, c, cls);
+                it.borrow_mut()
+                    .set_property(ITER_CURRENT.to_vec(), v.clone());
+                Ok(v)
             }
             None => Ok(Value::Null),
         },
@@ -2673,8 +2700,9 @@ fn iterator_method(vm: &mut Vm, method: &[u8], it: &Obj) -> R<Value> {
                 period_advance(cur, &iv);
             }
             period_set(vm, &period, &p);
-            it.borrow_mut()
-                .set_property(b"__timestamp_iter_index".to_vec(), Value::Long(index + 1));
+            let mut ib = it.borrow_mut();
+            ib.set_property(b"__timestamp_iter_index".to_vec(), Value::Long(index + 1));
+            ib.set_property(ITER_CURRENT.to_vec(), Value::Null);
             Ok(Value::Null)
         }
         _ => Ok(Value::Null),

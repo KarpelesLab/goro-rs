@@ -547,6 +547,39 @@ pub fn interval_set(o: &Rc<RefCell<PhpObject>>, iv: &IntervalObj) {
     for (k, v) in interval_props(iv) {
         ob.set_property(k.to_vec(), v);
     }
+    if ob.native.is_none() {
+        ob.native = Some(goro_core::object::NativeData {
+            data: Rc::new(()),
+            handlers: &IVAL_HANDLERS,
+        });
+    }
+}
+
+/// Set once the engine asked for the interval's property table
+/// (date_object_get_properties_interval() fills the standard one): only
+/// from then on are from_string / date_string readable as properties.
+const P_IVAL_SEEN: &[u8] = b"__timestamp_ival_seen";
+
+static IVAL_HANDLERS: goro_core::vm::NativeObjectHandlers = goro_core::vm::NativeObjectHandlers {
+    get_properties: Some(interval_get_properties),
+    clone_obj: Some(native_clone_obj),
+    ..goro_core::vm::NativeObjectHandlers::EMPTY
+};
+
+fn interval_get_properties(
+    _vm: &mut Vm,
+    o: &Rc<RefCell<PhpObject>>,
+    _purpose: u8,
+) -> Option<PhpArray> {
+    if o.borrow().has_property(P_IVAL) {
+        o.borrow_mut().set_property(P_IVAL_SEEN.to_vec(), Value::True);
+    }
+    None
+}
+
+fn native_clone_obj(_vm: &mut Vm, src: &Rc<RefCell<PhpObject>>, dst: &Rc<RefCell<PhpObject>>) {
+    let n = src.borrow().native.clone();
+    dst.borrow_mut().native = n;
 }
 
 // ---------------------------------------------------------------------------
@@ -664,44 +697,64 @@ pub fn make_interval_obj(vm: &mut Vm, r: &Option<RelTime>, civil_or_wall: i64) -
 }
 
 pub fn period_props(vm: &mut Vm, p: &PeriodObj) -> Vec<(&'static [u8], Value)> {
-    let ce = if p.start_ce.is_empty() {
-        b"DateTime".to_vec()
-    } else {
-        p.start_ce.clone()
-    };
-    vec![
-        (b"start" as &[u8], make_date_obj(vm, &p.start, &ce)),
-        (b"current", make_date_obj(vm, &p.current, &ce)),
-        (b"end", make_date_obj(vm, &p.end, &ce)),
-        (b"interval", make_interval_obj(vm, &p.interval, 0)),
-        (b"recurrences", Value::Long(p.recurrences)),
-        (
-            b"include_start_date",
-            if p.include_start_date {
-                Value::True
-            } else {
-                Value::False
-            },
-        ),
-        (
-            b"include_end_date",
-            if p.include_end_date {
-                Value::True
-            } else {
-                Value::False
-            },
-        ),
-    ]
+    PERIOD_PROPS
+        .iter()
+        .map(|k| (*k, period_prop(vm, p, k)))
+        .collect()
 }
 
-pub fn period_set(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, p: &PeriodObj) {
-    period_store(o, p);
-    let props = period_props(vm, p);
-    let mut ob = o.borrow_mut();
-    for (k, v) in props {
-        ob.set_property(k.to_vec(), v);
+/// One property of a DatePeriod (a fresh object for the object-valued ones).
+pub fn period_prop(vm: &mut Vm, p: &PeriodObj, name: &[u8]) -> Value {
+    let ce = || {
+        if p.start_ce.is_empty() {
+            b"DateTime".to_vec()
+        } else {
+            p.start_ce.clone()
+        }
+    };
+    match name {
+        b"start" => make_date_obj(vm, &p.start, &ce()),
+        b"current" => make_date_obj(vm, &p.current, &ce()),
+        b"end" => make_date_obj(vm, &p.end, &ce()),
+        b"interval" => make_interval_obj(vm, &p.interval, 0),
+        b"recurrences" => Value::Long(p.recurrences),
+        b"include_start_date" => if p.include_start_date { Value::True } else { Value::False },
+        _ => if p.include_end_date { Value::True } else { Value::False },
     }
 }
+
+/// The properties of a DatePeriod are no real ones: its property tables
+/// (date_period_get_properties_for) get fresh start/current/end/interval
+/// objects each time. The object only keeps placeholders, for the table's
+/// order (they compare equal, as the uninitialized slots of php-src do).
+pub fn period_set(_vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, p: &PeriodObj) {
+    period_store(o, p);
+    let mut ob = o.borrow_mut();
+    for k in PERIOD_PROPS {
+        ob.set_property(k.to_vec(), Value::Null);
+    }
+    ob.native = Some(goro_core::object::NativeData {
+        data: Rc::new(()),
+        handlers: &PERIOD_HANDLERS,
+    });
+}
+
+static PERIOD_HANDLERS: goro_core::vm::NativeObjectHandlers = goro_core::vm::NativeObjectHandlers {
+    get_properties: Some(period_get_properties),
+    clone_obj: Some(native_clone_obj),
+    ..goro_core::vm::NativeObjectHandlers::EMPTY
+};
+
+fn period_get_properties(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, _purpose: u8) -> Option<PhpArray> {
+    let mut a = vm.object_to_array(o).borrow().clone();
+    if let Some(p) = period_get(o).filter(|p| p.initialized) {
+        for (k, v) in period_props(vm, &p) {
+            a.set(ArrayKey::String(PhpString::from_bytes(k)), v);
+        }
+    }
+    Some(a)
+}
+
 
 // ---------------------------------------------------------------------------
 // Misc helpers
@@ -778,6 +831,11 @@ pub fn prop_read(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Option
         }
         Base::Interval => {
             let iv = interval_get(o)?;
+            if matches!(name, b"from_string" | b"date_string")
+                && !o.borrow().has_property(P_IVAL_SEEN)
+            {
+                return Some(None);
+            }
             let d = &iv.diff;
             Some(Some(match name {
                 b"y" => Value::Long(d.y),
@@ -806,11 +864,7 @@ pub fn prop_read(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Option
                 Some(p) if p.initialized => p,
                 _ => return Some(Some(Value::Null)),
             };
-            let props = period_props(vm, &p);
-            props
-                .into_iter()
-                .find(|(k, _)| *k == name)
-                .map(|(_, v)| Some(v))
+            Some(Some(period_prop(vm, &p, name)))
         }
     }
 }
