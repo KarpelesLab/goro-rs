@@ -4870,6 +4870,10 @@ pub(crate) fn sort_cmp_string(vm: &mut Vm, v: &Value) -> Vec<u8> {
                 Err(_) => Vec::new(),
             }
         }
+        Value::Double(f) if f.is_nan() => {
+            vm.emit_warning("unexpected NAN value was coerced to string");
+            b"NAN".to_vec()
+        }
         _ => v.to_php_string().as_bytes().to_vec(),
     }
 }
