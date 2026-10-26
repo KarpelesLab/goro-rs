@@ -140,6 +140,26 @@ fn stream_cast_fd(vm: &mut Vm, id: i64) -> Option<i32> {
     }
 }
 
+/// The descriptor behind a php://stdin, php://stdout, php://stderr or
+/// php://fd/N stream name.
+fn php_fd_stream(file: &[u8]) -> Option<i32> {
+    let rest = match file.get(..6) {
+        Some(p) if p.eq_ignore_ascii_case(b"php://") => &file[6..],
+        _ => return None,
+    };
+    if rest.eq_ignore_ascii_case(b"stdin") {
+        Some(0)
+    } else if rest.eq_ignore_ascii_case(b"stdout") {
+        Some(1)
+    } else if rest.eq_ignore_ascii_case(b"stderr") {
+        Some(2)
+    } else if rest.len() > 3 && rest[..3].eq_ignore_ascii_case(b"fd/") {
+        std::str::from_utf8(&rest[3..]).ok()?.parse::<i32>().ok()
+    } else {
+        None
+    }
+}
+
 /// php_stream_parse_fopen_modes() for "file" descriptors.
 fn open_flags(mode: &[u8]) -> Option<i32> {
     let plus = mode.contains(&b'+');
@@ -292,7 +312,21 @@ fn desc_from_array(
                     )));
                 }
             };
-            let fd = unsafe { libc::open(path.as_ptr(), flags, 0o666) };
+            // The file is opened through the stream layer and cast to a
+            // descriptor: php://stdin, php://stdout, php://stderr and
+            // php://fd/N are the process's own descriptors.
+            let fd = match php_fd_stream(&file) {
+                Some(n) => unsafe { libc::dup(n) },
+                None => {
+                    let path = match file.get(..7) {
+                        Some(p) if p.eq_ignore_ascii_case(b"file://") => {
+                            CString::new(file[7..].to_vec()).unwrap_or(path)
+                        }
+                        _ => path,
+                    };
+                    unsafe { libc::open(path.as_ptr(), flags, 0o666) }
+                }
+            };
             if fd < 0 {
                 let e = errno();
                 vm.emit_warning(&format!(

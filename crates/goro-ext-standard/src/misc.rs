@@ -22806,7 +22806,7 @@ fn popen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     // A child writing to our stdout: when the script's output is not
     // written straight to it, collect the child's and emit it at pclose().
     let capture_stdout = !mode_str.contains('r') && !vm.cli_direct_output;

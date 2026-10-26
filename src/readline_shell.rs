@@ -645,11 +645,13 @@ pub fn shell_run(vm: &mut Vm) -> i32 {
         if let Some(cmd) = pager.filter(|_| !out.is_empty()) {
             vm.flush_cli_output();
             use std::os::unix::ffi::OsStrExt;
-            if let Ok(mut child) = std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(std::ffi::OsStr::from_bytes(&cmd))
-                .stdin(std::process::Stdio::piped())
-                .spawn()
+            if let Ok(mut child) = goro_core::child_proc::prepare_command(
+                std::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg(std::ffi::OsStr::from_bytes(&cmd))
+                    .stdin(std::process::Stdio::piped()),
+            )
+            .spawn()
             {
                 if let Some(mut stdin) = child.stdin.take() {
                     use std::io::Write;
