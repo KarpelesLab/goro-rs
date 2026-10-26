@@ -192,6 +192,17 @@ final class StreamBucket {
                     cls.end_line = 0;
                     if cls.name.eq_ignore_ascii_case(b"php_user_filter") {
                         cls.filename = None;
+                        // (internal methods: their stub signatures, with the
+                        // tentative return types)
+                        for (_, sf) in goro_core::stubs::class_methods(b"php_user_filter") {
+                            if let Some(m) =
+                                cls.methods.get_mut(sf.name.to_ascii_lowercase().as_bytes())
+                            {
+                                let op = std::rc::Rc::make_mut(&mut m.op_array);
+                                op.internal_sig = Some(sf);
+                                op.filename = Vec::new();
+                            }
+                        }
                         vm.classes.insert(b"php_user_filter".to_vec(), cls);
                         done = true;
                     } else if cls.name.eq_ignore_ascii_case(b"StreamBucket") {

@@ -17312,7 +17312,7 @@ impl Vm {
                     b"IS_PUBLIC" => Some(Value::Long(1)),
                     b"IS_PROTECTED" => Some(Value::Long(2)),
                     b"IS_PRIVATE" => Some(Value::Long(4)),
-                    b"IS_DEPRECATED" => Some(Value::Long(0x40000)),
+                    b"IS_DEPRECATED" => Some(Value::Long(0x800)), // ZEND_ACC_DEPRECATED
                     _ => None,
                 }
             }

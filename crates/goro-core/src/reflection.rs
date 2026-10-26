@@ -5590,7 +5590,9 @@ pub fn reflection_method_method(
         }
         b"getfilename" => {
             // For methods on internal/built-in classes, return false.
-            let is_user = vm.classes.contains_key(class_lower.as_slice());
+            let is_user = vm.classes.contains_key(class_lower.as_slice())
+                && !rmethod(vm, &class_lower, method_lower.as_bytes())
+                    .is_some_and(|m| m.op_array.internal_sig.is_some());
             if !is_user {
                 return Some(Value::False);
             }
@@ -5601,7 +5603,9 @@ pub fn reflection_method_method(
             Some(Value::String(PhpString::from_string(filename)))
         }
         b"getstartline" => {
-            let is_user = vm.classes.contains_key(class_lower.as_slice());
+            let is_user = vm.classes.contains_key(class_lower.as_slice())
+                && !rmethod(vm, &class_lower, method_lower.as_bytes())
+                    .is_some_and(|m| m.op_array.internal_sig.is_some());
             if !is_user {
                 return Some(Value::False);
             }
@@ -5611,7 +5615,9 @@ pub fn reflection_method_method(
             Some(Value::Long(line as i64))
         }
         b"getendline" => {
-            let is_user = vm.classes.contains_key(class_lower.as_slice());
+            let is_user = vm.classes.contains_key(class_lower.as_slice())
+                && !rmethod(vm, &class_lower, method_lower.as_bytes())
+                    .is_some_and(|m| m.op_array.internal_sig.is_some());
             if !is_user {
                 return Some(Value::False);
             }
