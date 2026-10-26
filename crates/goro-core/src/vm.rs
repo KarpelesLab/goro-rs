@@ -5924,6 +5924,9 @@ impl Vm {
 
     /// Try to autoload a class by calling registered autoload functions
     pub fn try_autoload_class(&mut self, class_name: &[u8]) -> bool {
+        // zend_lookup_class_ex(): the autoloader gets the name without its
+        // leading backslash.
+        let class_name = class_name.strip_prefix(b"\\").unwrap_or(class_name);
         let exiting = self.exit_requested;
         // zend_lookup_class_ex(): the autoloader runs without
         // EG(filename_override): no "[constant expression]" frame, at the

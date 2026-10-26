@@ -11141,7 +11141,7 @@ fn is_subclass_of_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // is_subclass_of returns false if class_name == check_name (unlike is_a)
     // (an alias names the same class entry)
     let canonical = |n: &[u8]| -> Vec<u8> {
-        let l = n.to_ascii_lowercase();
+        let l = n.strip_prefix(b"\\").unwrap_or(n).to_ascii_lowercase();
         vm.classes
             .get(&l)
             .map(|c| c.name.to_ascii_lowercase())
@@ -11156,6 +11156,7 @@ fn is_subclass_of_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// zend_lookup_class(): true if the class exists, autoloading it if needed.
 fn class_known_or_autoload(vm: &mut Vm, name: &[u8]) -> bool {
+    let name = name.strip_prefix(b"\\").unwrap_or(name);
     let lower = lower_bytes(name);
     if vm.classes.contains_key(&lower) || vm.is_known_builtin_class(&lower) {
         return true;
@@ -11166,6 +11167,9 @@ fn class_known_or_autoload(vm: &mut Vm, name: &[u8]) -> bool {
 
 /// Check if class_name is the same as or inherits from check_name
 fn class_is_a(vm: &Vm, class_name: &[u8], check_name: &[u8]) -> bool {
+    // (zend_lookup_class_ex(): a leading backslash is not part of the name)
+    let class_name = class_name.strip_prefix(b"\\").unwrap_or(class_name);
+    let check_name = check_name.strip_prefix(b"\\").unwrap_or(check_name);
     let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
     let check_lower: Vec<u8> = check_name.iter().map(|b| b.to_ascii_lowercase()).collect();
 
@@ -11257,9 +11261,10 @@ fn get_parent_class_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let class_name = match args.first().map(|v| v.deref()) {
         Some(Value::Object(obj)) => obj.borrow().class_name.clone(),
         Some(Value::String(s)) => {
-            let lower = lower_bytes(s.as_bytes());
+            let name = s.as_bytes().strip_prefix(b"\\").unwrap_or(s.as_bytes());
+            let lower = lower_bytes(name);
             if !vm.classes.contains_key(&lower) && !vm.is_known_builtin_class(&lower) {
-                vm.try_autoload_class(s.as_bytes());
+                vm.try_autoload_class(name);
                 if vm.current_exception.is_some() {
                     return Err(VmError {
                         message: "Uncaught exception".into(),
@@ -11270,7 +11275,7 @@ fn get_parent_class_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     return Err(throw_type_error_msg(vm, "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, string given".to_string()));
                 }
             }
-            s.as_bytes().to_vec()
+            name.to_vec()
         }
         None => {
             vm.emit_deprecated("Calling get_parent_class() without arguments is deprecated");
@@ -11873,6 +11878,9 @@ struct FileHandle {
     /// reads of php_stream_fill_read_buffer().
     pub rb_cap: usize,
     pub rb_writepos: usize,
+    /// tmpfile(): the file is removed when the stream is closed
+    /// (php_stream_fopen_temporary_file() with PHP_STREAM_FLAG_...TEMP).
+    pub unlink_on_close: Option<std::ffi::CString>,
 }
 
 impl FileHandle {
@@ -11906,6 +11914,10 @@ impl Drop for FileHandle {
     fn drop(&mut self) {
         if let Some(c) = self.crypto.as_mut() {
             c.close(std::os::unix::io::AsRawFd::as_raw_fd(&self.file));
+        }
+        if let Some(p) = self.unlink_on_close.take() {
+            unregister_tmpfile_cleanup(&p);
+            unsafe { libc::unlink(p.as_ptr()) };
         }
     }
 }
@@ -12180,6 +12192,7 @@ fn register_std_streams() {
                     chunk_size: STREAM_CHUNK_SIZE,
                     rb_cap: 0,
                     rb_writepos: 0,
+                    unlink_on_close: None,
                 },
             );
         }
@@ -12643,6 +12656,7 @@ fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialSt
                     chunk_size: STREAM_CHUNK_SIZE,
                     rb_cap: 0,
                     rb_writepos: 0,
+                    unlink_on_close: None,
                 },
             );
         });
@@ -18533,26 +18547,66 @@ fn ftruncate_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn tmpfile_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // Create a temporary file
-    // Use libc mkstemp for a proper temp file
-    let template = b"/tmp/goro_tmp_XXXXXX\0";
-    let mut buf = template.to_vec();
-    let fd = unsafe { libc::mkstemp(buf.as_mut_ptr() as *mut libc::c_char) };
-    if fd < 0 {
+fn tmpfile_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // php_stream_fopen_tmpfile(): php_open_temporary_fd(NULL, "php") in the
+    // temporary directory; the file stays (its path is the stream's "uri")
+    // until the stream is closed.
+    let dir = php_get_temporary_directory(vm);
+    let Some(path) = do_open_temporary_file(vm, &dir, b"php") else {
+        vm.emit_warning(
+            "tmpfile(): Unable to create temporary file, Check permissions in temporary files directory.",
+        );
         return Ok(Value::False);
+    };
+    use std::os::unix::ffi::OsStrExt;
+    let p = std::ffi::OsStr::from_bytes(&path);
+    let file = match std::fs::OpenOptions::new().read(true).write(true).open(p) {
+        Ok(f) => f,
+        Err(_) => {
+            let _ = std::fs::remove_file(p);
+            return Ok(Value::False);
+        }
+    };
+    let uri = String::from_utf8_lossy(&path).into_owned();
+    let fid = alloc_file_handle_uri(file, "r+b", &uri);
+    let cpath = std::ffi::CString::new(path).ok();
+    if let Some(c) = &cpath {
+        register_tmpfile_cleanup(c);
     }
-    // Remove the file immediately so it's automatically cleaned up
-    let path = std::ffi::CStr::from_bytes_with_nul(&buf).unwrap();
-    unsafe {
-        libc::unlink(path.as_ptr());
-    }
-    // Convert fd to std::fs::File
-    use std::os::unix::io::FromRawFd;
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let fid = alloc_file_handle(file, "r+b");
+    FILE_HANDLES.with(|h| {
+        if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+            fh.unlink_on_close = cpath;
+        }
+    });
     goro_core::value::register_resource(fid, b"stream");
     Ok(Value::resource(fid))
+}
+
+/// tmpfile() files still open when the process exits are removed then
+/// (the request shutdown closes every stream in php-src).
+static TMPFILES: std::sync::Mutex<Vec<std::ffi::CString>> = std::sync::Mutex::new(Vec::new());
+
+fn register_tmpfile_cleanup(path: &std::ffi::CString) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    extern "C" fn cleanup() {
+        if let Ok(mut v) = TMPFILES.lock() {
+            for p in v.drain(..) {
+                unsafe { libc::unlink(p.as_ptr()) };
+            }
+        }
+    }
+    ONCE.call_once(|| unsafe {
+        libc::atexit(cleanup);
+    });
+    if let Ok(mut v) = TMPFILES.lock() {
+        v.push(path.clone());
+    }
+}
+
+fn unregister_tmpfile_cleanup(path: &std::ffi::CStr) {
+    if let Ok(mut v) = TMPFILES.lock() {
+        v.retain(|p| p.as_c_str() != path);
+    }
 }
 
 fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
