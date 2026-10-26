@@ -2018,6 +2018,7 @@ fn var_export(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     // Objects with hooked properties export the values of their get hooks
     // (zend_hooked_object_build_properties()).
+    let mut snapshot = false;
     let val_owned: Value = match &val_owned {
         Value::Object(obj) => {
             let class_lower: Vec<u8> = obj
@@ -2036,6 +2037,7 @@ fn var_export(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 for (k, v) in props {
                     tmp.set_property(k, v);
                 }
+                snapshot = true;
                 Value::Object(std::rc::Rc::new(std::cell::RefCell::new(tmp)))
             } else {
                 val_owned.clone()
@@ -2045,6 +2047,11 @@ fn var_export(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let mut buf = Vec::new();
     var_export_value(vm, &val_owned, &mut buf, 1);
+    // The hooked-object snapshot borrowed the real object's handle: it must
+    // not hand it back to the free list when dropped.
+    if snapshot && let Value::Object(tmp) = &val_owned {
+        tmp.borrow_mut().object_id = 0;
+    }
 
     if return_output {
         Ok(Value::String(PhpString::from_vec(buf)))
