@@ -21677,6 +21677,11 @@ fn resolve_context_id(val: &Value) -> Option<i64> {
     if has_ctx {
         return Some(fid);
     }
+    // A socket stream created with a context refers to it.
+    let shared = xp_socket::ctx_key(fid);
+    if shared != fid && STREAM_CONTEXTS.with(|c| c.borrow().contains_key(&shared)) {
+        return Some(shared);
+    }
     // Stream resource: lazily attach default context.
     let has_stream = FILE_HANDLES.with(|h| h.borrow().contains_key(&fid))
         || (matches!(val, Value::Resource(_))

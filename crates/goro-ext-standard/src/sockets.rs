@@ -696,7 +696,7 @@ fn connect_socket(
 
 /// Lookup of a socket context option ("socket" wrapper).
 fn ctx_socket_opt(ctx: Option<i64>, name: &[u8]) -> Option<Value> {
-    let id = ctx?;
+    let id = ctx_key(ctx?);
     STREAM_CONTEXTS.with(|c| {
         c.borrow()
             .get(&id)
@@ -753,12 +753,16 @@ fn alloc_socket_stream(fd: i32, sd: SockData, uri: Option<&[u8]>, ctx: Option<i6
         }
     });
     if let Some(cid) = ctx {
-        let c = STREAM_CONTEXTS.with(|c| c.borrow().get(&cid).cloned());
-        if let Some(c) = c {
-            STREAM_CONTEXTS.with(|m| m.borrow_mut().insert(fid, c));
-            // php_stream_context_set(): the stream holds a reference to
-            // its context resource.
+        let is_ctx_resource = goro_core::value::resource_type_of(cid).as_deref()
+            == Some(b"stream-context".as_ref());
+        if is_ctx_resource {
+            // php_stream_context_set(): the stream holds a reference to its
+            // context resource and shares it (options set through the
+            // stream are seen by the context and every other stream on it).
             STREAM_CTX_REFS.with(|m| m.borrow_mut().insert(fid, Value::resource(cid)));
+        } else if let Some(c) = STREAM_CONTEXTS.with(|c| c.borrow().get(&cid).cloned()) {
+            // the private context of another stream (an accepted socket)
+            STREAM_CONTEXTS.with(|m| m.borrow_mut().insert(fid, c));
         }
     }
     goro_core::value::register_resource(fid, b"stream");
@@ -768,6 +772,12 @@ fn alloc_socket_stream(fd: i32, sd: SockData, uri: Option<&[u8]>, ctx: Option<i6
 thread_local! {
     /// The context resource each socket stream holds (stream->ctx).
     static STREAM_CTX_REFS: RefCell<StdHashMap<i64, Value>> = RefCell::new(StdHashMap::new());
+}
+
+/// The key of the context a stream uses in STREAM_CONTEXTS: the context
+/// resource it was created with, else its own (lazily created) one.
+pub(crate) fn ctx_key(id: i64) -> i64 {
+    STREAM_CTX_REFS.with(|m| m.borrow().get(&id).map(|v| v.to_long()).unwrap_or(id))
 }
 
 /// The stream `fid` is freed: it releases its context.
@@ -1704,9 +1714,11 @@ pub(crate) fn stream_socket_accept(vm: &mut Vm, args: &[Value]) -> Result<Value,
     csd.is_blocked = true;
     csd.no_io = false;
     csd.timeout_event = false;
+    // php_tcp_sockop_accept(): the client stream gets the server's context
+    let key = ctx_key(fid);
     let ctx = STREAM_CONTEXTS
-        .with(|c| c.borrow().contains_key(&fid))
-        .then_some(fid);
+        .with(|c| c.borrow().contains_key(&key))
+        .then_some(key);
     let enable = csd.enable_on_connect;
     let method = csd.crypto_method & !STREAM_CRYPTO_IS_CLIENT;
     csd.enable_on_connect = false;
@@ -2634,6 +2646,7 @@ pub(crate) fn flush_crypto_warnings(vm: &mut Vm, func: &str) {
 
 /// The "ssl" options of a stream's (or context's) context.
 pub(crate) fn ssl_options(id: i64) -> Option<PhpArray> {
+    let id = ctx_key(id);
     STREAM_CONTEXTS.with(|c| {
         let c = c.borrow();
         let ctx = c.get(&id)?;
@@ -2647,6 +2660,7 @@ pub(crate) fn ssl_options(id: i64) -> Option<PhpArray> {
 }
 
 fn set_ssl_option(id: i64, name: &[u8], v: Value) {
+    let id = ctx_key(id);
     STREAM_CONTEXTS.with(|c| {
         if let Some(ctx) = c.borrow_mut().get_mut(&id) {
             ctx.options
@@ -2658,7 +2672,7 @@ fn set_ssl_option(id: i64, name: &[u8], v: Value) {
 }
 
 fn ctx_crypto_method(ctx: Option<i64>) -> Option<Value> {
-    let c = ctx?;
+    let c = ctx_key(ctx?);
     STREAM_CONTEXTS.with(|m| {
         m.borrow()
             .get(&c)
@@ -2820,7 +2834,7 @@ pub(crate) fn crypto_enable(vm: &mut Vm, func: &str, fid: i64, activate: bool) -
         for (k, v) in r.captured {
             set_ssl_option(fid, &k, v.clone());
             if let Some(src) = sd.ctx_src {
-                if src != fid {
+                if ctx_key(src) != ctx_key(fid) {
                     set_ssl_option(src, &k, v);
                 }
             }
@@ -3135,10 +3149,11 @@ pub(crate) fn http_proxy_tunnel(
     }
     // Set peer_name or name verification would try to use the proxy
     // server name.
+    let key = ctx_key(fid);
     if let Some(p) = peer_name {
         STREAM_CONTEXTS.with(|c| {
             let mut c = c.borrow_mut();
-            let ctx = c.entry(fid).or_default();
+            let ctx = c.entry(key).or_default();
             ctx.options
                 .entry(b"ssl".to_vec())
                 .or_default()
@@ -3151,7 +3166,7 @@ pub(crate) fn http_proxy_tunnel(
         STREAM_CONTEXTS.with(|c| {
             if let Some(o) = c
                 .borrow_mut()
-                .get_mut(&fid)
+                .get_mut(&key)
                 .and_then(|ctx| ctx.options.get_mut(b"ssl".as_slice()))
             {
                 o.shift_remove(b"peer_name".as_slice());
