@@ -14451,6 +14451,76 @@ impl Compiler {
         Ok(OperandType::Tmp(tmp))
     }
 
+    /// zend_compile_func_cuf() / zend_compile_func_cufa():
+    /// `call_user_func('compact', ...)` (global code or `\call_user_func`)
+    /// of a function known at compile time is bound to it (INIT_FCALL, not
+    /// a dynamic call): the scope-introspection builtins work on the
+    /// caller's frame. The literal function name, if so.
+    fn cuf_ct_bound_scope_fn(name: &Expr, args: &[Argument], namespace: &[u8]) -> Option<Vec<u8>> {
+        let ExprKind::Identifier(n) = &name.kind else {
+            return None;
+        };
+        if !namespace.is_empty() && !n.starts_with(b"\\") {
+            return None;
+        }
+        let n = n.strip_prefix(b"\\").unwrap_or(n);
+        let cufa = if n.eq_ignore_ascii_case(b"call_user_func") {
+            false
+        } else if n.eq_ignore_ascii_case(b"call_user_func_array") {
+            true
+        } else {
+            return None;
+        };
+        if args.iter().any(|a| a.unpack || a.name.is_some()) || (cufa && args.len() != 2) {
+            return None;
+        }
+        let ExprKind::String(f) = &args.first()?.value.kind else {
+            return None;
+        };
+        crate::vm::Vm::forbidden_dynamic_call(f)?;
+        (!f.starts_with(b"\\")).then(|| f.clone())
+    }
+
+    #[inline(never)]
+    fn compile_cuf_ct_bound(
+        &mut self,
+        expr: &Expr,
+        name: &Expr,
+        args: &[Argument],
+    ) -> CompileResult<OperandType> {
+        let f =
+            Self::cuf_ct_bound_scope_fn(name, args, &self.current_namespace).unwrap_or_default();
+        let cufa = matches!(&name.kind, ExprKind::Identifier(n)
+            if n.strip_prefix(b"\\").unwrap_or(n).eq_ignore_ascii_case(b"call_user_func_array"));
+        let mut fname = b"\\".to_vec();
+        fname.extend_from_slice(&f);
+        // (`call_user_func_array('f', [])`: no arguments)
+        let rest = if cufa && matches!(&args[1].value.kind, ExprKind::Array(e) if e.is_empty()) {
+            &args[2..]
+        } else {
+            &args[1..]
+        };
+        let rest: Vec<Argument> = rest
+            .iter()
+            .map(|a| Argument {
+                name: None,
+                value: a.value.clone(),
+                unpack: cufa,
+            })
+            .collect();
+        let call = Expr {
+            span: expr.span,
+            kind: ExprKind::FunctionCall {
+                name: Box::new(Expr {
+                    span: name.span,
+                    kind: ExprKind::Identifier(fname),
+                }),
+                args: rest,
+            },
+        };
+        self.compile_expr(&call)
+    }
+
     /// `[...] = ` / `list(...) = ` destructuring.
     fn is_list_target(target: &Expr) -> bool {
         match &target.kind {
@@ -16417,6 +16487,11 @@ impl Compiler {
             ExprKind::FunctionCall { name, .. } if matches!(&name.kind, ExprKind::String(s) if s.first() == Some(&b'\\')) => {
                 self.compile_fq_string_call(expr)
             }
+            ExprKind::FunctionCall { name, args }
+                if Self::cuf_ct_bound_scope_fn(name, args, &self.current_namespace).is_some() =>
+            {
+                self.compile_cuf_ct_bound(expr, name, args)
+            }
             ExprKind::FunctionCall { name, args } => {
                 // Only this call's own result is discarded, not its arguments'.
                 let discard_result = std::mem::take(&mut self.is_discarding_result);
@@ -16472,7 +16547,7 @@ impl Compiler {
                         });
                         return Ok(OperandType::Tmp(tmp));
                     }
-                    let extract_args = if func_lower == b"extract" {
+                    let extract_args = if unqualified == b"extract" {
                         extract_call_args(args)
                     } else {
                         None
@@ -16518,7 +16593,7 @@ impl Compiler {
                         });
                         return Ok(OperandType::Tmp(tmp));
                     }
-                    if n.eq_ignore_ascii_case(b"compact")
+                    if unqualified == b"compact"
                         && !args.is_empty()
                         && args.iter().all(|a| a.name.is_none() && !a.unpack)
                     {
