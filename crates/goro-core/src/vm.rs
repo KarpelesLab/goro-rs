@@ -22446,11 +22446,6 @@ impl Vm {
         });
     }
 
-    /// SEND_VAL of a plain value (not an undefined variable) to a call
-    /// whose target was resolved (see call_user_fn) and does not take the
-    /// argument by reference: what the general handler does then. Returns
-    /// false, doing nothing, otherwise.
-    #[inline(never)]
     /// SEND_VAL (`op` of `op_array`) of a variable to a user function's
     /// by-reference parameter (a call unknown at compile time, resolved
     /// when it was set up): the variable is made a reference (null when
@@ -22499,6 +22494,11 @@ impl Vm {
         true
     }
 
+    /// SEND_VAL of a plain value (not an undefined variable) to a call
+    /// whose target was resolved (see call_user_fn) and does not take the
+    /// argument by reference: what the general handler does then. Returns
+    /// false, doing nothing, otherwise.
+    #[inline(never)]
     pub(crate) fn send_val_fast(
         &mut self,
         op: &crate::opcode::Op,

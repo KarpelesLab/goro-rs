@@ -973,7 +973,7 @@ pub fn plain_internal_attribute(name: &[u8]) -> crate::object::RuntimeAttribute 
     });
     crate::object::RuntimeAttribute {
         name: name.to_vec(),
-        args_op_array: oa,
+        args_op_array: std::rc::Rc::new(oa),
         validation_error: None,
     }
 }
