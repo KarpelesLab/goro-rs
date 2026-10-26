@@ -243,7 +243,55 @@ impl Vm {
                     .position(|w| w == b"::")
                     .unwrap_or(name_lower.len());
                 let class = &name_lower[..sep];
-                match name_lower.get(sep + 2..).unwrap_or(b"") {
+                let method = name_lower.get(sep + 2..).unwrap_or(b"");
+                // zpp of the enum's from() / tryFrom() / cases()
+                let arity = match method {
+                    b"from" => Some(("from", 1usize)),
+                    b"tryfrom" => Some(("tryFrom", 1)),
+                    b"cases" => Some(("cases", 0)),
+                    _ => None,
+                };
+                let mut named_value: Option<Vec<Value>> = None;
+                if let Some((_, n)) = arity {
+                    for (pn, pv) in _named {
+                        if n == 1
+                            && pn.as_slice() == b"value"
+                            && args.is_empty()
+                            && named_value.is_none()
+                        {
+                            named_value = Some(vec![pv.clone()]);
+                            continue;
+                        }
+                        let msg = format!(
+                            "Unknown named parameter ${}",
+                            crate::string::msg_str(pn)
+                        );
+                        self.spl_throw(b"Error", &msg);
+                        return Value::Null;
+                    }
+                }
+                let args: &[Value] = named_value.as_deref().unwrap_or(args);
+                if let Some((m, n)) = arity {
+                    let given = args.iter().filter(|a| !matches!(a, Value::Undef)).count();
+                    if given != n {
+                        let disp = self
+                            .classes
+                            .get(class)
+                            .map(|c| crate::value::display_class_name(&c.name).to_string())
+                            .unwrap_or_else(|| String::from_utf8_lossy(class).into_owned());
+                        let msg = format!(
+                            "{}::{}() expects exactly {} argument{}, {} given",
+                            disp,
+                            m,
+                            n,
+                            if n == 1 { "" } else { "s" },
+                            given
+                        );
+                        self.spl_throw(b"ArgumentCountError", &msg);
+                        return Value::Null;
+                    }
+                }
+                match method {
                     b"tokenize" => self.phptoken_tokenize(class, args, line),
                     b"from" => self.enum_from(class, args, false, strict, line),
                     b"tryfrom" => self.enum_from(class, args, true, strict, line),

@@ -1880,9 +1880,9 @@ impl Vm {
             return false;
         }
         let mut iterator = args[0].deref();
-        if !matches!(iterator, Value::Object(_)) {
+        if !matches!(iterator, Value::Object(_) | Value::Generator(_)) {
             let msg = format!(
-                "{}(): Argument #1 ($iterator) must be of type Traversable, {} given",
+                "{}(): Argument #1 ($iterator) must be of type object, {} given",
                 func,
                 Self::value_type_name(&iterator)
             );
