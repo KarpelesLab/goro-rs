@@ -30562,7 +30562,11 @@ impl Vm {
                         self.gc_call_args = &call.args;
                         // (the top call_stack frame is this call's)
                         self.cv_frame_hint = Rc::as_ptr(&user_fn);
-                        let call_result = self.execute_op_array_vm(&user_fn, func_cvs);
+                        let call_result = if captures.is_some() {
+                            self.fcall_closure_frame(&user_fn, func_cvs, &call)
+                        } else {
+                            self.execute_op_array_vm(&user_fn, func_cvs)
+                        };
                         self.gc_call_args = std::ptr::null();
                         self.keep_ref_depth = None;
                         if self.pending_return.is_none() {

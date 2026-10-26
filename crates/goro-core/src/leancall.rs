@@ -1511,6 +1511,38 @@ impl Vm {
         }
     }
 
+    /// DO_FCALL's fast path of a call of closure `f` (see
+    /// fast_closure_simple): its backtrace frame pushed, its variables
+    /// `cvs` set up from the arguments of `call`, its scope entered, its
+    /// frame run as a lean call's callee when it may be (as a callback's,
+    /// see callback_frame), else (or from where it stops) by a frame of its
+    /// own.
+    #[inline(never)]
+    pub(crate) fn fcall_closure_frame(
+        &mut self,
+        f: &Rc<OpArray>,
+        cvs: Vec<Value>,
+        call: &PendingCall,
+    ) -> Result<Value, VmError> {
+        if f.callback_lean_kind() & 3 == 0
+            || !self.builtin_frames_synced()
+            || !self.callback_lean_ready(f)
+        {
+            return self.execute_op_array_vm(f, cvs);
+        }
+        // (the run has no frame to take them)
+        self.gc_call_args = std::ptr::null();
+        self.cv_frame_hint = std::ptr::null();
+        match self.lean_callback(f, cvs, call, false) {
+            Ok(r) => r,
+            Err(cvs) => {
+                self.gc_call_args = &call.args;
+                self.cv_frame_hint = Rc::as_ptr(f);
+                self.execute_op_array_vm(f, cvs)
+            }
+        }
+    }
+
     /// What a lean run of a callback's callee `f` needs of the running
     /// state (lean_ready(), and what execute_op_array() would set up).
     #[inline]
