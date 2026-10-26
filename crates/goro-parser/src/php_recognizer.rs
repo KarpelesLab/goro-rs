@@ -96,6 +96,12 @@ impl Fetch<'_> {
             self.pending_newline = false;
         }
         loop {
+            if self.stopped {
+                // (only the end token remains)
+            } else if let Some(t) = self.sc.scripting_whitespace() {
+                // (a T_WHITESPACE token: see TC_TRIVIA below)
+                self.last_line = t.line + token_newlines(&t, src);
+            }
             let t: Option<ScanToken> = if self.stopped {
                 None
             } else {

@@ -1424,6 +1424,29 @@ impl<'a> Scanner<'a> {
         self.tok(T_BAD_CHARACTER, p, p + 1)
     }
 
+    /// The T_WHITESPACE token next_token() would return now, if it is one
+    /// scanned in ST_IN_SCRIPTING (the commonest; else None and nothing
+    /// is scanned).
+    #[inline(always)]
+    pub fn scripting_whitespace(&mut self) -> Option<ScanToken> {
+        let p = self.pos;
+        if self.state != St::InScripting || !self.s.get(p).copied().is_some_and(is_ws) {
+            return None;
+        }
+        self.tok_state = St::InScripting;
+        let n = self.s.len();
+        let c = self.s[p];
+        // (scan_scripting()'s whitespace rule)
+        let (mut lf, mut cr) = (u32::from(c == b'\n'), c == b'\r');
+        let mut e = p + 1;
+        while e < n && is_ws(self.s[e]) {
+            lf += u32::from(self.s[e] == b'\n');
+            cr |= self.s[e] == b'\r';
+            e += 1;
+        }
+        self.tok_counted(T_WHITESPACE, p, e, lf, cr)
+    }
+
     /// Return the next token, or None at the end of input.
     #[inline(always)]
     pub fn next_token(&mut self) -> Option<ScanToken> {
