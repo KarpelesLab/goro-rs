@@ -711,7 +711,29 @@ impl Vm {
         if !self.ao_user_has(obj, b"offsetexists") && self.ao_user_has(obj, b"offsetget") {
             return self.ao_offset_exists(obj, offset, 2);
         }
+        if !self.ao_user_has(obj, b"offsetexists") {
+            // (check_empty=1: the stored value's truthiness)
+            return self.ao_offset_exists(obj, offset, 1);
+        }
         self.ao_has_dimension(obj, offset)
+    }
+
+    /// An object table's slot of a declared public property:
+    /// spl_array_has_dimension_ex() sees the IS_INDIRECT zval itself, which
+    /// is "set" (even uninitialized or unset) and never true (empty()).
+    fn ao_declared_slot(&self, t: &Table, k: &ArrayKey) -> bool {
+        let (Table::Obj(o), ArrayKey::String(name)) = (t, k) else {
+            return false;
+        };
+        let name = name.as_bytes();
+        if is_hidden_prop(name) || name.first() == Some(&0) {
+            return false;
+        }
+        let cl = obj_class_lower(o);
+        matches!(
+            self.find_instance_prop_def(&cl, name),
+            Some((crate::object::Visibility::Public, _))
+        )
     }
 
     /// has_property(ZEND_PROPERTY_EXISTS) for property_exists(): Some(result)
@@ -767,6 +789,9 @@ impl Vm {
             }
         };
         let t = self.ao_table(obj);
+        if self.ao_declared_slot(&t, &k) {
+            return check_empty != 1;
+        }
         match self.table_get(&t, &k) {
             None => false,
             Some(v) => {
