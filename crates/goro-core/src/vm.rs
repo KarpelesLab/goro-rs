@@ -22176,19 +22176,20 @@ impl Vm {
         true
     }
 
-    /// The builtin the INIT_FCALL at `ip` of `op_array` (calling `name`)
-    /// resolved to, when it is one php-src compiles into an opcode of its
-    /// own: the function and its fastpath::SPECIAL_CALLS index + 1.
+    /// The builtin the INIT_FCALL at `ip` of `op_array` resolved to (when
+    /// last set up), when it is one php-src compiles into an opcode of its
+    /// own: the function and its fastpath::SPECIAL_CALLS index + 1. (Only
+    /// an INIT_FCALL by a constant plain function name, see
+    /// plain_fcall_name, has such a target: that of the name it has.)
     #[inline]
     pub(crate) fn cached_special_call(
         op_array: &OpArray,
         ip: usize,
-        name: &[u8],
         fn_gen: usize,
     ) -> Option<(BuiltinFn, u8)> {
         let sites = op_array.sites().borrow();
         let c = sites.as_ref()?.call_targets.get(&(ip as u32))?;
-        if c.special == 0 || c.fn_gen != fn_gen || !crate::string::bytes_eq(&c.name, name) {
+        if c.special == 0 || c.fn_gen != fn_gen {
             return None;
         }
         Some((c.builtin?.func, c.special))

@@ -2416,9 +2416,8 @@ impl crate::vm::Vm {
         let ops = &op_array.ops;
         let literals = &op_array.literals;
         let op = &ops[ip];
-        let name = crate::vm::plain_fcall_name(op, literals)?;
         let fn_gen = self.user_functions.len() + 1;
-        let (func, special) = Self::cached_special_call(op_array, ip, name.as_bytes(), fn_gen)?;
+        let (func, special) = Self::cached_special_call(op_array, ip, fn_gen)?;
         let &(lower, kind, nargs) = SPECIAL_CALLS.get(special as usize - 1)?;
         // INIT_FCALL's op2 is the number of arguments; the sends follow it.
         if !matches!(op.op2, OperandType::Const(c)
