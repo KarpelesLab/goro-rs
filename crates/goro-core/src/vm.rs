@@ -1426,6 +1426,9 @@ pub struct Vm {
     /// Frames of closure calls: (call_stack depth, frame name, the Closure)
     /// for Closure::getCurrent(). (Weak: they do not keep it alive.)
     pub(crate) closure_frames: Vec<(usize, String, std::rc::Weak<RefCell<PhpObject>>)>,
+    /// The Closure an internal function (call_user_func(), array_map(), ...)
+    /// is about to call (zend_call_function()): its frame is a closure frame.
+    pub callback_closure: Option<std::rc::Weak<RefCell<PhpObject>>>,
     /// EG_FLAGS_OBJECT_STORE_NO_REUSE: set while the object store's
     /// destructors run at shutdown, so new objects get fresh handles.
     object_store_no_reuse: bool,
@@ -2062,6 +2065,7 @@ impl Vm {
             running_generators: Vec::new(),
             closure_call_objs: Vec::new(),
             closure_frames: Vec::new(),
+            callback_closure: None,
             called_class_stack: Vec::new(),
             class_scope_stack: Vec::new(),
             static_name_cache: (usize::MAX, std::collections::HashSet::new(), 0),
@@ -4614,6 +4618,25 @@ impl Vm {
         }
     }
 
+    /// The frame named `frame_name` an internal function pushes next for a
+    /// call of `closure` (see callback_closure): Closure::getCurrent() finds it.
+    #[inline(never)]
+    fn note_callback_closure_frame(
+        &mut self,
+        frame_name: &str,
+        closure: std::rc::Weak<RefCell<PhpObject>>,
+    ) {
+        // (the internal function's own frame is below it: entering the
+        // callback materializes it anyway)
+        self.materialize_builtin_frames(false);
+        let depth = self.call_stack.len() + 1;
+        while self.closure_frames.last().is_some_and(|f| f.0 >= depth) {
+            self.closure_frames.pop();
+        }
+        self.closure_frames
+            .push((depth, frame_name.to_string(), closure));
+    }
+
     /// A `[C, 'm']` / `"C::m"` callback: the method runs in its declaring
     /// class's scope with C as the called class (static::).
     fn call_static_method_callback(
@@ -4973,7 +4996,9 @@ impl Vm {
             Value::Object(o) if o.borrow().closure.is_some() => Some(Rc::downgrade(o)),
             _ => None,
         };
+        self.callback_closure = closure.clone();
         let r = self.call_callback_inner(callback, args);
+        self.callback_closure = None;
         // zend_call_function() of a closure releases it (ZEND_CALL_CLOSURE).
         if let Some(o) = closure.and_then(|w| w.upgrade()) {
             crate::gc::possible_root_object(&o);
@@ -9976,6 +10001,7 @@ impl Vm {
         this_val: Option<Value>,
     ) -> Result<Value, VmError> {
         let via_invoke = std::mem::take(&mut self.closure_invoke_call);
+        let callback_closure = self.callback_closure.take();
         let implicit_args = if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
             1
         } else {
@@ -10345,6 +10371,9 @@ impl Vm {
                     _ => (RcStr::new(), 0),
                 },
             };
+            if let Some(weak) = callback_closure {
+                self.note_callback_closure_frame(&frame_display, weak);
+            }
             self.call_stack
                 .push((frame_display, file, line, frame_args, is_instance));
         } else {
@@ -11486,8 +11515,11 @@ impl Vm {
                         }
                     }
                     hide_this_param(&mut new_op);
+                } else if (new_op.param_count as usize) <= new_op.param_attributes.len() {
+                    // Already at CV[0] (the body's first variable) but not
+                    // yet a hidden leading CV: the bound $this becomes one.
+                    hide_this_param(&mut new_op);
                 }
-                // If pos == 0, it's already there, nothing to do
             } else {
                 // $this doesn't exist at all - insert at CV[0], shifting everything
                 new_op.cv_names.insert(0, b"this".to_vec());

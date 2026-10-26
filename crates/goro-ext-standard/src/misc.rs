@@ -1918,7 +1918,9 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         Some(Value::Object(o)) if o.borrow().closure.is_some() => Some(Rc::downgrade(o)),
         _ => None,
     };
+    vm.callback_closure = closure.clone();
     let r = call_user_func_inner(vm, args);
+    vm.callback_closure = None;
     // zend_call_function() of a closure releases it (ZEND_CALL_CLOSURE).
     if let Some(o) = closure.and_then(|w| w.upgrade()) {
         goro_core::gc::possible_root_object(&o);
@@ -3740,7 +3742,7 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn array_map_impl(vm: &mut Vm, args: &[Value], callback: Value) -> Result<Value, VmError> {
-    let callback = callback.closure_callable();
+    // (a Closure is called as one: Closure::getCurrent() sees it)
     let mut arrays: Vec<Rc<RefCell<PhpArray>>> = Vec::new();
     for i in 1..args.len() {
         match args[i].deref() {
