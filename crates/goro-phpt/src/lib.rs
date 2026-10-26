@@ -1782,6 +1782,8 @@ fn execute_php_inner_impl(
     vm.register_extension(b"simplexml");
     vm.register_extension(b"tokenizer");
     vm.register_extension(b"pcre");
+    // (the CLI SAPI's; a --GET--/--POST-- test runs as cgi-fcgi, which has them)
+    goro_ext_standard::misc::set_sapi_header_functions(&mut vm, false);
 
     // run-tests.php's ini overwrites.
     vm.constants.insert(

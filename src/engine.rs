@@ -165,6 +165,9 @@ pub fn new_vm(ini: &IniSettings, sapi: &str) -> Vm {
         b"PHP_SAPI".to_vec(),
         Value::String(PhpString::from_string(sapi.to_string())),
     );
+    if sapi == "cli" {
+        goro_ext_standard::misc::set_sapi_header_functions(&mut vm, false);
+    }
     // (registered by sapi/cli's module startup)
     if sapi != "cli" && sapi != "cli-server" {
         vm.constants

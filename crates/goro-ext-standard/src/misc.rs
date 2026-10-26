@@ -15762,6 +15762,24 @@ fn header_remove_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
 }
 
+/// getallheaders(), apache_request_headers() and apache_response_headers()
+/// are functions of the web SAPIs (cli-server, cgi-fcgi, ...): the CLI
+/// SAPI has none of them.
+pub fn set_sapi_header_functions(vm: &mut Vm, present: bool) {
+    let fns: [(&[u8], goro_core::vm::BuiltinFn); 3] = [
+        (b"getallheaders", getallheaders_fn),
+        (b"apache_request_headers", getallheaders_fn),
+        (b"apache_response_headers", apache_response_headers_fn),
+    ];
+    for (name, f) in fns {
+        if present {
+            vm.functions.entry(name.to_vec()).or_insert(f);
+        } else {
+            vm.functions.remove(name);
+        }
+    }
+}
+
 fn getallheaders_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     // Read HTTP_* keys from $_SERVER, converting back to original header names.
     let server = vm.get_global(b"_SERVER").unwrap_or(Value::Null);

@@ -1615,6 +1615,7 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
         // Requests (--POST--, --GET--, ...) are served by the CGI SAPI
         // (the web server SAPIs have a name of their own).
         goro_core::compiler::set_sapi_name(b"cgi-fcgi");
+        crate::misc::set_sapi_header_functions(vm, true);
         vm.constants.insert(
             b"PHP_SAPI".to_vec(),
             Value::String(PhpString::from_bytes(b"cgi-fcgi")),
