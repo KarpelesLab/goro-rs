@@ -1130,9 +1130,23 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
         }
     };
 
-    // php_implode(): the pieces are converted first, then the result is
-    // allocated (zend_string_safe_alloc(n - 1, glue length, pieces length)).
     let values: Vec<Value> = arr.borrow().values().cloned().collect();
+    // (do_alloca() of the pieces table: on the heap past 32 KiB)
+    let tmp = if values.len() > 1 { values.len() * 16 } else { 0 };
+    let tmp = if tmp > 32 * 1024 { tmp } else { 0 };
+    if tmp > 0 && !goro_core::value::memory_alloc(tmp) {
+        return Err(vm.memory_limit_fatal());
+    }
+    let r = implode_pieces(vm, &values, &glue);
+    if tmp > 0 {
+        goro_core::value::memory_free(tmp);
+    }
+    r
+}
+
+/// php_implode(): the pieces are converted first, then the result is
+/// allocated (zend_string_safe_alloc(n - 1, glue length, pieces length)).
+fn implode_pieces(vm: &mut Vm, values: &[Value], glue: &PhpString) -> Result<Value, VmError> {
     let mut pieces: Vec<PhpString> = Vec::with_capacity(values.len());
     for v in values.iter() {
         if let Value::String(s) = v {
@@ -2222,6 +2236,20 @@ fn chunk_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if bytes.is_empty() {
         // Empty body returns just the end separator
         return Ok(Value::String(end));
+    }
+    if goro_core::value::memory_get_limit() > 0 {
+        // zend_string_safe_alloc(chunks, endlen, srclen) (or (srclen, 1,
+        // endlen) for a single short chunk)
+        let need = if chunklen > bytes.len() {
+            bytes.len().saturating_add((end.len() + 25).next_multiple_of(8))
+        } else {
+            bytes
+                .len()
+                .div_ceil(chunklen)
+                .saturating_mul(end.len())
+                .saturating_add((bytes.len() + 25).next_multiple_of(8))
+        };
+        vm.memory_check(need)?;
     }
     let mut result = Vec::new();
     for chunk in bytes.chunks(chunklen) {
@@ -4197,10 +4225,16 @@ fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         bytes.len() + 1
     };
-    let alloc_size = bytes
-        .len()
-        .saturating_add(est_breaks.saturating_mul(brk_bytes.len()))
-        .saturating_add(1);
+    // (zend_string_safe_alloc(n, m, l): n * m + ZEND_MM_ALIGNED_SIZE(24 + l + 1))
+    let alloc_size = if brk_bytes.len() == 1 && !cut_long {
+        (bytes.len() + 25).next_multiple_of(8)
+    } else if width > 0 {
+        est_breaks
+            .saturating_mul(brk_bytes.len())
+            .saturating_add((bytes.len() + 25).next_multiple_of(8))
+    } else {
+        bytes.len().saturating_mul(brk_bytes.len() + 1).saturating_add(32)
+    };
     if goro_core::value::memory_get_limit() > 0 {
         vm.memory_check(alloc_size)?;
     }
