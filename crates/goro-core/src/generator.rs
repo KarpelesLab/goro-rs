@@ -607,7 +607,12 @@ impl PhpGenerator {
                 OpCode::TryBegin => {
                     if let OperandType::JmpTarget(finally_target) = op.op2 {
                         if finally_target > 0 {
-                            try_stack.push((i, finally_target));
+                            // (a try without finally jumps to its end
+                            // instead: 0, no finally to run)
+                            let is_finally =
+                                op_array.ops.get(finally_target as usize).map(|o| o.opcode)
+                                    == Some(OpCode::FinallyEnter);
+                            try_stack.push((i, if is_finally { finally_target } else { 0 }));
                         }
                     }
                 }
@@ -615,7 +620,7 @@ impl PhpGenerator {
                     // Pop the matching TryBegin
                     if let Some((begin, finally_target)) = try_stack.pop() {
                         // Check if current_ip is within the try block range
-                        if current_ip > begin && current_ip <= i {
+                        if current_ip > begin && current_ip <= i && finally_target > 0 {
                             finally_targets.push(finally_target);
                         }
                     }
@@ -627,7 +632,7 @@ impl PhpGenerator {
         // Also check try blocks that are still open (not TryEnd'd because
         // the generator suspended before reaching TryEnd)
         for (begin, finally_target) in &try_stack {
-            if current_ip > *begin {
+            if current_ip > *begin && *finally_target > 0 {
                 finally_targets.push(*finally_target);
             }
         }
@@ -1283,6 +1288,17 @@ impl PhpGenerator {
             vm.property_hook_stack.push(k.clone());
         }
         let result = self.resume_body(vm);
+        // An exception leaving the generator from a finally block entered
+        // for another one: that one becomes its previous.
+        if result.is_err() && !self.fin.is_empty() && self.state == GeneratorState::Completed {
+            if let Some(cur) = &vm.current_exception {
+                while let Some((_, e)) = self.fin.pop() {
+                    if let Some(prev) = e {
+                        Vm::exception_set_previous(cur, prev);
+                    }
+                }
+            }
+        }
         if self.hook_key.is_some() {
             vm.property_hook_stack.pop();
         }
