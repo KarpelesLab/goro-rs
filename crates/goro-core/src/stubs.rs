@@ -814,6 +814,13 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
             let val = vm
                 .get_builtin_class_constant(&lower, &kn)
                 .or_else(|| k.value.and_then(literal_value))
+                .or_else(|| {
+                    // (the value the extension registered on the declaring
+                    // class: stubs of C-valued constants carry none)
+                    vm.classes
+                        .get(cls.name.to_ascii_lowercase().as_bytes())
+                        .and_then(|e| e.constants.get(&kn).cloned())
+                })
                 .unwrap_or(Value::Null);
             ce.constants.insert(kn.clone(), val);
             let vis = if k.flags & F_PRIVATE != 0 {
