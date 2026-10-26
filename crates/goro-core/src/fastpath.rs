@@ -139,7 +139,6 @@ impl PosMap {
     pub(crate) fn capacity(&self) -> usize {
         self.0.capacity()
     }
-
 }
 
 /// Store into a temporary result slot whose current content is a plain
@@ -2030,9 +2029,15 @@ impl crate::vm::Vm {
                     let rel = if matches!(op.op1, OperandType::Tmp(_))
                         || matches!(op.op2, OperandType::Tmp(_))
                     {
-                        let Some(rel) =
-                            consumed_tmps(free_mask.get(), ops, ip, op, tmps, no_release, &self.globals)
-                        else {
+                        let Some(rel) = consumed_tmps(
+                            free_mask.get(),
+                            ops,
+                            ip,
+                            op,
+                            tmps,
+                            no_release,
+                            &self.globals,
+                        ) else {
                             break 'run ip;
                         };
                         rel
@@ -2046,9 +2051,15 @@ impl crate::vm::Vm {
                     release_consumed(rel, f, op, tmps)
                 }
                 OpCode::ArrayGet | OpCode::ArraySet | OpCode::ArrayAppend => {
-                    let Some(rel) =
-                        consumed_tmps(free_mask.get(), ops, ip, op, tmps, no_release, &self.globals)
-                    else {
+                    let Some(rel) = consumed_tmps(
+                        free_mask.get(),
+                        ops,
+                        ip,
+                        op,
+                        tmps,
+                        no_release,
+                        &self.globals,
+                    ) else {
                         break 'run ip;
                     };
                     // (a write into the container the previous opcode fetched)
@@ -2079,9 +2090,15 @@ impl crate::vm::Vm {
                 },
                 // FETCH_DIM_W of an array element (see fast_dim_fetch_w)
                 OpCode::ArrayGetW => {
-                    let Some(rel) =
-                        consumed_tmps(free_mask.get(), ops, ip, op, tmps, no_release, &self.globals)
-                    else {
+                    let Some(rel) = consumed_tmps(
+                        free_mask.get(),
+                        ops,
+                        ip,
+                        op,
+                        tmps,
+                        no_release,
+                        &self.globals,
+                    ) else {
                         break 'run ip;
                     };
                     let f = self.fast_dim_fetch_w(op_array, ip, cvs, tmps);
@@ -2089,18 +2106,30 @@ impl crate::vm::Vm {
                 }
                 // (on an array, FETCH_DIM_IS's isset answers as ISSET_ISEMPTY_DIM's)
                 OpCode::ArrayIsset | OpCode::ArrayIssetFetch => {
-                    let Some(rel) =
-                        consumed_tmps(free_mask.get(), ops, ip, op, tmps, no_release, &self.globals)
-                    else {
+                    let Some(rel) = consumed_tmps(
+                        free_mask.get(),
+                        ops,
+                        ip,
+                        op,
+                        tmps,
+                        no_release,
+                        &self.globals,
+                    ) else {
                         break 'run ip;
                     };
                     let f = self.fast_dim_isset(op, cvs, tmps, literals);
                     release_consumed(rel, f, op, tmps)
                 }
                 OpCode::IssetCheck => {
-                    let Some(rel) =
-                        consumed_tmps(free_mask.get(), ops, ip, op, tmps, no_release, &self.globals)
-                    else {
+                    let Some(rel) = consumed_tmps(
+                        free_mask.get(),
+                        ops,
+                        ip,
+                        op,
+                        tmps,
+                        no_release,
+                        &self.globals,
+                    ) else {
                         break 'run ip;
                     };
                     let f = match fast_isset_check(op, cvs, tmps, literals) {
@@ -4034,7 +4063,16 @@ impl crate::vm::Vm {
             return Fast::No;
         }
         if const_name {
-            self.prop_ic_fill(op_array, ip, &ob, idx, plain, write || w_fetch || rw, scope, name);
+            self.prop_ic_fill(
+                op_array,
+                ip,
+                &ob,
+                idx,
+                plain,
+                write || w_fetch || rw,
+                scope,
+                name,
+            );
         }
         if w_fetch {
             drop(ob);
@@ -4194,7 +4232,9 @@ impl crate::vm::Vm {
         }
         match opc {
             // (++/-- of an object: the general handler checks readonly)
-            OpCode::PropertyGetIncDec | OpCode::PropertyGetRW if matches!(cur, Value::Object(_)) => {
+            OpCode::PropertyGetIncDec | OpCode::PropertyGetRW
+                if matches!(cur, Value::Object(_)) =>
+            {
                 return None;
             }
             OpCode::PropertyGetW => {
@@ -4202,10 +4242,12 @@ impl crate::vm::Vm {
                     return None;
                 }
                 drop(ob);
-                return Some(match self.prop_dim_write(op_array, ip, obj, slot, cvs, tmps) {
-                    Fast::No => prop_fetch_w(obj, slot, op, tmps),
-                    f => f,
-                });
+                return Some(
+                    match self.prop_dim_write(op_array, ip, obj, slot, cvs, tmps) {
+                        Fast::No => prop_fetch_w(obj, slot, op, tmps),
+                        f => f,
+                    },
+                );
             }
             _ => {}
         }

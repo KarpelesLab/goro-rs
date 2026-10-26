@@ -64977,7 +64977,9 @@ impl Vm {
                     && c.target.builtin.is_some()
                     && c.target.fn_gen == self.user_functions.len() + 1
                 {
-                    return crate::compiler::Compiler::is_array_ref_builtin(Some(c.name.as_bytes()));
+                    return crate::compiler::Compiler::is_array_ref_builtin(Some(
+                        c.name.as_bytes(),
+                    ));
                 }
                 self.pending_builtin_name(c)
                     .is_some_and(|n| crate::compiler::Compiler::is_array_ref_builtin(Some(&n)))
