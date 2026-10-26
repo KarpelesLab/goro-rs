@@ -233,6 +233,12 @@ impl XmlError {
 // ---------------------------------------------------------------------------
 // Character classes
 
+/// printf's "%.50s": the first 50 bytes (not characters).
+fn printf_50(s: &str) -> String {
+    let b = s.as_bytes();
+    String::from_utf8_lossy(&b[..b.len().min(50)]).into_owned()
+}
+
 /// IS_BYTE_CHAR
 fn is_byte_char(c: u8) -> bool {
     c >= 0x20 || c == 0x09 || c == 0x0A || c == 0x0D
@@ -976,7 +982,18 @@ fn utf8_truncated_at(d: &[u8], i: usize) -> bool {
 /// (libxml2 2.13 reads them as XML_INVALID_CHAR, one byte at a time). The
 /// offsets of the replacements (relative to `base`) go to `bad`. A valid
 /// but truncated sequence at the end is returned as the pending tail.
-fn sanitize_utf8(d: &[u8], base: usize, bad: &mut Vec<usize>, partial: bool) -> (Vec<u8>, Vec<u8>) {
+/// How sanitize_utf8 treats a truncated sequence at the end of `d`.
+#[derive(Clone, Copy, PartialEq)]
+enum Tail {
+    /// More data may follow (push parsing): keep it pending.
+    Partial,
+    /// Keep it for xmlCurrentChar's incomplete-sequence error.
+    Keep,
+    /// Invalid like any other byte (xmlUTF8MultibyteLen).
+    Replace,
+}
+
+fn sanitize_utf8(d: &[u8], base: usize, bad: &mut Vec<usize>, tail: Tail) -> (Vec<u8>, Vec<u8>) {
     let mut out = Vec::with_capacity(d.len() + 8);
     let mut i = 0;
     while i < d.len() {
@@ -991,11 +1008,12 @@ fn sanitize_utf8(d: &[u8], base: usize, bad: &mut Vec<usize>, partial: bool) -> 
             i += l;
             continue;
         }
-        if if partial {
-            incomplete_utf8_at_end(d, i)
-        } else {
-            utf8_truncated_at(d, i)
-        } {
+        let keep = match tail {
+            Tail::Partial => incomplete_utf8_at_end(d, i),
+            Tail::Keep => utf8_truncated_at(d, i),
+            Tail::Replace => false,
+        };
+        if keep {
             return (out, d[i..].to_vec());
         }
         bad.push(base + out.len());
@@ -1579,6 +1597,8 @@ pub struct Parser<'a, S: Sink> {
     /// Character data may continue in a later chunk (an incomplete UTF-8
     /// sequence at the end of the buffer is not an error yet).
     partial: bool,
+    /// Reading a character of an attribute value (encoding errors).
+    in_att_value: bool,
 }
 
 /// xmlParserInputState for the push parser.
@@ -1658,6 +1678,7 @@ impl<'a, S: Sink> Parser<'a, S> {
             conv_enc: None,
             conv_pending: Vec::new(),
             partial: false,
+            in_att_value: false,
         }
     }
 
@@ -1771,7 +1792,7 @@ impl<'a, S: Sink> Parser<'a, S> {
     /// caller's run of character data ends there).
     fn encoding_error(&mut self) -> bool {
         let pos = self.pos();
-        if !self.partial && utf8_truncated_at(&self.inp().data, pos) {
+        if !self.partial && !self.in_att_value && utf8_truncated_at(&self.inp().data, pos) {
             // xmlParseCharDataComplex: a sequence cut by the end of input;
             // its first byte is skipped
             let c = self.inp().data[pos];
@@ -1801,9 +1822,17 @@ impl<'a, S: Sink> Parser<'a, S> {
             self.fatal(XML_ERR_INVALID_ENCODING, None);
         }
         let partial = self.partial;
+        let att = self.in_att_value;
         let inp = self.inp_mut();
         let mut bad = std::mem::take(&mut inp.bad);
-        let (rest, tail) = sanitize_utf8(&inp.data[pos..], pos, &mut bad, partial);
+        let mode = if partial {
+            Tail::Partial
+        } else if att {
+            Tail::Replace
+        } else {
+            Tail::Keep
+        };
+        let (rest, tail) = sanitize_utf8(&inp.data[pos..], pos, &mut bad, mode);
         let mut conv = inp.data[..pos].to_vec();
         conv.extend_from_slice(&rest);
         inp.bad = bad;
@@ -1825,6 +1854,31 @@ impl<'a, S: Sink> Parser<'a, S> {
     #[inline(never)]
     fn nul_char(&mut self) {
         self.fatal(XML_ERR_INVALID_CHAR, Some("Char 0x0 out of allowed range"));
+    }
+
+    /// NEXT (xmlNextChar) over a byte-walked character: an invalid UTF-8
+    /// byte is reported (the first time) with the column after it.
+    #[inline(never)]
+    fn next_char_checked(&mut self) {
+        let pos = self.pos();
+        if self.cur() < 0x80 {
+            self.skip(1);
+            return;
+        }
+        if let Some((_, l)) = utf8_char(&self.inp().data, pos) {
+            self.skip(l);
+            return;
+        }
+        let report = !self.inp().enc_error;
+        self.inp_mut().enc_error = true;
+        self.in_att_value = true;
+        self.encoding_error();
+        self.in_att_value = false;
+        // now on the U+FFFD that replaced the byte
+        self.skip(3);
+        if report {
+            self.fatal(XML_ERR_INVALID_ENCODING, None);
+        }
     }
 
     /// Whether the current character replaced an invalid byte.
@@ -2304,7 +2358,7 @@ impl<'a, S: Sink> Parser<'a, S> {
             // while ((c = CUR) != 0): a NUL byte ends the skip
             while !self.stopped() && self.cur() != 0 {
                 let c = self.cur();
-                self.skip(1);
+                self.next_char_checked();
                 if c == b'>' {
                     break;
                 }
@@ -2508,7 +2562,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                     }
                     let msg = if have_buf {
                         let partial = String::from_utf8_lossy(&buf).into_owned();
-                        let p50: String = partial.chars().take(50).collect();
+                        let p50 = printf_50(&partial);
                         format!("Double hyphen within comment: <!--{}\n", p50)
                     } else {
                         "Double hyphen within comment\n".to_string()
@@ -2598,7 +2652,7 @@ impl<'a, S: Sink> Parser<'a, S> {
     fn finish_comment(&mut self, buf: Vec<u8>, cur: u32) {
         let s = String::from_utf8_lossy(&buf).into_owned();
         if cur == 0 {
-            let p50: String = s.chars().take(50).collect();
+            let p50 = printf_50(&s);
             self.fatal_msg(
                 XML_ERR_COMMENT_NOT_FINISHED,
                 format!("Comment not terminated \n<!--{}\n", p50),
@@ -4480,7 +4534,10 @@ impl<'a, S: Sink> Parser<'a, S> {
             }
             let c = self.cur();
             if c >= 0x80 {
+                // xmlUTF8MultibyteLen: no incomplete-sequence case here
+                self.in_att_value = true;
                 let (ch, l) = self.cur_char();
+                self.in_att_value = false;
                 if !is_char(ch) {
                     self.fatal_msg(
                         XML_ERR_INVALID_CHAR,
@@ -5215,7 +5272,7 @@ impl<'a, S: Sink> Parser<'a, S> {
         }
         let text = String::from_utf8_lossy(&buf).into_owned();
         if cur != b'>' as u32 || l == 0 {
-            let p50: String = text.chars().take(50).collect();
+            let p50 = printf_50(&text);
             self.fatal_msg(
                 XML_ERR_CDATA_NOT_FINISHED,
                 format!("CData section not finished\n{}\n", p50),
@@ -5654,7 +5711,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                 raw.extend_from_slice(chunk);
                 let base = self.st.inputs[0].data.len();
                 let mut bad = std::mem::take(&mut self.st.inputs[0].bad);
-                let (out, tail) = sanitize_utf8(&raw, base, &mut bad, true);
+                let (out, tail) = sanitize_utf8(&raw, base, &mut bad, Tail::Partial);
                 self.st.inputs[0].bad = bad;
                 self.conv_pending = tail;
                 Some(out)
@@ -6627,7 +6684,7 @@ impl<'a, S: Sink> Parser<'a, S> {
             // while ((c = CUR) != 0): a NUL byte ends the skip
             while !self.stopped() && self.cur() != 0 {
                 let c = self.cur();
-                self.skip(1);
+                self.next_char_checked();
                 if c == b'>' {
                     break;
                 }
