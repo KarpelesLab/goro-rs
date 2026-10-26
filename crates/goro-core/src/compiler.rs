@@ -13556,6 +13556,114 @@ impl Compiler {
         OperandType::Const(self.op_array.add_literal(Value::String(s)))
     }
 
+    /// zend_compile_func_sprintf(): sprintf() with a literal format of only
+    /// %s / %d / %% and as many values as placeholders is compiled as a
+    /// string concatenation (the values first, then the pieces: a constant
+    /// value is converted while compiling, %d casts to int). None when it
+    /// is compiled as a call.
+    #[inline(never)]
+    fn compile_sprintf_rope(
+        &mut self,
+        args: &[goro_parser::ast::Argument],
+        line: u32,
+    ) -> CompileResult<Option<OperandType>> {
+        if args.is_empty() || args.iter().any(|a| a.name.is_some() || a.unpack) {
+            return Ok(None);
+        }
+        let ExprKind::String(fmt) = &args[0].value.kind else {
+            return Ok(None);
+        };
+        if fmt.len() >= 256 {
+            return Ok(None);
+        }
+        // (literal piece, placeholder) pairs; placeholder b's' / b'd' / 0
+        let mut pieces: Vec<(Vec<u8>, u8)> = Vec::new();
+        let mut cur = Vec::new();
+        let mut i = 0;
+        let mut count = 0;
+        while i < fmt.len() {
+            if fmt[i] != b'%' {
+                cur.push(fmt[i]);
+                i += 1;
+                continue;
+            }
+            match fmt.get(i + 1) {
+                Some(b'%') => cur.push(b'%'),
+                Some(&c @ (b's' | b'd')) => {
+                    pieces.push((std::mem::take(&mut cur), c));
+                    count += 1;
+                }
+                _ => return Ok(None),
+            }
+            i += 2;
+        }
+        if count != args.len() - 1 {
+            return Ok(None);
+        }
+        if fmt.is_empty() {
+            let idx = self.op_array.add_literal(Value::String(PhpString::empty()));
+            return Ok(Some(OperandType::Const(idx)));
+        }
+        // The values first, as for a call.
+        let mut vals = Vec::with_capacity(count);
+        for a in &args[1..] {
+            vals.push(self.compile_expr(&a.value)?);
+        }
+        let mut elems: Vec<OperandType> = Vec::new();
+        let lit = |c: &mut Self, s: Vec<u8>| {
+            OperandType::Const(c.op_array.add_literal(Value::String(PhpString::from_vec(s))))
+        };
+        for ((piece, kind), v) in pieces.into_iter().zip(vals) {
+            if !piece.is_empty() {
+                elems.push(lit(self, piece));
+            }
+            if kind == b's' {
+                elems.push(self.concat_const_operand(v, line));
+            } else {
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::CastInt,
+                    op1: v,
+                    op2: OperandType::Unused,
+                    result: OperandType::Tmp(tmp),
+                    line,
+                });
+                elems.push(OperandType::Tmp(tmp));
+            }
+        }
+        if !cur.is_empty() {
+            elems.push(lit(self, cur));
+        }
+        let mut it = elems.into_iter();
+        let first = it.next().expect("non-empty format");
+        let mut acc: Option<OperandType> = None;
+        for e in it {
+            let tmp = self.op_array.alloc_temp();
+            self.op_array.emit(Op {
+                opcode: OpCode::Concat,
+                op1: acc.unwrap_or(first),
+                op2: e,
+                result: OperandType::Tmp(tmp),
+                line,
+            });
+            acc = Some(OperandType::Tmp(tmp));
+        }
+        Ok(Some(match acc {
+            Some(r) => r,
+            None => {
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::CastString,
+                    op1: first,
+                    op2: OperandType::Unused,
+                    result: OperandType::Tmp(tmp),
+                    line,
+                });
+                OperandType::Tmp(tmp)
+            }
+        }))
+    }
+
     /// zend_vm_set_opcode_handler(): the operands of a commutative opcode
     /// are swapped when op1's type sorts before op2's (CONST < TMP < VAR <
     /// CV), which shows in its errors and warnings. Ranked by the operand
@@ -15961,6 +16069,13 @@ impl Compiler {
                                 span: expr.span,
                             };
                             return self.compile_expr(&call);
+                        }
+                    }
+                    if unqualified == b"sprintf"
+                        && (self.current_namespace.is_empty() || func_lower.starts_with(b"\\"))
+                    {
+                        if let Some(r) = self.compile_sprintf_rope(args, expr.span.line)? {
+                            return Ok(r);
                         }
                     }
                     if unqualified == b"get_defined_vars" && args.is_empty() {
