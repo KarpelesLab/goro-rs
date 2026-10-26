@@ -56542,7 +56542,7 @@ impl Vm {
                                             line: op.line,
                                         });
                                     }
-                                    b"throwable" if !extends_exc => {
+                                    b"throwable" if !extends_exc && !class.is_interface => {
                                         // Throwable cannot be implemented by user classes/enums
                                         let kind = if class.is_enum { "Enum" } else { "Class" };
                                         return Err(VmError {
