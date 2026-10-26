@@ -1564,6 +1564,9 @@ pub struct Vm {
     /// sapi_module.ub_write: where output that reaches the SAPI goes
     /// (stdout when unset), e.g. the FastCGI connection of php-fpm.
     pub sapi_ub_write: Option<fn(&[u8])>,
+    /// The included files running (their main code, by address) with the
+    /// scope and `$this` of the code that included them.
+    pub(crate) include_frames: Vec<(*const OpArray, Option<Vec<u8>>, Option<Value>)>,
     /// sapi_module.flush (flush()), after the pending output was written.
     pub sapi_flush: Option<fn(&mut Vm)>,
     /// sapi_module.log_message: php_log_err() without an error_log file
@@ -2381,6 +2384,7 @@ impl Vm {
             cli_write_through: false,
             sapi_send_headers: None,
             sapi_ub_write: None,
+            include_frames: Vec::new(),
             sapi_flush: None,
             sapi_log_message: None,
             sapi_script_done: None,
@@ -22732,6 +22736,38 @@ impl Vm {
     /// passed arguments against the declared types and coerces them in weak
     /// mode. `func_name_lower` is the called name (a method's names its
     /// class, the scope of self/parent/static in the types).
+    /// Records the scope and `$this` an included file's code (`inc`) runs
+    /// with: those of the including code (`frame`, its variables `cvs`).
+    #[inline(never)]
+    fn push_include_frame(&mut self, frame: &OpArray, cvs: &[Value], inc: &OpArray) {
+        let entry = match self.include_frame_of(frame) {
+            Some((scope, this)) => (scope, this),
+            None => {
+                let this = match (frame.cv_names.first(), cvs.first().map(|v| v.deref())) {
+                    (Some(n), Some(v @ Value::Object(_))) if n.as_slice() == b"this" => Some(v),
+                    _ => None,
+                };
+                (frame.scope_class.clone(), this)
+            }
+        };
+        self.include_frames
+            .push((inc as *const OpArray, entry.0, entry.1));
+    }
+
+    /// The scope and `$this` of `op_array` when it is a running included
+    /// file's code.
+    #[inline(never)]
+    pub(crate) fn include_frame_of(
+        &self,
+        op_array: &OpArray,
+    ) -> Option<(Option<Vec<u8>>, Option<Value>)> {
+        self.include_frames
+            .iter()
+            .rev()
+            .find(|f| std::ptr::eq(f.0, op_array))
+            .map(|f| (f.1.clone(), f.2.clone()))
+    }
+
     /// The class self/parent/static name in a callee's parameter types.
     fn recv_scope_class(&self, user_fn: &OpArray, func_name_lower: &[u8]) -> Option<Vec<u8>> {
         if let Some(pos) = crate::string::find_double_colon(func_name_lower) {
@@ -45468,9 +45504,23 @@ impl Vm {
 
                 OpCode::MakeClosure => {
                     let inner = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let inner =
-                        self.closure_scope_at_creation(inner, op_array.scope_class.as_ref());
-                    let inner = self.closure_inherit_this(inner, op_array, &cvs);
+                    let inc = self.include_frame_of(op_array);
+                    let inner = match &inc {
+                        // (an included file's code runs in its includer's
+                        // scope, with its `$this`)
+                        Some((scope, this)) => {
+                            let inner = self.closure_scope_at_creation(inner, scope.as_ref());
+                            match this {
+                                Some(t) => self.closure_bind_frame_this(inner, t.clone()),
+                                None => inner,
+                            }
+                        }
+                        None => {
+                            let inner = self
+                                .closure_scope_at_creation(inner, op_array.scope_class.as_ref());
+                            self.closure_inherit_this(inner, op_array, &cvs)
+                        }
+                    };
                     let inner = self.closure_with_own_statics(inner, None);
                     let obj = self.make_closure_object(inner);
                     self.write_operand(&op.result, obj, &mut cvs, &mut tmps, &static_cv_keys);
@@ -47991,10 +48041,12 @@ impl Vm {
                                                 ))],
                                                 false,
                                             ));
+                                            self.push_include_frame(op_array, &cvs, inc_op_array);
                                             let exec_r = {
                                                 self.observe_code = true;
                                                 self.execute_op_array_vm(inc_op_array, inc_cvs)
                                             };
+                                            self.include_frames.pop();
                                             // (a fatal error still to be reported keeps
                                             // the include frame for the backtrace, as
                                             // the callers' frames are kept; one raised
@@ -48261,10 +48313,12 @@ impl Vm {
                                             Vec::new(),
                                             false,
                                         ));
+                                        self.push_include_frame(op_array, &cvs, &eval_op_array);
                                         let exec_r = {
                                             self.observe_code = true;
                                             self.execute_op_array_vm(&eval_op_array, eval_cvs)
                                         };
+                                        self.include_frames.pop();
                                         // (with the frames of the calls an exception left;
                                         // a fatal error still to be reported keeps its
                                         // eval() frame for the backtrace)

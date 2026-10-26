@@ -143,6 +143,11 @@ impl Vm {
             Some(v @ Value::Object(_)) => v,
             _ => return inner,
         };
+        self.closure_bind_frame_this(inner, this)
+    }
+
+    /// closure_inherit_this() with the frame's `$this` given.
+    pub(crate) fn closure_bind_frame_this(&mut self, inner: Value, this: Value) -> Value {
         let (name, caps) = closure_parts(&inner);
         if !is_closure_fn_name(&name) {
             return inner;
@@ -2365,6 +2370,13 @@ impl Vm {
     ) -> bool {
         if !matches!(op.result, OperandType::Tmp(_))
             || !crate::fastpath::tmp_writable(&op.result, tmps)
+        {
+            return false;
+        }
+        // (an included file's code: the includer's scope and `$this`)
+        if self
+            .include_frame_of(op_array)
+            .is_some_and(|(s, t)| s.is_some() || t.is_some())
         {
             return false;
         }
