@@ -5038,6 +5038,9 @@ fn h_stream_wrapper_register(vm: &mut Vm, args: &[Value]) -> Result<Option<Value
     let lower: Vec<u8> = protocol.iter().map(|b| b.to_ascii_lowercase()).collect();
     let exists = (is_builtin(&lower) && !builtin_disabled(&lower))
         || USER_WRAPPERS.with(|w| w.borrow().contains_key(&lower));
+    // The wrapper is a resource (le_protocols, "stream factory"), freed
+    // again when it cannot be registered.
+    let rsrc = goro_core::value::alloc_resource_id();
     if !valid_scheme(&protocol) || exists {
         if exists {
             warn(
@@ -5056,6 +5059,7 @@ fn h_stream_wrapper_register(vm: &mut Vm, args: &[Value]) -> Result<Option<Value
         }
         return Ok(Some(Value::False));
     }
+    goro_core::value::register_resource(rsrc, b"stream factory");
     USER_WRAPPERS.with(|w| {
         w.borrow_mut().insert(
             lower,
