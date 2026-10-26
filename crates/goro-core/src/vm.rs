@@ -9462,7 +9462,7 @@ impl Vm {
                         }
                     }
                     b"array" => matches!(value, Value::Array(_)),
-                    b"object" => matches!(value, Value::Object(_)),
+                    b"object" => matches!(value, Value::Object(_) | Value::Generator(_)),
                     b"callable" => {
                         // zend_is_callable(arg, 0): its deprecations are raised
                         // once the check returns (flush_callable_deprecations).
