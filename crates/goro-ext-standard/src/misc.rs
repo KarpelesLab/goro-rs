@@ -3549,7 +3549,22 @@ fn in_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Value::Array(arr) = &haystack {
         let strict = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
         if strict {
-            let found = arr.borrow().values().any(|val| val.identical(needle));
+            let arr = arr.borrow();
+            // (a string or an int is identical to the same string or int, or
+            // to a reference to one, only)
+            let found = match needle {
+                Value::String(n) => arr.values().any(|val| match val {
+                    Value::String(s) => s.as_bytes() == n.as_bytes(),
+                    Value::Reference(_) => val.identical(needle),
+                    _ => false,
+                }),
+                Value::Long(n) => arr.values().any(|val| match val {
+                    Value::Long(v) => v == n,
+                    Value::Reference(_) => val.identical(needle),
+                    _ => false,
+                }),
+                _ => arr.values().any(|val| val.identical(needle)),
+            };
             return Ok(if found { Value::True } else { Value::False });
         }
         let values: Vec<Value> = arr.borrow().values().cloned().collect();
