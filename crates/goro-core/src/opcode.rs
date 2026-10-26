@@ -39,6 +39,11 @@ pub enum OperandType {
     JmpTarget(u32),
 }
 
+/// The result operand of the FREE_TMPS that ends a statement: no
+/// temporary from its op1 on is live past it on any path (the compiler
+/// reuses them for the next statements, see compute_free_mask).
+pub const STMT_END: OperandType = OperandType::Const(u32::MAX);
+
 /// A single bytecode instruction
 #[derive(Debug, Clone)]
 pub struct Op {
@@ -488,6 +493,10 @@ pub struct OpArray {
     pub cv_names: Vec<Vec<u8>>,
     /// Number of temporary slots needed
     pub temp_count: u32,
+    /// The next temporary alloc_temp() hands out (while compiling: the
+    /// temporaries of a finished statement are reused, see STMT_END;
+    /// temp_count is the most the code uses at once).
+    pub temp_next: u32,
     /// Function name (empty for top-level script)
     pub name: Vec<u8>,
     /// Number of required/declared parameters (for variadic handling)
@@ -980,6 +989,7 @@ impl OpArray {
             literals: Vec::new(),
             cv_names: Vec::new(),
             temp_count: 0,
+            temp_next: 0,
             name: Vec::new(),
             param_count: 0,
             required_param_count: 0,
@@ -1065,10 +1075,14 @@ impl OpArray {
         idx
     }
 
-    /// Allocate a new temporary slot
+    /// Allocate a new temporary slot (the next free one: the compiler
+    /// reuses the temporaries of a finished statement, see temp_next).
     pub fn alloc_temp(&mut self) -> u32 {
-        let idx = self.temp_count;
-        self.temp_count += 1;
+        let idx = self.temp_next;
+        self.temp_next += 1;
+        if self.temp_next > self.temp_count {
+            self.temp_count = self.temp_next;
+        }
         idx
     }
 
@@ -1113,6 +1127,10 @@ pub(crate) struct FreeInfo {
     call_frees: Box<[(u32, u32)]>,
 }
 
+/// The free mask of `oa` (see FreeInfo), by live range: a temporary's index
+/// is used again once the FREE_TMPS ending a statement (STMT_END) released
+/// it (the compiler reuses the temporaries of a finished statement), each
+/// use of the index then being a range of its own.
 #[inline(never)]
 fn compute_free_mask(oa: &OpArray) -> FreeInfo {
     let n = oa.ops.len();
@@ -1124,16 +1142,26 @@ fn compute_free_mask(oa: &OpArray) -> FreeInfo {
         };
     }
     const NONE: u32 = u32::MAX;
-    let mut first = vec![NONE; tc];
-    let mut last = vec![NONE; tc];
-    let mut keep = vec![false; tc];
-    // The temporaries holding a compound assignment's read of its target.
-    let mut rw_read = vec![false; tc];
+    /// A live range of a temporary's index: its first and last uses, a
+    /// use that keeps it for later (see `peek`), and whether it holds a
+    /// compound assignment's read of its target.
+    struct Range {
+        t: u32,
+        first: u32,
+        last: u32,
+        keep: bool,
+        rw_read: bool,
+    }
+    let mut ranges: Vec<Range> = Vec::new();
+    // The open range of each index.
+    let mut open = vec![NONE; tc];
+    // The range of the op1 temporary of each opcode.
+    let mut op1_range = vec![NONE; n];
     // Latest source of a jump to each opcode.
     let mut jump_src = vec![NONE; n + 1];
     let mut any_jump = false;
     // The calls being set up (the callable temporary of an InitFCall), and
-    // the DoFCalls ending one with a temporary callable.
+    // the DoFCalls ending one with a temporary callable (its range).
     let mut open_calls: Vec<u32> = Vec::new();
     let mut calls_balanced = true;
     let mut call_ends: Vec<(u32, u32)> = Vec::new();
@@ -1146,7 +1174,11 @@ fn compute_free_mask(oa: &OpArray) -> FreeInfo {
             OpCode::InitMethodCall | OpCode::InitDynamicStaticCall => open_calls.push(NONE),
             OpCode::DoFCall => match open_calls.pop() {
                 Some(NONE) => {}
-                Some(t) => call_ends.push((i as u32, t)),
+                Some(t) => {
+                    if let Some(&r) = open.get(t as usize).filter(|&&r| r != NONE) {
+                        call_ends.push((i as u32, r));
+                    }
+                }
                 None => calls_balanced = false,
             },
             _ => {}
@@ -1166,11 +1198,52 @@ fn compute_free_mask(oa: &OpArray) -> FreeInfo {
             }
         }
         if op.opcode == OpCode::FreeTmps {
+            // (at the end of a statement, the range of each index it
+            // releases ends: elsewhere, the temporaries may still be used
+            // on another path, later in the code)
+            if let (OperandType::Tmp(a), OperandType::Tmp(b), STMT_END) =
+                (op.op1, op.op2, op.result)
+            {
+                let b = (b as usize).min(tc);
+                for r in open.get_mut((a as usize).min(b)..b).into_iter().flatten() {
+                    *r = NONE;
+                }
+            }
             continue;
         }
         // (a dynamic call's callable, a Closure, is the call frame's until
         // the call ends)
         let peek = matches!(op.opcode, OpCode::ListGet | OpCode::InitFCall);
+        for (slot, o) in [op.op1, op.op2, op.result].into_iter().enumerate() {
+            if let OperandType::Tmp(t) = o {
+                let tu = t as usize;
+                if tu >= tc {
+                    continue;
+                }
+                let r = match open[tu] {
+                    NONE => {
+                        ranges.push(Range {
+                            t,
+                            first: i as u32,
+                            last: i as u32,
+                            keep: false,
+                            rw_read: false,
+                        });
+                        open[tu] = (ranges.len() - 1) as u32;
+                        open[tu]
+                    }
+                    r => r,
+                };
+                let range = &mut ranges[r as usize];
+                range.last = i as u32;
+                if peek && slot == 0 {
+                    range.keep = true;
+                }
+                if slot == 0 {
+                    op1_range[i] = r;
+                }
+            }
+        }
         if let OperandType::Tmp(r) = op.result {
             if matches!(
                 op.opcode,
@@ -1181,29 +1254,17 @@ fn compute_free_mask(oa: &OpArray) -> FreeInfo {
                     | OpCode::PropertyGetWObjRW
             ) && (r as usize) < tc
             {
-                rw_read[r as usize] = true;
-            }
-        }
-        for (slot, o) in [op.op1, op.op2, op.result].into_iter().enumerate() {
-            if let OperandType::Tmp(t) = o {
-                let t = t as usize;
-                if t >= tc {
-                    continue;
-                }
-                if first[t] == NONE {
-                    first[t] = i as u32;
-                }
-                last[t] = i as u32;
-                if peek && slot == 0 {
-                    keep[t] = true;
+                let rr = open[r as usize];
+                if rr != NONE {
+                    ranges[rr as usize].rw_read = true;
                 }
             }
         }
     }
     let mut mask = vec![0u8; n];
-    for t in 0..tc {
-        let (f, l) = (first[t], last[t]);
-        if l == NONE || keep[t] {
+    for range in &ranges {
+        let (t, f, l) = (range.t, range.first, range.last);
+        if range.keep {
             continue;
         }
         if any_jump && f < l {
@@ -1224,10 +1285,11 @@ fn compute_free_mask(oa: &OpArray) -> FreeInfo {
         // operand after the write: the operand of `target_read op value`
         // followed by the write of its result goes with the write (bit 3:
         // the previous opcode's op2).
-        if let (OperandType::Tmp(r), OperandType::Tmp(v), OperandType::Tmp(res)) =
+        if let (OperandType::Tmp(_), OperandType::Tmp(v), OperandType::Tmp(res)) =
             (op.op1, op.op2, op.result)
         {
-            if v as usize == t && (r as usize) < tc && rw_read[r as usize] {
+            let r1 = op1_range[l as usize];
+            if v == t && r1 != NONE && ranges[r1 as usize].rw_read {
                 if let Some(next) = oa.ops.get(l as usize + 1) {
                     if next.op1 == OperandType::Tmp(res) || next.op2 == OperandType::Tmp(res) {
                         mask[l as usize + 1] |= 8;
@@ -1238,7 +1300,7 @@ fn compute_free_mask(oa: &OpArray) -> FreeInfo {
         }
         let mut bits = 0u8;
         for (b, o) in [op.op1, op.op2, op.result].into_iter().enumerate() {
-            if o == OperandType::Tmp(t as u32) {
+            if o == OperandType::Tmp(t) {
                 bits |= 1 << b;
             }
         }
@@ -1248,18 +1310,17 @@ fn compute_free_mask(oa: &OpArray) -> FreeInfo {
     // after the call setup reads it again).
     let mut call_frees = Vec::new();
     if calls_balanced && open_calls.is_empty() {
-        for (d, t) in call_ends {
-            let tu = t as usize;
-            if tu < tc
-                && keep[tu]
+        for (d, r) in call_ends {
+            let range = &ranges[r as usize];
+            if range.keep
                 && oa
                     .ops
-                    .get(last[tu] as usize)
+                    .get(range.last as usize)
                     .is_some_and(|o| o.opcode == OpCode::InitFCall)
-                && last[tu] < d
+                && range.last < d
             {
                 mask[d as usize] |= 16;
-                call_frees.push((d, t));
+                call_frees.push((d, range.t));
             }
         }
     }

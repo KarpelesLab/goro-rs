@@ -428,6 +428,9 @@ struct LoopContext {
     /// once a jump out of the loop frees its temporaries.
     depth_nop: Option<u32>,
     depth_tmp: Option<u32>,
+    /// The temporary reserved for it at the loop entry (the temporaries
+    /// allocated later may be ones the loop's statements reuse).
+    depth_slot: Option<u32>,
 }
 
 #[derive(Default)]
@@ -3788,7 +3791,10 @@ impl Compiler {
             let depth_op = match (self.loop_stack[i].depth_tmp, self.loop_stack[i].depth_nop) {
                 (Some(t), _) => OperandType::Tmp(t),
                 (None, Some(nop)) => {
-                    let t = self.op_array.alloc_temp();
+                    let t = match self.loop_stack[i].depth_slot {
+                        Some(t) => t,
+                        None => self.op_array.alloc_temp(),
+                    };
                     let op = &mut self.op_array.ops[nop as usize];
                     op.opcode = OpCode::SaveHandlerDepth;
                     op.result = OperandType::Tmp(t);
@@ -3911,13 +3917,58 @@ impl Compiler {
         }
     }
 
+    /// A foreach loop's temporary for its exception handler depth (see
+    /// LoopContext::depth_slot), when it may need one.
+    #[inline(never)]
+    fn reserve_loop_depth_slot(&mut self) {
+        let needs = self
+            .loop_stack
+            .last()
+            .is_some_and(|c| c.depth_nop.is_some());
+        if needs {
+            let t = self.op_array.alloc_temp();
+            if let Some(ctx) = self.loop_stack.last_mut() {
+                ctx.depth_slot = Some(t);
+            }
+        }
+    }
+
+    /// The end of an expression statement whose temporaries start at
+    /// `start`: they are released (a FREE_TMPS marked STMT_END), and the
+    /// next statements reuse them.
+    #[inline(never)]
+    fn end_stmt_tmps(&mut self, start: u32, line: u32) {
+        let end = self.op_array.temp_next;
+        if end > start {
+            self.op_array.emit(Op {
+                opcode: OpCode::FreeTmps,
+                op1: OperandType::Tmp(start),
+                op2: OperandType::Tmp(end),
+                result: crate::opcode::STMT_END,
+                line,
+            });
+        }
+        self.op_array.temp_next = start;
+    }
+
+    /// The end of the temporaries a region of statements (a try block)
+    /// may have used, from where it started on: the most used so far (the
+    /// statements reused theirs); the next temporaries are allocated past
+    /// it.
+    #[inline(never)]
+    fn tmps_region_end(&mut self) -> u32 {
+        let end = self.op_array.temp_count.max(self.op_array.temp_next);
+        self.op_array.temp_next = end;
+        end
+    }
+
     /// A temporary object a method was called on (and the arguments passed)
     /// is released once the call returns (Zend's ZEND_CALL_RELEASE_THIS),
     /// not at the end of the statement: free the call's temporaries except
     /// its result.
     #[inline(never)]
     fn emit_free_call_tmps(&mut self, start: u32, result: u32, line: u32) {
-        let end = self.op_array.temp_count;
+        let end = self.op_array.temp_next;
         self.emit_free_tmps((start, result), line);
         self.emit_free_tmps((result + 1, end), line);
     }
@@ -4187,7 +4238,7 @@ impl Compiler {
 
             StmtKind::Echo(exprs) => {
                 for expr in exprs {
-                    let tmp_start = self.op_array.temp_count;
+                    let tmp_start = self.op_array.temp_next;
                     let operand = self.compile_expr(expr)?;
                     self.op_array.emit(Op {
                         opcode: OpCode::Echo,
@@ -4197,8 +4248,7 @@ impl Compiler {
                         line: stmt.span.line,
                     });
                     // Temporaries of the echoed expression are freed by now.
-                    let tmp_end = self.op_array.temp_count;
-                    self.emit_free_tmps((tmp_start, tmp_end), stmt.span.line);
+                    self.end_stmt_tmps(tmp_start, stmt.span.line);
                 }
                 Ok(())
             }
@@ -4220,19 +4270,10 @@ impl Compiler {
                 ) {
                     self.assign_result_discarded = true;
                 }
-                let tmp_start = self.op_array.temp_count;
+                let tmp_start = self.op_array.temp_next;
                 self.compile_expr(expr)?;
                 self.is_discarding_result = false;
-                let tmp_end = self.op_array.temp_count;
-                if tmp_end > tmp_start {
-                    self.op_array.emit(Op {
-                        opcode: OpCode::FreeTmps,
-                        op1: OperandType::Tmp(tmp_start),
-                        op2: OperandType::Tmp(tmp_end),
-                        result: OperandType::Unused,
-                        line: stmt.span.line,
-                    });
-                }
+                self.end_stmt_tmps(tmp_start, stmt.span.line);
                 Ok(())
             }
 
@@ -4408,9 +4449,9 @@ impl Compiler {
                 elseif_clauses,
                 else_body,
             } => {
-                let cond_tmps = self.op_array.temp_count;
+                let cond_tmps = self.op_array.temp_next;
                 let cond = self.compile_expr(condition)?;
-                let cond_tmps = (cond_tmps, self.op_array.temp_count);
+                let cond_tmps = (cond_tmps, self.op_array.temp_next);
 
                 // Jump past body if condition is false
                 let jmp_false = self.op_array.emit(Op {
@@ -4449,9 +4490,9 @@ impl Compiler {
 
                 // Elseif clauses
                 for (elseif_cond, elseif_body) in elseif_clauses {
-                    let tmps_start = self.op_array.temp_count;
+                    let tmps_start = self.op_array.temp_next;
                     let cond = self.compile_expr(elseif_cond)?;
-                    let cond_tmps = (tmps_start, self.op_array.temp_count);
+                    let cond_tmps = (tmps_start, self.op_array.temp_next);
                     let jmp_false = self.op_array.emit(Op {
                         opcode: OpCode::JmpZ,
                         op1: cond,
@@ -4504,6 +4545,7 @@ impl Compiler {
                     free_tmps: Vec::new(),
                     depth_nop: None,
                     depth_tmp: None,
+                    depth_slot: None,
                     handler_depth: self.handler_regions.len(),
                 });
 
@@ -4558,6 +4600,7 @@ impl Compiler {
                     free_tmps: Vec::new(),
                     depth_nop: None,
                     depth_tmp: None,
+                    depth_slot: None,
                     handler_depth: self.handler_regions.len(),
                 });
 
@@ -4608,6 +4651,7 @@ impl Compiler {
                     free_tmps: Vec::new(),
                     depth_nop: None,
                     depth_tmp: None,
+                    depth_slot: None,
                     handler_depth: self.handler_regions.len(),
                 });
 
@@ -4793,6 +4837,7 @@ impl Compiler {
                     free_tmps: Vec::new(),
                     depth_nop: None,
                     depth_tmp: None,
+                    depth_slot: None,
                     handler_depth: self.handler_regions.len(),
                 });
 
@@ -4807,6 +4852,7 @@ impl Compiler {
                     }
                     ctx.depth_nop = depth_nop;
                 }
+                self.reserve_loop_depth_slot();
                 // By-ref foreach into a plain variable: ForeachNextRef binds the
                 // variable to the element's reference itself.
                 let by_ref_cv = match &value.kind {
@@ -4844,7 +4890,7 @@ impl Compiler {
                         kind: ExprKind::Variable(self.op_array.cv_names[cv as usize].clone()),
                         span: value.span,
                     };
-                    let tmp_start = self.op_array.temp_count;
+                    let tmp_start = self.op_array.temp_next;
                     self.compile_list_destructure_ref(elems, &hidden, stmt.span.line)?;
                     self.op_array.emit(Op {
                         opcode: OpCode::UnsetCv,
@@ -4855,7 +4901,7 @@ impl Compiler {
                     });
                     // The element references fetched for the bindings are
                     // not kept past them.
-                    let tmp_end = self.op_array.temp_count;
+                    let tmp_end = self.op_array.temp_next;
                     self.emit_free_tmps((tmp_start, tmp_end), stmt.span.line);
                 } else if *by_ref {
                     // Plain variables were bound by ForeachNextRef; other
@@ -5064,6 +5110,7 @@ impl Compiler {
                     free_tmps: Vec::new(),
                     depth_nop: None,
                     depth_tmp: None,
+                    depth_slot: None,
                     handler_depth: self.handler_regions.len(),
                 });
 
@@ -6291,7 +6338,7 @@ impl Compiler {
                 }
 
                 // Compile try body
-                let try_tmp_start = self.op_array.temp_count;
+                let try_tmp_start = self.op_array.temp_next;
                 self.handler_regions.push((try_begin, has_finally));
                 for s in try_body {
                     if let Err(e) = self.compile_stmt(s) {
@@ -6300,7 +6347,7 @@ impl Compiler {
                     }
                 }
                 self.handler_regions.pop();
-                let try_tmp_end = self.op_array.temp_count;
+                let try_tmp_end = self.tmps_region_end();
 
                 // End of try: clear exception handler and jump to finally/end
                 self.op_array.emit(Op {
@@ -11915,7 +11962,7 @@ impl Compiler {
                     span,
                 },
             };
-            let t0 = self.op_array.temp_count;
+            let t0 = self.op_array.temp_next;
             self.compile_expr(&e)?;
             let _ = t0;
         }
@@ -16061,7 +16108,7 @@ impl Compiler {
                     result: OperandType::Tmp(arr_tmp),
                     line: expr.span.line,
                 });
-                let elems_tmp_start = self.op_array.temp_count;
+                let elems_tmp_start = self.op_array.temp_next;
                 let lits_start = self.op_array.literals.len();
 
                 for elem in elements {
@@ -16248,7 +16295,7 @@ impl Compiler {
                 // The element temporaries were copied into the array: release
                 // them so the array holds the only reference (PHP moves TMPs
                 // into ADD_ARRAY_ELEMENT).
-                let elems_tmp_end = self.op_array.temp_count;
+                let elems_tmp_end = self.op_array.temp_next;
                 if elems_tmp_end > elems_tmp_start {
                     self.op_array.emit(Op {
                         opcode: OpCode::FreeTmps,
@@ -19295,7 +19342,7 @@ impl Compiler {
                 } else {
                     OperandType::Unused
                 };
-                let obj_tmp_start = self.op_array.temp_count;
+                let obj_tmp_start = self.op_array.temp_next;
                 self.chain_base = true;
                 let obj = self.compile_expr(object)?;
                 let tmp = self.op_array.alloc_temp();
