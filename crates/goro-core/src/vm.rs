@@ -1885,6 +1885,9 @@ pub struct Vm {
     pub current_file: crate::rcstr::RcStr,
     /// Line number of the last return statement (for return type error messages)
     last_return_line: u32,
+    /// The line of the return statement whose value waits for finally
+    /// blocks (SaveReturn): the return the function makes after them.
+    pending_return_line: u32,
     /// Whether the most recently completed user function call was declared
     /// to return by reference (for "Only variables should be assigned by
     /// reference" notices on `$x = &f()`).
@@ -2504,6 +2507,7 @@ impl Vm {
             pending_named_args: Vec::new(),
             current_file: "Unknown.php".into(),
             last_return_line: 0,
+            pending_return_line: 0,
             last_call_by_ref: false,
             isset_get_cache: None,
             plain_prop_memo: Default::default(),
@@ -24137,10 +24141,9 @@ impl Vm {
                 .last()
                 .is_some_and(|op| op.opcode == OpCode::Return && op.line == 0)
             && (self.last_return_line == 0
-                || !op_array
-                    .ops
-                    .iter()
-                    .any(|op| op.opcode == OpCode::Return && op.line != 0));
+                || !op_array.ops.iter().any(|op| {
+                    matches!(op.opcode, OpCode::Return | OpCode::SaveReturn) && op.line != 0
+                }));
         match v {
             Value::Reference(r) => {
                 let mut val = match &*r.borrow() {
@@ -50568,6 +50571,7 @@ impl Vm {
                             );
                         }
                     }
+                    self.pending_return_line = op.line;
                     self.pending_return = Some(val);
                     // A return inside try-with-finally discards any pending jump
                     self.pending_finally_jump = None;
@@ -50689,6 +50693,8 @@ impl Vm {
                             return Ok(Flow::Continue);
                         }
                         // No outer finally - return the value now
+                        // (the return statement made: not the implicit one)
+                        self.last_return_line = self.pending_return_line;
                         return Ok(Flow::Return(val));
                     }
                     // If there's a pending jump (deferred break/continue), execute it now
