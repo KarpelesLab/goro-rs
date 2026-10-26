@@ -149,19 +149,14 @@ fn with_stack<R>(f: impl FnOnce() -> R) -> Option<R> {
 }
 
 impl Parser {
-    /// `__halt_compiler();` at the top level: drop everything after it and
-    /// resolve direct references to `__COMPILER_HALT_OFFSET__` (unqualified
-    /// or `\`-qualified) to the byte offset right after the statement.
-    fn apply_halt_compiler(
-        tokens: &mut Vec<Token>,
-        docs: &mut Vec<(u32, Option<Vec<u8>>)>,
-        halt_map: Option<std::rc::Rc<dyn Fn(u32) -> u32>>,
-    ) {
+    /// The index of a top-level `__halt_compiler();` statement's name
+    /// token and the byte offset right after it.
+    fn find_halt_compiler(tokens: &[Token]) -> Option<(usize, u32)> {
         // (most scripts have none)
         if !tokens.iter().any(
             |t| matches!(&t.kind, TokenKind::Identifier(n) if n.eq_ignore_ascii_case(b"__halt_compiler")),
         ) {
-            return;
+            return None;
         }
         let mut depth: i32 = 0;
         let mut halt: Option<(usize, u32)> = None;
@@ -199,6 +194,28 @@ impl Parser {
                 _ => {}
             }
         }
+        halt
+    }
+
+    /// The `__COMPILER_HALT_OFFSET__` of a script: where its top-level
+    /// `__halt_compiler();` statement ends, None without one.
+    pub fn halt_compiler_offset(source: &[u8]) -> Option<u32> {
+        let mut lexer = crate::Lexer::new(source);
+        let tokens = lexer.tokenize();
+        let _ = crate::take_lexer_deprecations();
+        let _ = crate::take_lexer_warnings();
+        Self::find_halt_compiler(&tokens).map(|(_, o)| o)
+    }
+
+    /// `__halt_compiler();` at the top level: drop everything after it and
+    /// resolve direct references to `__COMPILER_HALT_OFFSET__` (unqualified
+    /// or `\`-qualified) to the byte offset right after the statement.
+    fn apply_halt_compiler(
+        tokens: &mut Vec<Token>,
+        docs: &mut Vec<(u32, Option<Vec<u8>>)>,
+        halt_map: Option<std::rc::Rc<dyn Fn(u32) -> u32>>,
+    ) {
+        let halt = Self::find_halt_compiler(tokens);
         let Some((hi, offset)) = halt else { return };
         // (an offset into the original script under zend.multibyte filters)
         let offset = halt_map.map_or(offset, |f| f(offset));

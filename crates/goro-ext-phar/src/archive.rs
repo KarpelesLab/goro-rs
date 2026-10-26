@@ -1766,7 +1766,9 @@ pub fn open_executed_filename(vm: &mut Vm, alias: Option<&[u8]>) -> Res<()> {
     let Some(fp) = read_file(&fname) else {
         return fail(format!("unable to open phar for reading \"{}\"", l(&fname)));
     };
-    if stristr(&fp, b"__HALT_COMPILER").is_none() {
+    // (zend_get_constant_str("__COMPILER_HALT_OFFSET__"): the executed
+    // file must have compiled a top-level __halt_compiler();)
+    if goro_parser::Parser::halt_compiler_offset(&fp).is_none() {
         return fail("__HALT_COMPILER(); must be declared in a phar".to_string());
     }
     let actual = expand_filepath(&fname).unwrap_or(fname);
