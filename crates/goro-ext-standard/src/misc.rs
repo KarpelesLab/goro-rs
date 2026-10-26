@@ -5927,7 +5927,7 @@ fn ini_set_as(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError
         .map(|v| Value::String(v.to_php_string()));
     // zend_alter_ini_entry_ex(): an entry no extension registered (or one
     // that was removed, like session.hash_function) cannot be set.
-    if old.is_none() {
+    if old.is_none() || !is_ini_entry_name(&key) {
         return Ok(Value::False);
     }
     // OnUpdateDefaultCharset / OnUpdateDefaultMimeTye: no header injection
@@ -6272,6 +6272,9 @@ fn ini_get_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn ini_get(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
+    if !is_ini_entry_name(name.as_bytes()) {
+        return Ok(Value::False);
+    }
     match vm.constants.get(name.as_bytes()) {
         Some(val) => {
             // ini_get always returns string values
@@ -6291,6 +6294,9 @@ fn ini_remember(vm: &mut Vm, key: &[u8]) {
 fn ini_restore(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
     let key = name.as_bytes().to_vec();
+    if !is_ini_entry_name(&key) {
+        return Ok(Value::Null);
+    }
     match vm.ini_originals.remove(&key) {
         Some(Some(orig)) => {
             let _ = ini_set(vm, &[Value::String(name), orig]);
@@ -16168,7 +16174,8 @@ fn get_parent_class_real(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 // iterator_to_array and iterator_count moved to goro-ext-spl
 
 /// INI settings share the constant table; their names ("mysqli.max_links")
-/// are lowercase and dotted, which no extension constant is.
+/// are lowercase and dotted, which no extension constant is (ini_get()
+/// and ini_set() of NAN or PHP_VERSION find no entry).
 fn is_ini_entry_name(name: &[u8]) -> bool {
     goro_core::vm::is_ini_entry_key(name)
 }
