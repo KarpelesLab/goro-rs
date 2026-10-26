@@ -23097,6 +23097,28 @@ impl Vm {
                     }
                 }
                 prev_op = Some(ip);
+                // `$GLOBALS['this'] = v`: the write fetch of the global
+                // $this (FETCH_W) throws.
+                if let Some(g) = globals_cv {
+                    if globals_dim_write_this(&op_array.ops[ip], g, &cvs, &tmps, &op_array.literals)
+                    {
+                        let msg = "Cannot re-assign $this";
+                        let line = op_array.ops[ip].line;
+                        let exc = self.create_exception(b"Error", msg, line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", msg),
+                            line,
+                        });
+                    }
+                }
             }
             // Runs of opcodes on plain values (see run_fast_ops); the first
             // one it does not handle takes the general path below. (In a
@@ -67136,4 +67158,38 @@ fn drop_backed_abstract_hooks(class: &mut crate::object::ClassEntry) {
             }
         }
     }
+}
+
+/// Whether `op` is a write fetch of `$GLOBALS['this']` (the frame's
+/// $GLOBALS CV is `globals`).
+#[inline(never)]
+fn globals_dim_write_this(
+    op: &crate::opcode::Op,
+    globals: u32,
+    cvs: &[Value],
+    tmps: &[Value],
+    literals: &[Value],
+) -> bool {
+    if op.op1 != OperandType::Cv(globals) {
+        return false;
+    }
+    let key = match op.opcode {
+        OpCode::ArraySet | OpCode::ArraySetRef | OpCode::ArraySetIncDec => &op.result,
+        OpCode::ArrayGetRW
+        | OpCode::ArrayGetRef
+        | OpCode::ArrayGetW
+        | OpCode::ArrayGetWRW
+        | OpCode::ArrayGetIncDec
+        | OpCode::ArrayGetWObj
+        | OpCode::ArrayGetWObjRW
+        | OpCode::ArrayGetObjW => &op.op2,
+        _ => return false,
+    };
+    let v = match key {
+        OperandType::Const(i) => literals.get(*i as usize),
+        OperandType::Cv(i) => cvs.get(*i as usize),
+        OperandType::Tmp(i) => tmps.get(*i as usize),
+        _ => None,
+    };
+    matches!(v.map(|v| v.deref()), Some(Value::String(s)) if s.as_bytes() == b"this")
 }

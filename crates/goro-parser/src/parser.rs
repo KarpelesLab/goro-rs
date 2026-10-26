@@ -3779,6 +3779,12 @@ impl Parser {
                         });
                     }
                 }
+                if param_name == b"this" {
+                    return Err(ParseError {
+                        message: "Cannot use $this as parameter".into(),
+                        span: self.span(),
+                    });
+                }
                 self.last_set_hook_type = param_type_hint.clone();
                 if matches!(self.peek(), TokenKind::OpenBrace) {
                     // set { ... } or set($value) { ... }

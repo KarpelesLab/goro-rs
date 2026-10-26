@@ -14201,14 +14201,13 @@ impl Compiler {
                         line: expr.span.line,
                     });
                 }
-                // $this cannot be re-assigned inside a method body.
-                if let ExprKind::Variable(target_name) = &target.kind {
-                    if target_name == b"this" && self.current_class.is_some() {
-                        return Err(CompileError {
-                            message: "Cannot re-assign $this".into(),
-                            line: expr.span.line,
-                        });
-                    }
+                // $this can't be assigned to, directly or by destructuring
+                // (zend_compile_assign(): is_this_fetch()).
+                if assign_target_reassigns_this(target) == Some(true) {
+                    return Err(CompileError {
+                        message: "Cannot re-assign $this".into(),
+                        line: expr.span.line,
+                    });
                 }
                 // Computed keys / names of the target are evaluated before the
                 // assigned value (the target's fetches are delayed past it).
@@ -19314,7 +19313,7 @@ impl Compiler {
                 }
                 // Check for $this = &$value
                 if let ExprKind::Variable(target_name) = &target.kind {
-                    if target_name == b"this" && self.current_class.is_some() {
+                    if target_name == b"this" {
                         return Err(CompileError {
                             message: "Cannot re-assign $this".into(),
                             line: expr.span.line,
@@ -23932,5 +23931,43 @@ impl Compiler {
             }
         }
         self.export_const_expr(expr, 0)
+    }
+}
+
+/// Whether an assignment target assigns $this (zend_compile_assign():
+/// is_this_fetch()), directly or in a destructuring list, as reached before
+/// another error of the list (mixed keyed / unkeyed entries, an empty
+/// entry in a keyed list): Some(true) $this, Some(false) another error
+/// comes first, None neither.
+#[inline(never)]
+fn assign_target_reassigns_this(target: &Expr) -> Option<bool> {
+    match &target.kind {
+        ExprKind::Variable(n) if n == b"this" => Some(true),
+        ExprKind::Array(elems) => {
+            let is_keyed = elems
+                .iter()
+                .find(|e| !matches!(e.value.kind, ExprKind::Null))
+                .is_some_and(|e| e.key.is_some());
+            for e in elems {
+                if matches!(e.value.kind, ExprKind::Null) {
+                    if is_keyed {
+                        return Some(false);
+                    }
+                    continue;
+                }
+                if e.unpack || e.key.is_some() != is_keyed {
+                    return Some(false);
+                }
+                if let Some(r) = assign_target_reassigns_this(&e.value) {
+                    return Some(r);
+                }
+            }
+            None
+        }
+        ExprKind::FunctionCall { name, args } if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")) => {
+            args.iter()
+                .find_map(|a| assign_target_reassigns_this(&a.value))
+        }
+        _ => None,
     }
 }
