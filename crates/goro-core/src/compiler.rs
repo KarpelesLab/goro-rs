@@ -21293,8 +21293,16 @@ impl Compiler {
         let Some(fname) = func_name else {
             return false;
         };
-        let lower = fname.to_ascii_lowercase();
-        let lower = lower.strip_prefix(b"\\").unwrap_or(&lower);
+        let fname = fname.strip_prefix(b"\\").unwrap_or(fname);
+        // (the longest of the names is 20 bytes)
+        let mut buf = [0u8; 24];
+        let Some(lower) = buf.get_mut(..fname.len()) else {
+            return false;
+        };
+        for (d, s) in lower.iter_mut().zip(fname) {
+            *d = s.to_ascii_lowercase();
+        }
+        let lower = &*lower;
         matches!(
             lower,
             b"next"

@@ -64976,6 +64976,14 @@ impl Vm {
             && matches!(op1, OperandType::Tmp(_))
             && matches!(result, OperandType::Const(_))
             && self.pending_calls.last().is_some_and(|c| {
+                // (a call resolved to a builtin of its name: that one, see
+                // resolve_call_target())
+                if c.target.user.is_none()
+                    && c.target.builtin.is_some()
+                    && c.target.fn_gen == self.user_functions.len() + 1
+                {
+                    return crate::compiler::Compiler::is_array_ref_builtin(Some(c.name.as_bytes()));
+                }
                 self.pending_builtin_name(c)
                     .is_some_and(|n| crate::compiler::Compiler::is_array_ref_builtin(Some(&n)))
             })
