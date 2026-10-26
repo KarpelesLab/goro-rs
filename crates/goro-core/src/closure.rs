@@ -811,6 +811,24 @@ impl Vm {
         }
     }
 
+    /// Whether the first internal class up the parent chain of the user
+    /// class `cl` (lowercase) has the method `ml`.
+    #[inline(never)]
+    fn internal_ancestor_has_method(&self, cl: &[u8], ml: &[u8]) -> bool {
+        let mut cur = cl.to_vec();
+        for _ in 0..64 {
+            let Some(c) = self.classes.get(&cur) else {
+                return self.internal_class(&cur).is_some()
+                    && crate::stubs::find_method(&cur, ml).is_some();
+            };
+            match &c.parent {
+                Some(p) => cur = lower(p),
+                None => return false,
+            }
+        }
+        false
+    }
+
     fn fcc_method(
         &mut self,
         obj: Value,
@@ -876,8 +894,24 @@ impl Vm {
                     ),
                 ));
             }
-            // Builtin classes: keep the forwarding closure.
-            None => return Ok(self.make_closure_object(wrapper)),
+            // Builtin classes: keep the forwarding closure (when the class
+            // has that method).
+            None => {
+                if self.internal_class(&cl).is_some()
+                    && crate::stubs::find_method(&cl, &ml).is_none()
+                    && crate::stubs::find_method(&cl, b"__call").is_none()
+                {
+                    return Err((
+                        b"Error",
+                        format!(
+                            "Call to undefined method {}::{}()",
+                            crate::value::display_class_name(&class_name),
+                            String::from_utf8_lossy(m)
+                        ),
+                    ));
+                }
+                return Ok(self.make_closure_object(wrapper));
+            }
         };
         let method = ce.methods.get(&ml).map(|md| {
             (
@@ -929,6 +963,11 @@ impl Vm {
                 Ok(self.make_closure_object(inner))
             }
             None if has_call => magic(self),
+            // A method inherited from an internal ancestor: the forwarding
+            // closure calls it.
+            None if self.internal_ancestor_has_method(&cl, &ml) => {
+                Ok(self.make_closure_object(wrapper))
+            }
             None => Err((
                 b"Error",
                 format!(
