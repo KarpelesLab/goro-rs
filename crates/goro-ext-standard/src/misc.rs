@@ -16471,7 +16471,7 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Z_PARAM_CLASS throws a TypeError when the class is not declared;
     // the message uses the original-case spelling supplied by the caller.
     if !vm.classes.contains_key(&name_lower) && internal.is_none() {
-        let class_str = class_name.to_string_lossy().to_string();
+        let class_str = class_name.to_msg_string();
         let msg = format!(
             "get_class_vars(): Argument #1 ($class) must be a valid class name, {} given",
             class_str

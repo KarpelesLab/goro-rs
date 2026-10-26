@@ -1084,7 +1084,7 @@ impl Vm {
                     b"Error",
                     format!(
                         "Call to undefined method Generator::{}()",
-                        String::from_utf8_lossy(m)
+                        crate::string::msg_str(m)
                     ),
                 ));
             }
@@ -1119,7 +1119,7 @@ impl Vm {
                     b"Error",
                     format!(
                         "Call to undefined method stdClass::{}()",
-                        String::from_utf8_lossy(m)
+                        crate::string::msg_str(m)
                     ),
                 ));
             }
@@ -1146,7 +1146,7 @@ impl Vm {
                         format!(
                             "Call to undefined method {}::{}()",
                             crate::value::display_class_name(&class_name),
-                            String::from_utf8_lossy(m)
+                            crate::string::msg_str(m)
                         ),
                     ));
                 }
@@ -1211,7 +1211,7 @@ impl Vm {
                 format!(
                     "Call to undefined method {}::{}()",
                     crate::value::display_class_name(&class_name),
-                    String::from_utf8_lossy(m)
+                    crate::string::msg_str(m)
                 ),
             )),
         }
@@ -1280,7 +1280,7 @@ impl Vm {
                         b"Error",
                         format!(
                             "Call to undefined method stdClass::{}()",
-                            String::from_utf8_lossy(m)
+                            crate::string::msg_str(m)
                         ),
                     ));
                 }
@@ -1419,8 +1419,8 @@ impl Vm {
                 b"Error",
                 format!(
                     "Call to undefined method {}::{}()",
-                    String::from_utf8_lossy(&canon),
-                    String::from_utf8_lossy(m)
+                    crate::string::msg_str(&canon),
+                    crate::string::msg_str(m)
                 ),
             )),
         }

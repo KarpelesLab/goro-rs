@@ -29636,7 +29636,7 @@ impl Vm {
                                                 format!(
                                                     "Call to undefined method {}::{}()",
                                                     crate::value::display_class_name(&cname),
-                                                    String::from_utf8_lossy(m.as_bytes())
+                                                    crate::string::msg_str(m.as_bytes())
                                                 ),
                                             ))
                                         } else {
@@ -29729,8 +29729,8 @@ impl Vm {
                                                     b"Error",
                                                     format!(
                                                         "Call to undefined method {}::{}()",
-                                                        String::from_utf8_lossy(&c.name),
-                                                        String::from_utf8_lossy(m.as_bytes())
+                                                        crate::string::msg_str(&c.name),
+                                                        crate::string::msg_str(m.as_bytes())
                                                     ),
                                                 )),
                                             }
@@ -29740,7 +29740,7 @@ impl Vm {
                                                 b"Error",
                                                 format!(
                                                     "Call to undefined method stdClass::{}()",
-                                                    String::from_utf8_lossy(m.as_bytes())
+                                                    crate::string::msg_str(m.as_bytes())
                                                 ),
                                             ))
                                         } else if let Some(sc) = crate::stubs::find_class_lower(&cl) {
@@ -29757,7 +29757,7 @@ impl Vm {
                                                         format!(
                                                             "Call to undefined method {}::{}()",
                                                             sc.name,
-                                                            String::from_utf8_lossy(m.as_bytes())
+                                                            crate::string::msg_str(m.as_bytes())
                                                         ),
                                                     ))
                                                 }
