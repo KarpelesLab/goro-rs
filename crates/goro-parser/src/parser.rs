@@ -1441,34 +1441,31 @@ impl Parser {
             }
             _ => {
                 // Check for __halt_compiler()
-                if let TokenKind::Identifier(ref name) = self.peek().clone() {
-                    if name.eq_ignore_ascii_case(b"__halt_compiler") {
-                        // Check for () and ;
-                        if matches!(self.peek_at(1), TokenKind::OpenParen)
-                            && matches!(self.peek_at(2), TokenKind::CloseParen)
-                            && matches!(self.peek_at(3), TokenKind::Semicolon)
-                        {
-                            self.advance(); // __halt_compiler
-                            self.advance(); // (
-                            self.advance(); // )
-                            self.advance(); // ;
-                            // Skip all remaining tokens until EOF
-                            while !self.is_at_end() {
-                                self.advance();
-                            }
-                            return Ok(Statement {
-                                kind: StmtKind::Nop,
-                                span,
-                            });
-                        }
+                if matches!(self.peek(), TokenKind::Identifier(name) if name.eq_ignore_ascii_case(b"__halt_compiler"))
+                    // Check for () and ;
+                    && matches!(self.peek_at(1), TokenKind::OpenParen)
+                    && matches!(self.peek_at(2), TokenKind::CloseParen)
+                    && matches!(self.peek_at(3), TokenKind::Semicolon)
+                {
+                    self.advance(); // __halt_compiler
+                    self.advance(); // (
+                    self.advance(); // )
+                    self.advance(); // ;
+                    // Skip all remaining tokens until EOF
+                    while !self.is_at_end() {
+                        self.advance();
                     }
+                    return Ok(Statement {
+                        kind: StmtKind::Nop,
+                        span,
+                    });
                 }
                 // Check for label: identifier followed by colon (but not ::)
-                if let TokenKind::Identifier(name) = self.peek().clone() {
+                if matches!(self.peek(), TokenKind::Identifier(_)) {
                     if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Colon) {
                         // Make sure it's not part of a ternary or other construct
                         // Labels appear at statement level as "label:" on their own
-                        self.advance(); // consume identifier
+                        let name = self.advance_take_bytes(); // consume identifier
                         self.advance(); // consume colon
                         return Ok(Statement {
                             kind: StmtKind::Label(name),
@@ -4069,9 +4066,39 @@ impl Parser {
 
     pub fn parse_expression(&mut self) -> ParseResult<Expr> {
         self.enter_depth()?;
-        let result = self.with_room(Self::parse_logical_or_low);
+        let result = if self.at_lone_operand() {
+            self.parse_primary()
+        } else {
+            self.with_room(Self::parse_logical_or_low)
+        };
         self.leave_depth();
         result
+    }
+
+    /// Whether the expression at the current token is that token alone
+    /// (a variable, literal or constant name before a token that ends any
+    /// expression): every level between parse_expression() and
+    /// parse_primary() would hand parse_primary()'s result up unchanged.
+    #[inline(always)]
+    fn at_lone_operand(&self) -> bool {
+        matches!(
+            self.peek(),
+            TokenKind::Variable(_)
+                | TokenKind::LongNumber(_)
+                | TokenKind::DoubleNumber(_)
+                | TokenKind::ConstantString(_)
+                | TokenKind::Identifier(_)
+                | TokenKind::True
+                | TokenKind::False
+                | TokenKind::Null
+        ) && matches!(
+            self.peek_at(1),
+            TokenKind::Semicolon
+                | TokenKind::Comma
+                | TokenKind::CloseParen
+                | TokenKind::CloseBracket
+                | TokenKind::DoubleArrow
+        )
     }
 
     /// Run `f` with room on the native stack (checked at every
@@ -4199,6 +4226,9 @@ impl Parser {
     }
 
     fn parse_assignment_inner(&mut self) -> ParseResult<Expr> {
+        if self.at_lone_operand() {
+            return self.parse_primary();
+        }
         let left = self.parse_null_coalesce()?;
 
         let compound_op = match self.peek() {
