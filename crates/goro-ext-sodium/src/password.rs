@@ -37,12 +37,12 @@ fn argon2_hash(
 ) -> Result<Option<Vec<u8>>, VmError> {
     // (size_t: a negative value is out of range)
     let memory_cost = option_long(vm, options, b"memory_cost").unwrap_or(MEMLIMIT) as u64;
-    if memory_cost > 0xffff_ffff || memory_cost < 8 {
+    if !(8..=0xffff_ffff).contains(&memory_cost) {
         value_error(vm, "Memory cost is outside of allowed memory range");
         return Ok(None);
     }
     let time_cost = option_long(vm, options, b"time_cost").unwrap_or(OPSLIMIT) as u64;
-    if time_cost > 0xffff_ffff || time_cost < 1 {
+    if !(1..=0xffff_ffff).contains(&time_cost) {
         value_error(vm, "Time cost is outside of allowed time range");
         return Ok(None);
     }

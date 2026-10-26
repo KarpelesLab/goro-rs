@@ -8638,9 +8638,7 @@ pub fn reflection_property_method(
         }
         b"isvirtual" => {
             let is_virtual = rcls(vm, &class_lower)
-                .and_then(|_c| {
-                    rprop(vm, &class_lower, prop_name.as_bytes()).map(|p| prop_is_virtual(&p))
-                })
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).map(prop_is_virtual))
                 .unwrap_or(false);
             Some(if is_virtual {
                 Value::True

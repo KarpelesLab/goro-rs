@@ -1315,8 +1315,10 @@ fn client_hello_max_version(rec: &[u8]) -> Option<u16> {
             let n = *data.first()? as usize;
             return data
                 .get(1..1 + n)?
-                .chunks_exact(2)
-                .map(|v| u16::from_be_bytes([v[0], v[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|v| u16::from_be_bytes(*v))
                 .filter(|v| (0x0300..=0x0304).contains(v))
                 .max();
         }
