@@ -68225,7 +68225,18 @@ pub(crate) fn no_direct_construct_msg(class_lower: &[u8]) -> Option<&'static str
 }
 
 /// Whether a key of the constants table is an INI entry, not a constant.
+#[inline]
 pub fn is_ini_entry_key(name: &[u8]) -> bool {
+    // (most keys are constants, uppercase: no INI entry name but SMTP
+    // starts with an uppercase letter)
+    if name.first().is_none_or(|b| b.is_ascii_uppercase()) && name != b"SMTP" {
+        return false;
+    }
+    is_ini_entry_key_slow(name)
+}
+
+#[inline(never)]
+fn is_ini_entry_key_slow(name: &[u8]) -> bool {
     if name.contains(&b'.') {
         return !name.iter().any(|b| b.is_ascii_uppercase());
     }
