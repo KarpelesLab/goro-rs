@@ -4026,11 +4026,9 @@ impl crate::vm::Vm {
         let OperandType::Tmp(rt) = op.result else {
             return Fast::No;
         };
-        // (sort($a[k]): the general handler creates the element null)
-        if matches!(op_array.ops.get(ip + 1), Some(n) if n.opcode == OpCode::SendVal && n.op1 == op.result)
-        {
-            return Fast::No;
-        }
+        // (sort($a[k]): the general handler creates a missing element null;
+        // an array element is fetched as for a write)
+        let sent = matches!(op_array.ops.get(ip + 1), Some(n) if n.opcode == OpCode::SendVal && n.op1 == op.result);
         let arr = match op.op1 {
             OperandType::Cv(i) => match cvs.get(i as usize) {
                 Some(Value::Array(a)) => a.clone(),
@@ -4078,11 +4076,14 @@ impl crate::vm::Vm {
         };
         // (the general handler's error / deprecation cases first: nothing
         // is changed for them)
-        if let Some(k) = &key {
-            match a.get(k) {
-                Some(Value::Array(_)) | None | Some(Value::Null) | Some(Value::Undef) => {}
+        match &key {
+            Some(k) => match a.get(k) {
+                Some(Value::Array(_)) => {}
+                None | Some(Value::Null) | Some(Value::Undef) if !sent => {}
                 _ => return Fast::No,
-            }
+            },
+            None if sent => return Fast::No,
+            None => {}
         }
         // An element is fetched for writing: the array's storage is its own
         // first (fetch_dim_from_array()).
