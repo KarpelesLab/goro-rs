@@ -3614,7 +3614,7 @@ pub fn reflection_class_method(
         b"getdoccomment" => {
             if let Some(ce) = rcls(vm, &class_lower) {
                 if let Some(ref doc) = ce.doc_comment {
-                    Some(Value::String(PhpString::from_string(doc.clone())))
+                    Some(Value::String(PhpString::from_bytes(doc.as_bytes())))
                 } else {
                     Some(Value::False)
                 }
@@ -6187,7 +6187,7 @@ pub fn reflection_method_method(
                 .and_then(|m| m.doc_comment.as_ref())
                 .cloned();
             if let Some(doc) = doc {
-                Some(Value::String(PhpString::from_string(doc)))
+                Some(Value::String(PhpString::from_bytes(doc.as_bytes())))
             } else {
                 Some(Value::False)
             }
@@ -8651,7 +8651,7 @@ pub fn reflection_property_method(
                 .and_then(|p| p.doc_comment.as_ref())
                 .cloned();
             if let Some(d) = doc {
-                Some(Value::String(PhpString::from_string(d)))
+                Some(Value::String(PhpString::from_bytes(d.as_bytes())))
             } else {
                 Some(Value::False)
             }
@@ -13490,7 +13490,7 @@ pub fn reflection_class_constant_method(
         }
         b"getdoccomment" => {
             if let Some(doc) = meta.as_ref().and_then(|m| m.doc_comment.clone()) {
-                Some(Value::String(PhpString::from_string(doc)))
+                Some(Value::String(PhpString::from_bytes(doc.as_bytes())))
             } else {
                 Some(Value::False)
             }
@@ -16750,7 +16750,7 @@ pub(crate) fn function_string(vm: &Vm, ctx: &FnStrCtx, indent: &str) -> String {
         let doc = ctx.method.and_then(|m| m.doc_comment.clone()).or_else(|| {
             op.doc_comment
                 .as_ref()
-                .map(|d| String::from_utf8_lossy(d).to_string())
+                .map(|d| String::from_utf8_lossy(d).into())
         });
         if let Some(d) = doc {
             s.push_str(indent);

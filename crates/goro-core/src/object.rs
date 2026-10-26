@@ -43,7 +43,7 @@ pub struct ConstantMeta {
     /// Optional declared type for typed class constants (PHP 8.3+).
     pub declared_type: Option<crate::opcode::ParamType>,
     /// Doc comment for the constant (if any).
-    pub doc_comment: Option<String>,
+    pub doc_comment: Option<std::rc::Rc<str>>,
     /// Class constants referenced in this constant's value expression.
     /// Each pair is (class_name_lower, constant_name). Used to re-emit
     /// #[\Deprecated] banners for those referenced constants when this
@@ -85,7 +85,7 @@ pub struct ClassEntry {
     /// File where the class was declared
     pub filename: Option<String>,
     /// Doc comment for the class (if any)
-    pub doc_comment: Option<String>,
+    pub doc_comment: Option<std::rc::Rc<str>>,
     pub attributes: Vec<RuntimeAttribute>,
     /// Closures compiled from const expressions (for deferred resolution)
     pub const_closures: Vec<crate::opcode::OpArray>,
@@ -177,7 +177,7 @@ pub struct PropertyDef {
     pub is_final: bool,
     pub attributes: Vec<RuntimeAttribute>,
     /// Doc comment for the property (if any).
-    pub doc_comment: Option<String>,
+    pub doc_comment: Option<std::rc::Rc<str>>,
 }
 
 #[derive(Debug, Clone)]
@@ -192,7 +192,7 @@ pub struct MethodDef {
     /// The class that originally declared this method (lowercase)
     pub declaring_class: Vec<u8>,
     /// Doc comment for the method (if any)
-    pub doc_comment: Option<String>,
+    pub doc_comment: Option<std::rc::Rc<str>>,
     pub attributes: Vec<RuntimeAttribute>,
 }
 

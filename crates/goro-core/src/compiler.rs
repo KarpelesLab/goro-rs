@@ -562,16 +562,16 @@ fn push_pending_compile_deprecated(msg: String, line: u32) {
 }
 
 /// A property hook's doc comment as stored on its MethodDef.
-fn hook_doc_string(doc: Option<&Vec<u8>>) -> Option<String> {
+fn hook_doc_string(doc: Option<&Vec<u8>>) -> Option<std::rc::Rc<str>> {
     doc.map(|d| doc_string(d))
 }
 
-/// `String::from_utf8_lossy(d).into_owned()`, validating a doc comment
-/// (all but always UTF-8) the fast way.
-fn doc_string(d: &[u8]) -> String {
+/// `String::from_utf8_lossy(d)`, validating a doc comment (all but always
+/// UTF-8) the fast way; shared by the copies of a class entry.
+fn doc_string(d: &[u8]) -> std::rc::Rc<str> {
     match std::str::from_utf8(d) {
-        Ok(s) => s.to_owned(),
-        Err(_) => String::from_utf8_lossy(d).into_owned(),
+        Ok(s) => s.into(),
+        Err(_) => String::from_utf8_lossy(d).into(),
     }
 }
 
