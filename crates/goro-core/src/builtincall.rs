@@ -325,6 +325,13 @@ impl Vm {
         let mut args = std::mem::take(&mut call.args);
         let ns_fallback = desc.ns_fallback(call.name.as_bytes());
         let func_name_lower = desc.lower;
+        // (`sort(...$args)`: the array sent by reference is handed over by
+        // handle, as a positional one is)
+        if let Some(a0 @ Value::Reference(_)) = args.first() {
+            if let Some(arr) = Self::array_ref_builtin_arg(func_name_lower, 0, a0) {
+                args[0] = arr;
+            }
+        }
         if call.named_args.capacity() == 0
             && call.target.user.is_none()
             && call.target.method_info.is_none()

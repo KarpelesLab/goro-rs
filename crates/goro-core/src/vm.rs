@@ -24315,15 +24315,13 @@ impl Vm {
         let Some(info) = crate::arginfo::lookup(&lower) else {
             return (None, false);
         };
-        // (an `array &$array` builtin is handed the array itself: see
-        // Compiler::is_array_ref_builtin)
-        let array_ref = crate::compiler::Compiler::is_array_ref_builtin(Some(&lower));
+        // (an `array &$array` builtin is then handed the referenced array,
+        // separated: see array_ref_builtin_arg())
         let by_ref: Vec<bool> = info
             .params
             .iter()
             .filter(|p| !p.variadic)
-            .enumerate()
-            .map(|(i, p)| p.by_ref != 0 && !(i == 0 && array_ref))
+            .map(|p| p.by_ref != 0)
             .collect();
         let variadic_ref = info
             .params
@@ -30887,6 +30885,9 @@ impl Vm {
                     );
 
                     // Look up callee's by_ref_params for by-reference unpacking
+                    // (an internal callee: what it modifies through such a
+                    // reference must be the element's own, see below)
+                    let mut builtin_callee = false;
                     let (callee_by_ref, callee_variadic_is_ref): (Option<Vec<bool>>, bool) = self
                         .pending_calls
                         .last()
@@ -30898,7 +30899,10 @@ impl Vm {
                             })
                         })
                         .map(|(br, vr)| (Some(br), vr))
-                        .unwrap_or_else(|| self.unpack_builtin_by_ref());
+                        .unwrap_or_else(|| {
+                            builtin_callee = true;
+                            self.unpack_builtin_by_ref()
+                        });
                     // Get source array Rc for by-ref modifications
                     let source_arr_rc = if let Value::Array(arr) = &val {
                         Some(arr.clone())
@@ -31944,6 +31948,13 @@ impl Vm {
                                     message: "Uncaught exception".to_string(),
                                     line: op.line,
                                 });
+                            }
+                        }
+                        // (`sort(...$args)`: the array sent by reference is
+                        // handed over by handle, as a positional one is)
+                        if let Some(a0 @ Value::Reference(_)) = call.args.first() {
+                            if let Some(arr) = Self::array_ref_builtin_arg(func_name_lower, 0, a0) {
+                                call.args[0] = arr;
                             }
                         }
                         self.caller_strict_types = op_array.strict_types;
