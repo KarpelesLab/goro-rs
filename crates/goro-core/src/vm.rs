@@ -6123,12 +6123,14 @@ impl Vm {
             }
         }
         let prev_op2 = (mask & 8 != 0 && p > 0).then(|| &ops[p - 1].op2);
-        for (b, o) in [&op.op1, &op.op2, &op.result]
-            .into_iter()
-            .enumerate()
-            .map(|(b, o)| (1u8 << b, o))
-            .chain(prev_op2.map(|o| (8u8, o)))
-        {
+        // (`a > b` is compiled as `b < a`: its op1 is b, freed first)
+        let order: [(u8, &OperandType); 3] =
+            if matches!(op.opcode, OpCode::Greater | OpCode::GreaterEqual) {
+                [(2, &op.op2), (1, &op.op1), (4, &op.result)]
+            } else {
+                [(1, &op.op1), (2, &op.op2), (4, &op.result)]
+            };
+        for (b, o) in order.into_iter().chain(prev_op2.map(|o| (8u8, o))) {
             let b = b.trailing_zeros();
             if mask & (1 << b) == 0 {
                 continue;
