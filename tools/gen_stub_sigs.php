@@ -585,7 +585,10 @@ function params_rs(array $params): string {
     $out = [];
     foreach ($params as $p) {
         $f = $p['by_ref'] | ($p['variadic'] ? 4 : 0) | ($p['sensitive'] ? 8 : 0) | ($p['unknown_default'] ? 16 : 0);
-        $out[] = 'StubArg { name: ' . rstr($p['name']) . ', ty: ' . rstr($p['type']) . ', default: ' . rs($p['default']) . ', flags: ' . $f . ' }';
+        // (gen_stub.php: an internal iterable parameter is Traversable|array)
+        $ty = $p['type'] === 'iterable' ? 'Traversable|array'
+            : ($p['type'] === '?iterable' ? 'Traversable|array|null' : $p['type']);
+        $out[] = 'StubArg { name: ' . rstr($p['name']) . ', ty: ' . rstr($ty) . ', default: ' . rs($p['default']) . ', flags: ' . $f . ' }';
     }
     return '&[' . implode(', ', $out) . ']';
 }

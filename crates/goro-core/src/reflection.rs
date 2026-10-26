@@ -9447,10 +9447,9 @@ fn reflection_parameter_op_array(
             .iter()
             .map(|b| b.to_ascii_lowercase())
             .collect();
-        if let Some(ce) = rcls(vm, &class_lower) {
-            if let Some(m) = ce.methods.get(&method_lower) {
-                return Some((*m.op_array).clone());
-            }
+        // (rmethod(): also an enum's implicit cases()/from()/tryFrom())
+        if let Some(m) = rmethod(vm, &class_lower, &method_lower) {
+            return Some((*m.op_array).clone());
         }
     }
     None

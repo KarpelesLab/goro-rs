@@ -16677,7 +16677,7 @@ pub static FUNCTIONS: &[StubFunc] = &[
         flags: 0x0,
         args: &[StubArg {
             name: "iterator",
-            ty: "iterable",
+            ty: "Traversable|array",
             default: None,
             flags: 0,
         }],
@@ -16690,7 +16690,7 @@ pub static FUNCTIONS: &[StubFunc] = &[
         args: &[
             StubArg {
                 name: "iterator",
-                ty: "iterable",
+                ty: "Traversable|array",
                 default: None,
                 flags: 0,
             },
@@ -38007,13 +38007,13 @@ pub static FUNCTIONS: &[StubFunc] = &[
         args: &[
             StubArg {
                 name: "arg1",
-                ty: "iterable",
+                ty: "Traversable|array",
                 default: None,
                 flags: 0,
             },
             StubArg {
                 name: "arg2",
-                ty: "?iterable",
+                ty: "Traversable|array|null",
                 default: Some("null"),
                 flags: 0,
             },
