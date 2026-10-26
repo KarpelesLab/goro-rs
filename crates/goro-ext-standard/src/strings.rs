@@ -4588,6 +4588,16 @@ fn pack_value_error(vm: &mut Vm, msg: String) -> VmError {
 }
 
 /// pack(): a port of ext/standard/pack.c.
+/// zval_get_string() of a pack() argument: an array warns.
+fn pack_arg_string(vm: &mut Vm, v: &Value) -> Result<goro_core::string::PhpString, VmError> {
+    let v = v.deref();
+    if matches!(v, Value::Array(_)) {
+        let line = vm.current_line;
+        vm.emit_warning_at("Array to string conversion", line);
+    }
+    vm.value_to_string_checked(&v)
+}
+
 fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let format = args.first().unwrap_or(&Value::Null).to_php_string();
     let format = format.as_bytes();
@@ -4649,7 +4659,7 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 let idx = currentarg as usize;
                 if arg < 0 {
-                    let s = vm.value_to_string_checked(&argv[idx].deref())?;
+                    let s = pack_arg_string(vm, &argv[idx])?;
                     arg = s.len() as i64;
                     if code == b'Z' {
                         arg += 1;
@@ -4755,7 +4765,7 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let arg_cp = if code != b'Z' { n } else { n.saturating_sub(1) };
                 let s = match strs[currentarg].take() {
                     Some(s) => s,
-                    None => vm.value_to_string_checked(&argv[currentarg].deref())?,
+                    None => pack_arg_string(vm, &argv[currentarg])?,
                 };
                 currentarg += 1;
                 let fill = if code == b'A' { b' ' } else { 0 };
@@ -4769,7 +4779,7 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let mut first = true;
                 let s = match strs[currentarg].take() {
                     Some(s) => s,
-                    None => vm.value_to_string_checked(&argv[currentarg].deref())?,
+                    None => pack_arg_string(vm, &argv[currentarg])?,
                 };
                 currentarg += 1;
                 let mut cnt = n;
