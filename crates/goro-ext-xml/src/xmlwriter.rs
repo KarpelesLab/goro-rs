@@ -330,7 +330,16 @@ fn find_encoder(vm: &mut Vm, name: &[u8]) -> Option<Encoder> {
     if let Some(e) = builtin_encoder(name) {
         return Some(e);
     }
-    if name.is_empty() || !vm.functions.contains_key(&b"mb_convert_encoding"[..]) {
+    if name.is_empty() {
+        // xmlFindCharEncodingHandler("") yields the UTF-8 handler; the
+        // declaration still carries the empty label (encoding="")
+        return Some(Encoder {
+            name: Vec::new(),
+            kind: EncKind::Utf8,
+            cache: HashMap::new(),
+        });
+    }
+    if !vm.functions.contains_key(&b"mb_convert_encoding"[..]) {
         return None;
     }
     let n = String::from_utf8_lossy(name).into_owned();
