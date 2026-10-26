@@ -5025,7 +5025,8 @@ impl<'a, S: Sink> Parser<'a, S> {
             return;
         }
         self.parse_content_internal();
-        if self.at_end() {
+        // (xmlHaltParser empties the input: a halted parse ends here too)
+        if self.at_end() || self.stopped() {
             if self.st.well_formed {
                 if let Some(n) = self.names.last() {
                     let msg = format!("Premature end of data in tag {} line {}\n", n.name, n.line);

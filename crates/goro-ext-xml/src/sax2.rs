@@ -573,6 +573,26 @@ impl Sink for TreeBuilder {
         nb_defaulted: usize,
         line: u32,
     ) {
+        // nodePush(): the tree builder's own depth limit (the push parser
+        // has no element depth check of its own)
+        let max_depth = if self.options & XML_PARSE_HUGE != 0 {
+            2048
+        } else {
+            256
+        };
+        if self.stack.len() > max_depth && !self.html {
+            let _ = p.report(
+                FROM_PARSER,
+                XML_ERR_RESOURCE_LIMIT,
+                ERR_FATAL,
+                format!(
+                    "Excessive depth in document: {} use XML_PARSE_HUGE option\n",
+                    self.stack.len()
+                ),
+            );
+            p.disable_sax = 2;
+            return;
+        }
         let doc = self.doc;
         let parent = self.node();
         let replace = p.replace_entities;
@@ -1113,6 +1133,7 @@ pub fn parse_in_context(
     context: NodeId,
     options: i64,
 ) -> (Option<Vec<NodeId>>, Vec<XmlError>) {
+    tree::with(|t| t.touch());
     let (doc, nsscope, entities, has_dtd) = tree::with(|t| {
         let doc = t.nodes[context].doc;
         // in-scope namespaces
