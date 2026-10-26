@@ -1994,7 +1994,7 @@ impl PKey {
                 let x = a.priv_key.as_ref()?;
                 let y = b.pub_key.as_ref()?;
                 if a.p != b.p || a.g != b.g {
-                    err::push(err::LIB_EVP, 101, "different parameters");
+                    err::push(err::LIB_PROV, 203, "mismatching domain parameters");
                     return None;
                 }
                 let one = Bn::from_u64(1);
@@ -2011,7 +2011,7 @@ impl PKey {
             }
             (PKey::Ec(a), PKey::Ec(b)) => {
                 if a.group.p != b.group.p || a.group.n != b.group.n {
-                    err::push(err::LIB_EVP, 101, "different parameters");
+                    err::push(err::LIB_PROV, 203, "mismatching domain parameters");
                     return None;
                 }
                 let d = a.priv_key.as_ref()?;
@@ -2021,7 +2021,7 @@ impl PKey {
                 ecx::derive(a.kind, a.priv_key.as_deref()?, &b.pub_key)
             }
             _ => {
-                err::push(err::LIB_EVP, 101, "different parameters");
+                err::push(err::LIB_EVP, 150, "operation not supported for this keytype");
                 None
             }
         }
