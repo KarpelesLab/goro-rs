@@ -109003,6 +109003,40 @@ pub static CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
+        name: "Pcntl\\QosClass",
+        kind: 3,
+        flags: 0x0,
+        ext: "pcntl",
+        parent: None,
+        interfaces: &[],
+        backing: "",
+        consts: &[],
+        props: &[],
+        cases: &[
+            StubCase {
+                name: "UserInteractive",
+                value: None,
+            },
+            StubCase {
+                name: "UserInitiated",
+                value: None,
+            },
+            StubCase {
+                name: "Default",
+                value: None,
+            },
+            StubCase {
+                name: "Utility",
+                value: None,
+            },
+            StubCase {
+                name: "Background",
+                value: None,
+            },
+        ],
+        methods: &[],
+    },
+    StubClass {
         name: "ValueError",
         kind: 0,
         flags: 0x0,

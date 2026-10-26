@@ -326,6 +326,28 @@ const FUNCTIONS: &[(&str, goro_core::vm::BuiltinFn)] = &[
 ];
 
 /// MINIT + RINIT
+/// enum Pcntl\\QosClass (declared on every platform; only macOS has the
+/// pcntl_{get,set}qos_class() functions that use it).
+fn register_qos_class(vm: &mut Vm) {
+    let mut ce = goro_core::object::ClassEntry::new(b"Pcntl\\QosClass".to_vec());
+    ce.is_enum = true;
+    ce.interfaces.push(b"UnitEnum".to_vec());
+    for name in [
+        &b"UserInteractive"[..],
+        b"UserInitiated",
+        b"Default",
+        b"Utility",
+        b"Background",
+    ] {
+        ce.enum_cases.push((name.to_vec(), Value::Null));
+        let mut marker = b"__enum_case__::".to_vec();
+        marker.extend_from_slice(name);
+        ce.constants
+            .insert(name.to_vec(), Value::String(PhpString::from_vec(marker)));
+    }
+    vm.classes.insert(b"pcntl\\qosclass".to_vec(), ce);
+}
+
 pub fn register(vm: &mut Vm) {
     if vm.loaded_extensions.contains(NAME) {
         return;
@@ -334,6 +356,7 @@ pub fn register(vm: &mut Vm) {
     // PHP_MINFO_FUNCTION(pcntl)
     vm.phpinfo_hooks
         .push(|_| "\npcntl\n\npcntl support => enabled\n".to_string());
+    register_qos_class(vm);
     for &(name, f) in FUNCTIONS {
         let params: Vec<&[u8]> = goro_core::stubs::find_function(name.as_bytes())
             .map(|s| s.args.iter().map(|a| a.name.as_bytes()).collect())

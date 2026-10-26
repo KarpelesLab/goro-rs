@@ -8638,7 +8638,9 @@ pub fn reflection_property_method(
         }
         b"isvirtual" => {
             let is_virtual = rcls(vm, &class_lower)
-                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).map(|p| p.is_virtual))
+                .and_then(|_c| {
+                    rprop(vm, &class_lower, prop_name.as_bytes()).map(|p| prop_is_virtual(&p))
+                })
                 .unwrap_or(false);
             Some(if is_virtual {
                 Value::True
@@ -15316,6 +15318,21 @@ fn reflection_method_modifiers_static(method: &crate::object::MethodDef) -> i64 
     mods
 }
 
+/// Whether a property is virtual: declared so, or an internal class's
+/// property its stub marks virtual although goro gives it storage
+/// (BcMath\\Number's value/scale).
+fn prop_is_virtual(prop: &crate::object::PropertyDef) -> bool {
+    prop.is_virtual
+        || crate::stubs::find_class_lower(&prop.declaring_class)
+            .or_else(|| crate::stubs::find_self_declared_class(&prop.declaring_class))
+            .is_some_and(|c| {
+                c.props.iter().any(|sp| {
+                    sp.name.as_bytes() == prop.name.as_slice()
+                        && sp.flags & crate::stubs::F_VIRTUAL != 0
+                })
+            })
+}
+
 /// Get modifier flags for a property
 fn reflection_property_modifiers(vm: &Vm, prop: &crate::object::PropertyDef) -> i64 {
     let mut mods = reflection_property_modifiers_static(prop);
@@ -15345,7 +15362,7 @@ fn reflection_property_modifiers_static(prop: &crate::object::PropertyDef) -> i6
     if prop.is_abstract {
         mods |= 0x40;
     }
-    if prop.is_virtual {
+    if prop_is_virtual(prop) {
         mods |= 0x200;
     }
     if prop.is_readonly {
