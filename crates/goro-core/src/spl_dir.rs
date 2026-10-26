@@ -689,7 +689,7 @@ impl Vm {
         } else {
             let mut cargs = vec![svec(fname), mode];
             cargs.extend_from_slice(a.get(1..).unwrap_or(&[]));
-            self.spl_file_object_construct(&new_obj, &cargs);
+            self.spl_file_object_construct_in(&new_obj, &cargs, func);
         }
         if self.current_exception.is_some() {
             return Value::Null;

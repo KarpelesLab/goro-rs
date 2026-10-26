@@ -774,6 +774,17 @@ impl Vm {
         obj: &Rc<RefCell<PhpObject>>,
         args: &[Value],
     ) -> bool {
+        self.spl_file_object_construct_in(obj, args, "SplFileObject::__construct")
+    }
+
+    /// spl_file_object_construct(), with the stream opened (and its
+    /// failure reported) by `open_func` (SplFileInfo::openFile()).
+    pub(crate) fn spl_file_object_construct_in(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        args: &[Value],
+        open_func: &str,
+    ) -> bool {
         let cl = obj_class_lower(obj);
         let is_temp = self.spl_find_base(&cl, &[b"spltempfileobject", b"splfileobject"])
             == Some(b"spltempfileobject");
@@ -859,7 +870,7 @@ impl Vm {
             self.spl_throw(b"Error", "Cannot call constructor twice");
             return false;
         }
-        if !self.sfo_open(obj, &file_name, &mode, use_include_path, context, func) {
+        if !self.sfo_open(obj, &file_name, &mode, use_include_path, context, open_func) {
             return false;
         }
         // path: directory part of the opened path (stream->orig_path)
