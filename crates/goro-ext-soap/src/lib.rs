@@ -277,6 +277,7 @@ fn use_soap_error_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
             _ => true,
         };
         g(|g| g.use_soap_error_handler = h);
+        crate::php::sync_error_display();
     } else {
         return Ok(Value::Null);
     }

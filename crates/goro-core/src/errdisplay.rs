@@ -30,6 +30,16 @@ pub const E_FATAL_ERRORS: i64 =
 /// `@`-silenced ones. Compared by value (a user level of -1 sets every bit).
 pub const ER_SILENT: i64 = 1 << 40;
 
+thread_local! {
+    static ERROR_DISPLAY_SUPPRESSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Errors reaching the default handler are not displayed (only logged):
+/// ext/soap's handler runs it with display_errors off.
+pub fn set_error_display_suppressed(off: bool) {
+    ERROR_DISPLAY_SUPPRESSED.with(|s| s.set(off));
+}
+
 /// ZEND_BEGIN_SILENCE: the error_reporting level inside `@` (`user`) or an
 /// engine-internal silent region.
 pub fn begin_silence(cur: i64, user: bool) -> i64 {
@@ -347,6 +357,10 @@ impl Vm {
                 "PHP {}:  {} in {} on line {}",
                 kind, msg, file, line
             ));
+        }
+        // (see set_error_display_suppressed)
+        if ERROR_DISPLAY_SUPPRESSED.with(|s| s.get()) {
+            return;
         }
         self.display_error(kind, msg, file, line);
     }

@@ -563,7 +563,7 @@ pub struct CodeGuard {
 }
 
 pub fn begin_code(this: &Obj, code: &'static str) -> CodeGuard {
-    g(|g| {
+    let s = g(|g| {
         let s = CodeGuard {
             handler: g.use_soap_error_handler,
             code: g.error_code,
@@ -574,7 +574,9 @@ pub fn begin_code(this: &Obj, code: &'static str) -> CodeGuard {
         g.error_code = Some(code);
         g.error_object = Some(this.clone());
         s
-    })
+    });
+    sync_error_display();
+    s
 }
 
 pub fn end_code(s: CodeGuard) {
@@ -583,7 +585,19 @@ pub fn end_code(s: CodeGuard) {
         g.error_code = s.code;
         g.error_object = s.obj;
         g.soap_version = s.version;
-    })
+    });
+    sync_error_display();
+}
+
+/// soap_real_error_handler(): with the SOAP error handler on and no
+/// SoapClient call going on, errors go to the default handler with
+/// display_errors off.
+pub fn sync_error_display() {
+    let off = g(|g| {
+        g.use_soap_error_handler
+            && !(g.error_object.is_some() && matches!(g.error_code, Some("Client") | Some("WSDL")))
+    });
+    goro_core::errdisplay::set_error_display_suppressed(off);
 }
 
 // ---------------------------------------------------------------------------
