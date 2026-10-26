@@ -1829,6 +1829,16 @@ fn call_user_func_array_checked(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
 fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().cloned().unwrap_or(Value::Null);
     let syntax_only = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    // An incomplete object's get_method() handler throws.
+    if !syntax_only {
+        if let Some(o) = incomplete_callable_object(&val) {
+            crate::serialize::incomplete_method_error(vm, &o);
+            return Err(VmError {
+                message: "Uncaught exception".into(),
+                line: vm.current_line,
+            });
+        }
+    }
     let (ok, name, _) = check_callable(vm, &val, syntax_only);
     if vm.current_exception.is_some() {
         return Err(VmError {
@@ -1842,6 +1852,30 @@ fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(name),
         if ok { Value::True } else { Value::False },
     )
+}
+
+/// The __PHP_Incomplete_Class object of a `[$obj, "method"]` callable.
+#[inline(never)]
+fn incomplete_callable_object(val: &Value) -> Option<Rc<RefCell<PhpObject>>> {
+    let Value::Array(a) = val else {
+        return None;
+    };
+    let a = a.borrow();
+    if a.len() != 2 {
+        return None;
+    }
+    let first = a.get(&ArrayKey::Int(0))?.deref();
+    let second = a.get(&ArrayKey::Int(1))?.deref();
+    match (first, second) {
+        (Value::Object(o), Value::String(_))
+            if o.borrow()
+                .class_name
+                .eq_ignore_ascii_case(b"__PHP_Incomplete_Class") =>
+        {
+            Some(o)
+        }
+        _ => None,
+    }
 }
 
 fn set_callable_name_and_return(
