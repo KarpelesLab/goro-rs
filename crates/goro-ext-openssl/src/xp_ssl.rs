@@ -1244,6 +1244,87 @@ const DEFAULT_SUITES: &[u16] = &[
     0x000A, // DES-CBC3-SHA
 ];
 
+/// OpenSSL's verdict on the header of a server's first record: plain HTTP
+/// sent to the TLS port, an oversized or non-TLS record. None when the
+/// header is fine (or not complete yet, or an SSLv2-style hello).
+fn first_record_error(h: &[u8]) -> Option<&'static [&'static str]> {
+    const TOO_LONG: &[&str] = &[
+        "error:0A0000C6:SSL routines::packet length too long",
+        "error:0A000139:SSL routines::record layer failure",
+    ];
+    if h.len() < 5 || (h[0] & 0x80 != 0 && h[2] == 1) {
+        return None;
+    }
+    let len = u16::from_be_bytes([h[3], h[4]]) as usize;
+    // the default read buffer: SSL3_RT_MAX_PLAIN_LENGTH +
+    // SSL3_RT_MAX_ENCRYPTED_OVERHEAD + alignment, less the header
+    if len > 16384 + 320 + 7 {
+        return Some(TOO_LONG);
+    }
+    if h[1] != 3 {
+        let p = &h[..5];
+        return Some(
+            if p.starts_with(b"GET ")
+                || p.starts_with(b"POST ")
+                || p.starts_with(b"HEAD ")
+                || p.starts_with(b"PUT ")
+            {
+                &["error:0A00009C:SSL routines::http request"]
+            } else if p.starts_with(b"CONNE") {
+                &["error:0A00009B:SSL routines::https proxy request"]
+            } else {
+                &["error:0A00010B:SSL routines::wrong version number"]
+            },
+        );
+    }
+    if len > 16384 {
+        return Some(&[
+            "error:0A000092:SSL routines::data length too long",
+            "error:0A000139:SSL routines::record layer failure",
+        ]);
+    }
+    None
+}
+
+/// The highest version a (complete, single-record) ClientHello offers: the
+/// largest supported_versions entry, else legacy_version.
+fn client_hello_max_version(rec: &[u8]) -> Option<u16> {
+    if rec.len() < 5 || rec[0] != 0x16 || rec.get(5) != Some(&1) {
+        return None;
+    }
+    let body = rec.get(9..)?;
+    let legacy = u16::from_be_bytes([*body.first()?, *body.get(1)?]);
+    let mut p = 2 + 32;
+    let sid = *body.get(p)? as usize;
+    p += 1 + sid;
+    let cs = u16::from_be_bytes([*body.get(p)?, *body.get(p + 1)?]) as usize;
+    p += 2 + cs;
+    let comp = *body.get(p)? as usize;
+    p += 1 + comp;
+    if p + 2 > body.len() {
+        return Some(legacy);
+    }
+    let ext_len = u16::from_be_bytes([body[p], body[p + 1]]) as usize;
+    p += 2;
+    let end = (p + ext_len).min(body.len());
+    while p + 4 <= end {
+        let ty = u16::from_be_bytes([body[p], body[p + 1]]);
+        let len = u16::from_be_bytes([body[p + 2], body[p + 3]]) as usize;
+        let data = body.get(p + 4..p + 4 + len)?;
+        if ty == 0x002b {
+            let n = *data.first()? as usize;
+            return data
+                .get(1..1 + n)?
+                .chunks_exact(2)
+                .map(|v| u16::from_be_bytes([v[0], v[1]]))
+                .filter(|v| (0x0300..=0x0304).contains(v))
+                .max();
+        }
+        p += 4 + len;
+    }
+    Some(legacy)
+}
+
 /// The TLS 1.2 suites purecrypto implements, as OpenSSL describes them:
 /// (id, name, kx, auth, enc, mac). The order is the default strength order
 /// used when a keyword adds several suites at once.
@@ -1546,6 +1627,14 @@ impl SslStream {
 
     /// The server builds its engine once the ClientHello is in (SNI).
     fn start_server(&mut self, vm: &mut Vm, fd: i32) -> Option<Hs> {
+        // The record layer's checks of the first record header
+        // (tls_get_more_records()), before anything is parsed.
+        if let Some(lines) = first_record_error(&self.hello) {
+            let f = self.func.clone();
+            let lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+            vm.emit_warning(&format!("{}(): {}", f, ssl_failed_warning(&lines)));
+            return Some(Hs::Failed);
+        }
         let info = match purecrypto::tls::peek_client_hello(&self.hello) {
             Ok(None) => return None,
             Ok(Some(i)) => Some(i),
@@ -1594,6 +1683,22 @@ impl SslStream {
                 ));
                 return Some(Hs::Failed);
             }
+        }
+        // A client whose highest version is below the server's floor:
+        // OpenSSL answers protocol_version ("unsupported protocol").
+        if let Some(client_max) = client_hello_max_version(&self.hello)
+            && client_max < cfg.min_version.as_u16()
+        {
+            let _ = sock_send(fd, &[0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x46]);
+            let f = self.func.clone();
+            vm.emit_warning(&format!(
+                "{}(): {}",
+                f,
+                ssl_failed_warning(&[
+                    "error:0A000102:SSL routines::unsupported protocol".to_string()
+                ])
+            ));
+            return Some(Hs::Failed);
         }
         match Connection::server(&cfg) {
             Ok(c) => self.conn = Some(c),
