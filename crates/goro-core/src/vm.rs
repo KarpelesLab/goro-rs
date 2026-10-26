@@ -12443,10 +12443,7 @@ impl Vm {
         }
 
         if let Some(sc) = &requested_scope {
-            if Some(sc) != original_op.scope_class.as_ref()
-                && !self.classes.contains_key(sc)
-                && sc.as_slice() != b"closure"
-            {
+            if Some(sc) != original_op.scope_class.as_ref() && !self.classes.contains_key(sc) {
                 let canon = self.builtin_canonical_name(sc);
                 self.emit_warning(&format!("Cannot bind closure to scope of internal class {}, this will be an error in PHP 9", canon));
                 return Value::Null;
