@@ -15531,20 +15531,16 @@ pub fn create_reflection_attributes(
     // must exist or throw an error.
     if filter_flags == 2 {
         if let Some(fname) = filter_name {
-            let fl: Vec<u8> = fname.iter().map(|b| b.to_ascii_lowercase()).collect();
-            let exists = vm.classes.contains_key(&fl) ||
-                // Built-in well-known classes
-                matches!(fl.as_slice(),
-                    b"stdclass" | b"exception" | b"error" | b"throwable" | b"closure" |
-                    b"generator" | b"weakreference" | b"weakmap" |
-                    b"arrayaccess" | b"iterator" | b"iteratoraggregate" |
-                    b"traversable" | b"countable" | b"stringable" |
-                    b"reflectionclass" | b"reflectionobject" | b"reflectionmethod" |
-                    b"reflectionfunction" | b"reflectionproperty" | b"reflectionparameter" |
-                    b"reflectionconstant" | b"reflectionclassconstant" | b"reflectionattribute" |
-                    b"reflectionextension" | b"reflectionnamedtype" | b"reflectionuniontype" |
-                    b"reflectionintersectiontype"
-                );
+            // zend_lookup_class(name): autoloaded if needed.
+            let bare = fname.strip_prefix(b"\\").unwrap_or(fname);
+            let fl: Vec<u8> = bare.to_ascii_lowercase();
+            if !vm.classes.contains_key(&fl) && !vm.is_known_builtin_class(&fl) {
+                vm.try_autoload_class(bare);
+                if vm.current_exception.is_some() {
+                    return Value::Null;
+                }
+            }
+            let exists = vm.classes.contains_key(&fl) || vm.is_known_builtin_class(&fl);
             if !exists {
                 let display = String::from_utf8_lossy(fname);
                 let line = vm.current_line;
@@ -15569,9 +15565,21 @@ pub fn create_reflection_attributes(
             } else {
                 // IS_INSTANCEOF = 2: check if attribute class is the given class
                 // or any subclass/implementer (transitive).
+                let fname = fname.strip_prefix(b"\\").unwrap_or(fname);
                 if !attr.name.eq_ignore_ascii_case(fname) {
                     let attr_lower: Vec<u8> =
                         attr.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    // read_attributes(): zend_lookup_class_ex(attr->name):
+                    // the attribute's class is autoloaded (and skipped when
+                    // it does not exist).
+                    if !vm.classes.contains_key(&attr_lower)
+                        && !vm.is_known_builtin_class(&attr_lower)
+                    {
+                        vm.try_autoload_class(&attr.name);
+                        if vm.current_exception.is_some() {
+                            return Value::Null;
+                        }
+                    }
                     let filter_lower: Vec<u8> =
                         fname.iter().map(|b| b.to_ascii_lowercase()).collect();
                     // Walk attr class + ancestors checking class + interfaces (transitively).
@@ -15598,6 +15606,9 @@ pub fn create_reflection_attributes(
                                     iface.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 queue.push(il);
                             }
+                        } else if crate::vm::is_builtin_subclass(&cur, &filter_lower) {
+                            is_subclass = true;
+                            break;
                         }
                     }
                     if !is_subclass {
