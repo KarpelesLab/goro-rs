@@ -537,13 +537,44 @@ impl Vm {
         }
         match non_private {
             Some(Visibility::Public) => true,
+            // is_protected_compatible_scope(property_info->prototype->ce,
+            // scope): relative to the class that first declared the
+            // property, so a sibling subclass's method sees it too.
             Some(_) => scope.is_some_and(|s| {
                 let s = lower(s);
-                s.as_slice() == cl || self.class_extends(&s, cl) || self.class_extends(cl, &s)
+                let proto = self.protected_prop_prototype_class(cl, name);
+                s.as_slice() == proto.as_slice()
+                    || self.class_extends(&s, &proto)
+                    || self.class_extends(&proto, &s)
             }),
             // An ancestor's private property: the name is a dynamic one.
             None => private.is_none_or(|p| !p.declaring_class.eq_ignore_ascii_case(cl)),
         }
+    }
+
+    /// The topmost class in `cl`'s ancestry (lowercase) declaring a
+    /// non-private property `name`: its prototype's class.
+    #[inline(never)]
+    fn protected_prop_prototype_class(&self, cl: &[u8], name: &[u8]) -> Vec<u8> {
+        let mut proto = cl.to_vec();
+        let mut cur = cl.to_vec();
+        for _ in 0..64 {
+            let Some(ce) = self.classes.get(&cur) else {
+                break;
+            };
+            if ce
+                .properties
+                .iter()
+                .any(|p| p.name == name && p.visibility != Visibility::Private && !p.is_static)
+            {
+                proto = cur.clone();
+            }
+            match &ce.parent {
+                Some(p) => cur = lower(p),
+                None => break,
+            }
+        }
+        proto
     }
 
     /// prop_visible_from_scope() of a property the class entry does not
