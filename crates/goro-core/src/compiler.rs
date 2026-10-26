@@ -16560,7 +16560,11 @@ impl Compiler {
                                 .ops
                                 .iter()
                                 .rev()
-                                .find(|o| o.result == arr_op && o.opcode == OpCode::StaticPropFetch)
+                                .find(|o| o.result == arr_op)
+                                // (the latest producer of the temporary: an
+                                // older read of another property may have
+                                // used the same one)
+                                .filter(|o| o.opcode == OpCode::StaticPropFetch)
                                 .map(|o| (o.op1, o.op2));
                             if let Some((cls, name)) = fetch {
                                 self.op_array.emit(Op {
