@@ -17235,8 +17235,11 @@ pub(crate) fn plain_fcall_name<'a>(
     match literals.get(i as usize) {
         Some(Value::String(s)) => {
             let b = s.as_bytes();
-            (!b.is_empty() && b.len() <= 64 && !b.starts_with(b"__") && !b.contains(&b':'))
-                .then_some(s)
+            (!b.is_empty()
+                && b.len() <= 64
+                && !b.starts_with(b"__")
+                && !crate::string::has_byte(b, b':'))
+            .then_some(s)
         }
         _ => None,
     }

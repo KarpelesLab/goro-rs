@@ -10,6 +10,23 @@ fn zstr_size(len: usize) -> usize {
     crate::value::zend_mm_size(len + 25)
 }
 
+/// Whether `b` holds the byte `c`, eight bytes at a time (a name or a
+/// key: short).
+#[inline]
+pub fn has_byte(b: &[u8], c: u8) -> bool {
+    const LO: u64 = 0x0101_0101_0101_0101;
+    const HI: u64 = 0x8080_8080_8080_8080;
+    let pat = LO.wrapping_mul(u64::from(c));
+    let (words, tail) = b.as_chunks::<8>();
+    for w in words {
+        let x = u64::from_ne_bytes(*w) ^ pat;
+        if x.wrapping_sub(LO) & !x & HI != 0 {
+            return true;
+        }
+    }
+    tail.contains(&c)
+}
+
 /// `a == b` of short byte strings without a call of memcmp: a few word
 /// loads (a name, an array key or a property name is usually short).
 #[inline]
