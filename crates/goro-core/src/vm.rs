@@ -610,6 +610,26 @@ impl Vm {
         }
     }
 
+    /// The clone_hold_handlers entry of the class `lower` or of its nearest
+    /// built-in ancestor with one.
+    #[inline(never)]
+    pub(crate) fn clone_hold_hook_of(
+        &self,
+        lower: &[u8],
+    ) -> Option<fn(&Rc<RefCell<PhpObject>>, bool)> {
+        if self.clone_hold_handlers.is_empty() {
+            return None;
+        }
+        let mut cur = lower.to_vec();
+        for _ in 0..64 {
+            if let Some(h) = self.clone_hold_handlers.get(&cur) {
+                return Some(*h);
+            }
+            cur = self.classes.get(&cur)?.parent.as_ref()?.to_ascii_lowercase();
+        }
+        None
+    }
+
     /// The extension create_object hook objects of the class `lower` (or of
     /// its first ancestor that has one) get.
     pub(crate) fn object_create_hook_of(
@@ -1821,6 +1841,11 @@ pub struct Vm {
     /// constructor dispatch (SPL/Reflection/etc.).
     pub object_construct_handlers:
         crate::fxhash::FxHashMap<Vec<u8>, fn(&mut Vm, &[Value], u32) -> Result<(), String>>,
+    /// Clone handlers of built-in classes (lowercase name) whose state is
+    /// copied after zend_objects_clone_members() ran a user __clone(): called
+    /// on the clone before it (`true`: set the state aside, the object looks
+    /// uninitialized) and after it (`false`: put it back).
+    pub clone_hold_handlers: crate::fxhash::FxHashMap<Vec<u8>, fn(&Rc<RefCell<PhpObject>>, bool)>,
     /// create_object hooks keyed by lowercase built-in class name: called for
     /// every `new` of the class or a subclass, before the constructor.
     pub object_create_handlers:
@@ -3269,6 +3294,7 @@ impl Vm {
             gmp_from_hex: None,
             gmp_from_dec: None,
             object_construct_handlers: Default::default(),
+            clone_hold_handlers: Default::default(),
             object_create_handlers: Default::default(),
             trace_without_args_classes: Vec::new(),
             ref_fetch_handlers: Default::default(),

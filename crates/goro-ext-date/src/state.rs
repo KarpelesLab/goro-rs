@@ -747,8 +747,34 @@ pub fn period_set(_vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, p: &PeriodObj) {
     });
 }
 
+/// create_object of DatePeriod: its handlers from the start.
+pub fn period_create(_vm: &mut Vm, o: &Rc<RefCell<PhpObject>>) {
+    let mut ob = o.borrow_mut();
+    if ob.native.is_none() {
+        ob.native = Some(goro_core::object::NativeData {
+            data: Rc::new(()),
+            handlers: &PERIOD_HANDLERS,
+        });
+    }
+}
+
+/// date_period_has_property(): the fields of an uninitialized period are
+/// not set (though they read as zero).
+fn period_has_property(
+    _vm: &mut Vm,
+    o: &Rc<RefCell<PhpObject>>,
+    name: &[u8],
+    _check_empty: u8,
+) -> Option<bool> {
+    if PERIOD_PROPS.contains(&name) && !period_get(o).is_some_and(|p| p.initialized) {
+        return Some(false);
+    }
+    None
+}
+
 static PERIOD_HANDLERS: goro_core::vm::NativeObjectHandlers = goro_core::vm::NativeObjectHandlers {
     get_properties: Some(period_get_properties),
+    has_property: Some(period_has_property),
     clone_obj: Some(native_clone_obj),
     ..goro_core::vm::NativeObjectHandlers::EMPTY
 };
@@ -868,10 +894,8 @@ pub fn prop_read(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Option
             if !PERIOD_PROPS.contains(&name) {
                 return None;
             }
-            let p = match period_get(o) {
-                Some(p) if p.initialized => p,
-                _ => return Some(Some(Value::Null)),
-            };
+            // (an uninitialized period's fields are zero)
+            let p = period_get(o).unwrap_or_default();
             Some(Some(period_prop(vm, &p, name)))
         }
     }
@@ -970,6 +994,42 @@ pub fn prop_added(o: &Rc<RefCell<PhpObject>>) {
         if let Some(pos) = ob.properties.iter().position(|(k, _)| k.as_slice() == *n) {
             let e = ob.properties.remove(pos);
             ob.properties.push(e);
+        }
+    }
+}
+
+/// The clone's state while a user __clone() runs: date_object_clone_*()
+/// copy it after zend_objects_clone_members(), so the clone looks
+/// uninitialized to __clone(). `before`: set it aside; else put it back.
+pub fn clone_hold(o: &Rc<RefCell<PhpObject>>, before: bool) {
+    const P_HELD: &[u8] = b"__timestamp_clone_held";
+    let mut ob = o.borrow_mut();
+    if before {
+        let is_ival = ob.has_property(P_IVAL);
+        let keys: Vec<Vec<u8>> = ob
+            .properties
+            .iter()
+            .map(|(k, _)| k.clone())
+            .filter(|k| {
+                k.starts_with(b"__timestamp")
+                    || goro_core::foreach_obj::is_date_view_prop(&ob, k)
+                    || is_ival
+                        && (IVAL_VISIBLE.contains(&k.as_slice()) || k.as_slice() == b"date_string")
+            })
+            .collect();
+        let mut held = PhpArray::new();
+        for k in keys {
+            let v = ob.get_property(&k);
+            ob.remove_property(&k);
+            held.set(ArrayKey::String(PhpString::from_vec(k)), v);
+        }
+        ob.set_property(P_HELD.to_vec(), arr_val(held));
+    } else if let Value::Array(a) = ob.get_property(P_HELD) {
+        ob.remove_property(P_HELD);
+        for (k, v) in a.borrow().iter() {
+            if let ArrayKey::String(k) = k {
+                ob.set_property(k.as_bytes().to_vec(), v.clone());
+            }
         }
     }
 }

@@ -482,7 +482,19 @@ impl Vm {
                                 Vec::new(),
                                 true,
                             ));
+                            let hold = match &new_obj_val {
+                                Value::Object(rc) => self
+                                    .clone_hold_hook_of(&class_lower)
+                                    .map(|h| (h, rc.clone())),
+                                _ => None,
+                            };
+                            if let Some((h, rc)) = &hold {
+                                h(rc, true);
+                            }
                             self.call_object_method(&new_obj_val, b"__clone", &[]);
+                            if let Some((h, rc)) = &hold {
+                                h(rc, false);
+                            }
                             self.call_stack.pop();
                             if let Value::Object(ref rc) = new_obj_val {
                                 let mut ob = rc.borrow_mut();

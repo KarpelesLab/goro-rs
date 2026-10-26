@@ -430,4 +430,16 @@ pub fn register(vm: &mut Vm) {
         .insert(b"dateinterval".to_vec(), construct_interval);
     vm.object_construct_handlers
         .insert(b"dateperiod".to_vec(), construct_period);
+    vm.object_create_handlers
+        .insert(b"dateperiod".to_vec(), state::period_create);
+    for c in [
+        &b"datetime"[..],
+        b"datetimeimmutable",
+        b"datetimezone",
+        b"dateinterval",
+        b"dateperiod",
+    ] {
+        vm.clone_hold_handlers
+            .insert(c.to_vec(), state::clone_hold);
+    }
 }
