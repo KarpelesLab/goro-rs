@@ -174,6 +174,8 @@ function parse_file(string $path, string $ext): void {
                 elseif (preg_match('/^#\s*ifdef\s+HAVE_ORALDAP\b/', $dir)) $cond = false;
                 elseif (preg_match('/^#\s*if\s+defined\(HAVE_ORALDAP\)/', $dir)) $cond = false;
                 elseif (preg_match('/^#\s*ifdef\s+STR_TRANSLATION\b/', $dir)) $cond = false;
+                // (a release build: no ZEND_DEBUG-only methods)
+                elseif (preg_match('/^#\s*if\s+ZEND_DEBUG\b/', $dir)) $cond = false;
                 elseif (preg_match('/MagickLibVersion|MAGICKCORE_|IM_HAVE_|PHP_IMAGICK_HAVE_|IMAGICK_WITH_KERNEL|PHP_VERSION_ID/', $dir)) $cond = imagick_cond($dir);
                 $stack[] = [$keep, $cond];
                 $keep = $keep && $cond;

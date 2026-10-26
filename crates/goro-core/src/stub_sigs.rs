@@ -69138,13 +69138,6 @@ pub static CLASSES: &[StubClass] = &[
                 ret: "int|false",
                 ext: "",
             },
-            StubFunc {
-                name: "debugGetTemplateCount",
-                flags: 0x1,
-                args: &[],
-                ret: "int",
-                ext: "",
-            },
         ],
     },
     StubClass {

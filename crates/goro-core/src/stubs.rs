@@ -819,21 +819,43 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
             add(b"value", c.backing);
         }
     }
-    // Constants: own, then parents', then interfaces'.
-    let mut const_sources: Vec<&'static StubClass> = chain.clone();
+    // Constants in constants_table order: an internal class inherits its
+    // parent's table when it is registered, then its interfaces' constants,
+    // before declaring its own (a redeclared one keeps its place).
+    fn const_order(cls: &'static StubClass, out: &mut Vec<&'static StubClass>, depth: usize) {
+        if depth > 32 || out.iter().any(|o| std::ptr::eq(*o, cls)) {
+            return;
+        }
+        if let Some(p) = cls.parent.and_then(|p| find_class(p.as_bytes())) {
+            const_order(p, out, depth + 1);
+        }
+        for i in cls.interfaces {
+            if let Some(ic) = find_class(i.as_bytes()) {
+                const_order(ic, out, depth + 1);
+            }
+        }
+        if !out.iter().any(|o| std::ptr::eq(*o, cls)) {
+            out.push(cls);
+        }
+    }
+    let mut const_sources: Vec<&'static StubClass> = Vec::new();
+    const_order(c, &mut const_sources, 0);
     for i in class_interfaces(c.name.as_bytes()) {
         if let Some(ic) = find_class(i.as_bytes()) {
-            const_sources.push(ic);
+            if !const_sources.iter().any(|o| std::ptr::eq(*o, ic)) {
+                const_sources.push(ic);
+            }
         }
     }
     let lower = c.name.to_ascii_lowercase().into_bytes();
     for cls in const_sources {
         for k in cls.consts {
             let kn = k.name.as_bytes().to_vec();
-            if ce.constants.contains_key(&kn) {
+            if cls.name != c.name && k.flags & F_PRIVATE != 0 {
                 continue;
             }
-            if cls.name != c.name && k.flags & F_PRIVATE != 0 {
+            // (an interface's constant does not override a class's)
+            if ce.constants.contains_key(&kn) && cls.kind == K_INTERFACE {
                 continue;
             }
             let val = vm

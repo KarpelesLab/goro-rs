@@ -1395,7 +1395,6 @@ pub static VERIFIED_METHODS: &[(&str, u8)] = &[
     ("dom\\htmldocument::createempty", 3),
     ("dom\\htmldocument::createfromfile", 3),
     ("dom\\htmldocument::createfromstring", 3),
-    ("dom\\htmldocument::debuggettemplatecount", 3),
     ("dom\\xmldocument::createempty", 3),
     ("dom\\xmldocument::createfromfile", 3),
     ("dom\\xmldocument::createfromstring", 3),
