@@ -3631,7 +3631,9 @@ impl crate::vm::Vm {
             let Some(pl) = lower_into(pn, &mut pbuf) else {
                 return false;
             };
-            if self.native_class_handlers.contains_key(pl) {
+            if self.native_class_handlers.contains_key(pl)
+                && !native_plain_base(pl, &self.native_class_handlers)
+            {
                 return false;
             }
             let Some(pce) = self.classes.get(pl) else {
@@ -3884,7 +3886,10 @@ impl crate::vm::Vm {
             return Fast::No;
         };
         // (no internal state marker: see PropTable)
-        if ob.native.is_some() || ob.closure.is_some() || ob.properties.has_internal() {
+        if (ob.native.is_some() && !self.native_props_plain(&ob.class_name))
+            || ob.closure.is_some()
+            || ob.properties.has_internal()
+        {
             return Fast::No;
         }
         let mangled = ob.properties.has_mangled();
@@ -4086,7 +4091,7 @@ impl crate::vm::Vm {
         let ob = obj.try_borrow().ok()?;
         // (no internal state marker: see PropTable)
         if ob.class_tag() != tag
-            || ob.native.is_some()
+            || (ob.native.is_some() && !ic.native_ok.get())
             || ob.closure.is_some()
             || ob.properties.has_internal()
             || (ic.plain.get() == PLAIN_UNMANGLED && ob.properties.has_mangled())
@@ -4293,6 +4298,27 @@ impl crate::vm::Vm {
         }
     }
 
+    /// Whether the native data of an object of class `class_name` has
+    /// nothing to do with its properties: a user class extending PDO or
+    /// PDOStatement (their native handlers have no property hooks; their
+    /// properties are plain slots, see plain_internal_base()).
+    #[cold]
+    #[inline(never)]
+    fn native_props_plain(&self, class_name: &[u8]) -> bool {
+        let mut cur = class_name.to_ascii_lowercase();
+        for _ in 0..64 {
+            match self.classes.get(cur.as_slice()) {
+                Some(ce) if ce.filename.is_some() => match &ce.parent {
+                    Some(p) => cur = p.to_ascii_lowercase(),
+                    None => return false,
+                },
+                Some(_) => return false,
+                None => return native_plain_base(&cur, &self.native_class_handlers),
+            }
+        }
+        false
+    }
+
     /// Whether the class scope is the one `ic` found its answer for.
     #[inline(always)]
     fn prop_ic_scope_ok(&self, ic: &crate::opcode::PropIc) -> bool {
@@ -4346,6 +4372,7 @@ impl crate::vm::Vm {
         if ic.tag.get() == tag
             && ic.slot.get() as usize == idx
             && ic.plain.get() == plain
+            && ic.native_ok.get() == ob.native.is_some()
             && (ic.any_scope.get() || s.as_deref() == scope)
         {
             return;
@@ -4358,6 +4385,9 @@ impl crate::vm::Vm {
         ic.slot.set(idx as u32);
         ic.plain.set(plain);
         ic.any_scope.set(any);
+        // (fast_prop_op() let the object's native data be: see
+        // native_props_plain())
+        ic.native_ok.set(ob.native.is_some());
     }
 
     /// What fast_prop_op() does for the commonest accesses, without its
@@ -4602,11 +4632,26 @@ fn plain_internal_base(lower: &[u8], prop: &[u8]) -> bool {
             return false;
         }
         match c.parent {
-            None => return c.name == "Exception" || c.name == "Error",
+            None => {
+                return matches!(c.name, "Exception" | "Error" | "PDO" | "PDOStatement");
+            }
             Some(p) => cur = crate::stubs::find_class(p.as_bytes()),
         }
     }
     false
+}
+
+/// Whether the internal class `lower` is PDO or PDOStatement, whose native
+/// handler (if registered) has no property hooks: its objects' native data
+/// (the connection, the statement) is not what their properties are.
+fn native_plain_base(
+    lower: &[u8],
+    handlers: &crate::fxhash::FxHashMap<Vec<u8>, crate::vm::NativeClassHandler>,
+) -> bool {
+    matches!(lower, b"pdo" | b"pdostatement")
+        && handlers.get(lower).is_none_or(|h| {
+            h.prop_read.is_none() && h.prop_write.is_none() && h.prop_added.is_none()
+        })
 }
 
 /// Whether `c` is a call of call_user_func() or call_user_func_array() by

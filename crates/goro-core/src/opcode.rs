@@ -658,6 +658,9 @@ pub(crate) struct PropIc {
     pub(crate) slot: std::cell::Cell<u32>,
     pub(crate) plain: std::cell::Cell<u8>,
     pub(crate) any_scope: std::cell::Cell<bool>,
+    /// The objects of the class have native data their properties have
+    /// nothing to do with (see Vm::native_props_plain).
+    pub(crate) native_ok: std::cell::Cell<bool>,
     pub(crate) scope: std::cell::RefCell<Option<Box<[u8]>>>,
 }
 
