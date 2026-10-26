@@ -815,6 +815,10 @@ impl PhpGenerator {
             (crate::rcstr::RcStr::new(), 0)
         };
         self.frame_depth = vm.call_stack.len().saturating_sub(vm.fiber_call_base());
+        if let Some(Value::Object(c)) = &self.closure {
+            // (Closure::getCurrent() in the body)
+            vm.note_generator_closure_frame(&func_name, c);
+        }
         vm.call_stack.push((
             func_name,
             func_file,

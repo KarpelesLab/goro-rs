@@ -5069,6 +5069,22 @@ impl Vm {
         }
     }
 
+    /// A closure's generator frame is about to be pushed at the next
+    /// call_stack depth: its Closure is the frame's current closure.
+    #[inline(never)]
+    pub(crate) fn note_generator_closure_frame(
+        &mut self,
+        frame_name: &str,
+        closure: &Rc<RefCell<PhpObject>>,
+    ) {
+        let depth = self.call_stack.len() + 1;
+        while self.closure_frames.last().is_some_and(|f| f.0 >= depth) {
+            self.closure_frames.pop();
+        }
+        self.closure_frames
+            .push((depth, frame_name.to_string(), Rc::downgrade(closure)));
+    }
+
     /// The frame named `frame_name` an internal function pushes next for a
     /// call of `closure` (see callback_closure): Closure::getCurrent() finds it.
     #[inline(never)]
