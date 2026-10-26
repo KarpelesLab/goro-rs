@@ -225,6 +225,14 @@ fn linked_method_prototype(vm: &Vm, class_lower: &[u8], m: &[u8], depth: u32) ->
         return None;
     }
     let ce = rcls(vm, class_lower)?;
+    // An enum's cases()/from()/tryFrom() implement UnitEnum's/BackedEnum's.
+    if ce.is_enum && ce.get_method(m).is_none() {
+        return match m {
+            b"cases" => Some(b"unitenum".to_vec()),
+            b"from" | b"tryfrom" if ce.enum_backing_type.is_some() => Some(b"backedenum".to_vec()),
+            _ => None,
+        };
+    }
     let meth = ce.get_method(m)?;
     // (interface methods have none, redeclared or inherited)
     if ce.is_interface {
@@ -785,6 +793,8 @@ pub(crate) fn rprops<'a>(vm: &'a Vm, lower: &[u8]) -> Vec<&'a crate::object::Pro
             // An extension's internal class: it inherits its parent's
             // properties when registered, then declares its own (a
             // redeclared one moves to the end, zend_declare_typed_property()).
+            // (an internal enum: zend_enum_register_props() first)
+            out.extend(enum_builtin_props(vm, lower).iter());
             if let Some(parent) = &ce.parent {
                 for pp in collect(vm, &parent.to_ascii_lowercase(), depth + 1) {
                     if pp.visibility == Visibility::Private
@@ -2684,8 +2694,12 @@ pub fn reflection_class_method(
             }
         }
         b"isabstract" => {
+            // ZEND_ACC_EXPLICIT_ABSTRACT_CLASS, or IMPLICIT_ABSTRACT_CLASS:
+            // an interface declaring or inheriting a method.
             let is_abstract = rcls(vm, &class_lower)
-                .map(|c| c.is_abstract)
+                .map(|c| {
+                    c.is_abstract || (c.is_interface && !rmethods(vm, &class_lower).is_empty())
+                })
                 .unwrap_or(false);
             Some(if is_abstract {
                 Value::True
@@ -2694,8 +2708,10 @@ pub fn reflection_class_method(
             })
         }
         b"isfinal" => {
+            // (user enums are final; internal ones are not flagged)
+            let user_enum = !is_internal_class(vm, &class_lower);
             let is_final = rcls(vm, &class_lower)
-                .map(|c| c.is_final || c.is_enum) // Enums are implicitly final
+                .map(|c| c.is_final || (c.is_enum && user_enum))
                 .unwrap_or(false);
             Some(if is_final { Value::True } else { Value::False })
         }
@@ -2978,7 +2994,7 @@ pub fn reflection_class_method(
                 if ce.is_abstract {
                     mods |= 0x40;
                 } // IS_EXPLICIT_ABSTRACT
-                if ce.is_final {
+                if ce.is_final || (ce.is_enum && !is_internal_class(vm, &class_lower)) {
                     mods |= 0x20;
                 } // IS_FINAL
                 if ce.is_readonly {

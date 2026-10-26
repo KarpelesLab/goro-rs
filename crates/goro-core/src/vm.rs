@@ -3322,7 +3322,6 @@ impl Vm {
         {
             let mut ph = ClassEntry::new(b"PropertyHookType".to_vec());
             ph.is_enum = true;
-            ph.is_final = true;
             ph.enum_backing_type = Some(b"string".to_vec());
             ph.interfaces.push(b"UnitEnum".to_vec());
             ph.interfaces.push(b"BackedEnum".to_vec());

@@ -459,6 +459,15 @@ pub fn class_interfaces(name: &[u8]) -> Vec<&'static str> {
         for i in c.interfaces {
             add_iface(i, &mut out, 1);
         }
+        // zend_register_internal_enum(): UnitEnum or BackedEnum
+        if c.kind == K_ENUM {
+            let i = if c.backing.is_empty() {
+                "UnitEnum"
+            } else {
+                "BackedEnum"
+            };
+            add_iface(i, &mut out, 1);
+        }
     }
     out
 }
@@ -647,6 +656,16 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
     {
         ce.interfaces.insert(0, b"Stringable".to_vec());
     }
+    // zend_register_internal_enum(): UnitEnum, and BackedEnum (which then
+    // brings UnitEnum along after it) for a backed one.
+    if c.kind == K_ENUM && ce.interfaces.is_empty() {
+        if c.backing.is_empty() {
+            ce.interfaces.push(b"UnitEnum".to_vec());
+        } else {
+            ce.interfaces.push(b"BackedEnum".to_vec());
+            ce.interfaces.push(b"UnitEnum".to_vec());
+        }
+    }
     ce.is_abstract = c.flags & F_ABSTRACT != 0;
     ce.is_final = c.flags & F_FINAL != 0;
     ce.is_readonly = c.flags & F_READONLY != 0;
@@ -747,6 +766,32 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
             // properties_info entry is replaced at the end of the table)
             ce.properties.retain(|x| x.name != def.name);
             ce.properties.push(def);
+        }
+    }
+    // zend_enum_register_props(): readonly $name (and $value).
+    if c.kind == K_ENUM && ce.properties.is_empty() {
+        let mut add = |name: &[u8], ty: &str| {
+            ce.properties.push(PropertyDef {
+                name: name.to_vec(),
+                default: Value::Undef,
+                is_static: false,
+                is_readonly: true,
+                visibility: Visibility::Public,
+                set_visibility: None,
+                declaring_class: c.name.to_ascii_lowercase().into_bytes(),
+                property_type: parse_type(ty),
+                has_get_hook: false,
+                has_set_hook: false,
+                is_virtual: false,
+                is_abstract: false,
+                is_final: false,
+                attributes: Vec::new(),
+                doc_comment: None,
+            });
+        };
+        add(b"name", "string");
+        if !c.backing.is_empty() {
+            add(b"value", c.backing);
         }
     }
     // Constants: own, then parents', then interfaces'.
