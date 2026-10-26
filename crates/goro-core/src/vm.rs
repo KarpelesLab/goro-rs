@@ -45750,6 +45750,14 @@ impl Vm {
                         op.line,
                     ) {
                         Ok(v) => {
+                            if mode == SpFetch::R
+                                && matches!(
+                                    (op.op1, op.op2, op.result),
+                                    (OperandType::Const(_), OperandType::Const(_), OperandType::Tmp(_))
+                                )
+                            {
+                                self.note_static_prop_site(op_array, ip - 1);
+                            }
                             if mode == SpFetch::W {
                                 // A string fetched for writing: remember the slot
                                 // so a string offset write is stored back.

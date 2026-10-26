@@ -1876,3 +1876,92 @@ impl Vm {
         Some(v.clone())
     }
 }
+
+impl Vm {
+    /// The STATIC_PROP_FETCH (a read of `A::$p`, by constant names) at `ip`
+    /// of `op_array` read the property: its site remembers where the
+    /// property's slot is, when that cannot change for the site (a class
+    /// named as it is, not a trait; a visibility the code's own class scope
+    /// decides).
+    #[inline(never)]
+    pub(crate) fn note_static_prop_site(&mut self, op_array: &OpArray, ip: usize) {
+        let op = &op_array.ops[ip];
+        let (Some(Value::String(class)), Some(Value::String(name))) = (
+            const_operand(op_array, &op.op1),
+            const_operand(op_array, &op.op2),
+        ) else {
+            return;
+        };
+        let cl = class.as_bytes();
+        if cl.eq_ignore_ascii_case(b"self")
+            || cl.eq_ignore_ascii_case(b"static")
+            || cl.eq_ignore_ascii_case(b"parent")
+            || cl.first() == Some(&b'\\')
+        {
+            return;
+        }
+        let Some(ci) = self.classes.get_index_of(&cl.to_ascii_lowercase()) else {
+            return;
+        };
+        let name = name.as_bytes();
+        let Ok(slot) = self.locate_static_prop(ci, name, Some(op_array)) else {
+            return;
+        };
+        let ce = &self.classes[ci];
+        let public = match slot.def {
+            Some((c, p)) => self.classes[c].properties[p].visibility == Visibility::Public,
+            None => true,
+        };
+        if ce.is_trait || !(public || op_array.scope_class.is_some()) {
+            return;
+        }
+        let Some(pi) = self.classes[slot.owner]
+            .static_properties
+            .get_index_of(name)
+        else {
+            return;
+        };
+        op_array
+            .sites()
+            .borrow_mut()
+            .get_or_insert_with(Default::default)
+            .sprop_sites
+            .insert(ip as u32, (slot.owner, pi));
+    }
+
+    /// STATIC_PROP_FETCH at `ip` of `op_array` (see note_static_prop_site):
+    /// the property's value, as static_prop_fetch() reads it, when it is set
+    /// and resolved. None: the general handler reads it.
+    #[inline(never)]
+    pub(crate) fn fast_static_prop_fetch(&self, op_array: &OpArray, ip: usize) -> Option<Value> {
+        let sites = op_array.sites().borrow();
+        let &(owner, pi) = sites.as_ref()?.sprop_sites.get(&(ip as u32))?;
+        let (k, v) = self
+            .classes
+            .get_index(owner)?
+            .1
+            .static_properties
+            .get_index(pi)?;
+        match const_operand(op_array, &op_array.ops[ip].op2) {
+            Some(Value::String(n)) if n.as_bytes() == k.as_slice() => {}
+            _ => return None,
+        }
+        let v = match v {
+            Value::Reference(r) => r.try_borrow().ok()?.clone(),
+            v => v.clone(),
+        };
+        match &v {
+            Value::Undef => None,
+            Value::String(s) if s.as_bytes().starts_with(b"__deferred_") => None,
+            _ => Some(v),
+        }
+    }
+}
+
+/// The literal operand `o` of `op_array`.
+fn const_operand<'a>(op_array: &'a OpArray, o: &crate::opcode::OperandType) -> Option<&'a Value> {
+    match o {
+        crate::opcode::OperandType::Const(c) => op_array.literals.get(*c as usize),
+        _ => None,
+    }
+}

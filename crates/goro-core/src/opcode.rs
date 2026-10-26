@@ -856,6 +856,10 @@ pub(crate) struct SiteCaches {
     /// for the class scope it ran in (see Vm::fast_class_const).
     /// (and, of `static::C`, the called class)
     pub(crate) const_sites: IpMap<(Option<Vec<u8>>, Option<Vec<u8>>, Value)>,
+    /// Where the static property reads (`A::$p`) found the property: the
+    /// class holding its slot and the slot's index in its
+    /// static_properties (see Vm::fast_static_prop_fetch).
+    pub(crate) sprop_sites: IpMap<(usize, usize)>,
 }
 
 impl Default for SiteCaches {
@@ -871,6 +875,7 @@ impl Default for SiteCaches {
             new_sites: Default::default(),
             ns_fallbacks: Default::default(),
             const_sites: Default::default(),
+            sprop_sites: Default::default(),
         }
     }
 }

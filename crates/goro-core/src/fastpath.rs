@@ -1886,6 +1886,7 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::SendVal
             | OpCode::SendValChecked
             | OpCode::StaticPropGet
+            | OpCode::StaticPropFetch
             | OpCode::BooleanNot
             | OpCode::CastBool
             | OpCode::ErrorSuppress
@@ -2208,6 +2209,26 @@ impl crate::vm::Vm {
                 }
                 OpCode::CastInt | OpCode::CastString => fast_cast(op, cvs, tmps, literals),
                 OpCode::InitCvNull => fast_init_cv_null(op, cvs),
+                // A static property read its site located (see
+                // fast_static_prop_fetch).
+                OpCode::StaticPropFetch => {
+                    if !tmp_writable(&op.result, tmps) {
+                        break 'run ip;
+                    }
+                    match self.fast_static_prop_fetch(op_array, ip) {
+                        Some(v) => {
+                            if let Value::Object(o) = &v {
+                                crate::gc::track_object(o);
+                            }
+                            if store_tmp(&op.result, v, tmps) {
+                                Fast::Done
+                            } else {
+                                Fast::No
+                            }
+                        }
+                        None => Fast::No,
+                    }
+                }
                 // A class constant its site resolved (see fast_class_const).
                 OpCode::StaticPropGet => {
                     if !tmp_writable(&op.result, tmps) {
