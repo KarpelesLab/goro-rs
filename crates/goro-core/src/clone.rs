@@ -220,6 +220,10 @@ impl Vm {
                     || class_lower == b"sysvsharedmemory"
                     || class_lower == b"sysvmessagequeue"
                     || class_lower == b"fiber"
+                    || class_lower == b"weakreference"
+                    // (default_exception_handlers: Exception, Error and
+                    // every subclass)
+                    || self.class_implements_interface(&class_lower, b"throwable")
                     || class_lower == b"internaliterator"
                     || class_lower == b"random\\engine\\secure"
                     || class_lower == b"random\\randomizer"
@@ -394,6 +398,15 @@ impl Vm {
                     };
                     new_obj.set_property(b"__spl_dll_cur".to_vec(), head);
                     new_obj.set_property(b"__spl_dll_tpos".to_vec(), Value::Long(0));
+                }
+                // spl_object_storage_new_ex(): the clone's position is reset.
+                if new_obj.has_property(b"__spl_pos")
+                    && self
+                        .spl_find_base(&class_lower, &[b"splobjectstorage"])
+                        .is_some()
+                {
+                    new_obj.set_property(b"__spl_pos".to_vec(), Value::Long(0));
+                    new_obj.set_property(b"__spl_index".to_vec(), Value::Long(0));
                 }
                 // For WeakMap, copy the live entries from the source.
                 let original_oid = obj_borrow.object_id;
