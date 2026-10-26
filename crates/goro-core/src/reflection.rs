@@ -6577,7 +6577,7 @@ fn deprecated_attr_with(args: &[(&str, &str)]) -> crate::object::RuntimeAttribut
         .ok()
         .and_then(|p| crate::compiler::Compiler::new().compile(&p).ok())
         .map(|(oa, _, _)| oa)
-        .unwrap_or_else(OpArray::new);
+        .unwrap_or_default();
     crate::object::RuntimeAttribute {
         name: b"Deprecated".to_vec(),
         args_op_array,
