@@ -45,7 +45,7 @@ impl Vm {
 
     /// Clone `val` like php-src's clone_obj handler (copy the properties,
     /// then run `__clone()`). On failure `current_exception` is set and
-    /// `Value::Null` is returned.
+    /// `Value::Null` is returned (the clone, when `__clone()` threw).
     /// ZEND_CLONE: the error for a __clone() the calling scope cannot call
     /// (checked before the object is copied).
     #[inline(never)]
@@ -490,9 +490,8 @@ impl Vm {
                                 ob.properties
                                     .retain(|(k, _)| !k.starts_with(b"__clone_modified_"));
                             }
-                            if self.current_exception.is_some() {
-                                return Value::Null;
-                            }
+                            // (on failure the caller releases the clone: after
+                            // its operand for ZEND_CLONE)
                         }
                     }
                 }

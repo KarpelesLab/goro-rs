@@ -46309,6 +46309,26 @@ impl Vm {
                         op.line
                     );
                     let cloned = self.clone_value(&val, op.line);
+                    if self.current_exception.is_some() {
+                        // ZEND_CLONE frees its operand, then the exception the
+                        // failed clone (its result)
+                        if let OperandType::Tmp(t) = op.op1 {
+                            if let Some(slot) = tmps.get_mut(t as usize) {
+                                let orig = std::mem::replace(slot, Value::Undef);
+                                drop(val);
+                                drop(orig);
+                            }
+                        }
+                        drop(cloned);
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
+                        return Ok(Flow::Next);
+                    }
                     native_exc_check!(
                         self,
                         exception_handlers,
