@@ -136,6 +136,12 @@ pub fn str_nullable(
 ) -> Result<Option<PhpString>, VmError> {
     match arg(args, idx) {
         None | Some(Value::Null) | Some(Value::Undef) => Ok(None),
+        Some(v @ (Value::Array(_) | Value::Resource(_) | Value::Generator(_))) => {
+            Err(arg_type_error(vm, f, idx + 1, pname, "?string", &v))
+        }
+        Some(v @ Value::Object(_)) if !stringable(vm, &v) => {
+            Err(arg_type_error(vm, f, idx + 1, pname, "?string", &v))
+        }
         Some(_) => str(vm, args, idx, f, pname).map(Some),
     }
 }
@@ -248,7 +254,8 @@ pub fn array_nullable(
 ) -> Result<Option<Rc<RefCell<PhpArray>>>, VmError> {
     match arg(args, idx) {
         None | Some(Value::Null) | Some(Value::Undef) => Ok(None),
-        Some(_) => array(vm, args, idx, f, pname).map(Some),
+        Some(Value::Array(a)) => Ok(Some(a)),
+        Some(v) => Err(arg_type_error(vm, f, idx + 1, pname, "?array", &v)),
     }
 }
 
