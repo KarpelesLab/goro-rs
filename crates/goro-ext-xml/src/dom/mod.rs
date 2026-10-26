@@ -819,8 +819,12 @@ impl<'a> Args<'a> {
         }
     }
     fn str_val(&self, vm: &mut Vm, i: usize, name: &str, v: &Value) -> R<String> {
+        self.str_val_ty(vm, i, name, v, "string")
+    }
+    /// str_val() of a parameter whose type (in errors) is `ty`
+    fn str_val_ty(&self, vm: &mut Vm, i: usize, name: &str, v: &Value, ty: &str) -> R<String> {
         if is_closure(v) {
-            self.type_err(vm, i, name, "string", v);
+            self.type_err(vm, i, name, ty, v);
             return Err(());
         }
         match v {
@@ -849,12 +853,12 @@ impl<'a> Args<'a> {
                     let s = vm.value_to_string(v);
                     Ok(s.to_string_lossy())
                 } else {
-                    self.type_err(vm, i, name, "string", v);
+                    self.type_err(vm, i, name, ty, v);
                     Err(())
                 }
             }
             _ => {
-                self.type_err(vm, i, name, "string", v);
+                self.type_err(vm, i, name, ty, v);
                 Err(())
             }
         }
@@ -898,7 +902,7 @@ impl<'a> Args<'a> {
     pub fn opt_str(&self, vm: &mut Vm, i: usize, name: &str) -> R<Option<String>> {
         match self.get(i) {
             None | Some(Value::Null) => Ok(None),
-            Some(v) => self.str_val(vm, i, name, &v).map(Some),
+            Some(v) => self.str_val_ty(vm, i, name, &v, "?string").map(Some),
         }
     }
     pub fn bool(&self, vm: &mut Vm, i: usize, name: &str, def: bool) -> R<bool> {

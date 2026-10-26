@@ -1550,6 +1550,16 @@ fn m_contains(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
         {
             oo
         }
+        // (zpp "o!", then the class checks)
+        Some(v) if !matches!(v, Value::Object(_)) => {
+            let msg = format!(
+                "{}(): Argument #1 ($other) must be of type ?object, {} given",
+                a.f,
+                type_name_of(&v)
+            );
+            throw_error(vm, b"TypeError", &msg);
+            return Err(());
+        }
         Some(v) => {
             let msg = format!(
                 "{}(): Argument #1 ($other) must be of type DOMNode|DOMNameSpaceNode|null, {} given",

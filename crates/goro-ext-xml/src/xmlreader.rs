@@ -2362,6 +2362,29 @@ fn with_core<T>(
     r
 }
 
+/// A ?string parameter given an array or a non-Stringable object: the
+/// TypeError names ?string.
+fn nullable_string_check(vm: &mut Vm, a: &Args, i: usize, name: &str) -> R<()> {
+    let Some(v) = a.raw(i) else {
+        return Ok(());
+    };
+    let bad = match &v {
+        Value::Array(_) => true,
+        Value::Object(o) => {
+            let cl = o.borrow().class_name.to_ascii_lowercase();
+            !vm.classes
+                .get(&cl)
+                .is_some_and(|c| c.methods.contains_key(&b"__tostring".to_vec()))
+        }
+        _ => false,
+    };
+    if bad {
+        a.type_err(vm, i, name, "?string", &v);
+        return Err(());
+    }
+    Ok(())
+}
+
 fn arg_string(vm: &mut Vm, a: &Args, i: usize, name: &str) -> R<String> {
     let b = a.str_bytes(vm, i, name)?;
     Ok(String::from_utf8_lossy(&b).into_owned())
@@ -2372,6 +2395,9 @@ fn arg_path(vm: &mut Vm, a: &Args, i: usize, name: &str, nullable: bool) -> R<Op
     let v = a.raw(i);
     if nullable && matches!(v, None | Some(Value::Null)) {
         return Ok(None);
+    }
+    if nullable {
+        nullable_string_check(vm, a, i, name)?;
     }
     let b = a.str_bytes(vm, i, name)?;
     if b.contains(&0) {
@@ -2943,7 +2969,10 @@ fn instance_method(vm: &mut Vm, a: &Args, m: &str, o: &Obj, d: &XmlReaderData) -
             a.count(vm, 0, 1)?;
             let name = match a.raw(0) {
                 None | Some(Value::Null) => None,
-                Some(_) => Some(arg_string(vm, a, 0, "name")?),
+                Some(_) => {
+                    nullable_string_check(vm, a, 0, "name")?;
+                    Some(arg_string(vm, a, 0, "name")?)
+                }
             };
             need_loaded(vm, d, "Data must be loaded before reading")?;
             let r = with_core(vm, d, &f, |vm, c| {

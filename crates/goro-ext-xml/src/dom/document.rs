@@ -1094,46 +1094,37 @@ fn m_save_html_file(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
 fn m_register_node_class(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let a = args(a);
     a.count(vm, 2, 2)?;
-    let base = a.str(vm, 0, "baseClass")?;
-    let ext = a.opt_str(vm, 1, "extendedClass")?;
+    // zpp "CC!": a class name (try_convert_to_string()) derived from
+    // DOMNode, then any class name or null
+    let class_arg = |vm: &mut Vm, i: usize, name: &str| -> R<String> {
+        match a.raw(i) {
+            Some(Value::Array(_)) => {
+                vm.emit_warning("Array to string conversion");
+                Ok("Array".to_string())
+            }
+            _ => a.str(vm, i, name),
+        }
+    };
+    let base = class_arg(vm, 0, "baseClass")?;
     let bl = base.trim_start_matches('\\').to_ascii_lowercase();
-    let base_known = vm.classes.contains_key(bl.as_bytes());
-    if !base_known
+    if !vm.classes.contains_key(bl.as_bytes())
         || base_of_class(vm, bl.as_bytes()).is_none()
         || !class_is(vm, bl.as_bytes(), "DOMNode")
     {
-        let msg = format!(
-            "{}(): Argument #1 ($baseClass) must be a valid class name, {} given",
-            a.f, base
-        );
-        if !base_known {
-            throw_error(
-                vm,
-                b"TypeError",
-                &format!(
-                    "{}(): Argument #1 ($baseClass) must be a valid class name, {} given",
-                    a.f, base
-                ),
-            );
-            return Err(());
-        }
-        let _ = msg;
-        // zpp "C" with DOMNode as base class
-        let canon = vm
-            .classes
-            .get(bl.as_bytes())
-            .map(|c| String::from_utf8_lossy(&c.name).into_owned())
-            .unwrap_or(base.clone());
         throw_error(
             vm,
             b"TypeError",
             &format!(
                 "{}(): Argument #1 ($baseClass) must be a class name derived from DOMNode, {} given",
-                a.f, canon
+                a.f, base
             ),
         );
         return Err(());
     }
+    let ext = match a.raw(1) {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(class_arg(vm, 1, "extendedClass")?),
+    };
     let base_canon = vm
         .classes
         .get(bl.as_bytes())
@@ -1149,7 +1140,8 @@ fn m_register_node_class(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
         }
         Some(e) => {
             let el = e.trim_start_matches('\\').to_ascii_lowercase();
-            if !vm.classes.contains_key(el.as_bytes()) {
+            if !vm.classes.contains_key(el.as_bytes()) && !vm.is_known_builtin_class(el.as_bytes())
+            {
                 throw_error(
                     vm,
                     b"TypeError",
@@ -1166,9 +1158,10 @@ fn m_register_node_class(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
                     .get(el.as_bytes())
                     .map(|c| String::from_utf8_lossy(&c.name).into_owned())
                     .unwrap_or(e.clone());
+                // (zend_argument_error(NULL, ...): an Error)
                 throw_error(
                     vm,
-                    b"ValueError",
+                    b"Error",
                     &format!(
                         "{}(): Argument #2 ($extendedClass) must be a class name derived from {} or null, {} given",
                         a.f, base_canon, ecanon
@@ -1428,6 +1421,11 @@ pub fn c14n(vm: &mut Vm, o: &Obj, a: &[Value], file: bool) -> R<Value> {
     };
     let xpath = arr(off + 2, "xpath")?;
     let prefixes = arr(off + 3, "nsPrefixes")?;
+    // (php_stream_open_wrapper_ex() of an empty path, once zpp is done)
+    if file && uri.is_empty() {
+        throw_error(vm, b"ValueError", "Path must not be empty");
+        return Err(());
+    }
     let n = need_node(vm, o)?;
     let doc = match doc_of_node(n) {
         Some(d) => d,

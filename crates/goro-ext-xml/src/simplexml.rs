@@ -2926,6 +2926,10 @@ fn call_method(
                 not_initialized(vm);
                 return Value::Null;
             }
+            // (xmlXPathRegisterNs() refuses an empty prefix)
+            if prefix.is_empty() {
+                return Value::False;
+            }
             let mut v = s.xpath_ns.borrow_mut();
             v.retain(|(p, _)| *p != prefix);
             v.push((prefix, uri));
