@@ -1961,8 +1961,9 @@ fn reflection_function_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
         .collect();
 
     // Check if function exists
-    let exists =
-        vm.user_functions.contains_key(&func_lower) || vm.functions.contains_key(&func_lower);
+    // (the engine's internal helpers, named "__...", are not functions)
+    let exists = vm.user_functions.contains_key(&func_lower)
+        || vm.functions.contains_key(&func_lower) && !func_lower.starts_with(b"__");
     if !exists {
         let err_msg = format!("Function {}() does not exist", func_name);
         let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
@@ -3478,10 +3479,9 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                             if p.name != prop_name.as_bytes() {
                                 return false;
                             }
-                            // Inherited private (instance) props are not visible.
+                            // Inherited private props are not visible.
                             if p.visibility == Visibility::Private
                                 && p.declaring_class != class_lower
-                                && !p.is_static
                             {
                                 return false;
                             }

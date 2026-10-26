@@ -1387,7 +1387,9 @@ fn function_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if name_lower == goro_core::gc::DESTRUCTOR_FIBER_FN {
         return Ok(Value::False);
     }
-    if vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower) {
+    // (the engine's internal helpers, named "__...", are not functions)
+    let internal = vm.functions.contains_key(&name_lower) && !name_lower.starts_with(b"__");
+    if internal || vm.user_functions.contains_key(&name_lower) && !is_closure_bytes(&name_lower) {
         Ok(Value::True)
     } else {
         Ok(Value::False)
@@ -10735,7 +10737,9 @@ fn get_defined_functions_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     }
     let mut internal = PhpArray::new();
     for name in vm.functions.keys() {
-        if name.as_slice() == goro_core::gc::DESTRUCTOR_FIBER_FN {
+        // (no internal function of php-src starts with "__": those are the
+        // engine's own helpers)
+        if name.as_slice() == goro_core::gc::DESTRUCTOR_FIBER_FN || name.starts_with(b"__") {
             continue;
         }
         internal.push(Value::String(PhpString::from_vec(name.clone())));
@@ -10746,6 +10750,8 @@ fn get_defined_functions_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         if !name.contains(&b':')
             && !name.starts_with(b"__closure_")
             && !name.starts_with(b"__arrow_")
+            && !name.starts_with(b"__bound_closure_")
+            && !name.starts_with(goro_core::compiler::CONST_THUNK_PREFIX.as_bytes())
         {
             user.push(Value::String(PhpString::from_vec(name.clone())));
         }
