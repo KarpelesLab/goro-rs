@@ -1359,7 +1359,10 @@ impl Value {
             let may_be_numeric = |s: &[u8]| {
                 matches!(
                     s.first(),
-                    Some(b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c | b'+' | b'-' | b'.' | b'0'..=b'9')
+                    Some(
+                        b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c | b'+' | b'-' | b'.' | b'0'
+                            ..=b'9'
+                    )
                 )
             };
             if !may_be_numeric(a) || !may_be_numeric(b) {
