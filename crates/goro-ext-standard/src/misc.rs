@@ -11258,6 +11258,13 @@ fn class_is_a_interface(vm: &Vm, iface_name: &[u8], check_name: &[u8]) -> bool {
                 return true;
             }
         }
+        // (`interface J extends I` has I as its parent)
+        if let Some(p) = &ce.parent {
+            let p_lower = p.to_ascii_lowercase();
+            if p_lower == check_name || class_is_a_interface(vm, &p_lower, check_name) {
+                return true;
+            }
+        }
     }
     false
 }
