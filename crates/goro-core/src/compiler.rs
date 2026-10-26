@@ -13411,6 +13411,115 @@ impl Compiler {
         })
     }
 
+    /// Whether evaluating `e` has no side effects (no assignment, call,
+    /// increment, ...): such a key may be evaluated where the fetch reads it.
+    fn key_is_pure(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::String(_)
+            | ExprKind::True
+            | ExprKind::False
+            | ExprKind::Null
+            | ExprKind::Variable(_)
+            | ExprKind::Identifier(_)
+            | ExprKind::ConstantAccess(_) => true,
+            ExprKind::InterpolatedString(parts) => parts.iter().all(|p| match p {
+                StringPart::Literal(_) => true,
+                StringPart::Expr(e) => Self::key_is_pure(e),
+            }),
+            ExprKind::BinaryOp { left, right, .. } => {
+                Self::key_is_pure(left) && Self::key_is_pure(right)
+            }
+            ExprKind::UnaryOp { op, operand, .. } => {
+                !matches!(
+                    op,
+                    UnaryOp::PreIncrement
+                        | UnaryOp::PreDecrement
+                        | UnaryOp::PostIncrement
+                        | UnaryOp::PostDecrement
+                ) && Self::key_is_pure(operand)
+            }
+            ExprKind::Cast(_, inner) => Self::key_is_pure(inner),
+            ExprKind::ArrayAccess { array, index } => {
+                Self::key_is_pure(array) && index.as_deref().is_none_or(Self::key_is_pure)
+            }
+            ExprKind::PropertyAccess {
+                object, property, ..
+            } => Self::key_is_pure(object) && Self::key_is_pure(property),
+            ExprKind::StaticPropertyAccess { .. } => true,
+            ExprKind::ClassConstAccess { class, .. } => Self::key_is_pure(class),
+            ExprKind::Ternary {
+                condition,
+                if_true,
+                if_false,
+            } => {
+                Self::key_is_pure(condition)
+                    && if_true.as_deref().is_none_or(Self::key_is_pure)
+                    && Self::key_is_pure(if_false)
+            }
+            ExprKind::NullCoalesce { left, right } => {
+                Self::key_is_pure(left) && Self::key_is_pure(right)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a dimension / property key along the fetch chain of an
+    /// isset()/empty()/?? operand has side effects.
+    fn is_chain_has_impure_key(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::ArrayAccess { array, index } => {
+                index.as_deref().is_some_and(|i| !Self::key_is_pure(i))
+                    || Self::is_chain_has_impure_key(array)
+            }
+            ExprKind::PropertyAccess {
+                object, property, ..
+            } => !Self::key_is_pure(property) || Self::is_chain_has_impure_key(object),
+            _ => false,
+        }
+    }
+
+    /// isset() / empty() / `??` whose operand's keys have side effects:
+    /// zend_delayed_compile_var() evaluates every key (and property name)
+    /// first, then runs the quiet fetches, so `isset($a[$x][$k = f()])`
+    /// assigns $k even when $a[$x] does not exist (symfony's PhpDumper).
+    /// The keys are evaluated into temporaries and the construct compiled
+    /// over them. None when nothing needs it.
+    #[inline(never)]
+    fn compile_isset_like_memoized(&mut self, expr: &Expr) -> CompileResult<Option<OperandType>> {
+        let target = match &expr.kind {
+            ExprKind::Isset(v) if v.len() == 1 => &v[0],
+            ExprKind::Empty(inner) => &**inner,
+            ExprKind::NullCoalesce { left, .. } if Self::coalesce_left_is_quiet(left) => &**left,
+            _ => return Ok(None),
+        };
+        if !matches!(
+            target.kind,
+            ExprKind::ArrayAccess { index: Some(_), .. } | ExprKind::PropertyAccess { .. }
+        ) || !Self::is_chain_has_impure_key(target)
+        {
+            return Ok(None);
+        }
+        let saved = self.tmp_aliases.len();
+        let memo = self.memoize_lvalue(target)?;
+        let kind = match &expr.kind {
+            ExprKind::Isset(_) => ExprKind::Isset(vec![memo]),
+            ExprKind::Empty(_) => ExprKind::Empty(Box::new(memo)),
+            ExprKind::NullCoalesce { right, .. } => ExprKind::NullCoalesce {
+                left: Box::new(memo),
+                right: right.clone(),
+            },
+            _ => unreachable!(),
+        };
+        let r = self.compile_expr(&Expr {
+            span: expr.span,
+            kind,
+        });
+        self.tmp_aliases.truncate(saved);
+        r.map(Some)
+    }
+
     /// Evaluate `e` once into a temporary and return a reserved variable
     /// standing for it (literals and plain variables are kept as is).
     fn memoize_operand(&mut self, e: &Expr) -> CompileResult<Expr> {
@@ -17792,6 +17901,9 @@ impl Compiler {
 
             ExprKind::NullCoalesce { left, right } => {
                 Self::check_coalesce_append(left, expr.span.line)?;
+                if let Some(r) = self.compile_isset_like_memoized(expr)? {
+                    return Ok(r);
+                }
                 self.mark_is_fetch_base(left);
                 // $a ?? $b: if $a is not null, use $a, else use $b
                 // Suppress warnings for the left side (undefined keys, undefined vars, etc.)
@@ -19063,6 +19175,9 @@ impl Compiler {
                     }
                     return self.compile_expr(&chain);
                 }
+                if let Some(r) = self.compile_isset_like_memoized(expr)? {
+                    return Ok(r);
+                }
                 self.mark_is_fetch_base(&exprs[0]);
                 if let Some(r) = self.compile_simple_dim_isset(&exprs[0], expr.span.line)? {
                     return Ok(r);
@@ -19487,6 +19602,9 @@ impl Compiler {
             }
 
             ExprKind::Empty(inner) => {
+                if let Some(r) = self.compile_isset_like_memoized(expr)? {
+                    return Ok(r);
+                }
                 self.mark_is_fetch_base(inner);
                 self.op_array.emit(Op {
                     opcode: OpCode::ErrorSuppress,
