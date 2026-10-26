@@ -15316,6 +15316,17 @@ fn method_prototype(vm: &Vm, m: &crate::object::MethodDef, scope: Option<&[u8]>)
     if let Some(ip) = iface_proto {
         return Some(ip);
     }
+    // An (internal) enum's cases()/from()/tryFrom() implement UnitEnum's /
+    // BackedEnum's.
+    if ce.is_enum {
+        match ml.as_slice() {
+            b"cases" => return Some("UnitEnum".to_string()),
+            b"from" | b"tryfrom" if ce.enum_backing_type.is_some() => {
+                return Some("BackedEnum".to_string());
+            }
+            _ => {}
+        }
+    }
     // A class declaring __toString() implicitly implements Stringable: the
     // topmost declaration's prototype is Stringable::__toString().
     if ml == b"__tostring" && !ce.is_trait && !ce.is_interface && decl != b"stringable" {
