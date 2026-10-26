@@ -1621,6 +1621,15 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
         );
         vm.constants
             .shift_remove(b"PHP_CLI_PROCESS_TITLE".as_slice());
+    } else if cli {
+        // php-cli has none of the web SAPIs' request-header functions.
+        for f in [
+            &b"getallheaders"[..],
+            b"apache_request_headers",
+            b"apache_response_headers",
+        ] {
+            vm.functions.remove(f);
+        }
     }
     // php_request_startup(): SAPI_PHP_VERSION_HEADER (the CLI SAPI has
     // no headers).

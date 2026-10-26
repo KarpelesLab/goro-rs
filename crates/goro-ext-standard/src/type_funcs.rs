@@ -16,8 +16,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"strval", strval);
     vm.register_function(b"boolval", boolval);
     vm.register_function(b"settype", settype);
-    vm.register_function(b"isset", php_isset);
-    vm.register_function(b"empty", php_empty);
     vm.register_function(b"count", count);
     vm.register_function(b"sizeof", sizeof);
     vm.register_function(b"is_scalar", is_scalar);
@@ -351,25 +349,6 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Not a reference - can't modify
         Ok(Value::True)
     }
-}
-
-fn php_isset(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    for arg in args {
-        match arg {
-            Value::Undef | Value::Null => return Ok(Value::False),
-            _ => {}
-        }
-    }
-    Ok(Value::True)
-}
-
-fn php_empty(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
-    Ok(if val.is_truthy() {
-        Value::False
-    } else {
-        Value::True
-    })
 }
 
 fn count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

@@ -170,6 +170,21 @@ pub fn new_vm(ini: &IniSettings, sapi: &str) -> Vm {
         vm.constants
             .shift_remove(b"PHP_CLI_PROCESS_TITLE".as_slice());
     }
+    // The request-header functions belong to the web SAPIs (cli-server,
+    // cgi, fpm-fcgi register them); php-cli has none of them and php-fpm
+    // no apache_response_headers().
+    let sapi_lacks: &[&[u8]] = match sapi {
+        "cli" => &[
+            b"getallheaders",
+            b"apache_request_headers",
+            b"apache_response_headers",
+        ],
+        "fpm-fcgi" => &[b"apache_response_headers"],
+        _ => &[],
+    };
+    for f in sapi_lacks {
+        vm.functions.remove(*f);
+    }
     let startup_messages = goro_ext_standard::misc::apply_startup_ini(&mut vm, ini);
     // The compiler checks the (emulated) C stack too: sized from the start.
     {

@@ -33,7 +33,10 @@ pub fn note_user_rlimit_as() {
 /// started with, unless the script set one itself.
 pub fn script_rlimit_as() -> Option<(u64, u64)> {
     if AS_RECORDED.load(Ordering::Acquire) && !AS_USER_SET.load(Ordering::Relaxed) {
-        Some((AS_SOFT.load(Ordering::Relaxed), AS_HARD.load(Ordering::Relaxed)))
+        Some((
+            AS_SOFT.load(Ordering::Relaxed),
+            AS_HARD.load(Ordering::Relaxed),
+        ))
     } else {
         None
     }
