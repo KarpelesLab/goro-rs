@@ -602,7 +602,9 @@ pub fn php_math_round(value: f64, places: i32, mode: i64) -> f64 {
             tmp_value * exponent
         }
     } else {
-        let s = format!("{:15.6}e{}", tmp_value, -(places as i64));
+        // (php's snprintf() prints -0.0 without its sign)
+        let t = if tmp_value == 0.0 { 0.0 } else { tmp_value };
+        let s = format!("{:15.6}e{}", t, -(places as i64));
         match s.trim().parse::<f64>() {
             Ok(v) if v.is_finite() => v,
             _ => value,
