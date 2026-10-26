@@ -25346,6 +25346,13 @@ impl Vm {
                             }
                             _ => val,
                         };
+                        // (a copy of an array: `$o->p = $x = []` must not
+                        // share $x's array, written in place)
+                        let stored = if matches!(stored, Value::Array(_)) {
+                            self.dup_array_value(stored)
+                        } else {
+                            stored
+                        };
                         if let Some(slot) = tmps.get_mut(r as usize) {
                             *slot = stored;
                         }

@@ -4020,7 +4020,12 @@ impl crate::vm::Vm {
             }
             v => v,
         };
-        let result = matches!(op.result, OperandType::Tmp(_)).then(|| val.clone());
+        // (the expression's value is a copy of an array: `$o->p = $x = []`
+        // must not share the array $x writes in place)
+        let result = matches!(op.result, OperandType::Tmp(_)).then(|| match &val {
+            Value::Array(_) => self.dup_array_value(val.clone()),
+            v => v.clone(),
+        });
         if let Some(ti) = to_tmp {
             tmps[ti] = val;
         } else if let OperandType::Cv(ci) = op.op1 {
