@@ -1632,7 +1632,7 @@ impl Vm {
     /// (the closure PHP builds over a call trampoline).
     /// `fcc`: a first-class callable (whose debug info lists the
     /// trampoline's `$arguments`), not Closure::fromCallable().
-    fn magic_call_closure(
+    pub(crate) fn magic_call_closure(
         &mut self,
         class_canon: &[u8],
         method: &[u8],

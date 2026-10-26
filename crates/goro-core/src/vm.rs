@@ -4498,6 +4498,40 @@ impl Vm {
         None
     }
 
+    /// zend_init_dynamic_call_array(): `[$obj, 'parent::m']()` looks the
+    /// method name up as is (no "Class::method" form, unlike a callback):
+    /// with a user `__call()`, the call is its trampoline's. The internal
+    /// callable of that trampoline, else None.
+    #[inline(never)]
+    fn dyn_array_magic_literal(&mut self, callable: &Value) -> Option<Value> {
+        let (o, m) = match callable {
+            Value::Array(a) => {
+                let a = a.borrow();
+                if a.len() != 2 {
+                    return None;
+                }
+                match (a.get_int(0).map(|v| v.deref()), a.get_int(1).map(|v| v.deref())) {
+                    (Some(Value::Object(o)), Some(Value::String(m)))
+                        if m.as_bytes().windows(2).any(|w| w == b"::") =>
+                    {
+                        (o, m)
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let cl = o.borrow().class_name.to_ascii_lowercase();
+        let canon = self
+            .classes
+            .get(&cl)
+            .filter(|c| c.get_method(b"__call").is_some())?
+            .name
+            .clone();
+        let clo = self.magic_call_closure(&canon, m.as_bytes(), Some(Value::Object(o)), false);
+        clo.closure_inner()
+    }
+
     /// zend_init_dynamic_call_array(): `[$obj, 'm']()` naming a method the
     /// calling scope cannot access (and no __call() to fall back on).
     #[inline(never)]
@@ -30543,6 +30577,15 @@ impl Vm {
                             Value::String(PhpString::from_vec(s.as_bytes()[1..].to_vec()))
                         }
                         _ => name_val,
+                    };
+                    // `[$obj, 'parent::m']()`: get_method() looks the name up
+                    // as is, reaching __call() with it.
+                    let (name_val, is_closure_array) = match (is_closure_array, &name_val) {
+                        (false, Value::Array(_)) => match self.dyn_array_magic_literal(&name_val) {
+                            Some(t) => (t, true),
+                            None => (name_val, false),
+                        },
+                        _ => (name_val, is_closure_array),
                     };
                     if matches!(&name_val, Value::Array(_)) && !is_closure_array {
                         // Dispatch through call_user_func (handles every array-callable form).
