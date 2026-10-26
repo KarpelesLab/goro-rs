@@ -336,6 +336,13 @@ pub fn register(vm: &mut Vm) {
         names.push(n.as_bytes().to_vec());
     }
     vm.module_constants.push((NAME.to_vec(), names));
+    // PHP_INI_BEGIN(): ldap.max_links "-1"
+    if !vm.constants.contains_key(b"ldap.max_links".as_slice()) {
+        vm.constants.insert(
+            b"ldap.max_links".to_vec(),
+            Value::String(goro_core::string::PhpString::from_bytes(b"-1")),
+        );
+    }
 }
 
 /// Constructors throw, as in ldap.c.

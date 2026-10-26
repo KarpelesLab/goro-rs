@@ -6083,7 +6083,11 @@ fn ini_get_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let details = args.get(1).is_none_or(|v| v.is_truthy());
     let mut names: Vec<&'static str> = Vec::new();
     match args.first() {
-        Some(v) if !matches!(v, Value::Null) => {
+        // (Core's module number is 0, which filters nothing)
+        Some(v)
+            if !matches!(v, Value::Null)
+                && !v.to_php_string().as_bytes().eq_ignore_ascii_case(b"core") =>
+        {
             let ext = v.to_php_string().to_string_lossy();
             let lower = ext.to_ascii_lowercase();
             let loaded =
@@ -6116,21 +6120,82 @@ fn ini_get_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
     }
-    names.sort_unstable();
+    // (zend_hash_sort() with strcasecmp() of the names)
+    names.sort_unstable_by(|a, b| {
+        a.to_ascii_lowercase()
+            .cmp(&b.to_ascii_lowercase())
+            .then_with(|| a.cmp(b))
+    });
+    // Entries without a default value (NULL, not ""): shown as NULL while
+    // they hold their (empty) default.
+    const NULL_DEFAULTS: &[&str] = &[
+        "assert.callback",
+        "browscap",
+        "doc_root",
+        "error_append_string",
+        "error_log",
+        "error_prepend_string",
+        "ffi.preload",
+        "fiber.stack_size",
+        "filter.default_flags",
+        "from",
+        "input_encoding",
+        "internal_encoding",
+        "intl.default_locale",
+        "mail.force_extra_parameters",
+        "mail.log",
+        "mbstring.detect_order",
+        "mbstring.http_input",
+        "mbstring.http_output",
+        "mbstring.internal_encoding",
+        "mbstring.substitute_character",
+        "opcache.file_cache",
+        "open_basedir",
+        "openssl.cafile",
+        "openssl.capath",
+        "output_encoding",
+        "output_handler",
+        "sendmail_from",
+        "sqlite3.extension_dir",
+        "sys_temp_dir",
+        "upload_tmp_dir",
+        "user_agent",
+        "zend.script_encoding",
+    ];
+    let ini_str = |v: &Value, name: &str| -> Value {
+        let s = v.to_php_string();
+        if s.is_empty() && NULL_DEFAULTS.contains(&name) {
+            Value::Null
+        } else {
+            Value::String(s)
+        }
+    };
     let mut out = PhpArray::new();
     for name in names {
+        let modified = vm.ini_originals.contains_key(name.as_bytes());
         let local = vm
             .constants
             .get(name.as_bytes())
-            .map(|v| Value::String(v.to_php_string()))
+            .map(|v| {
+                if modified {
+                    Value::String(v.to_php_string())
+                } else {
+                    ini_str(v, name)
+                }
+            })
             .unwrap_or(Value::Null);
         let key = ArrayKey::String(PhpString::from_bytes(name.as_bytes()));
         if !details {
             out.set(key, local);
             continue;
         }
+        // (php_ini_get_option(): an entry modified from a NULL default has
+        // no orig_value, its global value is the current one)
         let global = match vm.ini_originals.get(name.as_bytes()) {
-            Some(Some(v)) => Value::String(v.to_php_string()),
+            Some(Some(v)) => match ini_str(v, name) {
+                Value::Null => local.clone(),
+                g => g,
+            },
             Some(None) => Value::Null,
             None => local.clone(),
         };
