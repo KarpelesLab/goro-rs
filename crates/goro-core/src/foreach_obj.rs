@@ -55,6 +55,9 @@ pub fn is_date_view_prop(ob: &PhpObject, name: &[u8]) -> bool {
         b"timezone_type" | b"timezone" => {
             ob.has_property(b"__timestamp_state") || ob.has_property(b"__timestamp_tzobj")
         }
+        // (a DatePeriod's: placeholders for its property tables' order)
+        b"start" | b"current" | b"end" | b"interval" | b"recurrences" | b"include_start_date"
+        | b"include_end_date" => ob.has_property(b"__timestamp_period"),
         _ => false,
     }
 }

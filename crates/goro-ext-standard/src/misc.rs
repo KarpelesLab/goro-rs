@@ -4392,6 +4392,10 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // (php_array_walk() skips IS_UNDEF slots: uninitialized and
             // virtual properties)
             .filter(|e| !matches!(e.value, Value::Undef))
+            // (nor the date objects' view fields: no properties of theirs)
+            .filter(|e| {
+                e.slot.is_some() || !goro_core::foreach_obj::is_date_view_prop(&obj.borrow(), &e.key)
+            })
             .map(|e| {
                 let storage = match &e.slot {
                     Some(sl) => sl
