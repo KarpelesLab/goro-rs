@@ -313,11 +313,15 @@ fn iterator_to_array_impl(
                 }
             }
             if is_aggregate {
+                // (an internal class's get_iterator handler: the one
+                // zend_object_iterator, as for foreach)
+                vm.foreach_native_iter = u8::from(obj.borrow().native.is_some());
                 let iter_val = vm.spl_resolve_traversable(val);
+                let native_iter = std::mem::take(&mut vm.foreach_native_iter) == 2;
                 if vm.current_exception.is_some() {
                     return Ok(Value::Null);
                 }
-                let handle = take_handle.then(|| vm.internal_iterator_handle());
+                let handle = (take_handle && !native_iter).then(|| vm.internal_iterator_handle());
                 let r = iterator_to_array_impl(
                     vm,
                     &[iter_val, if use_keys { Value::True } else { Value::False }],
@@ -481,17 +485,18 @@ fn iterator_count_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::Null);
         }
     }
-    let resolved = match args.first() {
+    match args.first() {
         Some(v @ Value::Object(_)) => {
-            let r = vm.spl_resolve_traversable(v);
-            if vm.current_exception.is_some() {
+            let Some((r, handle)) = spl_get_iterator(vm, v) else {
                 return Ok(Value::Null);
-            }
-            Some(r)
+            };
+            let res = iterator_count_iterate(vm, Some(&r));
+            drop(r);
+            drop(handle);
+            res
         }
-        other => other.cloned(),
-    };
-    iterator_count_resolved(vm, resolved)
+        other => iterator_count_resolved(vm, other.cloned()),
+    }
 }
 
 fn iterator_count_iterate(vm: &mut Vm, resolved: Option<&Value>) -> Result<Value, VmError> {
@@ -610,81 +615,96 @@ fn iterator_apply_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Null);
     }
 
-    // Iterate over the iterator and call the callback for each element
-    let is_gen = matches!(iterator, Value::Generator(_));
-    if is_gen || matches!(iterator, Value::Object(_)) {
-        // Call rewind on the iterator. Propagate exceptions thrown by rewind
-        // back to the caller (don't keep iterating).
-        if is_gen {
-            if !vm.generator_traverse_start(&iterator) {
-                return Ok(Value::Null);
+    // spl_iterator_apply(): the Traversable's zend_object_iterator (an
+    // aggregate's getIterator() result's)
+    let Some((resolved, handle)) = spl_get_iterator(vm, &iterator) else {
+        return Ok(Value::Null);
+    };
+    let own = match &resolved {
+        Value::Object(o) => object_iterator(vm, o),
+        _ => None,
+    };
+    let it = own.as_ref().unwrap_or(&resolved).clone();
+    let r = iterator_apply_iterate(vm, &it, &callback, cb_args.as_ref());
+    drop(it);
+    drop(own);
+    drop(resolved);
+    drop(handle);
+    r
+}
+
+/// The zend_object_iterator spl_iterator_apply() gets for a Traversable:
+/// what an aggregate's getIterator() returns, and the handle the iterator
+/// takes (an internal class's get_iterator handler: the InternalIterator
+/// its getIterator() makes is that one object). None on an exception.
+fn spl_get_iterator(vm: &mut Vm, v: &Value) -> Option<(Value, Option<Value>)> {
+    match v {
+        Value::Object(o) => {
+            vm.foreach_native_iter = u8::from(o.borrow().native.is_some());
+            let r = vm.spl_resolve_traversable(v);
+            let native_iter = std::mem::take(&mut vm.foreach_native_iter) == 2;
+            if vm.current_exception.is_some() {
+                return None;
             }
-        } else {
-            let _ = vm.call_object_method(&iterator, b"rewind", &[]);
+            let handle = (!native_iter && matches!(r, Value::Object(_) | Value::Generator(_)))
+                .then(|| vm.internal_iterator_handle());
+            Some((r, handle))
         }
+        other => {
+            let handle = vm.internal_iterator_handle();
+            Some((other.clone(), Some(handle)))
+        }
+    }
+}
+
+fn iterator_apply_iterate(
+    vm: &mut Vm,
+    it: &Value,
+    callback: &Value,
+    cb_args: Option<&Value>,
+) -> Result<Value, VmError> {
+    if let Value::Generator(_) = it {
+        if !vm.generator_traverse_start(it) {
+            return Ok(Value::Null);
+        }
+    } else {
+        vm.it_rewind(it);
+    }
+    if vm.current_exception.is_some() {
+        return Ok(Value::Null);
+    }
+    let mut count = 0i64;
+    let call_user_func = vm.functions.get(b"call_user_func".as_slice()).copied();
+    while vm.it_valid(it) {
         if vm.current_exception.is_some() {
             return Ok(Value::Null);
         }
-
-        let mut count = 0i64;
-        loop {
-            // Check valid()
-            let valid = if is_gen {
-                Some(if vm.it_valid(&iterator) {
-                    Value::True
-                } else {
-                    Value::False
-                })
-            } else {
-                vm.call_object_method(&iterator, b"valid", &[])
-            };
+        // spl_iterator_func_apply()
+        count += 1;
+        if let Some(cuf) = call_user_func {
+            let mut call_fn_args = vec![callback.clone()];
+            if let Some(Value::Array(extra)) = cb_args {
+                for (_, v) in extra.borrow().iter() {
+                    call_fn_args.push(v.clone());
+                }
+            }
+            let result = cuf(vm, &call_fn_args)?;
             if vm.current_exception.is_some() {
                 return Ok(Value::Null);
             }
-            match valid {
-                Some(v) if !v.is_truthy() => break,
-                None => break,
-                _ => {}
-            }
-
-            // Call the callback via the registered call_user_func
-            let call_user_func = vm.functions.get(b"call_user_func".as_slice()).copied();
-            if let Some(cuf) = call_user_func {
-                let mut call_fn_args = vec![callback.clone()];
-                if let Some(Value::Array(extra)) = &cb_args {
-                    let extra_borrow = extra.borrow();
-                    for (_, v) in extra_borrow.iter() {
-                        call_fn_args.push(v.clone());
-                    }
-                }
-                let result = cuf(vm, &call_fn_args)?;
-                if vm.current_exception.is_some() {
-                    return Ok(Value::Null);
-                }
-                count += 1;
-
-                if !result.is_truthy() {
-                    break;
-                }
-            } else {
-                // Fallback: no call_user_func registered, just count
-                count += 1;
-            }
-
-            // Call next()
-            if is_gen {
-                vm.it_next(&iterator);
-            } else {
-                let _ = vm.call_object_method(&iterator, b"next", &[]);
-            }
-            if vm.current_exception.is_some() {
-                return Ok(Value::Null);
+            if !result.is_truthy() {
+                break;
             }
         }
-        Ok(Value::Long(count))
-    } else {
-        Ok(Value::Long(0))
+        vm.it_next(it);
+        if vm.current_exception.is_some() {
+            return Ok(Value::Null);
+        }
     }
+    if vm.current_exception.is_some() {
+        return Ok(Value::Null);
+    }
+    Ok(Value::Long(count))
 }
 
 // --- Class introspection functions ---
