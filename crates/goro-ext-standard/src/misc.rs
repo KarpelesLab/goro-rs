@@ -2502,6 +2502,10 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             for arg in &call_args {
                                 args_array.push(arg.clone());
                             }
+                            // (named arguments are kept with their names)
+                            for (k, v) in named_args {
+                                args_array.set(ArrayKey::String(PhpString::from_vec(k)), v);
+                            }
                             let magic_args = vec![
                                 Value::String(PhpString::from_vec(method_name.as_bytes().to_vec())),
                                 Value::Array(std::rc::Rc::new(std::cell::RefCell::new(args_array))),
