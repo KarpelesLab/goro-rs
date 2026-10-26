@@ -9,14 +9,14 @@ closures, generators, fibers, property hooks, lazy objects, typed properties and
 match, readonly, asymmetric visibility, pipe operator) and a large part of the standard
 extensions run the official php-src test suite.
 
-**php-src 8.5.4 test suite** (full run, master `81f84f02`, 2026-10-23):
+**php-src 8.5.4 test suite** (full run, master `3e911d17`, 2026-10-27):
 
 | Metric | Count |
 |---|---|
-| Total tests | 21696 (the generic PDO tests run once per driver) |
-| Pass | 20171 (93.0% of all, **99.4% of runnable**) |
-| Fail / Error | 127 |
-| Skip / XFail | 1398 (870 skip on real PHP on Linux too: Windows-only, 32-bit, online, …; 320 out-of-scope extensions: ffi, odbc, snmp, enchant, pdo_firebird/dblib/odbc; 213 php-fpm and phpdbg) |
+| Total tests | 21709 (the generic PDO tests run once per driver) |
+| Pass | 20345 (93.7% of all, **99.6% of runnable**) |
+| Fail / Error | 85 |
+| Skip / XFail | 1279 (most also skip on real PHP on Linux: Windows-only, 32-bit, online, …; plus the out-of-scope extensions ffi, odbc, snmp, enchant, pdo_firebird/dblib/odbc, and phpdbg) |
 
 CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n`), plus
 `cargo fmt --check` and `cargo clippy -D warnings`.
@@ -30,7 +30,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/standard | 3373 | 3376 | 99.9% |
 | ext/spl | 779 | 779 | 100% |
 | ext/date | 677 | 677 | 100% |
-| ext/reflection | 492 | 493 | 99.8% |
+| ext/reflection | 493 | 493 | 100% |
 | ext/dom (incl. HTML5 `Dom\HTMLDocument`) | 849 | 850 | 99.9% |
 | ext/simplexml / xml / xmlreader / xmlwriter / libxml | 339 | 344 | 98.5% |
 | ext/soap | 574 | 574 | 100% |
