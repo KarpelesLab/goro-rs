@@ -588,7 +588,14 @@ impl Vm {
             cvs[o_i] = clone.clone();
             cvs[k_i] = Value::String(name);
             cvs[v_i] = value;
+            // (its assignment is the internal function's: a set hook's
+            // TypeError has no "called in")
+            let saved = std::mem::replace(
+                &mut self.internal_assign_ops,
+                &op_array as *const crate::opcode::OpArray as usize,
+            );
             let _ = self.execute_op_array_pub(&op_array, cvs);
+            self.internal_assign_ops = saved;
             if self.current_exception.is_some() {
                 break;
             }

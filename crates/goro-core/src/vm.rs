@@ -1811,6 +1811,9 @@ pub struct Vm {
     /// pushes it after the check: a __toString() run by the parsing runs
     /// under it.
     pub(crate) zpp_frame_at: Option<u32>,
+    /// The op array of an assignment an internal function makes through
+    /// the VM (clone()'s $withProperties), by address (0: none).
+    pub(crate) internal_assign_ops: usize,
     /// Builtins with verified stub arginfo (see arginfo.rs), rebuilt when
     /// the number of registered functions changes.
     pub(crate) zpp_map: crate::fxhash::FxHashMap<Vec<u8>, (&'static crate::arginfo::FuncInfo, u8)>,
@@ -3221,6 +3224,7 @@ impl Vm {
             builtin_self_coercing: std::collections::HashSet::new(),
             builtin_named_skipped: Vec::new(),
             zpp_frame_at: None,
+            internal_assign_ops: 0,
             zpp_map: Default::default(),
             zpp_map_fn_count: usize::MAX,
             zpp_extension_verified: Default::default(),
@@ -58983,7 +58987,9 @@ impl Vm {
                                     &method,
                                     &mut fn_cvs[1],
                                     op_array.strict_types,
-                                    Some(op.line),
+                                    (op_array as *const OpArray as usize
+                                        != self.internal_assign_ops)
+                                        .then_some(op.line),
                                 ) {
                                 Err(VmError {
                                     message: "Uncaught exception".into(),
