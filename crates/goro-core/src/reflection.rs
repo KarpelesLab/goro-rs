@@ -15795,6 +15795,17 @@ pub fn reflection_attribute_method(
                 .to_php_string()
                 .to_string_lossy();
             drop(ob);
+            // zend_lookup_class(attr->name) comes first: the attribute's
+            // class is autoloaded before its arguments are evaluated.
+            {
+                let lower = attr_name.to_ascii_lowercase().into_bytes();
+                if !vm.classes.contains_key(&lower) && !vm.is_known_builtin_class(&lower) {
+                    vm.try_autoload_class(attr_name.as_bytes());
+                    if vm.current_exception.is_some() {
+                        return Some(Value::Null);
+                    }
+                }
+            }
             let args = match attr_args_value(vm, obj) {
                 Some(a) => a,
                 None => return Some(Value::Null),
