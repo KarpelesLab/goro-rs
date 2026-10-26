@@ -1369,6 +1369,32 @@ fn reflection_method_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> b
     }
 
     if args.get(1).map(|a| a.is_closure_obj()).unwrap_or(false) {
+        let invoke = args.get(2).is_some_and(|m| {
+            m.to_php_string()
+                .as_bytes()
+                .eq_ignore_ascii_case(b"__invoke")
+        });
+        if let (true, Some((decl, m))) = (invoke, internal_method_closure(vm, &args[1])) {
+            return internal_method_invoke_rm_construct(vm, &this, &decl, &m, line);
+        }
+        if let (true, Some(f)) = (invoke, internal_function_closure(vm, &args[1])) {
+            let mut obj = this.borrow_mut();
+            for (k, v) in [
+                (&b"name"[..], &b"__invoke"[..]),
+                (b"class", b"Closure"),
+                (b"__reflection_class", b"Closure"),
+                (b"__reflection_method", b"__invoke"),
+            ] {
+                obj.set_property(k.to_vec(), Value::String(PhpString::from_bytes(v)));
+            }
+            obj.set_property(
+                b"__reflection_target".to_vec(),
+                Value::String(PhpString::from_vec(f)),
+            );
+            obj.set_property(b"__reflection_invoke_internal".to_vec(), Value::True);
+            obj.set_property(b"__reflection_invoke_fn".to_vec(), Value::True);
+            return true;
+        }
         let mut a = args.to_vec();
         a[1] = closure_legacy_arg(&args[1]);
         // The __invoke() of a closure of a function or method is
@@ -1771,6 +1797,236 @@ fn magic_call_trampoline(vm: &Vm, closure: &Value) -> Option<(Vec<u8>, Vec<u8>)>
     Some((target, method))
 }
 
+/// The internal method (declaring class, method name) a closure is over:
+/// `$obj->m(...)`, `C::m(...)` of an internal method.
+pub(crate) fn internal_method_closure(vm: &Vm, closure: &Value) -> Option<(Vec<u8>, Vec<u8>)> {
+    let inner = closure.closure_inner()?;
+    let (name, _) = crate::closure::closure_parts(&inner);
+    if name.starts_with(b"__") {
+        return None;
+    }
+    let p = name.windows(2).position(|w| w == b"::")?;
+    let cl = name[..p].to_ascii_lowercase();
+    let (sc, sm) = vm.internal_method_of(&cl, &name[p + 2..].to_ascii_lowercase())?;
+    Some((sc.name.as_bytes().to_vec(), sm.name.as_bytes().to_vec()))
+}
+
+/// The internal function (lowercase name) a closure is over (`strlen(...)`).
+pub(crate) fn internal_function_closure(vm: &Vm, closure: &Value) -> Option<Vec<u8>> {
+    match closure.closure_inner()? {
+        Value::String(s) => {
+            let l = s.as_bytes().to_ascii_lowercase();
+            (!l.starts_with(b"__")
+                && !l.contains(&b':')
+                && vm.functions.contains_key(&l)
+                && !vm.user_functions.contains_key(&l))
+            .then_some(l)
+        }
+        _ => None,
+    }
+}
+
+/// ReflectionFunction of a closure of an internal method: set up like a
+/// ReflectionMethod of it (whose implementation answers the function
+/// queries, see internal_method_rf), named after the method.
+#[inline(never)]
+fn internal_method_rf_construct(
+    vm: &mut Vm,
+    this: &Rc<RefCell<PhpObject>>,
+    closure: Value,
+    decl: &[u8],
+    mname: &[u8],
+    line: u32,
+) -> bool {
+    let a = [
+        Value::Object(this.clone()),
+        Value::String(PhpString::from_bytes(decl)),
+        Value::String(PhpString::from_bytes(mname)),
+    ];
+    if !reflection_method_construct(vm, &a, line) {
+        return false;
+    }
+    let mut obj = this.borrow_mut();
+    obj.remove_property(b"class");
+    obj.set_property(
+        b"name".to_vec(),
+        Value::String(PhpString::from_bytes(mname)),
+    );
+    obj.set_property(b"__reflection_internal_method".to_vec(), Value::True);
+    obj.set_property(b"__reflection_is_closure".to_vec(), Value::True);
+    obj.set_property(b"__reflection_closure_obj".to_vec(), closure);
+    true
+}
+
+/// ReflectionMethod of the `__invoke` of a closure of an internal method
+/// (zend_get_closure_invoke_method(): a public Closure::__invoke with the
+/// method's signature): set up like a ReflectionMethod of the method, which
+/// answers the signature queries (see internal_invoke_rm).
+#[inline(never)]
+fn internal_method_invoke_rm_construct(
+    vm: &mut Vm,
+    this: &Rc<RefCell<PhpObject>>,
+    decl: &[u8],
+    mname: &[u8],
+    line: u32,
+) -> bool {
+    let a = [
+        Value::Object(this.clone()),
+        Value::String(PhpString::from_bytes(decl)),
+        Value::String(PhpString::from_bytes(mname)),
+    ];
+    if !reflection_method_construct(vm, &a, line) {
+        return false;
+    }
+    let mut obj = this.borrow_mut();
+    obj.set_property(
+        b"name".to_vec(),
+        Value::String(PhpString::from_bytes(b"__invoke")),
+    );
+    obj.set_property(
+        b"class".to_vec(),
+        Value::String(PhpString::from_bytes(b"Closure")),
+    );
+    obj.set_property(b"__reflection_invoke_internal".to_vec(), Value::True);
+    true
+}
+
+/// ReflectionMethod methods of a Closure::__invoke made by
+/// internal_method_invoke_rm_construct(); None for the signature queries
+/// (answered for the closure's method).
+#[inline(never)]
+fn internal_invoke_rm(
+    vm: &mut Vm,
+    method: &[u8],
+    obj: &Rc<RefCell<PhpObject>>,
+    args: Option<&[Value]>,
+) -> Option<Value> {
+    let b = |v: bool| if v { Value::True } else { Value::False };
+    // (the __invoke of a closure of an internal function: its signature
+    // queries are ReflectionFunction's of it)
+    let of_fn = obj.borrow().has_property(b"__reflection_invoke_fn");
+    if of_fn {
+        match method {
+            b"getparameters"
+            | b"getnumberofparameters"
+            | b"getnumberofrequiredparameters"
+            | b"getreturntype"
+            | b"hasreturntype"
+            | b"gettentativereturntype"
+            | b"hastentativereturntype"
+            | b"isvariadic"
+            | b"returnsreference"
+            | b"isdeprecated" => {
+                return reflection_function_method(vm, method, obj).or_else(|| {
+                    reflection_function_docall(vm, method, &[Value::Object(obj.clone())])
+                });
+            }
+            _ => {}
+        }
+    }
+    match method {
+        b"getdeclaringclass" => Some(create_reflection_class(vm, "Closure")),
+        b"isstatic" | b"isabstract" | b"isfinal" | b"isprivate" | b"isprotected"
+        | b"isconstructor" | b"isdestructor" | b"isuserdefined" => Some(Value::False),
+        b"ispublic" | b"isinternal" => Some(Value::True),
+        b"getmodifiers" => Some(Value::Long(1)),
+        b"getextension" => Some(Value::Null),
+        b"getextensionname" => Some(Value::False),
+        b"getdoccomment" | b"getfilename" | b"getstartline" | b"getendline" => Some(Value::False),
+        b"hasprototype" => Some(b(false)),
+        b"invoke" | b"invokeargs" => {
+            let a = args?;
+            let target = a.get(1).filter(|t| t.is_closure_obj())?.deref();
+            let call: Vec<Value> = if method == b"invoke" {
+                a.iter().skip(2).cloned().collect()
+            } else {
+                match a.get(2) {
+                    Some(Value::Array(arr)) => arr.borrow().values().cloned().collect(),
+                    _ => Vec::new(),
+                }
+            };
+            Some(vm.call_callback(&target, &call).unwrap_or(Value::Null))
+        }
+        b"__tostring" => {
+            obj.borrow_mut()
+                .remove_property(b"__reflection_invoke_internal");
+            let me = [Value::Object(obj.clone())];
+            let s = if of_fn {
+                reflection_function_method(vm, method, obj)
+                    .or_else(|| reflection_function_docall(vm, method, &me))
+            } else {
+                reflection_method_method(vm, method, obj)
+                    .or_else(|| reflection_method_docall(vm, method, &me))
+            };
+            obj.borrow_mut()
+                .set_property(b"__reflection_invoke_internal".to_vec(), Value::True);
+            let s = s?.to_php_string().to_string_lossy();
+            let (head, rest) = s.split_once('\n').unwrap_or((s.as_str(), ""));
+            let proto = head
+                .split_once('<')
+                .and_then(|(_, h)| h.split_once('>'))
+                .and_then(|(attrs, _)| {
+                    attrs
+                        .split(", ")
+                        .find(|p| p.starts_with("prototype "))
+                        .map(|p| p.to_string())
+                });
+            let mut out = String::from("Method [ <internal");
+            if let Some(p) = proto {
+                out.push_str(", ");
+                out.push_str(&p);
+            }
+            out.push_str("> public method __invoke ] {\n");
+            out.push_str(rest);
+            Some(Value::String(PhpString::from_string(out)))
+        }
+        _ => None,
+    }
+}
+
+/// ReflectionFunction methods of a closure of an internal method (see
+/// internal_method_rf_construct): the function queries are
+/// ReflectionMethod's; None for the closure ones ReflectionFunction answers.
+#[inline(never)]
+fn internal_method_rf(
+    vm: &mut Vm,
+    method: &[u8],
+    obj: &Rc<RefCell<PhpObject>>,
+    args: Option<&[Value]>,
+) -> Option<Value> {
+    match method {
+        b"getname"
+        | b"isclosure"
+        | b"getclosurethis"
+        | b"getclosurescopeclass"
+        | b"getclosurecalledclass"
+        | b"getclosureusedvariables"
+        | b"getclosure"
+        | b"isanonymous"
+        | b"invoke"
+        | b"invokeargs"
+        | b"isdisabled" => None,
+        b"__tostring" => {
+            let s = reflection_method_method(vm, method, obj)
+                .or_else(|| reflection_method_docall(vm, method, &[Value::Object(obj.clone())]))?;
+            let b = s.to_php_string();
+            match b.as_bytes().strip_prefix(b"Method [") {
+                Some(rest) => {
+                    let mut out = b"Closure [".to_vec();
+                    out.extend_from_slice(rest);
+                    Some(Value::String(PhpString::from_vec(out)))
+                }
+                None => Some(s),
+            }
+        }
+        _ => match args {
+            Some(a) => reflection_method_docall(vm, method, a),
+            None => reflection_method_method(vm, method, obj)
+                .or_else(|| reflection_method_docall(vm, method, &[Value::Object(obj.clone())])),
+        },
+    }
+}
+
 /// ReflectionFunction constructor
 fn reflection_function_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bool {
     let this = match args.first() {
@@ -1780,6 +2036,9 @@ fn reflection_function_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
     if let Some(arg) = args.get(1) {
         if arg.is_closure_obj() && args.len() == 2 {
             let closure = arg.deref();
+            if let Some((decl, mname)) = internal_method_closure(vm, &closure) {
+                return internal_method_rf_construct(vm, &this, closure, &decl, &mname, line);
+            }
             let legacy = closure_legacy_arg(&closure);
             let ok = reflection_function_construct(vm, &[args[0].clone(), legacy], line);
             if ok {
@@ -5263,6 +5522,11 @@ pub fn reflection_method_method(
     method: &[u8],
     obj: &Rc<RefCell<PhpObject>>,
 ) -> Option<Value> {
+    if obj.borrow().has_property(b"__reflection_invoke_internal") {
+        if let Some(r) = internal_invoke_rm(vm, method, obj, None) {
+            return Some(r);
+        }
+    }
     let ob = obj.borrow();
     let class_name = ob
         .get_property(b"__reflection_class")
@@ -5933,6 +6197,11 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
     }
     let this = args.first()?;
     if let Value::Object(obj) = this {
+        if obj.borrow().has_property(b"__reflection_invoke_internal") {
+            if let Some(r) = internal_invoke_rm(vm, method, obj, Some(args)) {
+                return Some(r);
+            }
+        }
         let ob = obj.borrow();
         let class_name = ob
             .get_property(b"__reflection_class")
@@ -6519,6 +6788,24 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                             return Some(Value::Null);
                         }
                     }
+                    // An internal method: a closure over it, `[$obj, 'm']`
+                    // (unless the object's class overrides it).
+                    if let Value::Object(o) = &target_obj {
+                        let ocl = o.borrow().class_name.to_ascii_lowercase();
+                        let ml = method_lower_bytes.as_bytes();
+                        if let (Some(_), Some((_, sm))) = (
+                            vm.internal_method_of(&class_lower, ml),
+                            vm.internal_method_of(&ocl, ml)
+                                .filter(|(_, m)| m.visibility() == Visibility::Public),
+                        ) {
+                            let mut arr = PhpArray::new();
+                            arr.push(target_obj.clone());
+                            arr.push(Value::String(PhpString::from_bytes(sm.name.as_bytes())));
+                            return Some(
+                                vm.make_closure_object(Value::Array(Rc::new(RefCell::new(arr)))),
+                            );
+                        }
+                    }
                     let key: Vec<u8> = callable.as_bytes().to_ascii_lowercase();
                     if !vm.user_functions.contains_key(&key) {
                         let op = vm
@@ -6992,6 +7279,11 @@ pub fn reflection_function_method(
     method: &[u8],
     obj: &Rc<RefCell<PhpObject>>,
 ) -> Option<Value> {
+    if obj.borrow().has_property(b"__reflection_internal_method") {
+        if let Some(r) = internal_method_rf(vm, method, obj, None) {
+            return Some(r);
+        }
+    }
     let ob = obj.borrow();
     let target = ob.get_property(b"__reflection_target").to_php_string();
     let func_lower = target.as_bytes().to_vec();
@@ -7690,6 +7982,11 @@ pub fn reflection_function_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
     }
     let this = args.first()?;
     if let Value::Object(obj) = this {
+        if obj.borrow().has_property(b"__reflection_internal_method") {
+            if let Some(r) = internal_method_rf(vm, method, obj, Some(args)) {
+                return Some(r);
+            }
+        }
         let ob = obj.borrow();
         let target = ob.get_property(b"__reflection_target").to_php_string();
         let func_lower = target.as_bytes().to_vec();
@@ -9887,7 +10184,10 @@ fn reflection_parameter_method_body(
             if !class_bytes.is_empty() && !method_bytes.is_empty() {
                 // Build a ReflectionMethod
                 let class_str = String::from_utf8_lossy(class_bytes).to_string();
-                let method_str = String::from_utf8_lossy(method_bytes).to_string();
+                // (the method's name as declared)
+                let method_str = rmethod(vm, class_bytes, method_bytes)
+                    .map(|m| String::from_utf8_lossy(&m.name).to_string())
+                    .unwrap_or_else(|| String::from_utf8_lossy(method_bytes).to_string());
                 let canonical_class = rcls(vm, class_bytes)
                     .map(|c| String::from_utf8_lossy(&c.name).to_string())
                     .unwrap_or_else(|| class_str.clone());

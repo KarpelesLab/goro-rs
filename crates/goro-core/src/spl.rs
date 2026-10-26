@@ -629,6 +629,34 @@ impl Vm {
         false
     }
 
+    /// Named arguments of a callback call (call_user_func(), a closure of the
+    /// method) to the internal method `method` of `obj`: placed among the
+    /// positional `args` (spl_place_named_args()). False with the exception
+    /// set on failure.
+    #[inline(never)]
+    pub fn place_internal_method_named_args(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        method: &[u8],
+        args: &mut Vec<Value>,
+        named: &[(Vec<u8>, Value)],
+    ) -> bool {
+        if named.is_empty() {
+            return true;
+        }
+        let cl = obj_class_lower(obj);
+        let base = self.internal_base_class(&cl).unwrap_or(cl);
+        let ml = method.to_ascii_lowercase();
+        let mut full = Vec::with_capacity(args.len() + 1);
+        full.push(Value::Object(obj.clone()));
+        full.append(args);
+        let line = self.current_line;
+        let ok = self.spl_place_named_args(&base, &ml, &mut full, named, false, line);
+        full.remove(0);
+        *args = full;
+        ok
+    }
+
     /// Place named arguments of an SPL method call at their positions
     /// (`args[0]` is $this). Skipped optional parameters become Undef.
     /// Returns false with an Error set on unknown/duplicate names.

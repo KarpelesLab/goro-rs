@@ -11220,6 +11220,21 @@ impl Vm {
             ),
             b"__invoke" => {
                 let (name, args) = match closure.unwrap_closure() {
+                    // A closure of an internal method, `[$obj, 'm']`: called
+                    // like the array callable (see INIT_DYNAMIC_CALL).
+                    Value::Array(arr)
+                        if matches!(arr.borrow().get_int(0), Some(Value::Object(_))) =>
+                    {
+                        let mut target = CallTarget::NONE;
+                        target.dynamic = true;
+                        self.pending_calls.push(PendingCall {
+                            name: PhpString::from_bytes(b"call_user_func"),
+                            args: vec![Value::Array(arr)],
+                            named_args: Vec::new(),
+                            target,
+                        });
+                        return Ok(());
+                    }
                     Value::Array(arr) => {
                         let mut values: Vec<Value> = arr.borrow().values().cloned().collect();
                         if values.is_empty() {
@@ -28223,6 +28238,7 @@ impl Vm {
                                                     && c.get_method(&ml).is_none()
                                                     && c.get_method(b"__call").is_none()
                                                     && !(cl == b"closure" && ml == b"__invoke")
+                                                    && self.internal_method_of(&cl, &ml).is_none()
                                             }
                                             None => cl == b"stdclass",
                                         };

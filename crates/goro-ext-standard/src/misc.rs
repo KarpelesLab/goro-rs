@@ -2373,6 +2373,15 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         }
                     }
                     // Built-in class methods (SPL, ext-provided native classes).
+                    let mut call_args = call_args;
+                    if !vm.place_internal_method_named_args(
+                        obj,
+                        method_name.as_bytes(),
+                        &mut call_args,
+                        &named_args,
+                    ) {
+                        return Ok(Value::Null);
+                    }
                     if let Some(r) = vm.call_object_method(
                         &Value::Object(obj.clone()),
                         method_name.as_bytes(),

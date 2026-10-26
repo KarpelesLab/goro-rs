@@ -202,6 +202,12 @@ impl Vm {
             let cls = &name[..p];
             let m = &name[p + 2..];
             let cl: Vec<u8> = cls.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if let Some((sc, sm)) = self.internal_method_of(&cl, &lower(m)) {
+                let mut out = sc.name.as_bytes().to_vec();
+                out.extend_from_slice(b"::");
+                out.extend_from_slice(sm.name.as_bytes());
+                return out;
+            }
             if let Some(ce) = self.classes.get(&cl) {
                 let ml: Vec<u8> = m.iter().map(|b| b.to_ascii_lowercase()).collect();
                 let md = ce.methods.get(&ml);
@@ -401,11 +407,18 @@ impl Vm {
                 .iter()
                 .map(|b| b.to_ascii_lowercase())
                 .collect();
-            let target_op: Option<OpArray> = self
-                .user_functions
-                .get(&tl)
-                .map(|o| (**o).clone())
-                .or_else(|| self.closure_method_op(&tl));
+            let internal = tl
+                .windows(2)
+                .position(|w| w == b"::")
+                .and_then(|p| self.internal_method_of(&tl[..p], &tl[p + 2..]));
+            let target_op: Option<OpArray> = if internal.is_some() {
+                None
+            } else {
+                self.user_functions
+                    .get(&tl)
+                    .map(|o| (**o).clone())
+                    .or_else(|| self.closure_method_op(&tl))
+            };
             if let Some(top) = &target_op {
                 let statics = self.closure_static_vars(top);
                 if !statics.is_empty() {
@@ -416,7 +429,23 @@ impl Vm {
                     props.push((b"static".to_vec(), Value::Array(Rc::new(RefCell::new(sa)))));
                 }
             }
-            if let Some(top) = &target_op {
+            if let Some((_, sm)) = internal {
+                let required = sm.required_args();
+                params = sm
+                    .args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        let mut d = if a.flags & crate::stubs::A_BY_REF != 0 {
+                            b"&$".to_vec()
+                        } else {
+                            b"$".to_vec()
+                        };
+                        d.extend_from_slice(a.name.as_bytes());
+                        (d, i >= required)
+                    })
+                    .collect();
+            } else if let Some(top) = &target_op {
                 params = Self::closure_param_entries(top);
             } else if let Some(fi) = crate::arginfo::lookup(&tl) {
                 // zend_closure_get_debug_info() for an internal function.
@@ -570,6 +599,9 @@ impl Vm {
         let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
         let scope_lower: Vec<u8> = if let Some(p) = lower.windows(2).position(|w| w == b"::") {
             let cl = lower[..p].to_vec();
+            if let Some((sc, _)) = self.internal_method_of(&cl, &lower[p + 2..]) {
+                return Some(sc.name.as_bytes().to_vec());
+            }
             self.classes
                 .get(&cl)
                 .and_then(|c| c.methods.get(&lower[p + 2..]))
@@ -811,6 +843,96 @@ impl Vm {
         }
     }
 
+    /// The internal method (stub class declaring it, stub method) that a
+    /// call of `ml` on an object of class `cl` (both lowercase) runs: the
+    /// class is internal or inherits the method from an internal ancestor.
+    /// None when a user class declares it (or there is no such method).
+    #[inline(never)]
+    pub(crate) fn internal_method_of(
+        &self,
+        cl: &[u8],
+        ml: &[u8],
+    ) -> Option<(
+        &'static crate::stubs::StubClass,
+        &'static crate::stubs::StubFunc,
+    )> {
+        if let Some(c) = self.classes.get(cl).filter(|c| c.filename.is_some()) {
+            if let Some(m) = c.get_method(ml) {
+                let d = lower(&m.declaring_class);
+                if d.is_empty() || self.classes.get(&d).is_some_and(|dc| dc.filename.is_some()) {
+                    return None;
+                }
+            }
+        }
+        let base = self.internal_base_class(cl)?;
+        crate::stubs::find_method(&base, ml)
+    }
+
+    /// `$obj->m(...)` (or Closure::fromCallable([$obj, 'm'])) of an internal
+    /// method: a closure over the method itself, `[$obj, 'Method']` (or
+    /// "Class::method" for a static one), like zend_closure_from_frame().
+    /// None when `m` is no internal method of the object's class.
+    #[inline(never)]
+    fn fcc_internal_method(
+        &mut self,
+        obj: &Value,
+        cl: &[u8],
+        m: &[u8],
+        scope: Option<&[u8]>,
+    ) -> Option<FccResult> {
+        let ml = lower(m);
+        let (sc, sm) = self.internal_method_of(cl, &ml)?;
+        let class_name = match obj {
+            Value::Object(o) => o.borrow().class_name.clone(),
+            _ => cl.to_vec(),
+        };
+        if sm.visibility() != crate::object::Visibility::Public {
+            if let Some(msg) = self.check_visibility(
+                sm.visibility(),
+                sc.name.as_bytes(),
+                &class_name,
+                sm.name,
+                false,
+                scope,
+            ) {
+                return Some(Err((b"Error", msg)));
+            }
+            // (a closure of a protected method would be called as an array
+            // callable, which checks its visibility: keep the forwarding
+            // closure)
+            return None;
+        }
+        if sm.is_static() {
+            let mut n = class_name;
+            n.extend_from_slice(b"::");
+            n.extend_from_slice(sm.name.as_bytes());
+            // (when it can be called by name)
+            self.internal_static_target(&str_val(&n))?;
+            return Some(Ok(self.make_closure_object(str_val(&n))));
+        }
+        let mut arr = PhpArray::new();
+        arr.push(obj.clone());
+        arr.push(str_val(sm.name.as_bytes()));
+        Some(Ok(self.make_closure_object(Value::Array(Rc::new(
+            RefCell::new(arr),
+        )))))
+    }
+
+    /// Closure::fromCallable('C::m') / (['C', 'm']) of a static method of
+    /// the internal class `cl` (lowercase): a closure over "C::m".
+    #[inline(never)]
+    fn fcc_internal_static_named(&mut self, cl: &[u8], m: &[u8]) -> Option<FccResult> {
+        let (_, sm) = self.internal_method_of(cl, &lower(m))?;
+        if !sm.is_static() {
+            return None;
+        }
+        let mut n = self.builtin_canonical_name(cl).into_bytes();
+        n.extend_from_slice(b"::");
+        n.extend_from_slice(sm.name.as_bytes());
+        self.internal_static_target(&str_val(&n))?;
+        Some(Ok(self.make_closure_object(str_val(&n))))
+    }
+
     /// Whether the first internal class up the parent chain of the user
     /// class `cl` (lowercase) has the method `ml`.
     #[inline(never)]
@@ -881,6 +1003,9 @@ impl Vm {
         }
         let class_name = o.borrow().class_name.clone();
         let cl = lower(&class_name);
+        if let Some(r) = self.fcc_internal_method(&obj, &cl, m, scope.as_deref()) {
+            return r;
+        }
         let ml = lower(m);
         let ce = match self.classes.get(&cl) {
             Some(c) => c,
@@ -987,7 +1112,7 @@ impl Vm {
         let mut name = cl.to_vec();
         name.extend_from_slice(b"::");
         name.extend_from_slice(&lower(m));
-        if !self.is_vm_static_builtin(&name) {
+        if self.internal_static_target(&str_val(&name)).is_none() {
             return self.make_closure_object(wrapper);
         }
         let mut n = self.builtin_canonical_name(cl).into_bytes();
@@ -1451,6 +1576,13 @@ impl Vm {
             Some(c) => c,
             None => {
                 if self.is_known_builtin_class(&cl) {
+                    // A closure over the internal method itself.
+                    if let Some(Ok(c)) = match &obj {
+                        Some(o) => self.fcc_internal_method(o, &cl, m, scope.as_deref()),
+                        None => self.fcc_internal_static_named(&cl, m),
+                    } {
+                        return Ok(c);
+                    }
                     // Builtin class methods: keep the [obj|class, method] callable.
                     let mut arr = PhpArray::new();
                     arr.push(obj.unwrap_or_else(|| str_val(cls)));
@@ -1617,17 +1749,26 @@ impl Vm {
             match lname.windows(2).position(|w| w == b"::") {
                 Some(p) => {
                     let cl = lname[..p].to_vec();
-                    let md = self
-                        .classes
-                        .get(&cl)
-                        .and_then(|c| c.methods.get(&lname[p + 2..]));
-                    match md {
-                        Some(md) => (
-                            Some(md.declaring_class.to_ascii_lowercase()),
-                            md.is_static,
-                            md.name.clone(),
-                        ),
-                        None => (Some(cl), caps.is_empty(), target[p + 2..].to_vec()),
+                    // (an internal method: its declaring class)
+                    if let Some((sc, sm)) = self.internal_method_of(&cl, &lname[p + 2..]) {
+                        (
+                            Some(lower(sc.name.as_bytes())),
+                            sm.is_static(),
+                            sm.name.as_bytes().to_vec(),
+                        )
+                    } else {
+                        let md = self
+                            .classes
+                            .get(&cl)
+                            .and_then(|c| c.methods.get(&lname[p + 2..]));
+                        match md {
+                            Some(md) => (
+                                Some(md.declaring_class.to_ascii_lowercase()),
+                                md.is_static,
+                                md.name.clone(),
+                            ),
+                            None => (Some(cl), caps.is_empty(), target[p + 2..].to_vec()),
+                        }
                     }
                 }
                 None => (None, false, name.clone()),
