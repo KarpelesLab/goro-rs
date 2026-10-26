@@ -6545,13 +6545,13 @@ impl Parser {
                 // Anonymous function. Prefer a stashed closure doc-comment
                 // from an enclosing `$var = function(){}` assignment, falling
                 // back to a doc-comment directly attached to this token.
-                let closure_doc = self
-                    .pending_closure_doc
-                    .take()
-                    .or_else(|| self.take_doc_comment());
+                let stashed = self.pending_closure_doc.take();
                 self.advance();
                 // Optional & for reference return
                 let by_ref_return = self.eat(&TokenKind::Ampersand);
+                // (backup_doc_comment: the latest doc comment before the
+                // parameter list)
+                let closure_doc = self.take_doc_comment().or(stashed);
                 self.expect(&TokenKind::OpenParen)?;
                 let params = self.parse_params()?;
                 self.expect(&TokenKind::CloseParen)?;
@@ -6616,13 +6616,13 @@ impl Parser {
                 })
             }
             TokenKind::Fn => {
-                let arrow_doc = self
-                    .pending_closure_doc
-                    .take()
-                    .or_else(|| self.take_doc_comment());
+                let stashed = self.pending_closure_doc.take();
                 self.advance();
                 // Optional & for reference return
                 let by_ref_return = self.eat(&TokenKind::Ampersand);
+                // (backup_doc_comment: the latest doc comment before the
+                // parameter list)
+                let arrow_doc = self.take_doc_comment().or(stashed);
                 self.expect(&TokenKind::OpenParen)?;
                 let params = self.parse_params()?;
                 self.expect(&TokenKind::CloseParen)?;
@@ -6655,14 +6655,14 @@ impl Parser {
                     Some(TokenKind::Function | TokenKind::Fn)
                 ) =>
             {
-                let static_doc = self
-                    .pending_closure_doc
-                    .take()
-                    .or_else(|| self.take_doc_comment());
+                let stashed = self.pending_closure_doc.take();
                 self.advance(); // static
                 if matches!(self.peek(), TokenKind::Fn) {
                     self.advance();
                     let by_ref_return = self.eat(&TokenKind::Ampersand);
+                    // (backup_doc_comment: the latest doc comment before the
+                    // parameter list)
+                    let static_doc = self.take_doc_comment().or(stashed);
                     self.expect(&TokenKind::OpenParen)?;
                     let params = self.parse_params()?;
                     self.expect(&TokenKind::CloseParen)?;
@@ -6691,6 +6691,7 @@ impl Parser {
                 } else {
                     self.advance(); // function
                     let by_ref_return = self.eat(&TokenKind::Ampersand);
+                    let static_doc = self.take_doc_comment().or(stashed);
                     self.expect(&TokenKind::OpenParen)?;
                     let params = self.parse_params()?;
                     self.expect(&TokenKind::CloseParen)?;
