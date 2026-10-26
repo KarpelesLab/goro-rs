@@ -3435,6 +3435,9 @@ impl crate::vm::Vm {
             && Rc::strong_count(&arr) <= 2;
         let iter = if unshared {
             arr
+        } else if let Some(view) = crate::array::cow_copy_rc(&arr) {
+            // (shared storage, or an empty array)
+            view
         } else {
             let view = match arr.try_borrow_mut() {
                 Ok(mut a) => a.cow_clone(),

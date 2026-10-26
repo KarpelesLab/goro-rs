@@ -7747,8 +7747,7 @@ impl Vm {
         for slot in cvs.iter_mut() {
             if let Value::Array(a) = slot {
                 if Rc::strong_count(a) > 1 {
-                    let copy = crate::array::cow_copy(a);
-                    *slot = Value::Array(Rc::new(RefCell::new(copy)));
+                    *slot = Value::Array(crate::array::cow_copy_new(a));
                 }
             }
         }
@@ -10952,8 +10951,7 @@ impl Vm {
             }
             if let Value::Array(a) = slot {
                 if Rc::strong_count(a) > 1 {
-                    let copy = crate::array::cow_copy(a);
-                    *slot = Value::Array(Rc::new(RefCell::new(copy)));
+                    *slot = Value::Array(crate::array::cow_copy_new(a));
                 }
             }
         }
@@ -30557,8 +30555,7 @@ impl Vm {
                                     1
                                 };
                                 if Rc::strong_count(a) > held {
-                                    let copy = crate::array::cow_copy(a);
-                                    *slot = Value::Array(Rc::new(RefCell::new(copy)));
+                                    *slot = Value::Array(crate::array::cow_copy_new(a));
                                 }
                             }
                         }
@@ -34822,8 +34819,7 @@ impl Vm {
                             }
                             if let Value::Array(a) = slot {
                                 if Rc::strong_count(a) > 1 {
-                                    let copy = crate::array::cow_copy(a);
-                                    *slot = Value::Array(Rc::new(RefCell::new(copy)));
+                                    *slot = Value::Array(crate::array::cow_copy_new(a));
                                 }
                             }
                         }
@@ -63422,6 +63418,20 @@ impl Vm {
     }
 
     pub(crate) fn dup_array_value(&self, value: Value) -> Value {
+        // (the common copies: shared storage, or an empty array)
+        match value {
+            Value::Array(arr) if !Rc::ptr_eq(&arr, &self.globals) => {
+                match crate::array::cow_copy_rc(&arr) {
+                    Some(copy) => Value::Array(copy),
+                    None => self.dup_array_value_general(Value::Array(arr)),
+                }
+            }
+            v => self.dup_array_value_general(v),
+        }
+    }
+
+    #[inline(never)]
+    fn dup_array_value_general(&self, value: Value) -> Value {
         match &value {
             Value::Array(arr) => {
                 // A copy that shares the array's storage until either is

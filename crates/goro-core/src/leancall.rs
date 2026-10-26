@@ -629,8 +629,7 @@ impl Vm {
             // all of them are by value).
             *slot = match v {
                 Value::Array(a) if Rc::strong_count(&a) > 1 => {
-                    let copy = crate::array::cow_copy(&a);
-                    Value::Array(Rc::new(RefCell::new(copy)))
+                    Value::Array(crate::array::cow_copy_new(&a))
                 }
                 v => v,
             };
@@ -679,8 +678,7 @@ impl Vm {
                 if let Value::Array(a) = &slots[ci] {
                     if Rc::strong_count(a) > 1 && !f.by_ref_params.get(ci).copied().unwrap_or(false)
                     {
-                        let copy = crate::array::cow_copy(a);
-                        slots[ci] = Value::Array(Rc::new(RefCell::new(copy)));
+                        slots[ci] = Value::Array(crate::array::cow_copy_new(a));
                     }
                 }
             }
@@ -1233,8 +1231,7 @@ impl Vm {
                         1
                     };
                     if Rc::strong_count(a) > held {
-                        let copy = crate::array::cow_copy(a);
-                        *slot = Value::Array(Rc::new(RefCell::new(copy)));
+                        *slot = Value::Array(crate::array::cow_copy_new(a));
                     }
                 }
             }

@@ -322,8 +322,7 @@ impl Vm {
         for slot in func_cvs.iter_mut().skip(hidden) {
             if let Value::Array(a) = slot {
                 if Rc::strong_count(a) > 1 {
-                    let copy = crate::array::cow_copy(a);
-                    *slot = Value::Array(Rc::new(RefCell::new(copy)));
+                    *slot = Value::Array(crate::array::cow_copy_new(a));
                 }
             }
         }

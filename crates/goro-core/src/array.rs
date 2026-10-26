@@ -228,6 +228,46 @@ pub fn cow_copy(a: &std::rc::Rc<std::cell::RefCell<PhpArray>>) -> PhpArray {
     }
 }
 
+/// cow_copy() of `a` for a new holder, made in its own allocation, when it
+/// is the common copy: storage shared with the copy (cow_clone()), or an
+/// empty array (clone()). None: the general copy (storage holding
+/// references, the symbol table, an array being borrowed ...).
+#[inline]
+pub(crate) fn cow_copy_rc(
+    a: &std::rc::Rc<std::cell::RefCell<PhpArray>>,
+) -> Option<std::rc::Rc<std::cell::RefCell<PhpArray>>> {
+    let mut b = a.try_borrow_mut().ok()?;
+    if b.shared.is_none() && !b.share_storage() {
+        return b.empty_copy_rc();
+    }
+    Some(b.share_header_rc())
+}
+
+/// A new array made by `make` right in its allocation (no copy of the
+/// header through the stack).
+#[inline(always)]
+fn rc_in_place(make: impl FnOnce() -> PhpArray) -> std::rc::Rc<std::cell::RefCell<PhpArray>> {
+    let mut rc = std::rc::Rc::<std::cell::RefCell<PhpArray>>::new_uninit();
+    // (a new Rc: its only holder)
+    if let Some(slot) = std::rc::Rc::get_mut(&mut rc) {
+        slot.write(std::cell::RefCell::new(make()));
+        // SAFETY: the value was written just above.
+        return unsafe { rc.assume_init() };
+    }
+    std::rc::Rc::new(std::cell::RefCell::new(make()))
+}
+
+/// cow_copy() of `a` in its own allocation (cow_copy_rc() when it can).
+#[inline]
+pub fn cow_copy_new(
+    a: &std::rc::Rc<std::cell::RefCell<PhpArray>>,
+) -> std::rc::Rc<std::cell::RefCell<PhpArray>> {
+    match cow_copy_rc(a) {
+        Some(copy) => copy,
+        None => std::rc::Rc::new(std::cell::RefCell::new(cow_copy(a))),
+    }
+}
+
 impl Clone for PhpArray {
     fn clone(&self) -> Self {
         // (a copy of shared storage shares it too)
@@ -412,26 +452,67 @@ impl PhpArray {
     /// into a Store both hold. Storage holding references is copied at
     /// once, as clone() does (see Store).
     pub fn cow_clone(&mut self) -> PhpArray {
-        if self.shared.is_none() {
-            // (nor the global symbol table: the variables' cells are its own)
-            if self.is_empty()
-                || self.untracked
-                || self
-                    .live()
-                    .iter()
-                    .any(|(_, v)| matches!(v, Value::Reference(_)))
-            {
-                return self.clone();
-            }
-            // (the table's accounting goes with it)
-            let charged = self.zend_size();
-            self.shared = Some(std::rc::Rc::new(Store {
-                entries: std::mem::take(&mut self.entries),
-                index: std::mem::take(&mut self.index),
-                charged,
-            }));
+        if self.shared.is_none() && !self.share_storage() {
+            return self.clone();
         }
         self.share_header()
+    }
+
+    /// Move this array's own storage into a Store its copies can share
+    /// (see cow_clone()). False: it is not shared (empty, holding
+    /// references, or the global symbol table, whose variables' cells are
+    /// its own).
+    #[inline]
+    fn share_storage(&mut self) -> bool {
+        debug_assert!(self.shared.is_none());
+        if self.is_empty()
+            || self.untracked
+            || self
+                .live()
+                .iter()
+                .any(|(_, v)| matches!(v, Value::Reference(_)))
+        {
+            return false;
+        }
+        // (the table's accounting goes with it)
+        let charged = self.zend_size();
+        self.shared = Some(std::rc::Rc::new(Store {
+            entries: std::mem::take(&mut self.entries),
+            index: std::mem::take(&mut self.index),
+            charged,
+        }));
+        true
+    }
+
+    /// clone() of an empty array (no table, so nothing accounted) in its
+    /// own allocation; None when it is not that simple copy.
+    #[inline]
+    fn empty_copy_rc(&self) -> Option<std::rc::Rc<std::cell::RefCell<PhpArray>>> {
+        if !self.is_empty() || self.untracked || !self.index.is_empty() {
+            return None;
+        }
+        Some(rc_in_place(|| PhpArray {
+            entries: Vec::new(),
+            head: 0,
+            next_int_key: self.next_int_key,
+            pointer: self.pointer,
+            packed: self.packed,
+            mixed: self.mixed,
+            index: Vec::new(),
+            gc_buffered: crate::object::GcSlot::default(),
+            zcap: 0,
+            zpacked: self.zpacked,
+            untracked: false,
+            ident: std::cell::Cell::new(self.identity()),
+            iters: None,
+            shared: None,
+        }))
+    }
+
+    /// share_header() in its own allocation.
+    #[inline]
+    fn share_header_rc(&self) -> std::rc::Rc<std::cell::RefCell<PhpArray>> {
+        rc_in_place(|| self.share_header())
     }
 
     /// Make this array's storage its own (before an element of it is
@@ -445,6 +526,7 @@ impl PhpArray {
     }
 
     /// A copy of this array, which shares its storage.
+    #[inline(always)]
     fn share_header(&self) -> PhpArray {
         // zend_array_dup(): a table of the same size (accounted once the
         // copy is separated).
