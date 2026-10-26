@@ -1504,8 +1504,10 @@ impl<'a> LazyFreeMask<'a> {
 /// frees memory (drops_quietly_deep()). None: the opcode is left to the
 /// dispatch loop.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn consumed_tmps(
     free_mask: &[u8],
+    ops: &[Op],
     ip: usize,
     op: &Op,
     tmps: &[Value],
@@ -1516,21 +1518,31 @@ fn consumed_tmps(
     if m & 11 == 0 {
         return Some(0);
     }
-    consumed_tmps_of(m, op, tmps, no_release, globals)
+    consumed_tmps_of(m, ops, ip, op, tmps, no_release, globals)
 }
 
 /// consumed_tmps() of an opcode consuming temporaries (free mask `m`).
 #[inline(never)]
 fn consumed_tmps_of(
     m: u8,
+    ops: &[Op],
+    ip: usize,
     op: &Op,
     tmps: &[Value],
     no_release: bool,
     globals: &Rc<RefCell<crate::array::PhpArray>>,
 ) -> Option<u8> {
-    // (bit 3: a compound assignment's operand, released after its write)
+    // (bit 3: a compound assignment's operand, released after its write:
+    // the previous opcode's op2; one holding a plain value has nothing to
+    // release then)
     if m & 8 != 0 {
-        return None;
+        let plain = match ip.checked_sub(1).and_then(|p| ops.get(p)).map(|p| p.op2) {
+            Some(OperandType::Tmp(v)) => tmps.get(v as usize).is_some_and(is_plain_scalar),
+            _ => false,
+        };
+        if !plain {
+            return None;
+        }
     }
     let mut rel = 0;
     for (b, o) in [(1u8, &op.op1), (2u8, &op.op2)] {
@@ -1973,7 +1985,7 @@ impl crate::vm::Vm {
                         || matches!(op.op2, OperandType::Tmp(_))
                     {
                         let Some(rel) =
-                            consumed_tmps(free_mask.get(), ip, op, tmps, no_release, &self.globals)
+                            consumed_tmps(free_mask.get(), ops, ip, op, tmps, no_release, &self.globals)
                         else {
                             break 'run ip;
                         };
@@ -1989,7 +2001,7 @@ impl crate::vm::Vm {
                 }
                 OpCode::ArrayGet | OpCode::ArraySet | OpCode::ArrayAppend => {
                     let Some(rel) =
-                        consumed_tmps(free_mask.get(), ip, op, tmps, no_release, &self.globals)
+                        consumed_tmps(free_mask.get(), ops, ip, op, tmps, no_release, &self.globals)
                     else {
                         break 'run ip;
                     };
@@ -2022,7 +2034,7 @@ impl crate::vm::Vm {
                 // FETCH_DIM_W of an array element (see fast_dim_fetch_w)
                 OpCode::ArrayGetW => {
                     let Some(rel) =
-                        consumed_tmps(free_mask.get(), ip, op, tmps, no_release, &self.globals)
+                        consumed_tmps(free_mask.get(), ops, ip, op, tmps, no_release, &self.globals)
                     else {
                         break 'run ip;
                     };
@@ -2032,7 +2044,7 @@ impl crate::vm::Vm {
                 // (on an array, FETCH_DIM_IS's isset answers as ISSET_ISEMPTY_DIM's)
                 OpCode::ArrayIsset | OpCode::ArrayIssetFetch => {
                     let Some(rel) =
-                        consumed_tmps(free_mask.get(), ip, op, tmps, no_release, &self.globals)
+                        consumed_tmps(free_mask.get(), ops, ip, op, tmps, no_release, &self.globals)
                     else {
                         break 'run ip;
                     };
@@ -2041,7 +2053,7 @@ impl crate::vm::Vm {
                 }
                 OpCode::IssetCheck => {
                     let Some(rel) =
-                        consumed_tmps(free_mask.get(), ip, op, tmps, no_release, &self.globals)
+                        consumed_tmps(free_mask.get(), ops, ip, op, tmps, no_release, &self.globals)
                     else {
                         break 'run ip;
                     };
