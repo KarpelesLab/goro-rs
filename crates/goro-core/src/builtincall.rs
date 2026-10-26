@@ -264,9 +264,7 @@ impl Vm {
         if !self.builtin_dofcall_ok(op_array, ip, tmps, free_mask) {
             return None;
         }
-        let Some(saved) = self.enter_lean_frames(op_array) else {
-            return None;
-        };
+        let saved = self.enter_lean_frames(op_array)?;
         let r = self.fast_builtin_dofcall(op_array, ip, tmps, false, free_mask);
         self.leave_lean_frames(saved);
         r

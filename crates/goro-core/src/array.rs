@@ -153,12 +153,11 @@ fn hash_int(n: i64) -> u64 {
 pub(crate) fn hash_bytes(b: &[u8]) -> u64 {
     const K: u64 = 0x9e37_79b9_7f4a_7c15;
     let mut h: u64 = (b.len() as u64).wrapping_mul(K);
-    let mut chunks = b.chunks_exact(8);
-    for c in &mut chunks {
-        let w = u64::from_le_bytes(c.try_into().unwrap());
+    let (chunks, r) = b.as_chunks::<8>();
+    for c in chunks {
+        let w = u64::from_le_bytes(*c);
         h = (h ^ w).wrapping_mul(K).rotate_left(29);
     }
-    let r = chunks.remainder();
     if !r.is_empty() {
         let mut buf = [0u8; 8];
         buf[..r.len()].copy_from_slice(r);
