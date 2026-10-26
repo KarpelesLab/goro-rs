@@ -23636,7 +23636,13 @@ impl Compiler {
             } => Self::eval_const_expr(operand),
             // Handle Identifier constants (TRUE, FALSE, NULL, PHP_INT_MAX, etc.)
             ExprKind::Identifier(name) => {
-                let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let lower: Vec<u8> = name
+                    .strip_prefix(b"\\")
+                    .unwrap_or(name)
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
+                // (`\true`: the global constant, folded the same way)
                 match lower.as_slice() {
                     b"true" => Some(Value::True),
                     b"false" => Some(Value::False),
@@ -23987,13 +23993,18 @@ impl Compiler {
                 Some(Value::String(crate::string::PhpString::from_vec(marker)))
             }
             ExprKind::Identifier(name) => {
-                let name_lower_lc: Vec<u8> = name.iter().map(|c| c.to_ascii_lowercase()).collect();
+                // `\false`, `\PHP_EOL`: a fully qualified global constant
+                let fq = name.strip_prefix(b"\\");
+                let bare = fq.unwrap_or(name);
+                let name_lower_lc: Vec<u8> = bare.iter().map(|c| c.to_ascii_lowercase()).collect();
                 let magic_val =
                     self.resolve_class_const_magic(&name_lower_lc, qualified_name, expr.span.line);
                 if !matches!(magic_val, Value::Null) {
                     return Some(magic_val);
                 }
-                let resolved_name = if self.current_namespace.is_empty() {
+                let resolved_name = if let Some(fq) = fq {
+                    fq.to_vec()
+                } else if self.current_namespace.is_empty() {
                     name.clone()
                 } else {
                     let mut fqn = self.current_namespace.clone();

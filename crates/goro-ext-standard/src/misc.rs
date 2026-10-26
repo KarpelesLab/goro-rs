@@ -1315,6 +1315,13 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         return Ok(val);
     }
+    // zend_get_special_const(): true, false and null (any case)
+    match lookup_name.to_ascii_lowercase().as_slice() {
+        b"true" => return Ok(Value::True),
+        b"false" => return Ok(Value::False),
+        b"null" => return Ok(Value::Null),
+        _ => {}
+    }
     let msg = format!("Undefined constant \"{}\"", name_str);
     let line = vm.current_line;
     let exc = vm.create_exception(b"Error", &msg, line);
@@ -19746,6 +19753,13 @@ fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             name_bytes
         };
         if vm.constants.const_contains(check_bytes) {
+            return Ok(Value::True);
+        }
+        // (zend_get_special_const(): true, false, null)
+        if matches!(
+            check_bytes.to_ascii_lowercase().as_slice(),
+            b"true" | b"false" | b"null"
+        ) {
             return Ok(Value::True);
         }
         // Normalize namespace prefix for case-insensitive lookup

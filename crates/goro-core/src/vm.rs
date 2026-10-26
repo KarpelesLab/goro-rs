@@ -65900,6 +65900,17 @@ impl Vm {
         if let Some(v) = self.constants.const_get(name) {
             return Some(v);
         }
+        // true / false / null in any case (`\false` included): the
+        // special constants, registered as TRUE / FALSE / NULL
+        let bare = name.strip_prefix(b"\\").unwrap_or(name);
+        if bare.len() <= 5
+            && matches!(
+                bare.to_ascii_lowercase().as_slice(),
+                b"true" | b"false" | b"null"
+            )
+        {
+            return self.constants.get(bare.to_ascii_uppercase().as_slice());
+        }
         let sep = name.iter().rposition(|&b| b == b'\\')?;
         let mut key = name[..sep].to_ascii_lowercase();
         key.extend_from_slice(&name[sep..]);
