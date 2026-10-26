@@ -41025,6 +41025,7 @@ impl Vm {
                                 Value::Object(o) => {
                                     Some(crate::value::display_class_name(&o.borrow().class_name))
                                 }
+                                Value::Generator(_) => Some("Generator".to_string()),
                                 _ => None,
                             };
                             if let Some(t) = illegal {
@@ -41802,6 +41803,7 @@ impl Vm {
                                 Value::Object(o) => {
                                     Some(crate::value::display_class_name(&o.borrow().class_name))
                                 }
+                                Value::Generator(_) => Some("Generator".to_string()),
                                 _ => None,
                             };
                             if let Some(t) = illegal {
@@ -50294,8 +50296,10 @@ impl Vm {
                     if matches!(
                         &arr_val,
                         Value::Array(_) | Value::Null | Value::Undef | Value::False
-                    ) && matches!(key_val.deref(), Value::Array(_) | Value::Object(_))
-                    {
+                    ) && matches!(
+                        key_val.deref(),
+                        Value::Array(_) | Value::Object(_) | Value::Generator(_)
+                    ) {
                         let msg = format!(
                             "Cannot access offset of type {} on array",
                             Self::value_type_name(&key_val.deref())

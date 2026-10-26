@@ -4360,6 +4360,10 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let is_object = matches!(first, Value::Object(_))
         || matches!(first, Value::Reference(r) if matches!(&*r.borrow(), Value::Object(_)));
 
+    // (a Generator object has no properties to walk)
+    if matches!(first.deref(), Value::Generator(_)) {
+        return Ok(Value::True);
+    }
     if !is_array && !is_object {
         require_array_arg(vm, first, "array_walk", "array", 1)?;
         return Ok(Value::True);
