@@ -6349,15 +6349,13 @@ impl Compiler {
                     // A non-constant initializer runs only on first execution
                     // (PHP 8.3+): guard it like ZEND_BIND_INIT_STATIC_OR_JMP.
                     let guard = match default {
-                        Some(e) if Self::eval_const_expr(e).is_none() => {
-                            Some(self.op_array.emit(Op {
-                                opcode: OpCode::StaticVarInitOrJmp,
-                                op1: OperandType::Cv(cv),
-                                op2: OperandType::JmpTarget(0),
-                                result: OperandType::Const(key_idx),
-                                line: stmt.span.line,
-                            }))
-                        }
+                        Some(e) if !Self::is_const_evaluable(e) => Some(self.op_array.emit(Op {
+                            opcode: OpCode::StaticVarInitOrJmp,
+                            op1: OperandType::Cv(cv),
+                            op2: OperandType::JmpTarget(0),
+                            result: OperandType::Const(key_idx),
+                            line: stmt.span.line,
+                        })),
                         _ => None,
                     };
                     if let Some(v) = default.as_ref().and_then(Self::eval_const_expr) {
@@ -13584,7 +13582,7 @@ impl Compiler {
                 2
             } else if matches!(o, OperandType::Const(i)
                     if !matches!(literals.get(*i as usize), Some(Value::Resource(_))))
-                || Self::eval_const_expr(e).is_some()
+                || Self::is_const_evaluable(e)
                 || Self::ct_folded(e)
             {
                 1
@@ -14546,7 +14544,7 @@ impl Compiler {
                 self.op_array
                     .add_literal(Value::String(PhpString::from_vec(name.clone()))),
             )),
-            ExprKind::Array(_) if Self::eval_const_expr(property).is_some() => {
+            ExprKind::Array(_) if Self::is_const_evaluable(property) => {
                 push_compile_warning("Array to string conversion".to_string(), property.span.line);
                 Ok(OperandType::Const(self.op_array.add_literal(
                     Value::String(PhpString::from_bytes(b"Array")),
@@ -16699,7 +16697,7 @@ impl Compiler {
                 // A compile-time constant array (zend_try_ct_eval_array) keeps
                 // the strings of the AST, which are not interned (one-byte
                 // and empty strings aside); only literal operands are.
-                if Self::eval_const_expr(expr).is_some() {
+                if Self::is_const_evaluable(expr) {
                     for lit in &self.op_array.literals[lits_start..] {
                         if let Value::String(s) = lit {
                             s.unmark_interned();
@@ -21265,7 +21263,7 @@ impl Compiler {
     /// RECV_INIT: a parameter default that is not a compile-time constant
     /// (e.g. a constant reference) is type-checked when it is used.
     fn emit_recv_default_check(op_array: &mut OpArray, cv: u32, default_expr: &Expr) {
-        if Self::eval_const_expr(default_expr).is_some()
+        if Self::is_const_evaluable(default_expr)
             || !matches!(op_array.param_types.get(cv as usize), Some(Some(_)))
         {
             return;
@@ -21661,6 +21659,35 @@ impl Compiler {
             }
         }
         Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr))))
+    }
+
+    /// `Self::eval_const_expr(expr).is_some()`, without building the values
+    /// of the literals and arrays it holds: an array evaluates when each
+    /// element's value does (an unpacked one to an array) and each key does
+    /// to an int or a string.
+    fn is_const_evaluable(expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::String(_)
+            | ExprKind::True
+            | ExprKind::False
+            | ExprKind::Null => true,
+            ExprKind::Array(elements) => elements.iter().all(|elem| {
+                if elem.unpack {
+                    return matches!(Self::eval_const_expr(&elem.value), Some(Value::Array(_)));
+                }
+                Self::is_const_evaluable(&elem.value)
+                    && elem.key.as_ref().is_none_or(|k| match &k.kind {
+                        ExprKind::Int(_) | ExprKind::String(_) => true,
+                        _ => matches!(
+                            Self::eval_const_expr(k),
+                            Some(Value::Long(_) | Value::String(_))
+                        ),
+                    })
+            }),
+            _ => Self::eval_const_expr(expr).is_some(),
+        }
     }
 
     fn eval_const_expr(expr: &Expr) -> Option<Value> {
