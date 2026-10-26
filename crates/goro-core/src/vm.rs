@@ -5,6 +5,7 @@ use std::rc::{Rc, Weak};
 
 use crate::array::{ArrayKey, PhpArray};
 use crate::fastpath::canonical_int_key;
+use crate::include_path::include_failure_reason;
 use crate::fiber::{FIBER_SUSPEND_SENTINEL, FiberState};
 use crate::object::{ClassEntry, PhpObject, Visibility};
 use crate::opcode::{OpArray, OpCode, OperandType, ParamType};
@@ -45499,6 +45500,29 @@ impl Vm {
                         });
                     }
 
+                    // zend_include_or_eval(): a path with a NUL byte fails
+                    // before any stream is opened; the message stops at the NUL.
+                    if path_str.contains('\0') {
+                        if let Some(flow) = self.include_nul_path_failure(
+                            &path_str,
+                            include_kind,
+                            op.line,
+                            &mut exception_handlers,
+                            &mut pending_calls_catch_depth,
+                            &mut ip,
+                        )? {
+                            return Ok(flow);
+                        }
+                        self.write_operand(
+                            &op.result,
+                            Value::False,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                        return Ok(Flow::Next);
+                    }
+
                     // Stream-wrapper URLs are used verbatim.
                     let resolved_stream_path = match self.include_resolve_hook {
                         Some(resolve) => match resolve(self, &path_str) {
@@ -45821,16 +45845,13 @@ impl Vm {
                             };
                             // Diagnostics name the path as written in the script.
                             let inc_path = &path_str;
-                            let reason = {
-                                let s = io_err.to_string();
-                                match s.find(" (os error") {
-                                    Some(i) => s[..i].to_string(),
-                                    None => s,
-                                }
-                            };
+                            let (reason, opened_path) =
+                                include_failure_reason(&io_err, is_once, &path_str, &abs_path);
                             let warning_msg = format!(
                                 "{}({}): Failed to open stream: {}",
-                                kind_name, inc_path, reason
+                                kind_name,
+                                opened_path.as_deref().unwrap_or(inc_path),
+                                reason
                             );
                             // Raised from the INCLUDE_OR_EVAL opline: backtraces
                             // show an argument-less include/require frame.

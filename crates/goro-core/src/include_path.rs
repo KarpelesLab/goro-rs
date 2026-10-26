@@ -57,3 +57,98 @@ impl Vm {
         canonical(std::path::Path::new(&joined)).unwrap_or(joined)
     }
 }
+
+/// The "Failed to open stream" reason of a failed include, and the path the
+/// warning names: include_once/require_once name the resolved real path when
+/// the name resolves (zend_resolve_path(); "" resolves to the working
+/// directory). Opening a directory fails in the plain-files wrapper's
+/// fstat()-less read as ENOTTY.
+pub(crate) fn include_failure_reason(
+    io_err: &std::io::Error,
+    is_once: bool,
+    path: &str,
+    abs_path: &str,
+) -> (String, Option<String>) {
+    let reason = if io_err.kind() == std::io::ErrorKind::IsADirectory {
+        "Inappropriate ioctl for device".to_string()
+    } else {
+        let s = io_err.to_string();
+        match s.find(" (os error") {
+            Some(i) => s[..i].to_string(),
+            None => s,
+        }
+    };
+    let opened = if is_once {
+        let candidate = if path.is_empty() {
+            std::env::current_dir().ok()
+        } else {
+            Some(std::path::PathBuf::from(abs_path))
+        };
+        candidate
+            .filter(|p| p.exists())
+            .and_then(|p| std::fs::canonicalize(p).ok())
+            .map(|c| c.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+    (reason, opened)
+}
+
+impl Vm {
+    /// zend_include_or_eval(): a file name with a NUL byte fails without
+    /// opening a stream; the ZMSG_FAILED_*_FOPEN message stops at the NUL.
+    /// Returns the flow when an Error was thrown (require), None when the
+    /// include evaluates to false.
+    #[inline(never)]
+    pub(crate) fn include_nul_path_failure(
+        &mut self,
+        path: &str,
+        include_kind: u32,
+        line: u32,
+        exception_handlers: &mut Vec<(u32, u32, u32, usize, usize)>,
+        pending_calls_catch_depth: &mut Option<usize>,
+        ip: &mut usize,
+    ) -> Result<Option<crate::vm::Flow>, crate::vm::VmError> {
+        let shown = &path[..path.find('\0').unwrap_or(path.len())];
+        let kind_name = match include_kind {
+            1 => "include_once",
+            2 => "require",
+            3 => "require_once",
+            _ => "include",
+        };
+        let include_path = self
+            .constants
+            .get(b"include_path".as_slice())
+            .map(|v| v.to_php_string().to_string_lossy())
+            .unwrap_or_else(|| ".".to_string());
+        if include_kind == 2 || include_kind == 3 {
+            let msg = format!(
+                "Failed opening required '{}' (include_path='{}')",
+                shown, include_path
+            );
+            if self.current_exception.is_none() {
+                let exc = self.create_exception(b"Error", &msg, line);
+                self.current_exception = Some(exc);
+            }
+            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                *pending_calls_catch_depth = Some(saved_pc);
+                *ip = catch_target as usize;
+                return Ok(Some(crate::vm::Flow::Continue));
+            }
+            return Err(crate::vm::VmError {
+                message: format!("Uncaught Error: {}", msg),
+                line,
+            });
+        }
+        let msg = format!(
+            "{}(): Failed opening '{}' for inclusion (include_path='{}')",
+            kind_name, shown, include_path
+        );
+        let file = self.current_file.clone();
+        self.call_stack
+            .push((kind_name.to_string(), file, line, Vec::new(), false));
+        self.emit_warning_at(&msg, line);
+        self.call_stack.pop();
+        Ok(None)
+    }
+}
