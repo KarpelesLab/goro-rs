@@ -5374,7 +5374,16 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         return Ok(Value::Array(Rc::new(RefCell::new(result))));
     }
-    let fmt1 = |f: f64| format!("{:.1}", f);
+    // spprintf("%.1f"): php's formatter prints -0.0 without its sign
+    let fmt1 = |f: f64| {
+        if f.is_nan() {
+            "NAN".to_string()
+        } else if f.is_infinite() {
+            if f < 0.0 { "-INF" } else { "INF" }.to_string()
+        } else {
+            format!("{:.1}", f + 0.0)
+        }
+    };
     if start_type == T_DOUBLE || end_type == T_DOUBLE || is_step_double {
         let (hi, lo, dec) = if start_double > end_double {
             (start_double, end_double, true)
