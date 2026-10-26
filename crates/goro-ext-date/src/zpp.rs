@@ -317,7 +317,10 @@ pub fn bool_arg(
         }
         Value::True => Ok(Some(true)),
         Value::False => Ok(Some(false)),
-        Value::Long(_) | Value::Double(_) | Value::String(_) => Ok(Some(v.is_truthy())),
+        Value::Long(_) | Value::Double(_) | Value::String(_) => {
+            vm.warn_nan_coercion(&v, "bool", vm.current_line);
+            Ok(Some(v.is_truthy()))
+        }
         _ => Err(arg_err(vm, fname, idx, pname, "bool", &v)),
     }
 }
@@ -346,6 +349,7 @@ pub fn str_arg(
         }
         Value::String(s) => Ok(Some(s.as_bytes().to_vec())),
         Value::Long(_) | Value::Double(_) | Value::True | Value::False => {
+            vm.warn_nan_coercion(&v, "string", vm.current_line);
             Ok(Some(v.to_php_string().as_bytes().to_vec()))
         }
         Value::Object(o) => {

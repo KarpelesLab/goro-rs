@@ -151,7 +151,10 @@ fn obj_or_str<T>(
                 Err(zpp::arg_type_error(vm, f, idx + 1, pname, &expected, &v))
             }
         }
-        other => Ok(Some(ObjOrStr::Str(other.to_php_string()))),
+        other => {
+            vm.warn_nan_coercion(other, "string", vm.current_line);
+            Ok(Some(ObjOrStr::Str(other.to_php_string())))
+        }
     }
 }
 

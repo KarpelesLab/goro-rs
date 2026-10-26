@@ -119,7 +119,10 @@ pub fn str(
                 Err(arg_type_error(vm, f, idx + 1, pname, "string", &v))
             }
         }
-        other => Ok(other.to_php_string()),
+        other => {
+            vm.warn_nan_coercion(other, "string", vm.current_line);
+            Ok(other.to_php_string())
+        }
     }
 }
 
@@ -213,7 +216,10 @@ pub fn bool(
         Value::Array(_) | Value::Object(_) | Value::Resource(_) | Value::Generator(_) => {
             Err(arg_type_error(vm, f, idx + 1, pname, "bool", &v))
         }
-        other => Ok(other.is_truthy()),
+        other => {
+            vm.warn_nan_coercion(other, "bool", vm.current_line);
+            Ok(other.is_truthy())
+        }
     }
 }
 
