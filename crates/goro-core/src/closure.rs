@@ -1083,6 +1083,17 @@ impl Vm {
                     ),
                 ));
             }
+            // incomplete_class_get_method()
+            None if cl.as_slice() == b"__php_incomplete_class" => {
+                let mut a = PhpArray::new();
+                a.push(obj.clone());
+                a.push(str_val(m));
+                let cb = Value::Array(Rc::new(RefCell::new(a)));
+                return Err((
+                    b"Error",
+                    Self::incomplete_method_call_msg(&cb).unwrap_or_default(),
+                ));
+            }
             // Builtin classes: keep the forwarding closure (when the class
             // has that method).
             None => {

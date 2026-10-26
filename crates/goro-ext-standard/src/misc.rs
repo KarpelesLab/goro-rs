@@ -1523,6 +1523,22 @@ fn validate_callback_arg_check(
     cb: &Value,
 ) -> Result<goro_core::callable::CallableCheck, VmError> {
     let r = vm.zend_is_callable_ex(cb, 0);
+    // (ZEND_INIT_USER_CALL: the "valid callback" TypeError follows what
+    // the incomplete object's get_method() threw)
+    let user_call = vm.ucf_call_line.is_some() && func.starts_with("call_user_func");
+    if user_call && vm.current_exception.is_some() && Vm::incomplete_callable_class(cb).is_some() {
+        let prev = vm.current_exception.take().unwrap_or(Value::Null);
+        let msg = format!(
+            "{}(): Argument #1 ($callback) must be a valid callback, {}",
+            func,
+            r.error.unwrap_or_default()
+        );
+        let err = throw_type_error_msg(vm, msg);
+        if let Some(exc) = &vm.current_exception {
+            Vm::exception_set_previous(exc, prev);
+        }
+        return Err(err);
+    }
     if vm.current_exception.is_some() {
         return Err(VmError {
             message: "Uncaught exception".into(),

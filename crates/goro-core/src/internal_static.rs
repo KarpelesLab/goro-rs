@@ -177,6 +177,22 @@ impl Vm {
                 match self.closure_from_callable(&callable, scope, this) {
                     Ok(c) => c,
                     Err(e) => {
+                        // (zend_create_closure_from_callable() reports the
+                        // failure after what get_method() threw)
+                        let prev = if self.current_exception.is_some()
+                            && Self::incomplete_callable_class(&callable).is_some()
+                        {
+                            self.current_exception.take()
+                        } else {
+                            None
+                        };
+                        let e = if prev.is_some() && e.is_empty() {
+                            self.is_callable_pure(&callable, 0)
+                                .error
+                                .unwrap_or_default()
+                        } else {
+                            e
+                        };
                         if self.current_exception.is_none() {
                             // (thrown from the method's frame, unless a
                             // callback call pushed it)
@@ -199,6 +215,9 @@ impl Vm {
                             ));
                             if push {
                                 self.call_stack.pop();
+                            }
+                            if let Some(p) = prev {
+                                Self::exception_set_previous(&exc, p);
                             }
                             self.current_exception = Some(exc);
                         }

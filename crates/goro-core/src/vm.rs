@@ -28695,6 +28695,11 @@ impl Vm {
                         None if !self.forbid_dynamic_call_methods.is_empty() => self
                             .forbidden_dynamic_method(dyn_check_val)
                             .map(|m| (b"Error".as_slice(), m)),
+                        // (zend_init_dynamic_call_array(): get_method())
+                        None if matches!(dyn_check_val, Value::Array(_)) => {
+                            Self::incomplete_method_call_msg(dyn_check_val)
+                                .map(|m| (b"Error".as_slice(), m))
+                        }
                         e => e,
                     };
                     if let Some((cls, msg)) = dyn_err {

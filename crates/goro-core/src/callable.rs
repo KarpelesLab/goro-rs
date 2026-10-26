@@ -838,12 +838,59 @@ impl Vm {
                 }
             }
         }
+        if flags & IS_CALLABLE_CHECK_SYNTAX_ONLY == 0 {
+            if let Some(msg) = Self::incomplete_method_call_msg(&callable) {
+                // incomplete_class_get_method() throws.
+                let exc = self.create_exception(b"Error", &msg, self.current_line);
+                self.current_exception = Some(exc);
+                let mut r = self.is_callable_pure(&callable, flags);
+                r.ok = false;
+                return r;
+            }
+        }
         let mut r = self.is_callable_pure(&callable, flags);
         let line = self.current_line;
         for d in std::mem::take(&mut r.deprecations) {
             self.emit_deprecated_at(&d, line);
         }
         r
+    }
+
+    /// The class an __PHP_Incomplete_Class object of a `[$obj, "method"]`
+    /// callable stands for.
+    #[inline(never)]
+    /// incomplete_class_get_method()'s Error for a `[$incomplete, "method"]`
+    /// callable.
+    pub fn incomplete_method_call_msg(callable: &Value) -> Option<String> {
+        let name = Self::incomplete_callable_class(callable)?;
+        Some(format!(
+            "The script tried to call a method on an incomplete object. Please ensure that the class definition \"{}\" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition",
+            crate::string::msg_str(&name)
+        ))
+    }
+
+    pub fn incomplete_callable_class(callable: &Value) -> Option<Vec<u8>> {
+        let Value::Array(arr) = callable else {
+            return None;
+        };
+        let a = arr.borrow();
+        if a.len() != 2 {
+            return None;
+        }
+        let Some(Value::Object(o)) = a.get_int(0).map(|v| v.deref()) else {
+            return None;
+        };
+        if !matches!(a.get_int(1).map(|v| v.deref()), Some(Value::String(_))) {
+            return None;
+        }
+        let o = o.borrow();
+        if !o.class_name.eq_ignore_ascii_case(b"__PHP_Incomplete_Class") {
+            return None;
+        }
+        Some(match o.get_property(b"__PHP_Incomplete_Class_Name") {
+            Value::String(s) => s.as_bytes().to_vec(),
+            _ => b"unknown".to_vec(),
+        })
     }
 
     /// Raise the deprecations queued by `callable` type checks.
