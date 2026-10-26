@@ -5008,10 +5008,12 @@ fn h_stream_wrapper_register(vm: &mut Vm, args: &[Value]) -> Result<Option<Value
         .first()
         .map(|v| v.deref().to_php_string().as_bytes().to_vec())
         .unwrap_or_default();
-    let class = args
-        .get(1)
-        .map(|v| v.deref().to_php_string().as_bytes().to_vec())
-        .unwrap_or_default();
+    // ("C": the class name is zval_try_get_string()'d)
+    let class_arg = args.get(1).map(|v| v.deref()).unwrap_or(Value::Null);
+    if matches!(class_arg, Value::Array(_)) {
+        vm.emit_warning("Array to string conversion");
+    }
+    let class = vm.value_to_string_checked(&class_arg)?.as_bytes().to_vec();
     let flags = int_arg(args, 2).unwrap_or(0);
     let cl: Vec<u8> = class
         .strip_prefix(b"\\")
