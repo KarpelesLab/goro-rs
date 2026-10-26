@@ -2188,7 +2188,7 @@ fn to_zval_object_ex(
                             .get(&lower(&ce))
                             .map(|c| c.name.clone())
                             .unwrap_or(ce.clone());
-                        o.borrow_mut().class_name = name;
+                        o.borrow_mut().set_class_name(name);
                     }
                 }
                 ret = r;

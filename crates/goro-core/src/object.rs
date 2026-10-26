@@ -539,7 +539,34 @@ impl IntoIterator for PropTable {
     }
 }
 
+thread_local! {
+    /// The class_tag() of each class name met (see class_tag_of).
+    static CLASS_TAGS: std::cell::RefCell<crate::fxhash::FxHashMap<Box<[u8]>, u32>> =
+        std::cell::RefCell::new(Default::default());
+}
+
+/// The number standing for class name `name` (exact bytes) in this
+/// thread: given in order from 1, kept for the thread's life (a name
+/// stands for one class in a request; the caches comparing them belong to
+/// one request, see opcode::SITE_EPOCH). (u32::MAX as the thread ends:
+/// no cache keeps that one.)
+pub fn class_tag_of(name: &[u8]) -> u32 {
+    CLASS_TAGS
+        .try_with(|m| {
+            let mut m = m.borrow_mut();
+            if let Some(&t) = m.get(name) {
+                return t;
+            }
+            let t = m.len() as u32 + 1;
+            m.insert(name.into(), t);
+            t
+        })
+        .unwrap_or(u32::MAX)
+}
+
 /// A PHP object instance
+///
+/// (`class_name` is changed with set_class_name(): see class_tag())
 #[derive(Debug, Clone)]
 pub struct PhpObject {
     pub class_name: Vec<u8>,
@@ -566,6 +593,8 @@ pub struct PhpObject {
     pub native: Option<NativeData>,
     /// memory_limit accounting (see `PhpObject::account`).
     pub mem: ObjectMem,
+    /// The class_tag() of `class_name` (0: not looked up yet).
+    tag: std::cell::Cell<u32>,
 }
 
 /// Bytes an object accounts for against memory_limit, and how many of its
@@ -804,9 +833,35 @@ impl PhpObject {
             closure: None,
             native: None,
             mem: ObjectMem::new(),
+            tag: std::cell::Cell::new(0),
         };
         o.account();
         o
+    }
+
+    /// A number standing for the object's class name in this thread (the
+    /// same for all objects of a class: a property access cache compares
+    /// it instead of the names, see Vm::prop_ic_hit). Never 0.
+    #[inline]
+    pub fn class_tag(&self) -> u32 {
+        match self.tag.get() {
+            0 => self.lookup_class_tag(),
+            t => t,
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn lookup_class_tag(&self) -> u32 {
+        let t = class_tag_of(&self.class_name);
+        self.tag.set(t);
+        t
+    }
+
+    /// Give the object another class (its class_tag() follows).
+    pub fn set_class_name(&mut self, name: Vec<u8>) {
+        self.class_name = name;
+        self.tag.set(0);
     }
 
     /// Bring the memory_limit accounting in line with the object's current

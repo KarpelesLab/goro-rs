@@ -13292,7 +13292,7 @@ pub fn reflection_static_call_named(
             reflection_static_call_named(vm, &base_s, method_lower, method_original, args, line);
         if method_lower == "createfrommethodname" {
             if let Some(Value::Object(o)) = &r {
-                o.borrow_mut().class_name = called;
+                o.borrow_mut().set_class_name(called);
             }
         }
         return r;

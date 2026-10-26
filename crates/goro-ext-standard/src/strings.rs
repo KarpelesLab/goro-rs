@@ -517,7 +517,7 @@ fn str_repeat(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "str_repeat(): Argument #2 ($times) must be greater than or equal to 0".to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
-            obj.borrow_mut().class_name = b"ValueError".to_vec();
+            obj.borrow_mut().set_class_name(b"ValueError".to_vec());
         }
         vm.current_exception = Some(exc);
         return Err(VmError {
@@ -2008,7 +2008,7 @@ fn chunk_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "chunk_split(): Argument #2 ($length) must be greater than 0".to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
-            obj.borrow_mut().class_name = b"ValueError".to_vec();
+            obj.borrow_mut().set_class_name(b"ValueError".to_vec());
         }
         vm.current_exception = Some(exc);
         return Err(VmError {
@@ -2739,7 +2739,7 @@ fn substr_compare(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 .to_string();
             let exc = vm.throw_type_error(msg.clone());
             if let Value::Object(obj) = &exc {
-                obj.borrow_mut().class_name = b"ValueError".to_vec();
+                obj.borrow_mut().set_class_name(b"ValueError".to_vec());
             }
             vm.current_exception = Some(exc);
             return Err(VmError {
@@ -2766,7 +2766,7 @@ fn substr_compare(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 .to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
-            obj.borrow_mut().class_name = b"ValueError".to_vec();
+            obj.borrow_mut().set_class_name(b"ValueError".to_vec());
         }
         vm.current_exception = Some(exc);
         return Err(VmError {
@@ -3248,7 +3248,7 @@ fn count_chars(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "count_chars(): Argument #2 ($mode) must be between 0 and 4 (inclusive)".to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
-            obj.borrow_mut().class_name = b"ValueError".to_vec();
+            obj.borrow_mut().set_class_name(b"ValueError".to_vec());
         }
         vm.current_exception = Some(exc);
         return Err(VmError {
@@ -3465,7 +3465,7 @@ fn strncmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "strncmp(): Argument #3 ($length) must be greater than or equal to 0".to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
-            obj.borrow_mut().class_name = b"ValueError".to_vec();
+            obj.borrow_mut().set_class_name(b"ValueError".to_vec());
         }
         vm.current_exception = Some(exc);
         return Err(VmError {
@@ -3513,7 +3513,7 @@ fn strncasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "strncasecmp(): Argument #3 ($length) must be greater than or equal to 0".to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
-            obj.borrow_mut().class_name = b"ValueError".to_vec();
+            obj.borrow_mut().set_class_name(b"ValueError".to_vec());
         }
         vm.current_exception = Some(exc);
         return Err(VmError {

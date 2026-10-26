@@ -4544,7 +4544,7 @@ fn array_combine(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "array_combine(): Argument #1 ($keys) and argument #2 ($values) must have the same number of elements".to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
-            obj.borrow_mut().class_name = b"ValueError".to_vec();
+            obj.borrow_mut().set_class_name(b"ValueError".to_vec());
         }
         vm.current_exception = Some(exc);
         return Err(VmError {
@@ -4599,7 +4599,7 @@ fn array_chunk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let exc = vm.throw_type_error(msg.clone());
             // Change to ValueError
             if let Value::Object(obj) = &exc {
-                obj.borrow_mut().class_name = b"ValueError".to_vec();
+                obj.borrow_mut().set_class_name(b"ValueError".to_vec());
             }
             vm.current_exception = Some(exc);
             return Err(VmError {
@@ -4715,7 +4715,7 @@ fn array_fill(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "array_fill(): Argument #2 ($count) must be greater than or equal to 0".to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
-            obj.borrow_mut().class_name = b"ValueError".to_vec();
+            obj.borrow_mut().set_class_name(b"ValueError".to_vec());
         }
         vm.current_exception = Some(exc);
         return Err(VmError {
@@ -4727,7 +4727,7 @@ fn array_fill(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "array_fill(): Argument #2 ($count) is too large".to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
-            obj.borrow_mut().class_name = b"ValueError".to_vec();
+            obj.borrow_mut().set_class_name(b"ValueError".to_vec());
         }
         vm.current_exception = Some(exc);
         return Err(VmError {
@@ -9976,7 +9976,7 @@ fn dirname_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "dirname(): Argument #2 ($levels) must be greater than or equal to 1".to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
-            obj.borrow_mut().class_name = b"ValueError".to_vec();
+            obj.borrow_mut().set_class_name(b"ValueError".to_vec());
         }
         vm.current_exception = Some(exc);
         return Err(VmError {
