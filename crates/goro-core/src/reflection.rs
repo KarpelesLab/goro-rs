@@ -4744,6 +4744,15 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     .iter()
                     .map(|b| b.to_ascii_lowercase())
                     .collect();
+                // zend_lookup_class(): the class is autoloaded first.
+                if !vm.classes.contains_key(&parent_lower)
+                    && !vm.is_known_builtin_class(&parent_lower)
+                {
+                    vm.try_autoload_class(parent_name.as_bytes());
+                    if vm.current_exception.is_some() {
+                        return Some(Value::Null);
+                    }
+                }
                 // Validate that the parent class exists (PHP throws ReflectionException otherwise)
                 let parent_exists = vm.classes.contains_key(&parent_lower)
                     || vm.is_known_builtin_class(&parent_lower);
