@@ -2075,7 +2075,24 @@ pub fn format_php_float(f: f64) -> String {
     if precision < 0 {
         return format_php_float_shortest(f);
     }
+    if !f.is_finite() {
+        return nonfinite_gcvt(f, precision.max(1) as usize);
+    }
     format_php_float_with_precision(f, precision as usize)
+}
+
+/// zend_gcvt() of INF/NAN: `snprintf(buf, ndigit + 1, ...)` keeps at most
+/// `ndigit` characters of "INF", "-INF" or "NAN".
+#[inline(never)]
+pub fn nonfinite_gcvt(f: f64, ndigit: usize) -> String {
+    let s = if f.is_nan() {
+        "NAN"
+    } else if f < 0.0 {
+        "-INF"
+    } else {
+        "INF"
+    };
+    s[..ndigit.min(s.len())].to_string()
 }
 
 /// Shortest round-trip representation (`%.*H` with precision -1).

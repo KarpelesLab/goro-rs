@@ -461,6 +461,12 @@ fn push_class_name(buf: &mut Vec<u8>, name: &[u8]) {
 /// a precision of 0 behaves differently from var_export()'s
 /// smart_str_append_double() (which bumps it to 1).
 fn format_serialize_double_gcvt(f: f64) -> String {
+    if !f.is_finite() {
+        let sp = goro_core::value::get_php_serialize_precision();
+        if sp >= 0 {
+            return goro_core::value::nonfinite_gcvt(f, sp as usize);
+        }
+    }
     if f.is_finite() && goro_core::value::get_php_serialize_precision() == 0 {
         // zend_gcvt(value, 0, ...): one significant digit, and E-style as
         // soon as the decimal point would follow it (decpt > ndigit == 0).
@@ -486,6 +492,12 @@ fn format_serialize_double_gcvt(f: f64) -> String {
 }
 
 pub(crate) fn format_serialize_double(f: f64) -> String {
+    if !f.is_finite() {
+        let sp = goro_core::value::get_php_serialize_precision();
+        if sp >= 0 {
+            return goro_core::value::nonfinite_gcvt(f, sp.max(1) as usize);
+        }
+    }
     if f.is_nan() {
         return "NAN".to_string();
     }
