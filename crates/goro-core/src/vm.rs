@@ -58400,7 +58400,9 @@ impl Vm {
                             // A set hook runs on the still-lazy object; only the
                             // state it touches initializes it (GH-18000).
                             let skip_init = is_lazy_uninit
-                                && ((has_set && !prop_declared && !guard_active)
+                                && ((has_set
+                                    && !guard_active
+                                    && (!prop_declared || self.prop_write_inaccessible(obj, pn)))
                                     || self.has_unguarded_hook(
                                         &class_lower,
                                         pn,
@@ -58408,7 +58410,15 @@ impl Vm {
                                     ));
                             if !skip_init {
                                 let exc_before_init = self.current_exception.is_some();
-                                self.maybe_run_lazy_init_op(obj);
+                                if !exc_before_init && (is_lazy_uninit || (is_proxy && already_real)) {
+                                    if let Some(msg) = self.lazy_write_access_error(obj, pn) {
+                                        let exc = self.create_exception(b"Error", &msg, op.line);
+                                        self.current_exception = Some(exc);
+                                    }
+                                }
+                                if self.current_exception.is_none() {
+                                    self.maybe_run_lazy_init_op(obj);
+                                }
                                 // An initializer exception aborts the write.
                                 if !exc_before_init && self.current_exception.is_some() {
                                     if let Some((c, f, _, _, pc)) = exception_handlers.pop() {

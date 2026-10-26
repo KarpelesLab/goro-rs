@@ -760,6 +760,73 @@ impl Vm {
         }
     }
 
+    /// zend_std_write_property() on a lazy object: the visibility of the
+    /// (lazy, so uninitialized) declared property is checked before the
+    /// object is initialized. The error message, if the write is denied.
+    #[inline(never)]
+    pub(crate) fn lazy_write_access_error(
+        &self,
+        obj: &Rc<RefCell<crate::object::PhpObject>>,
+        prop: &[u8],
+    ) -> Option<String> {
+        let class_name = obj.borrow().class_name.clone();
+        let cl = class_name.to_ascii_lowercase();
+        let scope = self.current_class_scope().map(|s| s.to_ascii_lowercase());
+        let (vis, decl, ro, _, set_vis) =
+            self.find_property_def_for_scope(&cl, prop, scope.as_deref())?;
+        if set_vis.is_some() {
+            return self.asym_set_denied(set_vis, ro, &decl, &class_name, prop, "modify");
+        }
+        // (an inaccessible property is written through __set())
+        if vis == crate::object::Visibility::Public
+            || self
+                .classes
+                .get(&cl)
+                .is_some_and(|c| c.get_method(b"__set").is_some())
+        {
+            return None;
+        }
+        let caller_scope = self.current_class_scope();
+        self.check_visibility(
+            vis,
+            &decl,
+            &class_name,
+            &String::from_utf8_lossy(prop),
+            true,
+            caller_scope.as_deref(),
+        )
+    }
+
+    /// Whether the declared property `prop` of `obj` is not visible from
+    /// the current scope (a write then goes to __set()).
+    #[inline(never)]
+    pub(crate) fn prop_write_inaccessible(
+        &self,
+        obj: &Rc<RefCell<crate::object::PhpObject>>,
+        prop: &[u8],
+    ) -> bool {
+        let class_name = obj.borrow().class_name.clone();
+        let cl = class_name.to_ascii_lowercase();
+        let scope = self.current_class_scope();
+        let scope_lower = scope.as_ref().map(|s| s.to_ascii_lowercase());
+        match self.find_property_def_for_scope(&cl, prop, scope_lower.as_deref()) {
+            Some((vis, decl, ..)) => {
+                vis != crate::object::Visibility::Public
+                    && self
+                        .check_visibility(
+                            vis,
+                            &decl,
+                            &class_name,
+                            &String::from_utf8_lossy(prop),
+                            true,
+                            scope.as_deref(),
+                        )
+                        .is_some()
+            }
+            None => false,
+        }
+    }
+
     /// zend_asymmetric_visibility_property_modification_error(): the
     /// message when the current scope may not write a `set_vis` property.
     pub(crate) fn asym_set_denied(
