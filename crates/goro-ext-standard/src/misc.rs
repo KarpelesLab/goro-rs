@@ -22385,24 +22385,29 @@ fn stream_wrapper_restore_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmE
     Ok(Value::True)
 }
 
-fn stream_get_wrappers_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn stream_get_wrappers_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut arr = PhpArray::new();
-    // Built-in wrappers (alphabetical).
-    for name in &[
-        b"compress.zlib" as &[u8],
-        b"data",
-        b"file",
-        b"glob",
-        b"http",
-        b"https",
-        b"php",
-    ] {
+    // In registration order: ext/openssl's (MINIT before zlib's and
+    // standard's), zlib's, standard's, then the other extensions' and the
+    // script's.
+    let ssl = vm.crypto_hooks.is_some();
+    let mut builtin: Vec<&[u8]> = Vec::new();
+    if ssl {
+        builtin.extend_from_slice(&[b"https", b"ftps"]);
+    }
+    builtin.extend_from_slice(&[b"compress.zlib", b"php", b"file", b"glob", b"data", b"http"]);
+    if !ssl {
+        builtin.push(b"https");
+    }
+    for name in &builtin {
         arr.push(Value::String(PhpString::from_bytes(name)));
     }
     // User-registered wrappers.
     USER_WRAPPERS.with(|w| {
         for scheme in w.borrow().keys() {
-            arr.push(Value::String(PhpString::from_vec(scheme.clone())));
+            if !builtin.contains(&scheme.as_slice()) {
+                arr.push(Value::String(PhpString::from_vec(scheme.clone())));
+            }
         }
     });
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
@@ -22416,10 +22421,16 @@ fn stream_get_filters_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
-fn stream_get_transports_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn stream_get_transports_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut arr = PhpArray::new();
     for name in &[b"tcp" as &[u8], b"udp", b"unix", b"udg"] {
         arr.push(Value::String(PhpString::from_bytes(name)));
+    }
+    // (ext/openssl's socket transports)
+    if vm.crypto_hooks.is_some() {
+        for name in &[b"ssl" as &[u8], b"tls", b"tlsv1.0", b"tlsv1.1", b"tlsv1.2", b"tlsv1.3"] {
+            arr.push(Value::String(PhpString::from_bytes(name)));
+        }
     }
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }

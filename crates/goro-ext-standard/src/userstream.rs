@@ -5131,22 +5131,44 @@ fn h_stream_wrapper_restore(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>
 fn h_stream_get_wrappers(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     let orig = call_orig(vm, "stream_get_wrappers", args)?;
     let mut a = new_arr();
+    // In registration order: the core ones, ftp:// (ext/standard's, right
+    // after http://), the other extensions' (phar://, zip://), then the
+    // script's.
+    let core: &[&[u8]] = &[
+        b"https",
+        b"ftps",
+        b"compress.zlib",
+        b"php",
+        b"file",
+        b"glob",
+        b"data",
+        b"http",
+    ];
+    let mut user: Vec<Value> = Vec::new();
+    let mut seen: Vec<Vec<u8>> = Vec::new();
     if let Value::Array(arr) = orig {
         for v in arr.borrow().values() {
             let name = v.to_php_string().as_bytes().to_ascii_lowercase();
             if builtin_disabled(&name) {
                 continue;
             }
-            a.push(v.clone());
+            if core.contains(&name.as_slice()) {
+                a.push(v.clone());
+            } else {
+                user.push(v.clone());
+            }
+            seen.push(name);
         }
     }
-    // Wrappers other extensions registered (phar://, zip://)
     let mut native: Vec<Vec<u8>> = NATIVE_WRAPPERS.with(|w| w.borrow().keys().cloned().collect());
-    native.sort();
+    native.sort_by_key(|n| (n.as_slice() != b"ftp", n.clone()));
     for name in native {
-        if !builtin_disabled(&name) {
+        if !builtin_disabled(&name) && !seen.contains(&name) {
             a.push(Value::String(PhpString::from_vec(name)));
         }
+    }
+    for v in user {
+        a.push(v);
     }
     Ok(Some(arr_val(a)))
 }
