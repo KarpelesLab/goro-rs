@@ -31,7 +31,7 @@ $cases = [
 foreach ($cases as [$url, $ct]) {
     $err = fopen('php://memory', 'w+');
     $ch = curl_init($url);
-    curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => 1, CURLOPT_CONNECT_TO => $ct, CURLOPT_VERBOSE => 1, CURLOPT_STDERR => $err, CURLOPT_TIMEOUT => 5]);
+    curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => 1, CURLOPT_PROXY => "", CURLOPT_CONNECT_TO => $ct, CURLOPT_VERBOSE => 1, CURLOPT_STDERR => $err, CURLOPT_TIMEOUT => 5]);
     $r = curl_exec($ch);
     echo json_encode($r), ' ', curl_errno($ch), ' [', curl_error($ch), "]\n";
     rewind($err);
