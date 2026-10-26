@@ -2888,8 +2888,10 @@ impl crate::vm::Vm {
         {
             return None;
         }
-        // The arguments, as the sends would pass them.
-        let mut args: [Value; 2] = [Value::Null, Value::Null];
+        // The arguments, as the sends would pass them: the values where they
+        // are, not copies (the builtins of SPECIAL_CALLS only look at them:
+        // they call no user code and change nothing they are in).
+        let mut args = std::mem::ManuallyDrop::new([Value::Null, Value::Null]);
         for (i, s) in sends.iter().enumerate() {
             let plain_send = match s.opcode {
                 OpCode::SendVal => matches!(s.result, OperandType::Unused),
@@ -2899,31 +2901,35 @@ impl crate::vm::Vm {
             if !plain_send {
                 return None;
             }
+            // SAFETY: a bitwise copy of a value that stays where it is for
+            // the call (see above), never dropped (`args` is ManuallyDrop).
             let v = match s.op1 {
                 OperandType::Cv(c) => match cvs.get(c as usize)? {
                     Value::Undef => return None,
                     Value::Reference(r) => match &*r.try_borrow().ok()? {
                         Value::Undef | Value::Reference(_) => return None,
-                        v => v.clone(),
+                        v => unsafe { std::ptr::read(v) },
                     },
-                    v => v.clone(),
+                    v => unsafe { std::ptr::read(v) },
                 },
-                OperandType::Const(c) => literals.get(c as usize)?.clone(),
+                OperandType::Const(c) => unsafe { std::ptr::read(literals.get(c as usize)?) },
                 // (a temporary the send releases: one that holds a plain
                 // value, or a container held elsewhere too)
                 OperandType::Tmp(c) => match tmps.get(c as usize)? {
                     Value::Undef | Value::Reference(_) => return None,
-                    v if is_plain_scalar(v) => v.clone(),
-                    v @ Value::Array(a) if Rc::strong_count(a) > 1 => v.clone(),
-                    v @ Value::Object(o) if Rc::strong_count(o) > 1 => v.clone(),
+                    v if is_plain_scalar(v) => unsafe { std::ptr::read(v) },
+                    v @ Value::Array(a) if Rc::strong_count(a) > 1 => unsafe { std::ptr::read(v) },
+                    v @ Value::Object(o) if Rc::strong_count(o) > 1 => unsafe { std::ptr::read(v) },
                     _ => return None,
                 },
                 _ => return None,
             };
-            if matches!(&v, Value::Array(a) if Rc::ptr_eq(a, &self.globals)) {
+            let v = std::mem::ManuallyDrop::new(v);
+            if matches!(&*v, Value::Array(a) if Rc::ptr_eq(a, &self.globals)) {
                 return None;
             }
-            args[i] = v;
+            // (the Null replaced holds nothing to drop)
+            args[i] = std::mem::ManuallyDrop::into_inner(v);
         }
         let ok = match kind {
             SpecialArgs::Any => true,
