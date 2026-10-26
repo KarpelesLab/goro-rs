@@ -691,7 +691,7 @@ fn exif_imagetype(vm: &mut Vm, args: &[Value]) -> R {
         ));
     }
     if path.is_empty() {
-        return Err(throw(vm, b"ValueError", "Path cannot be empty".into()));
+        return Err(throw(vm, b"ValueError", "Path must not be empty".into()));
     }
     let Some(id) = ext_io::open(vm, &path, "rb", true)? else {
         return Ok(Value::False);

@@ -310,7 +310,7 @@ final class StreamBucket {
     vm.register_function(b"natcasesort", natcasesort_fn);
     vm.register_function(b"range", range_fn);
     vm.register_function(b"current", current);
-    vm.register_function(b"pos", current);
+    vm.register_function(b"pos", pos_fn);
     vm.register_function(b"getrusage", getrusage_fn);
     vm.register_function(b"strptime", strptime_fn);
     vm.register_function(b"proc_nice", proc_nice_fn);
@@ -5630,9 +5630,19 @@ fn obj_slots(obj: &Rc<RefCell<PhpObject>>) -> Vec<(Vec<u8>, Option<Value>)> {
 /// The array-pointer functions on an object (deprecated): `op` is the
 /// function name; the property table is walked skipping UNDEF slots.
 fn obj_pointer_op(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, op: &str) -> Value {
+    obj_pointer_op_as(vm, obj, op, op)
+}
+
+/// obj_pointer_op() of a function called as `shown` (pos() is current())
+fn obj_pointer_op_as(
+    vm: &mut Vm,
+    obj: &Rc<RefCell<PhpObject>>,
+    op: &str,
+    shown: &str,
+) -> Value {
     vm.emit_deprecated(&format!(
         "{}(): Calling {}() on an object is deprecated",
-        op, op
+        shown, shown
     ));
     let slots = obj_slots(obj);
     let id = obj.borrow().object_id;
@@ -5660,6 +5670,13 @@ fn obj_pointer_op(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, op: &str) -> Value 
         (_, Some(i)) => slots[i].1.clone().unwrap_or(Value::False),
         (_, None) => Value::False,
     }
+}
+
+fn pos_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Object(o)) = args.first().map(|v| v.deref()) {
+        return Ok(obj_pointer_op_as(vm, &o, "current", "pos"));
+    }
+    current(vm, args)
 }
 
 fn current(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -15413,8 +15430,9 @@ fn http_response_code_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
             Value::Long(code)
         }
     };
+    // (a response code of 0 only reads it)
     if let Some(v) = args.first() {
-        if !matches!(v, Value::Null) {
+        if !matches!(v, Value::Null) && v.to_long() != 0 {
             if vm.headers_sent {
                 let msg = match vm.output_start.clone() {
                     Some((f, l)) => format!(
@@ -22523,6 +22541,16 @@ fn get_resources_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             });
         }
     };
+    // (zend_fetch_list_dtor_id(): a resource type some loaded extension
+    // registered)
+    if let Some(t) = &ty {
+        if t.as_slice() != b"Unknown" && !resource_type_registered(vm, t)? {
+            return Err(throw_value_error_msg(
+                vm,
+                "get_resources(): Argument #1 ($type) must be a valid resource type",
+            ));
+        }
+    }
     let mut arr = PhpArray::new();
     for (id, t) in goro_core::value::live_resources() {
         let keep = match (&ty, &t) {
@@ -22537,6 +22565,31 @@ fn get_resources_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
+/// Whether a loaded extension registered the resource type `name`.
+fn resource_type_registered(vm: &mut Vm, name: &[u8]) -> Result<bool, VmError> {
+    const CORE: &[&[u8]] = &[
+        b"index pointer",
+        b"persistent stream",
+        b"process",
+        b"stream factory",
+        b"stream filter",
+        b"stream",
+        b"stream-context",
+    ];
+    if CORE.contains(&name) {
+        return Ok(true);
+    }
+    let ext: &[u8] = match name {
+        b"dba" | b"dba persistent" => b"dba",
+        b"pgsql link" | b"pgsql link persistent" | b"pgsql result" => b"pgsql",
+        b"PDO persistent database" => b"pdo",
+        b"MySqli persistent connection" => b"mysqli",
+        _ => return Ok(false),
+    };
+    let loaded = extension_loaded_fn(vm, &[Value::String(PhpString::from_bytes(ext))])?;
+    Ok(loaded.is_truthy())
+}
+
 thread_local! {
     /// BG(syslog_device): openlog() keeps the ident pointer.
     static SYSLOG_IDENT: RefCell<Option<std::ffi::CString>> = const { RefCell::new(None) };

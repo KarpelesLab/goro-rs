@@ -1965,7 +1965,7 @@ fn getimagesize_from_any(vm: &mut Vm, args: &[Value], from_path: bool) -> Result
 
     let data = if from_path {
         if input.as_bytes().is_empty() {
-            return Err(throw(vm, b"ValueError", "Path cannot be empty".to_string()));
+            return Err(throw(vm, b"ValueError", "Path must not be empty".to_string()));
         }
         match open_and_read(vm, func, &input.to_string_lossy()) {
             Some(d) => d,
