@@ -9720,6 +9720,13 @@ impl Vm {
     /// Check if a class is (or inherits from / implements) a given type name
     #[allow(clippy::if_same_then_else)] // branches mirror php-src
     fn class_is_a(&self, class_entry: &ClassEntry, target_lower: &[u8]) -> bool {
+        // (a class_alias() names the aliased class)
+        if let Some(t) = self.classes.get(target_lower) {
+            if !t.name.eq_ignore_ascii_case(target_lower) {
+                let canon = t.name.to_ascii_lowercase();
+                return self.class_is_a(class_entry, &canon);
+            }
+        }
         // Check parent
         if let Some(parent_name) = &class_entry.parent {
             let parent_lower: Vec<u8> =
@@ -13975,6 +13982,14 @@ impl Vm {
                     let iface_lower: Vec<u8> =
                         iface.iter().map(|b| b.to_ascii_lowercase()).collect();
                     if iface_lower == iface_name {
+                        return true;
+                    }
+                    // (implemented through a class_alias() of it)
+                    if self
+                        .classes
+                        .get(&iface_lower)
+                        .is_some_and(|c| c.name.eq_ignore_ascii_case(iface_name))
+                    {
                         return true;
                     }
                     // The interface itself may extend other interfaces. PHP
@@ -53652,6 +53667,16 @@ impl Vm {
                                     message: format!("Uncaught Error: {}", msg),
                                     line: op.line,
                                 });
+                            }
+                            // A parent named through a class_alias() is the
+                            // aliased class (ce->parent is the class entry).
+                            if let Some(canon) = self
+                                .classes
+                                .get(&parent_lower)
+                                .map(|p| p.name.clone())
+                                .filter(|n| !n.eq_ignore_ascii_case(parent_name))
+                            {
+                                class.parent = Some(canon);
                             }
                         }
                         // Resolve traits: copy trait methods/properties/constants into the class

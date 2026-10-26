@@ -114,6 +114,8 @@ fn class_is_a(vm: &Vm, class: &[u8], n: &[u8]) -> bool {
     let Some(target) = vm.classes.get(&n) else {
         return false;
     };
+    // (a class_alias() names the aliased class)
+    let n = target.name.to_ascii_lowercase();
     let mut cur = class.to_ascii_lowercase();
     if target.is_interface {
         return vm.classes.contains_key(&cur) && vm.class_implements_interface(&cur, &n);
