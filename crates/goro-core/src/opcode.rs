@@ -482,11 +482,14 @@ pub enum OpCode {
     /// Like PropertyGetW for `unset($o->p[k])` (FETCH_OBJ_UNSET): a missing
     /// property is created as null instead of an array.
     PropertyGetWUnset,
+    /// Like StaticPropFetchW for `unset(C::$p[k])` (FETCH_STATIC_PROP_UNSET):
+    /// a null / uninitialized property is left alone.
+    StaticPropFetchUnset,
     // (new opcodes go above: LAST_OPCODE names the last one)
 }
 
 /// The opcode numbered highest (the last declared).
-const LAST_OPCODE: OpCode = OpCode::PropertyGetWUnset;
+const LAST_OPCODE: OpCode = OpCode::StaticPropFetchUnset;
 
 impl OpCode {
     /// The opcode numbered `n` (`op as u8`), as the file cache stores it.

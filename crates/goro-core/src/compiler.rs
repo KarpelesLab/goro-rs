@@ -13582,7 +13582,12 @@ impl Compiler {
             array.kind,
             ExprKind::StaticPropertyAccess { .. } | ExprKind::DynamicStaticPropertyAccess { .. }
         ) {
-            let tmp = self.emit_static_prop_fetch(OpCode::StaticPropFetchW, array)?;
+            let opcode = if mode == DimFetch::Unset {
+                OpCode::StaticPropFetchUnset
+            } else {
+                OpCode::StaticPropFetchW
+            };
+            let tmp = self.emit_static_prop_fetch(opcode, array)?;
             return Ok(OperandType::Tmp(tmp));
         }
         if let ExprKind::PropertyAccess {

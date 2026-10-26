@@ -35,6 +35,8 @@ pub(crate) enum SpFetch {
     W,
     /// Reference fetch (`$r = &C::$p`, by-ref argument, ...).
     Ref,
+    /// Container fetch for `unset(C::$p[k])`: nothing is auto-initialized.
+    Unset,
 }
 
 /// A resolved static property slot (indices into `Vm::classes`, so the
@@ -663,7 +665,7 @@ impl Vm {
                 }
                 Ok(v)
             }
-            SpFetch::W => {
+            SpFetch::W | SpFetch::Unset => {
                 let rc = match cell {
                     Value::Reference(r) => Some(r.clone()),
                     _ => None,
@@ -673,6 +675,7 @@ impl Vm {
                     None => cell.clone(),
                 };
                 match cur {
+                    Value::Null | Value::Undef if mode == SpFetch::Unset => Ok(Value::Null),
                     Value::Null | Value::Undef => {
                         if let Some(pt) = &ptype {
                             // (zend_handle_fetch_obj_flags(): an uninitialized

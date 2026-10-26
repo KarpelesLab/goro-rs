@@ -47303,6 +47303,7 @@ impl Vm {
                 OpCode::StaticPropFetch
                 | OpCode::StaticPropFetchRW
                 | OpCode::StaticPropFetchW
+                | OpCode::StaticPropFetchUnset
                 | OpCode::StaticPropGetRef => match outlined(|| -> Result<Flow, VmError> {
                     // `C::$p` reads (no class-constant fallback), read-modify-write,
                     // dimension-write container and reference fetches.
@@ -47320,6 +47321,7 @@ impl Vm {
                     let mode = match op.opcode {
                         OpCode::StaticPropFetchRW => SpFetch::RW,
                         OpCode::StaticPropFetchW => SpFetch::W,
+                        OpCode::StaticPropFetchUnset => SpFetch::Unset,
                         OpCode::StaticPropGetRef => SpFetch::Ref,
                         _ => SpFetch::R,
                     };
