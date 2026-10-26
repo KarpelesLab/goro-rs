@@ -34,6 +34,15 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"mb_ereg_search_getpos", mb_ereg_search_getpos);
     vm.register_function(b"mb_ereg_search_setpos", mb_ereg_search_setpos);
     vm.register_function(b"mb_regex_set_options", mb_regex_set_options);
+    // The argument count is checked before any argument is parsed.
+    for name in [
+        &b"mb_ereg_replace"[..],
+        b"mb_eregi_replace",
+        b"mb_ereg_replace_callback",
+    ] {
+        vm.zpp_extension_verified
+            .insert(name.to_vec(), goro_core::arginfo::CHECK_ARITY);
+    }
 }
 
 /// (names, onig encoding) as in php_mbregex.c's enc_name_map

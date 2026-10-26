@@ -979,6 +979,19 @@ fn mb_str_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         0 => (num, 0),
         _ => (num / 2, num - num / 2),
     };
+    // zend_string_alloc() of the result: over memory_limit this is the
+    // "Allowed memory size" fatal error, not an allocation.
+    let partial = |n: usize| get_substr(&pad, 0, n % pad_length, enc).len();
+    let pad_bytes = |n: usize| {
+        (n / pad_length)
+            .saturating_mul(pad.len())
+            .saturating_add(partial(n))
+    };
+    let total = input
+        .len()
+        .saturating_add(pad_bytes(left_pad))
+        .saturating_add(pad_bytes(right_pad));
+    vm.memory_check(total.saturating_add(24 + 1 + 7) & !7)?;
     let build = |n: usize| -> Vec<u8> {
         let mut v = Vec::new();
         for _ in 0..(n / pad_length) {
