@@ -1,4 +1,4 @@
-use crate::token::{Span, Token, TokenKind, keyword_or_identifier_owned};
+use crate::token::{Span, Token, TokenKind, keyword_or_identifier};
 
 /// Lexer state (PHP has multiple scanning modes)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,7 +130,18 @@ impl<'a> Lexer<'a> {
         true
     }
 
+    /// Skip whitespace and comments (see skip_trivia()).
+    #[inline(always)]
     fn skip_whitespace(&mut self) {
+        if matches!(
+            self.source.get(self.pos),
+            Some(b' ' | b'\t' | b'\r' | b'\n' | b'/' | b'#')
+        ) {
+            self.skip_trivia();
+        }
+    }
+
+    fn skip_trivia(&mut self) {
         loop {
             // Accumulate a run of whitespace.
             let ws_start = self.pos;
@@ -512,28 +523,45 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_single_quoted_string(&mut self) -> Vec<u8> {
-        // Opening quote already consumed
+        // Opening quote already consumed. `\'` and `\\` are escapes, any
+        // other byte (a lone `\` too) is itself: the text from `seg` on is
+        // copied as is.
+        let src = self.source;
+        let start = self.pos;
         let mut result = Vec::new();
+        let mut p = start;
+        let mut seg = p;
+        let mut lines = 0;
         loop {
-            match self.advance() {
-                Some(b'\'') => break,
-                Some(b'\\') => match self.peek() {
-                    Some(b'\'') => {
-                        self.advance();
-                        result.push(b'\'');
-                    }
-                    Some(b'\\') => {
-                        self.advance();
-                        result.push(b'\\');
-                    }
-                    _ => {
-                        result.push(b'\\');
-                    }
-                },
-                Some(ch) => result.push(ch),
-                None => break,
+            let Some(k) = memchr::memchr3(b'\'', b'\\', b'\n', &src[p..]) else {
+                // (unterminated)
+                result.extend_from_slice(&src[seg..]);
+                p = src.len();
+                break;
+            };
+            let q = p + k;
+            if src[q] == b'\n' {
+                lines += 1;
+                p = q + 1;
+                continue;
+            }
+            if src[q] == b'\'' {
+                result.extend_from_slice(&src[seg..q]);
+                p = q + 1;
+                break;
+            }
+            match src.get(q + 1) {
+                Some(&c @ (b'\'' | b'\\')) => {
+                    result.extend_from_slice(&src[seg..q]);
+                    result.push(c);
+                    p = q + 2;
+                    seg = p;
+                }
+                _ => p = q + 1,
             }
         }
+        self.line += lines;
+        self.pos = p;
         result
     }
 
@@ -1169,7 +1197,10 @@ impl<'a> Lexer<'a> {
             }
 
             b'a'..=b'z' | b'A'..=b'Z' | b'_' | 0x80..=0xFF => {
-                let ident = self.scan_identifier();
+                // (copied only when it is an identifier)
+                let src = self.source;
+                self.skip_label();
+                let ident = &src[start..self.pos];
 
                 // `{LABEL}("\\"{LABEL})+`: a namespaced name is one token
                 // (T_NAME_QUALIFIED, or T_NAME_RELATIVE for `namespace\...`).
@@ -1263,10 +1294,10 @@ impl<'a> Lexer<'a> {
                     if is_kw {
                         TokenKind::Enum
                     } else {
-                        TokenKind::Identifier(ident.clone())
+                        TokenKind::Identifier(ident.to_vec())
                     }
                 } else {
-                    keyword_or_identifier_owned(ident)
+                    keyword_or_identifier(ident)
                 }
             }
 
@@ -2165,35 +2196,40 @@ impl<'a> Lexer<'a> {
                 | TokenKind::BlockComment(_)
                 | TokenKind::DocComment(_) => {}
                 kind => {
-                    halt = match kind {
-                        TokenKind::Identifier(n)
-                            if depth == 0
-                                && !prev_member
-                                && n.eq_ignore_ascii_case(b"__halt_compiler") =>
-                        {
-                            1
+                    // (one match: the halt state, the brace depth and
+                    // whether the next name is a member's)
+                    let (next_halt, member) = match kind {
+                        TokenKind::Identifier(n) => (
+                            u8::from(
+                                depth == 0
+                                    && !prev_member
+                                    && n.eq_ignore_ascii_case(b"__halt_compiler"),
+                            ),
+                            false,
+                        ),
+                        TokenKind::OpenParen => (if halt == 1 { 2 } else { 0 }, false),
+                        TokenKind::CloseParen => (if halt == 2 { 3 } else { 0 }, false),
+                        TokenKind::Semicolon | TokenKind::CloseTag => {
+                            stop = halt == 3;
+                            (0, false)
                         }
-                        TokenKind::OpenParen if halt == 1 => 2,
-                        TokenKind::CloseParen if halt == 2 => 3,
-                        TokenKind::Semicolon | TokenKind::CloseTag if halt == 3 => {
-                            stop = true;
-                            0
+                        TokenKind::OpenBrace => {
+                            depth += 1;
+                            (0, false)
                         }
-                        _ => 0,
-                    };
-                    match kind {
-                        TokenKind::OpenBrace => depth += 1,
-                        TokenKind::CloseBrace => depth -= 1,
-                        _ => {}
-                    }
-                    prev_member = matches!(
-                        kind,
+                        TokenKind::CloseBrace => {
+                            depth -= 1;
+                            (0, false)
+                        }
                         TokenKind::Arrow
-                            | TokenKind::NullsafeArrow
-                            | TokenKind::DoubleColon
-                            | TokenKind::Function
-                            | TokenKind::Backslash
-                    );
+                        | TokenKind::NullsafeArrow
+                        | TokenKind::DoubleColon
+                        | TokenKind::Function
+                        | TokenKind::Backslash => (0, true),
+                        _ => (0, false),
+                    };
+                    halt = next_halt;
+                    prev_member = member;
                 }
             }
             let span = token.span;

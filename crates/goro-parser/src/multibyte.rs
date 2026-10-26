@@ -468,13 +468,15 @@ thread_local! {
 fn scan_encoding_declares(tokens: &[Token], settings: Option<&Settings>) {
     let mut out = Vec::new();
     let mut i = 0;
-    while i < tokens.len() {
-        if !matches!(tokens[i].kind, TokenKind::Declare)
-            || !matches!(
-                tokens.get(i + 1).map(|t| &t.kind),
-                Some(TokenKind::OpenParen)
-            )
-        {
+    while let Some(at) = tokens[i..]
+        .iter()
+        .position(|t| matches!(t.kind, TokenKind::Declare))
+    {
+        i += at;
+        if !matches!(
+            tokens.get(i + 1).map(|t| &t.kind),
+            Some(TokenKind::OpenParen)
+        ) {
             i += 1;
             continue;
         }

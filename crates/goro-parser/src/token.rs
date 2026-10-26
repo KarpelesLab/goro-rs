@@ -601,15 +601,6 @@ pub fn keyword_or_identifier(ident: &[u8]) -> TokenKind {
     keyword_kind(ident).unwrap_or_else(|| TokenKind::Identifier(ident.to_vec()))
 }
 
-/// keyword_or_identifier() of a name scanned into a buffer of its own
-/// (an identifier keeps it).
-pub fn keyword_or_identifier_owned(ident: Vec<u8>) -> TokenKind {
-    match keyword_kind(&ident) {
-        Some(k) => k,
-        None => TokenKind::Identifier(ident),
-    }
-}
-
 /// The keyword `ident` is (case-insensitively), if any.
 fn keyword_kind(ident: &[u8]) -> Option<TokenKind> {
     // (keywords are 2 to 12 bytes long)
