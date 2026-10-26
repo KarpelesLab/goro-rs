@@ -20413,7 +20413,7 @@ fn hrtime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     unsafe {
         libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
     }
-    let (secs, nsecs) = (ts.tv_sec as i64, ts.tv_nsec as i64);
+    let (secs, nsecs) = (ts.tv_sec, ts.tv_nsec);
     if as_number {
         Ok(Value::Long(
             secs.wrapping_mul(1_000_000_000).wrapping_add(nsecs),

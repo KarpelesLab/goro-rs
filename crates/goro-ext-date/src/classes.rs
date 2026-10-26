@@ -139,10 +139,10 @@ fn clone_obj(vm: &mut Vm, o: &Obj) -> R<Obj> {
             })
             .collect();
         keys.into_iter()
-            .filter_map(|k| {
+            .map(|k| {
                 let v = n.get_property(&k);
                 n.remove_property(&k);
-                Some((k, v))
+                (k, v)
             })
             .collect()
     } else {
