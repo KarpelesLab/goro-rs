@@ -605,6 +605,13 @@ pub(crate) fn fast_op(
             let Some(b) = defined_operand(&op.op2, cvs, tmps, literals) else {
                 return Fast::No;
             };
+            // (a temporary object is released by the opcode: the general
+            // handler's, as the dispatch loop frees it right after)
+            if matches!(op.op1, OperandType::Tmp(_)) && matches!(a, Value::Object(_))
+                || matches!(op.op2, OperandType::Tmp(_)) && matches!(b, Value::Object(_))
+            {
+                return Fast::No;
+            }
             let same = match (&a, &b) {
                 (Value::Array(_), Value::Array(_)) => return Fast::No,
                 // (an array is identical to no other type; a temporary's is
