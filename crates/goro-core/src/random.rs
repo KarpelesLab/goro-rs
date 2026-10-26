@@ -1656,6 +1656,13 @@ fn randomizer_call(
             }
             let e = randomizer_engine(vm, obj)?;
             let length = length as usize;
+            // zend_string_alloc(): over memory_limit, the "Allowed memory
+            // size" fatal error (the script ends: zend_bailout())
+            let size = length.saturating_add(24 + 1 + 7) & !7;
+            if vm.memory_check(size).is_err() {
+                vm.fatal_bailout = true;
+                return null;
+            }
             let mut out = Vec::with_capacity(length);
             while out.len() < length {
                 let mut r = generate(vm, &e);
@@ -1695,6 +1702,13 @@ fn randomizer_call(
             }
             let e = randomizer_engine(vm, obj)?;
             let length = length as usize;
+            if vm
+                .memory_check(length.saturating_add(24 + 1 + 7) & !7)
+                .is_err()
+            {
+                vm.fatal_bailout = true;
+                return null;
+            }
             let max_offset = source.len() - 1;
             let mut out = Vec::with_capacity(length);
             if max_offset > 0xff {

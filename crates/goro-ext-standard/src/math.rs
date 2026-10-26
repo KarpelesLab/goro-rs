@@ -1418,6 +1418,7 @@ fn random_bytes_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "random_bytes(): Argument #1 ($length) must be greater than 0".to_string(),
         );
     }
+    vm.memory_check(zend_string_alloc_size(len as usize))?;
     let mut bytes = vec![0u8; len as usize];
     goro_core::random::csprng_bytes(&mut bytes);
     Ok(Value::String(goro_core::string::PhpString::from_vec(bytes)))

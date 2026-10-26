@@ -858,57 +858,53 @@ fn explode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
 
-    // First, split without limit to get all pieces
-    let mut pieces: Vec<Vec<u8>> = Vec::new();
-    let mut start = 0;
-    let mut i = 0;
-    while i + d.len() <= s.len() {
-        if &s[i..i + d.len()] == d {
-            pieces.push(s[start..i].to_vec());
-            i += d.len();
-            start = i;
+    // The piece boundaries (php_explode() / php_explode_negative_limit()).
+    let find = |from: usize| -> Option<usize> {
+        if d.len() == 1 {
+            s[from..].iter().position(|&c| c == d[0]).map(|p| from + p)
         } else {
-            i += 1;
+            s[from..]
+                .windows(d.len())
+                .position(|w| w == d)
+                .map(|p| from + p)
         }
-    }
-    pieces.push(s[start..].to_vec());
-
+    };
     let mut arr = PhpArray::new();
-    if limit > 0 {
-        let limit = limit as usize;
-        if limit >= pieces.len() {
-            for p in pieces {
-                arr.push(Value::String(PhpString::from_vec(p)));
-            }
-        } else {
-            // Return first (limit-1) pieces, then rest joined
-            for p in &pieces[..limit - 1] {
-                arr.push(Value::String(PhpString::from_vec(p.clone())));
-            }
-            // Join remaining pieces with delimiter
-            let mut rest = Vec::new();
-            for (j, p) in pieces[limit - 1..].iter().enumerate() {
-                if j > 0 {
-                    rest.extend_from_slice(d);
-                }
-                rest.extend_from_slice(p);
-            }
-            arr.push(Value::String(PhpString::from_vec(rest)));
+    // (each element's zend_string and the growing table count against
+    // memory_limit: over it, the fatal error comes from inside explode())
+    let push = |vm: &mut Vm, arr: &mut PhpArray, b: &[u8]| -> Result<(), VmError> {
+        arr.push(Value::String(PhpString::from_bytes(b)));
+        if arr.len() & 0x3ff == 0 && goro_core::value::memory_exhausted() != 0 {
+            return Err(vm.memory_limit_fatal());
         }
+        Ok(())
+    };
+    if limit > 0 {
+        let mut start = 0;
+        while (arr.len() as i64) < limit - 1 {
+            let Some(p) = find(start) else { break };
+            push(_vm, &mut arr, &s[start..p])?;
+            start = p + d.len();
+        }
+        push(_vm, &mut arr, &s[start..])?;
     } else if limit < 0 {
-        // Negative limit: return all except last -limit elements
-        let drop = (-limit) as usize;
-        if drop >= pieces.len() {
-            // Return empty array - but PHP returns array with empty string? No, empty array
-            // Actually PHP returns empty array when limit drops all
-        } else {
-            for p in &pieces[..pieces.len() - drop] {
-                arr.push(Value::String(PhpString::from_vec(p.clone())));
-            }
+        // All except the last -limit pieces.
+        let mut ends = Vec::new();
+        let mut start = 0;
+        while let Some(p) = find(start) {
+            ends.push((start, p));
+            start = p + d.len();
+        }
+        ends.push((start, s.len()));
+        let keep = ends
+            .len()
+            .saturating_sub(limit.unsigned_abs().min(usize::MAX as u64) as usize);
+        for &(a, b) in &ends[..keep] {
+            push(_vm, &mut arr, &s[a..b])?;
         }
     } else {
         // limit == 0: treated as 1
-        arr.push(Value::String(PhpString::from_vec(s.to_vec())));
+        push(_vm, &mut arr, s)?;
     }
 
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
@@ -5789,7 +5785,10 @@ fn str_word_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         end -= 1;
     }
 
-    let mut words: Vec<(usize, Vec<u8>)> = Vec::new();
+    // (the words go straight into the result: its strings and table count
+    // against memory_limit as they are added)
+    let mut count = 0i64;
+    let mut arr = PhpArray::new();
     let mut p = start;
     while p < end {
         let s_pos = p;
@@ -5797,32 +5796,23 @@ fn str_word_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             p += 1;
         }
         if p > s_pos {
-            words.push((s_pos, bytes[s_pos..p].to_vec()));
+            count += 1;
+            let w = Value::String(PhpString::from_bytes(&bytes[s_pos..p]));
+            match format {
+                1 => arr.push(w),
+                2 => arr.set(ArrayKey::Int(s_pos as i64), w),
+                _ => {}
+            }
+            if format != 0 && count & 0x3ff == 0 && goro_core::value::memory_exhausted() != 0 {
+                return Err(vm.memory_limit_fatal());
+            }
         }
         p += 1;
     }
-
-    match format {
-        0 => Ok(Value::Long(words.len() as i64)),
-        1 => {
-            let mut arr = PhpArray::new();
-            for (_, word) in &words {
-                arr.push(Value::String(PhpString::from_vec(word.clone())));
-            }
-            Ok(Value::Array(Rc::new(RefCell::new(arr))))
-        }
-        2 => {
-            let mut arr = PhpArray::new();
-            for (pos, word) in &words {
-                arr.set(
-                    ArrayKey::Int(*pos as i64),
-                    Value::String(PhpString::from_vec(word.clone())),
-                );
-            }
-            Ok(Value::Array(Rc::new(RefCell::new(arr))))
-        }
-        _ => unreachable!(),
-    }
+    Ok(match format {
+        0 => Value::Long(count),
+        _ => Value::Array(Rc::new(RefCell::new(arr))),
+    })
 }
 
 fn convert_uuencode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
