@@ -1429,6 +1429,11 @@ pub struct Vm {
     /// The Closure an internal function (call_user_func(), array_map(), ...)
     /// is about to call (zend_call_function()): its frame is a closure frame.
     pub callback_closure: Option<std::rc::Weak<RefCell<PhpObject>>>,
+    /// Named arguments for the user function call_callback() runs next
+    /// (Fiber::start(x: 1)).
+    pub callback_named_args: Vec<(Vec<u8>, Value)>,
+    /// Fiber::start()'s named arguments, for fiber_start().
+    fiber_start_named: Vec<(Vec<u8>, Value)>,
     /// EG_FLAGS_OBJECT_STORE_NO_REUSE: set while the object store's
     /// destructors run at shutdown, so new objects get fresh handles.
     object_store_no_reuse: bool,
@@ -2066,6 +2071,8 @@ impl Vm {
             closure_call_objs: Vec::new(),
             closure_frames: Vec::new(),
             callback_closure: None,
+            callback_named_args: Vec::new(),
+            fiber_start_named: Vec::new(),
             called_class_stack: Vec::new(),
             class_scope_stack: Vec::new(),
             static_name_cache: (usize::MAX, std::collections::HashSet::new(), 0),
@@ -10002,6 +10009,11 @@ impl Vm {
     ) -> Result<Value, VmError> {
         let via_invoke = std::mem::take(&mut self.closure_invoke_call);
         let callback_closure = self.callback_closure.take();
+        let named_args = if named_args.is_empty() && !self.callback_named_args.is_empty() {
+            std::mem::take(&mut self.callback_named_args)
+        } else {
+            named_args
+        };
         let implicit_args = if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
             1
         } else {
@@ -30493,6 +30505,9 @@ impl Vm {
                             .map(|_| self.internal_method_display(b"fiber", method));
                         if let Some(n) = &observed {
                             self.observe_internal_begin(n);
+                        }
+                        if method == b"start" {
+                            self.fiber_start_named = call.named_args.clone();
                         }
                         let result = self.fiber_dispatch_method(
                             &fiber_obj,
@@ -62205,6 +62220,9 @@ impl Vm {
                 true,
             ));
             self.note_frame_this(&fiber_obj);
+            if method == b"start" {
+                self.fiber_start_named = call.named_args.clone();
+            }
             let result = self.fiber_dispatch_method(&fiber_obj, method, &extra_args, line);
             match &result {
                 Ok(_) => {
@@ -62645,6 +62663,17 @@ impl Vm {
         }
     }
 
+    /// A fiber that terminated releases its callable and the arguments it
+    /// was started with (zend_fiber_object_destroy() of the fci happens at
+    /// the end of zend_fiber_execute()). (False: still "constructed".)
+    #[inline(never)]
+    fn fiber_release_callable(&mut self, obj: &Rc<RefCell<PhpObject>>) {
+        let old = obj.borrow().get_property(b"__fiber_callback");
+        obj.borrow_mut()
+            .set_property(b"__fiber_callback".to_vec(), Value::False);
+        drop(old);
+    }
+
     /// Dispatch a Fiber instance method (start, resume, throw)
     fn fiber_dispatch_method(
         &mut self,
@@ -62854,6 +62883,7 @@ impl Vm {
         }
         let callback = obj_rc.borrow().get_property(b"__fiber_callback");
         let args_owned: Vec<Value> = args.to_vec();
+        let named_owned = std::mem::take(&mut self.fiber_start_named);
 
         // Compute the display name for the fiber's callback so it can
         // appear properly in stack traces (`{closure:file:line}` for
@@ -62895,7 +62925,9 @@ impl Vm {
             // with (zend_fiber's fci).
             let mark = vm.gc_pin(&callback);
             vm.gc_pin(&args_owned);
+            vm.callback_named_args = named_owned;
             let r = vm.call_callback(&callback, &args_owned);
+            vm.callback_named_args = Vec::new();
             vm.gc_unpin(mark);
             match r {
                 // (an internal callback, gc_destructor_fiber, returns with
@@ -63023,6 +63055,7 @@ impl Vm {
                     b"__fiber_state".to_vec(),
                     Value::Long(FiberState::Terminated as i64),
                 );
+                self.fiber_release_callable(&obj_rc);
                 obj_rc
                     .borrow_mut()
                     .set_property(b"__fiber_return_value".to_vec(), v);
@@ -63033,6 +63066,7 @@ impl Vm {
                     b"__fiber_state".to_vec(),
                     Value::Long(FiberState::Terminated as i64),
                 );
+                self.fiber_release_callable(&obj_rc);
                 obj_rc
                     .borrow_mut()
                     .set_property(b"__fiber_threw".to_vec(), Value::True);
@@ -63057,6 +63091,7 @@ impl Vm {
                     b"__fiber_state".to_vec(),
                     Value::Long(FiberState::Terminated as i64),
                 );
+                self.fiber_release_callable(&obj_rc);
                 obj_rc
                     .borrow_mut()
                     .set_property(b"__fiber_threw".to_vec(), Value::Long(2));
@@ -64218,6 +64253,7 @@ impl Vm {
                     b"__fiber_state".to_vec(),
                     Value::Long(FiberState::Terminated as i64),
                 );
+                self.fiber_release_callable(&obj_rc);
                 obj_rc
                     .borrow_mut()
                     .set_property(b"__fiber_return_value".to_vec(), v);
@@ -64229,6 +64265,7 @@ impl Vm {
                     b"__fiber_state".to_vec(),
                     Value::Long(FiberState::Terminated as i64),
                 );
+                self.fiber_release_callable(&obj_rc);
                 Ok(Value::Null)
             }
             Err(crate::fiber::FiberOutcome::Threw(exc)) => {
@@ -64236,6 +64273,7 @@ impl Vm {
                     b"__fiber_state".to_vec(),
                     Value::Long(FiberState::Terminated as i64),
                 );
+                self.fiber_release_callable(&obj_rc);
                 obj_rc
                     .borrow_mut()
                     .set_property(b"__fiber_threw".to_vec(), Value::True);
@@ -64259,6 +64297,7 @@ impl Vm {
                     b"__fiber_state".to_vec(),
                     Value::Long(FiberState::Terminated as i64),
                 );
+                self.fiber_release_callable(&obj_rc);
                 obj_rc
                     .borrow_mut()
                     .set_property(b"__fiber_threw".to_vec(), Value::Long(2));
@@ -64361,6 +64400,7 @@ impl Vm {
                     b"__fiber_state".to_vec(),
                     Value::Long(FiberState::Terminated as i64),
                 );
+                self.fiber_release_callable(&obj_rc);
                 obj_rc
                     .borrow_mut()
                     .set_property(b"__fiber_return_value".to_vec(), return_val);
@@ -64382,6 +64422,7 @@ impl Vm {
                         b"__fiber_state".to_vec(),
                         Value::Long(FiberState::Terminated as i64),
                     );
+                    self.fiber_release_callable(&obj_rc);
                     // An exception, or a fatal error (ZEND_FIBER_FLAG_BAILOUT).
                     let how = if self.current_exception.is_none() && self.fatal_emitted {
                         Value::Long(2)
@@ -64486,6 +64527,7 @@ impl Vm {
                     b"__fiber_state".to_vec(),
                     Value::Long(FiberState::Terminated as i64),
                 );
+                self.fiber_release_callable(&obj_rc);
                 obj_rc
                     .borrow_mut()
                     .set_property(b"__fiber_return_value".to_vec(), return_val);
@@ -64507,6 +64549,7 @@ impl Vm {
                         b"__fiber_state".to_vec(),
                         Value::Long(FiberState::Terminated as i64),
                     );
+                    self.fiber_release_callable(&obj_rc);
                     // An exception, or a fatal error (ZEND_FIBER_FLAG_BAILOUT).
                     let how = if self.current_exception.is_none() && self.fatal_emitted {
                         Value::Long(2)

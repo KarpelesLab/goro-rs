@@ -5992,10 +5992,15 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                         for (n, v) in invoke_named {
                             arr.set(ArrayKey::String(PhpString::from_vec(n)), v);
                         }
+                        let called_lower = reflection_called_class(obj, &class_lower);
                         if let Some(r) = invoke_user_method(
                             vm,
                             &m,
-                            &class_lower,
+                            if m.is_static {
+                                &called_lower
+                            } else {
+                                &class_lower
+                            },
                             &target_obj,
                             Value::Array(Rc::new(RefCell::new(arr))),
                         ) {
@@ -6027,7 +6032,13 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                     }
 
                     // Push class scope
-                    vm.called_class_stack.push(class_lower.clone());
+                    // (the called scope is the class the ReflectionMethod
+                    // was made for: static:: of an inherited method)
+                    let called = match obj.borrow().get_property(b"__reflection_lookup_class") {
+                        Value::String(l) => l.as_bytes().to_ascii_lowercase(),
+                        _ => class_lower.clone(),
+                    };
+                    vm.called_class_stack.push(called);
                     vm.push_class_scope(class_lower.clone());
 
                     let result = vm
@@ -6191,9 +6202,17 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                         vm.current_exception = Some(exc);
                         return Some(Value::Null);
                     }
-                    if let Some(r) =
-                        invoke_user_method(vm, &m, &class_lower, &target_obj, args_arr_val.clone())
-                    {
+                    if let Some(r) = invoke_user_method(
+                        vm,
+                        &m,
+                        &if m.is_static {
+                            reflection_called_class(obj, &class_lower)
+                        } else {
+                            class_lower.clone()
+                        },
+                        &target_obj,
+                        args_arr_val.clone(),
+                    ) {
                         return Some(r);
                     }
                     let mut cvs = vec![Value::Undef; m.op_array.cv_names.len()];
@@ -6214,7 +6233,13 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                         }
                     }
 
-                    vm.called_class_stack.push(class_lower.clone());
+                    // (the called scope is the class the ReflectionMethod
+                    // was made for: static:: of an inherited method)
+                    let called = match obj.borrow().get_property(b"__reflection_lookup_class") {
+                        Value::String(l) => l.as_bytes().to_ascii_lowercase(),
+                        _ => class_lower.clone(),
+                    };
+                    vm.called_class_stack.push(called);
                     vm.push_class_scope(class_lower.clone());
 
                     let result = vm
@@ -6338,6 +6363,15 @@ fn hook_method_display(name: &[u8]) -> String {
         format!("${}::set", crate::string::msg_str(p))
     } else {
         crate::string::msg_str(name).to_string()
+    }
+}
+
+/// The class a ReflectionMethod was made for (lowercase): static:: of the
+/// inherited static method it invokes.
+fn reflection_called_class(obj: &Rc<RefCell<PhpObject>>, class_lower: &[u8]) -> Vec<u8> {
+    match obj.borrow().get_property(b"__reflection_lookup_class") {
+        Value::String(l) => l.as_bytes().to_ascii_lowercase(),
+        _ => class_lower.to_vec(),
     }
 }
 
@@ -7419,14 +7453,10 @@ pub fn reflection_function_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
             b"invoke" => {
                 let invoke_args: Vec<Value> = args.iter().skip(1).cloned().collect();
                 if let Some(op_array) = vm.user_functions.get(&func_lower).cloned() {
-                    let mut cvs = vec![Value::Undef; op_array.cv_names.len()];
-                    for (i, arg) in invoke_args.iter().enumerate() {
-                        if i < cvs.len() {
-                            cvs[i] = arg.clone();
-                        }
-                    }
+                    // (zend_call_function(): the function's own frame, which
+                    // func_get_args() reads)
                     let result = vm
-                        .execute_op_array_pub(&op_array, cvs)
+                        .execute_fn_with_named_args(&op_array, invoke_args, Vec::new(), None)
                         .unwrap_or(Value::Null);
                     Some(result)
                 } else if let Some(func) = vm.functions.get(&func_lower).cloned() {
@@ -7449,14 +7479,10 @@ pub fn reflection_function_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                     vec![]
                 };
                 if let Some(op_array) = vm.user_functions.get(&func_lower).cloned() {
-                    let mut cvs = vec![Value::Undef; op_array.cv_names.len()];
-                    for (i, arg) in invoke_args.iter().enumerate() {
-                        if i < cvs.len() {
-                            cvs[i] = arg.clone();
-                        }
-                    }
+                    // (zend_call_function(): the function's own frame, which
+                    // func_get_args() reads)
                     let result = vm
-                        .execute_op_array_pub(&op_array, cvs)
+                        .execute_fn_with_named_args(&op_array, invoke_args, Vec::new(), None)
                         .unwrap_or(Value::Null);
                     Some(result)
                 } else if let Some(func) = vm.functions.get(&func_lower).cloned() {
