@@ -784,6 +784,55 @@ impl Vm {
         vec![obj.clone()]
     }
 
+    /// A property an internal class's read handler hides (the date fields
+    /// of a DateTime, ...) written / tested / unset on a user subclass with
+    /// the magic method `magic` (__set / __isset / __unset): its result.
+    /// None when it does not apply (or runs for that property already).
+    #[inline(never)]
+    pub(crate) fn native_hidden_prop_magic(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        name: &PhpString,
+        magic: &[u8],
+        value: Option<Value>,
+    ) -> Option<Value> {
+        let (class_lower, oid) = {
+            let b = obj.borrow();
+            (b.class_name.to_ascii_lowercase(), b.object_id)
+        };
+        if !self
+            .classes
+            .get(&class_lower)
+            .is_some_and(|c| c.methods.contains_key(magic))
+        {
+            return None;
+        }
+        let kind = match magic {
+            b"__set" => 1u8,
+            b"__unset" => 2,
+            b"__isset" => 3,
+            _ => 0,
+        };
+        let guard_key = (oid, name.as_bytes().to_vec(), kind);
+        if self.magic_prop_guards.contains(&guard_key) {
+            return None;
+        }
+        let (_, h) = self.find_native_class_handler(&class_lower)?;
+        let read = h.prop_read?;
+        // (only a field the read handler reports undefined)
+        if !matches!(read(self, obj, name.as_bytes()), Some(None)) {
+            return None;
+        }
+        self.magic_prop_guards.insert(guard_key.clone());
+        let mut args = vec![Value::String(name.clone())];
+        args.extend(value);
+        let v = self
+            .call_object_method(&Value::Object(obj.clone()), magic, &args)
+            .unwrap_or(Value::Null);
+        self.magic_prop_guards.remove(&guard_key);
+        Some(v.deref())
+    }
+
     /// A property an internal class's read handler reports undefined (the
     /// date fields of a DateTime, ...): a user subclass's __get() is called
     /// for it (zend_std_read_property()), unless it is already running for it.
@@ -48985,7 +49034,20 @@ impl Vm {
                             }
                         }
                         if let Some(r) = self.native_prop_read_unsilenced(obj, prop_name.as_bytes()) {
-                            let set = matches!(r, Some(ref v) if !matches!(v, Value::Null | Value::Undef));
+                            let set = match r {
+                                Some(v) => !matches!(v, Value::Null | Value::Undef),
+                                // (a user subclass's __isset() decides)
+                                None => self
+                                    .native_hidden_prop_magic(obj, &prop_name, b"__isset", None)
+                                    .is_some_and(|v| v.is_truthy()),
+                            };
+                            native_exc_check!(
+                                self,
+                                exception_handlers,
+                                pending_calls_catch_depth,
+                                ip,
+                                op.line
+                            );
                             self.write_operand(
                                 &op.result,
                                 if set { Value::True } else { Value::False },
@@ -49693,6 +49755,20 @@ impl Vm {
                         }
                     }
                     if let Value::Object(obj) = &obj_val_raw {
+                        if !self.native_class_handlers.is_empty()
+                            && self
+                                .native_hidden_prop_magic(obj, &prop_name, b"__unset", None)
+                                .is_some()
+                        {
+                            native_exc_check!(
+                                self,
+                                exception_handlers,
+                                pending_calls_catch_depth,
+                                ip,
+                                op.line
+                            );
+                            return Ok(Flow::Continue);
+                        }
                         if let Some(f) = native_handlers(obj).and_then(|h| h.unset_property) {
                             if f(self, obj, prop_name.as_bytes()) {
                                 native_exc_check!(
@@ -61344,6 +61420,26 @@ impl Vm {
                     if let Value::Object(obj) = &obj_val_raw {
                         if self.prop_rw_skip_set.is_some() && self.skip_prop_rw_writeback(obj, op_array, ip) {
                             return Ok(Flow::Next);
+                        }
+                        // A date field of a DateTime subclass: its __set().
+                        if !self.native_class_handlers.is_empty()
+                            && self
+                                .native_hidden_prop_magic(
+                                    obj,
+                                    &prop_name,
+                                    b"__set",
+                                    Some(value.deref()),
+                                )
+                                .is_some()
+                        {
+                            native_exc_check!(
+                                self,
+                                exception_handlers,
+                                pending_calls_catch_depth,
+                                ip,
+                                op.line
+                            );
+                            return Ok(Flow::Continue);
                         }
                         if let Some(f) = native_handlers(obj).and_then(|h| h.write_property) {
                             let v = value.deref();
