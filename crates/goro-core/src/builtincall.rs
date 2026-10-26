@@ -320,6 +320,7 @@ impl Vm {
         let call = &mut self.pending_calls[top];
         // (a dynamic call is a real one: it has a frame)
         let dynamic = call.target.dynamic;
+        self.builtin_real_call = dynamic || call.target.unpacked || !call.named_args.is_empty();
         let mut args = std::mem::take(&mut call.args);
         let ns_fallback = desc.ns_fallback(call.name.as_bytes());
         let func_name_lower = desc.lower;

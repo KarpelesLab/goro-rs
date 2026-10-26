@@ -927,6 +927,68 @@ fn implode_type_error(vm: &mut Vm, msg: String) -> VmError {
     }
 }
 
+/// PHP_FUNCTION(implode)'s zpp (array|string $separator, ?array $array =
+/// null) for a call php-src does not make frameless.
+#[inline(never)]
+fn implode_zpp(vm: &mut Vm, args: &[Value]) -> Result<Vec<Value>, VmError> {
+    let line = vm.current_line;
+    let strict = vm.caller_strict_types;
+    let mut out = Vec::with_capacity(2);
+    let Some(sep) = args.first().map(|v| v.deref()) else {
+        let msg = "implode() expects at least 1 argument, 0 given".to_string();
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line });
+    };
+    match sep {
+        Value::Array(_) | Value::String(_) => out.push(sep),
+        Value::Null | Value::Undef if !strict => {
+            vm.emit_deprecated_at(
+                "implode(): Passing null to parameter #1 ($separator) of type array|string is deprecated",
+                line,
+            );
+            if vm.current_exception.is_some() {
+                return Err(VmError {
+                    message: String::new(),
+                    line,
+                });
+            }
+            out.push(Value::String(PhpString::empty()));
+        }
+        other => match vm.zpp_coerce_scalar(goro_core::arginfo::T_STRING, &other, strict, line) {
+            Ok(Some(v)) => {
+                let s = vm.value_to_string(&v);
+                out.push(Value::String(s));
+            }
+            Ok(None) => {
+                let msg = format!(
+                    "implode(): Argument #1 ($separator) must be of type array|string, {} given",
+                    Vm::value_type_name(&other)
+                );
+                return Err(implode_type_error(vm, msg));
+            }
+            Err(()) => {
+                return Err(VmError {
+                    message: String::new(),
+                    line,
+                });
+            }
+        },
+    }
+    match args.get(1).map(|v| v.deref()) {
+        None | Some(Value::Null | Value::Undef) => out.push(Value::Null),
+        Some(a @ Value::Array(_)) => out.push(a),
+        Some(other) => {
+            let msg = format!(
+                "implode(): Argument #2 ($array) must be of type ?array, {} given",
+                Vm::value_type_name(&other)
+            );
+            return Err(implode_type_error(vm, msg));
+        }
+    }
+    Ok(out)
+}
+
 fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, VmError> {
     let null_pieces = || {
         format!(
@@ -934,7 +996,15 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
             func_name
         )
     };
-    let (glue, arr) = if func_name == "implode" {
+    // (a real implode() call parses its parameters like join())
+    let zpp_args;
+    let args = if func_name == "implode" && vm.builtin_real_call {
+        zpp_args = implode_zpp(vm, args)?;
+        &zpp_args[..]
+    } else {
+        args
+    };
+    let (glue, arr) = if func_name == "implode" && !vm.builtin_real_call {
         // A direct implode() call is frameless in php-src (its arginfo is
         // only arity-checked here): ZEND_FRAMELESS_FUNCTION(implode, 1/2)
         // parse the separator as a plain string, then the array.

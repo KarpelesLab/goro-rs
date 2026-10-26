@@ -1235,6 +1235,9 @@ pub(crate) struct CallTarget {
     /// arguments of an internal function's by-reference parameters are
     /// only known to be sent by reference at run time.
     pub(crate) dynamic: bool,
+    /// Arguments were unpacked into the call (`f(...$args)`): php-src
+    /// makes a real call of a function it would otherwise call frameless.
+    pub(crate) unpacked: bool,
 }
 
 /// What the frame of a method call set up by INIT_METHOD_CALL's fast path
@@ -1351,6 +1354,7 @@ impl CallTarget {
         fn_gen: 0,
         via_invoke: false,
         dynamic: false,
+        unpacked: false,
     };
 }
 
@@ -1881,6 +1885,10 @@ pub struct Vm {
     /// created element): `$o->p op= v` / `$o->p++` then writes nothing back,
     /// the operation's result replacing the temporary (this releases it).
     pub prop_ptr_temp: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>)>,
+    /// The internal function being called was called dynamically (`$f()`),
+    /// with unpacked or named arguments: php-src makes a real call of a
+    /// function it would otherwise call frameless (implode()).
+    pub builtin_real_call: bool,
     /// The call depth whose next RW write-back (PropertySet) is skipped,
     /// with the release of the temporary.
     prop_rw_skip_set: Option<(u32, fn(&mut Vm, &Rc<RefCell<PhpObject>>))>,
@@ -2457,6 +2465,7 @@ impl Vm {
             recorded_errors: None,
             incdec_skip_set: false,
             prop_ptr_temp: None,
+            builtin_real_call: false,
             prop_rw_skip_set: None,
             builtin_frame_named: Vec::new(),
             dim_rw_key: None,
@@ -22380,6 +22389,7 @@ impl Vm {
                 fn_gen: self.user_functions.len() + 1,
                 via_invoke: false,
                 dynamic: false,
+                unpacked: false,
             };
         }
         let builtin = match found {
@@ -22417,6 +22427,7 @@ impl Vm {
             fn_gen: self.user_functions.len() + 1,
             via_invoke: false,
             dynamic: false,
+            unpacked: false,
         }
     }
 
@@ -30611,6 +30622,7 @@ impl Vm {
                                                 None
                                             };
                             let r = if let Some(call) = self.pending_calls.last_mut() {
+                                call.target.unpacked = true;
                                 let mut had_named = false;
                                 let mut result = Ok(());
                                 let mut unpack_idx = 0usize;
@@ -33797,6 +33809,9 @@ impl Vm {
                         }
                         self.caller_strict_types = op_array.strict_types;
                         self.builtin_named_skipped = named_skipped_args;
+                        self.builtin_real_call = call.target.dynamic
+                            || call.target.unpacked
+                            || !call.named_args.is_empty();
 
                         let had_exception_before = self.current_exception.is_some();
 
