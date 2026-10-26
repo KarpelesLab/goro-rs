@@ -2446,6 +2446,36 @@ impl Compiler {
         (!declared).then(|| name.to_vec())
     }
 
+    /// The callee of `expr()`. A string literal "self::m" / "parent::m" /
+    /// "static::m" is an INIT_STATIC_METHOD_CALL of a class by that name
+    /// (zend_compile_dynamic_call()), not of the scope's: it is moved to a
+    /// temporary so the call resolves it like a dynamic one.
+    #[inline(never)]
+    fn compile_dynamic_callee(&mut self, name: &Expr) -> Result<OperandType, CompileError> {
+        let op = self.compile_expr(name)?;
+        let ExprKind::String(s) = &name.kind else {
+            return Ok(op);
+        };
+        let Some(pos) = s.windows(2).rposition(|w| w == b"::") else {
+            return Ok(op);
+        };
+        if !matches!(
+            s[..pos].to_ascii_lowercase().as_slice(),
+            b"self" | b"parent" | b"static"
+        ) {
+            return Ok(op);
+        }
+        let t = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::QmAssign,
+            op1: op,
+            op2: OperandType::Unused,
+            result: OperandType::Tmp(t),
+            line: name.span.line,
+        });
+        Ok(OperandType::Tmp(t))
+    }
+
     /// INIT_FCALL's result operand for a call of function `name` (as
     /// written) resolved to `resolved`: a constant when the namespaced name
     /// has no global fallback (qualified, fully qualified or imported with
@@ -16504,7 +16534,7 @@ impl Compiler {
                             .add_literal(Value::String(PhpString::from_vec(resolved.clone())));
                         OperandType::Const(idx)
                     }
-                    None => self.compile_expr(name)?,
+                    None => self.compile_dynamic_callee(name)?,
                 };
 
                 // Init function call

@@ -8148,6 +8148,43 @@ impl Vm {
         }
     }
 
+    /// The "Class "parent" not found" Error of a class looked up by name
+    /// (a dynamic call): unlike create_exception(), it names the class
+    /// even when it is self / parent / static.
+    #[inline(never)]
+    pub(crate) fn class_by_name_not_found(&mut self, cls: &[u8], line: u32) -> (Value, String) {
+        let msg = format!("Class \"{}\" not found", crate::string::msg_str(cls));
+        let exc = self.create_exception(b"Error", "", line);
+        if let Value::Object(o) = &exc {
+            o.borrow_mut().set_property(
+                b"message".to_vec(),
+                Value::String(PhpString::from_vec(
+                    crate::errdisplay::raw_error_bytes(&msg).into_owned(),
+                )),
+            );
+        }
+        (exc, msg)
+    }
+
+    /// create_exception() for an error of a class looked up by name, whose
+    /// "Class "parent" not found" names the class as given.
+    #[inline(never)]
+    pub(crate) fn create_exception_by_name_lookup(
+        &mut self,
+        class_name: &[u8],
+        message: &str,
+        line: u32,
+    ) -> Value {
+        match message
+            .strip_prefix("Class \"")
+            .and_then(|m| m.strip_suffix("\" not found"))
+            .filter(|_| class_name == b"Error")
+        {
+            Some(c) => self.class_by_name_not_found(c.as_bytes(), line).0,
+            None => self.create_exception(class_name, message, line),
+        }
+    }
+
     pub fn create_exception(&mut self, class_name: &[u8], message: &str, line: u32) -> Value {
         // Line 0 means "where we are" (zend_get_executed_lineno()).
         let line = if line == 0 { self.current_line } else { line };
@@ -29303,11 +29340,12 @@ impl Vm {
                                         {
                                             self.try_autoload_class(cn.as_bytes());
                                         }
-                                        if !self.classes.contains_key(&cl)
-                                            && !matches!(
-                                                cl.as_slice(),
-                                                b"self" | b"parent" | b"static"
-                                            )
+                                        // (zend_init_dynamic_call_array() looks the
+                                        // class up by name: no self/parent/static)
+                                        if matches!(
+                                            cl.as_slice(),
+                                            b"self" | b"parent" | b"static"
+                                        ) || !self.classes.contains_key(&cl)
                                             && !self.is_known_builtin_class(&cl)
                                         {
                                             Some((
@@ -29486,7 +29524,8 @@ impl Vm {
                     if let Some((cls, msg)) = dyn_err {
                         // An exception thrown by the error handler wins.
                         if self.current_exception.is_none() {
-                            let exc = self.create_exception(cls, &msg, op.line);
+                            // (a class looked up by name: "parent" too)
+                            let exc = self.create_exception_by_name_lookup(cls, &msg, op.line);
                             self.current_exception = Some(exc);
                         }
                         if let Some((catch_target, _, _, _, eh_pc_depth)) =
@@ -29596,6 +29635,25 @@ impl Vm {
                             let cls = &name.as_bytes()[..pos];
                             let cls_lower: Vec<u8> =
                                 cls.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            // `$f = "parent::m"; $f()`: zend_init_dynamic_call_string()
+                            // looks the class up by name.
+                            if !matches!(op.op1, OperandType::Const(_))
+                                && matches!(cls_lower.as_slice(), b"self" | b"parent" | b"static")
+                            {
+                                let (exc, msg) = self.class_by_name_not_found(cls, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    ip = *catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught Error: {}", msg),
+                                    line: op.line,
+                                });
+                            }
                             // `A::m()`: the class is fetched (and autoloaded)
                             // before the arguments are evaluated
                             // (ZEND_INIT_STATIC_METHOD_CALL).
@@ -29743,6 +29801,25 @@ impl Vm {
                         let cl: Vec<u8> =
                             class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                         let cl = cl.strip_prefix(b"\\").map(|s| s.to_vec()).unwrap_or(cl);
+                        // `$c = "parent"; $c::m()`: zend_fetch_class(DEFAULT)
+                        // looks the class up by name.
+                        if !matches!(op.op1, OperandType::Const(_))
+                            && matches!(cl.as_slice(), b"self" | b"parent" | b"static")
+                        {
+                            let (exc, msg) = self.class_by_name_not_found(&class_name, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
                         if !matches!(cl.as_slice(), b"self" | b"parent" | b"static")
                             && !self.classes.contains_key(&cl)
                         {
@@ -44369,7 +44446,7 @@ impl Vm {
                         }
                         Err((cls, msg)) => {
                             if self.current_exception.is_none() {
-                                let exc = self.create_exception(cls, &msg, op.line);
+                                let exc = self.create_exception_by_name_lookup(cls, &msg, op.line);
                                 self.current_exception = Some(exc);
                             }
                             if let Some((catch_target, _, _, _, eh_pc_depth)) =

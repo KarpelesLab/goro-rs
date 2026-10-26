@@ -707,6 +707,8 @@ impl Vm {
     /// like zend_closure_from_frame: resolves the target now, producing a
     /// fake closure over it. `wrapper` is the compiled forwarding closure,
     /// used for magic `__call`/`__callStatic` targets and builtin classes.
+    /// The callable of a dynamic call names its class: self / parent /
+    /// static are looked up as class names (zend_init_dynamic_call_*()).
     pub fn make_fcc(
         &mut self,
         wrapper: Value,
@@ -736,7 +738,10 @@ impl Vm {
         if let Some(m) = desc.strip_prefix(b"D:") {
             let cls = match caps.first().map(|v| v.deref()) {
                 Some(Value::Object(o)) => o.borrow().class_name.clone(),
-                Some(Value::String(s)) => s.as_bytes().to_vec(),
+                Some(Value::String(s)) => {
+                    by_name_class_check(s.as_bytes())?;
+                    s.as_bytes().to_vec()
+                }
                 _ => {
                     return Err((
                         b"Error",
@@ -827,6 +832,7 @@ impl Vm {
             Value::String(s) => {
                 let b = s.as_bytes().to_vec();
                 if let Some(p) = b.windows(2).position(|w| w == b"::") {
+                    by_name_class_check(&b[..p])?;
                     return self.fcc_static(&b[..p], &b[p + 2..], None, wrapper, scope);
                 }
                 self.fcc_function(&b, false)
@@ -844,6 +850,7 @@ impl Vm {
                         self.fcc_method(o, m.as_bytes(), wrapper, scope, false)
                     }
                     (Some(Value::String(c)), Some(Value::String(m))) => {
+                        by_name_class_check(c.as_bytes())?;
                         self.fcc_static(c.as_bytes(), m.as_bytes(), None, wrapper, scope)
                     }
                     _ => Err((
@@ -2372,4 +2379,16 @@ impl Vm {
         let obj = self.make_closure_object(inner);
         crate::fastpath::store_tmp(&op.result, obj, tmps)
     }
+}
+
+/// A class looked up by name for a dynamic call: "self", "parent" and
+/// "static" are not found.
+fn by_name_class_check(cls: &[u8]) -> Result<(), (&'static [u8], String)> {
+    if matches!(lower(cls).as_slice(), b"self" | b"parent" | b"static") {
+        return Err((
+            b"Error",
+            format!("Class \"{}\" not found", crate::string::msg_str(cls)),
+        ));
+    }
+    Ok(())
 }
