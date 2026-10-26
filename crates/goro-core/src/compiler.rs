@@ -158,7 +158,9 @@ thread_local! {
 /// More of zend_eval_const_expr()'s binary operations (scalar operands).
 #[inline(never)]
 fn ct_fold_binop_ext(op: BinaryOp, l: &Value, r: &Value) -> Option<Value> {
-    if matches!(l, Value::Array(_) | Value::Object(_)) || matches!(r, Value::Array(_) | Value::Object(_)) {
+    if matches!(l, Value::Array(_) | Value::Object(_))
+        || matches!(r, Value::Array(_) | Value::Object(_))
+    {
         return None;
     }
     let b = |x: bool| if x { Value::True } else { Value::False };
@@ -183,8 +185,12 @@ fn ct_fold_binop_ext(op: BinaryOp, l: &Value, r: &Value) -> Option<Value> {
                 _ => x * y,
             })
         }
-        BinaryOp::Less | BinaryOp::Greater | BinaryOp::LessEqual | BinaryOp::GreaterEqual
-        | BinaryOp::Equal | BinaryOp::NotEqual => {
+        BinaryOp::Less
+        | BinaryOp::Greater
+        | BinaryOp::LessEqual
+        | BinaryOp::GreaterEqual
+        | BinaryOp::Equal
+        | BinaryOp::NotEqual => {
             let (x, y) = (num(l)?, num(r)?);
             b(match op {
                 BinaryOp::Less => x < y,

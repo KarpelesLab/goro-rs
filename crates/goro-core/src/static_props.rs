@@ -1440,9 +1440,9 @@ impl Vm {
             .and_then(|o| self.classes.get(o))
             .and_then(|c| c.const_closures.iter().find(|op| op.name == name).cloned())
             .or_else(|| {
-                self.classes.values().find_map(|c| {
-                    c.const_closures.iter().find(|op| op.name == name).cloned()
-                })
+                self.classes
+                    .values()
+                    .find_map(|c| c.const_closures.iter().find(|op| op.name == name).cloned())
             });
         let Some(op) = op else {
             return Ok(Value::Null);
@@ -1870,8 +1870,7 @@ impl Vm {
             return None;
         }
         let v = self.constants.get(name)?;
-        if !scalar(v) || crate::stubs::find_constant(name).is_some_and(|c| c.flags & 0x20000 != 0)
-        {
+        if !scalar(v) || crate::stubs::find_constant(name).is_some_and(|c| c.flags & 0x20000 != 0) {
             return None;
         }
         Some(v.clone())

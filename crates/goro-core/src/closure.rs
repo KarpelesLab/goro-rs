@@ -924,10 +924,8 @@ impl Vm {
                 arr.borrow_mut().push(obj.clone());
                 arr.borrow_mut().push(str_val(sm.name.as_bytes()));
                 self.fcc_scoped_arrays.retain(|(w, _)| w.strong_count() > 0);
-                self.fcc_scoped_arrays.push((
-                    Rc::downgrade(&arr),
-                    scope.map(lower).unwrap_or_default(),
-                ));
+                self.fcc_scoped_arrays
+                    .push((Rc::downgrade(&arr), scope.map(lower).unwrap_or_default()));
                 return Some(Ok(self.make_closure_object(Value::Array(arr))));
             }
             return None;

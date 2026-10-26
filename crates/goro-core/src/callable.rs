@@ -623,7 +623,10 @@ impl Vm {
     /// The scope a closure over a non-public internal method was created in,
     /// when `a` is its `[$obj, 'method']` (see Vm::fcc_scoped_arrays).
     #[inline(never)]
-    fn fcc_array_scope(&self, a: &std::rc::Rc<std::cell::RefCell<crate::array::PhpArray>>) -> Option<Vec<u8>> {
+    fn fcc_array_scope(
+        &self,
+        a: &std::rc::Rc<std::cell::RefCell<crate::array::PhpArray>>,
+    ) -> Option<Vec<u8>> {
         self.fcc_scoped_arrays
             .iter()
             .find(|(w, _)| std::ptr::eq(w.as_ptr(), std::rc::Rc::as_ptr(a)))
@@ -642,9 +645,9 @@ impl Vm {
         let syntax_only = flags & IS_CALLABLE_CHECK_SYNTAX_ONLY != 0;
         let suppress = flags & IS_CALLABLE_SUPPRESS_DEPRECATIONS != 0;
         let scope = match &callable {
-            Value::Array(a) if !self.fcc_scoped_arrays.is_empty() => self
-                .fcc_array_scope(a)
-                .or_else(|| self.callable_scope()),
+            Value::Array(a) if !self.fcc_scoped_arrays.is_empty() => {
+                self.fcc_array_scope(a).or_else(|| self.callable_scope())
+            }
             _ => self.callable_scope(),
         };
         let this = self.current_frame_this();

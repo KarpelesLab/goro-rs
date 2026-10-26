@@ -1723,32 +1723,33 @@ fn execute_php_inner_impl(
         goro_core::compiler::CompileError,
         Vec<goro_core::object::ClassEntry>,
     )> = None;
-    let (op_array, compiled_classes, compile_warnings) = match with_ct_vm(|| compiler.compile(&program)) {
-        Ok(r) => {
-            // Drain any pending compile warnings so they don't leak into the next test
-            let _ = goro_core::compiler::take_pending_compile_warnings();
-            r
-        }
-        Err(e) => {
-            let mut out = String::new();
-            for (kind, msg, wline) in goro_core::compiler::take_pending_compile_warnings() {
-                out.push_str(&format!(
-                    "\n{}: {} in {} on line {}\n",
-                    kind, msg, filename, wline
-                ));
+    let (op_array, compiled_classes, compile_warnings) =
+        match with_ct_vm(|| compiler.compile(&program)) {
+            Ok(r) => {
+                // Drain any pending compile warnings so they don't leak into the next test
+                let _ = goro_core::compiler::take_pending_compile_warnings();
+                r
             }
-            // (taken now: the extensions' startup compiles code)
-            let Some((chunk, classes)) = goro_core::compiler::take_compile_time_binds() else {
-                out.push_str(&format!(
-                    "\nFatal error: {} in {} on line {}\n",
-                    e.message, filename, e.line
-                ));
-                return Ok(out.into_bytes());
-            };
-            deferred_compile_error = Some((out, e, classes));
-            (chunk, Vec::new(), Vec::new())
-        }
-    };
+            Err(e) => {
+                let mut out = String::new();
+                for (kind, msg, wline) in goro_core::compiler::take_pending_compile_warnings() {
+                    out.push_str(&format!(
+                        "\n{}: {} in {} on line {}\n",
+                        kind, msg, filename, wline
+                    ));
+                }
+                // (taken now: the extensions' startup compiles code)
+                let Some((chunk, classes)) = goro_core::compiler::take_compile_time_binds() else {
+                    out.push_str(&format!(
+                        "\nFatal error: {} in {} on line {}\n",
+                        e.message, filename, e.line
+                    ));
+                    return Ok(out.into_bytes());
+                };
+                deferred_compile_error = Some((out, e, classes));
+                (chunk, Vec::new(), Vec::new())
+            }
+        };
 
     // Execute
     let mut vm = Vm::new();

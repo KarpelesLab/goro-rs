@@ -8593,7 +8593,10 @@ fn effective_prop(
 ) -> Option<crate::object::PropertyDef> {
     let r = class_prop_info(vm, class_lower, prop);
     let ocl = obj.borrow().class_name.to_ascii_lowercase();
-    if ocl.as_slice() != class_lower && !r.as_ref().is_some_and(|d| d.visibility == Visibility::Private)
+    if ocl.as_slice() != class_lower
+        && !r
+            .as_ref()
+            .is_some_and(|d| d.visibility == Visibility::Private)
     {
         return class_prop_info(vm, &ocl, prop);
     }
@@ -8602,18 +8605,16 @@ fn effective_prop(
 
 /// The properties_info entry `prop` of class `class_lower`: its own
 /// declaration before an inherited private one of the same name.
-fn class_prop_info(
-    vm: &Vm,
-    class_lower: &[u8],
-    prop: &[u8],
-) -> Option<crate::object::PropertyDef> {
+fn class_prop_info(vm: &Vm, class_lower: &[u8], prop: &[u8]) -> Option<crate::object::PropertyDef> {
     let c = vm.classes.get(class_lower)?;
     let mut it = c.properties.iter().filter(|p| p.name == prop);
     let first = it.clone().next();
-    it.find(|p| p.declaring_class.eq_ignore_ascii_case(class_lower) || p.visibility != Visibility::Private)
-        .or(first)
-        .cloned()
-        .or_else(|| find_prop_decl(vm, class_lower, prop))
+    it.find(|p| {
+        p.declaring_class.eq_ignore_ascii_case(class_lower) || p.visibility != Visibility::Private
+    })
+    .or(first)
+    .cloned()
+    .or_else(|| find_prop_decl(vm, class_lower, prop))
 }
 
 /// The storage key of `prop` in `obj` as seen from class `scope`.
@@ -8649,7 +8650,11 @@ fn backing_key(
 
 /// Whether property `d` (of class `cl`) has a `kind` ("get"/"set") hook.
 fn prop_has_hook(vm: &Vm, d: &crate::object::PropertyDef, kind: &str, prop: &str) -> bool {
-    if if kind == "get" { d.has_get_hook } else { d.has_set_hook } {
+    if if kind == "get" {
+        d.has_get_hook
+    } else {
+        d.has_set_hook
+    } {
         return true;
     }
     let mut m = format!("__property_{}_", kind).into_bytes();
@@ -8680,7 +8685,8 @@ fn raw_value_effective_get(
     let d = eff?;
     if !prop_has_hook(vm, &d, "get", prop) {
         // The reflected class's view of the slot (a private of an ancestor).
-        if d.visibility == Visibility::Private && !d.declaring_class.eq_ignore_ascii_case(class_lower)
+        if d.visibility == Visibility::Private
+            && !d.declaring_class.eq_ignore_ascii_case(class_lower)
         {
             return None;
         }
@@ -8756,7 +8762,10 @@ fn raw_value_effective_set(
                 "$__o->{$__n} = $__v;",
                 &[
                     ("__o", Value::Object(obj.clone())),
-                    ("__n", Value::String(PhpString::from_string(prop.to_string()))),
+                    (
+                        "__n",
+                        Value::String(PhpString::from_string(prop.to_string())),
+                    ),
                     ("__v", value.clone()),
                 ],
                 class_lower,
@@ -9973,7 +9982,9 @@ fn reflection_parameter_op_array(
             .collect();
         // (rmethod(): also an enum's implicit cases()/from()/tryFrom())
         if let Some(m) = rmethod(vm, &class_lower, &method_lower) {
-            return Some(reflect_sig_op_array(&m.op_array).unwrap_or_else(|| (*m.op_array).clone()));
+            return Some(
+                reflect_sig_op_array(&m.op_array).unwrap_or_else(|| (*m.op_array).clone()),
+            );
         }
     }
     None

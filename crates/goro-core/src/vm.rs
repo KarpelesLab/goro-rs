@@ -5,8 +5,8 @@ use std::rc::{Rc, Weak};
 
 use crate::array::{ArrayKey, PhpArray};
 use crate::fastpath::canonical_int_key;
-use crate::include_path::include_failure_reason;
 use crate::fiber::{FIBER_SUSPEND_SENTINEL, FiberState};
+use crate::include_path::include_failure_reason;
 use crate::object::{ClassEntry, PhpObject, Visibility};
 use crate::opcode::{OpArray, OpCode, OperandType, ParamType};
 use crate::rcstr::RcStr;
@@ -4364,7 +4364,11 @@ impl Vm {
     /// class's stub (ReflectionClass::$name) in the hierarchy of
     /// `class_lower`: an unset one is uninitialized, not undefined.
     #[inline(never)]
-    pub(crate) fn unset_internal_typed_prop(&self, class_lower: &[u8], prop: &[u8]) -> Option<Vec<u8>> {
+    pub(crate) fn unset_internal_typed_prop(
+        &self,
+        class_lower: &[u8],
+        prop: &[u8],
+    ) -> Option<Vec<u8>> {
         let scope = self.current_class_scope().map(|s| s.to_ascii_lowercase());
         match self.find_property_def_walk(class_lower, prop, scope.as_deref()) {
             Some((_, decl, _, Some(_), _)) => Some(decl),
