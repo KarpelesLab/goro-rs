@@ -760,6 +760,42 @@ impl Vm {
         f(self, obj, name)
     }
 
+    /// A property an internal class's read handler reports undefined (the
+    /// date fields of a DateTime, ...): a user subclass's __get() is called
+    /// for it (zend_std_read_property()), unless it is already running for it.
+    #[inline(never)]
+    pub(crate) fn native_undefined_prop_get(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        name: &PhpString,
+    ) -> Option<Value> {
+        let (class_lower, oid) = {
+            let b = obj.borrow();
+            (b.class_name.to_ascii_lowercase(), b.object_id)
+        };
+        if !self
+            .classes
+            .get(&class_lower)
+            .is_some_and(|c| c.methods.contains_key(b"__get".as_slice()))
+        {
+            return None;
+        }
+        let guard_key = (oid, name.as_bytes().to_vec(), 0u8);
+        if self.magic_prop_guards.contains(&guard_key) {
+            return None;
+        }
+        self.magic_prop_guards.insert(guard_key.clone());
+        let v = self
+            .call_object_method(
+                &Value::Object(obj.clone()),
+                b"__get",
+                &[Value::String(name.clone())],
+            )
+            .unwrap_or(Value::Null);
+        self.magic_prop_guards.remove(&guard_key);
+        Some(v.deref())
+    }
+
     /// native_prop_read() from isset()/empty(): the handler's diagnostics
     /// are not hidden by the silencing the compiler wraps isset() in (the
     /// has_property handler of an internal class may warn).
@@ -59693,16 +59729,29 @@ impl Vm {
                             );
                             let v = match r {
                                 Some(v) => v,
-                                None => {
-                                    let class_display =
-                                        crate::value::display_class_name(&obj.borrow().class_name);
-                                    self.emit_warning(&format!(
-                                        "Undefined property: {}::${}",
-                                        class_display,
-                                        prop_name.to_msg_string()
-                                    ));
-                                    Value::Null
-                                }
+                                None => match self.native_undefined_prop_get(obj, &prop_name) {
+                                    Some(v) => {
+                                        native_exc_check!(
+                                            self,
+                                            exception_handlers,
+                                            pending_calls_catch_depth,
+                                            ip,
+                                            op.line
+                                        );
+                                        v
+                                    }
+                                    None => {
+                                        let class_display = crate::value::display_class_name(
+                                            &obj.borrow().class_name,
+                                        );
+                                        self.emit_warning(&format!(
+                                            "Undefined property: {}::${}",
+                                            class_display,
+                                            prop_name.to_msg_string()
+                                        ));
+                                        Value::Null
+                                    }
+                                },
                             };
                             self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
                             return Ok(Flow::Continue);
