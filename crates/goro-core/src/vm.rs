@@ -5757,12 +5757,36 @@ impl Vm {
 
     pub fn emit_fatal_at(&mut self, msg: &str, line: u32) -> VmError {
         let file = self.current_file.clone();
-        self.fatal_error_cb(crate::errdisplay::E_ERROR, msg, &file, line);
+        if self.current_exception.is_some() {
+            self.fatal_with_pending_exception(msg, &file, line);
+        } else {
+            self.fatal_error_cb(crate::errdisplay::E_ERROR, msg, &file, line);
+        }
         self.fatal_emitted = true;
         VmError {
             message: msg.to_string(),
             line,
         }
+    }
+
+    /// zend_error_zstr_at(): a fatal error raised while an exception is
+    /// pending first reports the exception as an "Uncaught" warning
+    /// (zend_exception_error(E_WARNING)); the fatal error then has no
+    /// backtrace.
+    #[cold]
+    #[inline(never)]
+    fn fatal_with_pending_exception(&mut self, msg: &str, file: &str, line: u32) {
+        let fatal_before = self.fatal_emitted;
+        self.uncaught_severity = Some(crate::errdisplay::E_WARNING);
+        let e = VmError {
+            message: msg.to_string(),
+            line,
+        };
+        self.report_uncaught(&e);
+        self.uncaught_severity = None;
+        self.fatal_emitted = fatal_before;
+        self.current_exception = None;
+        self.fatal_error_cb_ex(crate::errdisplay::E_ERROR, msg, file, line, false);
     }
 
     /// Emit a PHP notice
@@ -54777,6 +54801,7 @@ impl Vm {
 
                         // Check enum/class interface restrictions
                         // Auto-added UnitEnum/BackedEnum are at the END (added after user interfaces)
+                        let mut enum_serializable_err: Option<String> = None;
                         {
                             let auto_iface_count = if class.is_enum {
                                 if class.enum_backing_type.is_some() {
@@ -54815,13 +54840,13 @@ impl Vm {
                                             op.line,
                                         );
                                     }
-                                    return Err(VmError {
-                                        message: format!(
-                                            "Enum {} cannot implement the Serializable interface",
-                                            class_display
-                                        ),
-                                        line: op.line,
-                                    });
+                                    // (zend_verify_enum() runs after
+                                    // zend_verify_abstract_class())
+                                    enum_serializable_err = Some(format!(
+                                        "Enum {} cannot implement the Serializable interface",
+                                        class_display
+                                    ));
+                                    continue;
                                 }
                                 let extends_exc = class.parent.as_ref().is_some_and(|p| {
                                     let pl = p.to_ascii_lowercase();
@@ -55700,6 +55725,12 @@ impl Vm {
                                     line: err_line,
                                 });
                             }
+                        }
+                        if let Some(message) = enum_serializable_err {
+                            return Err(VmError {
+                                message,
+                                line: op.line,
+                            });
                         }
 
                         let name_lower: Vec<u8> = name_val
