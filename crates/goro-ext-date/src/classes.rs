@@ -972,6 +972,19 @@ pub fn construct_period(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(), S
         _ => return Ok(()),
     };
     let uargs: Vec<Value> = args[1..].to_vec();
+    // A parameter skipped by named arguments has no known default
+    // (zend_handle_undef_args(), before the call).
+    if let Some(i) = uargs.iter().position(|a| matches!(a, Value::Undef)) {
+        if uargs[i..].iter().any(|a| !matches!(a, Value::Undef)) {
+            let name = ["start", "interval", "end", "options"][i.min(3)];
+            let msg = format!(
+                "DatePeriod::__construct(): Argument #{} (${}) must be passed explicitly, because the default value is not known",
+                i + 1,
+                name
+            );
+            return ctor_result(Err(throw(vm, b"ArgumentCountError", &msg)));
+        }
+    }
     push_frame(vm, "DatePeriod->__construct".into(), &uargs, true);
     let r = (|| -> R<()> {
         let fname = "DatePeriod::__construct";
@@ -1141,6 +1154,7 @@ pub fn param_names(class: &[u8], method: &[u8]) -> Option<&'static [&'static str
             _ => return None,
         },
         (b"dateperiod", m) => match m {
+            b"__construct" => &["start", "interval", "end", "options"],
             b"createfromiso8601string" => &["specification", "options"],
             b"__unserialize" => &["data"],
             b"__set_state" => &["array"],
