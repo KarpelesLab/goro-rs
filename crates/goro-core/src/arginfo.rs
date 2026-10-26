@@ -1997,7 +1997,7 @@ impl Vm {
         Ok(r)
     }
 
-    fn zpp_object_has_tostring(&self, v: &Value) -> bool {
+    pub(crate) fn zpp_object_has_tostring(&self, v: &Value) -> bool {
         let Value::Object(o) = v else { return false };
         let lower: Vec<u8> = o.borrow().class_name.to_ascii_lowercase();
         if self

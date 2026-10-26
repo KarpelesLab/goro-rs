@@ -9430,20 +9430,7 @@ impl Vm {
                                     | Value::Double(_)
                                     | Value::True
                                     | Value::False
-                            ) || if let Value::Object(obj) = value {
-                                let obj_class_lower: Vec<u8> = obj
-                                    .borrow()
-                                    .class_name
-                                    .iter()
-                                    .map(|b| b.to_ascii_lowercase())
-                                    .collect();
-                                self.classes
-                                    .get(&obj_class_lower)
-                                    .map(|c| c.get_method(b"__tostring").is_some())
-                                    .unwrap_or(false)
-                            } else {
-                                false
-                            }
+                            ) || self.zpp_object_has_tostring(value)
                         }
                     }
                     b"bool" | b"boolean" => {
@@ -22822,18 +22809,9 @@ impl Vm {
                         || (!caller_strict
                             && !self.object_matches_class_part(arg, &type_info.param_type)));
                 if is_string_param {
-                    if let Value::Object(obj) = arg {
-                        let class_lower: Vec<u8> = obj
-                            .borrow()
-                            .class_name
-                            .iter()
-                            .map(|b| b.to_ascii_lowercase())
-                            .collect();
-                        let has_tostring = self
-                            .classes
-                            .get(&class_lower)
-                            .map(|c| c.get_method(b"__tostring").is_some())
-                            .unwrap_or(false);
+                    if let Value::Object(_) = arg {
+                        // (internal classes too: Exception, SimpleXMLElement, ...)
+                        let has_tostring = self.zpp_object_has_tostring(arg);
                         if has_tostring {
                             // Error will be handled later
                             if let Ok(s) = self.value_to_string_checked(arg) {
@@ -24207,15 +24185,8 @@ impl Vm {
             && variance::TypeView::from_param_type(ret_type).mask & variance::T_STRING != 0
             && !self.object_matches_class_part(val, ret_type)
         {
-            let has_tostring = match &*val {
-                Value::Object(o) => {
-                    let cl = o.borrow().class_name.to_ascii_lowercase();
-                    self.classes
-                        .get(&cl)
-                        .is_some_and(|c| c.get_method(b"__tostring").is_some())
-                }
-                _ => false,
-            };
+            // (internal classes too: Exception, SimpleXMLElement, ...)
+            let has_tostring = self.zpp_object_has_tostring(val);
             if has_tostring {
                 let obj = val.clone();
                 if let Ok(s) = self.value_to_string_checked(&obj) {
