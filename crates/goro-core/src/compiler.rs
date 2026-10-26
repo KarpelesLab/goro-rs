@@ -9454,7 +9454,7 @@ impl Compiler {
                                             line: 0,
                                         });
                                         let default_val = method_compiler
-                                            .compile_const_expr_value(default_expr)?;
+                                            .compile_param_default_relative(default_expr)?;
                                         if !matches!(default_expr.kind, ExprKind::Null) {
                                             let pcv = method_compiler
                                                 .op_array
@@ -13553,6 +13553,20 @@ impl Compiler {
         );
         let r = self.compile_expr(expr);
         self.is_discarding_result = prev;
+        r
+    }
+
+    /// A method parameter's default: `self::` / `parent::` stay relative
+    /// (resolved in the method's scope when the default is evaluated), so an
+    /// undefined constant is reported as "self::X" like php-src does.
+    #[inline(never)]
+    fn compile_param_default_relative(&mut self, e: &Expr) -> CompileResult<OperandType> {
+        let prev = std::mem::replace(
+            &mut self.keep_relative_class_names,
+            !self.is_in_trait && expr_has_relative_class_const(e),
+        );
+        let r = self.compile_const_expr_value(e);
+        self.keep_relative_class_names = prev;
         r
     }
 
@@ -23444,6 +23458,37 @@ fn check_duplicate_params(params: &[Param], line: u32) -> CompileResult<()> {
 }
 
 /// A constant non-string class expression such as `(0)::X` (PHP: "Illegal class name").
+/// Whether a constant expression reads a `self::` / `parent::` constant.
+fn expr_has_relative_class_const(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::ClassConstAccess { class, constant } => {
+            constant.as_slice() != b"class"
+                && matches!(&class.kind, ExprKind::Identifier(n)
+                    if n.eq_ignore_ascii_case(b"self") || n.eq_ignore_ascii_case(b"parent"))
+        }
+        ExprKind::BinaryOp { left, right, .. } | ExprKind::NullCoalesce { left, right } => {
+            expr_has_relative_class_const(left) || expr_has_relative_class_const(right)
+        }
+        ExprKind::UnaryOp { operand, .. } => expr_has_relative_class_const(operand),
+        ExprKind::Ternary {
+            condition,
+            if_true,
+            if_false,
+        } => {
+            expr_has_relative_class_const(condition)
+                || if_true
+                    .as_deref()
+                    .is_some_and(expr_has_relative_class_const)
+                || expr_has_relative_class_const(if_false)
+        }
+        ExprKind::Array(elems) => elems.iter().any(|el| {
+            expr_has_relative_class_const(&el.value)
+                || el.key.as_ref().is_some_and(expr_has_relative_class_const)
+        }),
+        _ => false,
+    }
+}
+
 fn is_illegal_class_literal(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Int(_)
