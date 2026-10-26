@@ -377,6 +377,24 @@ impl Vm {
                     new_obj.set_property(b"__spl_pos".to_vec(), Value::Long(0));
                     new_obj.set_property(b"__spl_pos_key".to_vec(), Value::Null);
                 }
+                // spl_dllist_object_new_ex(): the clone's traverse pointer
+                // is the head of its list, at position 0.
+                if new_obj.has_property(b"__spl_dll_cur")
+                    && self
+                        .spl_find_base(&class_lower, &[b"spldoublylinkedlist"])
+                        .is_some()
+                {
+                    let head = match new_obj.get_property(b"__spl_array") {
+                        Value::Array(a) => a.borrow().iter().next().map(|(k, _)| k.clone()),
+                        _ => None,
+                    };
+                    let head = match head {
+                        Some(crate::array::ArrayKey::Int(n)) => Value::Long(n),
+                        _ => Value::Null,
+                    };
+                    new_obj.set_property(b"__spl_dll_cur".to_vec(), head);
+                    new_obj.set_property(b"__spl_dll_tpos".to_vec(), Value::Long(0));
+                }
                 // For WeakMap, copy the live entries from the source.
                 let original_oid = obj_borrow.object_id;
                 let is_weakmap = class_lower.as_slice() == b"weakmap";
