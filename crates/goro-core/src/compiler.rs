@@ -10497,6 +10497,15 @@ impl Compiler {
                                     for param in params {
                                         if let Some(default_expr) = &param.default {
                                             let cv = dc.op_array.get_or_create_cv(&param.name);
+                                            let default_repr = self.default_value_repr_scoped(
+                                                default_expr,
+                                                if modifiers.is_trait {
+                                                    None
+                                                } else {
+                                                    Some(&qualified_name)
+                                                },
+                                            );
+                                            dc.op_array.set_param_default_repr(cv, default_repr);
                                             let undef_idx = dc.op_array.add_literal(Value::Undef);
                                             let check_tmp = dc.op_array.alloc_temp();
                                             let mark = dc.op_array.ops.len();
@@ -11716,6 +11725,7 @@ impl Compiler {
                 self.in_trait_body = saved_in_trait_body;
                 self.current_parent_class = saved_parent;
 
+                substitute_self_parent_types(&mut class);
                 // Store the class and emit a DeclareClass opcode
                 // Classes declared inside a function/method/closure body live on that
                 // body's op_array (encoded as a negative index), since the sub-compiler's
@@ -24007,6 +24017,77 @@ fn reserved_type_name_error(pt: &ParamType) -> Option<String> {
         ParamType::Nullable(inner) => reserved_type_name_error(inner),
         ParamType::Union(ts) | ParamType::Intersection(ts) => {
             ts.iter().find_map(reserved_type_name_error)
+        }
+    }
+}
+
+/// zend_compile_single_typename(): in a known scope (a named class that is
+/// not a trait) `self` and `parent` in declared types are replaced by the
+/// class names at compile time, so reflection shows them resolved.
+#[inline(never)]
+fn substitute_self_parent_types(class: &mut crate::object::ClassEntry) {
+    if class.is_trait
+        || class.name.contains(&0)
+        || class.name.starts_with(b"__anonymous_class_")
+        || class.name.starts_with(b"class@anonymous")
+    {
+        return;
+    }
+    fn walk(pt: &mut ParamType, me: &[u8], parent: Option<&[u8]>) {
+        match pt {
+            ParamType::Simple(n) => {
+                if n.as_slice() == b"self" {
+                    *n = me.to_vec();
+                } else if n.as_slice() == b"parent" {
+                    if let Some(p) = parent {
+                        *n = p.to_vec();
+                    }
+                }
+            }
+            ParamType::Nullable(inner) => walk(inner, me, parent),
+            ParamType::Union(items) | ParamType::Intersection(items) => {
+                for t in items {
+                    walk(t, me, parent);
+                }
+            }
+        }
+    }
+    fn has(pt: &ParamType) -> bool {
+        match pt {
+            ParamType::Simple(n) => n.as_slice() == b"self" || n.as_slice() == b"parent",
+            ParamType::Nullable(inner) => has(inner),
+            ParamType::Union(items) | ParamType::Intersection(items) => items.iter().any(has),
+        }
+    }
+    let me = class.name.clone();
+    let parent = class.parent.clone();
+    let parent = parent.as_deref();
+    for m in class.methods.values_mut() {
+        let needs = m.op_array.return_type.as_ref().is_some_and(has)
+            || m
+                .op_array
+                .param_types
+                .iter()
+                .any(|p| p.as_ref().is_some_and(|p| has(&p.param_type)));
+        if !needs {
+            continue;
+        }
+        let oa = std::rc::Rc::make_mut(&mut m.op_array);
+        if let Some(rt) = oa.return_type.as_mut() {
+            walk(rt, &me, parent);
+        }
+        for p in oa.param_types.iter_mut().flatten() {
+            walk(&mut p.param_type, &me, parent);
+        }
+    }
+    for p in class.properties.iter_mut() {
+        if let Some(t) = p.property_type.as_mut() {
+            walk(t, &me, parent);
+        }
+    }
+    for c in class.constants_meta.values_mut() {
+        if let Some(t) = c.declared_type.as_mut() {
+            walk(t, &me, parent);
         }
     }
 }
