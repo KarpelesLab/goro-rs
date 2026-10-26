@@ -944,7 +944,7 @@ pub static VERIFIED: &[(&str, u8)] = &[
     ("shmop_write", 3),
     ("shuffle", 3),
     ("similar_text", 3),
-    ("simplexml_import_dom", 1), // (its "C!" class name: by the function)
+    ("simplexml_import_dom", 3),
     ("simplexml_load_file", 1),
     ("simplexml_load_string", 1),
     ("sin", 3),
