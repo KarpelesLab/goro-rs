@@ -11253,7 +11253,8 @@ fn class_is_a_interface(vm: &Vm, iface_name: &[u8], check_name: &[u8]) -> bool {
         return goro_core::vm::is_builtin_subclass(iface_name, check_name);
     }
     if let Some(ce) = vm.classes.get(iface_name) {
-        for parent_iface in &ce.interfaces {
+        // (an interface's first parent is kept as its `parent`)
+        for parent_iface in ce.parent.iter().chain(ce.interfaces.iter()) {
             let pi_lower: Vec<u8> = parent_iface
                 .iter()
                 .map(|b| b.to_ascii_lowercase())
