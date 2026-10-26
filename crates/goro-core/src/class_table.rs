@@ -104,6 +104,21 @@ impl Vm {
         })
     }
 
+    /// The entry of `vm.classes` named `name` in any case (no leading
+    /// backslash), its name lowercased on the stack when short.
+    pub fn class_entry_ci(&self, name: &[u8]) -> Option<&crate::object::ClassEntry> {
+        let mut buf = [0u8; 128];
+        match buf.get_mut(..name.len()) {
+            Some(out) => {
+                for (o, c) in out.iter_mut().zip(name) {
+                    *o = c.to_ascii_lowercase();
+                }
+                self.classes.get(&*out)
+            }
+            None => self.classes.get(name.to_ascii_lowercase().as_slice()),
+        }
+    }
+
     /// Kind of a declared class (lowercased name), without autoloading.
     pub fn class_kind(&self, lower: &[u8]) -> Option<ClassKind> {
         self.lookup_class(lower).map(|c| c.kind)
@@ -138,6 +153,50 @@ impl Vm {
             }
         }
         out
+    }
+}
+
+/// A name lowercased for a lookup, on the stack when short (no allocation
+/// for the class names walking a hierarchy meets).
+pub(crate) struct LowerName {
+    buf: [u8; 128],
+    len: usize,
+    heap: Vec<u8>,
+}
+
+impl LowerName {
+    #[inline]
+    pub(crate) fn new(s: &[u8]) -> Self {
+        let mut n = LowerName {
+            buf: [0u8; 128],
+            len: 0,
+            heap: Vec::new(),
+        };
+        n.set(s);
+        n
+    }
+
+    #[inline]
+    pub(crate) fn set(&mut self, s: &[u8]) {
+        if let Some(out) = self.buf.get_mut(..s.len()) {
+            for (o, c) in out.iter_mut().zip(s) {
+                *o = c.to_ascii_lowercase();
+            }
+            self.len = s.len();
+        } else {
+            self.heap.clear();
+            self.heap.extend(s.iter().map(|c| c.to_ascii_lowercase()));
+            self.len = usize::MAX;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self) -> &[u8] {
+        if self.len == usize::MAX {
+            &self.heap
+        } else {
+            &self.buf[..self.len]
+        }
     }
 }
 

@@ -21,18 +21,20 @@ impl Vm {
         class_lower: &[u8],
         bases: &[&'static [u8]],
     ) -> Option<&'static [u8]> {
-        let mut cur: std::borrow::Cow<[u8]> = std::borrow::Cow::Borrowed(class_lower);
+        // (the ancestors' names lowercased on the stack)
+        let mut owned = crate::class_table::LowerName::new(b"");
+        let mut first = true;
         for _ in 0..64 {
-            if let Some(b) = bases.iter().find(|b| **b == &*cur) {
+            let cur: &[u8] = if first { class_lower } else { owned.get() };
+            if let Some(b) = bases.iter().find(|b| **b == cur) {
                 return Some(b);
             }
-            let next: Option<Vec<u8>> = self
-                .classes
-                .get(&*cur)
-                .and_then(|c| c.parent.as_ref())
-                .map(|p| p.to_ascii_lowercase())
-                .or_else(|| crate::vm::get_builtin_parent(&cur).map(|p| p.to_ascii_lowercase()));
-            cur = std::borrow::Cow::Owned(next?);
+            let next: &[u8] = match self.classes.get(cur).and_then(|c| c.parent.as_deref()) {
+                Some(p) => p,
+                None => crate::vm::get_builtin_parent(cur)?,
+            };
+            owned.set(next);
+            first = false;
         }
         None
     }

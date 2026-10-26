@@ -15244,37 +15244,39 @@ impl Vm {
             None => return false,
         };
         let (class, method) = (&rest[..sep], &rest[sep + 2..]);
-        let mut class = class.to_ascii_lowercase();
+        let mut cur = crate::class_table::LowerName::new(class);
         if this_arg == 0 {
-            let scope = self.current_class_scope().map(|s| s.to_ascii_lowercase());
-            class = match class.as_slice() {
-                b"parent" => {
-                    match scope.and_then(|s| self.classes.get(&s).and_then(|c| c.parent.clone())) {
-                        Some(p) => p.to_ascii_lowercase(),
+            let fwd = cur.get();
+            if fwd == b"parent" || fwd == b"self" || fwd == b"static" {
+                let is_parent = fwd == b"parent";
+                let Some(scope) = self.current_class_scope() else {
+                    return false;
+                };
+                if is_parent {
+                    match self.class_entry_ci(&scope).and_then(|c| c.parent.as_ref()) {
+                        Some(p) => cur.set(p),
                         None => return false,
                     }
+                } else {
+                    cur.set(&scope);
                 }
-                b"self" | b"static" => match scope {
-                    Some(s) => s,
-                    None => return false,
-                },
-                _ => class,
-            };
+            }
         }
         // A user subclass of a native class: its nearest native ancestor.
         for _ in 0..64 {
-            if self.native_class_handlers.contains_key(&class) {
+            if self.native_class_handlers.contains_key(cur.get()) {
                 break;
             }
-            match self.classes.get(&class).and_then(|c| c.parent.clone()) {
-                Some(p) => class = p.to_ascii_lowercase(),
+            match self.classes.get(cur.get()).and_then(|c| c.parent.as_ref()) {
+                Some(p) => cur.set(p),
                 None => return false,
             }
         }
-        if !self.native_class_handlers.contains_key(&class) {
+        let class = cur.get();
+        if !self.native_class_handlers.contains_key(class) {
             return false;
         }
-        let (_, m) = match crate::stubs::find_method(&class, method) {
+        let (_, m) = match crate::stubs::find_method(class, method) {
             Some(x) => x,
             None => return false,
         };
