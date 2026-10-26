@@ -19327,6 +19327,25 @@ impl Vm {
 
     /// End of the main script: uncaught exception handling and display,
     /// shutdown functions, destructors and module request shutdown.
+    /// "Class name must be a valid object or a string": the class operand
+    /// of a dynamic class fetch (`$v::C`, `$o instanceof $v`) that is
+    /// neither an object nor a string.
+    #[inline]
+    pub(crate) fn invalid_class_name_operand(&mut self, v: &Value, line: u32) -> Option<Value> {
+        match v {
+            Value::String(_) | Value::Object(_) | Value::Generator(_) => None,
+            Value::Reference(r) => {
+                let inner = r.borrow().clone();
+                self.invalid_class_name_operand(&inner, line)
+            }
+            _ => Some(self.create_exception(
+                b"Error",
+                "Class name must be a valid object or a string",
+                line,
+            )),
+        }
+    }
+
     /// Before the user exception handler runs: the frames the uncaught
     /// exception left are gone.
     #[inline(never)]
@@ -43170,6 +43189,23 @@ impl Vm {
                     let class_val = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .deref();
+                    // (ZEND_FETCH_CLASS of a dynamic class operand)
+                    if matches!(op.op2, OperandType::Cv(_) | OperandType::Tmp(_)) {
+                        if let Some(exc) = self.invalid_class_name_operand(&class_val, op.line) {
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: self.uncaught_exception_message(),
+                                line: op.line,
+                            });
+                        }
+                    }
                     let class_name = match &class_val {
                         Value::Object(o) => PhpString::from_vec(o.borrow().class_name.clone()),
                         other => other.to_php_string(),
@@ -43638,6 +43674,24 @@ impl Vm {
 
                 OpCode::StaticPropGet => match outlined(|| -> Result<Flow, VmError> {
                     let op1_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // ZEND_FETCH_CLASS: `$v::C` with $v neither an object nor a string
+                    if let Some(exc) = matches!(op.op1, OperandType::Cv(_) | OperandType::Tmp(_))
+                        .then(|| self.invalid_class_name_operand(&op1_val, op.line))
+                        .flatten()
+                    {
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            return Ok(Flow::Continue);
+                        }
+                        return Err(VmError {
+                            message: self.uncaught_exception_message(),
+                            line: op.line,
+                        });
+                    }
                     // If op1 is an object, extract the class name for static access
                     let class_name_raw = if let Value::Object(obj_ref) = &op1_val {
                         let obj = obj_ref.borrow();
