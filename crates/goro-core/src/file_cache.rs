@@ -9,7 +9,8 @@
 //! "GOROFC\0\0"  magic
 //! u32           FORMAT_VERSION
 //! u64           build id (the binary's identity, see build_id())
-//! i64, u64      the source file's mtime and size when it was compiled
+//! i64, u64, u64 the source file's mtime (seconds, nanoseconds) and size
+//!               when it was compiled
 //! u64, u64      payload length, payload checksum
 //! payload       the full path, the op array, the classes, the diagnostics
 //! ```
@@ -32,8 +33,7 @@ use std::rc::Rc;
 
 use crate::array::{ArrayKey, PhpArray};
 use crate::object::{
-    ClassEntry, ConstantMeta, MethodDef, PropertyDef, RuntimeAttribute, TraitAdaptation,
-    Visibility,
+    ClassEntry, ConstantMeta, MethodDef, PropertyDef, RuntimeAttribute, TraitAdaptation, Visibility,
 };
 use crate::opcode::{Op, OpArray, OpCode, OperandType, ParamType, ParamTypeInfo};
 use crate::script_cache::{Compiled, Diag};
@@ -43,7 +43,7 @@ use crate::value::Value;
 const MAGIC: &[u8; 8] = b"GOROFC\0\0";
 /// Bumped whenever the encoding below changes.
 const FORMAT_VERSION: u32 = 1;
-const HEADER_LEN: usize = 8 + 4 + 8 + 8 + 8 + 8 + 8;
+const HEADER_LEN: usize = 8 + 4 + 8 + 8 + 8 + 8 + 8 + 8;
 
 /// A value that cannot be stored (the script is then not cached).
 #[derive(Debug)]
@@ -224,7 +224,10 @@ fn find_generated_name(s: &[u8], from: usize) -> Option<(usize, usize, bool, usi
             _ => None,
         };
         if let Some((pfx, main)) = found {
-            let digits = rest[pfx..].iter().take_while(|c| c.is_ascii_digit()).count();
+            let digits = rest[pfx..]
+                .iter()
+                .take_while(|c| c.is_ascii_digit())
+                .count();
             if digits > 0 && digits <= 19 {
                 return Some((i, pfx, main, digits));
             }
@@ -1156,12 +1159,12 @@ impl Dec for Diag {
 /// A 64-bit checksum of the payload (FNV-1a over 8-byte words).
 fn checksum(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
-    let mut chunks = data.chunks_exact(8);
-    for c in &mut chunks {
-        h ^= u64::from_le_bytes(c.try_into().unwrap());
+    let (words, rest) = data.as_chunks::<8>();
+    for c in words {
+        h ^= u64::from_le_bytes(*c);
         h = h.wrapping_mul(0x100000001b3);
     }
-    for &b in chunks.remainder() {
+    for &b in rest {
         h ^= b as u64;
         h = h.wrapping_mul(0x100000001b3);
     }
@@ -1198,7 +1201,7 @@ fn settings_id() -> u64 {
 /// Serializes a compiled script (None if it holds what cannot be stored).
 pub fn encode(
     path: &str,
-    mtime: i64,
+    mtime: (i64, i64),
     size: u64,
     op_array: &OpArray,
     classes: &[ClassEntry],
@@ -1228,7 +1231,8 @@ pub fn encode(
     h.extend_from_slice(MAGIC);
     h.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
     h.extend_from_slice(&settings_id().to_le_bytes());
-    h.extend_from_slice(&mtime.to_le_bytes());
+    h.extend_from_slice(&mtime.0.to_le_bytes());
+    h.extend_from_slice(&mtime.1.to_le_bytes());
     h.extend_from_slice(&size.to_le_bytes());
     h.extend_from_slice(&payload_len.to_le_bytes());
     h.extend_from_slice(&sum.to_le_bytes());
@@ -1236,9 +1240,9 @@ pub fn encode(
     Some(w.buf)
 }
 
-/// The header of a cache file: (mtime, size) of the source it was
+/// The header of a cache file: ((mtime, its nanoseconds), size) of the source it was
 /// compiled from, when it is a cache file of this build.
-pub fn header(data: &[u8]) -> Option<(i64, u64)> {
+pub fn header(data: &[u8]) -> Option<((i64, i64), u64)> {
     if data.len() < HEADER_LEN || &data[..8] != MAGIC {
         return None;
     }
@@ -1247,7 +1251,7 @@ pub fn header(data: &[u8]) -> Option<(i64, u64)> {
     if version != FORMAT_VERSION || word(12) != settings_id() {
         return None;
     }
-    Some((word(20) as i64, word(28)))
+    Some(((word(20) as i64, word(28) as i64), word(36)))
 }
 
 /// Deserializes a cache file whose header() matched: None when it is
@@ -1256,7 +1260,7 @@ pub fn decode(path: &str, data: &[u8]) -> Option<Compiled> {
     header(data)?;
     let word = |at: usize| u64::from_le_bytes(data[at..at + 8].try_into().unwrap());
     let payload = &data[HEADER_LEN..];
-    if word(36) != payload.len() as u64 || word(44) != checksum(payload) {
+    if word(44) != payload.len() as u64 || word(52) != checksum(payload) {
         return None;
     }
     let mut r = R {

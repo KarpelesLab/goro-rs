@@ -416,6 +416,16 @@ fn extra_args(ini: &[(String, String)]) -> String {
 fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> TestResult {
     // Parse INI settings
     let mut ini_settings = parse_ini_settings(test.ini_section());
+    // GORO_PHPT_INI="name=value;...": settings for every test (as
+    // run-tests.php -d), which a test's own --INI-- overrides.
+    if let Ok(extra) = std::env::var("GORO_PHPT_INI") {
+        let extra: Vec<(String, String)> = extra
+            .split(';')
+            .filter_map(|kv| kv.split_once('='))
+            .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            .collect();
+        ini_settings.splice(0..0, extra);
+    }
     // run-tests.php loads the extensions a test lists that are built shared
     // with `-d extension=...` (zend_test is only loaded on request).
     for shared in ["dl_test", "zend_test"] {

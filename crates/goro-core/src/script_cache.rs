@@ -522,10 +522,10 @@ fn marker(mtime: i64, size: u64) -> Vec<u8> {
     format!("OPCACHE\0{}\0{}\0", mtime, size).into_bytes()
 }
 
-/// The source's (mtime, size), if a script compiled now may be stored in
+/// The source's ((mtime, its nanoseconds), size), if a script compiled now may be stored in
 /// the file cache (zend_file_cache_script_store()'s callers:
 /// file_update_protection, opcache.max_file_size, the blacklist).
-fn file_cache_storable(path: &str) -> Option<(String, i64, u64)> {
+fn file_cache_storable(path: &str) -> Option<(String, (i64, i64), u64)> {
     let bin = file_cache_bin_path(path)?;
     let cfg = CONFIG.with(|c| c.borrow().clone());
     if cfg.file_cache_read_only || is_blacklisted(path) {
@@ -539,7 +539,7 @@ fn file_cache_storable(path: &str) -> Option<(String, i64, u64)> {
     if cfg.file_update_protection > 0 && now() - meta.mtime() < cfg.file_update_protection {
         return None;
     }
-    Some((bin, meta.mtime(), meta.len()))
+    Some((bin, (meta.mtime(), meta.mtime_nsec()), meta.len()))
 }
 
 /// Writes a file cache entry: through a temporary file renamed over the
@@ -549,7 +549,10 @@ fn file_cache_write(bin: &str, data: &[u8]) {
     if let Some(dir) = dir {
         let _ = std::fs::create_dir_all(dir);
     }
-    let tmp = format!("{}.{}.tmp", bin, std::process::id());
+    // (unique to the writer: the worker threads of a server write too)
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = format!("{}.{}.{}.tmp", bin, std::process::id(), seq);
     let r = std::fs::write(&tmp, data).and_then(|()| std::fs::rename(&tmp, bin));
     if let Err(e) = r {
         let _ = std::fs::remove_file(&tmp);
@@ -567,7 +570,7 @@ pub fn file_cache_store(path: &str) {
     let Some((bin, mtime, size)) = file_cache_storable(path) else {
         return;
     };
-    file_cache_write(&bin, &marker(mtime, size));
+    file_cache_write(&bin, &marker(mtime.0, size));
 }
 
 /// zend_file_cache_script_store(): the compiled form of `path`, with its
@@ -585,14 +588,16 @@ pub fn file_cache_store_compiled(
     };
     match crate::file_cache::encode(path, mtime, size, op_array, classes, diags) {
         Some(data) => file_cache_write(&bin, &data),
-        None => file_cache_write(&bin, &marker(mtime, size)),
+        None => file_cache_write(&bin, &marker(mtime.0, size)),
     }
 }
 
-/// Whether the file cache is in use (opcache.file_cache).
+/// Whether the file cache is in use (opcache.file_cache; not with
+/// zend.multibyte, whose settings change what a file compiles to).
 #[inline]
 pub fn file_cache_enabled() -> bool {
     CONFIG.with(|c| !c.borrow().file_cache.is_empty())
+        && !goro_parser::multibyte::multibyte_enabled()
 }
 
 /// zend_file_cache_script_load(): the compiled form of `path` from the
@@ -611,7 +616,7 @@ pub fn file_cache_load(path: &str) -> Option<Rc<Compiled>> {
     if cfg.validate_timestamps {
         use std::os::unix::fs::MetadataExt;
         let meta = std::fs::metadata(path).ok()?;
-        if meta.mtime() != mtime || meta.len() != size {
+        if (meta.mtime(), meta.mtime_nsec()) != mtime || meta.len() != size {
             return None;
         }
     }
@@ -619,7 +624,7 @@ pub fn file_cache_load(path: &str) -> Option<Rc<Compiled>> {
     if cfg.enabled && (cfg.record_warnings || compiled.diags.is_empty()) && !is_blacklisted(path) {
         let key = cache_key(path, &cfg);
         let size = estimate_size(&compiled.op_array);
-        insert(&key, Some(compiled.clone()), mtime, size);
+        insert(&key, Some(compiled.clone()), mtime.0, size);
     }
     Some(compiled)
 }
@@ -632,11 +637,13 @@ pub fn in_file_cache(path: &str) -> bool {
     let Ok(data) = std::fs::read(&bin) else {
         return false;
     };
-    let entry = crate::file_cache::header(&data).or_else(|| {
-        let mut parts = data.strip_prefix(b"OPCACHE\0")?.split(|&c| c == 0);
-        let num = |p: Option<&[u8]>| std::str::from_utf8(p?).ok()?.parse::<i64>().ok();
-        Some((num(parts.next())?, num(parts.next())? as u64))
-    });
+    let entry = crate::file_cache::header(&data)
+        .map(|(t, s)| (t.0, s))
+        .or_else(|| {
+            let mut parts = data.strip_prefix(b"OPCACHE\0")?.split(|&c| c == 0);
+            let num = |p: Option<&[u8]>| std::str::from_utf8(p?).ok()?.parse::<i64>().ok();
+            Some((num(parts.next())?, num(parts.next())? as u64))
+        });
     let Some((mtime, size)) = entry else {
         return false;
     };
