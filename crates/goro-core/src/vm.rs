@@ -8023,7 +8023,9 @@ impl Vm {
     /// trait has its own statics in each using class (its scope).
     pub(crate) fn static_var_key(op_array: &OpArray, key: &[u8]) -> Vec<u8> {
         if let Some(sc) = &op_array.scope_class {
-            if !op_array.name.starts_with(b"{closure") {
+            if !op_array.name.starts_with(b"{closure")
+                && !crate::closure::is_closure_fn_name(&op_array.name)
+            {
                 if let Some(pos) = key.windows(2).position(|w| w == b"::") {
                     if &key[..pos] != sc.as_slice() {
                         let mut k = sc.clone();
