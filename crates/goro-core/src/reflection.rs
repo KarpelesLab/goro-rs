@@ -5568,8 +5568,9 @@ pub fn reflection_method_method(
             b"getnumberofparameters" => {
                 let count = rfunc(vm, fn_lower.as_slice())
                     .map(|op| {
-                        (op.param_count as usize).saturating_sub(method_this_hidden(fn_lower, op))
-                            as i64
+                        (op.param_count as usize).saturating_sub(
+                            method_this_hidden(fn_lower, op) + closure_hidden_params(op),
+                        ) as i64
                     })
                     .unwrap_or(0);
                 return Some(Value::Long(count));
@@ -6119,6 +6120,7 @@ pub fn reflection_method_method(
 
             if let Some(ref fn_lower) = closure_fn {
                 if let Some(op) = vm.user_functions.get(fn_lower.as_slice()).cloned() {
+                    let hidden = closure_hidden_params(&op) + method_this_hidden(fn_lower, &op);
                     let m = crate::object::MethodDef {
                         name: b"__invoke".to_vec(),
                         param_count: op.param_count as usize,
@@ -6140,7 +6142,9 @@ pub fn reflection_method_method(
                         display_name: "__invoke",
                         filename: "",
                         internal_user_arginfo: true,
-                        params_skip: Some(0),
+                        // (the closure's leading $this / use variables, a
+                        // method's $this)
+                        params_skip: Some(hidden),
                     };
                     return Some(Value::String(PhpString::from_string(function_string(
                         vm, &ctx, "",
