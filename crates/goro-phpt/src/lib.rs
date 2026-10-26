@@ -1682,7 +1682,10 @@ fn execute_php_inner_impl(
             lexer_deprecations.sort_by_key(|(_, line)| *line);
             let mut out = String::new();
             for (m, l) in lexer_deprecations.iter().filter(|(_, l)| *l <= e.span.line) {
-                out.push_str(&format!("\nDeprecated: {} in {} on line {}\n", m, filename, l));
+                out.push_str(&format!(
+                    "\nDeprecated: {} in {} on line {}\n",
+                    m, filename, l
+                ));
             }
             out.push_str(&msg);
             return Ok(out.into_bytes());
