@@ -10809,22 +10809,7 @@ impl Vm {
         // when dropped. For proxies, the real backing object was already
         // tracked when it was constructed inside the initializer.
         if state_bytes == b"ghost" {
-            let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            let has_destruct = self
-                .classes
-                .get(&class_lower)
-                .map(|c| c.methods.contains_key(b"__destruct".as_slice()))
-                .unwrap_or(false);
-            if has_destruct {
-                // Avoid double-registration: check it's not already tracked.
-                let already = self.destructible_objects.iter().any(|v| match v {
-                    Value::Object(rc) => rc.borrow().object_id == object_id,
-                    _ => false,
-                });
-                if !already {
-                    self.list_destructible(Value::Object(obj.clone()));
-                }
-            }
+            self.lazy_list_destructible(obj);
         }
         true
     }
@@ -12182,22 +12167,26 @@ impl Vm {
             ob.remove_property(b"__lazy_skipped");
             ob.remove_property(b"__lazy_flags");
         }
+        self.lazy_list_destructible(obj);
+    }
+
+    /// A lazy object became a regular one (initialized, realized, marked
+    /// initialized, or never lazy at all): its destructor runs once it is
+    /// released, as for any object.
+    pub fn lazy_list_destructible(&mut self, obj: &Rc<RefCell<PhpObject>>) {
+        if obj.borrow().dtor_listed.get() {
+            return;
+        }
         let class_lower: Vec<u8> = obj
             .borrow()
             .class_name
             .iter()
             .map(|b| b.to_ascii_lowercase())
             .collect();
-        let has_destruct = self
+        if self
             .classes
             .get(&class_lower)
-            .map(|c| c.methods.contains_key(b"__destruct".as_slice()))
-            .unwrap_or(false);
-        if has_destruct
-            && !self
-                .destructible_objects
-                .iter()
-                .any(|v| matches!(v, Value::Object(o) if Rc::ptr_eq(o, obj)))
+            .is_some_and(|c| c.get_method(b"__destruct").is_some())
         {
             self.list_destructible(Value::Object(obj.clone()));
         }

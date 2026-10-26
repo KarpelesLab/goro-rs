@@ -4670,10 +4670,17 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 // PHP: classes with no declared instance properties are never lazy
                 // — they are returned as already-initialized objects (no initializer).
                 let decl_prop_count = rcls(vm, &class_lower)
-                    .map(|ce| ce.properties.iter().filter(|p| !p.is_static).count())
+                    .map(|ce| {
+                        ce.properties
+                            .iter()
+                            .filter(|p| !p.is_static && !p.is_virtual)
+                            .count()
+                    })
                     .unwrap_or(0);
                 if decl_prop_count == 0 {
-                    return Some(Value::Object(Rc::new(RefCell::new(new_obj))));
+                    let obj = Rc::new(RefCell::new(new_obj));
+                    vm.lazy_list_destructible(&obj);
+                    return Some(Value::Object(obj));
                 }
                 // For lazy objects, all declared properties are seeded as Undef
                 // in declaration order so later assignments preserve that order.
@@ -4723,23 +4730,41 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
             b"marklazyobjectasinitialized" => {
                 let target = args.get(1).cloned().unwrap_or(Value::Null);
                 if let Value::Object(inner) = &target {
-                    // Initialize properties to their default values from the class
-                    // definition, skipping the initializer.
-                    let defaults: Vec<(Vec<u8>, Value)> = rcls(vm, &class_lower)
-                        .map(|ce| {
-                            ce.properties
-                                .iter()
-                                .filter(|p| !p.is_static && !matches!(p.default, Value::Undef))
-                                .map(|p| (p.name.clone(), p.default.clone()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let mut ob = inner.borrow_mut();
-                    for (name, val) in defaults {
-                        ob.set_property(name, val);
+                    if Vm::is_uninit_lazy(inner) {
+                        // zend_lazy_object_mark_as_initialized(): the still
+                        // lazy properties get their default values, and the
+                        // object (even a proxy) becomes a regular one.
+                        let obj_class_lower: Vec<u8> = inner
+                            .borrow()
+                            .class_name
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
+                        let defaults: Vec<(Vec<u8>, Value)> = rcls(vm, &obj_class_lower)
+                            .map(|ce| {
+                                ce.properties
+                                    .iter()
+                                    .filter(|p| {
+                                        !p.is_static
+                                            && !p.is_virtual
+                                            && !matches!(p.default, Value::Undef)
+                                    })
+                                    .filter(|p| !crate::vm::is_prop_skipped(inner, &p.name))
+                                    .map(|p| (p.name.clone(), p.default.clone()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        {
+                            let mut ob = inner.borrow_mut();
+                            for (name, val) in defaults {
+                                ob.set_property(name, val);
+                            }
+                        }
+                        vm.lazy_realize(inner);
                     }
-                    ob.remove_property(b"__lazy_state");
-                    ob.remove_property(b"__lazy_initializer");
+                    if let Value::Object(real) = inner.borrow().get_property(b"__lazy_real") {
+                        return Some(Value::Object(real));
+                    }
                 }
                 Some(target)
             }
