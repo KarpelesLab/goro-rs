@@ -14781,6 +14781,26 @@ impl Compiler {
         )
     }
 
+    /// `$a[] ?? x` (an append anywhere in the quietly fetched chain) is the
+    /// compile-time "Cannot use [] for reading".
+    #[inline(never)]
+    fn check_coalesce_append(left: &Expr, line: u32) -> Result<(), CompileError> {
+        let mut e = left;
+        loop {
+            match &e.kind {
+                ExprKind::ArrayAccess { index: None, .. } => {
+                    return Err(CompileError {
+                        message: "Cannot use [] for reading".into(),
+                        line,
+                    });
+                }
+                ExprKind::ArrayAccess { array, .. } => e = array,
+                ExprKind::PropertyAccess { object, .. } => e = object,
+                _ => return Ok(()),
+            }
+        }
+    }
+
     fn is_static_prop_expr(e: &Expr) -> bool {
         matches!(
             e.kind,
@@ -16907,6 +16927,7 @@ impl Compiler {
             ExprKind::ShellExec(call) => self.compile_expr(call),
 
             ExprKind::NullCoalesce { left, right } => {
+                Self::check_coalesce_append(left, expr.span.line)?;
                 self.mark_is_fetch_base(left);
                 // $a ?? $b: if $a is not null, use $a, else use $b
                 // Suppress warnings for the left side (undefined keys, undefined vars, etc.)
