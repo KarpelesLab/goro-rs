@@ -1865,6 +1865,13 @@ impl PhpGenerator {
                             self.write_operand(&op.result, v);
                             continue;
                         }
+                        // `$a[k] = $a`: the value is copied before the write
+                        // fetches the container (see the VM's handler).
+                        if matches!(op_array.literals.get(k as usize), Some(Value::Long(3))) {
+                            let v = vm.dup_array_value(v.deref());
+                            self.write_operand(&op.result, v);
+                            continue;
+                        }
                     }
                     let v = if matches!(v, Value::Undef) {
                         Value::Null
