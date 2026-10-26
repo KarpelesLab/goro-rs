@@ -15949,7 +15949,9 @@ impl Compiler {
                     if (self.current_namespace.is_empty() || func_lower.starts_with(b"\\"))
                         && matches!(unqualified, b"defined" | b"in_array")
                     {
-                        if let Some(args) = ct_special_call_args(unqualified, args) {
+                        if let Some(args) =
+                            ct_special_call_args(unqualified, args, !self.current_namespace.is_empty())
+                        {
                             self.is_discarding_result = discard_result;
                             let call = Expr {
                                 kind: ExprKind::FunctionCall {
@@ -24849,6 +24851,7 @@ fn extract_call_args(args: &[goro_parser::ast::Argument]) -> Option<Vec<Option<&
 fn ct_special_call_args(
     lname: &[u8],
     args: &[goro_parser::ast::Argument],
+    in_namespace: bool,
 ) -> Option<Vec<goro_parser::ast::Argument>> {
     if args.iter().any(|a| a.name.is_some() || a.unpack) {
         return None;
@@ -24875,6 +24878,26 @@ fn ct_special_call_args(
             let strict = match &args[2].value.kind {
                 ExprKind::True | ExprKind::False => return None,
                 ExprKind::Null => false,
+                // (a constant zend_try_ct_eval_const() substitutes: in a
+                // namespace only a fully qualified name resolves to it)
+                ExprKind::Identifier(n) => {
+                    let n = match n.strip_prefix(b"\\") {
+                        Some(n) => n,
+                        None if in_namespace => return None,
+                        None => n,
+                    };
+                    if n.contains(&b'\\') || n.iter().any(|b| b.is_ascii_lowercase()) {
+                        return None;
+                    }
+                    let id = Expr {
+                        kind: ExprKind::Identifier(n.to_vec()),
+                        span: args[2].value.span,
+                    };
+                    match Compiler::eval_const_expr(&id)? {
+                        v @ (Value::Long(_) | Value::Double(_) | Value::String(_)) => v.is_truthy(),
+                        _ => return None,
+                    }
+                }
                 _ => literal(&args[2].value)?.is_truthy(),
             };
             let ExprKind::Array(elems) = &args[1].value.kind else {
