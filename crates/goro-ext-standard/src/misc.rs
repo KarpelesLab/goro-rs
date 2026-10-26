@@ -4032,6 +4032,11 @@ fn walk_key_value(k: &ArrayKey) -> Value {
 /// `holder` is the variable (reference) the walked array lives in: as in
 /// php_array_walk(), it is reloaded after every callback, so that a callback
 /// replacing the array continues with the new one.
+thread_local! {
+    /// The nested arrays array_walk_recursive() is walking (by address).
+    static WALK_PROTECTED: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
 fn php_array_walk_arr(
     vm: &mut Vm,
     arr: Rc<RefCell<PhpArray>>,
@@ -4073,6 +4078,16 @@ fn php_array_walk_arr(
         let r = match val {
             Value::Reference(r) => {
                 if recursive {
+                    // GC_IS_RECURSIVE(): a nested array already being walked
+                    // (checked before it would be separated as shared)
+                    let protected = matches!(&*r.borrow(), Value::Array(a)
+                        if WALK_PROTECTED.with(|w| w.borrow().contains(&(Rc::as_ptr(a) as usize))));
+                    if protected {
+                        let exc =
+                            vm.create_exception(b"Error", "Recursion detected", vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Ok(false);
+                    }
                     if let Ok(mut inner) = r.try_borrow_mut() {
                         goro_core::array::separate_shared(&mut inner);
                     }
@@ -4100,12 +4115,20 @@ fn php_array_walk_arr(
             None
         };
         if let Some(sub) = inner_arr {
-            if Rc::ptr_eq(&sub, &arr) {
-                vm.emit_warning("array_walk_recursive(): Recursion detected");
-                return Ok(true);
+            // GC_IS_RECURSIVE(): an array already being walked (one of the
+            // nested ones entered so far) is an Error.
+            let ptr = Rc::as_ptr(&sub) as usize;
+            if WALK_PROTECTED.with(|w| w.borrow().contains(&ptr)) {
+                let msg = "Recursion detected";
+                let exc = vm.create_exception(b"Error", msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Ok(false);
             }
             drop(arr);
-            if !php_array_walk_arr(vm, sub, Some(&r), cb, userdata, true, depth + 1)? {
+            WALK_PROTECTED.with(|w| w.borrow_mut().push(ptr));
+            let res = php_array_walk_arr(vm, sub, Some(&r), cb, userdata, true, depth + 1);
+            WALK_PROTECTED.with(|w| w.borrow_mut().pop());
+            if !res? {
                 return Ok(false);
             }
         } else {
@@ -15196,6 +15219,16 @@ fn user_sort_compare(
             } else {
                 0
             };
+        }
+    }
+    // php_get_long(): zval_get_long() of the result
+    if let Value::Object(o) = &result {
+        if goro_core::value::native_cast(o, 1).is_none() {
+            let cn = goro_core::value::display_class_name(&o.borrow().class_name);
+            vm.emit_warning(&format!(
+                "Object of class {} could not be converted to int",
+                cn
+            ));
         }
     }
     let n = result.to_long();
