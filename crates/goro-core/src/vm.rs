@@ -2369,6 +2369,16 @@ pub struct Vm {
     /// The `$this` of the call whose arguments are being type-checked (the
     /// callee's RECV): a `callable` parameter is checked in its frame.
     pub(crate) recv_this: Option<Value>,
+    /// The functions made for one closure object each (a bound closure's
+    /// `__bound_closure_N`, a closure's copy with its own static variables
+    /// `...#N`) and the Closure objects using them: once none is alive the
+    /// function is dropped (see Vm::sweep_ephemeral_closures).
+    pub(crate) ephemeral_closures: Vec<(Vec<u8>, std::rc::Weak<RefCell<PhpObject>>)>,
+    /// ephemeral_closures' length at which it is swept next.
+    pub(crate) ephemeral_sweep_at: usize,
+    /// Swept functions leave a placeholder entry each (user_functions.len()
+    /// is the call caches' generation: it never decreases).
+    pub(crate) swept_closures: u64,
     /// The exception a `return` in a finally block discarded (see
     /// OpCode::Return), for the return type check.
     pub(crate) return_discarded_exc: Option<Value>,
@@ -3757,6 +3767,9 @@ impl Vm {
             closure_invoke_call: false,
             pending_call_via_invoke: false,
             recv_this: None,
+            ephemeral_closures: Vec::new(),
+            ephemeral_sweep_at: 4096,
+            swept_closures: 0,
             return_discarded_exc: None,
             exit_in_autoload: false,
             ini_set_hooks: HashMap::new(),

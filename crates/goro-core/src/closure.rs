@@ -45,6 +45,22 @@ pub fn is_closure_fn_name(name: &[u8]) -> bool {
         || name.starts_with(b"__bound_closure_")
 }
 
+/// The (lowercase) name of the function a closure's inner value calls when
+/// it was made for one Closure object (a bound copy, a copy with its own
+/// static variables).
+fn ephemeral_closure_name(inner: &Value) -> Option<Vec<u8>> {
+    let name = match inner {
+        Value::String(s) => s.as_bytes().to_vec(),
+        Value::Array(a) => match a.borrow().get_int(0) {
+            Some(Value::String(s)) => s.as_bytes().to_vec(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    (name.starts_with(b"__bound_closure_") || (is_closure_fn_name(&name) && name.contains(&b'#')))
+        .then(|| lower(&name))
+}
+
 /// Split an internal closure callable into (function name, captured values).
 pub fn closure_parts(inner: &Value) -> (Vec<u8>, Vec<Value>) {
     match inner {
@@ -185,11 +201,85 @@ impl Vm {
         if matches!(inner, Value::Null | Value::Undef) || inner.is_closure_obj() {
             return inner;
         }
+        let ephemeral = ephemeral_closure_name(&inner);
         let id = self.alloc_object_id();
         let mut o = PhpObject::new(b"Closure".to_vec(), id);
         o.closure = Some(Box::new(inner));
         o.account();
-        Value::Object(Rc::new(RefCell::new(o)))
+        let rc = Rc::new(RefCell::new(o));
+        if let Some(name) = ephemeral {
+            self.note_ephemeral_closure(name, &rc);
+        }
+        Value::Object(rc)
+    }
+
+    /// A Closure object of a function made for it alone (see
+    /// Vm::ephemeral_closures).
+    #[inline(never)]
+    fn note_ephemeral_closure(&mut self, name: Vec<u8>, obj: &Rc<RefCell<PhpObject>>) {
+        self.ephemeral_closures.push((name, Rc::downgrade(obj)));
+        if self.ephemeral_closures.len() >= self.ephemeral_sweep_at {
+            self.sweep_ephemeral_closures();
+            self.ephemeral_sweep_at = (self.ephemeral_closures.len() * 2).max(4096);
+        }
+    }
+
+    /// Drop the functions made for Closure objects that are all gone (and
+    /// their static variables). A function still named by a call being set
+    /// up is kept; running ones hold their op array themselves.
+    #[inline(never)]
+    pub(crate) fn sweep_ephemeral_closures(&mut self) {
+        let entries = std::mem::take(&mut self.ephemeral_closures);
+        let mut live: crate::fxhash::FxHashSet<Vec<u8>> = Default::default();
+        for (n, w) in &entries {
+            if w.strong_count() > 0 {
+                live.insert(n.clone());
+            }
+        }
+        for pc in &self.pending_calls {
+            live.insert(lower(pc.name.as_bytes()));
+        }
+        let mut dead: crate::fxhash::FxHashSet<Vec<u8>> = Default::default();
+        let mut kept = Vec::with_capacity(live.len());
+        for (n, w) in entries {
+            if w.strong_count() > 0 {
+                kept.push((n, w));
+            } else if !live.contains(&n) {
+                dead.insert(n);
+            }
+        }
+        self.ephemeral_closures = kept;
+        if dead.is_empty() {
+            return;
+        }
+        let placeholder: Option<Rc<OpArray>> = self.user_functions.values().next().cloned();
+        let mut removed = 0u64;
+        for n in &dead {
+            if self.user_functions.remove(n).is_some() {
+                removed += 1;
+            }
+        }
+        // (a placeholder per function removed: the length never decreases)
+        if let Some(ph) = placeholder {
+            for _ in 0..removed {
+                self.swept_closures += 1;
+                let key = format!("__closure_swept_{}", self.swept_closures).into_bytes();
+                self.user_functions.insert(key, Rc::clone(&ph));
+            }
+        }
+        let statics: Vec<Vec<u8>> = self
+            .static_vars()
+            .keys()
+            .filter(|k| {
+                k.windows(2)
+                    .position(|w| w == b"::")
+                    .is_some_and(|p| dead.contains(&lower(&k[..p])))
+            })
+            .cloned()
+            .collect();
+        for k in statics {
+            self.static_vars.remove(&k);
+        }
     }
 
     /// `clone $closure`: a new Closure object with the same function, bound
