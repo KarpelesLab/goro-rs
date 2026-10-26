@@ -535,6 +535,11 @@ fn with_internal_ctor_frame(
             None => v.clone(),
         })
         .collect();
+    // (a constructor the engine runs from another one is not zpp'd)
+    let nested = vm
+        .call_stack
+        .last()
+        .is_some_and(|f| f.4 && f.0.ends_with("->__construct"));
     vm.call_stack.push((
         format!("{}->__construct", decl),
         vm.current_file.clone(),
@@ -544,6 +549,41 @@ fn with_internal_ctor_frame(
     ));
     if let Some(this) = args.first() {
         vm.note_frame_this(this);
+    }
+    // zpp's argument count, from the constructor's stub
+    if let Some(m) = sig.filter(|_| !nested) {
+        let n = args.len().saturating_sub(1);
+        let min = m.required_args();
+        let max = if m
+            .args
+            .last()
+            .is_some_and(|a| a.flags & crate::stubs::A_VARIADIC != 0)
+        {
+            None
+        } else {
+            Some(m.args.len())
+        };
+        if n < min || max.is_some_and(|x| n > x) {
+            let (kind, k) = if max == Some(min) {
+                ("exactly", min)
+            } else if n < min {
+                ("at least", min)
+            } else {
+                ("at most", max.unwrap_or(min))
+            };
+            let msg = format!(
+                "{}::__construct() expects {} {} argument{}, {} given",
+                decl,
+                kind,
+                k,
+                if k == 1 { "" } else { "s" },
+                n
+            );
+            let exc = vm.create_exception(b"ArgumentCountError", &msg, line);
+            vm.current_exception = Some(exc);
+            vm.call_stack.pop();
+            return false;
+        }
     }
     let r = f(vm, args, line);
     vm.call_stack.pop();
@@ -1196,6 +1236,21 @@ fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bo
 
     let arg = args.get(1).cloned().unwrap_or(Value::Null);
 
+    // ReflectionObject::__construct(object $object)
+    let rc_lower = reflector_class_name.to_ascii_lowercase();
+    if (rc_lower == "reflectionobject"
+        || vm.class_extends(rc_lower.as_bytes(), b"reflectionobject"))
+        && !matches!(arg.deref(), Value::Object(_))
+    {
+        let err_msg = format!(
+            "ReflectionObject::__construct(): Argument #1 ($object) must be of type object, {} given",
+            Vm::value_type_name(&arg.deref())
+        );
+        let exc = vm.throw_type_error(err_msg);
+        vm.current_exception = Some(exc);
+        return false;
+    }
+
     // Reject array/non-stringable arguments before we try to stringify.
     match &arg {
         Value::Array(_) => {
@@ -1367,6 +1422,59 @@ fn reflection_method_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> b
         vm.current_exception = Some(exc);
         return false;
     }
+    // (instantiate_reflection_method(): the 1-argument form's deprecation
+    // comes before zpp)
+    let one_arg = user_arg_count == 1 && !CLOSURE_INVOKE_CTOR.with(|c| c.get());
+    if one_arg && !ONE_ARG_DEPRECATION_DONE.with(|c| c.replace(true)) {
+        let dep_msg = "Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead";
+        vm.emit_deprecated_raw(dep_msg, line);
+        if vm.current_exception.is_some() {
+            ONE_ARG_DEPRECATION_DONE.with(|c| c.set(false));
+            return false;
+        }
+    }
+    let r = reflection_method_construct_args(vm, &this, args, line, one_arg);
+    ONE_ARG_DEPRECATION_DONE.with(|c| c.set(false));
+    r
+}
+
+thread_local! {
+    /// The 1-argument deprecation of the ReflectionMethod construction in
+    /// progress was raised (a nested construction does not raise it again).
+    static ONE_ARG_DEPRECATION_DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn reflection_method_construct_args(
+    vm: &mut Vm,
+    this: &Rc<RefCell<PhpObject>>,
+    args: &[Value],
+    line: u32,
+    one_arg: bool,
+) -> bool {
+    let this = this.clone();
+    if one_arg {
+        match args.get(1).map(|v| v.deref()) {
+            Some(Value::Null) => {
+                vm.emit_deprecated_at(
+                    "ReflectionMethod::__construct(): Passing null to parameter #1 ($objectOrMethod) of type object|string is deprecated",
+                    line,
+                );
+                if vm.current_exception.is_some() {
+                    return false;
+                }
+            }
+            Some(Value::Object(_)) => {
+                let exc = vm.create_exception(
+                    b"ValueError",
+                    "ReflectionMethod::__construct(): Argument #2 ($method) cannot be null when argument #1 ($objectOrMethod) is an object",
+                    line,
+                );
+                vm.current_exception = Some(exc);
+                return false;
+            }
+            _ => {}
+        }
+    }
 
     if args.get(1).map(|a| a.is_closure_obj()).unwrap_or(false) {
         let invoke = args.get(2).is_some_and(|m| {
@@ -1533,10 +1641,8 @@ fn reflection_method_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> b
         };
         (class_str, method_arg)
     } else if args.len() >= 2 {
-        // new ReflectionMethod('Class::method')
-        // 1-arg form is deprecated in PHP 8.4 in favour of createFromMethodName.
-        let dep_msg = "Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead";
-        vm.emit_deprecated_raw(dep_msg, line);
+        // new ReflectionMethod('Class::method') (its deprecation was raised
+        // first)
         let arg = args[1].to_php_string().to_string_lossy();
         if let Some(pos) = arg.find("::") {
             (arg[..pos].to_string(), arg[pos + 2..].to_string())
@@ -2050,11 +2156,66 @@ fn internal_method_rf(
 }
 
 /// ReflectionFunction constructor
+/// Z_PARAM_STR of a Reflection constructor's argument `n`: arrays and
+/// non-Stringable objects are TypeErrors, null is deprecated (false when
+/// it threw).
+#[inline(never)]
+fn ctor_string_arg_ok(
+    vm: &mut Vm,
+    class: &str,
+    n: usize,
+    name: &str,
+    v: &Value,
+    line: u32,
+) -> bool {
+    let v = v.deref();
+    let bad = match &v {
+        Value::Array(_) => true,
+        Value::Object(o) => !vm
+            .classes
+            .get(&o.borrow().class_name.to_ascii_lowercase())
+            .is_some_and(|c| c.methods.contains_key(&b"__tostring".to_vec())),
+        Value::Null => {
+            vm.emit_deprecated_at(
+                &format!(
+                    "{}::__construct(): Passing null to parameter #{} (${}) of type string is deprecated",
+                    class, n, name
+                ),
+                line,
+            );
+            return vm.current_exception.is_none();
+        }
+        _ => false,
+    };
+    if bad {
+        let msg = format!(
+            "{}::__construct(): Argument #{} (${}) must be of type string, {} given",
+            class,
+            n,
+            name,
+            Vm::value_type_name(&v)
+        );
+        let exc = vm.create_exception(b"TypeError", &msg, line);
+        vm.current_exception = Some(exc);
+        return false;
+    }
+    true
+}
+
 fn reflection_function_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bool {
     let this = match args.first() {
         Some(Value::Object(o)) => o.clone(),
         _ => return true,
     };
+    if matches!(args.get(1).map(|v| v.deref()), Some(Value::Null)) {
+        vm.emit_deprecated_at(
+            "ReflectionFunction::__construct(): Passing null to parameter #1 ($function) of type Closure|string is deprecated",
+            line,
+        );
+        if vm.current_exception.is_some() {
+            return false;
+        }
+    }
     if let Some(arg) = args.get(1) {
         if arg.is_closure_obj() && args.len() == 2 {
             let closure = arg.deref();
@@ -2302,6 +2463,9 @@ fn reflection_property_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
 
     let class_arg = args.get(1).cloned().unwrap_or(Value::Null);
     let prop_arg = args.get(2).cloned().unwrap_or(Value::Null);
+    if !ctor_string_arg_ok(vm, "ReflectionProperty", 2, "property", &prop_arg, line) {
+        return false;
+    }
 
     let class_name_raw = match &class_arg {
         Value::Object(obj) => {
@@ -2849,6 +3013,9 @@ fn reflection_class_constant_construct_impl(vm: &mut Vm, args: &[Value], line: u
         );
         let exc = vm.create_exception(b"TypeError", &err_msg, line);
         vm.current_exception = Some(exc);
+        return false;
+    }
+    if !ctor_string_arg_ok(vm, &reflector_name, 2, "constant", &const_arg, line) {
         return false;
     }
 
@@ -13991,36 +14158,23 @@ pub fn reflection_static_call(
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
 
-                        // Check class exists
-                        if !vm.classes.contains_key(&class_lower_bytes) {
-                            let err_msg = format!("Class \"{}\" does not exist", class_name);
-                            let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
-                            vm.current_exception = Some(exc);
+                        let _ = (&class_lower_bytes, &method_lower_bytes);
+                        // (the constructor's two-argument form: internal
+                        // classes included)
+                        let obj_id = vm.alloc_object_id();
+                        let obj = Rc::new(RefCell::new(PhpObject::new(
+                            b"ReflectionMethod".to_vec(),
+                            obj_id,
+                        )));
+                        let a = [
+                            Value::Object(obj.clone()),
+                            Value::String(PhpString::from_string(class_name.to_string())),
+                            Value::String(PhpString::from_string(method_name.to_string())),
+                        ];
+                        if !reflection_method_construct(vm, &a, line) {
                             return Some(Value::Null);
                         }
-
-                        // Check method exists
-                        let method_exists = rcls(vm, &class_lower_bytes)
-                            .map(|c| c.get_method(&method_lower_bytes).is_some())
-                            .unwrap_or(false);
-
-                        if !method_exists {
-                            let canonical_class = rcls(vm, &class_lower_bytes)
-                                .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                                .unwrap_or(class_name.to_string());
-                            let err_msg = format!(
-                                "Method {}::{}() does not exist",
-                                canonical_class, method_name
-                            );
-                            let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
-                            vm.current_exception = Some(exc);
-                            return Some(Value::Null);
-                        }
-
-                        let canonical_class = rcls(vm, &class_lower_bytes)
-                            .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                            .unwrap_or(class_name.to_string());
-                        Some(create_reflection_method(vm, &canonical_class, method_name))
+                        Some(Value::Object(obj))
                     } else {
                         let err_msg = "ReflectionMethod::createFromMethodName(): Argument #1 ($method) must be a valid method name".to_string();
                         let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
