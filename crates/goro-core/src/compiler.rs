@@ -8390,7 +8390,19 @@ impl Compiler {
                                         | b"__construct"
                                         | b"__tostring"
                                 );
+                                // Properties are rejected first: a declared one
+                                // when compiled, a promoted one before the magic
+                                // methods (zend_verify_enum()).
                                 if forbidden_magic {
+                                    if let Some(l) = enum_property_line(body, stmt.span.line) {
+                                        return Err(CompileError {
+                                            message: format!(
+                                                "Enum {} cannot include properties",
+                                                crate::string::msg_str(name)
+                                            ),
+                                            line: l,
+                                        });
+                                    }
                                     return Err(CompileError {
                                         message: format!(
                                             "Enum {} cannot include magic method {}",
@@ -24016,4 +24028,24 @@ fn assign_target_reassigns_this(target: &Expr) -> Option<bool> {
         }
         _ => None,
     }
+}
+
+/// The line an enum's "cannot include properties" error is reported at,
+/// if it declares a property (at it) or a promoted constructor parameter
+/// (at the enum, `enum_line`).
+#[inline(never)]
+fn enum_property_line(body: &[ClassMember], enum_line: u32) -> Option<u32> {
+    if let Some(l) = body.iter().find_map(|m| match m {
+        ClassMember::Property { line, .. } => Some(*line),
+        _ => None,
+    }) {
+        return Some(l);
+    }
+    body.iter()
+        .any(|m| {
+            matches!(m, ClassMember::Method { name, params, .. }
+                if name.eq_ignore_ascii_case(b"__construct")
+                    && params.iter().any(|p| p.visibility.is_some() || p.readonly || p.set_visibility.is_some()))
+        })
+        .then_some(enum_line)
 }
