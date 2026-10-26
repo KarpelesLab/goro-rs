@@ -30646,11 +30646,12 @@ impl Vm {
                         }
                         let desc = call.target.builtin.expect("builtin call target");
                         let (func, zpp) = (desc.func, desc.zpp);
-                        let mut buf = [0u8; 64];
-                        let func_name_lower = desc.lower_name(call.name.as_bytes(), &mut buf);
+                        let ns_fallback = desc.ns_fallback(call.name.as_bytes());
+                        let func_name_lower = desc.lower;
                         self.note_call_result(op, func_name_lower);
                         // Compiled to an opcode by php-src: no frame of its own
-                        let special = !via_closure && desc.compiled_special(&call.args);
+                        let special =
+                            !via_closure && !ns_fallback && desc.compiled_special(&call.args);
                         // Generic zpp (verified stub arginfo)
                         let mut zpp_orig: Option<Vec<Value>> = None;
                         if let Some((info, flags)) = zpp {

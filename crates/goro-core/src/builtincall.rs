@@ -104,25 +104,15 @@ impl BuiltinDesc {
         args.len() < 3 && (self.special >> args.len()) & 1 != 0
     }
 
-    /// The lowercase name of a call of this builtin by `name` (the name it
-    /// was resolved for, or a longer unqualified namespaced one that fell
-    /// back to it), in `buf` when it is not `lower`.
+    /// Whether a call of this builtin by `name` (the name it was resolved
+    /// for, or a longer unqualified namespaced one that fell back to it:
+    /// INIT_NS_FCALL_BY_NAME) is such a fallback. Its frame is named after
+    /// the builtin all the same (`lower`), but php-src compiles none of
+    /// those calls into an opcode of their own (zend_compile_ns_call()).
     #[inline]
-    pub(crate) fn lower_name<'a>(&'static self, name: &[u8], buf: &'a mut [u8; 64]) -> &'a [u8] {
-        if name.len() == self.lower.len() {
-            return self.lower;
-        }
-        lower_name_slow(name, buf)
+    pub(crate) fn ns_fallback(&'static self, name: &[u8]) -> bool {
+        name.len() != self.lower.len()
     }
-}
-
-#[cold]
-#[inline(never)]
-fn lower_name_slow<'a>(name: &[u8], buf: &'a mut [u8; 64]) -> &'a [u8] {
-    for (d, s) in buf.iter_mut().zip(name) {
-        *d = s.to_ascii_lowercase();
-    }
-    &buf[..name.len().min(64)]
 }
 
 /// A running lean call's callee (see leancall.rs: Vm::lean_run's state, alive
@@ -199,8 +189,8 @@ impl Vm {
         // (a dynamic call is a real one: it has a frame)
         let dynamic = call.target.dynamic;
         let mut args = std::mem::take(&mut call.args);
-        let mut buf = [0u8; 64];
-        let func_name_lower = desc.lower_name(call.name.as_bytes(), &mut buf);
+        let ns_fallback = desc.ns_fallback(call.name.as_bytes());
+        let func_name_lower = desc.lower;
         if call.named_args.capacity() == 0
             && call.target.user.is_none()
             && call.target.method_info.is_none()
@@ -231,7 +221,7 @@ impl Vm {
         }
         self.note_call_result(op, func_name_lower);
         // Compiled to an opcode by php-src: no frame of its own
-        let special = !via_closure && !dynamic && desc.compiled_special(&args);
+        let special = !via_closure && !dynamic && !ns_fallback && desc.compiled_special(&args);
         // Generic zpp (verified stub arginfo)
         let mut zpp_orig: Option<Vec<Value>> = None;
         if let Some((info, flags)) = zpp {
