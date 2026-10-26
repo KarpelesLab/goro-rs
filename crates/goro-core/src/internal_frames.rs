@@ -690,8 +690,10 @@ impl Vm {
 /// ord() are only folded for a literal they cannot fail on) or on the
 /// calling context (func_get_args(), array_slice()) are left out.
 pub fn compiled_special(lname: &[u8], args: &[Value]) -> bool {
-    if lname == b"sprintf" {
-        return sprintf_is_rope(args);
+    // (sprintf() with a constant format is compiled to a rope, in_array()
+    // with a constant haystack to its opcode's builtin)
+    if lname == crate::compiler::IN_ARRAY_OP_FN {
+        return true;
     }
     match args.len() {
         0 => matches!(lname, b"get_class" | b"get_called_class"),
@@ -723,34 +725,6 @@ pub fn compiled_special(lname: &[u8], args: &[Value]) -> bool {
         2 => lname == b"array_key_exists",
         _ => false,
     }
-}
-
-/// Whether php-src compiles this sprintf() call into a rope instead of a
-/// function call (zend_compile_func_sprintf: a short format with only %s,
-/// %d and %% and one argument per placeholder), so it has no frame.
-pub fn sprintf_is_rope(args: &[Value]) -> bool {
-    let Some(Value::String(f)) = args.first() else {
-        return false;
-    };
-    let b = f.as_bytes();
-    if b.len() >= 256 {
-        return false;
-    }
-    let mut n = 0;
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' {
-            match b.get(i + 1) {
-                Some(b's') | Some(b'd') => n += 1,
-                Some(b'%') => {}
-                _ => return false,
-            }
-            i += 2;
-        } else {
-            i += 1;
-        }
-    }
-    n == args.len() - 1
 }
 
 /// `$this` of an internal method call in progress (see `note_frame_this`).

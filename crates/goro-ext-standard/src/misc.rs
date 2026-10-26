@@ -290,6 +290,8 @@ final class StreamBucket {
     vm.register_function(b"array_splice", array_splice);
     vm.register_function(b"array_search", array_search);
     vm.register_function(b"in_array", in_array);
+    // (in_array() as the ZEND_IN_ARRAY opcode: see ct_special_call_args)
+    vm.register_function(goro_core::compiler::IN_ARRAY_OP_FN, in_array);
     vm.register_function(b"array_filter", array_filter);
     vm.register_function(b"array_walk", array_walk);
     vm.register_function(b"array_reduce", array_reduce_fn);

@@ -400,6 +400,10 @@ fn push_compile_warning_tuple(w: (String, u32)) {
     push_compile_warning(w.0, w.1);
 }
 
+/// The builtin a constant-haystack in_array() call is compiled to (php-src's
+/// ZEND_IN_ARRAY opcode: it has no frame).
+pub const IN_ARRAY_OP_FN: &[u8] = b"__goro_in_array";
+
 thread_local! {
     /// CG(rtd_key_counter): runtime definition keys taken so far.
     static RTD_BASE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
@@ -16221,11 +16225,19 @@ impl Compiler {
                             !self.current_namespace.is_empty(),
                         ) {
                             self.is_discarding_result = discard_result;
+                            // (ZEND_IN_ARRAY: an opcode, no call frame)
+                            let name = if unqualified == b"in_array" {
+                                let mut n = b"\\".to_vec();
+                                n.extend_from_slice(IN_ARRAY_OP_FN);
+                                Box::new(Expr {
+                                    kind: ExprKind::Identifier(n),
+                                    span: name.span,
+                                })
+                            } else {
+                                name.clone()
+                            };
                             let call = Expr {
-                                kind: ExprKind::FunctionCall {
-                                    name: name.clone(),
-                                    args,
-                                },
+                                kind: ExprKind::FunctionCall { name, args },
                                 span: expr.span,
                             };
                             return self.compile_expr(&call);
@@ -25149,13 +25161,14 @@ fn ct_special_call_args(
             out[0].value.kind = ExprKind::String(v.to_php_string().as_bytes().to_vec());
             Some(out)
         }
-        b"in_array" if args.len() == 3 => {
-            let strict = match &args[2].value.kind {
-                ExprKind::True | ExprKind::False => return None,
-                ExprKind::Null => false,
+        b"in_array" if args.len() == 2 || args.len() == 3 => {
+            let strict = match &args.get(2).map(|a| &a.value.kind) {
+                None | Some(ExprKind::False) => false,
+                Some(ExprKind::True) => true,
+                Some(ExprKind::Null) => false,
                 // (a constant zend_try_ct_eval_const() substitutes: in a
                 // namespace only a fully qualified name resolves to it)
-                ExprKind::Identifier(n) => {
+                Some(ExprKind::Identifier(n)) => {
                     let n = match n.strip_prefix(b"\\") {
                         Some(n) => n,
                         None if in_namespace => return None,
@@ -25173,7 +25186,7 @@ fn ct_special_call_args(
                         _ => return None,
                     }
                 }
-                _ => literal(&args[2].value)?.is_truthy(),
+                Some(_) => literal(&args[2].value)?.is_truthy(),
             };
             let ExprKind::Array(elems) = &args[1].value.kind else {
                 return None;
@@ -25194,11 +25207,13 @@ fn ct_special_call_args(
                     return None;
                 }
             }
-            out[2].value.kind = if strict {
-                ExprKind::True
-            } else {
-                ExprKind::False
-            };
+            if let Some(a) = out.get_mut(2) {
+                a.value.kind = if strict {
+                    ExprKind::True
+                } else {
+                    ExprKind::False
+                };
+            }
             Some(out)
         }
         _ => None,

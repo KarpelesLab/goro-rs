@@ -32493,6 +32493,7 @@ impl Vm {
                         // real call.)
                         let special = call.named_args.is_empty()
                             && !via_closure
+                            && !call.target.dynamic
                             && !call_name_bytes.contains(&b'\\')
                             && crate::internal_frames::compiled_special(
                                 &func_name_lower,
