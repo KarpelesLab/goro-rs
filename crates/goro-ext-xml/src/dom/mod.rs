@@ -1349,12 +1349,11 @@ fn h_write_property(vm: &mut Vm, o: &Obj, name: &[u8], v: &Value) -> bool {
 
 fn h_has_property(vm: &mut Vm, o: &Obj, name: &[u8], check_empty: u8) -> Option<bool> {
     let (_b, p) = find_prop(vm, o, name)?;
+    // dom_property_exists: a failing read handler leaves its exception
+    // (e.g. Invalid State Error, a serialization error) in flight
     let n = match prop_target(vm, o) {
         Ok(n) => n,
-        Err(()) => {
-            vm.current_exception = None;
-            return Some(false);
-        }
+        Err(()) => return Some(false),
     };
     match (p.read)(vm, o, n) {
         Ok(v) => Some(if check_empty == 1 {
@@ -1362,10 +1361,7 @@ fn h_has_property(vm: &mut Vm, o: &Obj, name: &[u8], check_empty: u8) -> Option<
         } else {
             !matches!(v, Value::Null)
         }),
-        Err(()) => {
-            vm.current_exception = None;
-            Some(false)
-        }
+        Err(()) => Some(false),
     }
 }
 
