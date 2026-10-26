@@ -11678,6 +11678,7 @@ impl Compiler {
             });
         };
         bracket(self, OpCode::ErrorRestore);
+        let restore_at = self.op_array.ops.len() - 1;
         let r = self.compile_expr(e).map(|op| {
             let before = self.op_array.ops.len();
             let op = if snapshot {
@@ -11697,8 +11698,24 @@ impl Compiler {
             }
             op
         });
-        bracket(self, OpCode::ErrorSuppress);
+        if !self.drop_empty_unsilence(restore_at) {
+            bracket(self, OpCode::ErrorSuppress);
+        }
         r
+    }
+
+    /// compile_key_unsilenced(): a key compiled to no opcode (a variable)
+    /// needs no unsilenced region: the ErrorRestore at `restore_at`, the
+    /// last opcode, is dropped (true) rather than followed by the
+    /// ErrorSuppress ending the region.
+    #[inline(never)]
+    fn drop_empty_unsilence(&mut self, restore_at: usize) -> bool {
+        let ops = &mut self.op_array.ops;
+        if ops.len() == restore_at + 1 && ops[restore_at].opcode == OpCode::ErrorRestore {
+            ops.pop();
+            return true;
+        }
+        false
     }
 
     fn snapshot_cv(&mut self, op: OperandType, line: u32) -> OperandType {
