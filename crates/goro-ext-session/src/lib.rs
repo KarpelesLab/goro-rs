@@ -3919,7 +3919,10 @@ fn register_classes(vm: &mut Vm) {
     let mut iface = |name: &[u8]| {
         let mut ce = ClassEntry::new(name.to_vec());
         ce.is_interface = true;
-        vm.classes.entry(name.to_ascii_lowercase()).or_insert(ce);
+        let lower = name.to_ascii_lowercase();
+        if !vm.classes.contains_key(&lower) {
+            vm.classes.insert(lower, ce);
+        }
     };
     iface(b"SessionHandlerInterface");
     iface(b"SessionIdInterface");

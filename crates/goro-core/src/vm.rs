@@ -803,7 +803,7 @@ pub const OPEN_CTX_NONE: u8 = 1;
 pub const OPEN_CTX_EXISTING: u8 = 2;
 
 /// Type alias for the class map (used by external crates)
-pub type ClassMap = crate::fxhash::FxIndexMap<Vec<u8>, ClassEntry>;
+pub use crate::class_table::ClassMap;
 
 /// What Vm::retire_tables() takes out of an engine (released when dropped).
 pub struct RetiredTables {
@@ -52533,7 +52533,7 @@ impl Vm {
                         for trait_name in &trait_names {
                             let trait_lower: Vec<u8> =
                                 trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            if let Some(trait_def) = self.classes.get(&trait_lower).cloned() {
+                            if let Some(trait_def) = self.classes.get_rc(&trait_lower).cloned() {
                                 // Copy trait methods
                                 // Trait methods override inherited parent methods, but NOT the class's own methods
                                 // (zend_traits_copy_functions / zend_add_trait_method)
@@ -52751,7 +52751,7 @@ impl Vm {
                         for trait_name in &trait_names {
                             let trait_lower: Vec<u8> =
                                 trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            if let Some(trait_def) = self.classes.get(&trait_lower).cloned() {
+                            if let Some(trait_def) = self.classes.get_rc(&trait_lower).cloned() {
                                 // Copy trait constants (zend_do_traits_constant_binding /
                                 // do_trait_constant_check): a constant already declared by the
                                 // class or an earlier trait must be identical.
@@ -52947,7 +52947,7 @@ impl Vm {
                         for trait_name in &trait_names {
                             let trait_lower: Vec<u8> =
                                 trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            if let Some(trait_def) = self.classes.get(&trait_lower).cloned() {
+                            if let Some(trait_def) = self.classes.get_rc(&trait_lower).cloned() {
                                 // Copy trait properties (zend_do_traits_property_binding): a
                                 // property already declared by the class or an earlier trait must
                                 // be compatible; inherited private ones are shadowed, other
@@ -53152,11 +53152,13 @@ impl Vm {
                                     line: op.line,
                                 });
                             }
+                            // (the parent's entry is shared: held as it is, classes
+                            // declared meanwhile do not change it)
                             if let Some(parent) = self
                                 .classes
-                                .get(&parent_lower)
+                                .get_rc(&parent_lower)
                                 .cloned()
-                                .or_else(|| variance::linking_entry(&parent_lower))
+                                .or_else(|| variance::linking_entry(&parent_lower).map(Rc::new))
                             {
                                 // Check: interface can only extend another interface
                                 if class.is_interface && !parent.is_interface {
@@ -54422,7 +54424,7 @@ impl Vm {
                         for trait_name in &trait_names {
                             let trait_lower: Vec<u8> =
                                 trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            let Some(trait_def) = self.classes.get(&trait_lower).cloned() else {
+                            let Some(trait_def) = self.classes.get_rc(&trait_lower).cloned() else {
                                 continue;
                             };
                             for (method_name, method) in &trait_def.methods {
@@ -54507,7 +54509,7 @@ impl Vm {
                                     op.line
                                 );
                             }
-                            if let Some(iface) = self.classes.get(&iface_lower).cloned() {
+                            if let Some(iface) = self.classes.get_rc(&iface_lower).cloned() {
                                 // Check that we're implementing an interface, not a class
                                 if !iface.is_interface {
                                     let iface_display =
@@ -54803,7 +54805,7 @@ impl Vm {
                                         .iter()
                                         .map(|b| b.to_ascii_lowercase())
                                         .collect();
-                                    if let Some(pi) = self.classes.get(&pi_lower).cloned() {
+                                    if let Some(pi) = self.classes.get_rc(&pi_lower).cloned() {
                                         for (method_name, method) in &pi.methods {
                                             if !class.methods.contains_key(method_name) {
                                                 class

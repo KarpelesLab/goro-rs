@@ -8,7 +8,10 @@
 //! Lookups never autoload.
 
 use crate::stubs::{self, K_ENUM, K_INTERFACE, K_TRAIT, StubClass};
+use crate::object::ClassEntry;
 use crate::vm::Vm;
+use std::hash::Hash;
+use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClassKind {
@@ -153,6 +156,141 @@ impl Vm {
             }
         }
         out
+    }
+}
+
+/// The class table (EG(class_table)): lowercased name -> class entry, in
+/// declaration order. The entries are shared (`Rc`) and copied on write:
+/// one can be held across code that may declare classes (autoloading,
+/// error handlers) and a parent's entry is not copied to link a child.
+#[derive(Clone, Default)]
+pub struct ClassMap {
+    map: crate::fxhash::FxIndexMap<Vec<u8>, Rc<ClassEntry>>,
+}
+
+impl ClassMap {
+    #[inline]
+    pub fn get<Q: ?Sized + Hash + indexmap::Equivalent<Vec<u8>>>(
+        &self,
+        key: &Q,
+    ) -> Option<&ClassEntry> {
+        self.map.get(key).map(|c| &**c)
+    }
+
+    /// The shared entry (cloning it holds the entry as it is now).
+    #[inline]
+    pub fn get_rc<Q: ?Sized + Hash + indexmap::Equivalent<Vec<u8>>>(
+        &self,
+        key: &Q,
+    ) -> Option<&Rc<ClassEntry>> {
+        self.map.get(key)
+    }
+
+    /// The entry, to change (copied first when shared).
+    #[inline]
+    pub fn get_mut<Q: ?Sized + Hash + indexmap::Equivalent<Vec<u8>>>(
+        &mut self,
+        key: &Q,
+    ) -> Option<&mut ClassEntry> {
+        self.map.get_mut(key).map(Rc::make_mut)
+    }
+
+    #[inline]
+    pub fn get_full<Q: ?Sized + Hash + indexmap::Equivalent<Vec<u8>>>(
+        &self,
+        key: &Q,
+    ) -> Option<(usize, &Vec<u8>, &ClassEntry)> {
+        self.map.get_full(key).map(|(i, k, c)| (i, k, &**c))
+    }
+
+    #[inline]
+    pub fn get_index_of<Q: ?Sized + Hash + indexmap::Equivalent<Vec<u8>>>(
+        &self,
+        key: &Q,
+    ) -> Option<usize> {
+        self.map.get_index_of(key)
+    }
+
+    #[inline]
+    pub fn contains_key<Q: ?Sized + Hash + indexmap::Equivalent<Vec<u8>>>(&self, key: &Q) -> bool {
+        self.map.contains_key(key)
+    }
+
+    #[inline]
+    pub fn get_index(&self, i: usize) -> Option<(&Vec<u8>, &ClassEntry)> {
+        self.map.get_index(i).map(|(k, c)| (k, &**c))
+    }
+
+    #[inline]
+    pub fn get_index_rc(&self, i: usize) -> Option<(&Vec<u8>, &Rc<ClassEntry>)> {
+        self.map.get_index(i)
+    }
+
+    /// The entry at `i`, to change (copied first when shared).
+    #[inline]
+    pub fn get_index_mut(&mut self, i: usize) -> Option<(&Vec<u8>, &mut ClassEntry)> {
+        self.map.get_index_mut(i).map(|(k, c)| (&*k, Rc::make_mut(c)))
+    }
+
+    #[inline]
+    pub fn insert(&mut self, key: Vec<u8>, ce: ClassEntry) -> Option<Rc<ClassEntry>> {
+        self.map.insert(key, Rc::new(ce))
+    }
+
+    #[inline]
+    pub fn insert_rc(&mut self, key: Vec<u8>, ce: Rc<ClassEntry>) -> Option<Rc<ClassEntry>> {
+        self.map.insert(key, ce)
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    #[inline]
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (&Vec<u8>, &ClassEntry)> + Clone {
+        self.map.iter().map(|(k, c)| (k, &**c))
+    }
+
+    #[inline]
+    pub fn keys(&self) -> indexmap::map::Keys<'_, Vec<u8>, Rc<ClassEntry>> {
+        self.map.keys()
+    }
+
+    #[inline]
+    pub fn values(&self) -> impl DoubleEndedIterator<Item = &ClassEntry> + Clone {
+        self.map.values().map(|c| &**c)
+    }
+
+    /// Every entry, to change (each copied first when shared).
+    #[inline]
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut ClassEntry> {
+        self.map.values_mut().map(Rc::make_mut)
+    }
+}
+
+impl std::ops::Index<usize> for ClassMap {
+    type Output = ClassEntry;
+    #[inline]
+    fn index(&self, i: usize) -> &ClassEntry {
+        &self.map[i]
+    }
+}
+
+impl<'a> IntoIterator for &'a ClassMap {
+    type Item = (&'a Vec<u8>, &'a ClassEntry);
+    type IntoIter = std::iter::Map<
+        indexmap::map::Iter<'a, Vec<u8>, Rc<ClassEntry>>,
+        fn((&'a Vec<u8>, &'a Rc<ClassEntry>)) -> (&'a Vec<u8>, &'a ClassEntry),
+    >;
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.map.iter().map(|(k, c)| (k, &**c))
     }
 }
 
