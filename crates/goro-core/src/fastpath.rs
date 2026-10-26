@@ -468,7 +468,19 @@ pub(crate) fn drops_quietly_deep(
                 return false;
             }
             *budget -= arr.len() as u32;
-            arr.values().all(|v| drops_quietly_deep(v, budget, globals))
+            // (plain elements checked here, without a call each)
+            arr.values().all(|v| {
+                matches!(
+                    v,
+                    Value::Undef
+                        | Value::Null
+                        | Value::False
+                        | Value::True
+                        | Value::Long(_)
+                        | Value::Double(_)
+                        | Value::String(_)
+                ) || drops_quietly_deep(v, budget, globals)
+            })
         }
         Value::Object(o) => {
             if Rc::strong_count(o) > 1 || object_release_quiet(o) {
@@ -493,9 +505,18 @@ pub(crate) fn drops_quietly_deep(
                 return false;
             }
             *budget -= ob.properties.len() as u32;
-            ob.properties
-                .iter()
-                .all(|(_, v)| drops_quietly_deep(v, budget, globals))
+            ob.properties.iter().all(|(_, v)| {
+                matches!(
+                    v,
+                    Value::Undef
+                        | Value::Null
+                        | Value::False
+                        | Value::True
+                        | Value::Long(_)
+                        | Value::Double(_)
+                        | Value::String(_)
+                ) || drops_quietly_deep(v, budget, globals)
+            })
         }
         Value::Reference(r) => {
             Rc::strong_count(r) > 1
