@@ -9744,7 +9744,8 @@ impl Vm {
         line: u32,
         caller_strict: bool,
     ) -> Option<String> {
-        let called_in = !self.pending_call_via_invoke;
+        // (line 0: no user code call site, as for ReflectionMethod::invoke())
+        let called_in = !self.pending_call_via_invoke && line != 0;
         for (i, arg) in args.iter().enumerate() {
             // Extra arguments are checked against the variadic parameter.
             let (ti, variadic) = match user_fn.variadic_param {
@@ -34009,6 +34010,8 @@ impl Vm {
                         let nonframeless =
                             call.target.dynamic || call.named_args.capacity() != 0;
                         let mut named_skipped_args: Vec<usize> = Vec::new();
+                        let had_named_args = !call.named_args.is_empty();
+                        let unpacked_or_named = call.named_args.capacity() != 0;
                         let zpp = self.zpp_info(&func_name_lower);
                         let mut zpp_err: Option<crate::arginfo::ZppError> = None;
                         // (a variadic's extra named arguments: the call is
@@ -34404,8 +34407,11 @@ impl Vm {
                         let is_direct_ucf = (func_name_lower == b"call_user_func"
                             || func_name_lower == b"call_user_func_array")
                             && !call_name_bytes.contains(&b'\\')
-                            // (a dynamic call is a real one: not compiled)
-                            && (!call.target.dynamic || call.target.is_array_callable());
+                            // (a dynamic call is a real one: not compiled;
+                            // zend_try_compile_special_func(): not with
+                            // unpacked or named arguments)
+                            && (!call.target.dynamic || call.target.is_array_callable())
+                            && !unpacked_or_named;
                         let own_frame = !is_assert_call && !is_direct_ucf && !special;
                         if own_frame {
                             self.push_builtin_frame(
@@ -34413,6 +34419,15 @@ impl Vm {
                                 zpp_orig.as_deref().unwrap_or(&call.args),
                                 op.line,
                             );
+                            if had_named_args && !self.pending_named_args.is_empty() {
+                                // (the named arguments collected for the callback)
+                                let named = self
+                                    .pending_named_args
+                                    .iter()
+                                    .map(|(k, v)| (PhpString::from_vec(k.clone()), v.clone()))
+                                    .collect();
+                                self.note_builtin_frame_named(named);
+                            }
                         } else if is_direct_ucf {
                             self.ucf_call_line = Some(op.line);
                             // (a dynamic call is a real one: not compiled)
@@ -34434,6 +34449,9 @@ impl Vm {
                         if own_frame {
                             self.release_in_builtin_frame(&call.args);
                             self.pop_builtin_frame();
+                            if had_named_args {
+                                self.builtin_frame_named.clear();
+                            }
                         } else {
                             self.ucf_call_line = None;
                             self.ucf_strict = false;
