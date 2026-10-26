@@ -418,7 +418,7 @@ impl Vm {
             if let Value::Reference(r) = a {
                 let ok = !typed || {
                     let v = r.try_borrow().ok()?;
-                    crate::recv_fast::arg_matches_exactly(f, i, &v)
+                    crate::recv_fast::arg_matches_exactly(self, f, i, &v)
                 };
                 if !ok {
                     return None;
@@ -427,7 +427,7 @@ impl Vm {
                     let v = r.borrow().clone();
                     *a = v;
                 }
-            } else if by_ref || (typed && !crate::recv_fast::arg_matches_exactly(f, i, a)) {
+            } else if by_ref || (typed && !crate::recv_fast::arg_matches_exactly(self, f, i, a)) {
                 return None;
             }
         }
