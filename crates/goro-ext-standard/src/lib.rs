@@ -439,7 +439,6 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"var_dump", b"value", b"values");
     params!(b"print_r", b"value", b"return");
     params!(b"var_export", b"value", b"return");
-    params!(b"debug_zval_refcount", b"variable");
 
     // Misc functions
     params!(b"assert", b"assertion", b"description");

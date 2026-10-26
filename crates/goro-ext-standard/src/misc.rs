@@ -336,7 +336,6 @@ final class StreamBucket {
     vm.register_function(b"get_declared_interfaces", get_declared_interfaces_fn);
     vm.register_function(b"method_exists", method_exists);
     vm.register_function(b"is_object", is_object);
-    vm.register_function(b"debug_zval_refcount", debug_zval_refcount);
     vm.register_function(b"compact", compact);
     vm.register_function(b"extract", extract_fn);
     vm.register_function(b"array_column", array_column);
@@ -6752,9 +6751,6 @@ fn is_object(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(Value::Object(_) | Value::Generator(_)) => Value::True,
         _ => Value::False,
     })
-}
-fn debug_zval_refcount(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Null)
 }
 fn extract_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     // extract() is compiled to the dedicated OpCode::Extract since it modifies

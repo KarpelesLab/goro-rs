@@ -1469,6 +1469,14 @@ fn print_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() || args.len() > 2 {
         return Err(arg_count_error(vm, "print_r", 1, 2, args.len()));
     }
+    // (zpp of bool $return: a non-bool is coerced or a TypeError)
+    let coerced;
+    let args = if args.len() == 2 && !matches!(args[1].deref(), Value::True | Value::False) {
+        coerced = vm.zpp_self_check(b"print_r", args)?;
+        &coerced[..]
+    } else {
+        args
+    };
 
     let return_output = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     // Clone classes for property visibility lookup in print_r_value
@@ -1998,6 +2006,14 @@ fn var_export(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() || args.len() > 2 {
         return Err(arg_count_error(vm, "var_export", 1, 2, args.len()));
     }
+    // (zpp of bool $return: a non-bool is coerced or a TypeError)
+    let coerced;
+    let args = if args.len() == 2 && !matches!(args[1].deref(), Value::True | Value::False) {
+        coerced = vm.zpp_self_check(b"var_export", args)?;
+        &coerced[..]
+    } else {
+        args
+    };
     let return_output = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     // For lazy objects, trigger init and redirect proxy to real first.
     let original = args[0].clone();
