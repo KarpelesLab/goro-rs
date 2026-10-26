@@ -1237,6 +1237,9 @@ pub(crate) struct CallTarget {
     /// arguments of an internal function's by-reference parameters are
     /// only known to be sent by reference at run time.
     pub(crate) dynamic: bool,
+    /// The call_user_func() call INIT_DYNAMIC_CALL makes of an array
+    /// callable (`$cb()`): like a direct one, it has no frame of its own.
+    pub(crate) array_callable: bool,
 }
 
 /// What the frame of a method call set up by INIT_METHOD_CALL's fast path
@@ -1353,6 +1356,7 @@ impl CallTarget {
         fn_gen: 0,
         via_invoke: false,
         dynamic: false,
+        array_callable: false,
     };
 }
 
@@ -4949,32 +4953,52 @@ impl Vm {
     /// (with the function's frame) and returns true when it is forbidden.
     #[inline(never)]
     fn dynamic_forbidden_call_check(&mut self, lname: &[u8], args: &[Value], line: u32) -> bool {
-        let Some((mut cls, mut msg)) = self.forbidden_dynamic_call_error(lname, args.len()) else {
+        let Some((cls, msg)) = self.forbidden_dynamic_call_error(lname, args.len()) else {
             return false;
         };
-        // func_get_arg()/func_get_args()/func_num_args() check their
-        // $position and the calling scope before zend_forbid_dynamic_call().
-        if cls == b"Error" && lname.starts_with(b"func_") {
-            if lname == b"func_get_arg" && args.first().is_some_and(|a| a.deref().to_long() < 0) {
-                cls = b"ValueError";
-                msg = "func_get_arg(): Argument #1 ($position) must be greater than or equal to 0"
-                    .to_string();
-            } else if self.current_function_frame().is_none() {
-                msg = if lname == b"func_num_args" {
-                    "func_num_args() must be called from a function context".to_string()
-                } else {
-                    format!(
-                        "{}() cannot be called from the global scope",
-                        String::from_utf8_lossy(lname)
-                    )
-                };
-            }
-        }
+        let (cls, msg) = self.func_args_call_error(lname, args, cls, msg, true);
         self.push_builtin_frame(lname, args, line);
         let exc = self.create_exception(cls, &msg, line);
         self.pop_builtin_frame();
         self.current_exception = Some(exc);
         true
+    }
+
+    /// func_get_arg()/func_get_args()/func_num_args() called dynamically
+    /// check their $position, then (when called from the code itself, not
+    /// through an internal function's frame) the calling scope, before
+    /// zend_forbid_dynamic_call(): the error to raise instead of `msg`.
+    #[inline(never)]
+    pub fn func_args_call_error(
+        &self,
+        lname: &[u8],
+        args: &[Value],
+        cls: &'static [u8],
+        msg: String,
+        from_code: bool,
+    ) -> (&'static [u8], String) {
+        if cls != b"Error" || !lname.starts_with(b"func_") {
+            return (cls, msg);
+        }
+        if lname == b"func_get_arg" && args.first().is_some_and(|a| a.deref().to_long() < 0) {
+            return (
+                b"ValueError",
+                "func_get_arg(): Argument #1 ($position) must be greater than or equal to 0"
+                    .to_string(),
+            );
+        }
+        if from_code && self.current_function_frame().is_none() {
+            let m = if lname == b"func_num_args" {
+                "func_num_args() must be called from a function context".to_string()
+            } else {
+                format!(
+                    "{}() cannot be called from the global scope",
+                    String::from_utf8_lossy(lname)
+                )
+            };
+            return (cls, m);
+        }
+        (cls, msg)
     }
 
     /// zend_forbid_dynamic_call() in a scope-introspection function called
@@ -12174,6 +12198,7 @@ impl Vm {
                     {
                         let mut target = CallTarget::NONE;
                         target.dynamic = true;
+                        target.array_callable = true;
                         self.pending_calls.push(PendingCall {
                             name: PhpString::from_bytes(b"call_user_func"),
                             args: vec![Value::Array(arr)],
@@ -22719,6 +22744,7 @@ impl Vm {
                 fn_gen: self.user_functions.len() + 1,
                 via_invoke: false,
                 dynamic: false,
+                array_callable: false,
             };
         }
         let builtin = match found {
@@ -22756,6 +22782,7 @@ impl Vm {
             fn_gen: self.user_functions.len() + 1,
             via_invoke: false,
             dynamic: false,
+            array_callable: false,
         }
     }
 
@@ -29942,6 +29969,7 @@ impl Vm {
                         // Dispatch through call_user_func (handles every array-callable form).
                         let mut target = CallTarget::NONE;
                         target.dynamic = true;
+                        target.array_callable = true;
                         self.pending_calls.push(PendingCall {
                             name: PhpString::from_bytes(b"call_user_func"),
                             args: vec![name_val.clone()],
@@ -34229,7 +34257,9 @@ impl Vm {
                         // ZEND_INIT_NS_FCALL_BY_NAME makes a real call.)
                         let is_direct_ucf = (func_name_lower == b"call_user_func"
                             || func_name_lower == b"call_user_func_array")
-                            && !call_name_bytes.contains(&b'\\');
+                            && !call_name_bytes.contains(&b'\\')
+                            // (a dynamic call is a real one: not compiled)
+                            && (!call.target.dynamic || call.target.array_callable);
                         let own_frame = !is_assert_call && !is_direct_ucf && !special;
                         if own_frame {
                             self.push_builtin_frame(

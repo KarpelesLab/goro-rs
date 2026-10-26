@@ -2117,6 +2117,15 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let callback = &callback_v;
     if let Value::String(s) = callback {
         if let Some((cls, msg)) = vm.forbidden_dynamic_call_error(s.as_bytes(), args.len() - 1) {
+            // (a direct call_user_func() is compiled to ZEND_INIT_USER_CALL:
+            // no frame of its own between the callee and the calling code)
+            let lname = s
+                .as_bytes()
+                .strip_prefix(b"\\")
+                .unwrap_or(s.as_bytes())
+                .to_ascii_lowercase();
+            let direct = vm.ucf_call_line.is_some();
+            let (cls, msg) = vm.func_args_call_error(&lname, &args[1..], cls, msg, direct);
             let exc = vm.create_exception(cls, &msg, vm.current_line);
             vm.current_exception = Some(exc);
             return Err(VmError {
