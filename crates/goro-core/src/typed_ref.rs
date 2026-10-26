@@ -253,10 +253,7 @@ impl Vm {
                 }
             }
         }
-        if failed {
-            if r.is_err() {
-                return r;
-            }
+        if failed && r.is_ok() {
             return Err(crate::vm::VmError {
                 message: self.uncaught_exception_message(),
                 line: self.current_line,
