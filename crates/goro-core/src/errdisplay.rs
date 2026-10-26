@@ -376,8 +376,12 @@ impl Vm {
             // A declaration bound at compile time fails before the eval()
             // frame of the code being compiled exists.
             let hidden = if self.compile_time_binding
-                && self.call_stack.last().is_some_and(|f| f.0 == "eval")
-            {
+                && self.call_stack.last().is_some_and(|f| {
+                    matches!(
+                        f.0.as_str(),
+                        "eval" | "include" | "include_once" | "require" | "require_once"
+                    )
+                }) {
                 self.call_stack.pop()
             } else {
                 None
