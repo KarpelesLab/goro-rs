@@ -6810,6 +6810,7 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .collect();
 
     let class_lower: Vec<u8> = match class_or_obj {
+        Value::Generator(_) => b"generator".to_vec(),
         Value::Object(obj) => {
             let obj = obj.borrow();
             // Closures have __invoke method
@@ -11100,6 +11101,9 @@ fn is_a_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         (Some(Value::Object(obj)), Some(Value::String(s))) => {
             (obj.borrow().class_name.clone(), s.as_bytes().to_vec())
         }
+        (Some(Value::Generator(_)), Some(Value::String(s))) => {
+            (b"Generator".to_vec(), s.as_bytes().to_vec())
+        }
         (Some(Value::String(obj_class)), Some(Value::String(s))) => {
             // is_a with string class name + allow_string=true (3rd arg)
             let allow = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
@@ -11130,6 +11134,9 @@ fn is_subclass_of_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let (class_name, check_name) = match (args.first(), args.get(1)) {
         (Some(Value::Object(obj)), Some(Value::String(s))) => {
             (obj.borrow().class_name.clone(), s.as_bytes().to_vec())
+        }
+        (Some(Value::Generator(_)), Some(Value::String(s))) => {
+            (b"Generator".to_vec(), s.as_bytes().to_vec())
         }
         (Some(Value::String(obj_class)), Some(Value::String(s))) => {
             // is_subclass_of with string class name + allow_string=true (3rd arg, default true)
@@ -11274,6 +11281,7 @@ fn get_parent_class_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let class_name = match args.first().map(|v| v.deref()) {
         Some(Value::Object(obj)) => obj.borrow().class_name.clone(),
+        Some(Value::Generator(_)) => return Ok(Value::False),
         Some(Value::String(s)) => {
             let name = s.as_bytes().strip_prefix(b"\\").unwrap_or(s.as_bytes());
             let lower = lower_bytes(name);
@@ -20593,6 +20601,10 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .map(|v| v.to_php_string())
         .unwrap_or_else(|| PhpString::from_bytes(b""));
     let prop_bytes = prop_name.as_bytes();
+    // (a Generator has no properties)
+    if let Value::Generator(_) = obj_or_class {
+        return Ok(Value::False);
+    }
     // ArrayObject ARRAY_AS_PROPS: has_property(ZEND_PROPERTY_EXISTS) checks the storage.
     if let Value::Object(o) = obj_or_class {
         if let Some(r) = vm.spl_property_exists_hook(o, prop_bytes) {
