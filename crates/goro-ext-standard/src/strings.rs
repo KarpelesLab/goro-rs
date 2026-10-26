@@ -2040,6 +2040,10 @@ fn str_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let pad_type = args.get(3).map(|v| v.to_long()).unwrap_or(1); // STR_PAD_RIGHT=1
 
+    // PHP returns the input unchanged before validating the pad arguments.
+    if input.len() >= length {
+        return Ok(Value::String(input));
+    }
     let pad_bytes = pad_string.as_bytes();
     if pad_bytes.is_empty() {
         let msg = "str_pad(): Argument #3 ($pad_string) must not be empty";
@@ -2063,9 +2067,6 @@ fn str_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     let bytes = input.as_bytes();
-    if bytes.len() >= length {
-        return Ok(Value::String(input));
-    }
     // zend_string_safe_alloc(1, len, num_pad_chars, 0)
     vm.memory_check(
         bytes
@@ -2748,6 +2749,11 @@ fn substr_compare(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
+    // An explicit length of 0 is always 0, even for an out-of-range offset.
+    if let Some(0) = length {
+        return Ok(Value::Long(0));
+    }
+
     // Resolve negative offset (PHP clamps to 0 if it would go before start).
     let resolved_offset = if offset < 0 {
         (main_len + offset).max(0)
@@ -2769,11 +2775,6 @@ fn substr_compare(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
     let start = resolved_offset as usize;
-
-    // If length is explicitly 0, result is always 0
-    if let Some(0) = length {
-        return Ok(Value::Long(0));
-    }
 
     let sub = &main_bytes[start..]; // s1 + offset
     let s2_bytes = str2.as_bytes();
@@ -2937,6 +2938,10 @@ fn metaphone(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(word_bytes.len())];
+    // zend_string_alloc(max_phonemes + 1) of the phoned word
+    if max_phonemes > 0 {
+        vm.memory_check(((max_phonemes as usize).saturating_add(26 + 7)) & !7)?;
+    }
     let max = if max_phonemes > 0 {
         max_phonemes as usize
     } else {
@@ -3745,11 +3750,11 @@ fn compute_substr_range(s_len: usize, offset: i64, length: Option<i64>) -> (usiz
     let start = if offset >= 0 {
         (offset as usize).min(s_len)
     } else {
-        s_len.saturating_sub((-offset) as usize)
+        s_len.saturating_sub(offset.unsigned_abs() as usize)
     };
     let end = match length {
         Some(l) if l < 0 => {
-            let end_pos = s_len as i64 + l;
+            let end_pos = (s_len as i64).saturating_add(l);
             if end_pos <= start as i64 {
                 start
             } else {
@@ -3757,7 +3762,7 @@ fn compute_substr_range(s_len: usize, offset: i64, length: Option<i64>) -> (usiz
             }
         }
         Some(l) => {
-            let end_pos = start as i64 + l;
+            let end_pos = (start as i64).saturating_add(l);
             if end_pos > s_len as i64 {
                 s_len
             } else if end_pos < start as i64 {
@@ -5354,7 +5359,12 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let values: Vec<Value> = arr.borrow().values().cloned().collect();
             let mut buf = Vec::new();
             for v in values {
-                let tag = _vm.value_to_string(&v);
+                // zval_get_string()
+                let v = v.deref();
+                if matches!(v, Value::Array(_)) {
+                    _vm.emit_warning("Array to string conversion");
+                }
+                let tag = _vm.value_to_string_checked(&v)?;
                 buf.push(b'<');
                 buf.extend_from_slice(tag.as_bytes());
                 buf.push(b'>');
