@@ -18494,6 +18494,18 @@ impl Vm {
     }
 
     /// "Allowed memory size of N bytes exhausted (tried to allocate M bytes)"
+    /// An InternalIterator over the live entries of WeakMap `wm`.
+    #[inline(never)]
+    pub(crate) fn weakmap_iterator(&mut self, wm: &Value) -> Value {
+        let it = self.spl_instantiate(b"InternalIterator");
+        {
+            let mut b = it.borrow_mut();
+            b.set_property(b"__spl_wm_target".to_vec(), wm.clone());
+            b.set_property(b"__spl_pos".to_vec(), Value::Long(0));
+        }
+        Value::Object(it)
+    }
+
     pub fn memory_limit_fatal(&mut self) -> VmError {
         let tried = crate::value::take_memory_exhausted();
         let limit = crate::value::memory_get_limit();
@@ -31568,7 +31580,30 @@ impl Vm {
                         } else {
                             0
                         };
+                        // (zpp's argument count of the stub's method)
+                        if crate::reflection::reflection_stub_arity_error(
+                            self,
+                            b"weakmap",
+                            method,
+                            extra_args.len(),
+                        ) {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: "Uncaught ArgumentCountError".into(),
+                                line: op.line,
+                            });
+                        }
                         match method {
+                            b"getiterator" => {
+                                let it = self.weakmap_iterator(&wm_obj);
+                                self.write_operand(&op.result, it, &mut cvs, &mut tmps, &static_cv_keys);
+                            }
                             b"offsetget" => {
                                 let key_obj =
                                     extra_args.first().cloned().unwrap_or(Value::Null);
@@ -61124,17 +61159,12 @@ impl Vm {
                                     return Ok(Flow::Continue);
                                 }
                                 // WeakMap::getIterator(): an InternalIterator over
-                                // the live entries.
+                                // the live entries (made at the call, after
+                                // its argument count is checked).
                                 b"getiterator" => {
-                                    let it = self.spl_instantiate(b"InternalIterator");
-                                    {
-                                        let mut b = it.borrow_mut();
-                                        b.set_property(b"__spl_wm_target".to_vec(), obj_val.clone());
-                                        b.set_property(b"__spl_pos".to_vec(), Value::Long(0));
-                                    }
                                     self.pending_calls.push(PendingCall {
-                                        name: PhpString::from_bytes(b"__builtin_return"),
-                                        args: vec![Value::Object(it)],
+                                        name: PhpString::from_bytes(b"__weakmap::getiterator"),
+                                        args: vec![obj_val.clone()],
                                         named_args: Vec::new(),
                                         target: CallTarget::NONE,
                                     });
