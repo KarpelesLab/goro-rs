@@ -8430,113 +8430,6 @@ impl Compiler {
                                     });
                                 }
                             }
-                            // Enforce: __construct and __destruct cannot declare return types
-                            {
-                                let mn_lower: Vec<u8> =
-                                    method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                if method_return_type.is_some() {
-                                    if mn_lower == b"__construct" || mn_lower == b"__destruct" {
-                                        return Err(CompileError {
-                                            message: format!(
-                                                "Method {}::{}() cannot declare a return type",
-                                                crate::string::msg_str(name),
-                                                crate::string::msg_str(method_name)
-                                            ),
-                                            line: *method_line,
-                                        });
-                                    }
-                                    // Magic method return type restrictions
-                                    if let Some(rt) = method_return_type {
-                                        let class_display = crate::string::msg_str(name);
-                                        // Helper: check if a type hint matches a simple type name
-                                        let is_simple_type =
-                                            |hint: &TypeHint, expected: &[u8]| -> bool {
-                                                match hint {
-                                                    TypeHint::Simple(n) => {
-                                                        n.eq_ignore_ascii_case(expected)
-                                                    }
-                                                    _ => false,
-                                                }
-                                            };
-                                        // Helper: check if type is ?array (nullable array)
-                                        let is_nullable_array = |hint: &TypeHint| -> bool {
-                                            match hint {
-                                                TypeHint::Simple(n) => {
-                                                    n.eq_ignore_ascii_case(b"array")
-                                                }
-                                                TypeHint::Nullable(inner) => {
-                                                    matches!(inner.as_ref(), TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"array"))
-                                                }
-                                                TypeHint::Union(types) => {
-                                                    // array|null or null|array
-                                                    types.len() == 2
-                                                        && types
-                                                            .iter()
-                                                            .any(|t| is_simple_type(t, b"array"))
-                                                        && types
-                                                            .iter()
-                                                            .any(|t| is_simple_type(t, b"null"))
-                                                }
-                                                _ => false,
-                                            }
-                                        };
-                                        // zend_check_magic_method_return_type: the declared type must be
-                                        // a subset of the expected one (never is always allowed).
-                                        let _ = (&is_simple_type, &is_nullable_array);
-                                        {
-                                            use crate::vm::variance::{
-                                                T_ARRAY, T_BOOL, T_NEVER, T_NULL, T_OBJECT,
-                                                T_STATIC, T_STRING, T_VOID, TypeView,
-                                            };
-                                            let expected: Option<u32> = match mn_lower.as_slice() {
-                                                b"__clone" | b"__set" | b"__unset"
-                                                | b"__unserialize" | b"__wakeup" => Some(T_VOID),
-                                                b"__isset" => Some(T_BOOL),
-                                                b"__tostring" => Some(T_STRING),
-                                                b"__debuginfo" => Some(T_ARRAY | T_NULL),
-                                                b"__serialize" | b"__sleep" => Some(T_ARRAY),
-                                                b"__set_state" => Some(T_OBJECT),
-                                                _ => None,
-                                            };
-                                            if let Some(exp) = expected {
-                                                let pt = type_hint_to_param_type_with_ns(
-                                                    rt,
-                                                    &self.current_namespace,
-                                                    &self.use_map,
-                                                );
-                                                let tv = TypeView::from_param_type(&pt);
-                                                if tv.mask & T_NEVER == 0 {
-                                                    let mut is_complex = !tv.elems.is_empty();
-                                                    let mut extra = tv.mask & !exp;
-                                                    if extra & T_STATIC != 0 {
-                                                        extra &= !T_STATIC;
-                                                        is_complex = true;
-                                                    }
-                                                    if extra != 0 || (is_complex && exp != T_OBJECT)
-                                                    {
-                                                        let exp_tv = TypeView {
-                                                            mask: exp,
-                                                            elems: Vec::new(),
-                                                            is_intersection: false,
-                                                        };
-                                                        return Err(CompileError {
-                                                            message: format!(
-                                                                "{}::{}(): Return type must be {} when declared",
-                                                                class_display,
-                                                                crate::string::msg_str(method_name),
-                                                                crate::vm::variance::type_to_string(
-                                                                    &exp_tv, None
-                                                                )
-                                                            ),
-                                                            line: *method_line,
-                                                        });
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
                             // Validate magic method argument counts, static modifiers, visibility, by-ref params, and param types
                             {
                                 let mn_lower: Vec<u8> =
@@ -8567,8 +8460,8 @@ impl Compiler {
                                 if mn_lower == b"__isset" && params.len() != 1 {
                                     return Err(CompileError {
                                         message: format!(
-                                            "Method {}::__isset() must take exactly 1 argument",
-                                            class_display
+                                            "Method {}::{}() must take exactly 1 argument",
+                                            class_display, method_display
                                         ),
                                         line: *method_line,
                                     });
@@ -8576,8 +8469,8 @@ impl Compiler {
                                 if mn_lower == b"__unset" && params.len() != 1 {
                                     return Err(CompileError {
                                         message: format!(
-                                            "Method {}::__unset() must take exactly 1 argument",
-                                            class_display
+                                            "Method {}::{}() must take exactly 1 argument",
+                                            class_display, method_display
                                         ),
                                         line: *method_line,
                                     });
@@ -8585,8 +8478,8 @@ impl Compiler {
                                 if mn_lower == b"__get" && params.len() != 1 {
                                     return Err(CompileError {
                                         message: format!(
-                                            "Method {}::__get() must take exactly 1 argument",
-                                            class_display
+                                            "Method {}::{}() must take exactly 1 argument",
+                                            class_display, method_display
                                         ),
                                         line: *method_line,
                                     });
@@ -8594,8 +8487,8 @@ impl Compiler {
                                 if mn_lower == b"__set" && params.len() != 2 {
                                     return Err(CompileError {
                                         message: format!(
-                                            "Method {}::__set() must take exactly 2 arguments",
-                                            class_display
+                                            "Method {}::{}() must take exactly 2 arguments",
+                                            class_display, method_display
                                         ),
                                         line: *method_line,
                                     });
@@ -8603,8 +8496,8 @@ impl Compiler {
                                 if mn_lower == b"__call" && params.len() != 2 {
                                     return Err(CompileError {
                                         message: format!(
-                                            "Method {}::__call() must take exactly 2 arguments",
-                                            class_display
+                                            "Method {}::{}() must take exactly 2 arguments",
+                                            class_display, method_display
                                         ),
                                         line: *method_line,
                                     });
@@ -8612,8 +8505,8 @@ impl Compiler {
                                 if mn_lower == b"__callstatic" && params.len() != 2 {
                                     return Err(CompileError {
                                         message: format!(
-                                            "Method {}::__callStatic() must take exactly 2 arguments",
-                                            class_display
+                                            "Method {}::{}() must take exactly 2 arguments",
+                                            class_display, method_display
                                         ),
                                         line: *method_line,
                                     });
@@ -8621,8 +8514,8 @@ impl Compiler {
                                 if mn_lower == b"__unserialize" && params.len() != 1 {
                                     return Err(CompileError {
                                         message: format!(
-                                            "Method {}::__unserialize() must take exactly 1 argument",
-                                            class_display
+                                            "Method {}::{}() must take exactly 1 argument",
+                                            class_display, method_display
                                         ),
                                         line: *method_line,
                                     });
@@ -8630,8 +8523,8 @@ impl Compiler {
                                 if mn_lower == b"__set_state" && params.len() != 1 {
                                     return Err(CompileError {
                                         message: format!(
-                                            "Method {}::__set_state() must take exactly 1 argument",
-                                            class_display
+                                            "Method {}::{}() must take exactly 1 argument",
+                                            class_display, method_display
                                         ),
                                         line: *method_line,
                                     });
@@ -8762,8 +8655,8 @@ impl Compiler {
                                 if mn_lower == b"__callstatic" && !*is_static {
                                     return Err(CompileError {
                                         message: format!(
-                                            "Method {}::__callstatic() must be static",
-                                            class_display
+                                            "Method {}::{}() must be static",
+                                            class_display, method_display
                                         ),
                                         line: *method_line,
                                     });
@@ -8771,8 +8664,8 @@ impl Compiler {
                                 if mn_lower == b"__set_state" && !*is_static {
                                     return Err(CompileError {
                                         message: format!(
-                                            "Method {}::__set_state() must be static",
-                                            class_display
+                                            "Method {}::{}() must be static",
+                                            class_display, method_display
                                         ),
                                         line: *method_line,
                                     });
@@ -8804,6 +8697,113 @@ impl Compiler {
                                             ),
                                             *method_line,
                                         ));
+                                    }
+                                }
+                            }
+                            // Enforce: __construct and __destruct cannot declare return types
+                            {
+                                let mn_lower: Vec<u8> =
+                                    method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if method_return_type.is_some() {
+                                    if mn_lower == b"__construct" || mn_lower == b"__destruct" {
+                                        return Err(CompileError {
+                                            message: format!(
+                                                "Method {}::{}() cannot declare a return type",
+                                                crate::string::msg_str(name),
+                                                crate::string::msg_str(method_name)
+                                            ),
+                                            line: *method_line,
+                                        });
+                                    }
+                                    // Magic method return type restrictions
+                                    if let Some(rt) = method_return_type {
+                                        let class_display = crate::string::msg_str(name);
+                                        // Helper: check if a type hint matches a simple type name
+                                        let is_simple_type =
+                                            |hint: &TypeHint, expected: &[u8]| -> bool {
+                                                match hint {
+                                                    TypeHint::Simple(n) => {
+                                                        n.eq_ignore_ascii_case(expected)
+                                                    }
+                                                    _ => false,
+                                                }
+                                            };
+                                        // Helper: check if type is ?array (nullable array)
+                                        let is_nullable_array = |hint: &TypeHint| -> bool {
+                                            match hint {
+                                                TypeHint::Simple(n) => {
+                                                    n.eq_ignore_ascii_case(b"array")
+                                                }
+                                                TypeHint::Nullable(inner) => {
+                                                    matches!(inner.as_ref(), TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"array"))
+                                                }
+                                                TypeHint::Union(types) => {
+                                                    // array|null or null|array
+                                                    types.len() == 2
+                                                        && types
+                                                            .iter()
+                                                            .any(|t| is_simple_type(t, b"array"))
+                                                        && types
+                                                            .iter()
+                                                            .any(|t| is_simple_type(t, b"null"))
+                                                }
+                                                _ => false,
+                                            }
+                                        };
+                                        // zend_check_magic_method_return_type: the declared type must be
+                                        // a subset of the expected one (never is always allowed).
+                                        let _ = (&is_simple_type, &is_nullable_array);
+                                        {
+                                            use crate::vm::variance::{
+                                                T_ARRAY, T_BOOL, T_NEVER, T_NULL, T_OBJECT,
+                                                T_STATIC, T_STRING, T_VOID, TypeView,
+                                            };
+                                            let expected: Option<u32> = match mn_lower.as_slice() {
+                                                b"__clone" | b"__set" | b"__unset"
+                                                | b"__unserialize" | b"__wakeup" => Some(T_VOID),
+                                                b"__isset" => Some(T_BOOL),
+                                                b"__tostring" => Some(T_STRING),
+                                                b"__debuginfo" => Some(T_ARRAY | T_NULL),
+                                                b"__serialize" | b"__sleep" => Some(T_ARRAY),
+                                                b"__set_state" => Some(T_OBJECT),
+                                                _ => None,
+                                            };
+                                            if let Some(exp) = expected {
+                                                let pt = type_hint_to_param_type_with_ns(
+                                                    rt,
+                                                    &self.current_namespace,
+                                                    &self.use_map,
+                                                );
+                                                let tv = TypeView::from_param_type(&pt);
+                                                if tv.mask & T_NEVER == 0 {
+                                                    let mut is_complex = !tv.elems.is_empty();
+                                                    let mut extra = tv.mask & !exp;
+                                                    if extra & T_STATIC != 0 {
+                                                        extra &= !T_STATIC;
+                                                        is_complex = true;
+                                                    }
+                                                    if extra != 0 || (is_complex && exp != T_OBJECT)
+                                                    {
+                                                        let exp_tv = TypeView {
+                                                            mask: exp,
+                                                            elems: Vec::new(),
+                                                            is_intersection: false,
+                                                        };
+                                                        return Err(CompileError {
+                                                            message: format!(
+                                                                "{}::{}(): Return type must be {} when declared",
+                                                                class_display,
+                                                                crate::string::msg_str(method_name),
+                                                                crate::vm::variance::type_to_string(
+                                                                    &exp_tv, None
+                                                                )
+                                                            ),
+                                                            line: *method_line,
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
