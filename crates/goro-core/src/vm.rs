@@ -3973,7 +3973,7 @@ impl Vm {
     fn order_trait_methods_before_inherited(
         class: &mut ClassEntry,
         class_lower: &[u8],
-        own: &std::collections::HashSet<Vec<u8>>,
+        own: &crate::fxhash::FxHashSet<Vec<u8>>,
         trait_bound: &[Vec<u8>],
     ) {
         let keys: Vec<Vec<u8>> = class.methods.keys().cloned().collect();
@@ -52053,10 +52053,10 @@ impl Vm {
                         }
                         // Record methods directly defined in this class BEFORE parent inheritance
                         // so we know which methods trait methods should NOT override later
-                        let own_method_names_pre_inherit: std::collections::HashSet<Vec<u8>> =
+                        let own_method_names_pre_inherit: crate::fxhash::FxHashSet<Vec<u8>> =
                             class.methods.keys().cloned().collect();
                         // Record own property names before parent inheritance
-                        let own_prop_names_pre_inherit: std::collections::HashSet<Vec<u8>> =
+                        let own_prop_names_pre_inherit: crate::fxhash::FxHashSet<Vec<u8>> =
                             class.properties.iter().map(|p| p.name.clone()).collect();
                         // zend_do_link_class(): the parent, then the traits, then the
                         // interfaces are loaded (autoloaded) before anything is bound.
@@ -53486,10 +53486,12 @@ impl Vm {
                                             } else {
                                                 None
                                             };
-                                        let (check_against_name, check_against) = match &ctor_proto
-                                        {
-                                            Some((n, m)) => (n.clone(), m.clone()),
-                                            None => (parent.name.clone(), method.clone()),
+                                        let (check_against_name, check_against): (
+                                            &[u8],
+                                            &crate::object::MethodDef,
+                                        ) = match &ctor_proto {
+                                            Some((n, m)) => (n, m),
+                                            None => (&parent.name, method),
                                         };
                                         let should_check = (mn_lower != b"__construct"
                                             || method.is_abstract
@@ -53530,19 +53532,14 @@ impl Vm {
                                                 });
                                             }
                                         }
-                                        let _parent_decl_name = self
-                                            .classes
-                                            .get(&method.declaring_class.to_ascii_lowercase())
-                                            .map(|c| c.name.clone())
-                                            .unwrap_or_else(|| parent.name.clone());
                                         if should_check {
                                             // Check method signature compatibility
                                             if let Some((err_msg, unresolved)) = self
                                                 .variance_check_method(
                                                     &class,
                                                     child_method,
-                                                    &check_against_name,
-                                                    &check_against,
+                                                    check_against_name,
+                                                    check_against,
                                                 )
                                             {
                                                 if unresolved && is_early_attempt {
@@ -53591,11 +53588,19 @@ impl Vm {
                                 // A backed hooked property implicitly implements the
                                 // hooks it doesn't define (inherit_property_hook()).
                                 drop_backed_abstract_hooks(&mut class);
+                                // (only hook methods the parent has matter)
+                                let parent_has_hooks = parent
+                                    .methods
+                                    .keys()
+                                    .any(|k| k.starts_with(b"__property_"));
                                 let child_plain_props: Vec<(Vec<u8>, bool)> = class
                                     .properties
                                     .iter()
                                     .filter(|p| {
-                                        !p.is_abstract && !p.has_get_hook && !p.has_set_hook
+                                        parent_has_hooks
+                                            && !p.is_abstract
+                                            && !p.has_get_hook
+                                            && !p.has_set_hook
                                     })
                                     .map(|p| (p.name.clone(), p.is_readonly))
                                     .collect();
@@ -53651,8 +53656,6 @@ impl Vm {
                                     }
                                 }
                                 // Inherit properties (parent properties come first, child overrides take precedence)
-                                let _child_prop_names: Vec<Vec<u8>> =
-                                    class.properties.iter().map(|p| p.name.clone()).collect();
                                 // If the child is not abstract/interface and the parent has
                                 // abstract property hooks, the child must implement them.
                                 if !class.is_abstract && !class.is_interface {
@@ -55477,10 +55480,20 @@ impl Vm {
                         // not `set`, because readonly properties cannot be set externally.
                         if !class.is_abstract && !class.is_interface && !class.is_trait {
                             drop_backed_abstract_hooks(&mut class);
+                            // (nothing to remove without abstract hook methods)
+                            let has_abstract_hooks = class
+                                .methods
+                                .iter()
+                                .any(|(k, m)| m.is_abstract && k.starts_with(b"__property_"));
                             let child_plain_props: Vec<(Vec<u8>, bool)> = class
                                 .properties
                                 .iter()
-                                .filter(|p| !p.is_abstract && !p.has_get_hook && !p.has_set_hook)
+                                .filter(|p| {
+                                    has_abstract_hooks
+                                        && !p.is_abstract
+                                        && !p.has_get_hook
+                                        && !p.has_set_hook
+                                })
                                 .map(|p| (p.name.clone(), p.is_readonly))
                                 .collect();
                             for (cp_name, is_readonly) in &child_plain_props {
@@ -55852,13 +55865,14 @@ impl Vm {
                             .iter()
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
-                        let class_name_orig = name_val.to_php_string().as_bytes().to_vec();
-
                         // Register all methods as callable functions: ClassName::methodName
+                        // (keyed lowercased, each key made in one allocation)
                         for (_method_name, method) in &class.methods {
-                            let mut func_name = class_name_orig.clone();
+                            let mut func_name =
+                                Vec::with_capacity(name_lower.len() + 2 + method.name.len());
+                            func_name.extend_from_slice(&name_lower);
                             func_name.extend_from_slice(b"::");
-                            func_name.extend_from_slice(&method.name);
+                            func_name.extend(method.name.iter().map(|b| b.to_ascii_lowercase()));
                             // MethodDef keeps attributes apart from the OpArray;
                             // DoFCall's #[\Deprecated]/#[\NoDiscard] checks read
                             // them from the registered function.
@@ -55869,15 +55883,15 @@ impl Vm {
                                 std::rc::Rc::make_mut(&mut method_op_array).attributes =
                                     method.attributes.clone();
                             }
-                            self.user_functions
-                                .insert(func_name.to_ascii_lowercase(), method_op_array);
+                            self.user_functions.insert(func_name, method_op_array);
                         }
 
                         // Resolve deferred constant references (self::CONST, ClassName::CONST)
                         // in class constants (multiple passes to handle chains)
                         for _pass in 0..10 {
-                            let const_keys: Vec<Vec<u8>> =
-                                class.constants.keys().cloned().collect();
+                            // (only the constants holding a deferred reference:
+                            // a pass changes no other constant)
+                            let const_keys: Vec<Vec<u8>> = deferred_const_keys(&class);
                             let mut any_resolved = false;
                             for const_name in const_keys {
                                 if let Some(Value::String(s)) = class.constants.get(&const_name) {
@@ -55953,8 +55967,7 @@ impl Vm {
                         // These are either circular references or references to undefined constants
                         let mut deferred_error: Option<String> = None;
                         {
-                            let const_keys: Vec<Vec<u8>> =
-                                class.constants.keys().cloned().collect();
+                            let const_keys: Vec<Vec<u8>> = deferred_const_keys(&class);
                             // First, check for truly undefined constants (referenced constant doesn't exist)
                             'deferred_check: for const_name in const_keys {
                                 if let Some(Value::String(s)) = class.constants.get(&const_name) {
@@ -56034,8 +56047,18 @@ impl Vm {
                             });
                         }
                         // Resolve deferred constant references inside array values in class constants
-                        let const_keys_arr: Vec<Vec<u8>> =
-                            class.constants.keys().cloned().collect();
+                        // (only the arrays holding a deferred reference)
+                        let const_keys_arr: Vec<Vec<u8>> = class
+                            .constants
+                            .iter()
+                            .filter(|(_, v)| match v {
+                                Value::Array(a) => a.borrow().iter().any(|(_, e)| {
+                                    matches!(e, Value::String(s) if s.as_bytes().starts_with(b"__deferred_const__::"))
+                                }),
+                                _ => false,
+                            })
+                            .map(|(k, _)| k.clone())
+                            .collect();
                         for const_name in const_keys_arr {
                             if let Some(Value::Array(arr_rc)) = class.constants.get(&const_name) {
                                 let mut arr = arr_rc.borrow().clone();
@@ -56109,8 +56132,12 @@ impl Vm {
                         // Resolve deferred spread markers in class constant arrays.
                         // __deferred_spread__::ClassName::CONST means: expand the referenced array at this position.
                         {
-                            let const_keys_spread: Vec<Vec<u8>> =
-                                class.constants.keys().cloned().collect();
+                            let const_keys_spread: Vec<Vec<u8>> = class
+                                .constants
+                                .iter()
+                                .filter(|(_, v)| matches!(v, Value::Array(_)))
+                                .map(|(k, _)| k.clone())
+                                .collect();
                             for const_name in const_keys_spread {
                                 if let Some(Value::Array(arr_rc)) = class.constants.get(&const_name)
                                 {
@@ -56210,8 +56237,12 @@ impl Vm {
                         }
                         // Also resolve deferred spreads in static properties
                         {
-                            let static_keys_spread: Vec<Vec<u8>> =
-                                class.static_properties.keys().cloned().collect();
+                            let static_keys_spread: Vec<Vec<u8>> = class
+                                .static_properties
+                                .iter()
+                                .filter(|(_, v)| matches!(v, Value::Array(_)))
+                                .map(|(k, _)| k.clone())
+                                .collect();
                             for prop_name in static_keys_spread {
                                 if let Some(Value::Array(arr_rc)) =
                                     class.static_properties.get(&prop_name)
@@ -56308,7 +56339,14 @@ impl Vm {
                         // Circular spread detection is deferred to first constant access (StaticPropGet)
                         // so that the error can be caught by try/catch blocks around constant accesses.
                         // Resolve deferred binary operation expressions in class constants
-                        let const_keys2: Vec<Vec<u8>> = class.constants.keys().cloned().collect();
+                        let const_keys2: Vec<Vec<u8>> = class
+                            .constants
+                            .iter()
+                            .filter(|(_, v)| {
+                                matches!(v, Value::String(s) if s.as_bytes().starts_with(b"__deferred_binop__::"))
+                            })
+                            .map(|(k, _)| k.clone())
+                            .collect();
                         for const_name in const_keys2 {
                             if let Some(Value::String(s)) = class.constants.get(&const_name) {
                                 let s_bytes = s.as_bytes();
@@ -56391,8 +56429,14 @@ impl Vm {
                             }
                         }
                         // Resolve deferred constant references in static properties
-                        let static_keys: Vec<Vec<u8>> =
-                            class.static_properties.keys().cloned().collect();
+                        let static_keys: Vec<Vec<u8>> = class
+                            .static_properties
+                            .iter()
+                            .filter(|(_, v)| {
+                                matches!(v, Value::String(s) if s.as_bytes().starts_with(b"__deferred_const__::"))
+                            })
+                            .map(|(k, _)| k.clone())
+                            .collect();
                         for prop_name in static_keys {
                             if let Some(Value::String(s)) = class.static_properties.get(&prop_name)
                             {
@@ -68179,6 +68223,20 @@ fn vm_is_valid_timezone(tz_name: &str) -> bool {
 #[inline(never)]
 fn own_prop_order(props: &[crate::object::PropertyDef]) -> Vec<Vec<u8>> {
     props.iter().map(|p| p.name.clone()).collect()
+}
+
+/// The names of a class's constants whose value is a deferred constant
+/// reference (`__deferred_const__::Class::NAME`), in order.
+#[inline(never)]
+fn deferred_const_keys(class: &crate::object::ClassEntry) -> Vec<Vec<u8>> {
+    class
+        .constants
+        .iter()
+        .filter(|(_, v)| {
+            matches!(v, Value::String(s) if s.as_bytes().starts_with(b"__deferred_const__::"))
+        })
+        .map(|(k, _)| k.clone())
+        .collect()
 }
 
 /// Backed properties are considered to always implicitly implement get and
