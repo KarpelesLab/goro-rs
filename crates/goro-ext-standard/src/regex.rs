@@ -421,7 +421,12 @@ pub fn get_compiled_regex(vm: &mut Vm, regex: &[u8], fname: &str) -> Option<Rc<P
 
 #[inline]
 fn str_val(subject: &[u8], start: usize, end: usize) -> Value {
-    Value::String(PhpString::from_bytes(&subject[start..end]))
+    // (ZVAL_STRINGL_FAST(): the interned empty and one-char strings)
+    Value::String(match &subject[start..end] {
+        [] => PhpString::empty(),
+        [c] => PhpString::one_char(*c),
+        s => PhpString::from_bytes(s),
+    })
 }
 
 fn arr_val(a: PhpArray) -> Value {
