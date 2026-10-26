@@ -83,6 +83,9 @@ pub struct Parser {
     /// Nesting of parse_expression() / parse_unary(): every
     /// STACK_CHECK_EVERY-th level makes sure of native stack room.
     stack_nesting: u32,
+    /// Nesting of speculate(): what is parsed may be parsed again, so
+    /// advance_take_bytes() copies the payloads instead of taking them.
+    speculative: u32,
 }
 
 /// See Parser::stack_nesting: the levels in between use far less than the
@@ -277,6 +280,7 @@ impl Parser {
             in_foreach_target: false,
             last_group_close: usize::MAX,
             stack_nesting: 0,
+            speculative: 0,
         }
     }
 
@@ -414,6 +418,36 @@ impl Parser {
             self.pos += 1;
         }
         tok
+    }
+
+    /// Advance past the current token, handing over the bytes of an
+    /// Identifier / Variable / ConstantString (none for other tokens). The
+    /// token keeps an empty payload: a token behind the current one is
+    /// never looked at again for its text, except after a rewind, which
+    /// only happens in speculate() (where the bytes are copied).
+    fn advance_take_bytes(&mut self) -> Vec<u8> {
+        let i = self.pos.min(self.tokens.len() - 1);
+        let speculative = self.speculative != 0;
+        let bytes = match &mut self.tokens[i].kind {
+            TokenKind::Identifier(v) | TokenKind::Variable(v) | TokenKind::ConstantString(v) => {
+                if speculative {
+                    v.clone()
+                } else {
+                    std::mem::take(v)
+                }
+            }
+            _ => Vec::new(),
+        };
+        self.advance();
+        bytes
+    }
+
+    /// Run `f` on tokens the parser may rewind to and parse again.
+    fn speculate<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.speculative += 1;
+        let r = f(self);
+        self.speculative -= 1;
+        r
     }
 
     fn expect(&mut self, expected: &TokenKind) -> ParseResult<Span> {
@@ -751,8 +785,9 @@ impl Parser {
                 span,
             });
         }
-        match self.peek().clone() {
+        match self.peek() {
             TokenKind::InlineHtml(html) => {
+                let html = html.clone();
                 self.advance();
                 Ok(Statement {
                     kind: StmtKind::InlineHtml(html),
@@ -4866,28 +4901,31 @@ impl Parser {
                 };
                 if matches!(self.peek(), TokenKind::OpenParen) {
                     let saved_pos = self.pos;
-                    self.advance(); // consume '('
-                    let call_form = match self.peek() {
-                        TokenKind::CloseParen | TokenKind::Ellipsis => true,
-                        TokenKind::Variable(_) => false,
-                        _ => matches!(self.peek_at(1), TokenKind::Colon),
-                    };
-                    let args = if call_form {
-                        Some(self.parse_arguments()?)
-                    } else {
-                        let first = self.parse_expression()?;
-                        if self.eat(&TokenKind::Comma) {
-                            let mut args = vec![Argument {
-                                name: None,
-                                value: first,
-                                unpack: false,
-                            }];
-                            args.extend(self.parse_arguments()?);
-                            Some(args)
+                    // (rewound to below for a single parenthesized operand)
+                    let args = self.speculate(|p| -> ParseResult<Option<Vec<Argument>>> {
+                        p.advance(); // consume '('
+                        let call_form = match p.peek() {
+                            TokenKind::CloseParen | TokenKind::Ellipsis => true,
+                            TokenKind::Variable(_) => false,
+                            _ => matches!(p.peek_at(1), TokenKind::Colon),
+                        };
+                        Ok(if call_form {
+                            Some(p.parse_arguments()?)
                         } else {
-                            None
-                        }
-                    };
+                            let first = p.parse_expression()?;
+                            if p.eat(&TokenKind::Comma) {
+                                let mut args = vec![Argument {
+                                    name: None,
+                                    value: first,
+                                    unpack: false,
+                                }];
+                                args.extend(p.parse_arguments()?);
+                                Some(args)
+                            } else {
+                                None
+                            }
+                        })
+                    })?;
                     if let Some(mut args) = args {
                         let is_fcc = self.first_class_callable_flag;
                         let end_span = self.span();
@@ -4922,7 +4960,8 @@ impl Parser {
                     self.pos = saved_pos;
                 }
                 let start = self.pos;
-                let mut operand = self.parse_unary()?;
+                // (parsed again below when an assignment follows)
+                let mut operand = self.speculate(|p| p.parse_unary())?;
                 // `clone $a = expr` is `clone ($a = expr)` (the grammar shifts
                 // the assignment onto the variable).
                 if Self::is_lvalue(&operand)
@@ -5123,7 +5162,7 @@ impl Parser {
     /// `$$v`), then a method call when followed by `(`.
     fn parse_object_member(&mut self, object: Expr, nullsafe: bool) -> ParseResult<Expr> {
         let prop_span = self.span();
-        let member = match self.peek().clone() {
+        let member = match self.peek() {
             TokenKind::OpenBrace => {
                 self.advance();
                 let e = self.parse_expression()?;
@@ -5135,6 +5174,7 @@ impl Parser {
             | TokenKind::VariableVariable(_)
             | TokenKind::Dollar => self.parse_simple_variable()?,
             TokenKind::Identifier(name) => {
+                let name = name.clone();
                 self.advance();
                 Expr {
                     kind: ExprKind::Identifier(name),
@@ -5455,7 +5495,7 @@ impl Parser {
         }
 
         loop {
-            match self.peek().clone() {
+            match self.peek() {
                 TokenKind::Increment => {
                     // `variable T_INC`: `($a)++`, `1++`, `$a++++` are errors.
                     if self.last_group_close == self.pos.wrapping_sub(1)
@@ -5645,7 +5685,8 @@ impl Parser {
                             }) {
                                 let saved = self.pos;
                                 self.pos += 3;
-                                match self.parse_prop_hook_call(expr, &lit)? {
+                                // (rewound to `saved` when not a hook call)
+                                match self.speculate(|p| p.parse_prop_hook_call(expr, &lit))? {
                                     Ok(call) => {
                                         expr = call;
                                         continue;
@@ -5825,7 +5866,7 @@ impl Parser {
 
     fn parse_primary(&mut self) -> ParseResult<Expr> {
         let span = self.span();
-        match self.peek().clone() {
+        match self.peek() {
             TokenKind::AttributeOpen => {
                 let attr_doc = self.take_doc_comment();
                 let attributes = self.parse_attributes()?;
@@ -5925,6 +5966,7 @@ impl Parser {
                 }
             }
             TokenKind::LongNumber(n) => {
+                let n = *n;
                 self.advance();
                 Ok(Expr {
                     kind: ExprKind::Int(n),
@@ -5932,20 +5974,22 @@ impl Parser {
                 })
             }
             TokenKind::DoubleNumber(n) => {
+                let n = *n;
                 self.advance();
                 Ok(Expr {
                     kind: ExprKind::Float(n),
                     span,
                 })
             }
-            TokenKind::ConstantString(s) => {
-                self.advance();
+            TokenKind::ConstantString(_) => {
+                let s = self.advance_take_bytes();
                 Ok(Expr {
                     kind: ExprKind::String(s),
                     span,
                 })
             }
             TokenKind::InterpolatedStringPart(s) => {
+                let s = s.clone();
                 self.advance();
                 let mut parts = vec![StringPart::Literal(s)];
                 // Collect remaining parts
@@ -6135,8 +6179,8 @@ impl Parser {
                     span,
                 })
             }
-            TokenKind::Variable(name) => {
-                self.advance();
+            TokenKind::Variable(_) => {
+                let name = self.advance_take_bytes();
                 Ok(Expr {
                     kind: ExprKind::Variable(name),
                     span,
@@ -6144,6 +6188,7 @@ impl Parser {
             }
             TokenKind::DollarOpenBrace | TokenKind::Dollar => self.parse_simple_variable(),
             TokenKind::VariableVariable(name) => {
+                let name = name.clone();
                 self.advance();
                 // $$var is DynamicVariable with the inner variable
                 Ok(Expr {
@@ -6158,8 +6203,13 @@ impl Parser {
             | TokenKind::NameQualified(_)
             | TokenKind::NameFullyQualified(_)
             | TokenKind::NameRelative(_) => {
-                let full_name = Self::name_of(self.peek()).unwrap_or_default();
-                self.advance();
+                let full_name = if matches!(self.peek(), TokenKind::Identifier(_)) {
+                    self.advance_take_bytes()
+                } else {
+                    let name = Self::name_of(self.peek()).unwrap_or_default();
+                    self.advance();
+                    name
+                };
                 // Check if this is a function call
                 if matches!(self.peek(), TokenKind::OpenParen) {
                     self.advance();
@@ -7098,9 +7148,16 @@ impl Parser {
 
             // Check for named arguments: name: value
             // PHP allows reserved keywords as named parameter names
-            let name = {
-                let maybe_name = match self.peek().clone() {
-                    TokenKind::Identifier(ident) => Some(ident),
+            // (only a name followed by `:` is looked at)
+            let named = self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|t| t.kind == TokenKind::Colon);
+            let name = if !named {
+                None
+            } else {
+                let maybe_name = match self.peek() {
+                    TokenKind::Identifier(ident) => Some(ident.clone()),
                     // Reserved keywords that can be used as named parameter names
                     TokenKind::Array => Some(b"array".to_vec()),
                     TokenKind::Callable => Some(b"callable".to_vec()),
@@ -7172,17 +7229,9 @@ impl Parser {
                     _ => None,
                 };
                 if let Some(ident) = maybe_name {
-                    if self
-                        .tokens
-                        .get(self.pos + 1)
-                        .is_some_and(|t| t.kind == TokenKind::Colon)
-                    {
-                        self.advance(); // identifier/keyword
-                        self.advance(); // colon
-                        Some(ident)
-                    } else {
-                        None
-                    }
+                    self.advance(); // identifier/keyword
+                    self.advance(); // colon
+                    Some(ident)
                 } else {
                     None
                 }
