@@ -1092,7 +1092,13 @@ fn unser_init(vm: &Vm) -> Rc<RefCell<UnserData>> {
         let max_depth = vm
             .constants
             .get(b"unserialize_max_depth".as_ref())
-            .map(|v| v.to_long())
+            .map(|v| match v {
+                // OnUpdateLong: the value is a quantity ("1k" is 1024)
+                Value::String(s) => {
+                    goro_core::ini_quantity::parse_quantity(s.as_bytes(), true).0 as i64
+                }
+                v => v.to_long(),
+            })
             .unwrap_or(4096);
         let d = Rc::new(RefCell::new(UnserData {
             entries: Vec::new(),
