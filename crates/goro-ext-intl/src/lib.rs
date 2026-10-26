@@ -35,6 +35,7 @@ pub mod msgpattern;
 pub mod numdata;
 mod numdata_tables;
 pub mod rbnf;
+mod rbnf_ordinal;
 // misc area helpers (break iterator rules, UnicodeSet patterns)
 pub mod breakiter_rules;
 pub mod translit_data;

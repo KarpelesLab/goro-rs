@@ -107,6 +107,52 @@ struct Ctx<'a> {
     sets: &'a [RuleSet],
     df: &'a DecimalFormat,
     budget: u32,
+    /// The language `$(cardinal,…)$` / `$(ordinal,…)$` select plural
+    /// categories with.
+    lang: &'a str,
+}
+
+/// The text of a `$(kind,cat{text}cat{text}…)$` plural selection (the part
+/// between `$(` and `)$`) for `q`.
+fn plural_text(sel: &str, q: &Dq, lang: &str) -> String {
+    let Some((kind, body)) = sel.split_once(',') else {
+        return String::new();
+    };
+    let mut a = q.clone();
+    a.neg = false;
+    let plain = a.plain(0);
+    let ops = intl::plural::PluralOperands::parse(&plain);
+    use intl::plural::PluralCategory as C;
+    let cat = match ops {
+        Some(o) if kind.trim() == "ordinal" => intl::plural::ordinal_category(lang, &o),
+        Some(o) => intl::plural::plural_category(lang, &o),
+        None => C::Other,
+    };
+    let want = match cat {
+        C::Zero => "zero",
+        C::One => "one",
+        C::Two => "two",
+        C::Few => "few",
+        C::Many => "many",
+        C::Other => "other",
+    };
+    let mut other = String::new();
+    let mut rest = body;
+    while let Some(open) = rest.find('{') {
+        let key = rest[..open].trim();
+        let Some(close) = rest[open..].find('}') else {
+            break;
+        };
+        let text = &rest[open + 1..open + close];
+        if key == want {
+            return text.to_string();
+        }
+        if key == "other" {
+            other = text.to_string();
+        }
+        rest = &rest[open + close + 1..];
+    }
+    other
 }
 
 impl Ctx<'_> {
@@ -159,6 +205,19 @@ impl Ctx<'_> {
                     i += 1;
                 }
                 _ if skipping => i += 1,
+                '$' if cs.get(i + 1) == Some(&'(') => {
+                    let rest: String = cs[i + 2..].iter().collect();
+                    match rest.find(")$") {
+                        Some(e) => {
+                            out.push_str(&plural_text(&rest[..e], q, self.lang));
+                            i += 2 + rest[..e].chars().count() + 2;
+                        }
+                        None => {
+                            out.push(c);
+                            i += 1;
+                        }
+                    }
+                }
                 '<' | '>' | '=' | '←' | '→' => {
                     let delim = c;
                     let mut j = i + 1;
@@ -209,6 +268,36 @@ impl Ctx<'_> {
             }
             let mut a = q.clone();
             a.neg = false;
+            // (ICU picks the rule by the absolute value but formats the
+            // number itself: a rule passing it on whole, "=%other=", hands
+            // the other rule set the negative number)
+            let n = {
+                let mut ip = a.clone();
+                let _ = ip.round_at(0, ROUND_DOWN);
+                ip.to_i64().unwrap_or(i64::MAX)
+            };
+            let same_value = rs
+                .rules
+                .iter()
+                .filter(|r| r.base.is_some_and(|b| b <= n))
+                .max_by_key(|r| r.base.unwrap_or(0))
+                .is_some_and(|r| {
+                    let t = r.text.trim();
+                    t.len() > 3
+                        && t.starts_with("=%")
+                        && t.ends_with('=')
+                        && t[1..t.len() - 1].find('=').is_none()
+                });
+            if same_value {
+                let text = rs
+                    .rules
+                    .iter()
+                    .filter(|r| r.base.is_some_and(|b| b <= n))
+                    .max_by_key(|r| r.base.unwrap_or(0))
+                    .map(|r| r.text.clone())
+                    .unwrap_or_default();
+                return self.render(&text, set, q, q, q, depth, false);
+            }
             return format!("-{}", self.fmt(set, &a, depth + 1));
         }
         if q.lower() < 0 {
@@ -284,19 +373,79 @@ fn render_fraction(text: &str, ipart: &str, frac: &str) -> String {
 
 /// Format `q` with custom rules.
 pub fn format(rules: &str, q: &Dq, df: &DecimalFormat) -> String {
+    format_with(rules, None, q, df, "en")
+}
+
+/// Format `q` with `rules`, starting with the rule set named `start` (the
+/// first public one when None), plural selections in `lang`.
+pub fn format_with(
+    rules: &str,
+    start: Option<&str>,
+    q: &Dq,
+    df: &DecimalFormat,
+    lang: &str,
+) -> String {
     let sets = parse(rules);
     if sets.is_empty() {
         return df.format_dq(q.clone(), None).unwrap_or_default();
     }
     // the default rule set: the last public one... ICU uses the first public
-    let start = sets
+    let first = sets
         .iter()
         .position(|s| !s.name.starts_with("%%"))
         .unwrap_or(0);
+    let start = start
+        .and_then(|n| sets.iter().position(|s| s.name == n))
+        .unwrap_or(first);
     let mut ctx = Ctx {
         sets: &sets,
         df,
         budget: 10_000,
+        lang,
     };
     ctx.fmt(start, q, 0)
 }
+
+/// CLDR's %digits-ordinal rules for an ICU locale ID, by locale fallback
+/// (root's when no ancestor has any).
+pub fn digits_ordinal_rules(id: &str) -> &'static str {
+    use crate::rbnf_ordinal::DIGITS_ORDINAL;
+    let find = |l: &str| {
+        DIGITS_ORDINAL
+            .binary_search_by(|(k, _)| (*k).cmp(l))
+            .ok()
+            .map(|i| DIGITS_ORDINAL[i].1)
+    };
+    let mut cur = crate::numdata::base_name(id).replace('-', "_");
+    // (CLDR parent locales the truncation misses)
+    let lang = crate::numdata::language(&cur);
+    let region = cur.rsplit('_').next().unwrap_or("").to_string();
+    if lang == "zh" && matches!(region.as_str(), "TW" | "HK" | "MO") && !cur.contains("Hant") {
+        cur = "zh_Hant".to_string();
+    } else if lang == "es" && region.len() == 3
+        || (lang == "es" && LATAM.contains(&region.as_str()))
+    {
+        cur = "es_419".to_string();
+    }
+    loop {
+        if let Some(r) = find(&cur) {
+            return r;
+        }
+        match cur.rfind('_') {
+            Some(p) => {
+                cur.truncate(p);
+                while cur.ends_with('_') {
+                    cur.pop();
+                }
+            }
+            None => break,
+        }
+    }
+    find("root").unwrap_or("%digits-ordinal: -x: \u{2212}>>; 0: =#,##0=.;")
+}
+
+/// The regions whose Spanish has es_419 for parent (CLDR parentLocales).
+const LATAM: &[&str] = &[
+    "AR", "BO", "BR", "BZ", "CL", "CO", "CR", "CU", "DO", "EC", "GT", "HN", "MX", "NI", "PA", "PE",
+    "PR", "PY", "SV", "US", "UY", "VE",
+];

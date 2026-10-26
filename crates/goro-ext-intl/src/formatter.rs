@@ -243,7 +243,10 @@ fn point_word(lang: &str) -> &'static str {
         "ro" => "virgulă",
         "fi" => "pilkku",
         "tr" => "virgül",
-        "ja" | "zh" => "点",
+        "uk" => "кома",
+        // (CLDR ja: "x.x: ←←・→→→", zh: "x.x: ←←点→→→")
+        "ja" => "・",
+        "zh" => "点",
         _ => "point",
     }
 }
@@ -284,12 +287,14 @@ fn spellout(tag: &str, q: &Dq, df: &DecimalFormat) -> String {
     }
     out.push_str(&int_words);
     if q.lower() < 0 {
-        out.push(' ');
+        // (`→→→`: the digits without spaces, nor around the separator)
+        let sep = if matches!(lang.as_str(), "ja" | "zh") { "" } else { " " };
+        out.push_str(sep);
         out.push_str(point_word(&lang));
         let mut m = -1;
         while m >= q.lower() {
             let dg = q.digit(m);
-            out.push(' ');
+            out.push_str(sep);
             out.push_str(&intl::spellout::spell_cardinal(tag, dg as i64).unwrap_or_else(|| dg.to_string()));
             m -= 1;
         }
@@ -322,28 +327,20 @@ fn rbnf_format(nf: &Nf, style: i64, rules: Option<&str>, df: &DecimalFormat, q: 
         // (intl leaves RBNF's leading-space apostrophes in)
         SPELLOUT => spellout(tag, &q, df).replace("' ", " "),
         ORDINAL => {
+            // (rounded to an integer first, as ICU's RBNF rounds with no
+            // fraction digits)
             let mut t = q.clone();
             let _ = t.round_at(0, crate::decfmt::ROUND_HALFEVEN);
-            match t.to_i64() {
-                Some(n) => {
-                    // the digits as "#,##0" formats them, intl's suffix
-                    let abs = n.unsigned_abs().min(i64::MAX as u64) as i64;
-                    let ord = intl::number::format_ordinal(tag, abs);
-                    let plain = intl::number::format_decimal(tag, abs as f64);
-                    let mut d = df.clone();
-                    d.props.max_frac = 0;
-                    let body = match ord.strip_prefix(&plain) {
-                        Some(suffix) => {
-                            let mut b = d.format_i64(abs).unwrap_or_default();
-                            b.push_str(suffix);
-                            b
-                        }
-                        None => ord,
-                    };
-                    if n < 0 { format!("\u{2212}{}", body) } else { body }
-                }
-                None => df.format_dq(q, None).unwrap_or_default(),
+            if t.to_i64().is_none() {
+                return df.format_dq(q, None).unwrap_or_default();
             }
+            if t.is_zero() {
+                t.neg = false;
+            }
+            let mut d = df.clone();
+            d.props.max_frac = 0;
+            let rules = crate::rbnf::digits_ordinal_rules(&nf.valid);
+            crate::rbnf::format_with(rules, Some("%digits-ordinal"), &t, &d, &lang)
         }
         DURATION => {
             if lang == "en" {
