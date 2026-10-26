@@ -2866,6 +2866,14 @@ impl Vm {
                 line,
             });
         }
+        if method == b"__debuginfo" {
+            let mut arr = crate::array::PhpArray::new();
+            arr.set(
+                crate::array::ArrayKey::String(PhpString::from_bytes(b"function")),
+                Value::String(PhpString::from_string(self.generator_function_name(g))),
+            );
+            return Ok(Value::Array(Rc::new(RefCell::new(arr))));
+        }
         if method == b"throw" {
             let throwable = match &args[0] {
                 Value::Object(obj) => {
