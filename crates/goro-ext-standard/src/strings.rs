@@ -1371,6 +1371,28 @@ fn sprintf_append_string(
     }
 }
 
+/// php_sprintf_appendstring()'s buffer growth for a wide field: the
+/// zend_string (240 bytes at first) doubles until the field fits, which the
+/// memory limit may refuse.
+#[inline(never)]
+fn sprintf_grow_check(vm: &mut Option<&mut Vm>, pos: usize, width: usize) -> Result<(), VmError> {
+    let req = pos.saturating_add(width).saturating_add(1);
+    let mut size: usize = 240;
+    while req > size {
+        size <<= 1;
+    }
+    // (_ZSTR_STRUCT_SIZE)
+    let alloc = (24 + size + 1 + 7) & !7;
+    match vm.as_deref_mut() {
+        Some(vm_ref) => vm_ref.memory_check(alloc),
+        // (no constant folding of such a call)
+        None => Err(VmError {
+            message: String::new(),
+            line: 0,
+        }),
+    }
+}
+
 fn do_sprintf_inner(
     mut vm: Option<&mut Vm>,
     args: &[Value],
@@ -1595,6 +1617,9 @@ fn do_sprintf_inner(
             ));
         }
         let arg = &values[argnum];
+        if width >= 1 << 20 && spec != b'c' {
+            sprintf_grow_check(&mut vm, result.len(), width)?;
+        }
 
         // zval_get_long() of an object: GMP-like objects cast, others warn
         // ("could not be converted to int") and give 1.

@@ -4696,7 +4696,7 @@ fn array_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // PHP caps the target length at HT_MAX_SIZE (2^30 by default). Throw a
     // ValueError rather than trying to allocate a huge array.
     const MAX_ARRAY_SIZE: i64 = 1 << 30;
-    if pad_size <= -MAX_ARRAY_SIZE || pad_size >= MAX_ARRAY_SIZE {
+    if !(-MAX_ARRAY_SIZE..=MAX_ARRAY_SIZE).contains(&pad_size) {
         let msg =
             "array_pad(): Argument #2 ($length) must not exceed the maximum allowed array size"
                 .to_string();
@@ -4723,6 +4723,9 @@ fn array_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
 
         let pad_count = abs_size - current_len as usize;
+        // array_init_size() + zend_hash_real_init_packed()/_mixed()
+        let packed = arr.is_packed();
+        array_init_size_check(vm, abs_size, packed)?;
         let mut result = PhpArray::new();
 
         if pad_size < 0 {
@@ -4811,18 +4814,32 @@ fn array_fill(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let line = vm.current_line;
         return Err(vm.emit_fatal_at(&msg, line));
     }
-    let bytes = (num as usize).next_power_of_two().max(8) * 16;
-    let limit = goro_core::value::memory_get_limit();
-    if limit > 0 && goro_core::value::memory_get_usage().saturating_add(bytes) > limit {
-        goro_core::value::memory_alloc(bytes);
-        return Err(vm.memory_limit_fatal());
-    }
+    array_init_size_check(vm, num as usize, true)?;
     let val = args.get(2).map_or(Value::Null, Value::deref_for_storage);
     let mut result = PhpArray::new();
     for i in 0..num {
         result.set(goro_core::array::ArrayKey::Int(start + i), val.clone());
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+/// The allocation of an array_init_size(n) array once initialised: packed
+/// (zvals and the 2-slot hash) or mixed (buckets and a hash twice the size),
+/// which the memory limit may refuse.
+#[inline(never)]
+fn array_init_size_check(vm: &mut Vm, n: usize, packed: bool) -> Result<(), VmError> {
+    let size = n.next_power_of_two().max(8);
+    let bytes = if packed {
+        size * 16 + 8
+    } else {
+        size * 32 + size * 2 * 4
+    };
+    let limit = goro_core::value::memory_get_limit();
+    if limit > 0 && goro_core::value::memory_get_usage().saturating_add(bytes) > limit {
+        goro_core::value::memory_alloc(bytes);
+        return Err(vm.memory_limit_fatal());
+    }
+    Ok(())
 }
 
 fn array_fill_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
