@@ -176,7 +176,95 @@ fn identical_scalar(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// Has a by-reference argument slot changed from `old`? Arrays and objects
+/// compare by identity (a builtin storing a new value replaces them).
+fn ref_value_changed(old: &Value, new: &Value) -> bool {
+    match (old, new) {
+        (Value::Array(a), Value::Array(b)) => !Rc::ptr_eq(a, b),
+        (Value::Object(a), Value::Object(b)) => !Rc::ptr_eq(a, b),
+        _ => !identical_scalar(old, new),
+    }
+}
+
+/// The by-reference arguments of a builtin call that are bound to typed
+/// properties, with their values before the call.
+pub(crate) type TypedRefArgs = Vec<(Rc<RefCell<Value>>, Value)>;
+
+/// Collect the typed-reference arguments of a builtin call (None when there
+/// are none: the common case, decided without any lookup when no typed
+/// reference exists).
+#[inline]
+pub(crate) fn typed_ref_args(args: &[Value]) -> Option<TypedRefArgs> {
+    if !any() {
+        return None;
+    }
+    typed_ref_args_slow(args)
+}
+
+#[inline(never)]
+fn typed_ref_args_slow(args: &[Value]) -> Option<TypedRefArgs> {
+    let mut out = Vec::new();
+    for a in args {
+        if let Value::Reference(r) = a {
+            if is_typed(r) {
+                out.push((r.clone(), r.borrow().clone()));
+            }
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 impl Vm {
+    /// After a builtin call: the values it stored through by-reference
+    /// arguments bound to typed properties go through ZEND_TRY_ASSIGN_REF_*
+    /// semantics (coerced to the property types; on a mismatch the reference
+    /// keeps its old value and a TypeError is thrown), for builtins that
+    /// write their out-parameters directly.
+    #[inline(never)]
+    pub(crate) fn verify_typed_ref_args(
+        &mut self,
+        snap: TypedRefArgs,
+        r: Result<Value, crate::vm::VmError>,
+    ) -> Result<Value, crate::vm::VmError> {
+        // A builtin that threw (or assigned through try_assign_ref() and
+        // failed) leaves its references as they are.
+        if self.current_exception.is_some() {
+            return r;
+        }
+        let mut failed = false;
+        for (rc, old) in snap {
+            let new = rc.borrow().clone();
+            if !ref_value_changed(&old, &new) {
+                continue;
+            }
+            if failed {
+                *rc.borrow_mut() = old;
+                continue;
+            }
+            let mut v = new;
+            match self.typed_ref_verify(&rc, &mut v, self.caller_strict_types) {
+                Ok(()) => *rc.borrow_mut() = v,
+                Err(msg) => {
+                    *rc.borrow_mut() = old;
+                    let line = self.current_line;
+                    let e = self.create_exception(b"TypeError", &msg, line);
+                    self.current_exception = Some(e);
+                    failed = true;
+                }
+            }
+        }
+        if failed {
+            if r.is_err() {
+                return r;
+            }
+            return Err(crate::vm::VmError {
+                message: self.uncaught_exception_message(),
+                line: self.current_line,
+            });
+        }
+        r
+    }
+
     /// ZEND_TRY_ASSIGN_REF_*() of an internal function: store `value`
     /// through the by-reference argument `r`, coerced to the typed
     /// properties the reference is bound to (in the caller's strict_types

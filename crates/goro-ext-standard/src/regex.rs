@@ -623,6 +623,14 @@ fn set_ref(arg: Option<&Value>, v: Value) {
     }
 }
 
+/// ZEND_TRY_ASSIGN_REF_LONG() of a `$count` out-parameter (coerced to, or
+/// rejected by, a typed property the reference is bound to).
+fn set_count_ref(vm: &mut Vm, arg: Option<&Value>, n: usize) {
+    if let Some(Value::Reference(r)) = arg {
+        let _ = vm.try_assign_ref(r, Value::Long(n as i64));
+    }
+}
+
 fn arg_str(args: &[Value], i: usize) -> PhpString {
     args.get(i)
         .map(|v| v.deref().to_php_string())
@@ -1359,7 +1367,7 @@ fn preg_replace_common(vm: &mut Vm, args: &[Value], is_filter: bool) -> Result<V
             arr_val(out)
         }
     };
-    set_ref(zcount, Value::Long(replace_count as i64));
+    set_count_ref(vm, zcount, replace_count);
     Ok(ret)
 }
 
@@ -1696,7 +1704,7 @@ pub fn preg_replace_callback(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         flags,
         "preg_replace_callback",
     )?;
-    set_ref(zcount, Value::Long(count as i64));
+    set_count_ref(vm, zcount, count);
     Ok(ret)
 }
 
@@ -1751,7 +1759,7 @@ pub fn preg_replace_callback_array(vm: &mut Vm, args: &[Value]) -> Result<Value,
             _ => return Ok(Value::Null),
         }
     }
-    set_ref(zcount, Value::Long(replace_count as i64));
+    set_count_ref(vm, zcount, replace_count);
     Ok(match subject {
         StrOrArr::Arr(a) => Value::Array(a),
         StrOrArr::Str(s) => Value::String(s),

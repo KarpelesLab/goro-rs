@@ -554,11 +554,15 @@ impl Vm {
         args: &[Value],
     ) -> Result<Value, crate::vm::VmError> {
         let first_res = crate::value::next_resource_id();
-        let r = if self.observer.is_none() {
+        let typed_refs = crate::vm::typed_ref::typed_ref_args(args);
+        let mut r = if self.observer.is_none() {
             f(self, args)
         } else {
             self.call_builtin_with_observer(f, lname, args)
         };
+        if let Some(snap) = typed_refs {
+            r = self.verify_typed_ref_args(snap, r);
+        }
         // ZEND_VM_FCALL_INTERRUPT_CHECK(call): a signal that arrived during
         // the call is handled while its frame is still the current one.
         if crate::value::VM_INTERRUPT.load(std::sync::atomic::Ordering::Relaxed) {
