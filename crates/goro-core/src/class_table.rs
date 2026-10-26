@@ -7,8 +7,8 @@
 //! e.g. tests skipping on `class_exists('IntlDateFormatter')` keep skipping.
 //! Lookups never autoload.
 
-use crate::stubs::{self, K_ENUM, K_INTERFACE, K_TRAIT, StubClass};
 use crate::object::ClassEntry;
+use crate::stubs::{self, K_ENUM, K_INTERFACE, K_TRAIT, StubClass};
 use crate::vm::Vm;
 use std::hash::Hash;
 use std::rc::Rc;
@@ -163,12 +163,44 @@ impl Vm {
 /// declaration order. The entries are shared (`Rc`) and copied on write:
 /// one can be held across code that may declare classes (autoloading,
 /// error handlers) and a parent's entry is not copied to link a child.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ClassMap {
     map: crate::fxhash::FxIndexMap<Vec<u8>, Rc<ClassEntry>>,
+    /// Changed (to a number no class table had before) by every insert and
+    /// every mutable access: what is derived from the table holds while it
+    /// does not change (see Vm::class_chain()).
+    stamp: u64,
+}
+
+thread_local! {
+    static CLASS_MAP_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn fresh_gen() -> u64 {
+    CLASS_MAP_GEN.with(|g| {
+        let n = g.get() + 1;
+        g.set(n);
+        n
+    })
+}
+
+impl Default for ClassMap {
+    fn default() -> Self {
+        ClassMap {
+            map: Default::default(),
+            stamp: fresh_gen(),
+        }
+    }
 }
 
 impl ClassMap {
+    /// See `stamp`.
+    #[inline]
+    pub fn generation(&self) -> u64 {
+        self.stamp
+    }
+
     #[inline]
     pub fn get<Q: ?Sized + Hash + indexmap::Equivalent<Vec<u8>>>(
         &self,
@@ -192,6 +224,7 @@ impl ClassMap {
         &mut self,
         key: &Q,
     ) -> Option<&mut ClassEntry> {
+        self.stamp = fresh_gen();
         self.map.get_mut(key).map(Rc::make_mut)
     }
 
@@ -229,16 +262,21 @@ impl ClassMap {
     /// The entry at `i`, to change (copied first when shared).
     #[inline]
     pub fn get_index_mut(&mut self, i: usize) -> Option<(&Vec<u8>, &mut ClassEntry)> {
-        self.map.get_index_mut(i).map(|(k, c)| (&*k, Rc::make_mut(c)))
+        self.stamp = fresh_gen();
+        self.map
+            .get_index_mut(i)
+            .map(|(k, c)| (&*k, Rc::make_mut(c)))
     }
 
     #[inline]
     pub fn insert(&mut self, key: Vec<u8>, ce: ClassEntry) -> Option<Rc<ClassEntry>> {
+        self.stamp = fresh_gen();
         self.map.insert(key, Rc::new(ce))
     }
 
     #[inline]
     pub fn insert_rc(&mut self, key: Vec<u8>, ce: Rc<ClassEntry>) -> Option<Rc<ClassEntry>> {
+        self.stamp = fresh_gen();
         self.map.insert(key, ce)
     }
 
@@ -270,6 +308,7 @@ impl ClassMap {
     /// Every entry, to change (each copied first when shared).
     #[inline]
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut ClassEntry> {
+        self.stamp = fresh_gen();
         self.map.values_mut().map(Rc::make_mut)
     }
 }
@@ -291,6 +330,76 @@ impl<'a> IntoIterator for &'a ClassMap {
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
         self.map.iter().map(|(k, c)| (k, &**c))
+    }
+}
+
+/// The ancestry of a class name as the walks over parents see it: the
+/// name, then each parent (lowercased), the class table's parent while the
+/// class is there with one, else the stub's (at most 65 names).
+pub(crate) struct ClassChain {
+    pub(crate) names: Vec<Box<[u8]>>,
+    /// How many of `names` are reached through the class table's parents
+    /// (the first always, each next one while the previous is in the class
+    /// table with a parent).
+    pub(crate) user_len: usize,
+    /// The first of `names[..user_len]` an extension implements natively
+    /// (Vm::native_class_handlers, which only grows): (its size + 1 when
+    /// found, 0 not yet looked for; the index, usize::MAX for none).
+    pub(crate) native: std::cell::Cell<(usize, usize)>,
+}
+
+/// Vm::class_chain()'s chains, for one class table generation.
+#[derive(Default)]
+pub(crate) struct ClassChainMemo {
+    stamp: u64,
+    map: crate::fxhash::FxHashMap<Vec<u8>, Rc<ClassChain>>,
+}
+
+impl Vm {
+    /// The ancestry of `name` (see ClassChain), remembered while the class
+    /// table does not change.
+    pub(crate) fn class_chain(&self, name: &[u8]) -> Rc<ClassChain> {
+        let stamp = self.classes.generation();
+        {
+            let mut m = self.class_chain_memo.borrow_mut();
+            if m.stamp != stamp {
+                m.map.clear();
+                m.stamp = stamp;
+            }
+            if let Some(c) = m.map.get(name) {
+                return c.clone();
+            }
+        }
+        let mut names: Vec<Box<[u8]>> = vec![name.into()];
+        let mut user_len = 1;
+        let mut user = true;
+        while names.len() < 65 {
+            let cur = &names[names.len() - 1];
+            let next: Box<[u8]> = match self.classes.get(&**cur).and_then(|c| c.parent.as_ref()) {
+                Some(p) => p.to_ascii_lowercase().into(),
+                None => {
+                    user = false;
+                    match crate::vm::get_builtin_parent(cur) {
+                        Some(p) => p.to_ascii_lowercase().into(),
+                        None => break,
+                    }
+                }
+            };
+            names.push(next);
+            if user {
+                user_len += 1;
+            }
+        }
+        let c = Rc::new(ClassChain {
+            names,
+            user_len,
+            native: std::cell::Cell::new((0, usize::MAX)),
+        });
+        self.class_chain_memo
+            .borrow_mut()
+            .map
+            .insert(name.to_vec(), c.clone());
+        c
     }
 }
 

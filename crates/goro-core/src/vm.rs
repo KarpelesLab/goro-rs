@@ -1874,6 +1874,8 @@ pub struct Vm {
     >,
     /// Extension-provided method handlers keyed by lowercase built-in class name.
     pub native_class_handlers: crate::fxhash::FxHashMap<Vec<u8>, NativeClassHandler>,
+    /// See Vm::class_chain().
+    pub(crate) class_chain_memo: RefCell<crate::class_table::ClassChainMemo>,
     /// Constants of natively implemented internal classes registered by
     /// extensions, keyed by lowercase class name: (name, value, deprecation
     /// message) in declaration order.
@@ -3306,6 +3308,7 @@ impl Vm {
             ref_fetch_handlers: Default::default(),
             prop_ptr_handlers: Default::default(),
             native_class_handlers: Default::default(),
+            class_chain_memo: Default::default(),
             ext_class_constants: Default::default(),
             ini_validators: std::collections::HashMap::new(),
             warning_capture: None,
@@ -15249,33 +15252,59 @@ impl Vm {
             let fwd = cur.get();
             if fwd == b"parent" || fwd == b"self" || fwd == b"static" {
                 let is_parent = fwd == b"parent";
-                let Some(scope) = self.current_class_scope() else {
-                    return false;
-                };
-                if is_parent {
-                    match self.class_entry_ci(&scope).and_then(|c| c.parent.as_ref()) {
-                        Some(p) => cur.set(p),
-                        None => return false,
+                // (the scope's entry, when the class table has it under its
+                // own name: what current_class_scope() names, uncopied)
+                let own = self.scope_top().and_then(|l| {
+                    self.classes.get(l.as_slice()).filter(|c| {
+                        c.name.len() == l.len()
+                            && c.name
+                                .iter()
+                                .zip(l)
+                                .all(|(a, b)| a.to_ascii_lowercase() == *b)
+                    })
+                });
+                if let Some(c) = own {
+                    if is_parent {
+                        match c.parent.as_ref() {
+                            Some(p) => cur.set(p),
+                            None => return false,
+                        }
+                    } else {
+                        cur.set(&c.name);
                     }
                 } else {
-                    cur.set(&scope);
+                    let Some(scope) = self.current_class_scope() else {
+                        return false;
+                    };
+                    if is_parent {
+                        match self.class_entry_ci(&scope).and_then(|c| c.parent.as_ref()) {
+                            Some(p) => cur.set(p),
+                            None => return false,
+                        }
+                    } else {
+                        cur.set(&scope);
+                    }
                 }
             }
         }
-        // A user subclass of a native class: its nearest native ancestor.
-        for _ in 0..64 {
-            if self.native_class_handlers.contains_key(cur.get()) {
-                break;
+        // A user subclass of a native class: its nearest native ancestor
+        // (through the class table's parents).
+        let chain = self.class_chain(cur.get());
+        let handlers = self.native_class_handlers.len() + 1;
+        let idx = match chain.native.get() {
+            (h, i) if h == handlers => i,
+            _ => {
+                let i = chain.names[..chain.user_len.min(65)]
+                    .iter()
+                    .position(|n| self.native_class_handlers.contains_key(&**n))
+                    .unwrap_or(usize::MAX);
+                chain.native.set((handlers, i));
+                i
             }
-            match self.classes.get(cur.get()).and_then(|c| c.parent.as_ref()) {
-                Some(p) => cur.set(p),
-                None => return false,
-            }
-        }
-        let class = cur.get();
-        if !self.native_class_handlers.contains_key(class) {
+        };
+        let Some(class) = chain.names.get(idx) else {
             return false;
-        }
+        };
         let (_, m) = match crate::stubs::find_method(class, method) {
             Some(x) => x,
             None => return false,

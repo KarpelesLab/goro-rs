@@ -217,7 +217,11 @@ pub(crate) fn push_linking_ex(ce: &ClassEntry, nearly_linked: bool) {
 
 /// Whether `name_lower` is being linked (registered but unlinked in PHP terms).
 pub(crate) fn is_linking(name_lower: &[u8]) -> bool {
-    LINKING.with(|s| s.borrow().iter().any(|(c, _)| lower_is(&c.name, name_lower)))
+    LINKING.with(|s| {
+        s.borrow()
+            .iter()
+            .any(|(c, _)| lower_is(&c.name, name_lower))
+    })
 }
 
 thread_local! {

@@ -21,22 +21,13 @@ impl Vm {
         class_lower: &[u8],
         bases: &[&'static [u8]],
     ) -> Option<&'static [u8]> {
-        // (the ancestors' names lowercased on the stack)
-        let mut owned = crate::class_table::LowerName::new(b"");
-        let mut first = true;
-        for _ in 0..64 {
-            let cur: &[u8] = if first { class_lower } else { owned.get() };
-            if let Some(b) = bases.iter().find(|b| **b == cur) {
-                return Some(b);
-            }
-            let next: &[u8] = match self.classes.get(cur).and_then(|c| c.parent.as_deref()) {
-                Some(p) => p,
-                None => crate::vm::get_builtin_parent(cur)?,
-            };
-            owned.set(next);
-            first = false;
-        }
-        None
+        // (the ancestry remembered while the class table does not change)
+        let chain = self.class_chain(class_lower);
+        chain
+            .names
+            .iter()
+            .take(64)
+            .find_map(|cur| bases.iter().find(|b| **b == &**cur).copied())
     }
 
     /// Whether objects of this class get a built-in SPL `__toString`
