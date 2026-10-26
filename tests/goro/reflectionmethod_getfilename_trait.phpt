@@ -17,10 +17,10 @@ foreach ([['C', 'm'], ['Outer', 'm'], ['Inner', 'm'], ['C', 'own'], ['C', 'b'], 
 unlink("$d/inner.php"); unlink("$d/outer.php"); unlink("$d/base.php"); rmdir($d);
 
 ?>
---EXPECT--
+--EXPECTF--
 C::m inner.php
 Outer::m inner.php
 Inner::m inner.php
 C::own outer.php
 C::b base.php
-C::c refl_trait_file.php
+C::c %s.php
