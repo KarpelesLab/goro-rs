@@ -461,11 +461,13 @@ impl RuleSet {
                 }
                 continue;
             }
+            // (a backslash escapes outside quotes only: '\' is a quoted
+            // backslash)
             let mut quotes = 0;
             let mut k = a;
             while k < b {
                 match chars[k] {
-                    '\\' => k += 1,
+                    '\\' if quotes % 2 == 0 => k += 1,
                     '\'' => quotes += 1,
                     _ => {}
                 }
