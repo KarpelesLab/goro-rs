@@ -7,7 +7,6 @@
 //! raw stub data plus synthesized `ClassEntry`/`OpArray` views of it.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::object::{ClassEntry, ConstantMeta, MethodDef, PropertyDef, Visibility};
@@ -148,13 +147,13 @@ fn class_index_of(name: &[u8]) -> Option<usize> {
     }
 }
 
-fn function_index() -> &'static HashMap<String, usize> {
-    static IDX: OnceLock<HashMap<String, usize>> = OnceLock::new();
+fn function_index() -> &'static crate::fxhash::FxHashMap<Vec<u8>, usize> {
+    static IDX: OnceLock<crate::fxhash::FxHashMap<Vec<u8>, usize>> = OnceLock::new();
     IDX.get_or_init(|| {
         crate::stub_sigs::FUNCTIONS
             .iter()
             .enumerate()
-            .map(|(i, f)| (f.name.to_ascii_lowercase(), i))
+            .map(|(i, f)| (f.name.to_ascii_lowercase().into_bytes(), i))
             .collect()
     })
 }
@@ -332,9 +331,18 @@ pub fn stub_instanceof(child: &[u8], ancestor: &[u8]) -> Option<bool> {
 
 /// Look up the stub of an internal function.
 pub fn find_function(name: &[u8]) -> Option<&'static StubFunc> {
-    function_index()
-        .get(&lower_str(name))
-        .map(|&i| &crate::stub_sigs::FUNCTIONS[i])
+    let n = name.strip_prefix(b"\\").unwrap_or(name);
+    let mut buf = [0u8; 64];
+    let i = if n.len() <= buf.len() && n.is_ascii() {
+        // (lower_str() without the copies: ASCII is its own lossy UTF-8)
+        let lower = &mut buf[..n.len()];
+        lower.copy_from_slice(n);
+        lower.make_ascii_lowercase();
+        function_index().get(&*lower)
+    } else {
+        function_index().get(lower_str(name).as_bytes())
+    };
+    i.map(|&i| &crate::stub_sigs::FUNCTIONS[i])
 }
 
 /// Look up a global constant declared in a stub.

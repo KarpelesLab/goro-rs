@@ -503,7 +503,16 @@ fn push_pending_compile_deprecated(msg: String, line: u32) {
 
 /// A property hook's doc comment as stored on its MethodDef.
 fn hook_doc_string(doc: Option<&Vec<u8>>) -> Option<String> {
-    doc.map(|d| String::from_utf8_lossy(d).into_owned())
+    doc.map(|d| doc_string(d))
+}
+
+/// `String::from_utf8_lossy(d).into_owned()`, validating a doc comment
+/// (all but always UTF-8) the fast way.
+fn doc_string(d: &[u8]) -> String {
+    match std::str::from_utf8(d) {
+        Ok(s) => s.to_owned(),
+        Err(_) => String::from_utf8_lossy(d).into_owned(),
+    }
 }
 
 /// A deprecation raised while compiling a signature: reported with the
@@ -845,8 +854,18 @@ impl Compiler {
     fn is_builtin_byref_param(func_name: Option<&[u8]>, pos: usize) -> bool {
         match func_name {
             Some(name) => {
-                let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                match (lower.as_slice(), pos) {
+                let mut buf = [0u8; 64];
+                let heap;
+                let lower: &[u8] = if name.len() <= buf.len() {
+                    let lower = &mut buf[..name.len()];
+                    lower.copy_from_slice(name);
+                    lower.make_ascii_lowercase();
+                    lower
+                } else {
+                    heap = name.to_ascii_lowercase();
+                    &heap
+                };
+                match (lower, pos) {
                     // preg_match($pattern, $subject, &$matches, $flags, $offset)
                     (b"preg_match", 2) => true,
                     (b"preg_match_all", 2) => true,
@@ -7166,7 +7185,7 @@ impl Compiler {
                     stmt.span.line
                 };
                 if let Some(dc) = class_doc_comment.as_ref() {
-                    class.doc_comment = Some(String::from_utf8_lossy(dc).into_owned());
+                    class.doc_comment = Some(doc_string(dc));
                 }
                 // Resolve parent class name - also check for reserved names
                 if let Some(p) = extends.as_ref() {
@@ -8317,9 +8336,7 @@ impl Compiler {
                                 is_final: *prop_is_final,
                                 attributes: self
                                     .compile_attributes_at(attributes, "property", *prop_line),
-                                doc_comment: prop_doc_comment
-                                    .as_ref()
-                                    .map(|d| String::from_utf8_lossy(d).into_owned()),
+                                doc_comment: prop_doc_comment.as_ref().map(|d| doc_string(d)),
                             });
 
                             // Compile property get hook as a method: __property_get_$propname
@@ -9373,9 +9390,10 @@ impl Compiler {
                                                 is_abstract: false,
                                                 is_final: param.is_final,
                                                 attributes: pa,
-                                                doc_comment: param.doc_comment.as_ref().map(|d| {
-                                                    String::from_utf8_lossy(d).into_owned()
-                                                }),
+                                                doc_comment: param
+                                                    .doc_comment
+                                                    .as_ref()
+                                                    .map(|d| doc_string(d)),
                                             });
                                             // Compile promoted property get hook
                                             if let Some(hook_body) = &param.get_hook {
@@ -10050,7 +10068,7 @@ impl Compiler {
                                         declaring_class: declaring_class_lower,
                                         doc_comment: method_doc_comment
                                             .as_ref()
-                                            .map(|d| String::from_utf8_lossy(d).into_owned()),
+                                            .map(|d| doc_string(d)),
                                         attributes: self.compile_method_attributes(
                                             method_attributes,
                                             &qualified_name,
@@ -10238,7 +10256,7 @@ impl Compiler {
                                         declaring_class: declaring_class_lower,
                                         doc_comment: method_doc_comment
                                             .as_ref()
-                                            .map(|d| String::from_utf8_lossy(d).into_owned()),
+                                            .map(|d| doc_string(d)),
                                         attributes: self.compile_method_attributes(
                                             method_attributes,
                                             &qualified_name,
@@ -11007,9 +11025,7 @@ impl Compiler {
                                     declaring_class: declaring_class_lower,
                                     attributes: const_attrs,
                                     declared_type,
-                                    doc_comment: const_doc_comment
-                                        .as_ref()
-                                        .map(|d| String::from_utf8_lossy(d).into_owned()),
+                                    doc_comment: const_doc_comment.as_ref().map(|d| doc_string(d)),
                                     referenced_constants: refs,
                                     line: const_expr.span.line,
                                 },
@@ -11308,9 +11324,7 @@ impl Compiler {
                                     declaring_class: declaring_class_lower_ec,
                                     attributes: case_attrs_compiled,
                                     declared_type: None,
-                                    doc_comment: case_doc_comment
-                                        .as_ref()
-                                        .map(|d| String::from_utf8_lossy(d).into_owned()),
+                                    doc_comment: case_doc_comment.as_ref().map(|d| doc_string(d)),
                                     referenced_constants: Vec::new(),
                                     line: value.as_ref().map_or(0, |v| v.span.line),
                                 },
