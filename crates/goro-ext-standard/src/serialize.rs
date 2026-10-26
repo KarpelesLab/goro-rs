@@ -361,6 +361,20 @@ fn is_typed_slot(vm: &Vm, obj: &Rc<RefCell<PhpObject>>, key: &[u8]) -> bool {
     })
 }
 
+/// Whether `key` (mangled) names a virtual (hooked, backing-less) property
+/// of the object's class.
+fn is_virtual_slot(vm: &Vm, obj: &Rc<RefCell<PhpObject>>, key: &[u8]) -> bool {
+    let layout = vm.class_layout_of(&obj.borrow().class_name);
+    layout.slots.iter().any(|sl| {
+        sl.mangled() == key
+            && vm.classes.get(&sl.decl).is_some_and(|c| {
+                c.properties
+                    .iter()
+                    .any(|p| !p.is_static && p.name == sl.name && p.is_virtual)
+            })
+    })
+}
+
 // ---------------------------------------------------------------------------
 // serialize()
 // ---------------------------------------------------------------------------
@@ -819,6 +833,10 @@ impl Serializer {
                 let candidates = [name.clone(), mangle(&display, &name), mangle(b"*", &name)];
                 let mut found = false;
                 for cand in candidates.iter() {
+                    // (a virtual property has no value to serialize)
+                    if is_virtual_slot(vm, &target, cand) {
+                        continue;
+                    }
                     if !props.iter().any(|e| e.php_key == *cand) && is_typed_slot(vm, &target, cand)
                     {
                         // an uninitialized typed property is left out
