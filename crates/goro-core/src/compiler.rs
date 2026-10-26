@@ -4300,13 +4300,18 @@ impl Compiler {
                             };
                             if includes_null {
                                 return Err(CompileError {
-                                    message: "A function with return type must return a value (did you mean \"return null;\" instead of \"return;\"?)".to_string(),
+                                    message: format!(
+                                        "A {} with return type must return a value (did you mean \"return null;\" instead of \"return;\"?)",
+                                        callable_kind
+                                    ),
                                     line: stmt.span.line,
                                 });
                             } else {
                                 return Err(CompileError {
-                                    message: "A function with return type must return a value"
-                                        .to_string(),
+                                    message: format!(
+                                        "A {} with return type must return a value",
+                                        callable_kind
+                                    ),
                                     line: stmt.span.line,
                                 });
                             }
