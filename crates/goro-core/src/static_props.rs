@@ -1926,7 +1926,16 @@ impl Vm {
             .borrow_mut()
             .get_or_insert_with(Default::default)
             .sprop_sites
-            .insert(ip as u32, (slot.owner, pi));
+            // (a copy of the code bound to another scope keeps the site:
+            // a visibility the scope decided is checked against it)
+            .insert(
+                ip as u32,
+                (
+                    slot.owner,
+                    pi,
+                    (!public).then(|| op_array.scope_class.clone()).flatten(),
+                ),
+            );
     }
 
     /// STATIC_PROP_FETCH at `ip` of `op_array` (see note_static_prop_site):
@@ -1935,7 +1944,11 @@ impl Vm {
     #[inline(never)]
     pub(crate) fn fast_static_prop_fetch(&self, op_array: &OpArray, ip: usize) -> Option<Value> {
         let sites = op_array.sites().borrow();
-        let &(owner, pi) = sites.as_ref()?.sprop_sites.get(&(ip as u32))?;
+        let (owner, pi, scope) = sites.as_ref()?.sprop_sites.get(&(ip as u32))?;
+        if scope.is_some() && *scope != op_array.scope_class {
+            return None;
+        }
+        let (owner, pi) = (*owner, *pi);
         let (k, v) = self
             .classes
             .get_index(owner)?

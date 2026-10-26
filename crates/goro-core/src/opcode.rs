@@ -877,7 +877,7 @@ pub(crate) struct SiteCaches {
     /// Where the static property reads (`A::$p`) found the property: the
     /// class holding its slot and the slot's index in its
     /// static_properties (see Vm::fast_static_prop_fetch).
-    pub(crate) sprop_sites: IpMap<(usize, usize)>,
+    pub(crate) sprop_sites: IpMap<(usize, usize, Option<Vec<u8>>)>,
 }
 
 impl Default for SiteCaches {
