@@ -209,6 +209,8 @@ thread_local! {
     /// Active internal function names (for php_error_docref prefixes),
     /// with the user file/line they were called from.
     static FN_STACK: RefCell<Vec<(String, goro_core::rcstr::RcStr, u32)>> = const { RefCell::new(Vec::new()) };
+    /// The arguments of the FN_STACK entries (their trace frames' args).
+    static FN_ARGS: RefCell<Vec<Vec<Value>>> = const { RefCell::new(Vec::new()) };
     static PHASE: Cell<Phase> = const { Cell::new(Phase::Startup) };
     static MODIFIED: RefCell<Vec<(Vec<u8>, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
 }
@@ -222,10 +224,16 @@ pub(crate) struct FnGuard;
 
 impl FnGuard {
     pub(crate) fn new(vm: &Vm, name: &str) -> FnGuard {
+        Self::with_args(vm, name, &[])
+    }
+
+    /// new() of a function whose arguments its exceptions' traces show.
+    pub(crate) fn with_args(vm: &Vm, name: &str, args: &[Value]) -> FnGuard {
         FN_STACK.with(|s| {
             s.borrow_mut()
                 .push((name.to_string(), vm.current_file.clone(), vm.current_line))
         });
+        FN_ARGS.with(|s| s.borrow_mut().push(args.to_vec()));
         FnGuard
     }
 }
@@ -233,6 +241,9 @@ impl FnGuard {
 impl Drop for FnGuard {
     fn drop(&mut self) {
         FN_STACK.with(|s| {
+            s.borrow_mut().pop();
+        });
+        FN_ARGS.with(|s| {
             s.borrow_mut().pop();
         });
     }
@@ -342,7 +353,8 @@ pub(crate) fn throw(vm: &mut Vm, class: &[u8], msg: &str) {
             .unwrap_or(false)
         {
             let is_method = fname.contains("::");
-            vm.call_stack.push((fname, file, l, Vec::new(), is_method));
+            let args = FN_ARGS.with(|s| s.borrow().last().cloned().unwrap_or_default());
+            vm.call_stack.push((fname, file, l, args, is_method));
             pushed = true;
         }
     }
@@ -2927,7 +2939,7 @@ fn callback_error(vm: &mut Vm, fname: &str, n: usize, pname: &str, v: &Value, nu
 
 fn f_session_set_save_handler(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_set_save_handler";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if args.len() <= 2 {
         // OOP version
         if args.is_empty() {
@@ -3983,6 +3995,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_extension(b"session");
     PS.with(|p| *p.borrow_mut() = Ps::default());
     FN_STACK.with(|s| s.borrow_mut().clear());
+    FN_ARGS.with(|s| s.borrow_mut().clear());
     MODIFIED.with(|m| m.borrow_mut().clear());
     PHASE.with(|p| p.set(Phase::Startup));
     rewrite::reset();

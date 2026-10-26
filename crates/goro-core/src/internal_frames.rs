@@ -655,7 +655,8 @@ impl Vm {
 /// Whether php-src compiles this call to builtin `lname` with `args` (no
 /// named arguments, name resolved at compile time) into an opcode instead of
 /// a function call (zend_try_compile_special_func_ex), so it has no frame.
-/// Cases depending on literal arguments (defined(), in_array()) or on the
+/// Cases depending on literal arguments (defined(), in_array(); chr() and
+/// ord() are only folded for a literal they cannot fail on) or on the
 /// calling context (func_get_args(), array_slice()) are left out.
 pub fn compiled_special(lname: &[u8], args: &[Value]) -> bool {
     if lname == b"sprintf" {
@@ -683,8 +684,6 @@ pub fn compiled_special(lname: &[u8], args: &[Value]) -> bool {
                 | b"floatval"
                 | b"doubleval"
                 | b"strval"
-                | b"chr"
-                | b"ord"
                 | b"count"
                 | b"sizeof"
                 | b"get_class"

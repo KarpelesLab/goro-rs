@@ -10407,7 +10407,8 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "Cannot use \"{}\" as a class alias as it is reserved",
             goro_core::string::msg_str(&alias_lower)
         );
-        return Err(VmError { message: msg, line });
+        // (raised from within the call: its frame is in the backtrace)
+        return Err(vm.emit_fatal_at(&msg, line));
     }
     let autoload = args.get(2).map(|v| v.is_truthy()).unwrap_or(true);
     if autoload

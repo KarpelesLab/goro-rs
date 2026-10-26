@@ -13386,9 +13386,13 @@ impl Compiler {
                 }
             }
         };
+        // (the call is on the callable's line: zend_compile_pipe())
         let r = self.compile_expr(&Expr {
             kind,
-            span: expr.span,
+            span: goro_parser::token::Span {
+                line: callable.span.line,
+                ..expr.span
+            },
         });
         self.tmp_aliases.truncate(saved);
         r

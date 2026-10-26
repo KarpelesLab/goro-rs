@@ -727,6 +727,9 @@ pub struct RetiredTables {
 
 /// A `call_stack` entry: (function, file, line called from, args, is_instance_method).
 pub type CallFrame = (String, crate::rcstr::RcStr, u32, Vec<Value>, bool);
+/// The "[constant expression]" call stack entries hidden while an
+/// autoloader runs (with their positions), and the position to restore.
+type ConstExprFrames = (Vec<(usize, CallFrame)>, (crate::rcstr::RcStr, u32));
 
 /// VM runtime error
 #[derive(Debug, Clone)]
@@ -5344,13 +5347,55 @@ impl Vm {
     /// Try to autoload a class by calling registered autoload functions
     pub fn try_autoload_class(&mut self, class_name: &[u8]) -> bool {
         let exiting = self.exit_requested;
+        // zend_lookup_class_ex(): the autoloader runs without
+        // EG(filename_override): no "[constant expression]" frame, at the
+        // executing user code's position.
+        let hidden = self.hide_const_expr_frames();
         let r = self.try_autoload_class_inner(class_name);
+        if let Some(h) = hidden {
+            self.restore_const_expr_frames(h);
+        }
         // exit() in the autoloader: the class lookup that ran it is not
         // finished (php-src unwinds at once).
         if self.exit_requested && !exiting {
             self.exit_in_autoload = true;
         }
         r
+    }
+
+    /// Take the "[constant expression]" entries out of the call stack (see
+    /// try_autoload_class()), moving to the position the evaluation was
+    /// entered from. None when there is none.
+    #[inline(never)]
+    fn hide_const_expr_frames(&mut self) -> Option<ConstExprFrames> {
+        let first = self
+            .call_stack
+            .iter()
+            .position(|f| f.0 == "[constant expression]")?;
+        let mut frames = Vec::new();
+        let mut i = first;
+        while i < self.call_stack.len() {
+            if self.call_stack[i].0 == "[constant expression]" {
+                frames.push((i, self.call_stack.remove(i)));
+            } else {
+                i += 1;
+            }
+        }
+        let saved = (self.current_file.clone(), self.current_line);
+        let entered = &frames[0].1;
+        self.current_file = entered.1.clone();
+        self.current_line = entered.2;
+        Some((frames, saved))
+    }
+
+    #[inline(never)]
+    fn restore_const_expr_frames(&mut self, (frames, saved): ConstExprFrames) {
+        for (i, f) in frames {
+            let i = i.min(self.call_stack.len());
+            self.call_stack.insert(i, f);
+        }
+        self.current_file = saved.0;
+        self.current_line = saved.1;
     }
 
     fn try_autoload_class_inner(&mut self, class_name: &[u8]) -> bool {
