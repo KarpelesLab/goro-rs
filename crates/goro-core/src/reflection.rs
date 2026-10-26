@@ -10320,7 +10320,31 @@ pub fn reflection_constant_method(
     drop(ob);
 
     match method {
-        b"getname" => Some(Value::String(PhpString::from_string(name))),
+        // (the name the constant was registered with, const_->name; the
+        // property keeps the name given)
+        b"getname" | b"getshortname" => {
+            let key = normalize_const_key(name.as_bytes());
+            let registered = match vm.user_constant_names.iter().find(|(k, _)| *k == key) {
+                Some((_, n)) => String::from_utf8_lossy(n).into_owned(),
+                None => {
+                    let n = name.strip_prefix('\\').unwrap_or(&name);
+                    if matches!(n.to_ascii_lowercase().as_str(), "true" | "false" | "null") {
+                        n.to_ascii_uppercase()
+                    } else {
+                        n.to_string()
+                    }
+                }
+            };
+            Some(Value::String(PhpString::from_string(
+                if method == b"getshortname" {
+                    registered
+                        .rsplit_once('\\')
+                        .map_or(registered.clone(), |(_, s)| s.to_string())
+                } else {
+                    registered
+                },
+            )))
+        }
         b"getnamespacename" => {
             // Strip a leading backslash so the namespace prefix is reported
             // in canonical (unprefixed) form, matching PHP.
@@ -10329,15 +10353,6 @@ pub fn reflection_constant_method(
                 Some(Value::String(PhpString::from_string(n[..pos].to_string())))
             } else {
                 Some(Value::String(PhpString::empty()))
-            }
-        }
-        b"getshortname" => {
-            if let Some(pos) = name.rfind('\\') {
-                Some(Value::String(PhpString::from_string(
-                    name[pos + 1..].to_string(),
-                )))
-            } else {
-                Some(Value::String(PhpString::from_string(name)))
             }
         }
         b"getvalue" => Some(reflection_constant_value(vm, name.as_bytes())),
