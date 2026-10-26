@@ -178,10 +178,28 @@ impl Vm {
                     Ok(c) => c,
                     Err(e) => {
                         if self.current_exception.is_none() {
+                            // (thrown from the method's frame, unless a
+                            // callback call pushed it)
+                            let push = self
+                                .call_stack
+                                .last()
+                                .is_none_or(|f| f.0 != "Closure::fromCallable");
+                            if push {
+                                self.call_stack.push((
+                                    "Closure::fromCallable".to_string(),
+                                    self.current_file.clone(),
+                                    line,
+                                    args.to_vec(),
+                                    false,
+                                ));
+                            }
                             let exc = self.throw_type_error(format!(
                                 "Failed to create closure from callable: {}",
                                 e
                             ));
+                            if push {
+                                self.call_stack.pop();
+                            }
                             self.current_exception = Some(exc);
                         }
                         Value::Null
