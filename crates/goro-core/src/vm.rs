@@ -760,6 +760,30 @@ impl Vm {
         f(self, obj, name)
     }
 
+    /// The leading arguments of `$obj->m()` on an object of an
+    /// extension-provided class: none for a static method of it (called
+    /// through the object, it gets no $this), else the object.
+    #[inline(never)]
+    fn native_method_call_args(
+        &self,
+        class_name: &[u8],
+        method_lower: &[u8],
+        obj: &Value,
+    ) -> Vec<Value> {
+        if !self.native_class_handlers.is_empty() {
+            if let Some((native, h)) =
+                self.find_native_class_handler(&class_name.to_ascii_lowercase())
+            {
+                if (h.has_method)(&native, method_lower, true)
+                    && !(h.has_method)(&native, method_lower, false)
+                {
+                    return Vec::with_capacity(4);
+                }
+            }
+        }
+        vec![obj.clone()]
+    }
+
     /// A property an internal class's read handler reports undefined (the
     /// date fields of a DateTime, ...): a user subclass's __get() is called
     /// for it (zend_std_read_property()), unless it is already running for it.
@@ -63681,7 +63705,11 @@ impl Vm {
                                     args: if enum_static {
                                         Vec::new()
                                     } else {
-                                        vec![obj_val.clone()]
+                                        self.native_method_call_args(
+                                            &class_name_orig,
+                                            &method_name_lower,
+                                            &obj_val,
+                                        )
                                     },
                                     named_args: Vec::new(),
                                     target: CallTarget::NONE,
@@ -63704,9 +63732,14 @@ impl Vm {
                                 let mut func_name = class_name_orig.clone();
                                 func_name.extend_from_slice(b"::");
                                 func_name.extend_from_slice(method_name.as_bytes());
+                                let args = self.native_method_call_args(
+                                    &class_name_orig,
+                                    &method_name_lower,
+                                    &obj_val,
+                                );
                                 self.pending_calls.push(PendingCall {
                                     name: PhpString::from_vec(func_name),
-                                    args: vec![obj_val.clone()],
+                                    args,
                                     named_args: Vec::new(),
                                     target: CallTarget::NONE,
                                 });
