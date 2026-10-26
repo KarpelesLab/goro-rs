@@ -2989,7 +2989,9 @@ pub fn reflection_class_method(
                     {
                         continue;
                     }
-                    let val = if statics {
+                    // (default_static_members_table: the declared default,
+                    // not the current value)
+                    let val = if statics && is_deferred_const_value(&prop.default) {
                         vm.static_prop_raw(&prop.declaring_class.to_ascii_lowercase(), &prop.name)
                             .unwrap_or_else(|| prop.default.clone())
                     } else {
@@ -3054,6 +3056,10 @@ pub fn reflection_class_method(
                 if result.get(&key).is_none() {
                     // Static value is stored on the declaring class
                     let val = vm.static_prop_raw(&class_lower, &name).unwrap_or(default);
+                    // (an uninitialized typed static is left out)
+                    if matches!(val.deref(), Value::Undef) {
+                        continue;
+                    }
                     result.set(key, val);
                 }
             }
@@ -4915,13 +4921,8 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 let prop_name = PhpString::from_string(prop_name_s);
                 let default = args.get(2);
                 // zend_std_get_static_property() from the class's scope.
-                let declared_static = rcls(vm, &class_lower)
-                    .map(|ce| {
-                        ce.properties
-                            .iter()
-                            .any(|p| p.is_static && p.name == prop_name.as_bytes())
-                    })
-                    .unwrap_or(false);
+                let declared_static =
+                    visible_static_prop(vm, &class_lower, prop_name.as_bytes()).is_some();
                 if declared_static {
                     let val = find_static_property_value(vm, &class_lower, prop_name.as_bytes());
                     match val {
@@ -4976,13 +4977,8 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 let prop_name = PhpString::from_string(prop_name_s.clone());
                 let value = args.get(2).cloned().unwrap_or(Value::Null);
                 // Validate that this static prop exists on the class (or an ancestor)
-                let declared = rcls(vm, &class_lower)
-                    .map(|ce| {
-                        ce.properties
-                            .iter()
-                            .any(|p| p.is_static && p.name == prop_name.as_bytes())
-                    })
-                    .unwrap_or(false);
+                let declared =
+                    visible_static_prop(vm, &class_lower, prop_name.as_bytes()).is_some();
                 if !declared {
                     let canonical = rcls(vm, &class_lower)
                         .map(|c| String::from_utf8_lossy(&c.name).to_string())
@@ -4997,22 +4993,20 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     return Some(Value::Null);
                 }
                 // Enforce property type if declared
-                let prop_type = rcls(vm, &class_lower)
-                    .and_then(|ce| {
-                        ce.properties
-                            .iter()
-                            .find(|p| p.is_static && p.name == prop_name.as_bytes())
-                    })
-                    .and_then(|p| p.property_type.clone());
+                let static_def = visible_static_prop(vm, &class_lower, prop_name.as_bytes());
+                let prop_type = static_def.as_ref().and_then(|p| p.property_type.clone());
+                // (the TypeError names the declaring class)
+                let decl_display = static_def
+                    .as_ref()
+                    .and_then(|p| rcls(vm, &p.declaring_class.to_ascii_lowercase()))
+                    .map(|c| String::from_utf8_lossy(&c.name).to_string());
                 let mut coerced = value;
                 if let Some(pt) = prop_type.as_ref() {
                     let strict = false;
                     let original = coerced.clone();
                     crate::vm::Vm::coerce_value_to_type(&mut coerced, pt, strict);
                     if !vm.value_matches_type(&coerced, pt) {
-                        let canonical = rcls(vm, &class_lower)
-                            .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                            .unwrap_or(target.clone());
+                        let canonical = decl_display.clone().unwrap_or(target.clone());
                         let type_str = param_type_name(pt);
                         let value_type = match &original {
                             Value::Null => "null",
@@ -13245,6 +13239,26 @@ fn find_static_property_owner(vm: &Vm, class_lower: &[u8], prop_name: &[u8]) -> 
         }
     }
     owner
+}
+
+/// The static property `name` as seen from `class_lower`
+/// (zend_std_get_static_property_with_info): an ancestor's private one is
+/// not a property of the class.
+fn visible_static_prop(
+    vm: &Vm,
+    class_lower: &[u8],
+    name: &[u8],
+) -> Option<crate::object::PropertyDef> {
+    rcls(vm, class_lower)?
+        .properties
+        .iter()
+        .find(|p| {
+            p.is_static
+                && p.name == name
+                && (p.visibility != Visibility::Private
+                    || p.declaring_class.eq_ignore_ascii_case(class_lower))
+        })
+        .cloned()
 }
 
 /// Walk a class's parent chain to find a static property's current value.
