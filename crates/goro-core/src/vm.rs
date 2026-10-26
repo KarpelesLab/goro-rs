@@ -787,6 +787,32 @@ impl Vm {
         {
             return false;
         }
+        self.native_handler_prop_write_allowed(obj, name, kind)
+    }
+
+    /// The write-back (PropertySet) of `$o->p op= v` / `$o->p++`, the
+    /// property having been fetched for RW by the op two before.
+    #[inline(never)]
+    pub(crate) fn is_prop_rw_writeback(op_array: &OpArray, ip: usize) -> bool {
+        let (Some(set), Some(get)) = (
+            ip.checked_sub(1).and_then(|i| op_array.ops.get(i)),
+            ip.checked_sub(3).and_then(|i| op_array.ops.get(i)),
+        ) else {
+            return false;
+        };
+        matches!(get.opcode, OpCode::PropertyGetRW | OpCode::PropertyGetIncDec)
+            && get.op1 == set.op1
+            && get.op2 == set.result
+    }
+
+    /// The extension's property write guard alone (not
+    /// _reflection_write_property(), which get_property_ptr_ptr bypasses).
+    pub fn native_handler_prop_write_allowed(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        name: &[u8],
+        kind: u8,
+    ) -> bool {
         if self.native_class_handlers.is_empty() {
             return true;
         }
@@ -59914,7 +59940,14 @@ impl Vm {
                                 return Ok(Flow::Continue);
                             }
                         }
-                        if !self.native_prop_write_allowed(obj, prop_name.as_bytes(), 0) {
+                        // (reflection's name/class are modified in place
+                        // through get_property_ptr_ptr by `op=` and `++`)
+                        let allowed = if Self::is_prop_rw_writeback(op_array, ip) {
+                            self.native_handler_prop_write_allowed(obj, prop_name.as_bytes(), 0)
+                        } else {
+                            self.native_prop_write_allowed(obj, prop_name.as_bytes(), 0)
+                        };
+                        if !allowed {
                             if let Some((catch_target, _, _, _, saved_pc)) =
                                 exception_handlers.pop()
                             {
@@ -62647,7 +62680,9 @@ impl Vm {
         };
         // An internal class's get_property_ptr_ptr may refuse (DatePeriod's
         // readonly properties): the Error it throws.
-        if !self.native_class_handlers.is_empty() && !self.native_prop_write_allowed(o, prop, 0) {
+        if !self.native_class_handlers.is_empty()
+            && !self.native_handler_prop_write_allowed(o, prop, 0)
+        {
             if let Some(Value::Object(e)) = self.current_exception.take() {
                 return Some(
                     e.borrow()
