@@ -850,7 +850,7 @@ fn search_exec(vm: &mut Vm, args: &[Value], mode: u8) -> Result<Value, VmError> 
     if err == ONIG_MISMATCH {
         with(|m| {
             m.search_pos = s.len();
-            m.search_regs = Some(regs);
+            m.search_regs = None;
         });
         return Ok(Value::False);
     } else if err <= -2 {
@@ -859,7 +859,7 @@ fn search_exec(vm: &mut Vm, args: &[Value], mode: u8) -> Result<Value, VmError> 
             f,
             String::from_utf8_lossy(&onig::error_code_to_str(err))
         ));
-        with(|m| m.search_regs = Some(regs));
+        with(|m| m.search_regs = None);
         return Ok(Value::False);
     }
     let ret = match mode {
