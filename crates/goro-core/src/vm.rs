@@ -53599,7 +53599,8 @@ impl Vm {
                                 | Value::Double(_)
                                 | Value::True
                                 | Value::False
-                                | Value::Null => true,
+                                | Value::Null
+                                | Value::Undef => true,
                                 Value::String(key_str) => {
                                     let trimmed = key_str.to_string_lossy();
                                     let trimmed = trimmed.trim();
