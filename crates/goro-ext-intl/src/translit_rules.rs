@@ -1,7 +1,8 @@
 //! ICU transliteration rules (the RuleBasedTransliterator syntax):
 //! `a > b;`, `a < b;`, `a <> b;`, contexts `x { a } y`, the `|` cursor,
-//! `^` / `$` anchors, variables, UnicodeSets with `*` `+` `?`, quoting and
-//! escapes, `::ID;` steps. Rules are tried in order at each position; the
+//! `^` / `$` anchors, variables, UnicodeSets with `*` `+` `?`, segments
+//! `( )` and their `$1`..`$9` references, quoting and escapes, `::ID;`
+//! steps. Rules are tried in order at each position; the
 //! first match is replaced (ICU's semantics, hence its masking check).
 
 use std::collections::HashMap;
@@ -17,6 +18,7 @@ pub const U_MISSING_OPERATOR: i32 = 0x1000B;
 pub const U_UNDEFINED_VARIABLE: i32 = 0x10012;
 pub const U_UNQUOTED_SPECIAL: i32 = 0x10013;
 pub const U_UNTERMINATED_QUOTE: i32 = 0x10014;
+pub const U_MISMATCHED_SEGMENT_DELIMITERS: i32 = 0x10009;
 pub const U_RULE_MASK_ERROR: i32 = 0x10015;
 pub const U_INVALID_ID: i32 = 0x10021;
 
@@ -26,6 +28,17 @@ pub enum Elem {
     /// A set (index into the rule set's sets) and its pattern text.
     Set(usize),
     Quant(Box<Elem>, u32, u32),
+    /// The start / end of segment n (1-based), zero-width.
+    Open(u8),
+    Close(u8),
+}
+
+/// A piece of a rule's output.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OutE {
+    Char(char),
+    /// `$n`: the text segment n matched.
+    Ref(u8),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -33,8 +46,8 @@ pub struct Rule {
     pub ante: Vec<Elem>,
     pub key: Vec<Elem>,
     pub post: Vec<Elem>,
-    pub out: Vec<char>,
-    /// Cursor position in the output (chars), None = after it.
+    pub out: Vec<OutE>,
+    /// Cursor position in the output (pieces), None = after it.
     pub cursor: Option<usize>,
     pub anchor_start: bool,
     pub anchor_end: bool,
@@ -116,6 +129,8 @@ struct Side {
     post: Vec<Elem>,
     /// the literal text (for output use)
     text: Vec<char>,
+    /// the output: the text and the segment references
+    out: Vec<OutE>,
     cursor: Option<usize>,
     anchor_start: bool,
     anchor_end: bool,
@@ -144,6 +159,8 @@ impl P<'_> {
         let mut seen_close = false;
         let mut i = a;
         let mut first = true;
+        let mut segs: u8 = 0;
+        let mut open: Vec<u8> = Vec::new();
         while i < b {
             let ch = self.c[i];
             if is_ws(ch) {
@@ -168,7 +185,7 @@ impl P<'_> {
                     i += 1;
                 }
                 '|' => {
-                    s.cursor = Some(s.text.len());
+                    s.cursor = Some(s.out.len());
                     i += 1;
                 }
                 '^' if first => {
@@ -181,6 +198,7 @@ impl P<'_> {
                     if self.c.get(i) == Some(&'\'') {
                         cur.push(Elem::Char('\''));
                         s.text.push('\'');
+                        s.out.push(OutE::Char('\''));
                         i += 1;
                     } else {
                         loop {
@@ -191,6 +209,7 @@ impl P<'_> {
                                 if self.c.get(i + 1) == Some(&'\'') && i + 1 < b {
                                     cur.push(Elem::Char('\''));
                                     s.text.push('\'');
+                                    s.out.push(OutE::Char('\''));
                                     i += 2;
                                     continue;
                                 }
@@ -199,6 +218,7 @@ impl P<'_> {
                             }
                             cur.push(Elem::Char(self.c[i]));
                             s.text.push(self.c[i]);
+                            s.out.push(OutE::Char(self.c[i]));
                             i += 1;
                         }
                         let _ = st;
@@ -211,6 +231,7 @@ impl P<'_> {
                     let c = char::from_u32(cp).unwrap_or('\u{FFFD}');
                     cur.push(Elem::Char(c));
                     s.text.push(c);
+                    s.out.push(OutE::Char(c));
                 }
                 '[' | '\\' => {
                     let st = i;
@@ -230,6 +251,30 @@ impl P<'_> {
                     cur.push(Elem::Set(self.sets.len() - 1));
                     s.has_set = true;
                 }
+                '$' if self
+                    .c
+                    .get(i + 1)
+                    .is_some_and(|c| c.is_ascii_digit() && *c != '0') =>
+                {
+                    // a segment reference (output side)
+                    let n = self.c[i + 1] as u8 - b'0';
+                    s.out.push(OutE::Ref(n));
+                    i += 2;
+                }
+                '(' => {
+                    segs += 1;
+                    open.push(segs);
+                    cur.push(Elem::Open(segs));
+                    i += 1;
+                }
+                ')' => {
+                    let Some(n) = open.pop() else {
+                        return Err(self.syntax(U_MISMATCHED_SEGMENT_DELIMITERS, rule_start));
+                    };
+                    cur.push(Elem::Close(n));
+                    s.has_set = true;
+                    i += 1;
+                }
                 '$' => {
                     i += 1;
                     let st = i;
@@ -247,6 +292,7 @@ impl P<'_> {
                             cur.extend(v.iter().cloned());
                             if let Some(t) = self.var_out.get(&name) {
                                 s.text.extend(t.iter().copied());
+                                s.out.extend(t.iter().map(|&c| OutE::Char(c)));
                             }
                             if v.iter().any(|e| !matches!(e, Elem::Char(_))) {
                                 s.has_set = true;
@@ -268,16 +314,20 @@ impl P<'_> {
                     s.has_set = true;
                     i += 1;
                 }
-                '(' | ')' | '&' | '@' | '=' | '<' | '>' | ';' => {
+                '&' | '@' | '=' | '<' | '>' | ';' => {
                     return Err(self.syntax(U_UNQUOTED_SPECIAL, rule_start));
                 }
                 c => {
                     cur.push(Elem::Char(c));
                     s.text.push(c);
+                    s.out.push(OutE::Char(c));
                     i += 1;
                 }
             }
             first = false;
+        }
+        if !open.is_empty() {
+            return Err(self.syntax(U_MISMATCHED_SEGMENT_DELIMITERS, rule_start));
         }
         // "a } b": the key is everything before '}'
         if seen_close {
@@ -415,7 +465,6 @@ impl RuleSet {
         let mut steps: Vec<Step> = Vec::new();
         let mut rules: Vec<Rule> = Vec::new();
         let mut filter = None;
-        let mut reverse_ids: Vec<String> = Vec::new();
         for (a, b) in statements(&chars) {
             let mut a = a;
             while a < b && is_ws(chars[a]) {
@@ -438,13 +487,17 @@ impl RuleSet {
                     }
                     None => (body.clone(), String::new()),
                 };
-                let id = if forward { fwd } else { rev.clone() };
-                if steps.is_empty() && rules.is_empty() && id.starts_with('[') && forward {
+                let id = if forward { fwd } else { rev };
+                // a lone set is this direction's global filter (`::[set];`
+                // forward, `::([set]);` in reverse)
+                if id.starts_with('[') {
                     let ch: Vec<char> = id.chars().collect();
                     let mut k = 0;
                     if let Ok(s) = uset::parse(&ch, &mut k, &|_| None) {
                         if ch[k..].iter().all(|c| is_ws(*c)) {
-                            filter = Some(s);
+                            if filter.is_none() {
+                                filter = Some(s);
+                            }
                             continue;
                         }
                     }
@@ -452,12 +505,8 @@ impl RuleSet {
                 if !rules.is_empty() {
                     steps.push(Step::Rules(std::mem::take(&mut rules)));
                 }
-                if forward {
-                    if !id.is_empty() {
-                        steps.push(Step::Id(id));
-                    }
-                } else if !id.is_empty() {
-                    reverse_ids.push(id);
+                if !id.is_empty() {
+                    steps.push(Step::Id(id));
                 }
                 continue;
             }
@@ -503,7 +552,7 @@ impl RuleSet {
                 ante: src.ante.clone(),
                 key: src.key.clone(),
                 post: src.post.clone(),
-                out: dst.text.clone(),
+                out: dst.out.clone(),
                 cursor: dst.cursor,
                 anchor_start: src.anchor_start,
                 anchor_end: src.anchor_end,
@@ -518,11 +567,9 @@ impl RuleSet {
             steps.push(Step::Rules(rules));
         }
         if !forward {
-            // reverse: the rule sets apply in the reverse order
+            // reverse: the rule blocks and the IDs (their inverses) apply
+            // in the reverse order
             steps.reverse();
-            for id in reverse_ids.into_iter().rev() {
-                steps.push(Step::Id(id));
-            }
         }
         let rs = RuleSet {
             sets: p.sets,
@@ -540,6 +587,8 @@ impl RuleSet {
             (Elem::Quant(x, a1, b1), Elem::Quant(y, a2, b2)) => {
                 a1 == a2 && b1 == b2 && Self::elem_eq(x, y)
             }
+            // (ICU makes each segment a matcher of its own rule)
+            (Elem::Open(_), _) | (Elem::Close(_), _) => false,
             _ => false,
         }
     }
@@ -604,6 +653,8 @@ impl RuleSet {
                         _ => '+',
                     });
                 }
+                Elem::Open(_) => append_char(out, q, '(', true),
+                Elem::Close(_) => append_char(out, q, ')', true),
             }
         }
     }
@@ -631,11 +682,18 @@ impl RuleSet {
         for c in " > ".chars() {
             append_char(&mut out, &mut q, c, true);
         }
-        for (k, &c) in r.out.iter().enumerate() {
+        for (k, e) in r.out.iter().enumerate() {
             if r.cursor == Some(k) {
                 append_char(&mut out, &mut q, '|', true);
             }
-            append_char(&mut out, &mut q, c, false);
+            match e {
+                OutE::Char(c) => append_char(&mut out, &mut q, *c, false),
+                OutE::Ref(n) => {
+                    flush(&mut out, &mut q);
+                    out.push('$');
+                    out.push((b'0' + n) as char);
+                }
+            }
         }
         if r.cursor == Some(r.out.len()) && !r.out.is_empty() {
             append_char(&mut out, &mut q, '|', true);
@@ -650,13 +708,30 @@ impl RuleSet {
             Elem::Char(x) => *x == c,
             Elem::Set(k) => self.sets[*k].0.has(c),
             Elem::Quant(x, _, _) => self.match_elem(x, c),
+            Elem::Open(_) | Elem::Close(_) => true,
         }
     }
 
-    /// Match `elems` forward from `pos` (not past `limit`): the end.
-    fn match_fwd(&self, elems: &[Elem], t: &[char], mut pos: usize, limit: usize) -> Option<usize> {
+    /// A set with the anchor (U+FFFF, `[... $]`) matches the start / end of
+    /// the text without taking a character.
+    fn matches_ether(&self, e: &Elem) -> bool {
+        matches!(e, Elem::Set(k) if self.sets[*k].0.contains(0xFFFF))
+    }
+
+    /// Match `elems` forward from `pos` (not past `limit`): the end; the
+    /// segments' bounds go to `caps`.
+    fn match_fwd(
+        &self,
+        elems: &[Elem],
+        t: &[char],
+        mut pos: usize,
+        limit: usize,
+        caps: &mut Caps,
+    ) -> Option<usize> {
         for e in elems {
             match e {
+                Elem::Open(n) => caps[*n as usize].0 = pos,
+                Elem::Close(n) => caps[*n as usize].1 = pos,
                 Elem::Quant(x, mn, mx) => {
                     let mut n = 0;
                     while n < *mx && pos < limit && self.match_elem(x, t[pos]) {
@@ -668,6 +743,9 @@ impl RuleSet {
                     }
                 }
                 _ => {
+                    if pos >= limit && self.matches_ether(e) {
+                        continue;
+                    }
                     if pos >= limit || !self.match_elem(e, t[pos]) {
                         return None;
                     }
@@ -686,9 +764,12 @@ impl RuleSet {
         t: &[char],
         mut pos: usize,
         start: usize,
+        caps: &mut Caps,
     ) -> Option<usize> {
         for e in elems.iter().rev() {
             match e {
+                Elem::Open(n) => caps[*n as usize].0 = pos,
+                Elem::Close(n) => caps[*n as usize].1 = pos,
                 Elem::Quant(x, mn, mx) => {
                     let mut n = 0;
                     while n < *mx && pos > start && self.match_elem(x, t[pos - 1]) {
@@ -700,6 +781,9 @@ impl RuleSet {
                     }
                 }
                 _ => {
+                    if pos <= start && self.matches_ether(e) {
+                        continue;
+                    }
                     if pos <= start || !self.match_elem(e, t[pos - 1]) {
                         return None;
                     }
@@ -717,16 +801,17 @@ impl RuleSet {
             let limit = t.len();
             let mut done = false;
             for r in rules {
-                let Some(kend) = self.match_fwd(&r.key, t, pos, limit) else {
+                let mut caps: Caps = [(0, 0); 10];
+                let Some(kend) = self.match_fwd(&r.key, t, pos, limit, &mut caps) else {
                     continue;
                 };
-                let Some(pend) = self.match_fwd(&r.post, t, kend, limit) else {
+                let Some(pend) = self.match_fwd(&r.post, t, kend, limit, &mut caps) else {
                     continue;
                 };
                 if r.anchor_end && pend != limit {
                     continue;
                 }
-                let Some(astart) = self.match_back(&r.ante, t, pos, 0) else {
+                let Some(astart) = self.match_back(&r.ante, t, pos, 0, &mut caps) else {
                     continue;
                 };
                 if r.anchor_start && astart != 0 {
@@ -735,8 +820,26 @@ impl RuleSet {
                 if kend == pos && r.out.is_empty() {
                     continue;
                 }
-                t.splice(pos..kend, r.out.iter().copied());
-                let adv = r.cursor.unwrap_or(r.out.len());
+                // the output, segment references filled in (the cursor
+                // counts the characters before its piece)
+                let mut rep: Vec<char> = Vec::with_capacity(r.out.len());
+                let mut adv = None;
+                for (k, e) in r.out.iter().enumerate() {
+                    if r.cursor == Some(k) {
+                        adv = Some(rep.len());
+                    }
+                    match e {
+                        OutE::Char(c) => rep.push(*c),
+                        OutE::Ref(n) => {
+                            let (a, b) = caps[*n as usize];
+                            if a < b && b <= t.len() {
+                                rep.extend_from_slice(&t[a..b]);
+                            }
+                        }
+                    }
+                }
+                let adv = adv.unwrap_or(rep.len());
+                t.splice(pos..kend, rep);
                 pos += adv;
                 if adv == 0 && kend == pos {
                     pos += 1;
@@ -750,6 +853,9 @@ impl RuleSet {
         }
     }
 }
+
+/// The segments' (start, end) positions.
+type Caps = [(usize, usize); 10];
 
 fn flush(out: &mut String, q: &mut String) {
     if q.is_empty() {

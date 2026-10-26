@@ -45,6 +45,9 @@ enum K {
     KanaSwap(bool),
     Rules(Rc<RuleSet>),
     Chain(Vec<TElem>),
+    /// Any-BreakInternal: a space at the word boundaries between letters
+    /// and marks (ICU's BreakTransliterator).
+    BreakInternal,
 }
 
 #[derive(Clone)]
@@ -200,8 +203,51 @@ fn locale_case(src: &str) -> Option<String> {
     (l.len() == 2 || l.len() == 3).then_some(l)
 }
 
-/// The transform of a basic ID.
+/// The transform of a basic ID: a built-in one, else a CLDR transform
+/// registered under it.
 fn lookup(sp: &Spec) -> Option<K> {
+    if let Some(k) = lookup_builtin(sp) {
+        return Some(k);
+    }
+    if sp.target.is_empty() {
+        return None;
+    }
+    let mut id = format!("{}-{}", sp.source, sp.target);
+    if !sp.variant.is_empty() {
+        id.push('/');
+        id.push_str(&sp.variant);
+    }
+    cldr_transform(&id).map(K::Rules)
+}
+
+/// The CLDR transform registered under `id` (case-insensitive), compiled
+/// once per thread for its direction.
+fn cldr_transform(id: &str) -> Option<Rc<RuleSet>> {
+    use crate::translit_cldr::TRANSFORMS;
+    let (i, forward) = TRANSFORMS.iter().enumerate().find_map(|(i, t)| {
+        if t.forward.iter().any(|f| f.eq_ignore_ascii_case(id)) {
+            Some((i, true))
+        } else if t.reverse.iter().any(|f| f.eq_ignore_ascii_case(id)) {
+            Some((i, false))
+        } else {
+            None
+        }
+    })?;
+    CLDR_CACHE.with(|c| {
+        c.borrow_mut()
+            .entry((i, forward))
+            .or_insert_with(|| RuleSet::parse(TRANSFORMS[i].rules, forward).ok().map(Rc::new))
+            .clone()
+    })
+}
+
+thread_local! {
+    static CLDR_CACHE: std::cell::RefCell<std::collections::HashMap<(usize, bool), Option<Rc<RuleSet>>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The built-in transform of a basic ID.
+fn lookup_builtin(sp: &Spec) -> Option<K> {
     let src = sp.source.to_ascii_lowercase();
     let tgt = sp.target.to_ascii_lowercase();
     let var = sp.variant.to_ascii_lowercase();
@@ -243,6 +289,7 @@ fn lookup(sp: &Spec) -> Option<K> {
             K::HexAny
         }
         (_, "name") if any => K::Name,
+        (_, "breakinternal") if any => K::BreakInternal,
         ("name", "any") => K::NameAny,
         ("latin", "ascii") => K::LatinAscii,
         ("ascii", "latin") => K::Null,
@@ -593,7 +640,28 @@ fn title(t: &[char], lang: &str) -> Vec<char> {
     out.chars().collect()
 }
 
-/// Any-Latin: each script run romanized with its transform.
+/// Any-BreakInternal: a space at each word boundary with a letter or a
+/// mark on both sides.
+fn break_internal(t: &[char]) -> Vec<char> {
+    let lm = |c: char| un::is_letter(c) || un::is_mark(c);
+    let s: String = t.iter().collect();
+    let mut out: Vec<char> = Vec::with_capacity(t.len() + 8);
+    for w in un::words(&s) {
+        let mut cs = w.chars();
+        if let (Some(&prev), Some(next)) = (out.last(), cs.clone().next()) {
+            if lm(prev) && lm(next) {
+                out.push(' ');
+            }
+        }
+        out.extend(&mut cs);
+    }
+    out
+}
+
+/// Any-Latin: each script run romanized with its transform (the built-in
+/// ones, else the CLDR "<Script>-Latin" transform; Common and Inherited
+/// characters go with the run before them there, as in ICU's
+/// AnyTransliterator).
 fn any_latin(t: &[char]) -> Vec<char> {
     #[derive(PartialEq, Clone, Copy)]
     enum S {
@@ -604,6 +672,7 @@ fn any_latin(t: &[char]) -> Vec<char> {
         Geo,
         Kana,
         Hang,
+        Cldr(un::Script),
     }
     let script_of = |c: char| match un::script(c) {
         un::Script::Greek => S::Greek,
@@ -613,9 +682,16 @@ fn any_latin(t: &[char]) -> Vec<char> {
         un::Script::Hiragana | un::Script::Katakana => S::Kana,
         un::Script::Hangul => S::Hang,
         _ if c == 'ー' => S::Kana,
-        un::Script::Common | un::Script::Inherited => S::Other,
-        _ => S::Other,
+        un::Script::Common | un::Script::Inherited | un::Script::Latin => S::Other,
+        sc => {
+            if script_transform(sc).is_some() {
+                S::Cldr(sc)
+            } else {
+                S::Other
+            }
+        }
     };
+    let common = |c: char| matches!(un::script(c), un::Script::Common | un::Script::Inherited);
     let mut out = Vec::new();
     let mut i = 0;
     while i < t.len() {
@@ -624,7 +700,10 @@ fn any_latin(t: &[char]) -> Vec<char> {
         i += 1;
         while i < t.len() {
             let x = script_of(t[i]);
-            if x == s || (s != S::Other && un::is_mark(t[i])) {
+            if x == s
+                || (s != S::Other && un::is_mark(t[i]))
+                || (matches!(s, S::Cldr(_)) && common(t[i]))
+            {
                 i += 1;
             } else {
                 break;
@@ -638,11 +717,21 @@ fn any_latin(t: &[char]) -> Vec<char> {
             S::Geo => intl::translit::georgian_to_latin(&string_of(run)).chars().collect(),
             S::Kana => td::kana_latin(run),
             S::Hang => td::hangul_latin(run),
+            S::Cldr(sc) => match script_transform(sc) {
+                Some(rs) => apply_k(&K::Rules(rs), run.to_vec()),
+                None => run.to_vec(),
+            },
             S::Other => run.to_vec(),
         };
         out.extend(r);
     }
     out
+}
+
+/// The CLDR "<Script>-Latin" transform of a script, if registered.
+fn script_transform(sc: un::Script) -> Option<Rc<RuleSet>> {
+    let name: String = sc.long_name().chars().filter(|&c| c != '_').collect();
+    cldr_transform(&format!("{}-Latin", name))
 }
 
 fn apply_k(k: &K, t: Vec<char>) -> Vec<char> {
@@ -665,10 +754,11 @@ fn apply_k(k: &K, t: Vec<char>) -> Vec<char> {
             })
             .collect(),
         K::NameAny => name_any(&t),
+        K::BreakInternal => break_internal(&t),
         // (CLDR's rules, as ICU: Latin, Common and Inherited only; intl's
         // latin_ascii() strips the marks of other scripts and leaves the
         // compatibility characters)
-        K::LatinAscii => match cldr_rules(&LATIN_ASCII_RULES, crate::translit_cldr::LATIN_ASCII) {
+        K::LatinAscii => match cldr_rules(&LATIN_ASCII_RULES, crate::translit_cldr::LATIN_ASCII.rules) {
             Some(rs) => apply_k(&K::Rules(rs), t),
             None => intl::translit::latin_ascii(&string_of(&t)).chars().collect(),
         },

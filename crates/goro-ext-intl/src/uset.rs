@@ -17,6 +17,10 @@ pub enum USet {
     Script(Script),
     Scx(Script),
     Bin(fn(char) -> bool),
+    /// A Canonical_Combining_Class value.
+    Ccc(u8),
+    /// A Block (its name, loosely matched).
+    Block(String),
     Not(Box<USet>),
     Union(Vec<USet>),
     Inter(Box<USet>, Box<USet>),
@@ -37,6 +41,8 @@ impl USet {
             USet::Script(s) => un::script_u32(cp) == *s,
             USet::Scx(s) => un::script_extensions_u32(cp).contains(*s),
             USet::Bin(f) => char::from_u32(cp).is_some_and(f),
+            USet::Ccc(v) => un::canonical_combining_class_u32(cp) == *v,
+            USet::Block(b) => char::from_u32(cp).is_some_and(|c| loose(un::block(c)) == *b),
             USet::Not(s) => !s.contains(cp),
             USet::Union(v) => v.iter().any(|s| s.contains(cp)),
             USet::Inter(a, b) => a.contains(cp) && b.contains(cp),
@@ -295,6 +301,12 @@ pub fn binary_lookup(v: &str) -> Option<fn(char) -> bool> {
         "ascii" => |c| c.is_ascii(),
         "any" => |_| true,
         "assigned" => un::is_assigned,
+        "cased" => crate::uchar::is_cased,
+        "caseignorable" | "ci" => crate::uchar::is_case_ignorable,
+        "softdotted" | "sd" => crate::spoofchecker::is_soft_dotted,
+        "logicalorderexception" | "loe" => {
+            |c| matches!(c as u32, 0x0E40..=0x0E44 | 0x0EC0..=0x0EC4 | 0x19B5..=0x19B7 | 0x19BA | 0xAAB5 | 0xAAB6 | 0xAAB9 | 0xAABB | 0xAABC)
+        }
         _ => return None,
     };
     Some(f)
@@ -310,6 +322,8 @@ pub fn property(expr: &str) -> Option<USet> {
             "gc" | "generalcategory" => gc_lookup(v).map(USet::Gc),
             "sc" | "script" => script_lookup(v).map(USet::Script),
             "scx" | "scriptextensions" => script_lookup(v).map(USet::Scx),
+            "ccc" | "canonicalcombiningclass" => ccc_lookup(v).map(USet::Ccc),
+            "blk" | "block" => Some(USet::Block(loose(v))),
             _ => {
                 let f = binary_lookup(&k)?;
                 match loose(v).as_str() {
@@ -327,6 +341,37 @@ pub fn property(expr: &str) -> Option<USet> {
         return Some(USet::Bin(f));
     }
     script_lookup(expr).map(USet::Script)
+}
+
+/// A Canonical_Combining_Class value by number or (loose) name.
+fn ccc_lookup(v: &str) -> Option<u8> {
+    if let Ok(n) = v.trim().parse::<u8>() {
+        return Some(n);
+    }
+    Some(match loose(v).as_str() {
+        "notreordered" | "nr" => 0,
+        "overlay" | "ov" => 1,
+        "hanreading" | "hanr" => 6,
+        "nukta" | "nk" => 7,
+        "kanavoicing" | "kv" => 8,
+        "virama" | "vr" => 9,
+        "attachedbelowleft" | "atbl" => 200,
+        "attachedbelow" | "atb" => 202,
+        "attachedabove" | "ata" => 214,
+        "attachedaboveright" | "atar" => 216,
+        "belowleft" | "bl" => 218,
+        "below" | "b" => 220,
+        "belowright" | "br" => 222,
+        "left" | "l" => 224,
+        "right" | "r" => 226,
+        "aboveleft" | "al" => 228,
+        "above" | "a" => 230,
+        "aboveright" | "ar" => 232,
+        "doublebelow" | "db" => 233,
+        "doubleabove" | "da" => 234,
+        "iotasubscript" | "is" => 240,
+        _ => return None,
+    })
 }
 
 /// A parse failure: the ICU error code and the offset (in chars).
@@ -498,7 +543,13 @@ pub fn parse(s: &[char], pos: &mut usize, vars: VarFn) -> Result<USet, SetError>
                 }
                 let name: String = s[st + 1..*pos].iter().collect();
                 if name.is_empty() {
-                    // '$' as an anchor/literal
+                    // (before the ']': the anchor, U+FFFF, matching the
+                    // start / end of the text in transliterator contexts)
+                    if s.get(*pos) == Some(&']') {
+                        ranges.push((0xFFFF, 0xFFFF));
+                        last = None;
+                        continue;
+                    }
                     ranges.push(('$' as u32, '$' as u32));
                     last = Some('$' as u32);
                     continue;

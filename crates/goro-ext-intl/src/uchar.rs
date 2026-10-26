@@ -254,11 +254,11 @@ fn in_ranges(c: u32, r: &[(u32, u32)]) -> bool {
     r.iter().any(|&(a, b)| a <= c && c <= b)
 }
 
-fn is_cased(c: char) -> bool {
+pub(crate) fn is_cased(c: char) -> bool {
     un::is_uppercase(c) || un::is_lowercase(c) || un::general_category(c) == G::TitlecaseLetter
 }
 
-fn is_case_ignorable(c: char) -> bool {
+pub(crate) fn is_case_ignorable(c: char) -> bool {
     matches!(
         un::general_category(c),
         G::NonspacingMark | G::EnclosingMark | G::Format | G::ModifierLetter | G::ModifierSymbol
