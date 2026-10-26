@@ -131,7 +131,41 @@ fn set_writer(vm: &mut Vm, o: &Obj, writer: Box<PhpWriter>) {
     if let Some(old) = take_writer(o) {
         close_writer(vm, old);
     }
+    let watch = writer.needs_vm();
     put_writer(o, writer);
+    if watch {
+        watch_free(vm, o);
+    }
+}
+
+/// (only a marker: lets the VM run writer_free_obj when the object dies)
+static WRITER_HANDLERS: goro_core::vm::NativeObjectHandlers =
+    goro_core::vm::NativeObjectHandlers::EMPTY;
+
+/// A writer whose flush needs the VM (a PHP stream, mbstring conversion)
+/// is freed by the VM as soon as its object is released, like php-src's
+/// free_obj, instead of at the next sweep.
+#[inline(never)]
+fn watch_free(vm: &mut Vm, o: &Obj) {
+    if o.borrow().native.is_some() {
+        return;
+    }
+    o.borrow_mut().native = Some(goro_core::object::NativeData {
+        data: Rc::new(()),
+        handlers: &WRITER_HANDLERS,
+    });
+    vm.register_native_free_hook(&WRITER_HANDLERS, writer_free_obj);
+    vm.track_destructible(Value::Object(o.clone()));
+}
+
+fn writer_free_obj(vm: &mut Vm, o: &Obj) {
+    let slot = WRITERS.with(|w| w.borrow_mut().remove(&obj_key(o)));
+    if let Some(Slot {
+        writer: Some(w), ..
+    }) = slot
+    {
+        close_writer(vm, w);
+    }
 }
 
 /// Free writers whose object is gone (PHP frees them in the object dtor).
@@ -998,7 +1032,11 @@ fn with_writer(
     } else {
         pump(Some(vm), &mut w, false);
     }
+    let watch = w.needs_vm();
     put_writer(o, w);
+    if watch {
+        watch_free(vm, o);
+    }
     // libxml2 raises writer errors without a channel: they only update
     // xmlLastError and never reach PHP's error handler.
     drop(errors);
