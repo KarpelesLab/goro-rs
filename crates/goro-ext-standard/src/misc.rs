@@ -12572,7 +12572,17 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         let _ = f.seek(SeekFrom::Start(0));
                     }
                     let is_temp = matches!(sp, SpecialStream::Temp);
+                    let is_memory = matches!(sp, SpecialStream::Memory | SpecialStream::Temp);
                     let fid = alloc_file_handle_special_uri(f, &mode, sp, &filename);
+                    // TEMP_STREAM_APPEND: writes go to the end while the
+                    // stream position only counts the bytes written.
+                    if is_memory && mode.starts_with('a') {
+                        FILE_HANDLES.with(|h| {
+                            if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+                                fh.append_pos = Some((0, 0));
+                            }
+                        });
+                    }
                     // php_stream_input_ops / php_stream_output_ops: their
                     // own labels and fixed modes.
                     if lower == "input" || lower == "output" {
