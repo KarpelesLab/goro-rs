@@ -720,9 +720,10 @@ pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     libc::close(childend);
                 }
             }
-            // As with PHP's posix_spawn(): the ignored signals (SIGPIPE) are
-            // inherited, the mask is cleared, goro's RLIMIT_AS is not kept.
-            child_state.apply_in_child();
+            // The signal mask is inherited as in php-src (Symfony Process
+            // blocks the signals a child should ignore around proc_open());
+            // SIGPIPE and goro's RLIMIT_AS go back to what goro started with.
+            child_state.apply_in_child_keep_mask();
             if let Some(c) = &cwd_c {
                 if libc::chdir(c.as_ptr()) != 0 {
                     fail(errno());

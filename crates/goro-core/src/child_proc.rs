@@ -94,6 +94,25 @@ impl ChildState {
         }
     }
 
+    /// apply_in_child() without resetting the signal mask (proc_open():
+    /// the child inherits the parent's mask, as from php-src).
+    ///
+    /// # Safety
+    /// Only to be called between fork() and exec().
+    pub unsafe fn apply_in_child_keep_mask(&self) {
+        unsafe {
+            self.restore_rlimit_as();
+            libc::signal(
+                libc::SIGPIPE,
+                if self.sigpipe_ignored {
+                    libc::SIG_IGN
+                } else {
+                    libc::SIG_DFL
+                },
+            );
+        }
+    }
+
     /// Give back the RLIMIT_AS goro started with (pcntl_exec(): the new
     /// image keeps the mask and dispositions as they are).
     pub fn restore_rlimit_as(&self) {
