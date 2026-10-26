@@ -4376,6 +4376,19 @@ impl Vm {
         }
     }
 
+    /// unset() of typed property `prop` declared by an internal class (no
+    /// user declaration): the slot stays, uninitialized (var_dump() shows
+    /// it as such).
+    #[inline(never)]
+    pub(crate) fn unset_keeps_internal_slot(&self, class_lower: &[u8], prop: &[u8]) -> bool {
+        self.unset_internal_typed_prop(class_lower, prop)
+            .is_some_and(|d| {
+                self.classes
+                    .get(&d.to_ascii_lowercase())
+                    .is_none_or(|c| c.filename.is_none())
+            })
+    }
+
     /// The class whose `properties` declare the instance properties of
     /// class `lower`: its entry, or for an internal class (also one an
     /// extension registers as a bare entry) the stub's view of it.
@@ -47929,6 +47942,14 @@ impl Vm {
                                     let old = std::mem::replace(&mut e.1, Value::Undef);
                                     crate::gc::on_child_released(&old);
                                 }
+                            } else if self.unset_keeps_internal_slot(&class_lower_u, &pkey) {
+                                // An internal class's typed slot stays, uninitialized.
+                                if let Some(e) =
+                                    ob.properties.iter_mut().find(|(k, _)| **k == *pkey)
+                                {
+                                    let old = std::mem::replace(&mut e.1, Value::Undef);
+                                    crate::gc::on_child_released(&old);
+                                }
                             } else {
                                 ob.properties.retain(|(name, v)| {
                                     let keep = **name != *pkey;
@@ -58286,9 +58307,8 @@ impl Vm {
                                 let class_display = self
                                     .find_property_def(&class_lower, prop_name.as_bytes())
                                     .and_then(|d| {
-                                        self.classes
-                                            .get(&d.1.to_ascii_lowercase())
-                                            .map(|c| crate::value::display_class_name(&c.name))
+                                        self.class_name_for_display(&d.1.to_ascii_lowercase())
+                                            .map(|n| crate::value::display_class_name(&n))
                                     })
                                     .unwrap_or_else(|| {
                                         crate::value::display_class_name(&class_name_orig)

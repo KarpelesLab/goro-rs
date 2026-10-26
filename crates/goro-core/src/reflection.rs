@@ -12857,7 +12857,9 @@ pub fn reflection_class_constant_method(
     let is_final = meta.as_ref().map(|m| m.is_final).unwrap_or(false);
 
     // `unset($r->name)`: the typed property is uninitialized.
-    if matches!(method, b"getname" | b"__tostring") && !ob.has_property(b"name") {
+    if matches!(method, b"getname" | b"__tostring")
+        && matches!(ob.get_property(b"name"), Value::Undef)
+    {
         drop(ob);
         let msg = format!(
             "Typed property {}::$name must not be accessed before initialization",
