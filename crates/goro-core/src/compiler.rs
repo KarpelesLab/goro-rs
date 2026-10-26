@@ -14451,6 +14451,47 @@ impl Compiler {
         Ok(OperandType::Tmp(tmp))
     }
 
+    /// `[...] = ` / `list(...) = ` destructuring.
+    fn is_list_target(target: &Expr) -> bool {
+        match &target.kind {
+            ExprKind::Array(_) => true,
+            ExprKind::FunctionCall { name, .. } => {
+                matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list"))
+            }
+            _ => false,
+        }
+    }
+
+    /// `[...] = $GLOBALS`: zend_compile_list_assign() fetches the RHS as a
+    /// plain global variable named "GLOBALS", which is undefined (a warning
+    /// and null), like `$GLOBALS['GLOBALS']`.
+    #[inline(never)]
+    fn compile_list_assign_from_globals(
+        &mut self,
+        expr: &Expr,
+        target: &Expr,
+        value: &Expr,
+    ) -> CompileResult<OperandType> {
+        let fetch = Expr {
+            span: value.span,
+            kind: ExprKind::ArrayAccess {
+                array: Box::new(value.clone()),
+                index: Some(Box::new(Expr {
+                    span: value.span,
+                    kind: ExprKind::String(b"GLOBALS".to_vec()),
+                })),
+            },
+        };
+        let e = Expr {
+            span: expr.span,
+            kind: ExprKind::Assign {
+                target: Box::new(target.clone()),
+                value: Box::new(fetch),
+            },
+        };
+        self.compile_expr(&e)
+    }
+
     /// zend_delayed_compile_dim(): `$GLOBALS[]` in a statement's own
     /// expressions (outside isset() and unset(), which reject `[]` first).
     #[inline(never)]
@@ -15215,6 +15256,12 @@ impl Compiler {
 
             ExprKind::Assign { target, value } if matches!(&target.kind, ExprKind::DynamicVariable(i) if Self::static_dynvar_name(i).is_none()) => {
                 self.compile_assign_dynvar(expr, target, value)
+            }
+            ExprKind::Assign { target, value }
+                if matches!(&value.kind, ExprKind::Variable(n) if n == b"GLOBALS")
+                    && Self::is_list_target(target) =>
+            {
+                self.compile_list_assign_from_globals(expr, target, value)
             }
             ExprKind::Assign { target, value } => {
                 if matches!(&target.kind, ExprKind::Variable(n) if n == b"http_response_header") {
