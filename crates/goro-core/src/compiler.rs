@@ -5686,7 +5686,12 @@ impl Compiler {
                     is_switch: true,
                     finally_depth: self.finally_path.len(),
                     try_finally_depth: self.finally_targets.len(),
-                    free_tmps: Vec::new(),
+                    // (the subject lives until the switch ends: a return or
+                    // a `break N` leaving it releases it, ZEND_FREE)
+                    free_tmps: match subject_op {
+                        OperandType::Tmp(t) => vec![t],
+                        _ => Vec::new(),
+                    },
                     depth_nop: None,
                     depth_tmp: None,
                     depth_slot: None,
@@ -5761,6 +5766,18 @@ impl Compiler {
                 }
 
                 let after_switch = self.op_array.current_offset();
+                // ZEND_FREE of the subject after the switch, where every way
+                // out of it continues.
+                if let OperandType::Tmp(t) = subject_op {
+                    let undef = self.op_array.add_literal(Value::Undef);
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Assign,
+                        op1: OperandType::Tmp(t),
+                        op2: OperandType::Const(undef),
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                }
 
                 // Patch comparison jumps to their corresponding body offsets
                 for (jmp, case_idx) in case_body_jumps {
