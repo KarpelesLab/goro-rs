@@ -4640,7 +4640,10 @@ impl Vm {
         n: usize,
     ) -> Option<(&'static [u8], String)> {
         let msg = Self::forbidden_dynamic_call(name)?;
-        let lname = name.strip_prefix(b"\\").unwrap_or(name).to_ascii_lowercase();
+        let lname = name
+            .strip_prefix(b"\\")
+            .unwrap_or(name)
+            .to_ascii_lowercase();
         // (min, max) argument counts
         let (min, max) = match lname.as_slice() {
             b"func_get_arg" => (1, Some(1)),
@@ -4649,7 +4652,14 @@ impl Vm {
             _ => (0, Some(0)),
         };
         let arity = if n < min {
-            Some((if max == Some(min) { "exactly" } else { "at least" }, min))
+            Some((
+                if max == Some(min) {
+                    "exactly"
+                } else {
+                    "at least"
+                },
+                min,
+            ))
         } else {
             match max {
                 Some(m) if n > m => Some((if m == min { "exactly" } else { "at most" }, m)),
@@ -5224,8 +5234,14 @@ impl Vm {
         let callback = &callback;
         match callback {
             Value::String(s) => {
-                if let Some((cls, msg)) = self.forbidden_dynamic_call_error(s.as_bytes(), args.len()) {
-                    let lname = s.as_bytes().strip_prefix(b"\\").unwrap_or(s.as_bytes()).to_ascii_lowercase();
+                if let Some((cls, msg)) =
+                    self.forbidden_dynamic_call_error(s.as_bytes(), args.len())
+                {
+                    let lname = s
+                        .as_bytes()
+                        .strip_prefix(b"\\")
+                        .unwrap_or(s.as_bytes())
+                        .to_ascii_lowercase();
                     self.push_builtin_frame(&lname, args, 0);
                     let exc = self.create_exception(cls, &msg, self.current_line);
                     self.pop_builtin_frame();
@@ -45912,6 +45928,7 @@ impl Vm {
                                         Ok(program) => {
                                             let mut compiler = crate::compiler::Compiler::new();
                                             compiler.source_file = abs_path.as_bytes().to_vec();
+                                            compiler.takes_rtd_keys = true;
                                             let _ct = crate::compiler::CtVmGuard::new(self);
                                             compiler
                                                 .compile(&program)
@@ -46196,6 +46213,7 @@ impl Vm {
                                     format!("{}({}) : eval()'d code", self.current_file, op.line);
                                 let compiler_file = eval_file.clone().into_bytes();
                                 compiler.source_file = eval_file.into_bytes();
+                                compiler.takes_rtd_keys = true;
                                 let compiled = {
                                     let _ct = crate::compiler::CtVmGuard::new(self);
                                     compiler.compile(&program)

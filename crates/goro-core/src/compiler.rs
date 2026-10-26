@@ -400,6 +400,22 @@ fn push_compile_warning_tuple(w: (String, u32)) {
     push_compile_warning(w.0, w.1);
 }
 
+thread_local! {
+    /// CG(rtd_key_counter): runtime definition keys taken so far.
+    static RTD_BASE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// The counter when the file being compiled started.
+    static RTD_FILE_BASE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// The file's class declarations (rtd_seq) bound while compiling.
+    static RTD_EARLY: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The runtime definition key of the anonymous class `__anonymous_class_<seq>`
+/// of the file being compiled: the declarations before it that took one.
+fn anon_class_rtd_key(seq: u32) -> u32 {
+    let early_before = RTD_EARLY.with(|e| e.borrow().partition_point(|&s| s < seq)) as u32;
+    RTD_FILE_BASE.with(|b| b.get()) + seq - early_before
+}
+
 fn push_compile_warning(msg: String, line: u32) {
     COMPILE_WARNINGS.with(|w| w.borrow_mut().push((msg, line)));
 }
@@ -772,6 +788,9 @@ pub struct Compiler {
     in_const_expr: bool,
     /// Compiling a parameter's default value (see compile_param_default_value).
     in_param_default: bool,
+    /// A script, include or eval() compile: its class declarations take
+    /// runtime definition keys (the engine's own compiles don't).
+    pub takes_rtd_keys: bool,
     /// Compile-time fatal errors collected during attribute validation that
     /// should be raised before the script executes. The first one wins.
     pub deferred_fatal_errors: Vec<(String, u32)>,
@@ -1096,6 +1115,7 @@ impl Compiler {
             is_discarding_result: false,
             in_const_expr: false,
             in_param_default: false,
+            takes_rtd_keys: false,
             assign_result_discarded: false,
             hrh_assigned: false,
             hrh_is_base: 0,
@@ -3088,19 +3108,74 @@ impl Compiler {
 
     /// Build a map from parser anonymous class names (__anonymous_class_N) to PHP NUL-byte names.
     /// Must be called before hoisting/compilation so child compilers can inherit the map.
+    /// (`early`: the pass collecting the top-level classes bound while
+    /// compiling, whose declarations take no runtime definition key)
     fn build_anon_class_name_map(&mut self, stmts: &[Statement]) {
+        let mut bound = std::collections::HashSet::new();
+        let mut early = Vec::new();
+        self.anon_class_map_pass(stmts, Some((&mut bound, &mut early)));
+        early.sort_unstable();
+        RTD_EARLY.with(|e| *e.borrow_mut() = early);
+        self.anon_class_map_pass(stmts, None);
+    }
+
+    fn anon_class_map_pass(
+        &mut self,
+        stmts: &[Statement],
+        mut early: Option<(&mut std::collections::HashSet<Vec<u8>>, &mut Vec<u32>)>,
+    ) {
         for stmt in stmts {
             match &stmt.kind {
+                StmtKind::ClassDecl {
+                    name,
+                    modifiers,
+                    extends,
+                    implements,
+                    body,
+                    rtd_seq,
+                    ..
+                } if !name.starts_with(b"__anonymous_class_") => {
+                    let Some((bound, seqs)) = early.as_mut() else {
+                        continue;
+                    };
+                    let lower = |v: Vec<u8>| v.to_ascii_lowercase();
+                    let qn = lower(self.prefix_with_namespace(name));
+                    let uses_traits = body
+                        .iter()
+                        .any(|m| matches!(m, ClassMember::TraitUse { .. }));
+                    // zend_compile_class_decl(): a top-level declaration
+                    // without interfaces or traits whose parent (if any) is
+                    // known is bound while compiling.
+                    // (an interface's parents are interfaces it implements)
+                    let is_early = !modifiers.is_enum
+                        && implements.is_empty()
+                        && !(modifiers.is_interface && extends.is_some())
+                        && !uses_traits
+                        && !bound.contains(&qn)
+                        && !crate::vm::is_known_builtin_class_name(&qn)
+                        && extends.as_ref().is_none_or(|p| {
+                            let pl = lower(self.resolve_class_name(p));
+                            bound.contains(&pl) || crate::vm::is_known_builtin_class_name(&pl)
+                        });
+                    if is_early {
+                        bound.insert(qn);
+                        seqs.push(*rtd_seq);
+                    }
+                }
                 StmtKind::ClassDecl {
                     name,
                     extends,
                     implements,
                     ..
                 } if name.starts_with(b"__anonymous_class_") => {
+                    if early.is_some() {
+                        continue;
+                    }
                     let counter_part = &name[b"__anonymous_class_".len()..];
                     let counter: u32 = std::str::from_utf8(counter_part)
                         .ok()
                         .and_then(|s| s.parse().ok())
+                        .map(anon_class_rtd_key)
                         .unwrap_or(0);
                     // Base name is the fully qualified parent/interface name (as PHP uses it)
                     let base: Vec<u8> = if let Some(p) = extends.as_ref() {
@@ -3140,7 +3215,10 @@ impl Compiler {
                     }
                     self.use_map = HashMap::new();
                     if let Some(body_stmts) = body {
-                        self.build_anon_class_name_map(body_stmts);
+                        self.anon_class_map_pass(
+                            body_stmts,
+                            early.as_mut().map(|(b, s)| (&mut **b, &mut **s)),
+                        );
                     }
                     // Restore
                     self.current_namespace = saved_ns;
@@ -3185,7 +3263,15 @@ impl Compiler {
         let pending_base = PENDING_COMPILE_DIAGNOSTICS.with(|w| w.borrow().len());
         COMPILE_TIME_BINDS.with(|b| *b.borrow_mut() = None);
         let saved_has_yield = PROGRAM_HAS_YIELD.with(|y| y.replace(program.has_yield));
+        // (a compile run while another one is going on, e.g. evaluating
+        // a constant expression, leaves the outer file's keys alone)
+        let saved_rtd = (
+            RTD_FILE_BASE.with(|b| b.get()),
+            RTD_EARLY.with(|e| e.take()),
+        );
         let r = self.compile_file(program);
+        RTD_FILE_BASE.with(|b| b.set(saved_rtd.0));
+        RTD_EARLY.with(|e| *e.borrow_mut() = saved_rtd.1);
         PROGRAM_HAS_YIELD.with(|y| y.set(saved_has_yield));
         TICKS.with(|t| t.set(saved_ticks));
         // (a compiled file reports its diagnostics with its warnings)
@@ -3209,7 +3295,15 @@ impl Compiler {
         let warnings_base = COMPILE_WARNINGS.with(|w| w.borrow().len());
         let pending_diag_base = PENDING_COMPILE_DIAGNOSTICS.with(|w| w.borrow().len());
         // Pre-pass: build the anonymous class name map (NUL-byte PHP names)
+        // (CG(rtd_key_counter) runs on across files and eval()s; the keys
+        // of this file are taken)
+        let rtd_base = RTD_BASE.with(|b| b.get());
+        RTD_FILE_BASE.with(|b| b.set(rtd_base));
         self.build_anon_class_name_map(&program.statements);
+        if self.takes_rtd_keys {
+            let rtd_early = RTD_EARLY.with(|e| e.borrow().len() as u32);
+            RTD_BASE.with(|b| b.set(rtd_base + program.rtd_slots.saturating_sub(rtd_early)));
+        }
         // zend_handle_encoding_declaration() warned while the file was parsed.
         for (msg, line) in goro_parser::multibyte::take_declare_warnings() {
             push_compile_warning_tuple((msg.clone(), line));
@@ -5909,7 +6003,8 @@ impl Compiler {
                             result: OperandType::Unused,
                             line: 0,
                         });
-                        let default_val = func_compiler.compile_param_default_value(default_expr)?;
+                        let default_val =
+                            func_compiler.compile_param_default_value(default_expr)?;
                         if !matches!(default_expr.kind, ExprKind::Null) {
                             let pcv = func_compiler.op_array.get_or_create_cv(&param.name) as usize;
                             if let Some(Some(pti)) =
@@ -6997,6 +7092,7 @@ impl Compiler {
                 attributes: class_attributes,
                 end_line: class_end_line,
                 doc_comment: class_doc_comment,
+                ..
             } => {
                 // Determine qualified name: anonymous classes use NUL-byte PHP names
                 let is_anonymous = name.starts_with(b"__anonymous_class_");
@@ -7025,6 +7121,7 @@ impl Compiler {
                             let counter: u32 = std::str::from_utf8(counter_part)
                                 .ok()
                                 .and_then(|s| s.parse().ok())
+                                .map(anon_class_rtd_key)
                                 .unwrap_or(0);
                             let mut anon_name = b"class@anonymous\x00".to_vec();
                             anon_name.extend_from_slice(&self.source_file);
@@ -13611,7 +13708,10 @@ impl Compiler {
         }
         let mut elems: Vec<OperandType> = Vec::new();
         let lit = |c: &mut Self, s: Vec<u8>| {
-            OperandType::Const(c.op_array.add_literal(Value::String(PhpString::from_vec(s))))
+            OperandType::Const(
+                c.op_array
+                    .add_literal(Value::String(PhpString::from_vec(s))),
+            )
         };
         for ((piece, kind), v) in pieces.into_iter().zip(vals) {
             if !piece.is_empty() {
@@ -16057,9 +16157,11 @@ impl Compiler {
                     if (self.current_namespace.is_empty() || func_lower.starts_with(b"\\"))
                         && matches!(unqualified, b"defined" | b"in_array")
                     {
-                        if let Some(args) =
-                            ct_special_call_args(unqualified, args, !self.current_namespace.is_empty())
-                        {
+                        if let Some(args) = ct_special_call_args(
+                            unqualified,
+                            args,
+                            !self.current_namespace.is_empty(),
+                        ) {
                             self.is_discarding_result = discard_result;
                             let call = Expr {
                                 kind: ExprKind::FunctionCall {

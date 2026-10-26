@@ -340,6 +340,7 @@ pub fn compile(
     };
     let mut compiler = Compiler::new();
     compiler.source_file = filename.as_bytes().to_vec();
+    compiler.takes_rtd_keys = true;
     match compiler.compile(&program) {
         Ok((op_array, classes, compile_warnings)) => {
             let _ = goro_core::compiler::take_pending_compile_warnings();

@@ -710,6 +710,7 @@ impl Parser {
         Ok(Program {
             statements,
             has_yield: self.saw_yield,
+            rtd_slots: self.anon_counter,
         })
     }
 
@@ -2751,6 +2752,8 @@ impl Parser {
         }
         let end_line = self.span().line;
         self.expect(&TokenKind::CloseBrace)?;
+        let rtd_seq = self.anon_counter;
+        self.anon_counter += 1;
 
         Ok(Statement {
             kind: StmtKind::ClassDecl {
@@ -2763,6 +2766,7 @@ impl Parser {
                 attributes,
                 end_line,
                 doc_comment: late_doc,
+                rtd_seq,
             },
             span,
         })
@@ -6639,7 +6643,8 @@ impl Parser {
                         }
                         // Generate unique anonymous class name
                         // CG(rtd_key_counter) starts at 0
-                        let anon_name = format!("__anonymous_class_{}", self.anon_counter);
+                        let rtd_seq = self.anon_counter;
+                        let anon_name = format!("__anonymous_class_{}", rtd_seq);
                         self.anon_counter += 1;
                         // Parse class body with class name on stack for error messages
                         self.class_name_stack.push(anon_name.as_bytes().to_vec());
@@ -6661,6 +6666,7 @@ impl Parser {
                                 attributes: anon_attrs,
                                 end_line,
                                 doc_comment: anon_doc,
+                                rtd_seq,
                             },
                             span,
                         };

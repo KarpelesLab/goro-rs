@@ -819,6 +819,7 @@ impl crate::vm::Vm {
         };
         let mut compiler = crate::compiler::Compiler::new();
         compiler.source_file = path.as_bytes().to_vec();
+        compiler.takes_rtd_keys = true;
         let saved_file = std::mem::replace(&mut self.current_file, path.into());
         let r = match compiler.compile(&program) {
             Ok((mut op_array, classes, warnings)) => {

@@ -16,9 +16,12 @@ pub struct Program {
     /// Whether a `yield` was parsed: when false no function of the program
     /// is a generator.
     pub has_yield: bool,
+    /// The runtime definition key slots the file's class declarations
+    /// take (see `StmtKind::ClassDecl::rtd_seq`).
+    pub rtd_slots: u32,
 }
 
-// (as derived, without has_yield: what the statements tell)
+// (as derived, without has_yield / rtd_slots: what the statements tell)
 impl std::fmt::Debug for Program {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Program")
@@ -92,6 +95,12 @@ pub enum StmtKind {
         attributes: Vec<Attribute>,
         end_line: u32,
         doc_comment: Option<Vec<u8>>,
+        /// Position among the file's class declarations in the order
+        /// zend_compile_class_decl() builds their runtime definition keys
+        /// (CG(rtd_key_counter)): an anonymous class's when it is met, a
+        /// named class's after its body. (Anonymous classes are named
+        /// __anonymous_class_<rtd_seq>.)
+        rtd_seq: u32,
     },
     TryCatch {
         try_body: Vec<Statement>,

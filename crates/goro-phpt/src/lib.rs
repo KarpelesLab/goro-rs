@@ -1716,6 +1716,7 @@ fn execute_php_inner_impl(
     }
     let mut compiler = Compiler::new();
     compiler.source_file = filename.as_bytes().to_vec();
+    compiler.takes_rtd_keys = true;
     // A compile error preceded by classes PHP binds at compile time: those
     // are bound (their linking errors come first) before it is reported.
     let mut deferred_compile_error: Option<(
