@@ -6081,13 +6081,12 @@ fn ini_set_as(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError
     // OnUpdateAssertions: the quantity (warning when malformed); switching
     // between -1 and a non-negative value is only possible in php.ini
     if key == b"zend.assertions" {
-        let new_val = ini_quantity_warn(vm, "zend.assertions", &value.to_php_string().as_bytes());
+        let new_val = ini_quantity_warn(vm, "zend.assertions", value.to_php_string().as_bytes());
         let cur_val = vm
             .constants
             .get(b"zend.assertions".as_ref())
             .map(|v| {
-                goro_core::ini_quantity::parse_quantity(&v.to_php_string().as_bytes(), true).0
-                    as i64
+                goro_core::ini_quantity::parse_quantity(v.to_php_string().as_bytes(), true).0 as i64
             })
             .unwrap_or(1);
         if cur_val != new_val && (cur_val < 0 || new_val < 0) {
