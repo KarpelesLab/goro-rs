@@ -271,6 +271,16 @@ fn linked_method_prototype(vm: &Vm, class_lower: &[u8], m: &[u8], depth: u32) ->
     }
     let mut ifaces = Vec::new();
     flat_interfaces(vm, ce, &mut ifaces, 0);
+    // A class declaring __toString() implements Stringable (implicitly).
+    if m == b"__tostring" && !ce.is_trait {
+        let s = b"stringable".to_vec();
+        if pce.is_some_and(|p| p.get_method(m).is_some()) && !inherited_ifaces.contains(&s) {
+            inherited_ifaces.push(s.clone());
+        }
+        if !ifaces.contains(&s) {
+            ifaces.push(s);
+        }
+    }
     for i in ifaces.iter().filter(|i| !inherited_ifaces.contains(i)) {
         let Some(im) = rcls(vm, i).and_then(|ice| ice.get_method(m)) else {
             continue;
@@ -1959,6 +1969,16 @@ fn reflection_function_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
         vm.current_exception = Some(exc);
         return false;
     }
+    // `$name` is the function's own (declared / registered) name.
+    let func_name = match vm.user_functions.get(&func_lower) {
+        Some(op) if op.name.eq_ignore_ascii_case(&func_lower) => {
+            String::from_utf8_lossy(&op.name).into_owned()
+        }
+        Some(_) => func_name,
+        None => crate::stubs::find_function(&func_lower)
+            .map(|f| f.name.to_string())
+            .unwrap_or_else(|| String::from_utf8_lossy(&func_lower).into_owned()),
+    };
 
     let mut obj = this.borrow_mut();
     obj.set_property(
@@ -15296,6 +15316,11 @@ fn method_prototype(vm: &Vm, m: &crate::object::MethodDef, scope: Option<&[u8]>)
     if let Some(ip) = iface_proto {
         return Some(ip);
     }
+    // A class declaring __toString() implicitly implements Stringable: the
+    // topmost declaration's prototype is Stringable::__toString().
+    if ml == b"__tostring" && !ce.is_trait && !ce.is_interface && decl != b"stringable" {
+        return Some("Stringable".to_string());
+    }
     match proto {
         Some((name, is_abstract)) => {
             if is_ctor && !is_abstract {
@@ -15364,7 +15389,7 @@ pub(crate) fn parameter_string(op: &OpArray, idx: usize, skip: usize, required: 
         if let Some(sig) = op.internal_sig {
             s.push_str(" = ");
             match sig.args.get(idx).and_then(|a| a.default) {
-                Some(d) => s.push_str(d),
+                Some(d) => s.push_str(&arginfo_default_text(op.scope_class.as_deref(), d)),
                 None => s.push_str("<default>"),
             }
         } else {
@@ -15373,6 +15398,93 @@ pub(crate) fn parameter_string(op: &OpArray, idx: usize, skip: usize, required: 
     }
     s.push_str(" ]");
     s
+}
+
+/// A stub default as gen_stub.php writes it into the arginfo: class names
+/// fully qualified without the leading backslash (resolved in the
+/// namespace of the method's class), `|` with spaces, a NUL as `\x00`.
+fn arginfo_default_text(scope_lower: Option<&[u8]>, d: &str) -> String {
+    let ns: Option<String> = scope_lower
+        .and_then(crate::stubs::find_class)
+        .and_then(|c| c.name.rsplit_once('\\').map(|(n, _)| n.to_string()));
+    let b = d.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(d.len() + 8);
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'"' || c == b'\'' {
+            // a string literal: only the \0 escape changes
+            let q = c;
+            let start = i;
+            i += 1;
+            while i < b.len() && b[i] != q {
+                if b[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i = (i + 1).min(b.len());
+            let lb = &b[start..i];
+            if q == b'"' {
+                let mut j = 0;
+                while j < lb.len() {
+                    if lb[j] == b'\\' && j + 1 < lb.len() {
+                        if lb[j + 1] == b'0' && !lb.get(j + 2).is_some_and(|x| x.is_ascii_digit()) {
+                            out.extend_from_slice(b"\\x00");
+                        } else {
+                            out.extend_from_slice(&lb[j..j + 2]);
+                        }
+                        j += 2;
+                    } else {
+                        out.push(lb[j]);
+                        j += 1;
+                    }
+                }
+            } else {
+                out.extend_from_slice(lb);
+            }
+            continue;
+        }
+        if c == b'|' && out.last() != Some(&b' ') {
+            out.extend_from_slice(b" | ");
+            i += 1;
+            while i < b.len() && b[i] == b' ' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == b'\\' || c.is_ascii_alphabetic() || c == b'_' {
+            let start = i;
+            while i < b.len() && (b[i] == b'\\' || b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            let word = &d[start..i];
+            if d[i..].starts_with("::") {
+                let name = word.strip_prefix('\\').unwrap_or(word);
+                let qualified = match &ns {
+                    Some(n)
+                        if !word.starts_with('\\')
+                            && !name.contains('\\')
+                            && !matches!(
+                                name.to_ascii_lowercase().as_str(),
+                                "self" | "static" | "parent"
+                            )
+                            && crate::stubs::find_class(name.as_bytes()).is_none() =>
+                    {
+                        format!("{}\\{}", n, name)
+                    }
+                    _ => name.to_string(),
+                };
+                out.extend_from_slice(qualified.as_bytes());
+            } else {
+                out.extend_from_slice(word.as_bytes());
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// `_parameter_string()` for an internal function with userland arginfo
@@ -15683,6 +15795,15 @@ fn class_is_iterateable(vm: &Vm, class_lower: &[u8]) -> bool {
     {
         return false;
     }
+    // (an interface has no get_iterator of Iterator's: only a user one
+    // declaring hooked properties gets zend_hooked_object_get_iterator)
+    if let Some(ce) = rcls(vm, class_lower).filter(|c| c.is_interface) {
+        return !is_internal_class(vm, class_lower)
+            && ce
+                .properties
+                .iter()
+                .any(|p| p.has_get_hook || p.has_set_hook);
+    }
     if vm.class_extends(class_lower, b"iterator")
         || vm.class_extends(class_lower, b"iteratoraggregate")
     {
@@ -15706,10 +15827,13 @@ fn class_is_iterateable(vm: &Vm, class_lower: &[u8]) -> bool {
         }
         seen.push(c.clone());
         if let Some(ce) = rcls(vm, &c) {
-            if ce
-                .properties
-                .iter()
-                .any(|p| p.has_get_hook || p.has_set_hook)
+            // (zend_hooked_object_get_iterator: user hooks; an internal
+            // class's virtual properties have none)
+            if !is_internal_class(vm, &c)
+                && ce
+                    .properties
+                    .iter()
+                    .any(|p| p.has_get_hook || p.has_set_hook)
             {
                 return true;
             }
@@ -15826,7 +15950,11 @@ pub(crate) fn property_string(vm: &Vm, p: &crate::object::PropertyDef, indent: &
             &p.declaring_class,
         ));
     }
-    if p.has_get_hook || p.has_set_hook {
+    // (an internal class's virtual properties are read by its handlers:
+    // they have no hooks to list)
+    if (p.has_get_hook || p.has_set_hook)
+        && !is_internal_class(vm, &p.declaring_class.to_ascii_lowercase())
+    {
         s.push_str(" {");
         let decl = p.declaring_class.to_ascii_lowercase();
         let final_hook = |kind: &str| -> bool {
@@ -15880,7 +16008,11 @@ fn class_const_string(
     };
     let ty = match meta.and_then(|m| m.declared_type.as_ref()) {
         Some(t) => zend_type_string(t),
-        None => zend_zval_type_name(val).to_string(),
+        // (an object constant, e.g. an enum case, shows its class)
+        None => match val {
+            Value::Object(o) => crate::value::display_class_name(&o.borrow().class_name),
+            _ => zend_zval_type_name(val).to_string(),
+        },
     };
     let v = match val {
         Value::Array(_) => "Array".to_string(),
@@ -15987,7 +16119,9 @@ pub(crate) fn class_string(
         s.push_str("class ");
     }
     s.push_str(&String::from_utf8_lossy(&ce.name));
-    if let Some(p) = &ce.parent {
+    // (a user interface keeps its first parent interface as `parent`: it
+    // is listed with the others)
+    if let Some(p) = ce.parent.as_ref().filter(|_| !ce.is_interface) {
         let pn = rcls(vm, &p.to_ascii_lowercase())
             .map(|c| c.name.clone())
             .unwrap_or_else(|| p.clone());
@@ -16002,7 +16136,15 @@ pub(crate) fn class_string(
             });
         }
     }
-    let ifaces = class_all_interface_names(vm, class_lower);
+    let mut ifaces = class_all_interface_names(vm, class_lower);
+    // (the Stringable a __toString() method adds at compile time)
+    if !ce.is_trait
+        && !ifaces.iter().any(|i| i.eq_ignore_ascii_case("Stringable"))
+        && !class_lower.eq_ignore_ascii_case(b"stringable")
+        && vm.class_implements_interface(class_lower, b"stringable")
+    {
+        ifaces.push("Stringable".to_string());
+    }
     if !ifaces.is_empty() {
         s.push_str(if ce.is_interface {
             " extends "

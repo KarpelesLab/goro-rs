@@ -576,6 +576,23 @@ pub fn literal_value(expr: &str) -> Option<Value> {
         }
         _ => {}
     }
+    // (octal / hex / binary integer literals: mkdir()'s 0777)
+    let (radix, digits) = if let Some(h) = e.strip_prefix("0x").or_else(|| e.strip_prefix("0X")) {
+        (16, h)
+    } else if let Some(b) = e.strip_prefix("0b").or_else(|| e.strip_prefix("0B")) {
+        (2, b)
+    } else if let Some(o) = e.strip_prefix("0o").or_else(|| e.strip_prefix("0O")) {
+        (8, o)
+    } else if e.len() > 1 && e.starts_with('0') && e.bytes().all(|c| c.is_ascii_digit()) {
+        (8, &e[1..])
+    } else {
+        (10, "")
+    };
+    if radix != 10 {
+        if let Ok(n) = i64::from_str_radix(&digits.replace('_', ""), radix) {
+            return Some(Value::Long(n));
+        }
+    }
     if let Ok(n) = e.parse::<i64>() {
         return Some(Value::Long(n));
     }

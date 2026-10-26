@@ -139,6 +139,20 @@ fn check_class_attr_validators(class: &crate::object::ClassEntry, line: u32) -> 
     Ok(())
 }
 
+thread_local! {
+    /// The function whose parameter defaults are being rendered
+    /// (__FUNCTION__ in a default folds to its name).
+    static REPR_FN_NAME: std::cell::RefCell<Option<Vec<u8>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[inline(never)]
+fn with_repr_fn_name<R>(name: &[u8], f: impl FnOnce() -> R) -> R {
+    let saved = REPR_FN_NAME.with(|n| n.replace(Some(name.to_vec())));
+    let r = f();
+    REPR_FN_NAME.with(|n| *n.borrow_mut() = saved);
+    r
+}
+
 fn internal_attribute(name: &[u8]) -> Option<InternalAttribute> {
     let n = name
         .strip_prefix(b"\\")
@@ -5399,9 +5413,10 @@ impl Compiler {
                     func_compiler.op_array.param_types[cv as usize] = type_info;
 
                     if let Some(default_expr) = &param.default {
-                        func_compiler
-                            .op_array
-                            .set_param_default_repr(cv, self.default_value_repr(default_expr));
+                        let repr = with_repr_fn_name(&qualified_name, || {
+                            self.default_value_repr(default_expr)
+                        });
+                        func_compiler.op_array.set_param_default_repr(cv, repr);
                         // Emit: if param is Undef, set to default
                         let null_idx = func_compiler.op_array.add_literal(Value::Undef);
                         let check_tmp = func_compiler.op_array.alloc_temp();
@@ -23451,6 +23466,53 @@ impl Compiler {
                 b"true" | b"\\true" => Some(Value::True),
                 b"false" | b"\\false" => Some(Value::False),
                 b"null" | b"\\null" => Some(Value::Null),
+                // (magic constants are substituted at compile time)
+                b"__line__" => Some(Value::Long(expr.span.line as i64)),
+                b"__namespace__" => Some(Value::String(PhpString::from_vec(
+                    self.current_namespace.clone(),
+                ))),
+                b"__function__" => REPR_FN_NAME
+                    .with(|f| f.borrow().clone())
+                    .map(|n| Value::String(PhpString::from_vec(n))),
+                _ => None,
+            },
+            ExprKind::Ternary {
+                condition,
+                if_true,
+                if_false,
+            } => {
+                let c = self.fold_literal_default(condition)?;
+                if c.is_truthy() {
+                    match if_true {
+                        Some(t) => self.fold_literal_default(t),
+                        None => Some(c),
+                    }
+                } else {
+                    self.fold_literal_default(if_false)
+                }
+            }
+            ExprKind::NullCoalesce { left, right } => match self.fold_literal_default(left)? {
+                Value::Null => self.fold_literal_default(right),
+                v => Some(v),
+            },
+            ExprKind::UnaryOp {
+                op: UnaryOp::BooleanNot,
+                operand,
+                ..
+            } => match self.fold_literal_default(operand)? {
+                Value::Array(_) => None,
+                v => Some(if v.is_truthy() {
+                    Value::False
+                } else {
+                    Value::True
+                }),
+            },
+            ExprKind::UnaryOp {
+                op: UnaryOp::BitwiseNot,
+                operand,
+                ..
+            } => match self.fold_literal_default(operand)? {
+                Value::Long(n) => Some(Value::Long(!n)),
                 _ => None,
             },
             ExprKind::UnaryOp {
