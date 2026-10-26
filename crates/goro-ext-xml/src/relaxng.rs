@@ -297,6 +297,7 @@ fn nchildren(n: NodeId) -> Option<NodeId> {
 }
 
 fn set_next(n: NodeId, v: Option<NodeId>) {
+    tree::with(|t| t.touch());
     tree::with(|t| t.nodes[n].next = v)
 }
 

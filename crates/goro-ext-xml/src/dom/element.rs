@@ -74,6 +74,7 @@ pub fn set_prop(t: &mut Tree, n: NodeId, name: &str, value: &str) -> NodeId {
 
 /// dom_deep_ns_redef
 fn deep_ns_redef(t: &mut Tree, node: NodeId, ns: NsId) {
+    t.touch();
     let mut work: Vec<(NodeId, Option<NsId>)> = vec![(node, None)];
     while let Some((cur, mut defined)) = work.pop() {
         if t.nodes[cur].ns == Some(ns) {
@@ -647,6 +648,7 @@ fn m_set_attribute_ns(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
 }
 
 fn eliminate_ns(t: &mut Tree, elem: NodeId, ns: NsId) {
+    t.touch();
     t.nodes[elem].ns_def.retain(|&x| x != ns);
     let mut nodes = vec![elem];
     nodes.extend(

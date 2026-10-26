@@ -878,6 +878,7 @@ fn prop_dim_write(
     value: Option<&Value>,
     mut access: Access,
 ) -> Option<NodeId> {
+    tree::with(|t| t.touch());
     let mut retval_error = false;
     let s = sxe_of(obj)?;
     let mem: Option<Member> = match member {

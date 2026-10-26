@@ -841,6 +841,7 @@ fn m_get_descendant_namespaces(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
 
 /// Dom\Element::rename / Dom\Attr::rename
 fn m_rename(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
+    tree::with(|t| t.touch());
     let a = args(a);
     a.count(vm, 2, 2)?;
     let uri = a.opt_str(vm, 0, "namespaceURI")?;

@@ -289,6 +289,7 @@ pub fn convert_to_modern(doc: NodeId) {
 /// php_dom_libxml_reconcile_modern: move the namespaces of a subtree into
 /// the mapper of `doc`.
 pub fn reconcile_modern(t: &mut Tree, doc: NodeId, node: NodeId) {
+    t.touch();
     let map_one = |t: &mut Tree, cache: &mut HashMap<NsId, NsId>, x: NodeId| {
         if let Some(ns) = t.nodes[x].ns {
             let nn = match cache.get(&ns) {

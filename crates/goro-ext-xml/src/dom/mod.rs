@@ -170,6 +170,19 @@ pub struct DomData {
     /// Cached property objects ([SameObject] attributes such as
     /// Dom\Element::$classList or Dom\Document::$implementation).
     pub cache: RefCell<Vec<(&'static str, CacheEntry)>>,
+    /// Live node lists: the last item looked up and the length, valid
+    /// while the tree generation is unchanged (php_dom_obj_map's
+    /// cached_obj / cached_length with their cache tag).
+    pub list_cache: std::cell::Cell<ListCache>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct ListCache {
+    pub generation: u64,
+    /// (index, node) of the last item found
+    pub item: Option<(usize, NodeId)>,
+    pub len_generation: u64,
+    pub len: Option<i64>,
 }
 
 pub enum CacheEntry {
@@ -284,6 +297,7 @@ pub fn attach(o: &Obj, kind: Kind) {
         data: Rc::new(DomData {
             kind: RefCell::new(kind),
             cache: RefCell::new(Vec::new()),
+            list_cache: Default::default(),
         }) as Rc<dyn Any>,
         handlers: &HANDLERS,
     });
@@ -295,6 +309,7 @@ pub fn attach_with(o: &Obj, kind: Kind, handlers: &'static NativeObjectHandlers)
         data: Rc::new(DomData {
             kind: RefCell::new(kind),
             cache: RefCell::new(Vec::new()),
+            list_cache: Default::default(),
         }) as Rc<dyn Any>,
         handlers,
     });

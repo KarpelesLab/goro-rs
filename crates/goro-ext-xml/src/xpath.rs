@@ -1029,7 +1029,57 @@ fn eval_step(input: &[NodeId], st: &Step, ctx: &mut Ctx) -> Result<Vec<NodeId>, 
         Axis::Ancestor | Axis::AncestorOrSelf | Axis::Preceding | Axis::PrecedingSibling
     );
     let mut out: Vec<NodeId> = Vec::new();
+    // `child::x[k]` / `following-sibling::x[k]`: stop at the k-th match
+    // (the axis may be long and is walked for every context node)
+    let nth = match (st.axis, st.preds.first()) {
+        (Axis::Child | Axis::FollowingSibling, Some(Expr::Number(k)))
+            if *k >= 1.0 && k.fract() == 0.0 && *k < 1e9 =>
+        {
+            Some(*k as usize)
+        }
+        _ => None,
+    };
     for &n in input {
+        if let Some(want) = nth {
+            let hit = tw(|t| {
+                let nt = t.nodes[n].t;
+                let mut c = match st.axis {
+                    Axis::Child
+                        if !matches!(
+                            nt,
+                            NType::Attribute | NType::NamespaceDecl | NType::EntityRef
+                        ) =>
+                    {
+                        t.nodes[n].children
+                    }
+                    Axis::FollowingSibling
+                        if !matches!(nt, NType::Attribute | NType::NamespaceDecl) =>
+                    {
+                        t.nodes[n].next
+                    }
+                    _ => None,
+                };
+                let mut seen = 0;
+                while let Some(x) = c {
+                    let skip = st.axis == Axis::Child
+                        && matches!(t.nodes[x].t, NType::Dtd | NType::EntityDecl);
+                    if !skip && node_test(t, x, &st.test, test_ns.as_deref(), st.axis) {
+                        seen += 1;
+                        if seen == want {
+                            return Some(x);
+                        }
+                    }
+                    c = t.nodes[x].next;
+                }
+                None
+            });
+            let mut cand: Vec<NodeId> = hit.into_iter().collect();
+            for p in &st.preds[1..] {
+                cand = apply_predicate(&cand, p, ctx, false)?;
+            }
+            out.extend(cand);
+            continue;
+        }
         let mut cand = axis_nodes(n, st.axis);
         cand.retain(|&c| tw(|t| node_test(t, c, &st.test, test_ns.as_deref(), st.axis)));
         // predicates see proximity positions: reverse axes count from the
@@ -1302,8 +1352,46 @@ pub fn ns_node(t: &mut Tree, elem: NodeId, ns: tree::NsId) -> NodeId {
 // ---------------------------------------------------------------------------
 // Ordering
 
+/// Position of `x` among its siblings (`attr`: in the attribute list),
+/// memoized for the whole list on first use: keys of large node sets stay
+/// linear instead of walking `prev` for every node.
+fn sib_index(
+    t: &Tree,
+    x: NodeId,
+    parent: NodeId,
+    attr: bool,
+    memo: &mut HashMap<NodeId, usize>,
+) -> usize {
+    if let Some(&i) = memo.get(&x) {
+        return i;
+    }
+    let first = if attr {
+        t.nodes[parent].properties
+    } else {
+        t.nodes[parent].children
+    };
+    let mut i = 0;
+    let mut c = first;
+    while let Some(y) = c {
+        memo.insert(y, i);
+        i += 1;
+        c = t.nodes[y].next;
+    }
+    if let Some(&i) = memo.get(&x) {
+        return i;
+    }
+    // (not in its parent's list: count the previous siblings)
+    let mut i = 0;
+    let mut p = t.nodes[x].prev;
+    while let Some(y) = p {
+        i += 1;
+        p = t.nodes[y].prev;
+    }
+    i
+}
+
 /// Key for document order: path of (rank, index) from the root.
-fn order_key(t: &Tree, n: NodeId) -> Vec<(u8, usize)> {
+fn order_key(t: &Tree, n: NodeId, memo: &mut HashMap<NodeId, usize>) -> Vec<(u8, usize)> {
     let mut key = Vec::new();
     let mut cur = n;
     loop {
@@ -1319,24 +1407,8 @@ fn order_key(t: &Tree, n: NodeId) -> Vec<(u8, usize)> {
             // (xmlXPathCmpNodes(): the namespace nodes of an element tie;
             // the stable sort keeps the axis order)
             NType::NamespaceDecl => (0u8, 0),
-            NType::Attribute => {
-                let mut i = 0;
-                let mut p = nd.prev;
-                while let Some(x) = p {
-                    i += 1;
-                    p = t.nodes[x].prev;
-                }
-                (1u8, i)
-            }
-            _ => {
-                let mut i = 0;
-                let mut p = nd.prev;
-                while let Some(x) = p {
-                    i += 1;
-                    p = t.nodes[x].prev;
-                }
-                (2u8, i)
-            }
+            NType::Attribute => (1u8, sib_index(t, cur, parent, true, memo)),
+            _ => (2u8, sib_index(t, cur, parent, false, memo)),
         };
         key.push((rank, idx));
         cur = parent;
@@ -1351,8 +1423,10 @@ pub fn sort_dedup(v: &mut Vec<NodeId>) {
     }
     // quick check: already strictly increasing by id and unique is not
     // sufficient (ids are allocation order), so compute keys
-    let keys: Vec<(Vec<(u8, usize)>, NodeId)> =
-        tw(|t| v.iter().map(|&n| (order_key(t, n), n)).collect());
+    let keys: Vec<(Vec<(u8, usize)>, NodeId)> = tw(|t| {
+        let mut memo = HashMap::new();
+        v.iter().map(|&n| (order_key(t, n, &mut memo), n)).collect()
+    });
     let mut keys = keys;
     keys.sort_by(|a, b| a.0.cmp(&b.0));
     let mut seen = std::collections::HashSet::new();

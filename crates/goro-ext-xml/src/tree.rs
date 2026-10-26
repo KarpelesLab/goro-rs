@@ -317,6 +317,9 @@ pub struct Tree {
     pub predef: Vec<(String, NodeId)>,
     /// Slots given back with `release`, reused by `alloc`.
     pub free_slots: Vec<NodeId>,
+    /// Bumped by structural changes (php_libxml_invalidate_node_list_cache):
+    /// live node lists may resume from a cached position while unchanged.
+    pub generation: u64,
 }
 
 thread_local! {
@@ -348,7 +351,14 @@ impl Tree {
     // ------------------------------------------------------------------
     // Allocation
 
+    /// A structural change: cached node list positions are stale.
+    #[inline]
+    pub fn touch(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     pub fn alloc(&mut self, n: Node) -> NodeId {
+        self.touch();
         if let Some(id) = self.free_slots.pop() {
             self.nodes[id] = n;
             return id;
@@ -361,6 +371,7 @@ impl Tree {
     /// no other node) refers to any more, e.g. the nodes an XMLReader is
     /// done with. Its id may be reused by a later allocation.
     pub fn release(&mut self, id: NodeId) {
+        self.touch();
         self.nodes[id] = Node::new(NType::Text, "");
         self.free_slots.push(id);
     }
@@ -608,6 +619,7 @@ impl Tree {
 
     /// Append `child` as the last child of `parent` with no text merging.
     pub fn link_child_raw(&mut self, parent: NodeId, child: NodeId) {
+        self.touch();
         if self.nodes[child].t == NType::Attribute && self.nodes[parent].t == NType::Element {
             // attributes go to the property list
             self.nodes[child].parent = Some(parent);
@@ -646,6 +658,7 @@ impl Tree {
 
     /// Set the document of a subtree (xmlSetTreeDoc).
     pub fn set_tree_doc(&mut self, id: NodeId, doc: Option<NodeId>) {
+        self.touch();
         let mut stack = vec![id];
         while let Some(n) = stack.pop() {
             if self.nodes[n].doc == doc && n != id {
@@ -677,6 +690,7 @@ impl Tree {
 
     /// xmlUnlinkNode
     pub fn unlink(&mut self, id: NodeId) {
+        self.touch();
         let t = self.nodes[id].t;
         if t == NType::Dtd {
             if let Some(doc) = self.nodes[id].doc {
@@ -720,6 +734,7 @@ impl Tree {
 
     /// Insert `new` before `cur` (no merging).
     pub fn insert_before_raw(&mut self, cur: NodeId, new: NodeId) {
+        self.touch();
         let parent = self.nodes[cur].parent;
         let prev = self.nodes[cur].prev;
         self.nodes[new].parent = parent;
@@ -742,6 +757,7 @@ impl Tree {
 
     /// Insert `new` after `cur` (no merging).
     pub fn insert_after_raw(&mut self, cur: NodeId, new: NodeId) {
+        self.touch();
         let parent = self.nodes[cur].parent;
         let next = self.nodes[cur].next;
         self.nodes[new].parent = parent;
@@ -1065,6 +1081,7 @@ impl Tree {
         name: &str,
         value: &str,
     ) -> NodeId {
+        self.touch();
         let href = ns.map(|n| self.nss[n].href.clone());
         if let Some(a) = self.has_ns_prop(node, name, href.as_deref()) {
             // An ID stays one (its new value registered if free).
@@ -1176,6 +1193,7 @@ impl Tree {
 
     /// Replace all children of `id` with a single text node.
     pub fn set_children_text(&mut self, id: NodeId, value: &str) {
+        self.touch();
         let kids = self.children_of(id);
         for k in kids {
             self.unlink(k);

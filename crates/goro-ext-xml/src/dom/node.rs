@@ -80,6 +80,7 @@ fn new_reconciled_ns(t: &mut Tree, tree_root: NodeId, ns: NsId) -> Option<NsId> 
 
 /// xmlReconciliateNs
 pub fn reconciliate_ns(t: &mut Tree, root: NodeId) {
+    t.touch();
     if t.nodes[root].t != NType::Element {
         return;
     }
@@ -212,6 +213,7 @@ pub fn insert_fragment(
     nextsib: Option<NodeId>,
     frag: NodeId,
 ) -> Option<NodeId> {
+    t.touch();
     let newchild = t.nodes[frag].children?;
     let flast = t.nodes[frag].last.unwrap();
     match prevsib {
@@ -241,6 +243,7 @@ pub fn insert_fragment(
 
 /// xmlReplaceNode(old, cur)
 pub fn replace_node(t: &mut Tree, old: NodeId, cur: NodeId) {
+    t.touch();
     if old == cur {
         return;
     }
@@ -418,6 +421,7 @@ fn w_node_value(_vm: &mut Vm, _o: &Obj, n: NodeId, v: &Value) -> R<()> {
 }
 
 pub fn remove_all_children(t: &mut Tree, n: NodeId) {
+    t.touch();
     for c in t.children_of(n) {
         t.unlink(c);
     }
@@ -561,6 +565,7 @@ fn r_prefix(_vm: &mut Vm, _o: &Obj, n: NodeId) -> R<Value> {
 }
 
 fn w_prefix(vm: &mut Vm, _o: &Obj, n: NodeId, v: &Value) -> R<()> {
+    tree::with(|t| t.touch());
     let prefix = cstr(&str_of(v)).to_string();
     let doc = doc_of_node(n);
     let r = tree::with(|t| -> Result<(), i64> {
@@ -973,6 +978,7 @@ pub fn append_child_legacy(vm: &mut Vm, parent: NodeId, child: NodeId) -> R<Valu
 
 /// php_dom_reconcile_attribute_namespace_after_insertion
 pub fn reconcile_attribute_ns_after_insertion(t: &mut Tree, attr: NodeId) {
+    t.touch();
     let ns = match t.nodes[attr].ns {
         Some(ns) => ns,
         None => return,
@@ -1935,6 +1941,7 @@ fn pre_insert_helper(
     newchild: NodeId,
     last: NodeId,
 ) {
+    t.touch();
     match insertion_point {
         None => {
             match t.nodes[parent].children {
@@ -1967,6 +1974,7 @@ fn insert_node_list_unchecked(
     parent: NodeId,
     mut insertion_point: Option<NodeId>,
 ) {
+    t.touch();
     if t.nodes[node].t == NType::DocumentFrag {
         if let Some(newchild) = t.nodes[node].children {
             let last = t.nodes[node].last.unwrap();

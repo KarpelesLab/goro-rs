@@ -413,6 +413,7 @@ pub fn entity_props() -> Vec<Prop> {
 // EntityReference
 
 pub fn sync_entity_ref(n: NodeId) -> Option<NodeId> {
+    tree::with(|t| t.touch());
     tree::with(|t| {
         if t.nodes[n].t != NType::EntityRef {
             return t.nodes[n].children;

@@ -38,7 +38,7 @@ enum LK {
         ns: Option<String>,
         local: String,
     },
-    Static(Vec<Value>),
+    Static,
     Empty,
     /// modern collections (Dom\HTMLCollection)
     ChildElements(NodeId),
@@ -78,7 +78,8 @@ fn map_ref(o: &Obj) -> Option<MapRef> {
                 },
                 None => LK::Empty,
             },
-            ListKind::Static(v) => LK::Static(v.clone()),
+            // (the items are read in place by static_list())
+            ListKind::Static(_) => LK::Static,
             ListKind::Empty => LK::Empty,
             ListKind::ChildElements(b) => node_of(b).map(LK::ChildElements).unwrap_or(LK::Empty),
             ListKind::ByQName { base, qname } => match node_of(base) {
@@ -148,6 +149,53 @@ fn by_tag(t: &Tree, base: NodeId, ns: Option<&str>, local: &str, limit: usize) -
     out
 }
 
+/// The `idx`-th element of a ByTag list, resuming from the list's cached
+/// position when the tree is unchanged and `idx` is not before it (as
+/// php-src's node list cache does: sequential access stays linear).
+fn by_tag_item(
+    t: &Tree,
+    d: Option<&DomData>,
+    base: NodeId,
+    ns: Option<&str>,
+    local: &str,
+    idx: usize,
+) -> Option<NodeId> {
+    let cached = d.and_then(|d| {
+        let c = d.list_cache.get();
+        if c.generation == t.generation {
+            c.item.filter(|&(i, _)| i <= idx)
+        } else {
+            None
+        }
+    });
+    let found = match cached {
+        Some((i, n)) if i == idx => Some(n),
+        Some((mut i, n)) => {
+            let mut cur = next_in_tree(t, n, base);
+            let mut hit = None;
+            while let Some(x) = cur {
+                if tag_matches(t, x, ns, local) {
+                    i += 1;
+                    if i == idx {
+                        hit = Some(x);
+                        break;
+                    }
+                }
+                cur = next_in_tree(t, x, base);
+            }
+            hit
+        }
+        None => by_tag(t, base, ns, local, idx + 1).get(idx).copied(),
+    };
+    if let (Some(d), Some(n)) = (d, found) {
+        let mut c = d.list_cache.get();
+        c.generation = t.generation;
+        c.item = Some((idx, n));
+        d.list_cache.set(c);
+    }
+    found
+}
+
 fn children_start(n: NodeId) -> Option<NodeId> {
     let is_ref = tree::with(|t| t.nodes[n].t == NType::EntityRef);
     if is_ref {
@@ -156,7 +204,20 @@ fn children_start(n: NodeId) -> Option<NodeId> {
     tree::with(|t| t.nodes[n].children)
 }
 
+/// A static list's items without copying them (map_ref clones the list).
+fn static_list<R>(o: &Obj, f: impl FnOnce(&[Value]) -> R) -> Option<R> {
+    let d = data_of(o)?;
+    let k = d.kind.borrow();
+    match &*k {
+        Kind::List(ListKind::Static(v)) => Some(f(v)),
+        _ => None,
+    }
+}
+
 pub fn list_length(o: &Obj) -> i64 {
+    if let Some(n) = static_list(o, |v| v.len() as i64) {
+        return n;
+    }
     match map_ref(o) {
         Some(MapRef::List(l)) => match l {
             LK::Children(n) => {
@@ -172,9 +233,27 @@ pub fn list_length(o: &Obj) -> i64 {
                 })
             }
             LK::ByTag { base, ns, local } => {
-                tree::with(|t| by_tag(t, base, ns.as_deref(), &local, usize::MAX).len() as i64)
+                let d = data_of(o);
+                tree::with(|t| {
+                    if let Some(d) = &d {
+                        let c = d.list_cache.get();
+                        if let Some(len) = c.len {
+                            if c.len_generation == t.generation {
+                                return len;
+                            }
+                        }
+                    }
+                    let len = by_tag(t, base, ns.as_deref(), &local, usize::MAX).len() as i64;
+                    if let Some(d) = &d {
+                        let mut c = d.list_cache.get();
+                        c.len = Some(len);
+                        c.len_generation = t.generation;
+                        d.list_cache.set(c);
+                    }
+                    len
+                })
             }
-            LK::Static(v) => v.len() as i64,
+            LK::Static => 0,
             LK::Empty => 0,
             l => tree::with(|t| modern_nodes(t, &l, usize::MAX).len() as i64),
         },
@@ -211,6 +290,9 @@ pub fn get_item(vm: &mut Vm, o: &Obj, index: i64) -> Value {
         return Value::Null;
     }
     let idx = index as usize;
+    if let Some(v) = static_list(o, |v| v.get(idx).cloned()) {
+        return v.unwrap_or(Value::Null);
+    }
     let node = match map_ref(o) {
         Some(MapRef::List(l)) => match l {
             LK::Children(n) => {
@@ -228,12 +310,11 @@ pub fn get_item(vm: &mut Vm, o: &Obj, index: i64) -> Value {
                     None
                 })
             }
-            LK::ByTag { base, ns, local } => tree::with(|t| {
-                by_tag(t, base, ns.as_deref(), &local, idx + 1)
-                    .get(idx)
-                    .copied()
-            }),
-            LK::Static(v) => return v.get(idx).cloned().unwrap_or(Value::Null),
+            LK::ByTag { base, ns, local } => {
+                let d = data_of(o);
+                tree::with(|t| by_tag_item(t, d.as_deref(), base, ns.as_deref(), &local, idx))
+            }
+            LK::Static => None,
             LK::Empty => None,
             l => tree::with(|t| modern_nodes(t, &l, idx + 1).get(idx).copied()),
         },

@@ -514,7 +514,11 @@ impl CompatSink {
             };
             {
                 let mut a = arr.borrow_mut();
-                let last_key = a.keys().last().cloned();
+                let last_key = a
+                    .len()
+                    .checked_sub(1)
+                    .and_then(|i| a.entry_at(i))
+                    .map(|(k, _)| k.clone());
                 if let Some(lk) = last_key {
                     if let Some(Value::Array(cur)) = a.get(&lk).cloned() {
                         let is_cdata = matches!(cur.borrow().get(&skey("type")), Some(Value::String(t)) if t.as_bytes() == b"cdata");
@@ -634,9 +638,11 @@ fn separated_array(r: &Rc<RefCell<Value>>) -> Option<Rc<RefCell<PhpArray>>> {
     let mut v = r.borrow_mut();
     let inner: &mut Value = &mut v;
     if let Value::Array(a) = inner {
-        let s = separate_rc(a.clone());
-        *a = s.clone();
-        return Some(s);
+        if Rc::strong_count(a) > 1 {
+            let copy = a.borrow().clone();
+            *a = Rc::new(RefCell::new(copy));
+        }
+        return Some(a.clone());
     }
     None
 }
@@ -646,19 +652,24 @@ fn ctag(data: &Rc<RefCell<Value>>, idx: i64) -> Option<Rc<RefCell<PhpArray>>> {
     let arr = separated_array(data)?;
     let mut a = arr.borrow_mut();
     let k = ArrayKey::Int(idx);
-    let cur = match a.get(&k)? {
-        Value::Array(c) => c.clone(),
+    match a.get_mut(&k)? {
+        Value::Array(c) => {
+            // (separate in place: no copy while the array holds the only
+            // reference)
+            if Rc::strong_count(c) > 1 {
+                let copy = c.borrow().clone();
+                *c = Rc::new(RefCell::new(copy));
+            }
+            Some(c.clone())
+        }
         Value::Reference(r) => {
             if let Value::Array(c) = &*r.borrow() {
                 return Some(c.clone());
             }
-            return None;
+            None
         }
-        _ => return None,
-    };
-    let s = separate_rc(cur);
-    a.set(k, Value::Array(s.clone()));
-    Some(s)
+        _ => None,
+    }
 }
 
 /// xml_add_to_info
@@ -674,12 +685,22 @@ fn add_to_info(b: &mut XmlState, name: &[u8]) {
     {
         let mut a = arr.borrow_mut();
         let key = Vm::value_to_array_key(pstr(name.to_vec()));
-        let list = match a.get(&key) {
-            Some(Value::Array(l)) => separate_rc(l.clone()),
-            _ => Rc::new(RefCell::new(PhpArray::new())),
-        };
-        list.borrow_mut().push(Value::Long(b.curtag));
-        a.set(key, Value::Array(list));
+        match a.get_mut(&key) {
+            Some(Value::Array(l)) => {
+                // (pushed in place: copying the list for each tag would
+                // make the index quadratic)
+                if Rc::strong_count(l) > 1 {
+                    let copy = l.borrow().clone();
+                    *l = Rc::new(RefCell::new(copy));
+                }
+                l.borrow_mut().push(Value::Long(b.curtag));
+            }
+            _ => {
+                let mut list = PhpArray::new();
+                list.push(Value::Long(b.curtag));
+                a.set(key, Value::Array(Rc::new(RefCell::new(list))));
+            }
+        }
     }
     b.curtag += 1;
 }

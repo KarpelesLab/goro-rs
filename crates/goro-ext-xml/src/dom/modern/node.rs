@@ -661,6 +661,7 @@ fn pre_insert_helper(
     newchild: NodeId,
     last: NodeId,
 ) {
+    t.touch();
     match insertion_point {
         None => {
             match t.nodes[parent].children {
@@ -694,6 +695,7 @@ fn insert_node_list_unchecked(
     parent: NodeId,
     mut insertion_point: Option<NodeId>,
 ) {
+    t.touch();
     if t.nodes[node].t == NType::DocumentFrag {
         if let Some(newchild) = t.nodes[node].children {
             let last = t.nodes[node].last.unwrap();
@@ -876,6 +878,7 @@ fn insert_fragment(
     nextsib: Option<NodeId>,
     frag: NodeId,
 ) {
+    t.touch();
     let first = match t.nodes[frag].children {
         Some(f) => f,
         None => return,
@@ -1428,6 +1431,7 @@ struct Relinked {
 /// dom_relink_ns_decls: make the xmlns attributes of a modern document
 /// visible as namespace declarations for the canonicalizer.
 fn relink_ns_decls(t: &mut Tree, root: NodeId) -> Vec<Relinked> {
+    t.touch();
     let mut out = Vec::new();
     let mut cur = Some(root);
     while let Some(x) = cur {
@@ -1482,6 +1486,7 @@ fn relink_ns_decls(t: &mut Tree, root: NodeId) -> Vec<Relinked> {
 
 /// dom_unlink_ns_decls
 fn unlink_ns_decls(t: &mut Tree, saved: Vec<Relinked>) {
+    t.touch();
     for r in saved {
         t.nodes[r.elem].ns_def.clear();
         t.nodes[r.elem].ns = r.ns;
