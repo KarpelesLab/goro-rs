@@ -8042,7 +8042,7 @@ impl Compiler {
                                                                 crate::array::ArrayKey::Int(n)
                                                             }
                                                             Value::String(s) => {
-                                                                crate::array::ArrayKey::String(s)
+                                                                Self::const_str_key(s)
                                                             }
                                                             _ => {
                                                                 all_const = false;
@@ -10858,10 +10858,10 @@ impl Compiler {
                                                     match v {
                                                         Value::Array(src_arr) => {
                                                             // Spread literal array
-                                                            let src_borrow = src_arr.borrow();
-                                                            for (k, sv) in src_borrow.iter() {
-                                                                arr.set(k.clone(), sv.clone());
-                                                            }
+                                                            Self::const_spread_into(
+                                                                &mut arr,
+                                                                &src_arr.borrow(),
+                                                            );
                                                         }
                                                         Value::String(ref s)
                                                             if s.as_bytes().starts_with(
@@ -10905,7 +10905,7 @@ impl Compiler {
                                                                 crate::array::ArrayKey::Int(n)
                                                             }
                                                             Value::String(s) => {
-                                                                crate::array::ArrayKey::String(s)
+                                                                Self::const_str_key(s)
                                                             }
                                                             _ => {
                                                                 ok = false;
@@ -23381,6 +23381,24 @@ impl Compiler {
         }
     }
 
+    /// The array key a constant-expression string key stands for ("1" is 1).
+    fn const_str_key(s: PhpString) -> crate::array::ArrayKey {
+        match crate::fastpath::canonical_int_key(s.as_bytes()) {
+            Some(n) => crate::array::ArrayKey::Int(n),
+            None => crate::array::ArrayKey::String(s),
+        }
+    }
+
+    /// Spreads `src` into a constant-expression array (integer keys renumbered).
+    fn const_spread_into(arr: &mut crate::array::PhpArray, src: &crate::array::PhpArray) {
+        for (k, v) in src.iter() {
+            match k {
+                crate::array::ArrayKey::Int(_) => arr.push(v.clone()),
+                _ => arr.set(k.clone(), v.clone()),
+            }
+        }
+    }
+
     fn eval_const_expr(expr: &Expr) -> Option<Value> {
         match &expr.kind {
             ExprKind::Int(n) => Some(Value::Long(*n)),
@@ -23396,10 +23414,7 @@ impl Compiler {
                     if elem.unpack {
                         // Spread operator in constant expression: only arrays allowed
                         if let Value::Array(src_arr) = val {
-                            let src_borrow = src_arr.borrow();
-                            for (k, v) in src_borrow.iter() {
-                                arr.set(k.clone(), v.clone());
-                            }
+                            Self::const_spread_into(&mut arr, &src_arr.borrow());
                         } else {
                             // Non-array in constant expression spread: return None
                             // (will be handled at runtime with proper error)
@@ -23409,7 +23424,8 @@ impl Compiler {
                         let k = Self::eval_const_expr(key_expr)?;
                         let key = match k {
                             Value::Long(n) => crate::array::ArrayKey::Int(n),
-                            Value::String(s) => crate::array::ArrayKey::String(s),
+                            // ("1" is the integer key 1)
+                            Value::String(s) => Self::const_str_key(s),
                             _ => return None,
                         };
                         arr.set(key, val);
@@ -23698,7 +23714,7 @@ impl Compiler {
                         let key_val = Self::eval_const_expr(idx_expr)?;
                         let key = match key_val {
                             Value::Long(n) => crate::array::ArrayKey::Int(n),
-                            Value::String(s) => crate::array::ArrayKey::String(s),
+                            Value::String(s) => Self::const_str_key(s),
                             _ => return None,
                         };
                         Some(arr.get(&key).cloned().unwrap_or(Value::Null))
