@@ -396,7 +396,11 @@ pub fn run_main_script(vm: &mut Vm, src: &[u8], name: &str) -> Result<Value, VmE
         }
         return vm.execute_chunk(&c.op_array);
     }
-    match compile(src, name, true) {
+    let compiled = {
+        let _ct = goro_core::compiler::CtVmGuard::new(vm);
+        compile(src, name, true)
+    };
+    match compiled {
         Ok(mut c) => {
             if goro_core::script_cache::enabled()
                 && goro_core::script_cache::store_compiled(

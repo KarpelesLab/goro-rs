@@ -140,6 +140,185 @@ fn check_class_attr_validators(class: &crate::object::ClassEntry, line: u32) -> 
 }
 
 thread_local! {
+    /// The VM whose constants and classes the compile sees (what
+    /// zend_try_ct_eval_const() / zend_try_ct_eval_class_const() look up),
+    /// while a CtVmGuard is alive.
+    static CT_VM: Cell<*const crate::vm::Vm> = const { Cell::new(std::ptr::null()) };
+    /// Set while rendering attribute arguments (to the attribute's line):
+    /// constants fold like the compiler folds them
+    /// (ReflectionAttribute::__toString()).
+    static CT_FOLD_CONSTS: Cell<u32> = const { Cell::new(0) };
+    /// The public scalar constants of the classes of the file being compiled
+    /// that are bound at compile time ("class::NAME" => (value, the class's
+    /// end line)): later code can fold them (zend_try_ct_eval_class_const()).
+    static CT_USER_CLASS_CONSTS: std::cell::RefCell<HashMap<Vec<u8>, (Value, u32)>>
+        = std::cell::RefCell::new(HashMap::new());
+}
+
+/// More of zend_eval_const_expr()'s binary operations (scalar operands).
+#[inline(never)]
+fn ct_fold_binop_ext(op: BinaryOp, l: &Value, r: &Value) -> Option<Value> {
+    if matches!(l, Value::Array(_) | Value::Object(_)) || matches!(r, Value::Array(_) | Value::Object(_)) {
+        return None;
+    }
+    let b = |x: bool| if x { Value::True } else { Value::False };
+    let num = |v: &Value| match v {
+        Value::Long(n) => Some(*n as f64),
+        Value::Double(f) => Some(*f),
+        _ => None,
+    };
+    Some(match op {
+        BinaryOp::BooleanAnd | BinaryOp::LogicalAnd => b(l.is_truthy() && r.is_truthy()),
+        BinaryOp::BooleanOr | BinaryOp::LogicalOr => b(l.is_truthy() || r.is_truthy()),
+        BinaryOp::LogicalXor => b(l.is_truthy() != r.is_truthy()),
+        BinaryOp::Identical => b(l.identical(r)),
+        BinaryOp::NotIdentical => b(!l.identical(r)),
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul
+            if matches!(l, Value::Double(_)) || matches!(r, Value::Double(_)) =>
+        {
+            let (x, y) = (num(l)?, num(r)?);
+            Value::Double(match op {
+                BinaryOp::Add => x + y,
+                BinaryOp::Sub => x - y,
+                _ => x * y,
+            })
+        }
+        BinaryOp::Less | BinaryOp::Greater | BinaryOp::LessEqual | BinaryOp::GreaterEqual
+        | BinaryOp::Equal | BinaryOp::NotEqual => {
+            let (x, y) = (num(l)?, num(r)?);
+            b(match op {
+                BinaryOp::Less => x < y,
+                BinaryOp::Greater => x > y,
+                BinaryOp::LessEqual => x <= y,
+                BinaryOp::GreaterEqual => x >= y,
+                BinaryOp::Equal => x == y,
+                _ => x != y,
+            })
+        }
+        _ => return None,
+    })
+}
+
+/// Record the foldable constants of an early-bound class (see
+/// CT_USER_CLASS_CONSTS).
+#[inline(never)]
+fn record_ct_class_consts(c: &ClassEntry) {
+    let lower = c.name.to_ascii_lowercase();
+    CT_USER_CLASS_CONSTS.with(|m| {
+        let mut m = m.borrow_mut();
+        for (name, v) in c.constants.iter() {
+            let scalar = matches!(
+                v,
+                Value::Null | Value::True | Value::False | Value::Long(_) | Value::Double(_)
+            ) || matches!(v, Value::String(s) if !s.as_bytes().starts_with(b"__"));
+            let public = c.constants_meta.get(name).is_none_or(|meta| {
+                meta.visibility == crate::object::Visibility::Public && meta.attributes.is_empty()
+            });
+            if scalar && public {
+                let mut key = lower.clone();
+                key.extend_from_slice(b"::");
+                key.extend_from_slice(name);
+                m.insert(key, (v.clone(), c.end_line));
+            }
+        }
+        // (inherited ones: the parent was bound before it)
+        if let Some(parent) = &c.parent {
+            let mut pfx = parent.to_ascii_lowercase();
+            if pfx.first() == Some(&b'\\') {
+                pfx.remove(0);
+            }
+            pfx.extend_from_slice(b"::");
+            let inherited: Vec<(Vec<u8>, Value)> = m
+                .iter()
+                .filter_map(|(k, (v, _))| {
+                    k.strip_prefix(pfx.as_slice())
+                        .filter(|n| !c.constants.contains_key(*n))
+                        .map(|n| (n.to_vec(), v.clone()))
+                })
+                .collect();
+            for (n, v) in inherited {
+                let mut key = lower.clone();
+                key.extend_from_slice(b"::");
+                key.extend_from_slice(&n);
+                m.insert(key, (v, c.end_line));
+            }
+        }
+    });
+}
+
+/// The class being compiled, for compile-time folding of `self::X`
+/// (zend_try_ct_eval_class_const() on the active class entry): its
+/// lowercase name and its constants (name, value expression, line).
+struct ActiveClassCt {
+    name_lower: Vec<u8>,
+    consts: Vec<(Vec<u8>, *const Expr, u32)>,
+}
+
+thread_local! {
+    static ACTIVE_CLASS_CT: std::cell::RefCell<Option<ActiveClassCt>>
+        = const { std::cell::RefCell::new(None) };
+    static CT_FOLD_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Restores the previous ACTIVE_CLASS_CT when the class's compile ends.
+struct ActiveClassCtGuard(Option<ActiveClassCt>);
+
+impl ActiveClassCtGuard {
+    #[inline(never)]
+    fn set(qualified: &[u8], body: &[ClassMember], foldable: bool) -> Self {
+        let new = foldable.then(|| ActiveClassCt {
+            name_lower: qualified.to_ascii_lowercase(),
+            consts: body
+                .iter()
+                .filter_map(|m| match m {
+                    ClassMember::ClassConstant { name, value, .. } => {
+                        Some((name.clone(), value as *const Expr, value.span.line))
+                    }
+                    _ => None,
+                })
+                .collect(),
+        });
+        ActiveClassCtGuard(ACTIVE_CLASS_CT.with(|a| a.replace(new)))
+    }
+}
+
+impl Drop for ActiveClassCtGuard {
+    fn drop(&mut self) {
+        let prev = self.0.take();
+        ACTIVE_CLASS_CT.with(|a| *a.borrow_mut() = prev);
+    }
+}
+
+/// Makes `vm`'s constants and classes visible to the compiles run while it
+/// is alive (compile-time constant substitution). The VM must not be
+/// changed while a compile runs.
+pub struct CtVmGuard(*const crate::vm::Vm);
+
+impl CtVmGuard {
+    pub fn new(vm: &crate::vm::Vm) -> Self {
+        CtVmGuard(CT_VM.with(|c| c.replace(vm as *const crate::vm::Vm)))
+    }
+}
+
+impl Drop for CtVmGuard {
+    fn drop(&mut self) {
+        CT_VM.with(|c| c.set(self.0));
+    }
+}
+
+/// A constant ("NAME") or class constant ("class::NAME") the compile may
+/// substitute (see Vm::ct_constant()).
+fn persistent_ct_const(name: &[u8]) -> Option<Value> {
+    let p = CT_VM.with(|c| c.get());
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: the guard's VM outlives it and is not changed while the
+    // compile runs.
+    unsafe { &*p }.ct_constant(name)
+}
+
+thread_local! {
     /// The function whose parameter defaults are being rendered
     /// (__FUNCTION__ in a default folds to its name).
     static REPR_FN_NAME: std::cell::RefCell<Option<Vec<u8>>> = const { std::cell::RefCell::new(None) };
@@ -1895,6 +2074,8 @@ impl Compiler {
                     line: 0,
                 });
                 // Reflection's rendering of each argument (ReflectionAttribute::__toString).
+                // (folded as the compiler folds constant expressions)
+                let saved_fold = CT_FOLD_CONSTS.with(|f| f.replace(attr.line.max(1)));
                 ac.op_array.param_default_repr = attr
                     .args
                     .iter()
@@ -1905,6 +2086,7 @@ impl Compiler {
                         })
                     })
                     .collect();
+                CT_FOLD_CONSTS.with(|f| f.set(saved_fold));
                 // validate_nodiscard(): not on a property hook.
                 let validation_error = (self.in_hook_attrs
                     && name
@@ -2967,6 +3149,7 @@ impl Compiler {
         program: &Program,
     ) -> CompileResult<(OpArray, Vec<ClassEntry>, Vec<(String, u32)>)> {
         self.is_top_level = true;
+        CT_USER_CLASS_CONSTS.with(|m| m.borrow_mut().clear());
         crate::ast_export::register_program(program);
         let warnings_base = COMPILE_WARNINGS.with(|w| w.borrow().len());
         let pending_diag_base = PENDING_COMPILE_DIAGNOSTICS.with(|w| w.borrow().len());
@@ -3488,6 +3671,9 @@ impl Compiler {
                         let r = self.compile_stmt(stmt);
                         self.in_hoisting_pass = false;
                         r?;
+                        if let Some(c) = self.compiled_classes.last() {
+                            record_ct_class_consts(c);
+                        }
                         self.hoisted_class_idx
                             .insert(qn_lower.clone(), self.compiled_classes.len() as i64 - 1);
                         self.hoisted_class_names.insert(qn_lower);
@@ -6795,6 +6981,12 @@ impl Compiler {
                     // Prefix class name with namespace
                     self.prefix_with_namespace(name)
                 };
+                // (self:: folds at compile time in a non-trait class)
+                let _ct_guard = ActiveClassCtGuard::set(
+                    &qualified_name,
+                    body,
+                    !is_anonymous && !modifiers.is_trait && !modifiers.is_enum,
+                );
                 // Check for reserved class names
                 let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
                 let (article, kind) = if modifiers.is_interface {
@@ -23809,8 +24001,14 @@ impl Compiler {
                 b"__function__" => REPR_FN_NAME
                     .with(|f| f.borrow().clone())
                     .map(|n| Value::String(PhpString::from_vec(n))),
+                _ if CT_FOLD_CONSTS.with(|f| f.get()) != 0 => self.ct_fold_global_const(n),
                 _ => None,
             },
+            ExprKind::ClassConstAccess { class, constant }
+                if CT_FOLD_CONSTS.with(|f| f.get()) != 0 =>
+            {
+                self.ct_fold_class_const(class, constant)
+            }
             ExprKind::Ternary {
                 condition,
                 if_true,
@@ -23903,6 +24101,11 @@ impl Compiler {
             ExprKind::BinaryOp { op, left, right } => {
                 let l = self.fold_literal_default(left)?;
                 let r = self.fold_literal_default(right)?;
+                if CT_FOLD_CONSTS.with(|f| f.get()) != 0 {
+                    if let Some(v) = ct_fold_binop_ext(*op, &l, &r) {
+                        return Some(v);
+                    }
+                }
                 match (op, &l, &r) {
                     (BinaryOp::Add, Value::Long(a), Value::Long(b)) => {
                         a.checked_add(*b).map(Value::Long)
@@ -23936,8 +24139,110 @@ impl Compiler {
         }
     }
 
+    /// zend_try_ct_eval_const(): an internal constant named by `n`, fully
+    /// qualified or in the global namespace (a namespaced name is looked
+    /// up as such: no internal constant has one).
+    #[inline(never)]
+    fn ct_fold_global_const(&self, n: &[u8]) -> Option<Value> {
+        let name = match n.strip_prefix(b"\\") {
+            Some(rest) => rest,
+            None if self.current_namespace.is_empty()
+                && !self.use_const_map.contains_key(n)
+                && !self.use_const_map.contains_key(&n.to_ascii_lowercase()) =>
+            {
+                n
+            }
+            None => return None,
+        };
+        if name.contains(&b'\\') {
+            return None;
+        }
+        persistent_ct_const(name)
+    }
+
+    /// zend_try_ct_eval_class_const() for an internal class's constant.
+    #[inline(never)]
+    fn ct_fold_class_const(&self, class: &Expr, constant: &[u8]) -> Option<Value> {
+        let ExprKind::Identifier(n) = &class.kind else {
+            return None;
+        };
+        let lower = n.to_ascii_lowercase();
+        let active = ACTIVE_CLASS_CT.with(|a| a.borrow().as_ref().map(|c| c.name_lower.clone()));
+        let mut key = if lower.as_slice() == b"self" {
+            active.clone()?
+        } else if matches!(lower.as_slice(), b"parent" | b"static") {
+            return None;
+        } else {
+            let mut k = self.resolve_class_name(n);
+            if k.first() == Some(&b'\\') {
+                k.remove(0);
+            }
+            if constant.eq_ignore_ascii_case(b"class") {
+                return Some(Value::String(PhpString::from_vec(k)));
+            }
+            k.to_ascii_lowercase()
+        };
+        if constant.eq_ignore_ascii_case(b"class") {
+            // self::class: the active class's name.
+            return self
+                .current_class
+                .clone()
+                .map(|c| Value::String(PhpString::from_vec(c)));
+        }
+        // The class being compiled: its constants declared so far.
+        if active.as_deref() == Some(key.as_slice()) {
+            let line = CT_FOLD_CONSTS.with(|f| f.get());
+            let expr = ACTIVE_CLASS_CT.with(|a| {
+                a.borrow().as_ref().and_then(|c| {
+                    c.consts
+                        .iter()
+                        .find(|(nm, _, l)| nm.as_slice() == constant && *l <= line)
+                        .map(|(_, e, _)| *e)
+                })
+            })?;
+            let depth = CT_FOLD_DEPTH.with(|d| d.get());
+            if depth > 16 {
+                return None;
+            }
+            CT_FOLD_DEPTH.with(|d| d.set(depth + 1));
+            // SAFETY: the class body outlives its compile (the guard is
+            // dropped before the AST).
+            let v = self.fold_literal_default(unsafe { &*expr });
+            CT_FOLD_DEPTH.with(|d| d.set(depth));
+            return v.filter(|v| !matches!(v, Value::Array(_)));
+        }
+        key.extend_from_slice(b"::");
+        key.extend_from_slice(constant);
+        persistent_ct_const(&key).or_else(|| {
+            // A class of this file bound at compile time before the use.
+            let line = CT_FOLD_CONSTS.with(|f| f.get());
+            CT_USER_CLASS_CONSTS.with(|m| {
+                m.borrow()
+                    .get(&key)
+                    .filter(|(_, end)| *end < line)
+                    .map(|(v, _)| v.clone())
+            })
+        })
+    }
+
     /// Port of `zend_ast_export_ex` for constant expressions.
     fn export_const_expr(&self, expr: &Expr, priority: i32) -> Option<String> {
+        // A sub-expression the compiler folded is shown as its value.
+        if CT_FOLD_CONSTS.with(|f| f.get()) != 0
+            && !matches!(
+                expr.kind,
+                ExprKind::Int(_)
+                    | ExprKind::Float(_)
+                    | ExprKind::String(_)
+                    | ExprKind::True
+                    | ExprKind::False
+                    | ExprKind::Null
+            )
+        {
+            if let Some(v) = self.fold_literal_default(expr) {
+                return Some(crate::reflection::format_default_value(&v));
+            }
+        }
         fn qstr(s: &[u8]) -> String {
             let mut out = String::from("'");
             for &c in s {

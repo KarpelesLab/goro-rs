@@ -1818,3 +1818,58 @@ impl Vm {
         None
     }
 }
+
+impl Vm {
+    /// zend_try_ct_eval_const() / zend_try_ct_eval_class_const(): the value
+    /// of constant `name` ("NAME", or "class_lower::NAME") a compile may
+    /// substitute: a defined, non-deprecated constant with a scalar value,
+    /// or a public scalar constant of a declared class (not an enum).
+    pub fn ct_constant(&self, name: &[u8]) -> Option<Value> {
+        let scalar = |v: &Value| match v {
+            Value::Null | Value::True | Value::False | Value::Long(_) | Value::Double(_) => true,
+            Value::String(s) => !s.as_bytes().starts_with(b"__"),
+            _ => false,
+        };
+        if let Some(sep) = name.windows(2).position(|w| w == b"::") {
+            let (cl, cname) = (&name[..sep], &name[sep + 2..]);
+            if let Some(c) = self.classes.get(cl) {
+                if c.is_enum {
+                    return None;
+                }
+                let v = c.constants.get(cname)?;
+                let ok = c.constants_meta.get(cname).is_none_or(|m| {
+                    m.visibility == crate::object::Visibility::Public && m.attributes.is_empty()
+                });
+                if ok && scalar(v) {
+                    return Some(v.clone());
+                }
+                if c.filename.is_some() {
+                    return None;
+                }
+            }
+            // An internal class: public, not deprecated.
+            let stub = crate::stubs::find_class_lower(cl)?;
+            if !stub.cases.is_empty() {
+                return None;
+            }
+            let k = stub.consts.iter().find(|k| k.name.as_bytes() == cname)?;
+            if k.flags & 1 == 0 || k.flags & 0x800 != 0 {
+                return None;
+            }
+            if self.ext_class_constant_deprecation(cl, cname).is_some() {
+                return None;
+            }
+            return self.get_builtin_class_constant(cl, cname).filter(scalar);
+        }
+        // (INI entries share the table: lowercase names)
+        if name.iter().any(|b| b.is_ascii_lowercase()) {
+            return None;
+        }
+        let v = self.constants.get(name)?;
+        if !scalar(v) || crate::stubs::find_constant(name).is_some_and(|c| c.flags & 0x20000 != 0)
+        {
+            return None;
+        }
+        Some(v.clone())
+    }
+}

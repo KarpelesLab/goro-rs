@@ -701,7 +701,11 @@ fn cli_request_info(
 /// Compile and run a piece of PHP code (without <?php) in the global scope.
 fn run_snippet(vm: &mut Vm, code: &str) {
     let src = format!("<?php {}", code);
-    if let Ok(mut c) = engine::compile(src.as_bytes(), "Command line code", false) {
+    let compiled = {
+        let _ct = goro_core::compiler::CtVmGuard::new(vm);
+        engine::compile(src.as_bytes(), "Command line code", false)
+    };
+    if let Ok(mut c) = compiled {
         engine::load(vm, &mut c);
         let r = vm.execute(&c.op_array);
         finish_errors(vm, r);
@@ -980,7 +984,11 @@ fn php_string_literal(v: &str) -> String {
 /// Compile and execute the main script. Returns true when the request
 /// failed (parse error, uncaught exception or fatal error).
 fn run_main(vm: &mut Vm, src: &[u8], filename: &str) -> bool {
-    match engine::compile(src, filename, true) {
+    let compiled = {
+        let _ct = goro_core::compiler::CtVmGuard::new(vm);
+        engine::compile(src, filename, true)
+    };
+    match compiled {
         Ok(mut c) => {
             engine::load(vm, &mut c);
             let r = vm.execute(&c.op_array);
@@ -1011,7 +1019,11 @@ fn process_stdin(
     fn compile_code(vm: &mut Vm, code: &[u8], name: &str) -> Option<engine::Compiled> {
         let mut src = b"<?php ".to_vec();
         src.extend_from_slice(code);
-        match engine::compile(&src, name, false) {
+        let compiled = {
+            let _ct = goro_core::compiler::CtVmGuard::new(vm);
+            engine::compile(&src, name, false)
+        };
+        match compiled {
             Ok(c) => Some(c),
             Err(e) => {
                 engine::report_compile_error(vm, &e, name);

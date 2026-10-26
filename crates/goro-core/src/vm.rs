@@ -45676,6 +45676,7 @@ impl Vm {
                                         Ok(program) => {
                                             let mut compiler = crate::compiler::Compiler::new();
                                             compiler.source_file = abs_path.as_bytes().to_vec();
+                                            let _ct = crate::compiler::CtVmGuard::new(self);
                                             compiler
                                                 .compile(&program)
                                                 .map(|(o, c, w)| (Ok((o, c)), w))
@@ -45948,7 +45949,11 @@ impl Vm {
                                     format!("{}({}) : eval()'d code", self.current_file, op.line);
                                 let compiler_file = eval_file.clone().into_bytes();
                                 compiler.source_file = eval_file.into_bytes();
-                                match compiler.compile(&program) {
+                                let compiled = {
+                                    let _ct = crate::compiler::CtVmGuard::new(self);
+                                    compiler.compile(&program)
+                                };
+                                match compiled {
                                     Ok((eval_op_array, eval_classes, eval_warnings)) => {
                                         // Emit the scanner's and the compiler's
                                         // diagnostics (in the eval()'d code)

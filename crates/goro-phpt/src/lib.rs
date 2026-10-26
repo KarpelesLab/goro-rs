@@ -1505,6 +1505,8 @@ fn execute_php_inner_impl(
     use goro_core::vm::Vm;
     use goro_parser::Parser;
 
+    // (its side effects come before this test's setup)
+    init_ct_vm();
     // Reset memory tracking and limits for this test
     memory_reset();
     set_memory_limit(128 * 1024 * 1024); // 128MB default
@@ -1721,7 +1723,7 @@ fn execute_php_inner_impl(
         goro_core::compiler::CompileError,
         Vec<goro_core::object::ClassEntry>,
     )> = None;
-    let (op_array, compiled_classes, compile_warnings) = match compiler.compile(&program) {
+    let (op_array, compiled_classes, compile_warnings) = match with_ct_vm(|| compiler.compile(&program)) {
         Ok(r) => {
             // Drain any pending compile warnings so they don't leak into the next test
             let _ = goro_core::compiler::take_pending_compile_warnings();
@@ -1756,51 +1758,7 @@ fn execute_php_inner_impl(
         &goro_parser::order_lexer_diagnostics(&lexer_deprecations, &lexer_warnings),
         &compile_warnings,
     ));
-    goro_ext_standard::register_standard_functions(&mut vm);
-    goro_ext_date::register(&mut vm);
-    goro_ext_json::register(&mut vm);
-    goro_ext_ctype::register(&mut vm);
-    goro_ext_hash::register(&mut vm);
-    goro_ext_openssl::register(&mut vm);
-    goro_ext_zlib::register(&mut vm);
-    goro_ext_gmp::register(&mut vm);
-    goro_ext_bz2::register(&mut vm);
-    goro_ext_curl::register(&mut vm);
-    goro_ext_xml::register(&mut vm);
-    goro_ext_session::register(&mut vm);
-    goro_ext_mysqli::register(&mut vm);
-    goro_ext_pdo::register(&mut vm);
-    goro_ext_pgsql::register(&mut vm);
-    goro_ext_sockets::register(&mut vm);
-    goro_ext_mbstring::register(&mut vm);
-    goro_ext_spl::register(&mut vm);
-    goro_ext_reflection::register(&mut vm);
-    goro_ext_bcmath::register(&mut vm);
-    goro_ext_filter::register(&mut vm);
-    goro_ext_soap::register(&mut vm);
-    goro_ext_iconv::register(&mut vm);
-    goro_ext_gettext::register(&mut vm);
-    goro_ext_xsl::register(&mut vm);
-    goro_ext_sysvipc::register(&mut vm);
-    goro_ext_ftp::register(&mut vm);
-    goro_ext_pcntl::register(&mut vm);
-    goro_ext_posix::register(&mut vm);
-    goro_ext_calendar::register(&mut vm);
-    goro_ext_phar::register(&mut vm);
-    goro_ext_exif::register(&mut vm);
-    goro_ext_zip::register(&mut vm);
-    goro_ext_fileinfo::register(&mut vm);
-    goro_ext_sodium::register(&mut vm);
-    goro_ext_intl::register(&mut vm);
-    goro_ext_gd::register(&mut vm);
-    goro_ext_dba::register(&mut vm);
-    goro_ext_readline::register(&mut vm);
-    goro_ext_tidy::register(&mut vm);
-    goro_ext_sqlite3::register(&mut vm);
-    goro_ext_ldap::register(&mut vm);
-    goro_ext_uuid::register(&mut vm);
-    goro_ext_mailparse::register(&mut vm);
-    goro_ext_imagick::register(&mut vm);
+    register_test_extensions(&mut vm);
     goro_ext_zend_test::register_loadables(&mut vm);
     if goro_ext_zend_test::requested(ini_settings.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
         goro_ext_zend_test::register(&mut vm);
@@ -3383,4 +3341,86 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
         .or_else(|| test.sections.get("STDIN"))
         .map(|s| test.bytes(s));
     PhptRequest { info, env, stdin }
+}
+
+/// The extensions a test's VM gets (before the optional ones).
+fn register_test_extensions(vm: &mut goro_core::vm::Vm) {
+    goro_ext_standard::register_standard_functions(vm);
+    goro_ext_date::register(vm);
+    goro_ext_json::register(vm);
+    goro_ext_ctype::register(vm);
+    goro_ext_hash::register(vm);
+    goro_ext_openssl::register(vm);
+    goro_ext_zlib::register(vm);
+    goro_ext_gmp::register(vm);
+    goro_ext_bz2::register(vm);
+    goro_ext_curl::register(vm);
+    goro_ext_xml::register(vm);
+    goro_ext_session::register(vm);
+    goro_ext_mysqli::register(vm);
+    goro_ext_pdo::register(vm);
+    goro_ext_pgsql::register(vm);
+    goro_ext_sockets::register(vm);
+    goro_ext_mbstring::register(vm);
+    goro_ext_spl::register(vm);
+    goro_ext_reflection::register(vm);
+    goro_ext_bcmath::register(vm);
+    goro_ext_filter::register(vm);
+    goro_ext_soap::register(vm);
+    goro_ext_iconv::register(vm);
+    goro_ext_gettext::register(vm);
+    goro_ext_xsl::register(vm);
+    goro_ext_sysvipc::register(vm);
+    goro_ext_ftp::register(vm);
+    goro_ext_pcntl::register(vm);
+    goro_ext_posix::register(vm);
+    goro_ext_calendar::register(vm);
+    goro_ext_phar::register(vm);
+    goro_ext_exif::register(vm);
+    goro_ext_zip::register(vm);
+    goro_ext_fileinfo::register(vm);
+    goro_ext_sodium::register(vm);
+    goro_ext_intl::register(vm);
+    goro_ext_gd::register(vm);
+    goro_ext_dba::register(vm);
+    goro_ext_readline::register(vm);
+    goro_ext_tidy::register(vm);
+    goro_ext_sqlite3::register(vm);
+    goro_ext_ldap::register(vm);
+    goro_ext_uuid::register(vm);
+    goro_ext_mailparse::register(vm);
+    goro_ext_imagick::register(vm);
+}
+
+thread_local! {
+    /// A VM with the standard extensions for the compile-time constant
+    /// substitution of the scripts (compiled before their VM exists).
+    static CT_VM: std::cell::OnceCell<Box<goro_core::vm::Vm>> = const { std::cell::OnceCell::new() };
+}
+
+/// Create this thread's CT_VM (once).
+fn init_ct_vm() {
+    CT_VM.with(|c| {
+        c.get_or_init(|| {
+            let mut vm = goro_core::vm::Vm::new();
+            register_test_extensions(&mut vm);
+            goro_ext_zend_test::register_loadables(&mut vm);
+            Box::new(vm)
+        });
+    })
+}
+
+/// Run `f` (a compile) with the constants of a standard VM visible.
+fn with_ct_vm<R>(f: impl FnOnce() -> R) -> R {
+    init_ct_vm();
+    CT_VM.with(|c| {
+        let vm = c.get_or_init(|| {
+            let mut vm = goro_core::vm::Vm::new();
+            register_test_extensions(&mut vm);
+            goro_ext_zend_test::register_loadables(&mut vm);
+            Box::new(vm)
+        });
+        let _g = goro_core::compiler::CtVmGuard::new(vm);
+        f()
+    })
 }
