@@ -488,7 +488,10 @@ impl Vm {
     ) -> bool {
         // (the arginfo the call target resolved when the call was set up)
         if call.target.fn_gen == self.user_functions.len() + 1 && call.target.user.is_none() {
-            if let Some((_, Some((fi, _)))) = &call.target.builtin {
+            if let Some(crate::vm::BuiltinDesc {
+                zpp: Some((fi, _)), ..
+            }) = call.target.builtin
+            {
                 let p = fi
                     .params
                     .get(arg_index)

@@ -19,6 +19,7 @@ mod builtincall;
 mod fastcall;
 #[path = "leancall.rs"]
 mod leancall;
+pub(crate) use builtincall::BuiltinDesc;
 pub(crate) use fastcall::MethodSite;
 #[path = "internal_static.rs"]
 pub mod internal_static;
@@ -973,8 +974,8 @@ pub(crate) struct PendingCall {
 pub(crate) struct CallTarget {
     /// The user function of that name (as user_fn_lookup() finds it).
     pub(crate) user: Option<Rc<OpArray>>,
-    /// The builtin of that name, and its generic zpp info.
-    pub(crate) builtin: Option<(BuiltinFn, Option<(&'static crate::arginfo::FuncInfo, u8)>)>,
+    /// The builtin of that name (with its generic zpp info, see BuiltinDesc).
+    pub(crate) builtin: Option<&'static builtincall::BuiltinDesc>,
     /// A builtin of that name exists (even when `builtin` is not recorded).
     pub(crate) has_builtin: bool,
     /// For a method call set up by INIT_METHOD_CALL's fast path (see
@@ -1060,7 +1061,7 @@ pub(crate) struct ForwardSite {
 pub(crate) struct CachedCallTarget {
     name: Vec<u8>,
     user: Option<Weak<OpArray>>,
-    builtin: Option<(BuiltinFn, Option<(&'static crate::arginfo::FuncInfo, u8)>)>,
+    builtin: Option<&'static builtincall::BuiltinDesc>,
     has_builtin: bool,
     method: Option<(u32, bool)>,
     /// (of a method: see MethodCallInfo)
@@ -21706,7 +21707,7 @@ impl Vm {
                 let zpp_types = matches!(zpp, Some((_, f)) if f & crate::arginfo::CHECK_TYPES != 0);
                 // (the legacy per-builtin type checks take the general path)
                 if zpp_types || !self.builtin_param_types.contains_key(lower) {
-                    Some((f, zpp))
+                    Some(BuiltinDesc::get(lower, f, zpp))
                 } else {
                     None
                 }
@@ -22190,7 +22191,7 @@ impl Vm {
         if c.special == 0 || c.fn_gen != fn_gen || !crate::string::bytes_eq(&c.name, name) {
             return None;
         }
-        Some((c.builtin?.0, c.special))
+        Some((c.builtin?.func, c.special))
     }
 
     /// Whether the parent of `class` (a delayed early-binding candidate)
@@ -30187,20 +30188,13 @@ impl Vm {
                         if via_closure {
                             self.closure_pending_calls.pop();
                         }
-                        let (func, zpp) = call.target.builtin.expect("builtin call target");
-                        let name = call.name.as_bytes();
+                        let desc = call.target.builtin.expect("builtin call target");
+                        let (func, zpp) = (desc.func, desc.zpp);
                         let mut buf = [0u8; 64];
-                        for (d, s) in buf.iter_mut().zip(name) {
-                            *d = s.to_ascii_lowercase();
-                        }
-                        let func_name_lower = &buf[..name.len()];
+                        let func_name_lower = desc.lower_name(call.name.as_bytes(), &mut buf);
                         self.note_call_result(op, func_name_lower);
                         // Compiled to an opcode by php-src: no frame of its own
-                        let special = !via_closure
-                            && crate::internal_frames::compiled_special(
-                                func_name_lower,
-                                &call.args,
-                            );
+                        let special = !via_closure && desc.compiled_special(&call.args);
                         // Generic zpp (verified stub arginfo)
                         let mut zpp_orig: Option<Vec<Value>> = None;
                         if let Some((info, flags)) = zpp {

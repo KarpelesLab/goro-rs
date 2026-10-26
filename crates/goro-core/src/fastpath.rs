@@ -1933,7 +1933,7 @@ impl crate::vm::Vm {
                                     ucf = true;
                                     true
                                 }
-                                (None, Some((_, Some((fi, _))))) => {
+                                (None, Some(crate::vm::BuiltinDesc { zpp: Some((fi, _)), .. })) => {
                                     let idx = c.args.len();
                                     fi.params
                                         .get(idx)

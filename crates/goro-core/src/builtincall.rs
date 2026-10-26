@@ -19,10 +19,110 @@
 //! roots, see LeanFrame), and loses it right after. A failure there ends
 //! the lean call itself: the caller's DO_FCALL dispatches it.
 
-use super::{ForeachState, OpArray, PendingCall, Vm, VmError, push_lossy};
+use super::{BuiltinFn, ForeachState, OpArray, PendingCall, Vm, VmError, push_lossy};
 use crate::fastpath::{store_tmp, tmp_writable};
 use crate::opcode::OperandType;
 use crate::value::Value;
+
+/// The builtin a call site resolved to (see CallTarget::builtin), with
+/// what its calls would otherwise work out from its name each time: its
+/// lowercase name (the name of its frame) and whether php-src compiles its
+/// calls into an opcode of their own (see
+/// internal_frames::compiled_special). One per builtin (made once, kept
+/// for good: see BuiltinDesc::get).
+#[derive(Debug)]
+pub(crate) struct BuiltinDesc {
+    pub(crate) func: BuiltinFn,
+    /// Its generic zpp info (see Vm::zpp_info).
+    pub(crate) zpp: Option<(&'static crate::arginfo::FuncInfo, u8)>,
+    /// Its lowercase name.
+    pub(crate) lower: &'static [u8],
+    /// compiled_special() of a call with N arguments: bit N (N < 3);
+    /// SPECIAL_SPRINTF: sprintf (that depends on the format).
+    special: u8,
+}
+
+const SPECIAL_SPRINTF: u8 = 0x80;
+
+impl BuiltinDesc {
+    /// The BuiltinDesc of builtin `func` by the lowercase name `lower`,
+    /// with generic zpp info `zpp`: made the first time (there are as many
+    /// as builtins), the same one after that.
+    #[inline(never)]
+    pub(crate) fn get(
+        lower: &[u8],
+        func: BuiltinFn,
+        zpp: Option<(&'static crate::arginfo::FuncInfo, u8)>,
+    ) -> &'static BuiltinDesc {
+        type Descs = crate::fxhash::FxHashMap<Vec<u8>, Vec<&'static BuiltinDesc>>;
+        thread_local! {
+            static DESCS: std::cell::RefCell<Descs> = Default::default();
+        }
+        let same_zpp = |a: Option<(&'static crate::arginfo::FuncInfo, u8)>| match (a, zpp) {
+            (None, None) => true,
+            (Some((a, af)), Some((b, bf))) => std::ptr::eq(a, b) && af == bf,
+            _ => false,
+        };
+        DESCS.with(|d| {
+            let mut d = d.borrow_mut();
+            let found = d.get(lower).and_then(|list| {
+                list.iter()
+                    .find(|x| x.func as usize == func as usize && same_zpp(x.zpp))
+            });
+            if let Some(&found) = found {
+                return found;
+            }
+            let list = d.entry(lower.to_vec()).or_default();
+            let special = if lower == b"sprintf" {
+                SPECIAL_SPRINTF
+            } else {
+                let none = [Value::Null, Value::Null];
+                (0..3).fold(0u8, |bits, n| {
+                    let special = crate::internal_frames::compiled_special(lower, &none[..n]);
+                    bits | (u8::from(special) << n)
+                })
+            };
+            let desc: &'static BuiltinDesc = Box::leak(Box::new(BuiltinDesc {
+                func,
+                zpp,
+                lower: Box::leak(lower.to_vec().into_boxed_slice()),
+                special,
+            }));
+            list.push(desc);
+            desc
+        })
+    }
+
+    /// internal_frames::compiled_special() of a call of this builtin with
+    /// `args`.
+    #[inline]
+    pub(crate) fn compiled_special(&self, args: &[Value]) -> bool {
+        if self.special & SPECIAL_SPRINTF != 0 {
+            return crate::internal_frames::sprintf_is_rope(args);
+        }
+        args.len() < 3 && (self.special >> args.len()) & 1 != 0
+    }
+
+    /// The lowercase name of a call of this builtin by `name` (the name it
+    /// was resolved for, or a longer unqualified namespaced one that fell
+    /// back to it), in `buf` when it is not `lower`.
+    #[inline]
+    pub(crate) fn lower_name<'a>(&'static self, name: &[u8], buf: &'a mut [u8; 64]) -> &'a [u8] {
+        if name.len() == self.lower.len() {
+            return self.lower;
+        }
+        lower_name_slow(name, buf)
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn lower_name_slow<'a>(name: &[u8], buf: &'a mut [u8; 64]) -> &'a [u8] {
+    for (d, s) in buf.iter_mut().zip(name) {
+        *d = s.to_ascii_lowercase();
+    }
+    &buf[..name.len().min(64)]
+}
 
 /// A running lean call's callee (see leancall.rs: Vm::lean_run's state, alive
 /// while its run of fast opcodes runs), for the builtin calls it makes.
@@ -87,10 +187,33 @@ impl Vm {
         if !self.builtin_dofcall_ok(op_array, ip, tmps, free_mask) {
             return None;
         }
+        let top = self.pending_calls.len().checked_sub(1)?;
+        let desc = self.pending_calls[top].target.builtin?;
         let op = &op_array.ops[ip];
         let mask = free_mask.get(ip).copied().unwrap_or(0);
         self.last_call_by_ref = false;
-        let mut call = self.pending_calls.pop()?;
+        // The call: its arguments, its name's lowercase form; the rest of it
+        // goes at once (in place: nothing of it is released with any effect).
+        let call = &mut self.pending_calls[top];
+        let mut args = std::mem::take(&mut call.args);
+        let mut buf = [0u8; 64];
+        let func_name_lower = desc.lower_name(call.name.as_bytes(), &mut buf);
+        if call.named_args.capacity() == 0
+            && call.target.user.is_none()
+            && call.target.method_info.is_none()
+            && call.target.forward.is_none()
+        {
+            // (of what is left, only the name has anything to drop)
+            // SAFETY: the call is no longer in the vector, and read once.
+            unsafe {
+                self.pending_calls.set_len(top);
+                drop(std::ptr::read(
+                    &(*self.pending_calls.as_ptr().add(top)).name,
+                ));
+            }
+        } else {
+            self.pending_calls.truncate(top);
+        }
         while matches!(self.closure_pending_calls.last(), Some(&i) if i > self.pending_calls.len())
         {
             self.closure_pending_calls.pop();
@@ -99,23 +222,13 @@ impl Vm {
         if via_closure {
             self.closure_pending_calls.pop();
         }
-        let Some((func, zpp)) = call.target.builtin else {
-            self.pending_calls.push(call);
-            return None;
-        };
+        let (func, zpp) = (desc.func, desc.zpp);
         if !internal_code {
             self.current_line = op.line;
         }
-        let name = call.name.as_bytes();
-        let mut buf = [0u8; 64];
-        for (d, s) in buf.iter_mut().zip(name) {
-            *d = s.to_ascii_lowercase();
-        }
-        let func_name_lower = &buf[..name.len().min(64)];
         self.note_call_result(op, func_name_lower);
         // Compiled to an opcode by php-src: no frame of its own
-        let special =
-            !via_closure && crate::internal_frames::compiled_special(func_name_lower, &call.args);
+        let special = !via_closure && desc.compiled_special(&args);
         // Generic zpp (verified stub arginfo)
         let mut zpp_orig: Option<Vec<Value>> = None;
         if let Some((info, flags)) = zpp {
@@ -125,7 +238,7 @@ impl Vm {
             if let Err(e) = self.zpp_check(
                 info,
                 flags,
-                &mut call.args,
+                &mut args,
                 &mut zpp_orig,
                 op_array.strict_types,
                 op.line,
@@ -136,7 +249,7 @@ impl Vm {
                     if !special {
                         self.push_builtin_frame(
                             func_name_lower,
-                            zpp_orig.as_deref().unwrap_or(&call.args),
+                            zpp_orig.as_deref().unwrap_or(&args),
                             op.line,
                         );
                     }
@@ -147,7 +260,7 @@ impl Vm {
                     self.current_exception = Some(exc_val);
                 }
                 let message = self.uncaught_exception_message();
-                return Some(self.fast_call_fail(op_array, ip, message, call));
+                return Some(self.fast_call_fail(op_array, ip, message, args));
             }
         }
         self.caller_strict_types = op_array.strict_types;
@@ -156,17 +269,17 @@ impl Vm {
         if own_frame {
             self.push_builtin_frame(
                 func_name_lower,
-                zpp_orig.as_deref().unwrap_or(&call.args),
+                zpp_orig.as_deref().unwrap_or(&args),
                 op.line,
             );
         }
         let builtin_result = if own_frame {
-            self.call_builtin_observed(func, func_name_lower, &call.args)
+            self.call_builtin_observed(func, func_name_lower, &args)
         } else {
-            func(self, &call.args)
+            func(self, &args)
         };
         if own_frame {
-            self.release_in_builtin_frame(&call.args);
+            self.release_in_builtin_frame(&args);
             self.pop_builtin_frame();
         } else {
             self.ucf_call_line = None;
@@ -177,34 +290,31 @@ impl Vm {
             Ok(result) => {
                 if self.current_exception.is_some() {
                     let message = self.uncaught_exception_message();
-                    return Some(self.fast_call_fail(op_array, ip, message, call));
+                    return Some(self.fast_call_fail(op_array, ip, message, args));
                 }
                 result
             }
             Err(e) => {
                 // The arguments are released before the exception unwinds
                 // (a destructor's exception chains to it).
-                if self.current_exception.is_some()
-                    && self.has_release_work()
-                    && !call.args.is_empty()
-                {
-                    call.args.clear();
+                if self.current_exception.is_some() && self.has_release_work() && !args.is_empty() {
+                    args.clear();
                     self.current_line = op.line;
                     self.run_pending_destructors();
                 }
-                return Some(self.fast_call_fail(op_array, ip, e.message, call));
+                return Some(self.fast_call_fail(op_array, ip, e.message, args));
             }
         };
         // zend_vm_stack_free_args(): the arguments are released when the
         // call returns.
-        if self.has_release_work() && !call.args.is_empty() {
-            call.args.clear();
+        if self.has_release_work() && !args.is_empty() {
+            args.clear();
             self.current_line = op.line;
             self.run_pending_destructors();
             if self.current_exception.is_some() {
                 drop(result);
                 let message = "Uncaught exception from destructor".to_string();
-                return Some(self.fast_call_fail(op_array, ip, message, call));
+                return Some(self.fast_call_fail(op_array, ip, message, args));
             }
         }
         match &result {
@@ -221,13 +331,13 @@ impl Vm {
                 self.run_pending_destructors();
                 if self.current_exception.is_some() {
                     let message = "Uncaught exception from destructor".to_string();
-                    return Some(self.fast_call_fail(op_array, ip, message, call));
+                    return Some(self.fast_call_fail(op_array, ip, message, args));
                 }
             }
         } else {
             store_tmp(&op.result, result, tmps);
         }
-        self.recycle_args(&mut call);
+        self.recycle_arg_vec(args);
         Some(true)
     }
 
@@ -413,11 +523,18 @@ impl Vm {
         op_array: &OpArray,
         ip: usize,
         message: String,
-        mut call: super::PendingCall,
+        args: Vec<Value>,
     ) -> bool {
         let line = op_array.ops[ip].line;
         self.fast_call_failed = Some(VmError { message, line });
-        self.recycle_args(&mut call);
+        self.recycle_arg_vec(args);
         false
+    }
+
+    /// recycle_args() of the arguments taken out of a call.
+    #[inline]
+    fn recycle_arg_vec(&mut self, mut args: Vec<Value>) {
+        super::clear_values(&mut args);
+        self.recycle_values(args);
     }
 }
