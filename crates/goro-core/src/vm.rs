@@ -1904,10 +1904,6 @@ pub struct Vm {
     /// created element): `$o->p op= v` / `$o->p++` then writes nothing back,
     /// the operation's result replacing the temporary (this releases it).
     pub prop_ptr_temp: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>)>,
-    /// The internal function being called was called dynamically (`$f()`),
-    /// with unpacked or named arguments: php-src makes a real call of a
-    /// function it would otherwise call frameless (implode()).
-    pub builtin_real_call: bool,
     /// The call depth whose next RW write-back (PropertySet) is skipped,
     /// with the release of the temporary.
     prop_rw_skip_set: Option<(u32, fn(&mut Vm, &Rc<RefCell<PhpObject>>))>,
@@ -2197,6 +2193,11 @@ pub struct Vm {
     /// The argument list a caller keeps while the user function it is
     /// calling runs: taken into that function's GcFrame (null otherwise).
     pub(crate) gc_call_args: *const Vec<Value>,
+    /// The builtin being called is not called as php-src's frameless call
+    /// of a direct call (a dynamic call, unpacked or named arguments, a
+    /// callback): min()/max()/implode() then run their PHP_FUNCTION's
+    /// semantics rather than ZEND_FRAMELESS_FUNCTION's.
+    pub nonframeless_call: bool,
     /// Deprecations of `callable` type checks (see callable.rs), raised by
     /// flush_callable_deprecations() after the check.
     pub(crate) pending_callable_deprecations: RefCell<Vec<String>>,
@@ -2491,7 +2492,6 @@ impl Vm {
             recorded_errors: None,
             incdec_skip_set: false,
             prop_ptr_temp: None,
-            builtin_real_call: false,
             prop_rw_skip_set: None,
             builtin_frame_named: Vec::new(),
             dim_rw_key: None,
@@ -3593,6 +3593,7 @@ impl Vm {
             frame_this: Vec::new(),
             gc_frames: Vec::new(),
             gc_call_args: std::ptr::null(),
+            nonframeless_call: false,
             pending_callable_deprecations: RefCell::new(Vec::new()),
             mute_callable_deprecations: false,
             ucf_call_line: None,
@@ -22768,7 +22769,7 @@ impl Vm {
                 fn_gen: self.user_functions.len() + 1,
                 via_invoke: false,
                 dynamic: false,
-            };
+                    };
         }
         let builtin = match found {
             Some(f)
@@ -22805,7 +22806,7 @@ impl Vm {
             fn_gen: self.user_functions.len() + 1,
             via_invoke: false,
             dynamic: false,
-        }
+            }
     }
 
     /// Give `class` its own copy of the array defaults it shares with the
@@ -24293,44 +24294,6 @@ impl Vm {
         self.recycle_values(cvs);
         drop(sym);
         r
-    }
-
-    /// SEND_UNPACK to an internal function: its by-reference parameters
-    /// (and prefer-ref ones: ARG_SHOULD_BE_SENT_BY_REF) bind to the unpacked
-    /// array's elements, as for a user function.
-    #[inline(never)]
-    fn unpack_builtin_by_ref(&self) -> (Option<Vec<bool>>, bool) {
-        let Some(call) = self.pending_calls.last() else {
-            return (None, false);
-        };
-        let name = call.name.as_bytes();
-        let name = name.strip_prefix(b"\\").unwrap_or(name);
-        if name.contains(&b':') || call.target.closure {
-            return (None, false);
-        }
-        let lower = name.to_ascii_lowercase();
-        if !self.functions.contains_key(&lower) {
-            return (None, false);
-        }
-        let Some(info) = crate::arginfo::lookup(&lower) else {
-            return (None, false);
-        };
-        // (an `array &$array` builtin is then handed the referenced array,
-        // separated: see array_ref_builtin_arg())
-        let by_ref: Vec<bool> = info
-            .params
-            .iter()
-            .filter(|p| !p.variadic)
-            .map(|p| p.by_ref != 0)
-            .collect();
-        let variadic_ref = info
-            .params
-            .last()
-            .is_some_and(|p| p.variadic && p.by_ref != 0);
-        if !variadic_ref && !by_ref.contains(&true) {
-            return (None, false);
-        }
-        (Some(by_ref), variadic_ref)
     }
 
     /// The argument list a DO_FCALL hands the callee's frame (gc_call_args),
@@ -30901,7 +30864,9 @@ impl Vm {
                         .map(|(br, vr)| (Some(br), vr))
                         .unwrap_or_else(|| {
                             builtin_callee = true;
-                            self.unpack_builtin_by_ref()
+                            // (an internal function's by-reference parameters
+                            // are bound below: builtin_refs)
+                            (None, false)
                         });
                     // Get source array Rc for by-ref modifications
                     let source_arr_rc = if let Value::Array(arr) = &val {
@@ -31068,7 +31033,7 @@ impl Vm {
                         Ok(pairs) => {
                             // An internal function's by-reference parameters.
                             let builtin_refs: Vec<u8> = match (&callee_by_ref, self.pending_calls.last()) {
-                                (None, Some(call)) if matches!(val, Value::Array(_)) => {
+                                (None, Some(call)) => {
                                     let base = call.args.len();
                                     (0..pairs.len())
                                         .map(|i| self.builtin_arg_send_mode(call, base + i))
@@ -31104,12 +31069,12 @@ impl Vm {
                             // by reference is separated first (SEPARATE_ARRAY), so
                             // a copy sharing it (`$copy = $a; f(...$copy)`) keeps
                             // its elements.
-                            let source_arr_rc = if matches!(val, Value::Array(_))
+                            let separated = matches!(val, Value::Array(_))
                                 && (callee_variadic_is_ref
                                     || callee_by_ref.as_ref().is_some_and(|b| b.contains(&true))
                                     || builtin_refs.iter().any(|&m| m != 0)
-                                    || !builtin_named_refs.is_empty())
-                            {
+                                    || !builtin_named_refs.is_empty());
+                            let source_arr_rc = if separated {
                                 source_arr_rc.map(|a| Self::unpack_separate(&op.op1, &mut cvs, a))
                             } else {
                                 source_arr_rc
@@ -31185,6 +31150,17 @@ impl Vm {
                                             break;
                                         }
                                         let mut v = v;
+                                        // (the separated array's element: a lone
+                                        // reference became its value)
+                                        if separated && matches!(v, Value::Reference(_)) {
+                                            if let Some(src) = source_arr_rc.as_ref() {
+                                                if let Some(e) = src.borrow().get(&ArrayKey::String(
+                                                    PhpString::from_vec(name_bytes.clone()),
+                                                )) {
+                                                    v = e.clone();
+                                                }
+                                            }
+                                        }
                                         let builtin_ref_mode = builtin_named_refs
                                             .iter()
                                             .find(|n| n.0 == name_bytes)
@@ -31257,6 +31233,16 @@ impl Vm {
                                             break;
                                         }
                                         let arg_pos = call.args.len();
+                                        let mut v = v;
+                                        if separated && matches!(v, Value::Reference(_)) {
+                                            if let (Some(src), Some(&k)) =
+                                                (source_arr_rc.as_ref(), src_int_keys.get(unpack_idx))
+                                            {
+                                                if let Some(e) = src.borrow().get(&ArrayKey::Int(k)) {
+                                                    v = e.clone();
+                                                }
+                                            }
+                                        }
                                         // Check if callee expects by-ref at this position
                                         let is_by_ref = callee_by_ref
                                             .as_ref()
@@ -31952,9 +31938,13 @@ impl Vm {
                         }
                         // (`sort(...$args)`: the array sent by reference is
                         // handed over by handle, as a positional one is)
-                        if let Some(a0 @ Value::Reference(_)) = call.args.first() {
-                            if let Some(arr) = Self::array_ref_builtin_arg(func_name_lower, 0, a0) {
-                                call.args[0] = arr;
+                        if call.named_args.capacity() != 0 {
+                            if let Some(a0 @ Value::Reference(_)) = call.args.first() {
+                                if let Some(arr) =
+                                    Self::array_ref_builtin_arg(func_name_lower, 0, a0)
+                                {
+                                    call.args[0] = arr;
+                                }
                             }
                         }
                         self.caller_strict_types = op_array.strict_types;
@@ -31968,6 +31958,8 @@ impl Vm {
                                 op.line,
                             );
                         }
+                        self.nonframeless_call =
+                            call.target.dynamic || call.named_args.capacity() != 0;
                         let builtin_result = if own_frame {
                             self.call_builtin_observed(func, func_name_lower, &call.args)
                         } else {
@@ -34012,6 +34004,10 @@ impl Vm {
                         );
                     } else if let Some(func) = self.functions.get(&func_name_lower).copied() {
                         // Built-in function - resolve named args if present
+                        // (unpacked arguments reserve room for named ones:
+                        // see SendUnpack)
+                        let nonframeless =
+                            call.target.dynamic || call.named_args.capacity() != 0;
                         let mut named_skipped_args: Vec<usize> = Vec::new();
                         let zpp = self.zpp_info(&func_name_lower);
                         let mut zpp_err: Option<crate::arginfo::ZppError> = None;
@@ -34124,7 +34120,7 @@ impl Vm {
                         }
                         // `sort(array: $a)`: the array sent by reference is
                         // handed over by handle, as a positional one is.
-                        if let Some(a0) = call.args.first() {
+                        if let Some(a0) = call.args.first().filter(|_| nonframeless) {
                             if matches!(a0, Value::Reference(_)) {
                                 if let Some(arr) =
                                     Self::array_ref_builtin_arg(&func_name_lower, 0, a0)
@@ -34385,8 +34381,6 @@ impl Vm {
                         }
                         self.caller_strict_types = op_array.strict_types;
                         self.builtin_named_skipped = named_skipped_args;
-                        self.builtin_real_call =
-                            call.target.dynamic || call.named_args.capacity() != 0;
 
                         let had_exception_before = self.current_exception.is_some();
 
@@ -34424,6 +34418,7 @@ impl Vm {
                             // (a dynamic call is a real one: not compiled)
                             self.ucf_strict = op_array.strict_types && !call.target.dynamic;
                         }
+                        self.nonframeless_call = nonframeless;
                         let builtin_result = if own_frame {
                             self.call_builtin_observed(func, &func_name_lower, &call.args)
                         } else if is_direct_ucf {
@@ -67129,7 +67124,23 @@ impl Vm {
         cvs: &mut [Value],
         arr: Rc<RefCell<PhpArray>>,
     ) -> Rc<RefCell<PhpArray>> {
-        let fresh = Rc::new(RefCell::new(arr.borrow().clone()));
+        let mut copy = arr.borrow().clone();
+        // (zend_array_dup(): a reference only the array holds is copied as
+        // its value)
+        let lone_refs: Vec<(ArrayKey, Value)> = arr
+            .borrow()
+            .iter()
+            .filter_map(|(k, v)| match v {
+                Value::Reference(r) if Rc::strong_count(r) == 1 => {
+                    Some((k.clone(), r.borrow().clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (k, v) in lone_refs {
+            copy.set(k, v);
+        }
+        let fresh = Rc::new(RefCell::new(copy));
         if let OperandType::Cv(i) = operand {
             match cvs.get_mut(*i as usize) {
                 Some(Value::Reference(r)) => {

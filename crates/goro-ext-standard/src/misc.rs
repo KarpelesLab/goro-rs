@@ -3262,6 +3262,10 @@ fn array_unique(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let first = args.first().unwrap_or(&Value::Null);
     require_array_arg(vm, first, "array_unique", "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
+        // (nothing to do for one element: no comparison, no conversion)
+        if arr.borrow().len() <= 1 {
+            return Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone()))));
+        }
         let flags = args.get(1).map(|v| v.to_long()).unwrap_or(2); // SORT_STRING = 2 default
         if flags == SORT_STRING {
             // SORT_STRING: keep the first element of each string value

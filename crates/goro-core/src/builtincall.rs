@@ -321,15 +321,18 @@ impl Vm {
         // (a dynamic call is a real one: it has a frame)
         let dynamic = call.target.dynamic;
         // (unpacked or named arguments: see SendUnpack)
-        self.builtin_real_call = dynamic || call.named_args.capacity() != 0;
+        let unpacked = call.named_args.capacity() != 0;
+        self.nonframeless_call = dynamic || unpacked;
         let mut args = std::mem::take(&mut call.args);
         let ns_fallback = desc.ns_fallback(call.name.as_bytes());
         let func_name_lower = desc.lower;
         // (`sort(...$args)`: the array sent by reference is handed over by
         // handle, as a positional one is)
-        if let Some(a0 @ Value::Reference(_)) = args.first() {
-            if let Some(arr) = Self::array_ref_builtin_arg(func_name_lower, 0, a0) {
-                args[0] = arr;
+        if unpacked {
+            if let Some(a0 @ Value::Reference(_)) = args.first() {
+                if let Some(arr) = Self::array_ref_builtin_arg(func_name_lower, 0, a0) {
+                    args[0] = arr;
+                }
             }
         }
         if call.named_args.capacity() == 0

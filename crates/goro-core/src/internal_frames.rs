@@ -463,7 +463,9 @@ impl Vm {
                 });
             }
             self.push_builtin_frame(lname, args, at);
+            let prev_nf = std::mem::replace(&mut self.nonframeless_call, true);
             let r = self.call_builtin_observed(f, lname, args);
+            self.nonframeless_call = prev_nf;
             self.pop_builtin_frame();
             self.interrupt_after_internal_call();
             return r;
@@ -486,7 +488,9 @@ impl Vm {
             });
         }
         self.push_builtin_frame(lname, orig.as_deref().unwrap_or(&owned), at);
+        let prev_nf = std::mem::replace(&mut self.nonframeless_call, true);
         let r = self.call_builtin_observed(f, lname, &owned);
+        self.nonframeless_call = prev_nf;
         self.pop_builtin_frame();
         self.interrupt_after_internal_call();
         r
@@ -723,11 +727,13 @@ impl Vm {
             self.ucf_call_line = Some(line);
             self.ucf_strict = false;
         }
+        let prev_nf = std::mem::replace(&mut self.nonframeless_call, true);
         let r = if own_frame {
             self.call_builtin_observed(f, lname, &args)
         } else {
             f(self, &args)
         };
+        self.nonframeless_call = prev_nf;
         if own_frame {
             self.release_in_builtin_frame(&args);
             self.pop_builtin_frame();

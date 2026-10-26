@@ -1027,13 +1027,13 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
     };
     // (a real implode() call parses its parameters like join())
     let zpp_args;
-    let args = if func_name == "implode" && vm.builtin_real_call {
+    let args = if func_name == "implode" && vm.nonframeless_call {
         zpp_args = implode_zpp(vm, args)?;
         &zpp_args[..]
     } else {
         args
     };
-    let (glue, arr) = if func_name == "implode" && !vm.builtin_real_call {
+    let (glue, arr) = if func_name == "implode" && !vm.nonframeless_call {
         // A direct implode() call is frameless in php-src (its arginfo is
         // only arity-checked here): ZEND_FRAMELESS_FUNCTION(implode, 1/2)
         // parse the separator as a plain string, then the array.
@@ -1106,10 +1106,37 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
         // ?array $array = null, checked from the arginfo).
         let a0 = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
         let a1 = args.get(1).map(|v| v.deref()).unwrap_or(Value::Null);
+        // (Z_PARAM_ARRAY_HT_OR_STR() of a null separator, coerced)
+        if matches!(a0, Value::Null) && !vm.caller_strict_types && !args.is_empty() {
+            let line = vm.current_line;
+            vm.emit_deprecated_at(
+                &format!(
+                    "{}(): Passing null to parameter #1 ($separator) of type array|string is deprecated",
+                    func_name
+                ),
+                line,
+            );
+            if vm.current_exception.is_some() {
+                return Err(VmError {
+                    message: String::new(),
+                    line,
+                });
+            }
+        }
         match (a0, a1) {
             (Value::Array(arr), Value::Null | Value::Undef) => (PhpString::empty(), arr),
             (_, Value::Null | Value::Undef) => {
                 return Err(implode_type_error(vm, null_pieces()));
+            }
+            // (zpp: the second argument's type is checked before the
+            // array-as-separator one)
+            (_, other) if !matches!(other, Value::Array(_)) => {
+                let msg = format!(
+                    "{}(): Argument #2 ($array) must be of type ?array, {} given",
+                    func_name,
+                    Vm::value_type_name(&other)
+                );
+                return Err(implode_type_error(vm, msg));
             }
             (Value::Array(_), _) => {
                 let msg = format!(
@@ -1119,14 +1146,7 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
                 return Err(implode_type_error(vm, msg));
             }
             (sep, Value::Array(arr)) => (vm.value_to_string(&sep), arr),
-            (_, other) => {
-                let msg = format!(
-                    "{}(): Argument #2 ($array) must be of type ?array, {} given",
-                    func_name,
-                    Vm::value_type_name(&other)
-                );
-                return Err(implode_type_error(vm, msg));
-            }
+            _ => unreachable!(),
         }
     };
 

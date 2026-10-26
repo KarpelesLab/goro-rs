@@ -685,7 +685,7 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // ZEND_FRAMELESS_FUNCTION(max, 2): what a direct two-argument call runs
     // (the lhs unless it compares below the rhs; uncomparable gives the lhs).
-    if args.len() == 2 {
+    if args.len() == 2 && !vm.nonframeless_call {
         let c = vm.zend_compare(&args[0], &args[1]);
         if vm.current_exception.is_some() {
             return Ok(Value::Null);
@@ -771,7 +771,7 @@ fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // ZEND_FRAMELESS_FUNCTION(min, 2): what a direct two-argument call runs
     // (the lhs only when it compares below the rhs).
-    if args.len() == 2 {
+    if args.len() == 2 && !vm.nonframeless_call {
         let c = vm.zend_compare(&args[0], &args[1]);
         if vm.current_exception.is_some() {
             return Ok(Value::Null);
