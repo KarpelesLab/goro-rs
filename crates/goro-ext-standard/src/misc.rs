@@ -836,6 +836,20 @@ fn set_error_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             ));
         }
     }
+    // (Z_PARAM_LONG after the callback)
+    let coerced;
+    let args = if args.len() > 1 {
+        coerced = vm.zpp_self_check_flags(
+            b"set_error_handler",
+            args,
+            goro_core::arginfo::CHECK_ARITY
+                | goro_core::arginfo::CHECK_TYPES
+                | goro_core::arginfo::CHECK_PAST_STOP,
+        )?;
+        &coerced[..]
+    } else {
+        args
+    };
     let mask = args
         .get(1)
         .map(|v| v.to_long())
@@ -1575,6 +1589,13 @@ fn forward_static_call_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
             line: vm.current_line,
         });
     }
+    forward_static_dispatch(vm, args)
+}
+
+/// The call of forward_static_call() / forward_static_call_array() (`args`:
+/// the callback and its positional arguments; named ones pending).
+fn forward_static_dispatch(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let cb = &args[0];
     let target = match cb.deref() {
         Value::Array(a) => {
             let a = a.borrow();
@@ -1632,6 +1653,15 @@ fn forward_static_call_array_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
     let Some(cb) = args.first() else {
         return Ok(Value::Null);
     };
+    validate_callback_arg(vm, "forward_static_call_array", cb)?;
+    // (Z_PARAM_ARRAY_HT after the callback)
+    let args = &vm.zpp_self_check_flags(
+        b"forward_static_call_array",
+        args,
+        goro_core::arginfo::CHECK_ARITY
+            | goro_core::arginfo::CHECK_TYPES
+            | goro_core::arginfo::CHECK_PAST_STOP,
+    )?[..];
     let mut call_args = vec![cb.clone()];
     if let Some(Value::Array(a)) = args.get(1).map(|v| v.deref()) {
         let mut named = Vec::new();
@@ -1654,7 +1684,8 @@ fn forward_static_call_array_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
             vm.pending_named_args = named;
         }
     }
-    forward_static_call_fn(vm, &call_args)
+    // (no class scope is needed, unlike forward_static_call())
+    forward_static_dispatch(vm, &call_args)
 }
 
 /// A callback zend_is_callable_ex() accepts without any side effect or
@@ -10617,6 +10648,7 @@ fn getenv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn putenv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     use std::os::unix::ffi::OsStrExt;
+    let args = &vm.zpp_self_check(b"putenv", args)?[..];
     let setting = args.first().unwrap_or(&Value::Null).to_php_string();
     let b = setting.as_bytes();
     if b.is_empty() || b[0] == b'=' {
@@ -20150,7 +20182,8 @@ fn gethostname_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn umask_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     #[cfg(unix)]
     {
-        if let Some(mask) = args.first() {
+        // (a null $mask only reads the mask)
+        if let Some(mask) = args.first().filter(|m| !matches!(m.deref(), Value::Null)) {
             let new_mask = mask.to_long() as u32;
             let old = unsafe { libc::umask(new_mask as libc::mode_t) };
             Ok(Value::Long(old as i64))

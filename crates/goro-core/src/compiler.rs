@@ -15810,10 +15810,15 @@ impl Compiler {
                         });
                         return Ok(OperandType::Tmp(tmp));
                     }
-                    if func_lower == b"extract" && !args.is_empty() {
+                    let extract_args = if func_lower == b"extract" {
+                        extract_call_args(args)
+                    } else {
+                        None
+                    };
+                    if let Some(slots) = extract_args {
                         // extract($array [, $flags [, $prefix]])
                         // Compile the array argument
-                        let arr_operand = self.compile_extract_source(&args[0].value)?;
+                        let arr_operand = self.compile_extract_source(slots[0].expect("array"))?;
                         // Build a [flags, prefix] array in a tmp so the opcode
                         // can access both without growing the Op struct.
                         let meta_tmp = self.op_array.alloc_temp();
@@ -15824,34 +15829,21 @@ impl Compiler {
                             result: OperandType::Tmp(meta_tmp),
                             line: expr.span.line,
                         });
-                        // Push flags (default 0 == EXTR_OVERWRITE)
-                        let flags = if args.len() > 1 {
-                            self.compile_expr(&args[1].value)?
-                        } else {
-                            let idx = self.op_array.add_literal(Value::Long(0));
-                            OperandType::Const(idx)
-                        };
-                        self.op_array.emit(Op {
-                            opcode: OpCode::ArrayAppend,
-                            op1: OperandType::Tmp(meta_tmp),
-                            op2: flags,
-                            result: OperandType::Tmp(meta_tmp),
-                            line: expr.span.line,
-                        });
-                        // Push prefix (null when not passed)
-                        let prefix = if args.len() > 2 {
-                            self.compile_expr(&args[2].value)?
-                        } else {
-                            let idx = self.op_array.add_literal(Value::Null);
-                            OperandType::Const(idx)
-                        };
-                        self.op_array.emit(Op {
-                            opcode: OpCode::ArrayAppend,
-                            op1: OperandType::Tmp(meta_tmp),
-                            op2: prefix,
-                            result: OperandType::Tmp(meta_tmp),
-                            line: expr.span.line,
-                        });
+                        // The flags and prefix passed (zpp'd by the opcode)
+                        for a in &slots[1..] {
+                            let v = match a {
+                                Some(e) => self.compile_expr(e)?,
+                                // ($flags skipped for a named $prefix)
+                                None => OperandType::Const(self.op_array.add_literal(Value::Long(0))),
+                            };
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayAppend,
+                                op1: OperandType::Tmp(meta_tmp),
+                                op2: v,
+                                result: OperandType::Tmp(meta_tmp),
+                                line: expr.span.line,
+                            });
+                        }
                         let tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
                             opcode: OpCode::Extract,
@@ -24605,4 +24597,37 @@ fn enum_property_line(body: &[ClassMember], enum_line: u32) -> Option<u32> {
                     && params.iter().any(|p| p.visibility.is_some() || p.readonly || p.set_visibility.is_some()))
         })
         .then_some(enum_line)
+}
+
+/// The arguments of an extract() call compiled to OpCode::Extract, in
+/// parameter order ($array, then the $flags and $prefix given), or None
+/// when it is compiled as a plain call (whose argument checks then fail).
+#[inline(never)]
+fn extract_call_args(args: &[goro_parser::ast::Argument]) -> Option<Vec<Option<&Expr>>> {
+    const NAMES: [&[u8]; 3] = [b"array", b"flags", b"prefix"];
+    let mut slots: [Option<&Expr>; 3] = [None; 3];
+    let mut next = 0;
+    for a in args {
+        if a.unpack {
+            return None;
+        }
+        let i = match &a.name {
+            None => {
+                let i = next;
+                next += 1;
+                i
+            }
+            Some(n) => NAMES.iter().position(|p| *p == n.as_slice())?,
+        };
+        if i >= 3 || slots[i].is_some() {
+            return None;
+        }
+        slots[i] = Some(&a.value);
+    }
+    let last = slots.iter().rposition(|s| s.is_some())?;
+    // (only $flags may be skipped: its default is EXTR_OVERWRITE)
+    if slots[0].is_none() {
+        return None;
+    }
+    Some(slots[..=last].to_vec())
 }

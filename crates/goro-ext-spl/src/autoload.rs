@@ -276,6 +276,8 @@ fn same_callable(a: &Value, b: &Value) -> bool {
 }
 
 pub fn spl_autoload_register_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    use goro_core::arginfo::{CHECK_ARITY, CHECK_PAST_STOP, CHECK_TYPES};
+    vm.zpp_self_check_flags(b"spl_autoload_register", args, CHECK_ARITY)?;
     let callback = args.first().cloned().unwrap_or(Value::Null).deref();
     let normalized = if matches!(callback, Value::Null) {
         Value::String(PhpString::from_bytes(b"spl_autoload"))
@@ -300,6 +302,18 @@ pub fn spl_autoload_register_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
             );
         }
     }
+    // (the bools are parsed after the callback)
+    let coerced;
+    let args = if args.len() > 1 {
+        coerced = vm.zpp_self_check_flags(
+            b"spl_autoload_register",
+            args,
+            CHECK_ARITY | CHECK_TYPES | CHECK_PAST_STOP,
+        )?;
+        &coerced[..]
+    } else {
+        args
+    };
     if let Some(v) = args.get(1) {
         if !v.to_bool() {
             let line = vm.current_line;

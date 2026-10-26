@@ -113,6 +113,79 @@ pub fn register_standard_functions(vm: &mut Vm) {
             .entry(name.as_bytes().to_vec())
             .or_insert(goro_core::arginfo::CHECK_ARITY);
     }
+    // Functions tools/verify_arginfo.py does not probe (they sleep, change
+    // process or engine state, write output...) whose C implementation parses
+    // its parameters in one zpp block matching the stub (its source check):
+    // argument counts and types.
+    for name in [
+        "usleep",
+        "time_nanosleep",
+        "time_sleep_until",
+        "set_time_limit",
+        "set_error_handler",
+        "set_exception_handler",
+        "restore_error_handler",
+        "restore_exception_handler",
+        "register_shutdown_function",
+        "register_tick_function",
+        "unregister_tick_function",
+        "header_register_callback",
+        "error_reporting",
+        "ini_restore",
+        "ignore_user_abort",
+        "error_log",
+        "openlog",
+        "syslog",
+        "umask",
+        "chdir",
+        "chroot",
+        "putenv",
+        "trigger_error",
+        "user_error",
+        "highlight_file",
+        "show_source",
+        "php_strip_whitespace",
+        "printf",
+        "vprintf",
+        "print_r",
+        "var_export",
+        "var_dump",
+        "header",
+        "header_remove",
+        "setcookie",
+        "setrawcookie",
+        "http_response_code",
+        "gc_enable",
+        "gc_disable",
+        "get_browser",
+        "gethostbyname",
+        "gethostbynamel",
+        "gethostbyaddr",
+        "debug_backtrace",
+        "debug_print_backtrace",
+        "output_add_rewrite_var",
+        "output_reset_rewrite_vars",
+        "flush",
+        "sleep",
+        "forward_static_call",
+        "forward_static_call_array",
+        "func_get_args",
+        "func_num_args",
+        "func_get_arg",
+        "get_defined_vars",
+        "compact",
+        "extract",
+        "dns_check_record",
+        "checkdnsrr",
+        "dns_get_mx",
+        "getmxrr",
+        "dns_get_record",
+    ] {
+        vm.zpp_extension_verified.insert(
+            name.as_bytes().to_vec(),
+            goro_core::arginfo::CHECK_ARITY | goro_core::arginfo::CHECK_TYPES,
+        );
+    }
 }
 
 /// ext/bz2's stream functions (bzopen(), bzread(), bzerr*() and the bz*

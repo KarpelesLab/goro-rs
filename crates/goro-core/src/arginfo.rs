@@ -492,6 +492,16 @@ pub enum ZppError {
     Pending,
 }
 
+/// Variadic functions parsing their arguments with zend_parse_parameters()
+/// and a "*" / "+" spec (not the fast ZPP macros).
+fn legacy_zpp_variadic(name: &str) -> bool {
+    matches!(name, "register_shutdown_function" | "register_tick_function")
+        || name.starts_with("array_diff_")
+        || name.starts_with("array_udiff")
+        || name.starts_with("array_intersect")
+        || name.starts_with("array_uintersect")
+}
+
 /// The T_* bit of a (dereferenced) value's type.
 fn value_type_bit(v: &Value) -> u16 {
     match v {
@@ -1244,8 +1254,12 @@ impl Vm {
             defaulted.push(i);
         }
         if extra_named {
-            if let Some(msg) = info.arity_error(args.len()) {
-                return Err(ZppError::Throw(b"ArgumentCountError", msg));
+            // (zend_parse_parameters() with a "*" / "+" spec rejects them
+            // before it checks the argument count)
+            if !legacy_zpp_variadic(info.name) {
+                if let Some(msg) = info.arity_error(args.len()) {
+                    return Err(ZppError::Throw(b"ArgumentCountError", msg));
+                }
             }
             return Err(ZppError::Throw(
                 b"ArgumentCountError",

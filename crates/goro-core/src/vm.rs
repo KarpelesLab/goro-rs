@@ -32324,13 +32324,16 @@ impl Vm {
                         if !call.named_args.is_empty() {
                             // Special functions that forward named args to their callbacks
                             let forwards_named = func_name_lower == b"call_user_func"
-                                || func_name_lower == b"call_user_func_array"
                                 || func_name_lower == b"forward_static_call"
-                                || func_name_lower == b"forward_static_call_array"
                                 || self.builtin_named_variadics.contains(&func_name_lower);
                             if forwards_named {
                                 // Store named args on VM for forwarding
-                                self.pending_named_args = std::mem::take(&mut call.named_args);
+                                let named = std::mem::take(&mut call.named_args);
+                                zpp_err = self.forwarded_named_args(
+                                    &func_name_lower,
+                                    &mut call.args,
+                                    named,
+                                );
                             } else if let Some(info) = crate::arginfo::lookup(&func_name_lower)
                             {
                                 // Stub arginfo: map names to positions, fill skipped defaults
@@ -32437,6 +32440,8 @@ impl Vm {
                             }
                         }
                         if let Some(e) = zpp_err {
+                            // (named arguments kept for a callback that is not called)
+                            self.pending_named_args.clear();
                             if let crate::arginfo::ZppError::Throw(cls, msg) = e {
                                 // zpp errors are raised inside the function: its frame is in the trace
                                 if zpp_err_in_call && !special {
@@ -46303,17 +46308,37 @@ impl Vm {
                         .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                         .deref();
                     let meta_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    let (flags, prefix): (i64, Option<Vec<u8>>) = match &meta_val {
-                        Value::Array(a) => {
-                            let a = a.borrow();
-                            let f = a.iter().next().map(|(_, v)| v.to_long()).unwrap_or(0);
-                            let p = match a.iter().nth(1).map(|(_, v)| v.deref()) {
-                                None | Some(Value::Null) => None,
-                                Some(v) => Some(v.to_php_string().as_bytes().to_vec()),
-                            };
-                            (f, p)
+                    // (the arguments as passed: the array, then the flags and
+                    // prefix given)
+                    let mut fargs = vec![arr_val.clone()];
+                    if let Value::Array(m) = &meta_val {
+                        fargs.extend(m.borrow().iter().map(|(_, v)| v.deref()));
+                    }
+                    let zpp = self.extract_zpp(&fargs, op_array.strict_types, op.line);
+                    let mut err: Option<(&[u8], String)> = None;
+                    let (flags, prefix): (i64, Option<Vec<u8>>) = match zpp {
+                        Ok(z) => (
+                            z.get(1).map(|v| v.to_long()).unwrap_or(0),
+                            z.get(2).map(|v| v.to_php_string().as_bytes().to_vec()),
+                        ),
+                        Err(Some(e)) => {
+                            err = Some(e);
+                            (0, None)
                         }
-                        _ => (meta_val.to_long(), None),
+                        Err(None) => {
+                            // (an error handler threw on a deprecation)
+                            if let Some((catch_target, _, _, _, saved_pc)) =
+                                exception_handlers.pop()
+                            {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: self.uncaught_exception_message(),
+                                line: op.line,
+                            });
+                        }
                     };
                     let refs = flags & 0x100 != 0;
                     let etype = flags & 0xff;
@@ -46329,8 +46354,8 @@ impl Vm {
                             .iter()
                             .all(|&c| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x7f)
                     };
-                    let mut err: Option<(&[u8], String)> = None;
-                    if !(0..=6).contains(&etype) {
+                    if err.is_some() {
+                    } else if !(0..=6).contains(&etype) {
                         err = Some((
                             b"ValueError",
                             "extract(): Argument #2 ($flags) must be a valid extract type".into(),
@@ -46517,14 +46542,6 @@ impl Vm {
                     }
                     if let Some((class, msg)) = err {
                         // (thrown from inside extract(): its frame is in the trace)
-                        let mut fargs = vec![arr_val.clone(), Value::Long(flags)];
-                        if let Value::Array(m) = &meta_val {
-                            if let Some(p) = m.borrow().iter().nth(1).map(|(_, v)| v.deref()) {
-                                if !matches!(p, Value::Null) {
-                                    fargs.push(p);
-                                }
-                            }
-                        }
                         self.push_builtin_frame(b"extract", &fargs, op.line);
                         let exc_val = self.create_exception(class, &msg, op.line);
                         self.pop_builtin_frame();
@@ -61691,6 +61708,69 @@ impl Vm {
     }
 
     /// Convert a value to string, calling __toString for objects if available
+    /// Named arguments of a call to a builtin collecting the extra ones for
+    /// its callback (Z_PARAM_VARIADIC_WITH_NAMED): the ones naming a
+    /// declared parameter take its position, the others are kept in
+    /// pending_named_args.
+    #[inline(never)]
+    fn forwarded_named_args(
+        &mut self,
+        lname: &[u8],
+        args: &mut Vec<Value>,
+        named: Vec<(Vec<u8>, Value)>,
+    ) -> Option<crate::arginfo::ZppError> {
+        let mut rest = Vec::with_capacity(named.len());
+        if let Some(info) = crate::arginfo::lookup(lname) {
+            for (n, v) in named {
+                let pos = info
+                    .params
+                    .iter()
+                    .position(|p| !p.variadic && p.name.as_bytes() == n.as_slice());
+                match pos {
+                    Some(i) if i == args.len() => args.push(v),
+                    Some(i) if i < args.len() => {
+                        return Some(crate::arginfo::ZppError::Throw(
+                            b"Error",
+                            format!(
+                                "Named parameter ${} overwrites previous argument",
+                                String::from_utf8_lossy(&n)
+                            ),
+                        ));
+                    }
+                    _ => rest.push((n, v)),
+                }
+            }
+        } else {
+            rest = named;
+        }
+        self.pending_named_args = rest;
+        None
+    }
+
+    /// zpp of extract() (compiled to OpCode::Extract): the coerced
+    /// arguments, Err(Some) the error to throw, Err(None) when an exception
+    /// is pending.
+    #[inline(never)]
+    #[allow(clippy::type_complexity)]
+    fn extract_zpp(
+        &mut self,
+        args: &[Value],
+        strict: bool,
+        line: u32,
+    ) -> Result<Vec<Value>, Option<(&'static [u8], String)>> {
+        let mut owned = args.to_vec();
+        let Some(info) = crate::arginfo::lookup(b"extract") else {
+            return Ok(owned);
+        };
+        let mut orig = None;
+        let flags = crate::arginfo::CHECK_ARITY | crate::arginfo::CHECK_TYPES;
+        match self.zpp_check(info, flags, &mut owned, &mut orig, strict, line) {
+            Ok(()) => Ok(owned),
+            Err(crate::arginfo::ZppError::Throw(c, m)) => Err(Some((c, m))),
+            Err(crate::arginfo::ZppError::Pending) => Err(None),
+        }
+    }
+
     pub fn value_to_string(&mut self, val: &Value) -> PhpString {
         // Unwrap References to handle their inner Value
         if let Value::Reference(r) = val {
