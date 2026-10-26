@@ -35144,6 +35144,11 @@ impl Vm {
                                 for arg in call.args.iter().skip(vi) {
                                     variadic_arr.push(arg.clone());
                                 }
+                                // (with the extra named arguments)
+                                for (name, val) in call.named_args.drain(..) {
+                                    variadic_arr
+                                        .set(ArrayKey::String(PhpString::from_vec(name)), val);
+                                }
                                 if vi < func_cvs.len() {
                                     func_cvs[vi] =
                                         Value::Array(Rc::new(RefCell::new(variadic_arr)));
