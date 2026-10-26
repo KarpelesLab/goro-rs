@@ -54,7 +54,11 @@ impl Vm {
             None => ".",
         };
         let joined = format!("{}/{}", script_dir, path);
-        canonical(std::path::Path::new(&joined)).unwrap_or(joined)
+        canonical(std::path::Path::new(&joined))
+            // (not found: the plain-files wrapper opens the name itself,
+            // relative to the working directory)
+            .or_else(|| canonical(&cwd.join(path)))
+            .unwrap_or(joined)
     }
 }
 

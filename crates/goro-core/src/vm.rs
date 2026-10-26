@@ -48378,8 +48378,10 @@ impl Vm {
                                 // opened as a stream resource.
                                 crate::value::alloc_resource_id();
                             }
-                            // Track file for _once variants
-                            if self.included_files.insert(abs_path.clone()) {
+                            // Track file for _once variants (zend_include_or_eval()
+                            // adds it before compiling; a plain include once
+                            // it compiled: compile_filename())
+                            if is_once && self.included_files.insert(abs_path.clone()) {
                                 self.included_files_list.push(abs_path.clone());
                             }
                             let (parsed, lex_diags) = match source {
@@ -48421,6 +48423,11 @@ impl Vm {
                                     };
                                     match compiled {
                                         Ok((code, inc_warnings)) => {
+                                            if !is_once
+                                                && self.included_files.insert(abs_path.clone())
+                                            {
+                                                self.included_files_list.push(abs_path.clone());
+                                            }
                                             // (the cached compilation is run as is)
                                             let shared = match code {
                                                 Err(c) => c,
