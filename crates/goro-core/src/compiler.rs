@@ -3951,6 +3951,29 @@ impl Compiler {
         self.op_array.temp_next = start;
     }
 
+    /// The end of a return statement whose temporaries start at `start`
+    /// (compiled to a RETURN: the frame is left there, the value taken):
+    /// none of them is live past it, which a FREE_TMPS marked STMT_END
+    /// after it (only run when the code jumps to it) tells the free mask,
+    /// and the next statements reuse them.
+    #[inline(never)]
+    fn end_return_tmps(&mut self, start: u32, line: u32) {
+        let end = self.op_array.temp_next;
+        if end <= start
+            || !matches!(self.op_array.ops.last(), Some(o) if o.opcode == OpCode::Return)
+        {
+            return;
+        }
+        self.op_array.emit(Op {
+            opcode: OpCode::FreeTmps,
+            op1: OperandType::Tmp(start),
+            op2: OperandType::Tmp(end),
+            result: crate::opcode::STMT_END,
+            line,
+        });
+        self.op_array.temp_next = start;
+    }
+
     /// The release of an if / elseif condition's temporaries, on either
     /// path from its test: none of them is live past it (marked STMT_END,
     /// see compute_free_mask).
@@ -4000,7 +4023,11 @@ impl Compiler {
     }
 
     fn compile_stmt(&mut self, stmt: &Statement) -> CompileResult<()> {
+        let ret_tmps = matches!(stmt.kind, StmtKind::Return(_)).then_some(self.op_array.temp_next);
         let r = self.compile_stmt_inner(stmt);
+        if let Some(start) = ret_tmps {
+            self.end_return_tmps(start, stmt.span.line);
+        }
         if !self.dynvar_pending.is_empty() {
             // The variables fetched for dynamic writes are not held past
             // the statement.
