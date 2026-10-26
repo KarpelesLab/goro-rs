@@ -5507,9 +5507,14 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 }
             }
             b"getattributes" => {
-                let attrs = rcls(vm, &class_lower)
+                let mut attrs = rcls(vm, &class_lower)
                     .map(|c| c.attributes.clone())
                     .unwrap_or_default();
+                if attrs.is_empty() && class_lower == b"stdclass" {
+                    attrs.push(crate::stubs::plain_internal_attribute(
+                        b"AllowDynamicProperties",
+                    ));
+                }
                 let filter_name = args.get(1).and_then(|v| {
                     if matches!(v, Value::Null) {
                         None
@@ -14935,9 +14940,21 @@ pub fn create_reflection_attributes(
     // Validate flags: only 0 (default) and 2 (IS_INSTANCEOF) are allowed.
     if filter_flags != 0 && filter_flags != 2 {
         let line = vm.current_line;
+        // (the class declaring the getAttributes() called)
+        let class = match target {
+            1 => "ReflectionClass",
+            8 => "ReflectionProperty",
+            16 => "ReflectionClassConstant",
+            32 => "ReflectionParameter",
+            64 => "ReflectionConstant",
+            _ => "ReflectionFunctionAbstract",
+        };
         let exc = vm.create_exception(
             b"ValueError",
-            "ReflectionFunctionAbstract::getAttributes(): Argument #2 ($flags) must be a valid attribute filter flag",
+            &format!(
+                "{}::getAttributes(): Argument #2 ($flags) must be a valid attribute filter flag",
+                class
+            ),
             line,
         );
         vm.current_exception = Some(exc);

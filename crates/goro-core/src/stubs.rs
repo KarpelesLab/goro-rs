@@ -951,6 +951,33 @@ fn internal_attribute_attr(name: &str) -> Option<crate::object::RuntimeAttribute
     })
 }
 
+/// An argument-less attribute an internal declaration carries in its stub
+/// (stdClass's #[\AllowDynamicProperties]).
+pub fn plain_internal_attribute(name: &[u8]) -> crate::object::RuntimeAttribute {
+    use crate::opcode::{Op, OpCode, OperandType};
+    let mut oa = OpArray::new();
+    let t = oa.alloc_temp();
+    oa.emit(Op {
+        opcode: OpCode::ArrayNew,
+        op1: OperandType::Unused,
+        op2: OperandType::Unused,
+        result: OperandType::Tmp(t),
+        line: 0,
+    });
+    oa.emit(Op {
+        opcode: OpCode::Return,
+        op1: OperandType::Tmp(t),
+        op2: OperandType::Unused,
+        result: OperandType::Unused,
+        line: 0,
+    });
+    crate::object::RuntimeAttribute {
+        name: name.to_vec(),
+        args_op_array: oa,
+        validation_error: None,
+    }
+}
+
 /// Whether objects of the class can't be (un)serialized
 /// (ZEND_ACC_NOT_SERIALIZABLE, inherited from internal ancestors).
 pub fn class_is_not_serializable(vm: &crate::vm::Vm, class_lower: &[u8]) -> bool {
