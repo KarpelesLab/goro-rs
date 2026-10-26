@@ -227,11 +227,18 @@ fn locale_arg(vm: &mut Vm, v: &Value, n: usize) -> Result<Option<Vec<u8>>, VmErr
                 Ok(Some(v.to_php_string().as_bytes().to_vec()))
             }
         }
-        Value::Object(_) => match vm.value_to_string_checked(&v) {
-            Ok(st) => Ok(Some(st.as_bytes().to_vec())),
-            Err(e) if vm.current_exception.is_some() => Err(e),
-            Err(_) => Err(bad(vm, &v)),
-        },
+        // (zend_parse_arg_str(): a Stringable converts, others are a type error)
+        Value::Object(_) => {
+            let (strict, line) = (vm.caller_strict_types, vm.current_line);
+            match vm.zpp_coerce_scalar(goro_core::arginfo::T_STRING, &v, strict, line) {
+                Ok(Some(st)) => Ok(Some(st.to_php_string().as_bytes().to_vec())),
+                Ok(None) => Err(bad(vm, &v)),
+                Err(()) => Err(VmError {
+                    message: vm.uncaught_exception_message(),
+                    line,
+                }),
+            }
+        }
         _ => Err(bad(vm, &v)),
     }
 }
