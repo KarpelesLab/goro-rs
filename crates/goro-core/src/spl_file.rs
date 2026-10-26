@@ -1262,7 +1262,11 @@ impl Vm {
             }
             b"fscanf" => {
                 let format = match a.first() {
-                    Some(v) => v.clone(),
+                    // (zpp of the method's own string $format)
+                    Some(v) => match self.spl_arg_string("SplFileObject::fscanf", 1, "format", v) {
+                        Some(s) => Value::String(s),
+                        None => return Some(Value::Null),
+                    },
                     None => {
                         return self.spl_throw(
                             b"ArgumentCountError",

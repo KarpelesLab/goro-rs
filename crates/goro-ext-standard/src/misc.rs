@@ -13473,6 +13473,16 @@ fn fread_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
     let length = length_signed as usize;
+    // php_stream_read_to_str(): zend_string_alloc(length) up front; a
+    // request alone over memory_limit is the "Allowed memory size" fatal.
+    let str_size = length.saturating_add(25).next_multiple_of(8);
+    let limit = goro_core::value::memory_get_limit();
+    if limit > 0 && str_size > limit {
+        return Err(vm.memory_check(str_size).err().unwrap_or(VmError {
+            message: String::new(),
+            line: vm.current_line,
+        }));
+    }
     // If read filters are attached, route through filter chain.
     let has_read_filters =
         crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
@@ -14026,7 +14036,7 @@ pub(crate) fn stream_write(vm: &mut Vm, func: &str, handle: &Value, data: &[u8])
                 vm.emit_notice_at(
                     &format!(
                         "{}(): Write of {} bytes failed with errno=9 Bad file descriptor",
-                        func,
+                        called_as(vm, func),
                         data.len()
                     ),
                     line,
