@@ -343,7 +343,7 @@ impl Vm {
                 }
             }
         }
-        self.lean_run(op_array, ip, f, sep, slots, nargs, call, cvs, tmps)
+        self.lean_run(op_array, ip, f, sep, slots, nargs, call, cvs, tmps, false)
     }
 
     /// The INIT_FCALL at `ip` of `op_array` just set up a call (the top
@@ -373,25 +373,20 @@ impl Vm {
         // (a method's `$this` leads the arguments)
         let base = lead(sep);
         // The sends, then the DO_FCALL (a nested call's INIT_* ends them).
-        let nsends = ops
-            .get(ip + 1..)?
-            .iter()
-            .take(17)
-            .position(|s| !matches!(s.opcode, OpCode::SendVal | OpCode::SendValChecked))?;
+        let nsends = op_array.fused_sends(ip)?;
         let nargs = base + nsends;
         if nargs > f.param_count as usize || nargs < base + f.required_param_count as usize {
             return None;
         }
         let do_ip = ip + 1 + nsends;
         let fcall = &ops[do_ip];
-        if fcall.opcode != OpCode::DoFCall {
-            return None;
-        }
         // The sends: what send_val_fast() sends.
         let sends = &ops[ip + 1..do_ip];
         // (typed parameters: the arguments must have their types already,
         // see recv_fast.rs)
-        let typed = f.lean_kind() & 4 != 0;
+        let kind = f.lean_kind();
+        let typed = kind & 4 != 0;
+        let by_ref = kind & 16 != 0;
         if typed && !self.pending_callable_deprecations.borrow().is_empty() {
             return None;
         }
@@ -414,7 +409,7 @@ impl Vm {
                     return None;
                 }
             }
-            let ok = !arg_by_ref(f, base + i)
+            let ok = !(by_ref && arg_by_ref(f, base + i))
                 && match s.op1 {
                     OperandType::Cv(c) => match cvs.get(c as usize) {
                         None | Some(Value::Undef) => false,
@@ -445,13 +440,21 @@ impl Vm {
         if !self.lean_ready(fcall, tmps) {
             return None;
         }
-        let call = self.pop_lean_call();
-        let mut slots = self.take_values(f.cv_names.len());
+        let mut call = self.pop_lean_call();
+        // (the variables in the buffer the call's arguments would have
+        // had: none was sent, but a method's `$this`)
+        let mut slots = if base == 0 && call.args.is_empty() {
+            let mut v = std::mem::take(&mut call.args);
+            v.resize_with(f.cv_names.len(), || Value::Undef);
+            v
+        } else {
+            self.take_values(f.cv_names.len())
+        };
         if base == 1 {
             slots[0] = call.args[0].clone();
         }
         for (slot, s) in slots[base..].iter_mut().zip(sends) {
-            *slot = match s.op1 {
+            let v = match s.op1 {
                 OperandType::Cv(c) => match &cvs[c as usize] {
                     Value::Reference(r) => r.borrow().clone(),
                     v => v.clone(),
@@ -463,13 +466,23 @@ impl Vm {
                 OperandType::Const(c) => literals[c as usize].clone(),
                 _ => Value::Null,
             };
+            // By-value array parameters get their own copy (see lean_run:
+            // all of them are by value).
+            *slot = match v {
+                Value::Array(a) if Rc::strong_count(&a) > 1 => {
+                    let copy = crate::array::cow_copy(&a);
+                    Value::Array(Rc::new(RefCell::new(copy)))
+                }
+                v => v,
+            };
         }
-        let done = self.lean_run(op_array, do_ip, f, sep, slots, nargs, call, cvs, tmps);
+        let done = self.lean_run(op_array, do_ip, f, sep, slots, nargs, call, cvs, tmps, true);
         Some(if done { do_ip + 1 } else { do_ip })
     }
 
     /// The lean call of `f` made by the DO_FCALL at `ip` of `op_array`,
-    /// the first `nargs` of its variables `slots` set to the arguments.
+    /// the first `nargs` of its variables `slots` set to the arguments
+    /// (`copied`: by-value array arguments got their own copy already).
     /// True: the call was made, its result stored in `tmps`. False: it was
     /// handed over.
     #[allow(clippy::too_many_arguments)]
@@ -484,6 +497,7 @@ impl Vm {
         mut call: PendingCall,
         caller_cvs: &[Value],
         tmps: &mut [Value],
+        copied: bool,
     ) -> bool {
         let op = &op_array.ops[ip];
         // (what DO_FCALL's fast path does with the call)
@@ -500,12 +514,15 @@ impl Vm {
         // By-value array parameters get their own copy (nothing of the call
         // holds one any more: the frame's copy of the arguments is not made).
         let base = lead(sep);
-        let fixed = f.variadic_param.map_or(nargs, |vi| nargs.min(vi as usize));
-        for (ci, slot) in slots.iter_mut().enumerate().take(fixed).skip(base) {
-            if let Value::Array(a) = slot {
-                if Rc::strong_count(a) > 1 && !f.by_ref_params.get(ci).copied().unwrap_or(false) {
-                    let copy = crate::array::cow_copy(a);
-                    *slot = Value::Array(Rc::new(RefCell::new(copy)));
+        if !copied {
+            let fixed = f.variadic_param.map_or(nargs, |vi| nargs.min(vi as usize));
+            for ci in base..fixed.min(slots.len()) {
+                if let Value::Array(a) = &slots[ci] {
+                    if Rc::strong_count(a) > 1 && !f.by_ref_params.get(ci).copied().unwrap_or(false)
+                    {
+                        let copy = crate::array::cow_copy(a);
+                        slots[ci] = Value::Array(Rc::new(RefCell::new(copy)));
+                    }
                 }
             }
         }
@@ -641,7 +658,7 @@ impl Vm {
             }
             _ => None,
         };
-        let Some(result) = result else {
+        let Some((result, plain)) = result else {
             // Handed over to DO_FCALL's general handler.
             drop(vm_frame);
             let info = f.cv_name_info();
@@ -676,10 +693,19 @@ impl Vm {
         if self.foreach_pool.len() < 16 {
             self.foreach_pool.push(fe);
         }
-        crate::gc::release_frame(&slots);
-        // (the temporaries, then the variables)
-        release_slots(&mut ctmps);
-        release_slots(&mut slots);
+        if plain {
+            // (nothing to release: see lean_return)
+            // SAFETY: the values left are plain ones, without drop glue.
+            unsafe {
+                ctmps.set_len(0);
+                slots.set_len(0);
+            }
+        } else {
+            crate::gc::release_frame(&slots);
+            // (the temporaries, then the variables)
+            release_slots(&mut ctmps);
+            release_slots(&mut slots);
+        }
         self.recycle_values(ctmps);
         self.recycle_values(slots);
         if !crate::gc::release_quiet() {
@@ -746,8 +772,10 @@ impl Vm {
     /// The RETURN at `ip` of a lean call's callee (stopped there), when it
     /// is one DO_FCALL's fast path makes (a defined operand, see the fast
     /// RETURN arm of the dispatch loop) and the release of the frame only
-    /// frees memory: the returned value. None: the call is handed over.
-    /// `unused`: the result of the call is not used (it is released too).
+    /// frees memory: the returned value, and whether the variables and
+    /// temporaries left hold nothing to release (plain values only). None:
+    /// the call is handed over. `unused`: the result of the call is not
+    /// used (it is released too).
     fn lean_return(
         &mut self,
         f: &OpArray,
@@ -755,49 +783,67 @@ impl Vm {
         cvs: &[Value],
         tmps: &mut [Value],
         unused: bool,
-    ) -> Option<Value> {
+    ) -> Option<(Value, bool)> {
         let r = f.ops.get(ip)?;
         if r.opcode != OpCode::Return || self.current_exception.is_some() || self.has_release_work()
         {
             return None;
         }
-        let v = match r.op1 {
-            OperandType::Cv(i) => match cvs.get(i as usize)? {
-                Value::Undef => return None,
-                Value::Reference(rc) => match &*rc.try_borrow().ok()? {
+        // (a returned temporary is moved out, not released: looked at in
+        // place until then)
+        let null = Value::Null;
+        let (copy, ret_tmp) = match r.op1 {
+            OperandType::Cv(i) => (
+                match cvs.get(i as usize)? {
                     Value::Undef => return None,
-                    // (a referenced array outlives the frame: the caller
-                    // gets its own copy, as the general handler's)
-                    v @ Value::Array(_) => self.dup_array_value(v.clone()),
-                    v => v.clone(),
+                    Value::Reference(rc) => match &*rc.try_borrow().ok()? {
+                        Value::Undef => return None,
+                        // (a referenced array outlives the frame: the caller
+                        // gets its own copy, as the general handler's)
+                        v @ Value::Array(_) => Some(self.dup_array_value(v.clone())),
+                        v => Some(v.clone()),
+                    },
+                    v => Some(v.clone()),
                 },
-                v => v.clone(),
-            },
-            OperandType::Tmp(i) => match tmps.get(i as usize)? {
-                Value::Undef => Value::Null,
-                v => v.clone(),
-            },
-            OperandType::Const(i) => f.literals.get(i as usize)?.clone(),
-            _ => Value::Null,
+                usize::MAX,
+            ),
+            OperandType::Tmp(i) => {
+                tmps.get(i as usize)?;
+                (None, i as usize)
+            }
+            OperandType::Const(i) => (Some(f.literals.get(i as usize)?.clone()), usize::MAX),
+            _ => (Some(Value::Null), usize::MAX),
         };
-        // (the returned temporary is moved out, not released)
-        let ret_tmp = match r.op1 {
-            OperandType::Tmp(i) => i as usize,
-            _ => usize::MAX,
+        let v: &Value = match &copy {
+            Some(v) => v,
+            None => match &tmps[ret_tmp] {
+                Value::Undef => &null,
+                v => v,
+            },
         };
         // (a declared return type: the value must have it already, see
         // recv_fast.rs)
-        if f.lean_kind() & 8 != 0 && !crate::recv_fast::return_matches_exactly(f, &v, r.line == 0) {
+        if f.lean_kind() & 8 != 0 && !crate::recv_fast::return_matches_exactly(f, v, r.line == 0) {
             return None;
         }
         // (containers of such values too, within a budget: a tree of
         // plain objects the callee built and drops, see drops_quietly_deep)
         let mut budget = 256u32;
         let globals = &self.globals;
-        let mut quiet = |v: &Value| {
-            is_plain_scalar(v) || crate::fastpath::drops_quietly_deep(v, &mut budget, globals)
+        let mut plain = true;
+        let mut quiet = |v: &Value| match v {
+            Value::Undef
+            | Value::Null
+            | Value::False
+            | Value::True
+            | Value::Long(_)
+            | Value::Double(_) => true,
+            v => {
+                plain = false;
+                is_plain_scalar(v) || crate::fastpath::drops_quietly_deep(v, &mut budget, globals)
+            }
         };
-        if (unused && !is_plain_scalar(&v))
+        if (unused && !is_plain_scalar(v))
             || !cvs.iter().all(&mut quiet)
             || !tmps
                 .iter()
@@ -806,13 +852,17 @@ impl Vm {
         {
             return None;
         }
-        if let Some(slot) = tmps.get_mut(ret_tmp) {
-            *slot = Value::Undef;
-        }
+        let v = match copy {
+            Some(v) => v,
+            None => match std::mem::replace(&mut tmps[ret_tmp], Value::Undef) {
+                Value::Undef => Value::Null,
+                v => v,
+            },
+        };
         self.return_discarded_exc = None;
         self.last_return_line = r.line;
         self.current_line = r.line;
-        Some(v)
+        Some((v, plain))
     }
 
     /// The DO_FCALL at `ip` of `op_array`, the callee of the running lean

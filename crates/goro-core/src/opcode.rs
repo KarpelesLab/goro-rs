@@ -592,6 +592,8 @@ pub struct OpArray {
     lean_kind: FreshOnClone<u8>,
     /// See OpArray::prop_ic().
     prop_ics: FreshOnClone<PropIcs>,
+    /// See OpArray::fused_sends().
+    fused_sends: FreshOnClone<Box<[u8]>>,
 }
 
 /// A value an OpArray computes from itself on first use, which a copy of
@@ -867,7 +869,8 @@ impl OpArray {
     /// something (a by-reference return, a generator, variadics,
     /// attributes, static variables, `$GLOBALS` or auto-globals, internal
     /// code, a closure); plus 4 when it has typed parameters, 8 a return
-    /// type (checked per call, see vm::leancall).
+    /// type (checked per call, see vm::leancall), 16 a parameter by
+    /// reference.
     #[inline]
     pub(crate) fn lean_kind(&self) -> u8 {
         match self.lean_kind.0.get() {
@@ -897,12 +900,39 @@ impl OpArray {
                 && !crate::closure::is_closure_fn_name(&self.name)
                 && self.cv_name_info().plain_cvs;
             let typed = 4 * u8::from(self.param_types.iter().any(|t| t.is_some()))
-                + 8 * u8::from(self.return_type.is_some());
+                + 8 * u8::from(self.return_type.is_some())
+                + 16 * u8::from(self.by_ref_params.iter().any(|&b| b));
             match (plain, self.cv_names.first().map(|n| n.as_slice())) {
                 (false, _) => 0,
                 (true, Some(b"this")) => 2 | typed,
                 (true, _) => 1 | typed,
             }
+        })
+    }
+
+    /// The INIT_* of a call at `ip`: the number of plain sends (SEND_VAL,
+    /// SEND_VAL_EX) right after it, at most 16, when the DO_FCALL of the
+    /// call follows them (see Vm::lean_fused).
+    #[inline]
+    pub(crate) fn fused_sends(&self, ip: usize) -> Option<usize> {
+        let m = match self.fused_sends.0.get() {
+            Some(m) if m.len() == self.ops.len() => m,
+            Some(_) => return fused_sends_at(&self.ops, ip),
+            None => self.fused_sends_init(),
+        };
+        match m.get(ip) {
+            Some(&n) if n != u8::MAX => Some(n as usize),
+            _ => None,
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn fused_sends_init(&self) -> &[u8] {
+        self.fused_sends.0.get_or_init(|| {
+            (0..self.ops.len())
+                .map(|ip| fused_sends_at(&self.ops, ip).map_or(u8::MAX, |n| n as u8))
+                .collect()
         })
     }
 
@@ -1132,6 +1162,7 @@ impl OpArray {
             free_mask: Default::default(),
             lean_kind: Default::default(),
             prop_ics: Default::default(),
+            fused_sends: Default::default(),
         }
     }
 
@@ -1226,6 +1257,16 @@ pub(crate) struct FreeInfo {
     mask: Box<[u8]>,
     /// (DoFCall index, callable temporary), by index.
     call_frees: Box<[(u32, u32)]>,
+}
+
+/// OpArray::fused_sends() of the opcode at `ip` of `ops`.
+fn fused_sends_at(ops: &[Op], ip: usize) -> Option<usize> {
+    let rest = ops.get(ip + 1..)?;
+    let n = rest
+        .iter()
+        .take(17)
+        .position(|s| !matches!(s.opcode, OpCode::SendVal | OpCode::SendValChecked))?;
+    (rest[n].opcode == OpCode::DoFCall).then_some(n)
 }
 
 /// The free mask of `oa` (see FreeInfo), by live range: a temporary's index
