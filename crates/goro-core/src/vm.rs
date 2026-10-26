@@ -8055,19 +8055,63 @@ impl Vm {
     /// "f(): Argument #N ($name) could not be passed by reference" for a
     /// literal named argument of user function `call_name` whose parameter
     /// `name` is by reference.
+    #[inline(never)]
     fn named_literal_by_ref_error(&self, call_name: &[u8], name: &[u8]) -> Option<String> {
         let lower = call_name.to_ascii_lowercase();
-        let op = self.user_functions.get(&lower).cloned().or_else(|| {
+        let user = self.user_functions.get(&lower).cloned().or_else(|| {
             let sep = lower.windows(2).position(|w| w == b"::")?;
             self.classes
                 .get(&lower[..sep])
                 .and_then(|c| c.get_method(&lower[sep + 2..]))
                 .map(|m| m.op_array.clone())
-        })?;
+        });
+        let Some(op) = user else {
+            // A builtin: its by-reference parameter, or the by-reference
+            // variadic one collecting an unknown name.
+            let info = crate::arginfo::lookup(&lower)?;
+            if let Some((i, p)) = info
+                .params
+                .iter()
+                .enumerate()
+                .find(|(_, p)| !p.variadic && p.name.as_bytes() == name)
+            {
+                return (p.by_ref == 1).then(|| {
+                    format!(
+                        "{}(): Argument #{} (${}) could not be passed by reference",
+                        info.name,
+                        i + 1,
+                        p.name
+                    )
+                });
+            }
+            let last = info.params.len().checked_sub(1)?;
+            let p = &info.params[last];
+            return (p.variadic && p.by_ref == 1).then(|| {
+                format!(
+                    "{}(): Argument #{} could not be passed by reference",
+                    info.name,
+                    last + 1
+                )
+            });
+        };
         let implicit = crate::internal_frames::implicit_args(&op);
-        let i = (implicit..op.by_ref_params.len())
-            .find(|&i| op.cv_names.get(i).is_some_and(|n| n.as_slice() == name))?;
-        if !op.by_ref_params[i] || op.variadic_param == Some(i as u32) {
+        let found = (implicit..op.by_ref_params.len()).find(|&i| {
+            op.variadic_param != Some(i as u32)
+                && op.cv_names.get(i).is_some_and(|n| n.as_slice() == name)
+        });
+        let Some(i) = found else {
+            // (an extra named argument goes to the variadic parameter)
+            let v = op.variadic_param? as usize;
+            if !op.by_ref_params.get(v).copied().unwrap_or(false) {
+                return None;
+            }
+            return Some(format!(
+                "{}(): Argument #{} could not be passed by reference",
+                String::from_utf8_lossy(op.effective_name()),
+                v - implicit + 1
+            ));
+        };
+        if !op.by_ref_params[i] {
             return None;
         }
         Some(format!(
@@ -8197,9 +8241,18 @@ impl Vm {
             }
         }
         crate::arginfo::lookup(&lower).is_some_and(|info| {
-            info.params
+            match info
+                .params
                 .iter()
-                .any(|p| p.by_ref == 1 && p.name.as_bytes() == name)
+                .find(|p| !p.variadic && p.name.as_bytes() == name)
+            {
+                Some(p) => p.by_ref == 1,
+                // (an unknown name goes to a by-reference variadic parameter)
+                None => info
+                    .params
+                    .last()
+                    .is_some_and(|p| p.variadic && p.by_ref != 0),
+            }
         })
     }
 

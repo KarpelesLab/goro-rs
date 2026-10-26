@@ -2424,6 +2424,61 @@ impl Compiler {
         }
     }
 
+    /// A named argument of a builtin that is an expression (not a variable,
+    /// not a call) given to a by-reference parameter: ZEND_SEND_VAL_EX's
+    /// "could not be passed by reference". (Literals are checked when sent.)
+    #[inline(never)]
+    fn named_value_by_ref_check(
+        &mut self,
+        func_name: Option<&[u8]>,
+        name: &[u8],
+        value: &Expr,
+        line: u32,
+    ) {
+        let Some(info) = func_name.and_then(|f| crate::arginfo::lookup(&f.to_ascii_lowercase()))
+        else {
+            return;
+        };
+        if Self::is_writable_lvalue(value)
+            || Self::is_var_result_expr(value)
+            || matches!(
+                value.kind,
+                ExprKind::FunctionCall { .. }
+                    | ExprKind::MethodCall { .. }
+                    | ExprKind::StaticMethodCall { .. }
+            )
+        {
+            return;
+        }
+        let Some((i, p)) = info
+            .params
+            .iter()
+            .enumerate()
+            .find(|(_, p)| !p.variadic && p.name.as_bytes() == name)
+        else {
+            return;
+        };
+        if p.by_ref != 1 {
+            return;
+        }
+        let msg = format!(
+            "{}(): Argument #{} (${}) could not be passed by reference",
+            info.name,
+            i + 1,
+            p.name
+        );
+        let msg_idx = self
+            .op_array
+            .add_literal(Value::String(PhpString::from_string(msg)));
+        self.op_array.emit(Op {
+            opcode: OpCode::ThrowErrorMsg,
+            op1: OperandType::Const(msg_idx),
+            op2: OperandType::Unused,
+            result: OperandType::Unused,
+            line,
+        });
+    }
+
     /// Compile and emit SendVal/SendNamedVal/SendUnpack opcodes for function call arguments.
     fn compile_send_args(&mut self, args: &[Argument], line: u32) -> CompileResult<()> {
         self.compile_send_args_with_name(args, line, None)
@@ -2558,6 +2613,9 @@ impl Compiler {
                     continue;
                 }
                 let val = self.compile_expr(&arg.value)?;
+                if !matches!(val, OperandType::Const(_) | OperandType::Cv(_)) {
+                    self.named_value_by_ref_check(func_name, name, &arg.value, line);
+                }
                 self.op_array.emit(Op {
                     opcode: OpCode::SendNamedVal,
                     op1: val,
