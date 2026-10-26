@@ -11202,11 +11202,19 @@ pub fn reflection_extension_method(
             // to this extension (matched via get_function_extension()). Return
             // a string-keyed map of ReflectionFunction objects.
             let mut result = PhpArray::new();
-            let func_names: Vec<String> = vm
+            // The module's function table order, then the others goro
+            // attributes to the extension.
+            for fname in extension_function_names(vm, &ext_lower) {
+                let rf = create_reflection_function(vm, &fname);
+                result.set(ArrayKey::String(PhpString::from_string(fname)), rf);
+            }
+            let mut func_names: Vec<String> = vm
                 .functions
                 .keys()
                 .map(|k| String::from_utf8_lossy(k).to_string())
+                .filter(|k| function_listed_ext(k).is_none())
                 .collect();
+            func_names.sort();
             for fname in func_names {
                 let ext = get_function_extension(&fname).unwrap_or("standard");
                 if ext.eq_ignore_ascii_case(&ext_lower)
@@ -11600,13 +11608,55 @@ fn extension_string(vm: &mut Vm, name: &str, ext_lower: &str) -> String {
 /// An extension's classes: the hand-kept list (in registration order),
 /// then the other classes its stubs declare (by name).
 fn extension_class_names(ext: &str) -> Vec<&'static str> {
-    let mut out: Vec<&'static str> = get_extension_classes(ext).to_vec();
+    let mut out: Vec<&'static str> = crate::ext_order::EXT_CLASSES
+        .iter()
+        .find(|(e, _)| *e == ext)
+        .map(|(_, l)| l.to_vec())
+        .unwrap_or_default();
+    for c in get_extension_classes(ext) {
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(c)) {
+            out.push(c);
+        }
+    }
     for c in crate::stub_sigs::CLASSES {
         if c.ext.eq_ignore_ascii_case(ext) && !out.iter().any(|o| o.eq_ignore_ascii_case(c.name)) {
             out.push(c.name);
         }
     }
     out
+}
+
+/// The extension (lowercase) whose registration-order list names function
+/// `name` (lowercase), if any.
+fn function_listed_ext(name: &str) -> Option<&'static str> {
+    thread_local! {
+        static MAP: std::collections::HashMap<String, &'static str> = {
+            let mut m = std::collections::HashMap::new();
+            for (e, l) in crate::ext_order::EXT_FUNCTIONS {
+                for f in l.iter() {
+                    m.entry(f.to_ascii_lowercase()).or_insert(*e);
+                }
+            }
+            m
+        };
+    }
+    MAP.with(|m| m.get(name).copied())
+}
+
+/// The defined functions of extension `ext` (lowercase), in the module's
+/// registration order.
+fn extension_function_names(vm: &Vm, ext: &str) -> Vec<String> {
+    let Some((_, list)) = crate::ext_order::EXT_FUNCTIONS
+        .iter()
+        .find(|(e, _)| *e == ext)
+    else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter(|f| vm.functions.contains_key(f.to_ascii_lowercase().as_bytes()))
+        .filter(|f| function_listed_ext(&f.to_ascii_lowercase()) == Some(ext))
+        .map(|f| f.to_string())
+        .collect()
 }
 
 fn get_extension_classes(ext: &str) -> &'static [&'static str] {
@@ -11804,6 +11854,13 @@ pub fn extension_ini_entries(ext: &str) -> &'static [&'static str] {
 fn get_extension_ini_entries(ext: &str) -> &'static [&'static str] {
     match ext {
         "bcmath" => &["bcmath.scale"],
+        "date" => &[
+            "date.timezone",
+            "date.default_latitude",
+            "date.default_longitude",
+            "date.sunset_zenith",
+            "date.sunrise_zenith",
+        ],
         "pcre" => &["pcre.backtrack_limit", "pcre.recursion_limit", "pcre.jit"],
         "gd" => &["gd.jpeg_ignore_warning"],
         "dba" => &["dba.default_handler"],

@@ -13,6 +13,7 @@ pub mod crypto;
 pub mod csv;
 pub mod custom_fiber;
 pub mod errdisplay;
+pub mod ext_order;
 pub mod ext_stream;
 pub mod fastpath;
 pub mod fetch_w;
