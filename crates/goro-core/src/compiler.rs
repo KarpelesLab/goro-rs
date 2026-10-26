@@ -21609,7 +21609,11 @@ impl Compiler {
                 operand,
                 ..
             } => match Self::eval_const_expr(operand)? {
-                Value::Long(n) => Some(Value::Long(-n)),
+                Value::Long(n) => Some(
+                    n.checked_neg()
+                        .map(Value::Long)
+                        .unwrap_or(Value::Double(-(n as f64))),
+                ),
                 Value::Double(f) => Some(Value::Double(-f)),
                 _ => None,
             },
@@ -21627,11 +21631,11 @@ impl Compiler {
                 let l = Self::eval_const_expr(left)?;
                 let r = Self::eval_const_expr(right)?;
                 match (l, op, r) {
-                    (Value::Long(a), BinaryOp::ShiftLeft, Value::Long(b)) => {
-                        Some(Value::Long(a << b))
+                    (Value::Long(a), BinaryOp::ShiftLeft, Value::Long(b)) if b >= 0 => {
+                        Some(Value::Long(if b >= 64 { 0 } else { a << b }))
                     }
-                    (Value::Long(a), BinaryOp::ShiftRight, Value::Long(b)) => {
-                        Some(Value::Long(a >> b))
+                    (Value::Long(a), BinaryOp::ShiftRight, Value::Long(b)) if b >= 0 => {
+                        Some(Value::Long(a >> b.min(63)))
                     }
                     (Value::Long(a), BinaryOp::BitwiseAnd, Value::Long(b)) => {
                         Some(Value::Long(a & b))
@@ -21642,27 +21646,39 @@ impl Compiler {
                     (Value::Long(a), BinaryOp::BitwiseXor, Value::Long(b)) => {
                         Some(Value::Long(a ^ b))
                     }
-                    (Value::Long(a), BinaryOp::Add, Value::Long(b)) => {
-                        Some(Value::Long(a.wrapping_add(b)))
-                    }
-                    (Value::Long(a), BinaryOp::Sub, Value::Long(b)) => {
-                        Some(Value::Long(a.wrapping_sub(b)))
-                    }
-                    (Value::Long(a), BinaryOp::Mul, Value::Long(b)) => {
-                        Some(Value::Long(a.wrapping_mul(b)))
-                    }
+                    (Value::Long(a), BinaryOp::Add, Value::Long(b)) => Some(
+                        a.checked_add(b)
+                            .map(Value::Long)
+                            .unwrap_or(Value::Double(a as f64 + b as f64)),
+                    ),
+                    (Value::Long(a), BinaryOp::Sub, Value::Long(b)) => Some(
+                        a.checked_sub(b)
+                            .map(Value::Long)
+                            .unwrap_or(Value::Double(a as f64 - b as f64)),
+                    ),
+                    (Value::Long(a), BinaryOp::Mul, Value::Long(b)) => Some(
+                        a.checked_mul(b)
+                            .map(Value::Long)
+                            .unwrap_or(Value::Double(a as f64 * b as f64)),
+                    ),
                     (Value::Long(a), BinaryOp::Div, Value::Long(b)) if b != 0 => {
-                        if a % b == 0 {
+                        if a == i64::MIN && b == -1 {
+                            Some(Value::Double(a as f64 / b as f64))
+                        } else if a % b == 0 {
                             Some(Value::Long(a / b))
                         } else {
                             Some(Value::Double(a as f64 / b as f64))
                         }
                     }
                     (Value::Long(a), BinaryOp::Mod, Value::Long(b)) if b != 0 => {
-                        Some(Value::Long(a % b))
+                        Some(Value::Long(a.wrapping_rem(b)))
                     }
                     (Value::Long(a), BinaryOp::Pow, Value::Long(b)) if b >= 0 => {
-                        Some(Value::Long(a.wrapping_pow(b as u32)))
+                        // (an overflow is a float: left to the runtime)
+                        u32::try_from(b)
+                            .ok()
+                            .and_then(|b| a.checked_pow(b))
+                            .map(Value::Long)
                     }
                     (Value::Double(a), BinaryOp::Add, Value::Double(b)) => {
                         Some(Value::Double(a + b))
@@ -21688,7 +21704,12 @@ impl Compiler {
                         Some(Value::String(PhpString::from_vec(result)))
                     }
                     // String concatenation with non-string right side
-                    (Value::String(a), BinaryOp::Concat, rv) => {
+                    (Value::String(a), BinaryOp::Concat, rv)
+                        if matches!(
+                            rv,
+                            Value::Long(_) | Value::Null | Value::True | Value::False
+                        ) || matches!(rv, Value::Double(f) if !f.is_nan()) =>
+                    {
                         let mut result = a.as_bytes().to_vec();
                         result.extend_from_slice(rv.to_php_string().as_bytes());
                         Some(Value::String(PhpString::from_vec(result)))
@@ -21738,39 +21759,26 @@ impl Compiler {
                     (Value::Long(a), BinaryOp::NotIdentical, Value::Long(b)) => {
                         Some(if a != b { Value::True } else { Value::False })
                     }
-                    // Equal/NotEqual with string comparison (loose)
-                    (Value::String(a), BinaryOp::Equal, Value::String(b)) => {
-                        Some(if a.as_bytes() == b.as_bytes() {
-                            Value::True
-                        } else {
-                            Value::False
-                        })
-                    }
-                    (Value::String(a), BinaryOp::NotEqual, Value::String(b)) => {
-                        Some(if a.as_bytes() != b.as_bytes() {
-                            Value::True
-                        } else {
-                            Value::False
-                        })
-                    }
-                    (Value::Long(a), BinaryOp::Equal, Value::String(b))
-                    | (Value::String(b), BinaryOp::Equal, Value::Long(a)) => {
-                        let s = std::str::from_utf8(b.as_bytes()).unwrap_or("");
-                        Some(if s.parse::<i64>().ok() == Some(a) {
-                            Value::True
-                        } else {
-                            Value::False
-                        })
-                    }
-                    (Value::Long(a), BinaryOp::NotEqual, Value::String(b))
-                    | (Value::String(b), BinaryOp::NotEqual, Value::Long(a)) => {
-                        let s = std::str::from_utf8(b.as_bytes()).unwrap_or("");
-                        Some(if s.parse::<i64>().ok() != Some(a) {
-                            Value::True
-                        } else {
-                            Value::False
-                        })
-                    }
+                    // Loose (in)equality of scalars (numeric strings compare
+                    // as numbers: "1e3" == "1000")
+                    (
+                        l @ (Value::String(_) | Value::Long(_)),
+                        BinaryOp::Equal,
+                        r @ (Value::String(_) | Value::Long(_)),
+                    ) => Some(if l.equals(&r) {
+                        Value::True
+                    } else {
+                        Value::False
+                    }),
+                    (
+                        l @ (Value::String(_) | Value::Long(_)),
+                        BinaryOp::NotEqual,
+                        r @ (Value::String(_) | Value::Long(_)),
+                    ) => Some(if l.equals(&r) {
+                        Value::False
+                    } else {
+                        Value::True
+                    }),
                     _ => None,
                 }
             }
