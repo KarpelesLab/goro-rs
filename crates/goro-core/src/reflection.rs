@@ -4636,6 +4636,11 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     vm.current_exception = Some(exc);
                     return Some(Value::Null);
                 }
+                if let Some(msg) = crate::vm::no_direct_construct_msg(&class_lower) {
+                    let exc = vm.create_exception(b"Error", msg, vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 // Create instance and call constructor with remaining args
                 let canonical = rcls(vm, &class_lower)
                     .map(|c| c.name.clone())
@@ -4727,6 +4732,11 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 ))
             }
             b"newinstanceargs" => {
+                if let Some(msg) = crate::vm::no_direct_construct_msg(&class_lower) {
+                    let exc = vm.create_exception(b"Error", msg, vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 // Same as newInstance but takes an array of args
                 // Validate the argument is an array (or null/missing)
                 let args_arr = match args.get(1) {

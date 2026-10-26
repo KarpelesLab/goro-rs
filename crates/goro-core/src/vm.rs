@@ -57139,7 +57139,8 @@ impl Vm {
                             };
                             Some(format!("Cannot instantiate {} {}", kind, c.name))
                         })
-                    };
+                    }
+                    .or_else(|| no_direct_construct_msg(&name_lower).map(str::to_string));
                     if let Some(err_msg) = inst_err {
                         let exc = self.create_exception(b"Error", &err_msg, op.line);
                         self.current_exception = Some(exc);
@@ -66355,6 +66356,35 @@ const UNDOTTED_INI_ENTRIES: &[&[u8]] = &[
     b"xmlrpc_error_number",
     b"xmlrpc_errors",
 ];
+
+/// The get_constructor() error of the internal classes only their
+/// extension's functions create (the others register their own).
+#[inline(never)]
+pub(crate) fn no_direct_construct_msg(class_lower: &[u8]) -> Option<&'static str> {
+    Some(match class_lower {
+        b"deflatecontext" => "Cannot directly construct DeflateContext, use deflate_init() instead",
+        b"inflatecontext" => "Cannot directly construct InflateContext, use inflate_init() instead",
+        b"opensslcertificate" => {
+            "Cannot directly construct OpenSSLCertificate, use openssl_x509_read() instead"
+        }
+        b"opensslcertificatesigningrequest" => {
+            "Cannot directly construct OpenSSLCertificateSigningRequest, use openssl_csr_new() instead"
+        }
+        b"opensslasymmetrickey" => {
+            "Cannot directly construct OpenSSLAsymmetricKey, use openssl_pkey_new() instead"
+        }
+        b"soap\\url" => "Cannot directly construct Soap\\Url",
+        b"soap\\sdl" => "Cannot directly construct Soap\\Sdl",
+        b"socket" => "Cannot directly construct Socket, use socket_create() instead",
+        b"addressinfo" => {
+            "Cannot directly construct AddressInfo, use socket_addrinfo_lookup() instead"
+        }
+        b"xmlparser" => {
+            "Cannot directly construct XMLParser, use xml_parser_create() or xml_parser_create_ns() instead"
+        }
+        _ => return None,
+    })
+}
 
 /// Whether a key of the constants table is an INI entry, not a constant.
 pub fn is_ini_entry_key(name: &[u8]) -> bool {
