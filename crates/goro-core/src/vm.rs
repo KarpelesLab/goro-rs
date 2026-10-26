@@ -8872,7 +8872,14 @@ impl Vm {
             let args_cow = Self::trace_frame_args_at(&frame_list, idx);
             let args: &[Value] = &args_cow;
             let wrapped;
-            let args: &[Value] = if sensitive
+            // (a frame with extra named arguments is wrapped by
+            // frame_args_array() below)
+            let at_named = !ignore_args
+                && func_name != "eval"
+                && named_args.iter().any(|n| n.0 == stack_at[idx]);
+            let args: &[Value] = if at_named {
+                args
+            } else if sensitive
                 || (!args.is_empty() && self.internal_sensitive_param_flags(func_name).is_some())
             {
                 wrapped = self.trace_frame_args(func_name, args);
