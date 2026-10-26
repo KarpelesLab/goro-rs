@@ -10106,11 +10106,15 @@ fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             // Find the original-case class name
             let scope_lower: Vec<u8> = scope.iter().map(|b| b.to_ascii_lowercase()).collect();
-            let class_name = _vm
-                .classes
-                .get(&scope_lower)
-                .map(|c| c.name.clone())
-                .unwrap_or(scope);
+            // (an internal class scope, like a bound closure's dummy
+            // Closure one, by its canonical name)
+            let class_name = match _vm.classes.get(&scope_lower) {
+                Some(c) => c.name.clone(),
+                None if _vm.is_known_builtin_class(&scope_lower) => {
+                    _vm.builtin_canonical_name(&scope_lower).into_bytes()
+                }
+                None => scope,
+            };
             return Ok(Value::String(PhpString::from_vec(class_name)));
         }
         let msg = "get_class() without arguments must be called from within a class";

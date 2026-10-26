@@ -14022,6 +14022,32 @@ pub fn reflection_attribute_method(
                 .iter()
                 .map(|b| b.to_ascii_lowercase())
                 .collect();
+            // The target of an internal attribute is validated now
+            // (zend_get_attribute_object(): delayed with #[\DelayedTargetValidation]).
+            let target_name = match obj
+                .borrow()
+                .get_property(b"__reflection_attr_target")
+                .to_long()
+            {
+                1 => "class",
+                2 => "function",
+                4 => "method",
+                8 => "property",
+                16 => "class constant",
+                32 => "parameter",
+                64 => "constant",
+                _ => "",
+            };
+            if !target_name.is_empty() {
+                if let Some(msg) = crate::compiler::Compiler::validate_internal_attr(
+                    attr_name.as_bytes(),
+                    target_name,
+                ) {
+                    let exc = vm.create_exception(b"Error", &msg, call_site_line);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+            }
             // Built-in attribute classes: AllowDynamicProperties, Override,
             // SensitiveParameter, ReturnTypeWillChange, DelayedTargetValidation
             // are marker attributes that have no constructor body.
@@ -14048,32 +14074,6 @@ pub fn reflection_attribute_method(
                 };
                 let new_obj = PhpObject::new(canonical_name.to_vec(), obj_id);
                 return Some(Value::Object(Rc::new(RefCell::new(new_obj))));
-            }
-            // The target of an internal attribute is validated now
-            // (zend_get_attribute_object(): delayed with #[\DelayedTargetValidation]).
-            let target_name = match obj
-                .borrow()
-                .get_property(b"__reflection_attr_target")
-                .to_long()
-            {
-                1 => "class",
-                2 => "function",
-                4 => "method",
-                8 => "property",
-                16 => "class constant",
-                32 => "parameter",
-                64 => "constant",
-                _ => "",
-            };
-            if !target_name.is_empty() {
-                if let Some(msg) = crate::compiler::Compiler::validate_internal_attr(
-                    attr_name.as_bytes(),
-                    target_name,
-                ) {
-                    let exc = vm.create_exception(b"Error", &msg, call_site_line);
-                    vm.current_exception = Some(exc);
-                    return Some(Value::Null);
-                }
             }
             // A validator error delayed by #[\DelayedTargetValidation].
             if let Value::String(e) = obj
