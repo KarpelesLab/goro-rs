@@ -28342,7 +28342,7 @@ impl Vm {
                             b"Error",
                             format!(
                                 "Value of type {} is not callable",
-                                Vm::value_type_name(&name_val)
+                                Vm::zval_type_name(&name_val)
                             ),
                         )),
                         _ => None,

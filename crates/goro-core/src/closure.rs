@@ -805,7 +805,7 @@ impl Vm {
                 b"Error",
                 format!(
                     "Value of type {} is not callable",
-                    Vm::value_type_name(other)
+                    Vm::zval_type_name(other)
                 ),
             )),
         }
