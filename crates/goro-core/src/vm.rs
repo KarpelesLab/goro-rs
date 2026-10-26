@@ -1701,6 +1701,8 @@ pub struct Vm {
     /// report_uncaught() is reporting the exception an uncaught one's
     /// __toString() threw.
     pub(crate) uncaught_tostring_nested: bool,
+    /// push_scope_class_display()'s last (lowercase scope, display name).
+    scope_display_cache: (Vec<u8>, String),
     /// Closure objects being called: (pending_calls index of the call, the
     /// Closure) until the call's frame is pushed.
     pub(crate) closure_call_objs: Vec<(usize, std::rc::Weak<RefCell<PhpObject>>)>,
@@ -2405,6 +2407,7 @@ impl Vm {
             running_generators: Vec::new(),
             running_gen_values: Vec::new(),
             uncaught_tostring_nested: false,
+            scope_display_cache: (Vec::new(), String::new()),
             closure_call_objs: Vec::new(),
             closure_frames: Vec::new(),
             callback_closure: None,
@@ -11169,16 +11172,11 @@ impl Vm {
         // (in the buffer of a finished call's frame)
         let mut frame_display = self.string_pool.pop().unwrap_or_default();
         if !op_array.display_name.is_empty() {
-            // A closure's frame is qualified by its scope (Class::{closure:...},
-            // shown Class->... with $this), as for a direct call.
-            if let Some(sc) = op_array.scope_class.as_ref().filter(|_| {
-                crate::closure::is_closure_fn_name(&op_array.name)
-                    && op_array.display_name.starts_with(b"{closure")
-            }) {
-                self.push_scope_class_display(&mut frame_display, sc);
-                frame_display.push_str("::");
+            if op_array.scope_class.is_some() {
+                self.push_scoped_closure_frame_name(op_array, &mut frame_display);
+            } else {
+                push_lossy(&mut frame_display, &op_array.display_name);
             }
-            push_lossy(&mut frame_display, &op_array.display_name);
         } else if let Some(fcc) = &op_array.fcc_target_name {
             push_lossy(&mut frame_display, fcc);
         } else if let Some(sc) = &op_array.scope_class {
@@ -18160,13 +18158,33 @@ pub(crate) fn is_known_builtin_class_name(class_lower: &[u8]) -> bool {
 
 impl Vm {
     /// Get canonical (properly cased) name for built-in class
+    /// The frame name of a callback with a display name and a scope: a
+    /// closure's is qualified by its scope (Class::{closure:...}, shown
+    /// Class->... with $this), as for a direct call.
+    #[inline(never)]
+    fn push_scoped_closure_frame_name(&mut self, op_array: &OpArray, dst: &mut String) {
+        if let Some(sc) = op_array.scope_class.as_ref().filter(|_| {
+            op_array.display_name.starts_with(b"{closure")
+                && crate::closure::is_closure_fn_name(&op_array.name)
+        }) {
+            self.push_scope_class_display(dst, sc);
+            dst.push_str("::");
+        }
+        push_lossy(dst, &op_array.display_name);
+    }
+
     /// The display name of scope class `scope` (lowercase) appended to `dst`.
     #[inline(never)]
-    fn push_scope_class_display(&self, dst: &mut String, scope: &[u8]) {
-        match self.classes.get(scope) {
-            Some(c) => dst.push_str(&crate::string::msg_str(&c.name)),
-            None => dst.push_str(&self.builtin_canonical_name(scope)),
+    fn push_scope_class_display(&mut self, dst: &mut String, scope: &[u8]) {
+        // (the last one is kept: a callback is often called repeatedly)
+        if self.scope_display_cache.0 != scope {
+            let display = match self.classes.get(scope) {
+                Some(c) => crate::string::msg_str(&c.name).into_owned(),
+                None => self.builtin_canonical_name(scope),
+            };
+            self.scope_display_cache = (scope.to_vec(), display);
         }
+        dst.push_str(&self.scope_display_cache.1);
     }
 
     pub fn builtin_canonical_name(&self, class_lower: &[u8]) -> String {
