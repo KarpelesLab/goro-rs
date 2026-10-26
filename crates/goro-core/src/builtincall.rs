@@ -38,11 +38,11 @@ pub(crate) struct BuiltinDesc {
     /// Its lowercase name.
     pub(crate) lower: &'static [u8],
     /// compiled_special() of a call with N arguments: bit N (N < 3);
-    /// SPECIAL_SPRINTF: sprintf (that depends on the format).
+    /// SPECIAL_ALWAYS: every call (the in_array() opcode's builtin).
     special: u8,
 }
 
-const SPECIAL_SPRINTF: u8 = 0x80;
+const SPECIAL_ALWAYS: u8 = 0x80;
 
 impl BuiltinDesc {
     /// The BuiltinDesc of builtin `func` by the lowercase name `lower`,
@@ -73,8 +73,9 @@ impl BuiltinDesc {
                 return found;
             }
             let list = d.entry(lower.to_vec()).or_default();
-            let special = if lower == b"sprintf" {
-                SPECIAL_SPRINTF
+            // (sprintf() with a constant format is compiled to a rope)
+            let special = if lower == crate::compiler::IN_ARRAY_OP_FN {
+                SPECIAL_ALWAYS
             } else {
                 let none = [Value::Null, Value::Null];
                 (0..3).fold(0u8, |bits, n| {
@@ -97,8 +98,8 @@ impl BuiltinDesc {
     /// `args`.
     #[inline]
     pub(crate) fn compiled_special(&self, args: &[Value]) -> bool {
-        if self.special & SPECIAL_SPRINTF != 0 {
-            return crate::internal_frames::sprintf_is_rope(args);
+        if self.special & SPECIAL_ALWAYS != 0 {
+            return true;
         }
         args.len() < 3 && (self.special >> args.len()) & 1 != 0
     }
@@ -195,6 +196,8 @@ impl Vm {
         // The call: its arguments, its name's lowercase form; the rest of it
         // goes at once (in place: nothing of it is released with any effect).
         let call = &mut self.pending_calls[top];
+        // (a dynamic call is a real one: it has a frame)
+        let dynamic = call.target.dynamic;
         let mut args = std::mem::take(&mut call.args);
         let mut buf = [0u8; 64];
         let func_name_lower = desc.lower_name(call.name.as_bytes(), &mut buf);
@@ -228,7 +231,7 @@ impl Vm {
         }
         self.note_call_result(op, func_name_lower);
         // Compiled to an opcode by php-src: no frame of its own
-        let special = !via_closure && desc.compiled_special(&args);
+        let special = !via_closure && !dynamic && desc.compiled_special(&args);
         // Generic zpp (verified stub arginfo)
         let mut zpp_orig: Option<Vec<Value>> = None;
         if let Some((info, flags)) = zpp {
