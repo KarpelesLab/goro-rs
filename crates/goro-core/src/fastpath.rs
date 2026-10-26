@@ -1844,9 +1844,10 @@ impl crate::vm::Vm {
             op_array,
             mask: None,
         };
-        // (the line of the last opcode run: the dispatch loop's current line
-        // once control goes back to it; nothing here reads it)
-        let mut line = None;
+        // (the index of the last opcode run, usize::MAX: none; its line is
+        // the dispatch loop's current line once control goes back to it,
+        // nothing here reads it)
+        let mut last = usize::MAX;
         let next = 'run: loop {
             let Some(op) = ops.get(ip) else {
                 break 'run ip;
@@ -2268,7 +2269,7 @@ impl crate::vm::Vm {
                             // itself, see Vm::lean_user_dofcall)
                             match self.lean_user_dofcall(op_array, ip, cvs, tmps, free_mask.get()) {
                                 Some(true) if self.lean_frame_call_left() => {
-                                    line = Some(op.line);
+                                    last = ip;
                                     break 'run ip + 1;
                                 }
                                 Some(true) => Fast::Done,
@@ -2296,7 +2297,7 @@ impl crate::vm::Vm {
                             // (an object with a destructor came to be: the
                             // run's release-free assumption no longer holds)
                             Some(true) if self.has_release_work() => {
-                                line = Some(op.line);
+                                last = ip;
                                 break 'run ip + 1;
                             }
                             Some(true) => Fast::Done,
@@ -2311,7 +2312,7 @@ impl crate::vm::Vm {
                         // The callee of a lean call (see builtincall.rs).
                         match self.lean_builtin_dofcall(op_array, ip, tmps, free_mask.get()) {
                             Some(true) if self.has_release_work() => {
-                                line = Some(op.line);
+                                last = ip;
                                 break 'run ip + 1;
                             }
                             Some(true) => Fast::Done,
@@ -2323,7 +2324,7 @@ impl crate::vm::Vm {
                         // with a frame (see Vm::lean_user_dofcall).
                         match self.lean_user_dofcall(op_array, ip, cvs, tmps, free_mask.get()) {
                             Some(true) if self.lean_frame_call_left() => {
-                                line = Some(op.line);
+                                last = ip;
                                 break 'run ip + 1;
                             }
                             Some(true) => Fast::Done,
@@ -2342,7 +2343,7 @@ impl crate::vm::Vm {
                 },
                 _ => return ip,
             };
-            line = Some(op.line);
+            last = ip;
             match fast {
                 Fast::No => return ip,
                 Fast::Done => ip += 1,
@@ -2360,8 +2361,8 @@ impl crate::vm::Vm {
                 break 'run ip;
             }
         };
-        if let (Some(l), false) = (line, internal_code) {
-            self.current_line = l;
+        if let (Some(op), false) = (ops.get(last), internal_code) {
+            self.current_line = op.line;
         }
         next
     }
