@@ -21482,7 +21482,7 @@ fn stream_context_set_option_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
     }
     let ctx_val = args.first().unwrap_or(&Value::Null);
     let fid = context_arg(vm, ctx_val, "stream_context_set_option", "context")?;
-    let arg2 = args.get(1).unwrap_or(&Value::Null);
+    let arg2 = &stream_context_set_option_arg2(vm, args.get(1).unwrap_or(&Value::Null))?;
     let arg3 = args.get(2);
     let arg4 = args.get(3);
     // Array signature: stream_context_set_option($ctx, array $options)
@@ -21570,6 +21570,52 @@ fn stream_context_set_option_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
         return Ok(Value::True);
     }
     Ok(Value::False)
+}
+
+/// Z_PARAM_ARRAY_HT_OR_STR($wrapper_or_options): an array, or a string
+/// (scalars and Stringable objects convert, null is deprecated).
+#[inline(never)]
+fn stream_context_set_option_arg2(vm: &mut Vm, v: &Value) -> Result<Value, VmError> {
+    let v = v.deref();
+    match &v {
+        Value::Array(_)
+        | Value::String(_)
+        | Value::Long(_)
+        | Value::Double(_)
+        | Value::True
+        | Value::False => return Ok(v),
+        Value::Null | Value::Undef => {
+            vm.emit_deprecated(
+                "stream_context_set_option(): Passing null to parameter #2 ($wrapper_or_options) of type array|string is deprecated",
+            );
+            if vm.current_exception.is_some() {
+                return Err(VmError {
+                    message: String::new(),
+                    line: vm.current_line,
+                });
+            }
+            return Ok(Value::String(PhpString::empty()));
+        }
+        Value::Object(o)
+            if vm
+                .classes
+                .get(&o.borrow().class_name.to_ascii_lowercase())
+                .is_some_and(|c| c.methods.contains_key(&b"__tostring".to_vec())) =>
+        {
+            return vm.value_to_string_checked(&v).map(Value::String);
+        }
+        _ => {}
+    }
+    let msg = format!(
+        "stream_context_set_option(): Argument #2 ($wrapper_or_options) must be of type array|string, {} given",
+        Vm::value_type_name(&v)
+    );
+    let exc = vm.throw_type_error(msg.clone());
+    vm.current_exception = Some(exc);
+    Err(VmError {
+        message: msg,
+        line: vm.current_line,
+    })
 }
 
 fn stream_context_get_options_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

@@ -83,6 +83,14 @@ fn opt_string(
             }
             Ok(Some(PhpString::empty()))
         }
+        // ($eol is ?string)
+        Some(v) if pname == "eol" && matches!(v.deref(), Value::Array(_)) => Err(type_error(
+            vm,
+            format!(
+                "{}(): Argument #{} (${}) must be of type ?string, array given",
+                func, argnum, pname
+            ),
+        )),
         Some(v) => zpp_string(vm, func, argnum, pname, v).map(Some),
     }
 }
