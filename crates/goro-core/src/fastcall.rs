@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::{CallTarget, MethodCallInfo, PendingCall, Vm};
-use crate::object::{NewTemplate, PhpObject, Visibility};
+use crate::object::{InternalNewTemplate, NewTemplate, PhpObject, Visibility};
 use crate::opcode::{Op, OpArray, OperandType};
 use crate::string::PhpString;
 use crate::value::Value;
@@ -52,6 +52,16 @@ pub(crate) struct MethodSite {
     /// `user_functions.len() + 1` when the method was last seen registered
     /// under func_name (0: not checked).
     reg_gen: usize,
+}
+
+/// What internal_ctor_probe() saw before the general INIT_METHOD_CALL
+/// handler ran (see note_internal_ctor_site).
+pub(crate) struct InternalCtorProbe {
+    class_name: Vec<u8>,
+    obj: *const RefCell<PhpObject>,
+    root: bool,
+    pending: usize,
+    frames: usize,
 }
 
 /// Lowercase `s` into `buf` (None when it does not fit).
@@ -129,6 +139,9 @@ impl Vm {
         let literals = &op_array.literals;
         if let Some(t) = self.new_site_template(op_array, ip) {
             return NewFast::Obj(self.new_from_template(&t, op, tmps), t.no_ctor);
+        }
+        if let Some(obj) = self.new_internal_fast(op_array, ip, op, tmps) {
+            return NewFast::Obj(obj, false);
         }
         let OperandType::Const(ci) = op.op1 else {
             return NewFast::No;
@@ -247,6 +260,471 @@ impl Vm {
             }
         }
         NewFast::Obj(obj_value, false)
+    }
+
+    /// NEW at `ip` of an internal class whose site made one before (see
+    /// InternalNewTemplate): what the general handler does then. None:
+    /// nothing was done.
+    #[inline(never)]
+    fn new_internal_fast(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        op: &Op,
+        tmps: &[Value],
+    ) -> Option<Value> {
+        let t = op_array
+            .sites()
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.internal_new_sites.get(&(ip as u32)).cloned())?;
+        if !self.internal_template_valid(&t) {
+            return None;
+        }
+        // Recycle the old object ID from the result slot before allocating
+        // a new one.
+        if let OperandType::Tmp(idx) = &op.result {
+            if let Some(old_val) = tmps.get(*idx as usize) {
+                self.maybe_recycle_object_id(old_val);
+            }
+        }
+        let obj_id = self.alloc_object_id();
+        let mut props = t.slots.clone();
+        for &i in &t.arrays {
+            if let Some(slot) = props.get_mut(i) {
+                slot.1 = Value::Array(Rc::new(RefCell::new(crate::array::PhpArray::new())));
+            }
+        }
+        if let Some((fi, li, ti)) = t.throwable {
+            if let Some(slot) = props.get_mut(fi) {
+                slot.1 = Value::String(PhpString::from_string(self.current_file.to_string()));
+            }
+            if let Some(slot) = props.get_mut(li) {
+                slot.1 = Value::Long(op.line as i64);
+            }
+            let trace = self.build_exception_trace();
+            self.filter_new_exception_trace(&t.lower, &trace);
+            if let Some(slot) = props.get_mut(ti) {
+                slot.1 = trace;
+            }
+        }
+        let obj = PhpObject::new_declared(t.class_name.clone(), obj_id, props, t.tag);
+        let rc = Rc::new(RefCell::new(obj));
+        if let Some(h) = t.create_hook {
+            h(self, &rc);
+        }
+        Some(Value::Object(rc))
+    }
+
+    /// Whether the class an InternalNewTemplate was made for is still the
+    /// one its name finds.
+    #[inline]
+    fn internal_template_valid(&self, t: &InternalNewTemplate) -> bool {
+        if self.object_create_handlers.len() != t.hooks_len {
+            return false;
+        }
+        let generation = self.classes.generation();
+        if t.stamp.get() == generation {
+            return true;
+        }
+        let ok = match self.classes.get(t.lower.as_slice()) {
+            None => t.entry.is_null(),
+            Some(ce) => std::ptr::eq(ce, t.entry),
+        };
+        if ok {
+            t.stamp.set(generation);
+        }
+        ok
+    }
+
+    /// The general NEW handler at `ip` made `obj` (its properties set, not
+    /// yet shared) of class `lower`: the site's InternalNewTemplate, when
+    /// the class and all of its ancestors are internal and the site names
+    /// it by a constant (see new_internal_fast).
+    #[inline(never)]
+    pub(crate) fn note_internal_new_site(
+        &self,
+        op_array: &OpArray,
+        ip: usize,
+        lower: &[u8],
+        obj: &PhpObject,
+        throwable: bool,
+    ) {
+        let op = &op_array.ops[ip];
+        let OperandType::Const(ci) = op.op1 else {
+            return;
+        };
+        let Some(Value::String(name)) = op_array.literals.get(ci as usize) else {
+            return;
+        };
+        let name = name.as_bytes();
+        let bare = name.strip_prefix(b"\\").unwrap_or(name);
+        if bare.contains(&0)
+            || !bare.eq_ignore_ascii_case(lower)
+            || obj.native.is_some()
+            || obj.closure.is_some()
+        {
+            return;
+        }
+        let entry: *const crate::object::ClassEntry = match self.classes.get(lower) {
+            None => {
+                if self.internal_class(lower).is_none() {
+                    return;
+                }
+                std::ptr::null()
+            }
+            Some(ce) => {
+                if ce.methods.contains_key(b"__destruct".as_slice()) {
+                    return;
+                }
+                let mut cur = ce;
+                for _ in 0..64 {
+                    if cur.filename.is_some() || cur.is_enum || cur.is_abstract {
+                        return;
+                    }
+                    let Some(p) = cur.parent.as_ref() else {
+                        break;
+                    };
+                    match self.classes.get(p.to_ascii_lowercase().as_slice()) {
+                        Some(pc) => cur = pc,
+                        None => break,
+                    }
+                }
+                ce
+            }
+        };
+        let mut arrays = Vec::new();
+        for (i, (_, v)) in obj.properties.iter().enumerate() {
+            match v {
+                Value::Undef
+                | Value::Null
+                | Value::True
+                | Value::False
+                | Value::Long(_)
+                | Value::Double(_)
+                | Value::String(_) => {}
+                Value::Array(a) if a.borrow().is_empty() => arrays.push(i),
+                _ => return,
+            }
+        }
+        let throwable = if throwable {
+            let at = |k: &[u8]| obj.properties.iter().position(|(n, _)| n.as_slice() == k);
+            let trace = obj
+                .throwable_private_key(b"trace")
+                .or_else(|| at(b"trace"));
+            match (at(b"file"), at(b"line"), trace) {
+                (Some(f), Some(l), Some(t)) => Some((f, l, t)),
+                _ => return,
+            }
+        } else {
+            None
+        };
+        let t = InternalNewTemplate {
+            class_name: obj.class_name.clone(),
+            lower: lower.to_vec(),
+            entry,
+            stamp: std::cell::Cell::new(self.classes.generation()),
+            slots: obj.properties.clone(),
+            arrays,
+            throwable,
+            tag: crate::object::class_tag_of(&obj.class_name),
+            create_hook: self.object_create_hook_of(lower),
+            hooks_len: self.object_create_handlers.len(),
+        };
+        op_array
+            .sites()
+            .borrow_mut()
+            .get_or_insert_with(Default::default)
+            .internal_new_sites
+            .insert(ip as u32, Rc::new(t));
+    }
+
+    /// The object the INIT_METHOD_CALL `op` calls a method of, when its
+    /// operand holds one (a variable's reference is followed).
+    #[inline]
+    fn method_call_object(op: &Op, cvs: &[Value], tmps: &[Value]) -> Option<Rc<RefCell<PhpObject>>> {
+        match op.op1 {
+            OperandType::Cv(i) => match cvs.get(i as usize)? {
+                Value::Object(o) => Some(Rc::clone(o)),
+                Value::Reference(r) => match &*r.try_borrow().ok()? {
+                    Value::Object(o) => Some(Rc::clone(o)),
+                    _ => None,
+                },
+                _ => None,
+            },
+            OperandType::Tmp(t) => match tmps.get(t as usize)? {
+                Value::Object(o) => Some(Rc::clone(o)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// INIT_METHOD_CALL `__construct` at `ip` on an object of an internal
+    /// class, where the general handler set up the same call for an object
+    /// of that class before (see note_internal_ctor_site): that call.
+    /// False: nothing was done.
+    #[inline(never)]
+    pub(crate) fn init_internal_ctor_fast(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        cvs: &[Value],
+        tmps: &[Value],
+    ) -> bool {
+        if self.observer.is_some() {
+            return false;
+        }
+        let op = &op_array.ops[ip];
+        let Some(obj) = Self::method_call_object(op, cvs, tmps) else {
+            return false;
+        };
+        let (name, root, kind) = {
+            let sites = op_array.sites().borrow();
+            let Some((class, name, root, kind)) =
+                sites.as_ref().and_then(|s| s.ctor_sites.get(&(ip as u32)))
+            else {
+                return false;
+            };
+            if obj.borrow().class_name != *class {
+                return false;
+            }
+            (name.clone(), *root, *kind)
+        };
+        let obj_val = Value::Object(obj);
+        if root {
+            Self::root_internal_call_this(op, op_array, &obj_val);
+        }
+        let mut args = self.take_values(0);
+        args.push(obj_val);
+        self.pending_calls.push(PendingCall {
+            name,
+            args,
+            named_args: Vec::new(),
+            target: CallTarget {
+                internal_ctor: kind,
+                ..CallTarget::NONE
+            },
+        });
+        true
+    }
+
+    /// Before the general INIT_METHOD_CALL handler runs at `ip`: when it is
+    /// a `__construct` call (by that name) on an object of an internal
+    /// class without an observer watching, what note_internal_ctor_site()
+    /// compares with what the handler did.
+    #[inline(never)]
+    pub(crate) fn internal_ctor_probe(
+        &self,
+        op_array: &OpArray,
+        ip: usize,
+        cvs: &[Value],
+        tmps: &[Value],
+    ) -> Option<InternalCtorProbe> {
+        let op = &op_array.ops[ip];
+        let OperandType::Const(mi) = op.op2 else {
+            return None;
+        };
+        match op_array.literals.get(mi as usize) {
+            Some(Value::String(m)) if m.as_bytes() == b"__construct" => {}
+            _ => return None,
+        }
+        if self.observer.is_some() || self.current_exception.is_some() {
+            return None;
+        }
+        let obj = Self::method_call_object(op, cvs, tmps)?;
+        let class_name = {
+            let ob = obj.try_borrow().ok()?;
+            if ob.closure.is_some() {
+                return None;
+            }
+            ob.class_name.clone()
+        };
+        let lower = class_name.to_ascii_lowercase();
+        if matches!(
+            lower.as_slice(),
+            b"fiber" | b"weakreference" | b"weakmap" | b"closure" | b"generator"
+        ) {
+            return None;
+        }
+        match self.classes.get(lower.as_slice()) {
+            None => {
+                self.internal_class(&lower)?;
+            }
+            Some(ce) => {
+                if ce.methods.contains_key(b"__construct".as_slice()) {
+                    return None;
+                }
+                // (a user class: one deriving from an internal class)
+                if ce.filename.is_some() {
+                    if self.user_class_chain(&lower) {
+                        return None;
+                    }
+                } else {
+                    crate::stubs::find_class_lower(&lower)?;
+                }
+            }
+        }
+        Some(InternalCtorProbe {
+            root: self.has_internal_ctor(&lower),
+            class_name,
+            obj: Rc::as_ptr(&obj),
+            pending: self.pending_calls.len(),
+            frames: self.call_stack.len(),
+        })
+    }
+
+    /// After the general INIT_METHOD_CALL handler ran at `ip` (see
+    /// internal_ctor_probe): when all it did was set up a call with the
+    /// object as its only argument, the site's next calls for objects of
+    /// the class are set up the same way (see init_internal_ctor_fast).
+    #[inline(never)]
+    pub(crate) fn note_internal_ctor_site(&self, op_array: &OpArray, ip: usize, p: InternalCtorProbe) {
+        if self.current_exception.is_some()
+            || self.pending_calls.len() != p.pending + 1
+            || self.call_stack.len() != p.frames
+        {
+            return;
+        }
+        let Some(call) = self.pending_calls.last() else {
+            return;
+        };
+        let t = &call.target;
+        let plain_target = t.user.is_none()
+            && t.builtin.is_none()
+            && !t.has_builtin
+            && t.method.is_none()
+            && !t.no_ctor
+            && !t.no_ns_fallback
+            && !t.ns_global
+            && !t.closure
+            && t.forward.is_none()
+            && !t.forward_this
+            && t.method_info.is_none()
+            && t.fn_gen == 0
+            && !t.via_invoke
+            && !t.dynamic
+            && t.internal_ctor == 0;
+        let only_this = matches!(call.args.as_slice(), [Value::Object(o)] if std::ptr::eq(Rc::as_ptr(o), p.obj));
+        if !plain_target || !only_this || !call.named_args.is_empty() {
+            return;
+        }
+        let name = call.name.clone();
+        let kind = self.internal_ctor_kind(&p.class_name, name.as_bytes());
+        op_array
+            .sites()
+            .borrow_mut()
+            .get_or_insert_with(Default::default)
+            .ctor_sites
+            .insert(ip as u32, (p.class_name, name, p.root, kind));
+    }
+
+    /// The CallTarget::internal_ctor of the constructor call `name` the
+    /// general INIT_METHOD_CALL handler set up for an object of class
+    /// `class_name`: what the general DO_FCALL handler does with it (see
+    /// fast_internal_ctor_target), when it reaches its constructor branch
+    /// for the call (no other branch takes the name) and then runs
+    /// Exception's / Error's constructor (1: a throwable class, not an
+    /// ErrorException, without hooked properties nor a construct handler)
+    /// or the construct handler an extension registered for the class (2:
+    /// an internal class whose nearest builtin ancestor is itself).
+    #[inline(never)]
+    fn internal_ctor_kind(&self, class_name: &[u8], name: &[u8]) -> u8 {
+        let mut want = class_name.to_vec();
+        want.extend_from_slice(b"::__construct");
+        if name != want.as_slice() || name.starts_with(b"__") {
+            return 0;
+        }
+        let lower_name = name.to_ascii_lowercase();
+        let lower = class_name.to_ascii_lowercase();
+        if self.vm_static_builtin_target(&lower_name).is_some()
+            || self.functions.contains_key(&lower_name)
+            || self.user_functions.contains_key(&lower_name)
+        {
+            return 0;
+        }
+        if let Some((native, h)) = self.find_native_class_handler(&lower) {
+            if (h.has_method)(&native, b"__construct", true) {
+                return 0;
+            }
+        }
+        // The classes of the class chain: the user ones, then the stub
+        // classes from the first internal one.
+        let mut chain: Vec<Vec<u8>> = Vec::new();
+        let mut cur = lower.clone();
+        let mut stub_root = None;
+        for _ in 0..64 {
+            match self.classes.get(cur.as_slice()) {
+                Some(ce) if ce.filename.is_some() => {
+                    if ce.methods.contains_key(b"__construct".as_slice())
+                        || ce
+                            .properties
+                            .iter()
+                            .any(|p| p.has_get_hook || p.has_set_hook)
+                    {
+                        return 0;
+                    }
+                    chain.push(cur.clone());
+                    match &ce.parent {
+                        Some(p) => cur = p.to_ascii_lowercase(),
+                        None => return 0,
+                    }
+                }
+                _ => {
+                    stub_root = Some(cur);
+                    break;
+                }
+            }
+        }
+        let Some(root) = stub_root else {
+            return 0;
+        };
+        let Some((_, h)) = crate::stubs::class_hierarchy(&root) else {
+            return 0;
+        };
+        chain.push(root.clone());
+        chain.extend(h.parents_lower.iter().cloned());
+        let has = |n: &[u8]| chain.iter().any(|c| c.as_slice() == n);
+        let handler = chain
+            .iter()
+            .any(|c| self.object_construct_handlers.contains_key(c.as_slice()));
+        if has(b"exception") || has(b"error") {
+            if has(b"errorexception") || handler {
+                return 0;
+            }
+            return 1;
+        }
+        // (the general handler's nearest builtin ancestor of the class is
+        // the class itself: it is none of the special ones, nor extends one)
+        const SPECIAL: &[&[u8]] = &[
+            b"arrayobject",
+            b"arrayiterator",
+            b"recursivearrayiterator",
+            b"datetime",
+            b"datetimeimmutable",
+            b"datetimezone",
+            b"dateinterval",
+            b"dateperiod",
+            b"iteratoriterator",
+            b"splfileinfo",
+            b"splfixedarray",
+            b"spldoublylinkedlist",
+            b"splobjectstorage",
+            b"splpriorityqueue",
+            b"splheap",
+            b"appenditerator",
+            b"multipleiterator",
+        ];
+        let special_ancestor = h.parents_lower.iter().any(|p| {
+            SPECIAL.contains(&p.as_slice()) || p.starts_with(b"reflection") || p.ends_with(b"iterator")
+        });
+        if chain.len() == 1 + h.parents_lower.len()
+            && !special_ancestor
+            && self.object_construct_handlers.contains_key(lower.as_slice())
+        {
+            return 2;
+        }
+        0
     }
 
     /// `new stdClass`: an object without properties, of a class without a

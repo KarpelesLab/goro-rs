@@ -1366,6 +1366,12 @@ pub(crate) struct CallTarget {
     /// arguments of an internal function's by-reference parameters are
     /// only known to be sent by reference at run time.
     pub(crate) dynamic: bool,
+    /// The constructor call of a `new` of an internal class (or of a user
+    /// subclass without a constructor of its own) that the general handler
+    /// would make one of these ways (see Vm::fast_internal_ctor_target):
+    /// 1 Exception's / Error's constructor, 2 an extension's construct
+    /// handler; 0: none of them.
+    pub(crate) internal_ctor: u8,
 }
 
 /// What the frame of a method call set up by INIT_METHOD_CALL's fast path
@@ -1494,6 +1500,7 @@ impl CallTarget {
         fn_gen: 0,
         call_flags: 0,
         dynamic: false,
+        internal_ctor: 0,
     };
 }
 
@@ -22522,6 +22529,35 @@ impl Vm {
     }
 
     /// Whether the call DO_FCALL is about to make is the constructor call
+    /// of an internal class INIT_METHOD_CALL found the general handler
+    /// makes as Exception's constructor or an extension's construct handler
+    /// (see CallTarget::internal_ctor), without named arguments nor an
+    /// observer; a message that is not a scalar (Exception's) is left to
+    /// the general handler.
+    #[inline]
+    fn fast_internal_ctor_target(&self) -> bool {
+        self.observer.is_none()
+            && self.pending_calls.last().is_some_and(|c| {
+                c.target.internal_ctor != 0
+                    && c.named_args.is_empty()
+                    && matches!(c.args.first(), Some(Value::Object(_)))
+                    && (c.target.internal_ctor != 1
+                        || matches!(
+                            c.args.get(1),
+                            None | Some(
+                                Value::String(_)
+                                    | Value::Null
+                                    | Value::Undef
+                                    | Value::Long(_)
+                                    | Value::Double(_)
+                                    | Value::True
+                                    | Value::False
+                            )
+                        ))
+            })
+    }
+
+    /// Whether the call DO_FCALL is about to make is the constructor call
     /// of a `new` of a user class without a constructor (see
     /// CallTarget::no_ctor), without named arguments.
     #[inline]
@@ -23176,6 +23212,7 @@ impl Vm {
                 fn_gen: self.user_functions.len() + 1,
                 call_flags: 0,
                 dynamic: false,
+                internal_ctor: 0,
             };
         }
         let builtin = match found {
@@ -23213,6 +23250,7 @@ impl Vm {
             fn_gen: self.user_functions.len() + 1,
             call_flags: 0,
             dynamic: false,
+            internal_ctor: 0,
         }
     }
 
@@ -32265,6 +32303,148 @@ impl Vm {
                     self.write_operand(&op.result, Value::Null, cvs, tmps, &static_cv_keys);
                     self.recycle_args(&mut call);
                 }),
+                // The constructor call of a `new` of an internal class (see
+                // fast_internal_ctor_target): what the constructor branch of
+                // the general handler below does then.
+                OpCode::DoFCall if self.fast_internal_ctor_target() => {
+                    match outlined(|| -> Result<Flow, VmError> {
+                        self.last_call_by_ref = false;
+                        let mut call = self.pending_calls.pop().expect("pending call");
+                        while matches!(self.closure_pending_calls.last(), Some(&i) if i > self.pending_calls.len())
+                        {
+                            self.closure_pending_calls.pop();
+                        }
+                        if self.closure_pending_calls.last() == Some(&self.pending_calls.len()) {
+                            self.closure_pending_calls.pop();
+                        }
+                        {
+                            let mut buf = [0u8; 128];
+                            let name = call.name.as_bytes();
+                            match buf.get_mut(..name.len()) {
+                                Some(lower) => {
+                                    for (d, c) in lower.iter_mut().zip(name) {
+                                        *d = c.to_ascii_lowercase();
+                                    }
+                                    self.note_call_result(op, lower);
+                                }
+                                None => self.note_call_result(op, &name.to_ascii_lowercase()),
+                            }
+                        }
+                        let kind = call.target.internal_ctor;
+                        let Some(Value::Object(obj)) = call.args.first().cloned() else {
+                            unreachable!("constructor call without its object");
+                        };
+                        if obj.borrow().has_property(b"__ctor_pending") {
+                            obj.borrow_mut()
+                                .properties
+                                .retain(|(k, _)| k != b"__ctor_pending");
+                        }
+                        // Generic zpp (verified stub arginfo of the internal constructor)
+                        if self.zpp_internal_ctor(
+                            &mut call.args,
+                            &mut call.named_args,
+                            op_array.strict_types,
+                            op.line,
+                        ) {
+                            if let Some((catch_target, _, _, _, saved_pc)) =
+                                exception_handlers.pop()
+                            {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: self.uncaught_exception_message(),
+                                line: op.line,
+                            });
+                        }
+                        if kind == 2 {
+                            // An extension's construct handler
+                            let handler = {
+                                let ob = obj.borrow();
+                                let lower = ob.class_name.to_ascii_lowercase();
+                                self.object_construct_handlers.get(lower.as_slice()).copied()
+                            };
+                            let Some(handler) = handler else {
+                                unreachable!("construct handler gone");
+                            };
+                            let fatal_before = self.fatal_emitted;
+                            let r = handler(self, &call.args, op.line);
+                            // (a fatal error raised by the constructor ends the
+                            // script)
+                            if !fatal_before
+                                && self.fatal_emitted
+                                && self.current_exception.is_none()
+                            {
+                                return Err(VmError {
+                                    message: String::new(),
+                                    line: op.line,
+                                });
+                            }
+                            if let Err(msg) = r {
+                                // (the handler set current_exception)
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                let class_disp = match &self.current_exception {
+                                    Some(Value::Object(o)) => {
+                                        String::from_utf8_lossy(&o.borrow().class_name).into_owned()
+                                    }
+                                    _ => "TypeError".to_string(),
+                                };
+                                return Err(VmError {
+                                    message: format!("Uncaught {}: {}", class_disp, msg),
+                                    line: op.line,
+                                });
+                            }
+                            self.write_operand(&op.result, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.recycle_args(&mut call);
+                            return Ok(Flow::Continue);
+                        }
+                        // Exception's / Error's constructor ($message, $code, $previous)
+                        {
+                            let mut ob = obj.borrow_mut();
+                            // The trace is captured when the object is created
+                            // (zend_default_exception_new); the constructor
+                            // only fills it in when missing.
+                            if !matches!(ob.throwable_get(b"trace"), Value::Array(_)) {
+                                drop(ob);
+                                let trace = self.build_exception_trace();
+                                let lower = obj.borrow().class_name.to_ascii_lowercase();
+                                self.filter_new_exception_trace(&lower, &trace);
+                                ob = obj.borrow_mut();
+                                ob.throwable_set(b"trace", trace);
+                            }
+                            ob.throwable_set(b"previous", Value::Null);
+                            if let Some(m) = call.args.get(1) {
+                                let m = match m {
+                                    Value::Long(_) | Value::Double(_) | Value::True | Value::False => {
+                                        Value::String(m.to_php_string())
+                                    }
+                                    m => m.clone(),
+                                };
+                                ob.set_property(b"message".to_vec(), m);
+                            }
+                            if let Some(c) = call.args.get(2) {
+                                ob.set_property(b"code".to_vec(), c.clone());
+                            }
+                            if let Some(p) = call.args.get(3) {
+                                ob.throwable_set(b"previous", p.clone());
+                            }
+                        }
+                        self.write_operand(&op.result, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
+                        self.recycle_args(&mut call);
+                        Ok(Flow::Next)
+                    })? {
+                        Flow::Next => {}
+                        Flow::Continue => continue 'exec,
+                        Flow::Return(v) => return Ok(v),
+                    }
+                }
                 // A call of a builtin by its plain name, without named
                 // arguments (see resolve_call_target): the builtin branch of
                 // the general handler below, without the name dispatch.
@@ -59520,6 +59700,10 @@ impl Vm {
                             check = parent_lower;
                         }
                     }
+                    // (what the site's next objects get, see new_internal_fast)
+                    if !self.classes.get(&name_lower).is_some_and(|c| c.filename.is_some()) {
+                        self.note_internal_new_site(op_array, ip - 1, &name_lower, &obj, is_throwable);
+                    }
                     // Properties added from here on are dynamic ones.
                     obj.mark_declared();
 
@@ -62852,6 +63036,14 @@ impl Vm {
                 },
 
                 OpCode::InitMethodCall => match outlined(|| -> Result<Flow, VmError> {
+                    // The constructor call of an internal class's `new` (see
+                    // init_internal_ctor_fast)
+                    if self.init_internal_ctor_fast(op_array, ip - 1, &cvs, &tmps) {
+                        return Ok(Flow::Next);
+                    }
+                    let ctor_probe = self.internal_ctor_probe(op_array, ip - 1, &cvs, &tmps);
+                    let ip_before = ip;
+                    let r = (|| -> Result<Flow, VmError> {
                     // `$o->$name()`: the name must be a string.
                     if !matches!(op.op2, OperandType::Const(_))
                         && !matches!(
@@ -64008,6 +64200,13 @@ impl Vm {
                         }
                     }
                     Ok(Flow::Next)
+                    })();
+                    if let Some(p) = ctor_probe {
+                        if ip == ip_before && matches!(r, Ok(Flow::Next | Flow::Continue)) {
+                            self.note_internal_ctor_site(op_array, ip - 1, p);
+                        }
+                    }
+                    r
                 })? {
                     Flow::Next => {}
                     Flow::Continue => continue 'exec,

@@ -152,6 +152,36 @@ impl NewTemplate {
     }
 }
 
+/// What the general NEW handler made of an object of an internal class (a
+/// class only the stubs declare, or one an extension registered, all of
+/// whose ancestors are internal too) at a NEW site naming it: its
+/// properties as they are before the object exists, the same for every
+/// object of the class but for a throwable's file, line and trace (see
+/// Vm::new_internal_fast). Internal classes do not change once declared.
+#[derive(Debug)]
+pub(crate) struct InternalNewTemplate {
+    /// The class's declared name, and its lowercased name.
+    pub(crate) class_name: Vec<u8>,
+    pub(crate) lower: Vec<u8>,
+    /// The class table entry it came from (null: a stub-only class, the
+    /// class table not having one), and the class table's generation it was
+    /// last seen in there.
+    pub(crate) entry: *const ClassEntry,
+    pub(crate) stamp: std::cell::Cell<u64>,
+    /// The properties (an empty array is a placeholder: each object gets
+    /// its own, see `arrays`).
+    pub(crate) slots: PropTable,
+    pub(crate) arrays: Vec<usize>,
+    /// A throwable's `file`, `line` and `trace` slots.
+    pub(crate) throwable: Option<(usize, usize, usize)>,
+    /// The class_tag() of the class's objects.
+    pub(crate) tag: u32,
+    /// The extension create_object hook its objects get, and how many hooks
+    /// there were when it was looked up.
+    pub(crate) create_hook: Option<fn(&mut crate::vm::Vm, &std::rc::Rc<std::cell::RefCell<PhpObject>>)>,
+    pub(crate) hooks_len: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct PropertyDef {
     pub name: Vec<u8>,

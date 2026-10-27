@@ -898,11 +898,18 @@ pub(crate) struct SiteCaches {
     /// class name, the pending call's name and whether the method takes
     /// no argument by reference (see Vm::init_spl_method_fast).
     pub(crate) spl_sites: IpMap<(Vec<u8>, crate::string::PhpString, bool)>,
+    /// The INIT_METHOD_CALLs `__construct` on an object of an internal
+    /// class: the object's class name, the pending call's name and whether
+    /// the call releases its $this, and its CallTarget::internal_ctor (see
+    /// Vm::init_internal_ctor_fast).
+    pub(crate) ctor_sites: IpMap<(Vec<u8>, crate::string::PhpString, bool, u8)>,
     /// The template the NEWs of a user class last used (see
     /// Vm::new_object_fast).
     /// (and whether the constructor call after the NEW may be skipped:
     /// Vm::ctor_call_shape())
     pub(crate) new_sites: IpMap<(std::rc::Rc<crate::object::NewTemplate>, bool)>,
+    /// What the NEWs of an internal class made (see Vm::new_internal_fast).
+    pub(crate) internal_new_sites: IpMap<std::rc::Rc<crate::object::InternalNewTemplate>>,
     /// The unqualified namespaced function calls / `f(...)` callables that
     /// fell back to the global function: the namespaced (lowercase) name.
     /// Like the runtime cache of INIT_NS_FCALL_BY_NAME, a function of that
@@ -932,7 +939,9 @@ impl Default for SiteCaches {
             method_sites: Default::default(),
             forward_sites: Default::default(),
             spl_sites: Default::default(),
+            ctor_sites: Default::default(),
             new_sites: Default::default(),
+            internal_new_sites: Default::default(),
             ns_fallbacks: Default::default(),
             const_sites: Default::default(),
             sprop_sites: Default::default(),
