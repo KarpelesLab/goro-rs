@@ -512,6 +512,8 @@ pub enum ClassMember {
     TraitUse {
         traits: Vec<Vec<u8>>,
         adaptations: Vec<TraitAdaptation>,
+        /// Line of the first trait name (the ZEND_AST_USE_TRAIT's).
+        line: u32,
     },
     EnumCase {
         name: Vec<u8>,

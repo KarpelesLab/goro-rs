@@ -1169,6 +1169,7 @@ fn export_member(s: &mut String, m: &ClassMember, indent: usize) {
         ClassMember::TraitUse {
             traits,
             adaptations,
+            ..
         } => {
             s.push_str("use ");
             s.push_str(

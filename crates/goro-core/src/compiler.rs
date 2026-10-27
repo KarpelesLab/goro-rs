@@ -9093,9 +9093,11 @@ impl Compiler {
                                         message: format!(
                                             "Cannot redeclare {}::{}()",
                                             crate::string::msg_str(name),
-                                            crate::string::msg_str(method_name)
+                                            // (named by its lowercase key)
+                                            crate::string::msg_str(&mn_lower)
                                         ),
-                                        line: *method_line,
+                                        // (zend_enum_register_funcs(): at the enum)
+                                        line: stmt.span.line,
                                     });
                                 }
                             }
@@ -11277,7 +11279,7 @@ impl Compiler {
                                             crate::string::msg_str(const_name),
                                             tstr
                                         ),
-                                        line: stmt.span.line,
+                                        line: const_expr.span.line,
                                     });
                                 }
                                 match Self::check_literal_default(&pt, const_expr) {
@@ -11376,7 +11378,7 @@ impl Compiler {
                                         crate::string::msg_str(name),
                                         crate::string::msg_str(const_name)
                                     ),
-                                    line: stmt.span.line,
+                                    line: const_expr.span.line,
                                 });
                             }
                         }
@@ -11392,7 +11394,7 @@ impl Compiler {
                             if !modifiers.is_enum {
                                 return Err(CompileError {
                                     message: "Case can only be used in enums".to_string(),
-                                    line: stmt.span.line,
+                                    line: *case_line,
                                 });
                             }
                             // Backed enum cases must have values, unit enum cases must not
@@ -11403,7 +11405,7 @@ impl Compiler {
                                         crate::string::msg_str(case_name),
                                         crate::string::msg_str(name)
                                     ),
-                                    line: stmt.span.line,
+                                    line: *case_line,
                                 });
                             }
                             if enum_backing_type.is_none() && value.is_some() {
@@ -11413,7 +11415,7 @@ impl Compiler {
                                         crate::string::msg_str(case_name),
                                         crate::string::msg_str(name)
                                     ),
-                                    line: stmt.span.line,
+                                    line: *case_line,
                                 });
                             }
                             // zend_declare_typed_class_constant()
@@ -11671,6 +11673,7 @@ impl Compiler {
                         ClassMember::TraitUse {
                             traits,
                             adaptations,
+                            line: use_line,
                         } => {
                             // Interfaces cannot use traits
                             if modifiers.is_interface {
@@ -11684,7 +11687,7 @@ impl Compiler {
                                         trait_list.first().unwrap_or(&String::new()),
                                         crate::string::msg_str(name)
                                     ),
-                                    line: stmt.span.line,
+                                    line: Self::member_line(*use_line, stmt.span.line),
                                 });
                             }
                             for trait_name in traits {

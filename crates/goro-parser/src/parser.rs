@@ -66,6 +66,9 @@ pub struct Parser {
     /// Whether the get hook parsed by the last parse_property_hooks() was `&get`.
     last_get_hook_by_ref: bool,
     last_hook_attrs: HookAttrs,
+    /// Line of the trait use statement being parsed (its first trait
+    /// name's): zend_compile_use_trait()'s errors are reported there.
+    trait_use_line: u32,
     /// A doc-comment captured at the start of an assignment statement that
     /// should be applied to a closure/arrow function on the right-hand side.
     /// Set in parse_statement() when we see `/** doc */ $x = function/fn/static
@@ -296,6 +299,7 @@ impl Parser {
             last_set_hook_type: None,
             last_get_hook_by_ref: false,
             last_hook_attrs: HookAttrs::default(),
+            trait_use_line: 0,
             pending_closure_doc: None,
             class_name_stack: Vec::new(),
             is_interface_stack: Vec::new(),
@@ -374,7 +378,15 @@ impl Parser {
     fn static_trait_name_error(&self) -> ParseError {
         ParseError {
             message: "Cannot use \"static\" as trait name, as it is reserved".into(),
-            span: self.current().span,
+            span: self.trait_use_span(),
+        }
+    }
+
+    /// Where an error of the trait use being parsed is reported.
+    fn trait_use_span(&self) -> Span {
+        match self.trait_use_line {
+            0 => self.current().span,
+            l => Span::new(0, 0, l),
         }
     }
 
@@ -2365,7 +2377,7 @@ impl Parser {
         if matches!(self.peek(), TokenKind::Static) {
             return Err(self.static_trait_name_error());
         }
-        let span = self.current().span;
+        let span = self.trait_use_span();
         let n = self.parse_class_name_ref()?;
         if n.eq_ignore_ascii_case(b"self") || n.eq_ignore_ascii_case(b"parent") {
             return Err(ParseError {
@@ -2448,14 +2460,14 @@ impl Parser {
                         return Err(ParseError {
                             message: "Cannot use \"static\" as method modifier in trait alias"
                                 .into(),
-                            span: self.span(),
+                            span: self.trait_use_span(),
                         });
                     }
                     TokenKind::Abstract => {
                         return Err(ParseError {
                             message: "Cannot use \"abstract\" as method modifier in trait alias"
                                 .into(),
-                            span: self.span(),
+                            span: self.trait_use_span(),
                         });
                     }
                     TokenKind::Readonly => {
@@ -2975,6 +2987,8 @@ impl Parser {
             TokenKind::Use => {
                 // trait use
                 self.advance();
+                let use_line = self.span().line;
+                self.trait_use_line = use_line;
                 let mut traits = Vec::new();
                 loop {
                     if matches!(self.peek(), TokenKind::Static)
@@ -2999,9 +3013,11 @@ impl Parser {
                 } else {
                     self.expect_semicolon()?;
                 }
+                self.trait_use_line = 0;
                 Ok(ClassMember::TraitUse {
                     traits,
                     adaptations,
+                    line: use_line,
                 })
             }
             TokenKind::Function => {
