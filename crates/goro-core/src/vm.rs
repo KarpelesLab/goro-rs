@@ -11780,6 +11780,7 @@ impl Vm {
         None
     }
 
+    #[inline]
     fn run_pending_destructors(&mut self) {
         // (nothing to do, the scan of the list's tail would find nothing:
         // counted as made, see quiet_release_budget)
@@ -11787,6 +11788,11 @@ impl Vm {
             self.destructible_objects.skip_scan();
             return;
         }
+        self.run_pending_destructors_now();
+    }
+
+    #[inline(never)]
+    fn run_pending_destructors_now(&mut self) {
         if crate::gc::weak_dirty() {
             crate::gc::purge_weakmaps(self);
         }

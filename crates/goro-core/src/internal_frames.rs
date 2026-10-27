@@ -1363,19 +1363,23 @@ fn frame_is_for(name: &str, op_array: &crate::opcode::OpArray) -> bool {
     if name.ends_with('}') && (name.starts_with("{closure") || name.contains("::{closure")) {
         return crate::closure::is_closure_fn_name(&op_array.name);
     }
-    let last = |s: &[u8]| -> usize {
-        let mut i = s.len();
-        while i > 0 {
-            if s[i - 1] == b':' || s[i - 1] == b'>' {
-                break;
+    // (the parts after the last ':' or '>' of both, case-insensitively:
+    // compared from their ends, in one pass)
+    let sep = |c: u8| c == b':' || c == b'>';
+    let (n, o) = (name.as_bytes(), op_array.name.as_slice());
+    let (mut i, mut j) = (n.len(), o.len());
+    loop {
+        let a = if i > 0 { Some(n[i - 1]) } else { None };
+        let b = if j > 0 { Some(o[j - 1]) } else { None };
+        match (a.filter(|&c| !sep(c)), b.filter(|&c| !sep(c))) {
+            (None, None) => return true,
+            (Some(x), Some(y)) if x.eq_ignore_ascii_case(&y) => {
+                i -= 1;
+                j -= 1;
             }
-            i -= 1;
+            _ => return false,
         }
-        i
-    };
-    let n = name.as_bytes();
-    let o = &op_array.name;
-    n[last(n)..].eq_ignore_ascii_case(&o[last(o)..])
+    }
 }
 
 /// Whether two call_stack frame names name the same function ("A->f" and
