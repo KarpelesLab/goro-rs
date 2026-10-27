@@ -1913,7 +1913,7 @@ impl Compiler {
                         func,
                         crate::string::msg_str(&p.name)
                     ),
-                    p.line,
+                    p.recv_line,
                 );
             }
             if let Some(lr) = last_req {
@@ -1925,7 +1925,7 @@ impl Compiler {
                             crate::string::msg_str(&p.name),
                             crate::string::msg_str(&params[lr].name)
                         ),
-                        p.line,
+                        p.recv_line,
                     );
                 }
             }
@@ -6072,7 +6072,7 @@ impl Compiler {
                         return Err(CompileError {
                             message: "Cannot declare promoted property outside a constructor"
                                 .to_string(),
-                            line: param.line,
+                            line: param.recv_line,
                         });
                     }
                 }
@@ -6360,7 +6360,7 @@ impl Compiler {
                                                     None
                                                 )
                                             ),
-                                            line: default_expr.span.line,
+                                            line: param.recv_line,
                                         });
                                     }
                                     Ok(Some(widened)) => {
@@ -6383,7 +6383,7 @@ impl Compiler {
                         Self::emit_recv_default_check(
                             &mut func_compiler.op_array,
                             cv,
-                            default_expr,
+                            default_expr, param.recv_line,
                         );
                         let after = func_compiler.op_array.current_offset();
                         func_compiler.op_array.patch_jump(jmp_skip, after);
@@ -9631,7 +9631,7 @@ impl Compiler {
                                         if is_promoted_param(param) {
                                             return Err(CompileError {
                                                 message: "Cannot declare promoted property outside a constructor".to_string(),
-                                                line: param.line,
+                                                line: param.recv_line,
                                             });
                                         }
                                     }
@@ -9644,7 +9644,7 @@ impl Compiler {
                                         if is_promoted_param(param) {
                                             return Err(CompileError {
                                                 message: "Cannot declare promoted property in an abstract constructor".to_string(),
-                                                line: param.line,
+                                                line: param.recv_line,
                                             });
                                         }
                                     }
@@ -9684,7 +9684,7 @@ impl Compiler {
                                                             crate::string::msg_str(name),
                                                             crate::string::msg_str(&param.name)
                                                         ),
-                                                        line: param.line,
+                                                        line: param.recv_line,
                                                     });
                                                 }
                                                 let vis_level = |v: &ObjVisibility| match v {
@@ -9700,7 +9700,7 @@ impl Compiler {
                                                                 crate::string::msg_str(name),
                                                                 crate::string::msg_str(&param.name)
                                                             ),
-                                                            line: param.line,
+                                                            line: param.recv_line,
                                                         });
                                                     }
                                                 }
@@ -9715,7 +9715,7 @@ impl Compiler {
                                                         crate::string::msg_str(name),
                                                         crate::string::msg_str(&param.name)
                                                     ),
-                                                    line: param.line,
+                                                    line: param.recv_line,
                                                 });
                                             }
                                             // Hooked promoted properties cannot be readonly (PHP-8.4 rule)
@@ -9726,7 +9726,7 @@ impl Compiler {
                                                 return Err(CompileError {
                                                     message: "Hooked properties cannot be readonly"
                                                         .to_string(),
-                                                    line: param.line,
+                                                    line: param.recv_line,
                                                 });
                                             }
                                             let declaring_class_lower: Vec<u8> = qualified_name
@@ -9746,7 +9746,7 @@ impl Compiler {
                                                     message:
                                                         "Cannot declare variadic promoted property"
                                                             .to_string(),
-                                                    line: param.line,
+                                                    line: param.recv_line,
                                                 });
                                             }
                                             // Check for duplicate property from promotion
@@ -9758,7 +9758,7 @@ impl Compiler {
                                                         crate::string::msg_str(name),
                                                         crate::string::msg_str(&param.name)
                                                     ),
-                                                    line: param.line,
+                                                    line: param.recv_line,
                                                 });
                                             }
                                             if let Some(hint) = param
@@ -9773,7 +9773,7 @@ impl Compiler {
                                                         crate::string::msg_str(&param.name),
                                                         type_hint_display(hint)
                                                     ),
-                                                    line: param.line,
+                                                    line: param.recv_line,
                                                 });
                                             }
                                             let prop_attrs =
@@ -9808,7 +9808,7 @@ impl Compiler {
                                                     .0;
                                                 return Err(CompileError {
                                                     message: message.to_string(),
-                                                    line: if hl > 0 { hl } else { param.line },
+                                                    line: if hl > 0 { hl } else { param.recv_line },
                                                 });
                                             }
                                             let prom_has_get_hook = param.get_hook.is_some();
@@ -10334,7 +10334,7 @@ impl Compiler {
                                                             crate::string::msg_str(&param.name),
                                                             type_hint_display(hint)
                                                         ),
-                                                        line: default_expr.span.line,
+                                                        line: param.recv_line,
                                                     });
                                                 }
                                             }
@@ -10420,7 +10420,7 @@ impl Compiler {
                                                             message: format!("Cannot use {} as default value for parameter ${} of type {}", tn,
                                                                 crate::string::msg_str(&param.name),
                                                                 crate::vm::variance::type_to_string(&crate::vm::variance::TypeView::from_param_type(&pti.param_type), None)),
-                                                            line: default_expr.span.line,
+                                                            line: param.recv_line,
                                                         });
                                                     }
                                                     Ok(Some(widened)) => {
@@ -10444,7 +10444,7 @@ impl Compiler {
                                         Self::emit_recv_default_check(
                                             &mut method_compiler.op_array,
                                             cv,
-                                            default_expr,
+                                            default_expr, param.recv_line,
                                         );
                                         let after = method_compiler.op_array.current_offset();
                                         method_compiler.op_array.patch_jump(jmp_skip, after);
@@ -20549,7 +20549,7 @@ impl Compiler {
                                                     None
                                                 )
                                             ),
-                                            line: default_expr.span.line,
+                                            line: param.recv_line,
                                         });
                                     }
                                     Ok(Some(widened)) => {
@@ -20572,7 +20572,7 @@ impl Compiler {
                         Self::emit_recv_default_check(
                             &mut closure_compiler.op_array,
                             cv,
-                            default_expr,
+                            default_expr, param.recv_line,
                         );
                         let after = closure_compiler.op_array.current_offset();
                         closure_compiler.op_array.patch_jump(jmp_skip, after);
@@ -20901,7 +20901,7 @@ impl Compiler {
                                                     None
                                                 )
                                             ),
-                                            line: default_expr.span.line,
+                                            line: param.recv_line,
                                         });
                                     }
                                     Ok(Some(widened)) => {
@@ -20924,7 +20924,7 @@ impl Compiler {
                         Self::emit_recv_default_check(
                             &mut closure_compiler.op_array,
                             cv,
-                            default_expr,
+                            default_expr, param.recv_line,
                         );
                         let after = closure_compiler.op_array.current_offset();
                         closure_compiler.op_array.patch_jump(jmp_skip, after);
@@ -23374,7 +23374,7 @@ impl Compiler {
     /// float (use `v`); Err((type name, value name)) when invalid.
     /// RECV_INIT: a parameter default that is not a compile-time constant
     /// (e.g. a constant reference) is type-checked when it is used.
-    fn emit_recv_default_check(op_array: &mut OpArray, cv: u32, default_expr: &Expr) {
+    fn emit_recv_default_check(op_array: &mut OpArray, cv: u32, default_expr: &Expr, line: u32) {
         if Self::is_const_evaluable(default_expr)
             || !matches!(op_array.param_types.get(cv as usize), Some(Some(_)))
         {
@@ -23385,7 +23385,7 @@ impl Compiler {
             op1: OperandType::Cv(cv),
             op2: OperandType::Unused,
             result: OperandType::Unused,
-            line: default_expr.span.line,
+            line: if line > 0 { line } else { default_expr.span.line },
         });
     }
 
@@ -26239,7 +26239,7 @@ fn check_duplicate_params(params: &[Param], line: u32) -> CompileResult<()> {
     let mut saw_variadic = false;
     for p in params {
         // CG(zend_lineno) is the parameter's line.
-        let line = if p.line > 0 { p.line } else { line };
+        let line = if p.recv_line > 0 { p.recv_line } else { line };
         if matches!(
             p.name.as_slice(),
             b"GLOBALS"

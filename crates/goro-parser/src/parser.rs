@@ -66,6 +66,8 @@ pub struct Parser {
     /// Whether the get hook parsed by the last parse_property_hooks() was `&get`.
     last_get_hook_by_ref: bool,
     last_hook_attrs: HookAttrs,
+    /// Line of the property hook being parsed (its name's).
+    cur_hook_line: u32,
     /// Line of the trait use statement being parsed (its first trait
     /// name's): zend_compile_use_trait()'s errors are reported there.
     trait_use_line: u32,
@@ -299,6 +301,7 @@ impl Parser {
             last_set_hook_type: None,
             last_get_hook_by_ref: false,
             last_hook_attrs: HookAttrs::default(),
+            cur_hook_line: 0,
             trait_use_line: 0,
             pending_closure_doc: None,
             class_name_stack: Vec::new(),
@@ -3606,7 +3609,45 @@ impl Parser {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn parse_property_hooks(
+        &mut self,
+        prop_name: &[u8],
+        prop_type_hint: Option<&TypeHint>,
+        prop_line: u32,
+    ) -> ParseResult<(
+        Option<Vec<Statement>>,
+        Option<(Vec<u8>, Vec<Statement>)>,
+        bool,
+        bool,
+        bool,
+        bool,
+    )> {
+        self.cur_hook_line = 0;
+        self.parse_property_hooks_impl(prop_name, prop_type_hint, prop_line)
+            .map_err(|mut e| {
+                // zend_compile_property_hooks()'s checks of a hook's
+                // parameters are reported on the hook's line.
+                let m = e.message.as_str();
+                let hook_check = (m.starts_with("set hook of property")
+                    && m.ends_with("must accept exactly one parameters"))
+                    || (m.starts_with("get hook of property")
+                        && m.ends_with("must not have a parameter list"))
+                    || (m.starts_with("Parameter $")
+                        && (m.ends_with("must not be pass-by-reference")
+                            || m.ends_with("must not be variadic")
+                            || m.ends_with("must not have a default value")))
+                    || (m.starts_with("Type of parameter $")
+                        && m.ends_with("must be compatible with property type"));
+                if hook_check && self.cur_hook_line > 0 {
+                    e.span.line = self.cur_hook_line;
+                }
+                e
+            })
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn parse_property_hooks_impl(
         &mut self,
         prop_name: &[u8],
         prop_type_hint: Option<&TypeHint>,
@@ -3706,6 +3747,7 @@ impl Parser {
             };
 
             let hook_line = self.span().line;
+            self.cur_hook_line = hook_line;
             // zend_compile_func_decl(): #[\NoDiscard] cannot apply to hooks
             // (unless its validation is delayed); reported on the hook's line.
             let is_attr = |a: &Attribute, n: &[u8]| {
@@ -3808,6 +3850,7 @@ impl Parser {
                     );
                 }
                 self.advance(); // consume 'set'
+                let mut deferred_variance: Option<ParseError> = None;
                 // Optional parameter: set(Type $value) or set($value) or just set
                 let had_paren = matches!(self.peek(), TokenKind::OpenParen);
                 let (param_name, param_type_hint) = if self.eat(&TokenKind::OpenParen) {
@@ -3926,7 +3969,7 @@ impl Parser {
                             .last()
                             .map(|n| String::from_utf8_lossy(n).into_owned())
                             .unwrap_or_else(|| "?".to_string());
-                        return Err(ParseError {
+                        let e = ParseError {
                             message: format!(
                                 "Type of parameter ${} of hook {}::${}::set must be compatible with property type",
                                 String::from_utf8_lossy(&param_name),
@@ -3934,7 +3977,16 @@ impl Parser {
                                 String::from_utf8_lossy(prop_name),
                             ),
                             span: self.span(),
-                        });
+                        };
+                        // A type on one side only is rejected before the
+                        // hook is compiled; incompatible types after
+                        // (zend_verify_property_hook_variance()), on the
+                        // line its compilation ended on.
+                        if prop_type_hint.is_some() && param_type_hint.is_some() {
+                            deferred_variance = Some(e);
+                        } else {
+                            return Err(e);
+                        }
                     }
                 }
                 if param_name == b"this" {
@@ -3994,6 +4046,11 @@ impl Parser {
                     });
                 }
                 self.last_hook_attrs.lines[1] = (hook_line, self.prev_token_line());
+                if let Some(mut e) = deferred_variance {
+                    e.span.line = self.prev_token_line();
+                    self.cur_hook_line = 0;
+                    return Err(e);
+                }
             } else {
                 let class_name = self
                     .class_name_stack
