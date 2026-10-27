@@ -420,7 +420,8 @@ fn count_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError
             }
 
             // Non-countable object: TypeError in PHP 8+
-            let class_name = String::from_utf8_lossy(&obj.borrow().class_name).into_owned();
+            // (zend_zval_value_name(): "class@anonymous" for an anonymous class)
+            let class_name = Vm::value_type_name(val);
             let err_msg = format!(
                 "{}(): Argument #1 ($value) must be of type Countable|array, {} given",
                 fname, class_name
