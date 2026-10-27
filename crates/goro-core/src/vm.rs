@@ -45658,6 +45658,10 @@ impl Vm {
                                     // Propagate generator error. If the generator
                                     // set a specific current_exception, keep it;
                                     // otherwise create a generic Error.
+                                    // (a fatal error bails out as is)
+                                    if self.fatal_emitted && self.current_exception.is_none() {
+                                        return Err(e);
+                                    }
                                     if self.current_exception.is_none() {
                                         let exc_val =
                                             self.create_exception(b"Error", &e.message, e.line);
