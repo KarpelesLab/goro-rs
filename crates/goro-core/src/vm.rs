@@ -20874,6 +20874,21 @@ impl Vm {
         None
     }
 
+    /// call_internal_method() from the internal class `class_lower` (not
+    /// the object's class): ReflectionMethod::invoke() of an internal
+    /// method a user subclass overrides.
+    #[inline(never)]
+    pub(crate) fn call_internal_method_of(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        obj_val: &Value,
+        class_lower: &[u8],
+        method_lower: &[u8],
+        args: &[Value],
+    ) -> Option<Value> {
+        self.call_internal_method(obj, obj_val, class_lower, method_lower, args)
+    }
+
     /// call_object_method() for an internal method (no-argument and
     /// argument-taking dispatch, up the class chain).
     fn call_internal_method(

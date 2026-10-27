@@ -233,7 +233,12 @@ fn linked_method_prototype(vm: &Vm, class_lower: &[u8], m: &[u8], depth: u32) ->
             _ => None,
         };
     }
-    let meth = ce.get_method(m)?;
+    let Some(meth) = ce.get_method(m) else {
+        // (a method inherited from an internal class is not copied into
+        // the user class's table: it is the parent's, with its prototype)
+        let p = ce.parent.as_deref().map(lower_name)?;
+        return linked_method_prototype(vm, &p, m, depth + 1);
+    };
     // (interface methods have none, redeclared or inherited)
     if ce.is_interface {
         return None;
@@ -7397,12 +7402,27 @@ fn invoke_internal_method(
         )))
     } else {
         let mut arr = PhpArray::new();
-        arr.push(target_obj);
+        arr.push(target_obj.clone());
         arr.push(Value::String(PhpString::from_vec(m.name.clone())));
         Value::Array(Rc::new(RefCell::new(arr)))
     };
     // (ReflectionMethod::invoke() calls methods whatever their visibility)
     let prev = INVOKE_BYPASS.with(|b| b.replace(true));
+    // The reflected internal method itself runs, not an override of it in
+    // the object's (user) class.
+    if let Value::Object(o) = &target_obj {
+        if !m.is_static {
+            if let Some(base) = overridden_internal_base(vm, o, &m.name.to_ascii_lowercase()) {
+                let ov = target_obj.clone();
+                let r =
+                    vm.call_internal_method_of(o, &ov, &base, &m.name.to_ascii_lowercase(), args);
+                if let Some(v) = r {
+                    INVOKE_BYPASS.with(|b| b.set(prev));
+                    return v;
+                }
+            }
+        }
+    }
     let r = vm.call_callback(&callable, args);
     INVOKE_BYPASS.with(|b| b.set(prev));
     match r {
@@ -7415,6 +7435,28 @@ fn invoke_internal_method(
             Value::Null
         }
     }
+}
+
+/// The internal class an object's user class overrides the internal
+/// method `method_lower` of: the nearest internal ancestor.
+#[inline(never)]
+fn overridden_internal_base(
+    vm: &Vm,
+    obj: &Rc<RefCell<PhpObject>>,
+    method_lower: &[u8],
+) -> Option<Vec<u8>> {
+    let mut cur = obj.borrow().class_name.to_ascii_lowercase();
+    let def = vm.classes.get(&cur)?.get_method(method_lower)?;
+    if def.op_array.internal_sig.is_some() || vm.is_known_builtin_class(&cur) {
+        return None;
+    }
+    for _ in 0..64 {
+        if vm.is_known_builtin_class(&cur) {
+            return Some(cur);
+        }
+        cur = vm.classes.get(&cur)?.parent.as_ref()?.to_ascii_lowercase();
+    }
+    None
 }
 
 thread_local! {
