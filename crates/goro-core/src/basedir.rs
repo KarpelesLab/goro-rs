@@ -42,7 +42,13 @@ pub fn expand_filepath(path: &str) -> Option<String> {
             c => parts.push(c),
         }
     }
-    Some(format!("/{}", parts.join("/")))
+    // (virtual_file_ex(): a path ending with a slash keeps it)
+    let slash = if path.ends_with('/') && !parts.is_empty() {
+        "/"
+    } else {
+        ""
+    };
+    Some(format!("/{}{}", parts.join("/"), slash))
 }
 
 /// php_check_specific_open_basedir: true if `path` is inside `basedir`.

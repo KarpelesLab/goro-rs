@@ -19,6 +19,9 @@ thread_local! {
 enum Kind {
     /// Warn and return false (stat family, mkdir, unlink, chdir, ...).
     Stat(usize),
+    /// Like Stat, checking the expanded path (disk_free_space():
+    /// expand_filepath() first).
+    StatExpanded(usize),
     /// Warn, then "Failed to open stream: Operation not permitted", false.
     Stream(usize),
     /// Warn, then "Failed to open directory: Operation not permitted", false.
@@ -87,13 +90,27 @@ fn call_orig(vm: &mut Vm, fname: &'static str, args: &[Value]) -> Result<Value, 
 }
 
 fn guarded(vm: &mut Vm, fname: &'static str, kind: Kind, args: &[Value]) -> Result<Value, VmError> {
-    if !active(vm) {
+    // (setting open_basedir itself resolves its entries: also the first
+    // time)
+    let sets_basedir = matches!(kind, Kind::IniSet)
+        && args
+            .first()
+            .is_some_and(|v| v.to_php_string().as_bytes() == b"open_basedir");
+    if !active(vm) && !sets_basedir {
         return call_orig(vm, fname, args);
     }
     match kind {
         Kind::Stat(i) => {
             if let Some(p) = arg_str(args, i) {
                 if !vm.check_open_basedir(fname, &p) {
+                    return Ok(Value::False);
+                }
+            }
+        }
+        Kind::StatExpanded(i) => {
+            if let Some(p) = arg_str(args, i) {
+                let full = basedir::expand_filepath(&p).unwrap_or(p);
+                if !vm.check_open_basedir(fname, &full) {
                     return Ok(Value::False);
                 }
             }
@@ -299,9 +316,9 @@ guards! {
     g_filegroup => ("filegroup", Kind::Stat(0)),
     g_fileperms => ("fileperms", Kind::Stat(0)),
     g_filesize => ("filesize", Kind::Stat(0)),
-    g_disk_free_space => ("disk_free_space", Kind::Stat(0)),
-    g_diskfreespace => ("diskfreespace", Kind::Stat(0)),
-    g_disk_total_space => ("disk_total_space", Kind::Stat(0)),
+    g_disk_free_space => ("disk_free_space", Kind::StatExpanded(0)),
+    g_diskfreespace => ("diskfreespace", Kind::StatExpanded(0)),
+    g_disk_total_space => ("disk_total_space", Kind::StatExpanded(0)),
     g_chdir => ("chdir", Kind::Stat(0)),
     g_chmod => ("chmod", Kind::Stat(0)),
     g_chown => ("chown", Kind::Stat(0)),
