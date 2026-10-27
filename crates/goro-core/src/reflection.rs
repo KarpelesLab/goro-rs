@@ -1728,7 +1728,7 @@ fn reflection_method_construct_args(
 
     // (zend_lookup_class(): a leading backslash is not part of the name)
     let lookup_name = class_name.strip_prefix('\\').unwrap_or(&class_name);
-    let class_lower: Vec<u8> = crate::errdisplay::raw_error_bytes(&lookup_name)
+    let class_lower: Vec<u8> = crate::errdisplay::raw_error_bytes(lookup_name)
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
@@ -1742,7 +1742,7 @@ fn reflection_method_construct_args(
     let mut is_user_class = vm.classes.contains_key(&class_lower);
     let mut is_builtin_class = vm.is_known_builtin_class(&class_lower);
     if !is_user_class && !is_builtin_class {
-        vm.try_autoload_class(&crate::errdisplay::raw_error_bytes(&lookup_name));
+        vm.try_autoload_class(&crate::errdisplay::raw_error_bytes(lookup_name));
         if vm.current_exception.is_some() {
             return false;
         }
@@ -3725,9 +3725,7 @@ pub fn reflection_class_method(
                 if let Some(ref filename) = ce.filename {
                     Some(Value::String(PhpString::from_msg(&filename.clone())))
                 } else {
-                    Some(Value::String(PhpString::from_msg(
-                        &vm.current_file.to_string(),
-                    )))
+                    Some(Value::String(PhpString::from_msg(vm.current_file.as_ref())))
                 }
             } else {
                 Some(Value::False)
@@ -3890,7 +3888,7 @@ pub fn reflection_class_method(
                 }
                 new_obj.set_property(
                     b"file".to_vec(),
-                    Value::String(PhpString::from_msg(&vm.current_file.to_string())),
+                    Value::String(PhpString::from_msg(vm.current_file.as_ref())),
                 );
                 new_obj.set_property(b"line".to_vec(), Value::Long(vm.current_line as i64));
                 new_obj.throwable_set(b"previous", Value::Null);
@@ -3921,7 +3919,7 @@ pub fn reflection_class_method(
             };
             Some(match (ext, method) {
                 (Some(e), b"getextension") => make_reflection_extension(vm, e),
-                (Some(e), _) => Value::String(PhpString::from_msg(&e.to_string())),
+                (Some(e), _) => Value::String(PhpString::from_msg(e)),
                 (None, b"getextension") => Value::Null,
                 (None, _) => Value::False,
             })
@@ -3933,18 +3931,14 @@ pub fn reflection_class_method(
         }),
         b"getnamespacename" => {
             if let Some(pos) = target.rfind('\\') {
-                Some(Value::String(PhpString::from_msg(
-                    &target[..pos].to_string(),
-                )))
+                Some(Value::String(PhpString::from_msg(&target[..pos])))
             } else {
                 Some(Value::String(PhpString::empty()))
             }
         }
         b"getshortname" => {
             if let Some(pos) = target.rfind('\\') {
-                Some(Value::String(PhpString::from_msg(
-                    &target[pos + 1..].to_string(),
-                )))
+                Some(Value::String(PhpString::from_msg(&target[pos + 1..])))
             } else {
                 Some(Value::String(PhpString::from_msg(&target)))
             }
@@ -6068,7 +6062,7 @@ pub fn reflection_method_method(
                 }
                 b"__tostring" => {
                     return Some(Value::String(PhpString::from_msg(
-                        &"Method [ <internal> public method __invoke ] {\n}\n".to_string(),
+                        "Method [ <internal> public method __invoke ] {\n}\n",
                     )));
                 }
                 _ => {}
@@ -6198,17 +6192,12 @@ pub fn reflection_method_method(
                 .filter(|m| m.op_array.internal_sig.is_some())
                 .and_then(internal_method_ext);
             Some(match (method, ext) {
-                (b"getextensionname", Some(e)) => {
-                    Value::String(PhpString::from_msg(&e.to_string()))
-                }
+                (b"getextensionname", Some(e)) => Value::String(PhpString::from_msg(e)),
                 (b"getextensionname", None) => Value::False,
                 (_, Some(e)) => {
                     let obj_id = vm.alloc_object_id();
                     let mut ext_obj = PhpObject::new(b"ReflectionExtension".to_vec(), obj_id);
-                    ext_obj.set_property(
-                        b"name".to_vec(),
-                        Value::String(PhpString::from_msg(&e.to_string())),
-                    );
+                    ext_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_msg(e)));
                     Value::Object(Rc::new(RefCell::new(ext_obj)))
                 }
                 (_, None) => Value::Null,
@@ -7932,9 +7921,7 @@ pub fn reflection_function_method(
                         op_array.filename.clone(),
                     )))
                 } else {
-                    Some(Value::String(PhpString::from_msg(
-                        &vm.current_file.to_string(),
-                    )))
+                    Some(Value::String(PhpString::from_msg(vm.current_file.as_ref())))
                 }
             } else {
                 Some(Value::False)
@@ -8071,7 +8058,7 @@ pub fn reflection_function_method(
                 let key_str = crate::string::msg_str(key);
                 if key_str.starts_with(&prefix) {
                     let var_name = &key_str[prefix.len()..];
-                    let key = ArrayKey::String(PhpString::from_msg(&var_name.to_string()));
+                    let key = ArrayKey::String(PhpString::from_msg(var_name));
                     if result.get(&key).is_none() {
                         result.set(key, val.deref());
                     }
@@ -8212,10 +8199,7 @@ pub fn reflection_function_method(
             if let Some(ext) = ext_name {
                 let obj_id = vm.alloc_object_id();
                 let mut ext_obj = PhpObject::new(b"ReflectionExtension".to_vec(), obj_id);
-                ext_obj.set_property(
-                    b"name".to_vec(),
-                    Value::String(PhpString::from_msg(&ext.to_string())),
-                );
+                ext_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_msg(ext)));
                 Some(Value::Object(Rc::new(RefCell::new(ext_obj))))
             } else {
                 Some(Value::Null)
@@ -8226,7 +8210,7 @@ pub fn reflection_function_method(
             let ext_name = internal_function_ext(vm, &func_lower)
                 .or_else(|| get_function_extension(&func_str));
             if let Some(ext) = ext_name {
-                Some(Value::String(PhpString::from_msg(&ext.to_string())))
+                Some(Value::String(PhpString::from_msg(ext)))
             } else {
                 Some(Value::False)
             }
@@ -8289,7 +8273,7 @@ pub fn reflection_function_method(
                 return Some(Value::String(PhpString::from_bytes(b"")));
             }
             if let Some(pos) = name.rfind('\\') {
-                Some(Value::String(PhpString::from_msg(&name[..pos].to_string())))
+                Some(Value::String(PhpString::from_msg(&name[..pos])))
             } else {
                 Some(Value::String(PhpString::from_bytes(b"")))
             }
@@ -8301,9 +8285,7 @@ pub fn reflection_function_method(
                 return Some(Value::String(PhpString::from_msg(&name)));
             }
             if let Some(pos) = name.rfind('\\') {
-                Some(Value::String(PhpString::from_msg(
-                    &name[pos + 1..].to_string(),
-                )))
+                Some(Value::String(PhpString::from_msg(&name[pos + 1..])))
             } else {
                 Some(Value::String(PhpString::from_msg(&name)))
             }
@@ -9125,10 +9107,7 @@ pub fn reflection_property_method(
                 if let Some(m) =
                     reflection_property_hook_method(vm, &class_lower, prop_name.as_bytes(), kind)
                 {
-                    arr.set(
-                        crate::array::ArrayKey::String(PhpString::from_msg(&kind.to_string())),
-                        m,
-                    );
+                    arr.set(crate::array::ArrayKey::String(PhpString::from_msg(kind)), m);
                 }
             }
             Some(Value::Array(Rc::new(RefCell::new(arr))))
@@ -9371,7 +9350,7 @@ fn raw_value_effective_set(
                 "$__o->{$__n} = $__v;",
                 &[
                     ("__o", Value::Object(obj.clone())),
-                    ("__n", Value::String(PhpString::from_msg(&prop.to_string()))),
+                    ("__n", Value::String(PhpString::from_msg(prop))),
                     ("__v", value.clone()),
                 ],
                 class_lower,
@@ -10983,7 +10962,7 @@ fn reflection_parameter_method_body(
                                 return Some(v.clone());
                             }
                             // Case-insensitive built-ins
-                            let lower: Vec<u8> = crate::errdisplay::raw_error_bytes(&const_name)
+                            let lower: Vec<u8> = crate::errdisplay::raw_error_bytes(const_name)
                                 .iter()
                                 .map(|b| b.to_ascii_lowercase())
                                 .collect();
@@ -11449,7 +11428,7 @@ fn reflection_parameter_method_body(
                         if r.chars()
                             .all(|c| c.is_alphanumeric() || c == '_' || c == '\\' || c == ':')
                         {
-                            return Some(Value::String(PhpString::from_msg(&r.to_string())));
+                            return Some(Value::String(PhpString::from_msg(r)));
                         }
                     }
                     let display = if let Some(rest) = name.strip_prefix("global:") {
@@ -11601,7 +11580,7 @@ pub fn reflection_constant_method(
             // in canonical (unprefixed) form, matching PHP.
             let n = name.strip_prefix('\\').unwrap_or(&name);
             if let Some(pos) = n.rfind('\\') {
-                Some(Value::String(PhpString::from_msg(&n[..pos].to_string())))
+                Some(Value::String(PhpString::from_msg(&n[..pos])))
             } else {
                 Some(Value::String(PhpString::empty()))
             }
@@ -11654,7 +11633,7 @@ pub fn reflection_constant_method(
             };
             Some(match (ext, method) {
                 (Some(e), b"getextension") => make_reflection_extension(vm, e),
-                (Some(e), _) => Value::String(PhpString::from_msg(&e.to_string())),
+                (Some(e), _) => Value::String(PhpString::from_msg(e)),
                 (None, b"getextension") => Value::Null,
                 (None, _) => Value::False,
             })
@@ -11797,10 +11776,7 @@ fn reflection_constant_value(vm: &Vm, name: &[u8]) -> Value {
 fn make_reflection_extension(vm: &mut Vm, name: &str) -> Value {
     let obj_id = vm.alloc_object_id();
     let mut ext_obj = PhpObject::new(b"ReflectionExtension".to_vec(), obj_id);
-    ext_obj.set_property(
-        b"name".to_vec(),
-        Value::String(PhpString::from_msg(&name.to_string())),
-    );
+    ext_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_msg(name)));
     Value::Object(Rc::new(RefCell::new(ext_obj)))
 }
 
@@ -12096,9 +12072,7 @@ pub fn reflection_generator_method(
                     return Some(Value::String(PhpString::from_msg(&fname)));
                 }
             }
-            Some(Value::String(PhpString::from_msg(
-                &vm.current_file.to_string(),
-            )))
+            Some(Value::String(PhpString::from_msg(vm.current_file.as_ref())))
         }
         b"getexecutingline" => {
             if let Some(g) = get_gen(obj) {
@@ -12418,7 +12392,7 @@ pub fn reflection_fiber_method(
             };
             Some(match (method, pos) {
                 (b"getexecutingfile", Some((f, _))) => {
-                    Value::String(PhpString::from_msg(&f.to_string()))
+                    Value::String(PhpString::from_msg(f.as_ref()))
                 }
                 (_, Some((_, l))) => Value::Long(l as i64),
                 _ => Value::Null,
@@ -12472,7 +12446,7 @@ pub fn reflection_zend_extension_method(
     obj: &Rc<RefCell<PhpObject>>,
 ) -> Option<Value> {
     let name = obj.borrow().get_property(b"name");
-    let s = |v: &str| Some(Value::String(PhpString::from_msg(&v.to_string())));
+    let s = |v: &str| Some(Value::String(PhpString::from_msg(v)));
     match method {
         b"getname" => Some(name),
         b"getversion" => Some(
@@ -12549,10 +12523,7 @@ pub fn reflection_extension_method(
                         .contains_key(cname.to_ascii_lowercase().as_bytes())
                 {
                     let rc = create_reflection_class(vm, cname);
-                    result.set(
-                        ArrayKey::String(PhpString::from_msg(&cname.to_string())),
-                        rc,
-                    );
+                    result.set(ArrayKey::String(PhpString::from_msg(cname)), rc);
                 }
             }
             Some(Value::Array(Rc::new(RefCell::new(result))))
@@ -12566,7 +12537,7 @@ pub fn reflection_extension_method(
                         .classes
                         .contains_key(cname.to_ascii_lowercase().as_bytes())
                 {
-                    result.push(Value::String(PhpString::from_msg(&cname.to_string())));
+                    result.push(Value::String(PhpString::from_msg(cname)));
                 }
             }
             Some(Value::Array(Rc::new(RefCell::new(result))))
@@ -12597,7 +12568,7 @@ pub fn reflection_extension_method(
             let const_list = get_extension_constants(&ext_lower);
             for (cname, val) in const_list {
                 let v = vm.constants.get(cname.as_bytes()).cloned().unwrap_or(val);
-                result.set(ArrayKey::String(PhpString::from_msg(&cname.to_string())), v);
+                result.set(ArrayKey::String(PhpString::from_msg(cname)), v);
             }
             // The constants the extension's stubs declare (that are defined).
             for c in crate::stub_sigs::CONSTANTS {
@@ -12631,7 +12602,7 @@ pub fn reflection_extension_method(
                         v => Value::String(v.to_php_string()),
                     })
                     .unwrap_or_else(|| Value::String(PhpString::from_bytes(b"")));
-                result.set(ArrayKey::String(PhpString::from_msg(&entry.to_string())), v);
+                result.set(ArrayKey::String(PhpString::from_msg(entry)), v);
             }
             Some(Value::Array(Rc::new(RefCell::new(result))))
         }
@@ -13679,7 +13650,7 @@ fn create_reflection_function(vm: &mut Vm, func_name: &str) -> Value {
     let mut rf_obj = PhpObject::new(b"ReflectionFunction".to_vec(), obj_id);
     rf_obj.set_property(
         b"name".to_vec(),
-        Value::String(PhpString::from_msg(&func_name.to_string())),
+        Value::String(PhpString::from_msg(func_name)),
     );
     let lower = func_name.to_ascii_lowercase();
     rf_obj.set_property(
@@ -14597,12 +14568,12 @@ pub fn reflection_static_call(
                         let method_name = &method_str[pos + 2..];
                         // Create a ReflectionMethod
                         let class_lower_bytes: Vec<u8> =
-                            crate::errdisplay::raw_error_bytes(&class_name)
+                            crate::errdisplay::raw_error_bytes(class_name)
                                 .iter()
                                 .map(|b| b.to_ascii_lowercase())
                                 .collect();
                         let method_lower_bytes: Vec<u8> =
-                            crate::errdisplay::raw_error_bytes(&method_name)
+                            crate::errdisplay::raw_error_bytes(method_name)
                                 .iter()
                                 .map(|b| b.to_ascii_lowercase())
                                 .collect();
@@ -14617,8 +14588,8 @@ pub fn reflection_static_call(
                         )));
                         let a = [
                             Value::Object(obj.clone()),
-                            Value::String(PhpString::from_msg(&class_name.to_string())),
-                            Value::String(PhpString::from_msg(&method_name.to_string())),
+                            Value::String(PhpString::from_msg(class_name)),
+                            Value::String(PhpString::from_msg(method_name)),
                         ];
                         if !reflection_method_construct(vm, &a, line) {
                             return Some(Value::Null);
@@ -14657,7 +14628,7 @@ pub fn reflection_static_call(
 
 /// Create a ReflectionClass object for a given class name
 pub fn create_reflection_class(vm: &mut Vm, class_name: &str) -> Value {
-    let class_lower: Vec<u8> = crate::errdisplay::raw_error_bytes(&class_name)
+    let class_lower: Vec<u8> = crate::errdisplay::raw_error_bytes(class_name)
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
@@ -14673,11 +14644,11 @@ pub fn create_reflection_class(vm: &mut Vm, class_name: &str) -> Value {
     let mut obj = PhpObject::new(reflector, obj_id);
     obj.set_property(
         b"name".to_vec(),
-        Value::String(PhpString::from_msg(&class_name.to_string())),
+        Value::String(PhpString::from_msg(class_name)),
     );
     obj.set_property(
         b"__reflection_target".to_vec(),
-        Value::String(PhpString::from_msg(&class_name.to_string())),
+        Value::String(PhpString::from_msg(class_name)),
     );
     Value::Object(Rc::new(RefCell::new(obj)))
 }
@@ -14698,11 +14669,11 @@ pub fn create_reflection_method_with_lookup(
     method_name: &str,
     lookup_class: Option<&str>,
 ) -> Value {
-    let class_lower: Vec<u8> = crate::errdisplay::raw_error_bytes(&class_name)
+    let class_lower: Vec<u8> = crate::errdisplay::raw_error_bytes(class_name)
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
-    let method_lower: Vec<u8> = crate::errdisplay::raw_error_bytes(&method_name)
+    let method_lower: Vec<u8> = crate::errdisplay::raw_error_bytes(method_name)
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
@@ -14739,7 +14710,7 @@ pub fn create_reflection_method_with_lookup(
     );
     if let Some(lookup) = lookup_class {
         let lookup_canonical = {
-            let lookup_lower: Vec<u8> = crate::errdisplay::raw_error_bytes(&lookup)
+            let lookup_lower: Vec<u8> = crate::errdisplay::raw_error_bytes(lookup)
                 .iter()
                 .map(|b| b.to_ascii_lowercase())
                 .collect();
@@ -14797,19 +14768,19 @@ pub fn create_reflection_property(vm: &mut Vm, class_name: &str, prop_name: &str
     let mut obj = PhpObject::new(b"ReflectionProperty".to_vec(), obj_id);
     obj.set_property(
         b"name".to_vec(),
-        Value::String(PhpString::from_msg(&prop_name.to_string())),
+        Value::String(PhpString::from_msg(prop_name)),
     );
     obj.set_property(
         b"class".to_vec(),
-        Value::String(PhpString::from_msg(&class_name.to_string())),
+        Value::String(PhpString::from_msg(class_name)),
     );
     obj.set_property(
         b"__reflection_class".to_vec(),
-        Value::String(PhpString::from_msg(&class_name.to_string())),
+        Value::String(PhpString::from_msg(class_name)),
     );
     obj.set_property(
         b"__reflection_prop".to_vec(),
-        Value::String(PhpString::from_msg(&prop_name.to_string())),
+        Value::String(PhpString::from_msg(prop_name)),
     );
     Value::Object(Rc::new(RefCell::new(obj)))
 }
@@ -14825,12 +14796,12 @@ pub fn create_reflection_class_constant(
     let mut obj = PhpObject::new(b"ReflectionClassConstant".to_vec(), obj_id);
     obj.set_property(
         b"name".to_vec(),
-        Value::String(PhpString::from_msg(&const_name.to_string())),
+        Value::String(PhpString::from_msg(const_name)),
     );
     // Walk up the parent chain to find which class actually declares this
     // constant. The visible `class` property and getDeclaringClass() both
     // return the declaring class, not the class the reflection was made on.
-    let class_lower: Vec<u8> = crate::errdisplay::raw_error_bytes(&class_name)
+    let class_lower: Vec<u8> = crate::errdisplay::raw_error_bytes(class_name)
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
