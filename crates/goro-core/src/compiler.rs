@@ -24576,12 +24576,15 @@ impl Compiler {
                             Value::String(s) => Self::const_str_key(s),
                             _ => return None,
                         };
-                        Some(arr.get(&key).cloned().unwrap_or(Value::Null))
+                        // (a missing key warns: evaluated at run time, like
+                        // zend_eval_const_expr() leaves it)
+                        arr.get(&key).cloned()
                     } else {
                         None // append access [] not valid in const expr
                     }
                 } else {
-                    Some(Value::Null) // accessing array offset on non-array
+                    // (a string offset or a non-array container: at run time)
+                    None
                 }
             }
             // Cast expressions in constant contexts
