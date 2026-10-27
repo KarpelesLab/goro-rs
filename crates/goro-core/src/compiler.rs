@@ -5590,6 +5590,14 @@ impl Compiler {
                 body,
                 ..
             } => {
+                // (zend_compile_foreach() fetches a plain value variable
+                // BP_VAR_R: a read)
+                if matches!(&value.kind, ExprKind::Variable(n) if n == b"http_response_header")
+                    && !self.hrh_assigned
+                    && !*by_ref
+                {
+                    self.foreach_hrh_deprecation(value);
+                }
                 if matches!(&value.kind, ExprKind::Variable(n) if n == b"GLOBALS")
                     || matches!(&value.kind, ExprKind::Array(elems) if Self::list_writes_globals(elems))
                 {
@@ -15986,6 +15994,32 @@ impl Compiler {
         self.compile_expr(&call)
     }
 
+    /// Whether a list() / [...] assignment target writes
+    /// `$http_response_header` (fetched BP_VAR_W: later reads of it are not
+    /// deprecated, CG(context).has_assigned_to_http_response_header).
+    #[inline(never)]
+    fn foreach_hrh_deprecation(&mut self, value: &Expr) {
+        let cv = self.op_array.get_or_create_cv(b"http_response_header");
+        if cv >= self.op_array.param_count {
+            push_compile_deprecated(
+                "The predefined locally scoped $http_response_header variable is deprecated, call http_get_last_response_headers() instead".to_string(),
+                value.span.line,
+            );
+        }
+    }
+
+    #[inline(never)]
+    fn list_assigns_hrh(target: &Expr) -> bool {
+        match &target.kind {
+            ExprKind::Variable(n) => n == b"http_response_header",
+            ExprKind::Array(elems) => elems.iter().any(|e| Self::list_assigns_hrh(&e.value)),
+            ExprKind::FunctionCall { args, .. } if Self::is_list_target(target) => {
+                args.iter().any(|a| Self::list_assigns_hrh(&a.value))
+            }
+            _ => false,
+        }
+    }
+
     /// `[...] = ` / `list(...) = ` destructuring.
     fn is_list_target(target: &Expr) -> bool {
         match &target.kind {
@@ -16934,7 +16968,9 @@ impl Compiler {
                 self.compile_list_assign_from_globals(expr, target, value)
             }
             ExprKind::Assign { target, value } => {
-                if matches!(&target.kind, ExprKind::Variable(n) if n == b"http_response_header") {
+                if matches!(&target.kind, ExprKind::Variable(n) if n == b"http_response_header")
+                    || (Self::is_list_target(target) && Self::list_assigns_hrh(target))
+                {
                     self.hrh_assigned = true;
                 }
                 let result_discarded = std::mem::take(&mut self.assign_result_discarded);
