@@ -10205,6 +10205,55 @@ impl Vm {
         None
     }
 
+    /// ZEND_RECV_VARIADIC's check of the extra named arguments a typed
+    /// variadic parameter collects (numbered after the positional
+    /// arguments); coerced in weak mode. The TypeError message, if any.
+    #[inline(never)]
+    fn variadic_named_arg_types(
+        &self,
+        user_fn: &OpArray,
+        positional: usize,
+        named: &mut [(Vec<u8>, Value)],
+        func_display_name: &str,
+        implicit_args: usize,
+        line: u32,
+        caller_strict: bool,
+    ) -> Option<String> {
+        let v = user_fn.variadic_param? as usize;
+        let type_info = user_fn.param_types.get(v)?.as_ref()?;
+        for (_, arg) in named.iter_mut() {
+            let val = arg.deref();
+            if !self.value_matches_type_mode(&val, &type_info.param_type, caller_strict) {
+                let func_display_name = func_display_name.split('\0').next().unwrap_or_default();
+                let msg = format!(
+                    "{}(): Argument #{} must be of type {}, {} given",
+                    func_display_name,
+                    // (after the positional ones: max(op1.num, EX_NUM_ARGS() + 1))
+                    (v + 1).max(positional + 1).saturating_sub(implicit_args),
+                    self.param_type_display(&type_info.param_type),
+                    Self::value_type_name(&val),
+                );
+                if self.pending_call_via_invoke || line == 0 {
+                    return Some(msg);
+                }
+                return Some(format!(
+                    "{}, called in {} on line {}",
+                    msg, self.current_file, line
+                ));
+            }
+            if !caller_strict {
+                if let Value::Reference(r) = arg {
+                    let mut c = r.borrow().clone();
+                    Self::coerce_value_to_type(&mut c, &type_info.param_type, false);
+                    *r.borrow_mut() = c;
+                } else {
+                    Self::coerce_value_to_type(arg, &type_info.param_type, false);
+                }
+            }
+        }
+        None
+    }
+
     /// RECV_INIT check of a parameter that received a non-constant default:
     /// coerce it (the function's own strict_types) or report the TypeError.
     fn recv_default_check(
@@ -23137,7 +23186,7 @@ impl Vm {
                 .filter(|v| matches!(v, Value::Object(_)))
                 .cloned();
         }
-        let param_err = self.check_param_types_with_strict(
+        let mut param_err = self.check_param_types_with_strict(
             user_fn,
             &call.args,
             &display_name,
@@ -23146,6 +23195,18 @@ impl Vm {
             caller_strict,
         );
         self.recv_this = None;
+        // (the extra named arguments a typed variadic collects)
+        if param_err.is_none() && user_fn.variadic_param.is_some() && !call.named_args.is_empty() {
+            param_err = self.variadic_named_arg_types(
+                user_fn,
+                call.args.len(),
+                &mut call.named_args,
+                &display_name,
+                implicit_args,
+                line,
+                caller_strict,
+            );
+        }
         self.pending_call_via_invoke = false;
         // Pop temp scope
         if temp_scope_pushed {
