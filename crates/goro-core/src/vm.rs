@@ -45886,7 +45886,25 @@ impl Vm {
                         let snap = foreach_snap.entry(iter_idx).or_default();
                         snap.clear();
                         snap.reserve(ab.len());
-                        snap.extend(ab.iter().map(|(k, v)| (k.clone(), v.clone())));
+                        // (a reference only the array holds is snapshotted as
+                        // its value: the loop's hold must not make it look
+                        // shared to a copy of the array taken in the loop,
+                        // which zend_array_dup()s it into a plain value)
+                        snap.extend(ab.iter().map(|(k, v)| {
+                            let v = match v {
+                                Value::Reference(r) if Rc::strong_count(r) == 1 => {
+                                    match r.try_borrow().as_deref() {
+                                        // (not an element pointing back at
+                                        // the array)
+                                        Ok(Value::Array(a)) if Rc::ptr_eq(a, &arr) => v.clone(),
+                                        Ok(inner) => inner.clone(),
+                                        Err(_) => v.clone(),
+                                    }
+                                }
+                                _ => v.clone(),
+                            };
+                            (k.clone(), v)
+                        }));
                     } else if !foreach_snap.is_empty() {
                         foreach_snap.remove(&iter_idx);
                     }
