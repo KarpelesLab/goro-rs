@@ -2449,6 +2449,7 @@ fn new_instance(vm: &mut Vm, class: &[u8], core: Box<Core>) -> Value {
     let mut o = PhpObject::new(disp, id);
     vm.apply_class_property_defaults(&mut o, &lower);
     let o = Rc::new(RefCell::new(o));
+    vm.lazy_list_destructible(&o);
     attach(&o);
     let has_ctor = lower != b"xmlreader"
         && vm

@@ -156,7 +156,12 @@ fn new_sxe_object(vm: &mut Vm, class_name: &[u8], sxe: Sxe) -> Obj {
         data: Rc::new(sxe) as Rc<dyn Any>,
         handlers: &HANDLERS,
     });
-    Rc::new(RefCell::new(o))
+    let o = Rc::new(RefCell::new(o));
+    if lower != b"simplexmlelement" && lower != b"simplexmliterator" {
+        // a user subclass's __destruct runs once the object is released
+        vm.lazy_list_destructible(&o);
+    }
+    o
 }
 
 /// An object of `class` (SimpleXMLElement or a subclass) for `node` of

@@ -174,6 +174,9 @@ pub struct DomData {
     /// while the tree generation is unchanged (php_dom_obj_map's
     /// cached_obj / cached_length with their cache tag).
     pub list_cache: std::cell::Cell<ListCache>,
+    /// Live node lists: the object of the last item returned, which the
+    /// list keeps alive (php_dom_obj_map's cached_obj reference).
+    pub item_obj: RefCell<Option<Value>>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -197,6 +200,9 @@ thread_local! {
 
 impl Drop for DomData {
     fn drop(&mut self) {
+        if let Some(Value::Object(o)) = self.item_obj.get_mut().take() {
+            goro_core::gc::note_dtor_candidate(&o);
+        }
         if let Kind::Node(n) = self.kind.get_mut() {
             let n = *n;
             if tree::try_with(|t| free_detached(t, n)).is_none() {
@@ -298,6 +304,7 @@ pub fn attach(o: &Obj, kind: Kind) {
             kind: RefCell::new(kind),
             cache: RefCell::new(Vec::new()),
             list_cache: Default::default(),
+            item_obj: RefCell::new(None),
         }) as Rc<dyn Any>,
         handlers: &HANDLERS,
     });
@@ -310,6 +317,7 @@ pub fn attach_with(o: &Obj, kind: Kind, handlers: &'static NativeObjectHandlers)
             kind: RefCell::new(kind),
             cache: RefCell::new(Vec::new()),
             list_cache: Default::default(),
+            item_obj: RefCell::new(None),
         }) as Rc<dyn Any>,
         handlers,
     });
@@ -690,10 +698,16 @@ pub fn new_object(vm: &mut Vm, class: &[u8]) -> Obj {
     };
     let id = vm.alloc_object_id();
     let mut o = PhpObject::new(disp, id);
-    if vm.classes.contains_key(&lower) {
+    let user = vm.classes.contains_key(&lower);
+    if user {
         vm.apply_class_property_defaults(&mut o, &lower);
     }
-    Rc::new(RefCell::new(o))
+    let o = Rc::new(RefCell::new(o));
+    if user {
+        // a user subclass's __destruct runs once the wrapper is released
+        vm.lazy_list_destructible(&o);
+    }
+    o
 }
 
 /// Object for a DOMNodeList/DOMNamedNodeMap.
@@ -1731,8 +1745,22 @@ fn call_method(
             CURRENT_FN.with(|c| *c.borrow_mut() = prev);
             return r.unwrap_or(Value::Null);
         }
-        if methods_of(b).contains_key(&m) {
-            let name = method_display(b, &m);
+        let ctor = m == "__construct"
+            && (has_ctor(b)
+                || (b.is_modern() && (modern::is_node_base(b) || b == Base::MTokenList)));
+        if ctor || methods_of(b).contains_key(&m) {
+            let name = if ctor {
+                let decl = if b == Base::MTokenList {
+                    "Dom\\TokenList"
+                } else if b.is_modern() {
+                    "Dom\\Node"
+                } else {
+                    base_name(b)
+                };
+                format!("{}::__construct", decl)
+            } else {
+                method_display(b, &m)
+            };
             throw_error(
                 vm,
                 b"Error",

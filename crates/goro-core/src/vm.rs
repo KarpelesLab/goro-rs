@@ -34760,9 +34760,14 @@ impl Vm {
                             } {
                                 // parent::method() from a subclass instance method reaches the
                                 // native instance method with $this.
+                                // (handlers may answer for instance methods called
+                                // statically too: the stub tells a static method)
                                 let fwd_this: Option<Value> = if is_forwarding_call
-                                    && !(h.has_method)(&native, &method_part, true)
                                     && (h.has_method)(&native, &method_part, false)
+                                    && match crate::stubs::find_method(&native, &method_part) {
+                                        Some((_, m)) => m.flags & crate::stubs::F_STATIC == 0,
+                                        None => !(h.has_method)(&native, &method_part, true),
+                                    }
                                 {
                                     match cvs.first() {
                                         Some(v @ Value::Object(o)) => {
@@ -61727,9 +61732,11 @@ impl Vm {
                         let mut cur = self.classes.get(&name_lower).and_then(|c| c.parent.clone());
                         for _ in 0..64 {
                             let Some(p) = cur else { break };
+                            // (an extension's class is in the table too, without
+                            // a file)
                             match self.classes.get(&p.to_ascii_lowercase()) {
-                                Some(pc) => cur = pc.parent.clone(),
-                                None => {
+                                Some(pc) if pc.filename.is_some() => cur = pc.parent.clone(),
+                                _ => {
                                     builtin_ancestor = true;
                                     break;
                                 }
