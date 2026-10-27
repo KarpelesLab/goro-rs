@@ -8874,9 +8874,37 @@ impl Vm {
                 }
             }
         }
+        let op_array: Rc<OpArray> = op_array.into();
+        // A closure's generator resolves static:: as the closure does (its
+        // $this's class, else the class it was created in / bound to),
+        // whoever resumes it. (A method's generator: its caller sets it.)
+        let called = if crate::closure::is_closure_fn_name(&op_array.name) {
+            self.closure_generator_called_class(&op_array, &cvs)
+        } else {
+            None
+        };
         let mut g = crate::generator::PhpGenerator::new(op_array, cvs);
+        g.called_class = called;
         g.object_id = self.alloc_object_id();
         g
+    }
+
+    /// The called class of the generator of closure `op_array` given `cvs`
+    /// (see new_generator).
+    #[inline(never)]
+    fn closure_generator_called_class(&self, op_array: &OpArray, cvs: &[Value]) -> Option<Vec<u8>> {
+        if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
+            if let Some(Value::Object(obj)) = cvs.first() {
+                return Some(obj.borrow().class_name.clone());
+            }
+        }
+        let scope = op_array.scope_class.as_ref()?;
+        Some(op_array.closure_called_class.clone().unwrap_or_else(|| {
+            self.classes
+                .get(scope)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| scope.clone())
+        }))
     }
 
     /// Recycle an object ID if the Rc has only one strong reference left (about to be dropped)
