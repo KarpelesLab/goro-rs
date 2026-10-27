@@ -124,11 +124,88 @@ pub fn compare_recursion_take() -> bool {
 
 thread_local! {
     static COMPARE_RECURSION: Cell<bool> = const { Cell::new(false) };
+    /// The pending COMPARE_RECURSION is an object comparison that ran out of
+    /// (emulated) C stack instead.
+    static COMPARE_STACK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// zend_std_compare_objects(): zend_objects_check_stack_limit() failed;
+/// the VM raises "Maximum call stack size reached during object
+/// comparison".
+#[cold]
+#[inline(never)]
+fn compare_stack_overflow_set() {
+    COMPARE_STACK.with(|c| c.set(true));
+    compare_recursion_set();
+}
+
+/// Take the COMPARE_STACK flag (with the COMPARE_RECURSION one taken).
+pub fn compare_stack_overflow_take() -> bool {
+    COMPARE_STACK.with(|c| c.replace(false))
+}
+
+/// Nesting depth of Value::compare / Value::equals past which a level runs
+/// through `deep_compare` (checks of the stack).
+const DEEP_COMPARE: usize = 1000;
+
+/// Emulated C stack a level of object comparison uses
+/// (zend_std_compare_objects() + zend_compare(): php-src gets ~22.6k
+/// levels deep in an 8 MiB stack).
+const OBJECT_COMPARE_COST: usize = 369;
+
+/// A level of a deep comparison: object comparisons check the (emulated)
+/// C stack (zend_objects_check_stack_limit(), estimated from the depth);
+/// arrays, which php-src does not check, run on a fresh stack segment when
+/// this one runs low. None when the comparison cannot go on (the error is
+/// pending).
+#[cold]
+#[inline(never)]
+fn deep_compare<R>(a: &Value, b: &Value, depth: usize, f: impl FnOnce() -> R) -> Option<R> {
+    if matches!((a, b), (Value::Object(_), Value::Object(_)))
+        && !crate::stack::native_fits(depth.saturating_mul(OBJECT_COMPARE_COST))
+    {
+        compare_stack_overflow_set();
+        return None;
+    }
+    match crate::stack::with_room(f) {
+        Ok(r) => Some(r),
+        Err(_) => {
+            compare_recursion_set();
+            None
+        }
+    }
 }
 
 thread_local! {
     /// Arrays/objects (left operands) currently being compared.
     static CMP_ACTIVE: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `===` of two arrays: the same keys in the same order, with identical
+/// values (zend_hash_compare(ordered=1)).
+fn identical_arrays(a: &Rc<RefCell<PhpArray>>, b: &Rc<RefCell<PhpArray>>) -> bool {
+    let a = a.borrow();
+    let b = b.borrow();
+    if a.len() != b.len() {
+        return false;
+    }
+    for ((ka, a_val), (kb, b_val)) in a.iter().zip(b.iter()) {
+        if ka != kb || !a_val.identical(b_val) {
+            return false;
+        }
+    }
+    true
+}
+
+/// identical_arrays() of deeply nested arrays, on a fresh stack segment
+/// (php-src recurses without a stack check).
+#[cold]
+#[inline(never)]
+fn identical_arrays_grow(a: &Rc<RefCell<PhpArray>>, b: &Rc<RefCell<PhpArray>>) -> bool {
+    crate::stack::with_room(|| identical_arrays(a, b)).unwrap_or_else(|_| {
+        compare_recursion_set();
+        false
+    })
 }
 
 /// GC_PROTECT_RECURSION on the left operand of a container comparison.
@@ -1419,11 +1496,10 @@ impl Value {
             d.set(n + 1);
             n
         });
-        let r = if depth > 1000 {
-            compare_recursion_set();
-            false
-        } else {
+        let r = if depth < DEEP_COMPARE {
             self.equals_inner(other)
+        } else {
+            deep_compare(self, other, depth, || self.equals_inner(other)).unwrap_or(false)
         };
         COMPARE_DEPTH.with(|d| d.set(depth));
         r
@@ -1688,18 +1764,11 @@ impl Value {
                 let Some(_guard) = CmpGuard::enter(Rc::as_ptr(a) as *const () as usize) else {
                     return false;
                 };
-                let a = a.borrow();
-                let b = b.borrow();
-                if a.len() != b.len() {
-                    return false;
+                if crate::stack::has_room() {
+                    identical_arrays(a, b)
+                } else {
+                    identical_arrays_grow(a, b)
                 }
-                // zend_hash_compare(ordered=1): same keys in the same order.
-                for ((ka, a_val), (kb, b_val)) in a.iter().zip(b.iter()) {
-                    if ka != kb || !a_val.identical(b_val) {
-                        return false;
-                    }
-                }
-                true
             }
             (Value::Object(a), Value::Object(b)) => {
                 // === for objects means same instance
@@ -1722,18 +1791,16 @@ impl Value {
 
     /// PHP <=> comparison, returns -1, 0, or 1
     pub fn compare(&self, other: &Value) -> i64 {
-        // Arrays nested into themselves through references: stop instead of
-        // overflowing the stack.
         let depth = COMPARE_DEPTH.with(|d| {
             let n = d.get();
             d.set(n + 1);
             n
         });
-        let r = if depth > 1000 {
-            compare_recursion_set();
-            0
-        } else {
+        let r = if depth < DEEP_COMPARE {
             self.compare_inner(other)
+        } else {
+            // (ZEND_UNCOMPARABLE when it cannot go on)
+            deep_compare(self, other, depth, || self.compare_inner(other)).unwrap_or(1)
         };
         COMPARE_DEPTH.with(|d| d.set(depth));
         r

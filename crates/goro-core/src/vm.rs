@@ -7262,6 +7262,9 @@ impl Vm {
                 if self.current_exception.is_some() {
                     return (a, b);
                 }
+                if !self.precast_needed(&x, &y, &mut 16384) {
+                    return (a, b);
+                }
                 match self.compare_precast_elements(&x, &y, &mut 4096) {
                     Some((x, y)) => (x, y),
                     None => (a, b),
@@ -7391,6 +7394,76 @@ impl Vm {
             }
         }
         true
+    }
+
+    /// Whether compare_precast_elements() could find anything to do: an
+    /// object element paired with a string element that casts it with
+    /// __toString(), or a lazy object, among the pairs it would walk (all
+    /// of them here, without comparing them: its comparison of each pair
+    /// walks all the pair holds, once per level of a deeply nested
+    /// structure). Calls nothing. (Past `budget` containers, a walk four
+    /// times longer than compare_precast_elements() may make, it gives up.)
+    #[inline(never)]
+    fn precast_needed(&self, a: &Value, b: &Value, budget: &mut usize) -> bool {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        let container = |v: &Value| matches!(v, Value::Object(_) | Value::Array(_));
+        let pairs: Vec<(Value, Value)> = match (a, b) {
+            (Value::Array(x), Value::Array(y)) => {
+                let (x, y) = (x.borrow(), y.borrow());
+                if x.len() != y.len()
+                    || !x.values().any(|e| container(&e.deref()))
+                        && !y.values().any(|e| container(&e.deref()))
+                {
+                    return false;
+                }
+                x.iter()
+                    .filter_map(|(k, va)| y.get(k).map(|vb| (va.deref(), vb.deref())))
+                    .collect()
+            }
+            (Value::Object(oa), Value::Object(ob)) => {
+                if Rc::ptr_eq(oa, ob) {
+                    return false;
+                }
+                let (x, y) = (oa.borrow(), ob.borrow());
+                if x.native.is_some()
+                    || y.native.is_some()
+                    || !x.class_name.eq_ignore_ascii_case(&y.class_name)
+                    || x.properties.len() != y.properties.len()
+                {
+                    return false;
+                }
+                x.properties
+                    .iter()
+                    .map(|(k, va)| (va.deref(), y.get_property(k).deref()))
+                    .collect()
+            }
+            _ => return false,
+        };
+        let is_lazy =
+            |v: &Value| matches!(v, Value::Object(o) if o.borrow().has_property(b"__lazy_state"));
+        for (va, vb) in &pairs {
+            match (va, vb) {
+                (Value::Object(o), Value::String(_)) | (Value::String(_), Value::Object(o))
+                    if self.object_casts_by_tostring(o) =>
+                {
+                    return true;
+                }
+                (Value::Array(_) | Value::Object(_), Value::Array(_) | Value::Object(_)) => {
+                    if is_lazy(va)
+                        || is_lazy(vb)
+                        || crate::stack::with_room(|| self.precast_needed(va, vb, budget))
+                            .unwrap_or(false)
+                    {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Arrays (or same-class plain objects) compared element by element:
@@ -7536,7 +7609,10 @@ impl Vm {
                 }
                 _ => {}
             }
-            if na[i].1.compare_zend(&nb[j].1) != 0 {
+            // (whether the walk goes on: nothing to decide after the last
+            // pair, whose comparison would walk all it holds once per level
+            // of a deeply nested structure)
+            if i + 1 < ea.len() && na[i].1.compare_zend(&nb[j].1) != 0 {
                 break;
             }
         }
@@ -26666,7 +26742,11 @@ impl Vm {
             // A comparison of the previous op recursed into a container
             // already being compared (zend_hash_compare()).
             if crate::value::compare_recursion_take() && self.current_exception.is_none() {
-                let msg = "Nesting level too deep - recursive dependency?";
+                let msg = if crate::value::compare_stack_overflow_take() {
+                    "Maximum call stack size reached during object comparison"
+                } else {
+                    "Nesting level too deep - recursive dependency?"
+                };
                 let line = self.current_line;
                 let exc = self.create_exception(b"Error", msg, line);
                 self.current_exception = Some(exc);
