@@ -76,7 +76,8 @@ pub fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
     if n < 4 {
         return n == 0 || (a[0] == b[0] && a[n / 2] == b[n / 2] && a[n - 1] == b[n - 1]);
     }
-    a == b
+    // (long names, of classes in one namespace, differ at their end)
+    w(a, n - 8) == w(b, n - 8) && a == b
 }
 
 /// PHP binary-safe string with cached hash

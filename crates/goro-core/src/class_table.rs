@@ -299,14 +299,20 @@ impl ClassMap {
     }
 
     #[inline]
-    pub fn insert(&mut self, key: Vec<u8>, ce: ClassEntry) -> Option<Rc<ClassEntry>> {
+    pub fn insert(&mut self, key: Vec<u8>, mut ce: ClassEntry) -> Option<Rc<ClassEntry>> {
+        if method_attributes_unshared(&ce) {
+            share_method_attributes(&mut ce);
+        }
         let old = self.map.contains_key(&key);
         self.inserted(&key, &ce, old);
         self.map.insert(key, Rc::new(ce))
     }
 
     #[inline]
-    pub fn insert_rc(&mut self, key: Vec<u8>, ce: Rc<ClassEntry>) -> Option<Rc<ClassEntry>> {
+    pub fn insert_rc(&mut self, key: Vec<u8>, mut ce: Rc<ClassEntry>) -> Option<Rc<ClassEntry>> {
+        if method_attributes_unshared(&ce) {
+            share_method_attributes(Rc::make_mut(&mut ce));
+        }
         let old = self.map.contains_key(&key);
         self.inserted(&key, &ce, old);
         self.map.insert(key, ce)
@@ -342,6 +348,26 @@ impl ClassMap {
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut ClassEntry> {
         self.changed();
         self.map.values_mut().map(Rc::make_mut)
+    }
+}
+
+/// Whether a method of `ce` has attributes its code does not carry.
+fn method_attributes_unshared(ce: &ClassEntry) -> bool {
+    ce.methods
+        .values()
+        .any(|m| !m.attributes.is_empty() && m.op_array.attributes.is_empty())
+}
+
+/// Give the code of each method of `ce` its attributes, as the calls of it
+/// do (the deprecation and #[\NoDiscard] checks look at the code's): once,
+/// here, instead of a copy of the code by each call.
+#[cold]
+#[inline(never)]
+fn share_method_attributes(ce: &mut ClassEntry) {
+    for m in ce.methods.values_mut() {
+        if !m.attributes.is_empty() && m.op_array.attributes.is_empty() {
+            Rc::make_mut(&mut m.op_array).attributes = m.attributes.clone();
+        }
     }
 }
 
