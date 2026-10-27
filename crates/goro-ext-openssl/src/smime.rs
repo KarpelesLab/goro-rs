@@ -632,12 +632,15 @@ fn sign(
     others: &[Rc<Cert>],
     data: &[u8],
     flags: i64,
+    cms: bool,
 ) -> Option<(Vec<u8>, Md)> {
     let md = default_md(key)?;
     let content = crlf_copy(data, flags);
     let sid = asn1::seq(&[cert.issuer_der.clone(), cert.serial_der()]);
     let digest_alg = match md {
-        // OpenSSL puts NULL parameters on the digest AlgorithmIdentifier
+        // PKCS7_add_signer() puts NULL parameters on the digest
+        // AlgorithmIdentifier; CMS's X509_ALGOR_set_md() leaves them absent
+        _ if cms => asn1::algid(md.oid()?, None),
         Md::Sha512 if matches!(key, PKey::Ecx(_)) => asn1::algid(md.oid()?, None),
         _ => asn1::algid(md.oid()?, Some(asn1::null())),
     };
@@ -687,8 +690,12 @@ fn sign(
     if flags & F_NOCERTS == 0 {
         certs.push(cert.der.clone());
     }
-    for o in others {
-        certs.push(o.der.clone());
+    // PKCS7_sign() skips the extra certificates too with PKCS7_NOCERTS;
+    // CMS_sign() always adds them
+    if cms || flags & F_NOCERTS == 0 {
+        for o in others {
+            certs.push(o.der.clone());
+        }
     }
     let mut sd = vec![
         asn1::int_i64(1),
@@ -1768,7 +1775,7 @@ fn sign_common(vm: &mut Vm, args: &[Value], f: &str, cms: bool) -> Result<Value,
         }
     }
     let signed = if key_ok {
-        sign(&cert, &key, &others, &input, flags)
+        sign(&cert, &key, &others, &input, flags, cms)
     } else {
         None
     };
