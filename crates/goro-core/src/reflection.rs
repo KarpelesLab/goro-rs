@@ -10852,7 +10852,32 @@ fn reflection_parameter_method_body(
                         }
                     }
                     b"getdefaultvalueconstantname" => match const_name {
-                        Some(n) => Value::String(PhpString::from_msg(&n)),
+                        Some(n) => {
+                            // a class name the stub writes unqualified inside
+                            // a namespace (`IntervalBoundary::ClosedOpen` in
+                            // `namespace Random`) names the namespaced class
+                            // when one exists
+                            let ns = resolved_op_array
+                                .as_ref()
+                                .and_then(|op| op.scope_class.as_ref())
+                                .and_then(|s| {
+                                    crate::stubs::find_class_lower(&s.to_ascii_lowercase())
+                                })
+                                .and_then(|c| c.name.rsplit_once('\\').map(|(ns, _)| ns));
+                            let n = match (n.split_once("::"), ns) {
+                                (Some((cls, _)), Some(ns)) if !cls.contains('\\') => {
+                                    let q = format!("{}\\{}", ns, n);
+                                    let qcls = format!("{}\\{}", ns, cls).to_ascii_lowercase();
+                                    if crate::stubs::find_class_lower(qcls.as_bytes()).is_some() {
+                                        q
+                                    } else {
+                                        n
+                                    }
+                                }
+                                _ => n,
+                            };
+                            Value::String(PhpString::from_msg(&n))
+                        }
                         None => Value::Null,
                     },
                     _ => {
