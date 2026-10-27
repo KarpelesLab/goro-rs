@@ -3852,7 +3852,7 @@ impl crate::vm::Vm {
                             // (the callee of a lean call makes the call
                             // itself, see Vm::lean_user_dofcall)
                             match self.lean_user_dofcall(op_array, ip, cvs, tmps, free_mask.get()) {
-                                Some(true) if self.lean_frame_call_left() => {
+                                Some(true) if self.lean_frame_call_left(no_release) => {
                                     last = ip;
                                     break 'run ip + 1;
                                 }
@@ -3890,14 +3890,13 @@ impl crate::vm::Vm {
                             Some(false) => break 'run ip,
                             None => return ip,
                         }
-                    } else if no_release
-                        && self.lean_depth >= 1
+                    } else if self.lean_depth >= 1
                         && self.lean_resume.is_empty()
                         && self.fast_builtin_target()
                     {
                         // The callee of a lean call (see builtincall.rs).
                         match self.lean_builtin_dofcall(op_array, ip, tmps, free_mask.get()) {
-                            Some(true) if self.has_release_work() => {
+                            Some(true) if no_release && self.has_release_work() => {
                                 last = ip;
                                 break 'run ip + 1;
                             }
@@ -3927,11 +3926,11 @@ impl crate::vm::Vm {
                             Some(false) => break 'run ip,
                             None => return ip,
                         }
-                    } else if no_release && self.lean_depth >= 1 {
+                    } else if self.lean_depth >= 1 {
                         // A user function the callee of a lean call calls
                         // with a frame (see Vm::lean_user_dofcall).
                         match self.lean_user_dofcall(op_array, ip, cvs, tmps, free_mask.get()) {
-                            Some(true) if self.lean_frame_call_left() => {
+                            Some(true) if self.lean_frame_call_left(no_release) => {
                                 last = ip;
                                 break 'run ip + 1;
                             }

@@ -715,23 +715,29 @@ impl Vm {
         tmps: &mut [Value],
         free_mask: &[u8],
     ) -> Option<bool> {
-        // (no destructor may run there: see fast_builtin_dofcall)
-        if self.has_release_work() || !self.builtin_dofcall_ok(op_array, ip, tmps, free_mask) {
+        // (the release points of the call run destructors with the
+        // callees' frames made, see enter_lean_frames)
+        if !self.builtin_dofcall_ok(op_array, ip, tmps, free_mask) {
             return None;
         }
         // (a builtin that needs no frame for these arguments: none for the
-        // lean callees either)
+        // lean callees either, unless a destructor may run at the release
+        // of its arguments)
         if self
             .pending_calls
             .last()
             .and_then(|c| c.target.builtin)
             .is_some_and(|d| d.pure != 0)
+            && (!self.has_release_work()
+                || (!self.destructible_objects.is_empty() && self.quiet_release_budget() > 0))
         {
             if let Some(r) = self.pure_dofcall(op_array, ip, tmps, false, free_mask) {
                 return Some(r);
             }
         }
+        // (frameless: but for a destructor its release points may run)
         if self.lean_lazy.is_none()
+            && !self.has_release_work()
             && self
                 .pending_calls
                 .last()

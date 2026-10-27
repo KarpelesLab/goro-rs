@@ -1157,7 +1157,6 @@ impl Vm {
             || !matches!(op.op2, OperandType::Unused)
             || !matches!(op.result, OperandType::Tmp(_) | OperandType::Unused)
             || !tmp_writable(&op.result, tmps)
-            || self.has_release_work()
             || self.observer.is_some()
             || self.current_exception.is_some()
             || self.bind_next_frame
@@ -1463,10 +1462,11 @@ impl Vm {
 
     /// After a call lean_user_dofcall() made: whether the run of the lean
     /// callee stops (after the DO_FCALL): what the call did needs the
-    /// dispatch loop (exit(), a fatal error's bailout, a destructor due).
+    /// dispatch loop (exit(), a fatal error's bailout, a destructor due in
+    /// a run that assumed none: `no_release`, see run_fast_ops).
     #[inline]
-    pub(crate) fn lean_frame_call_left(&self) -> bool {
-        self.has_release_work()
+    pub(crate) fn lean_frame_call_left(&self, no_release: bool) -> bool {
+        (no_release && self.has_release_work())
             || self.exit_requested
             || self.fatal_bailout
             || self.current_exception.is_some()
