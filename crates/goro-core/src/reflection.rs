@@ -4525,6 +4525,10 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 } else {
                     vec![]
                 };
+                // (each is the reflected class's method: its called scope
+                // when invoked, see reflection_method_factory(ce, ...))
+                let lookup_canonical = rcls(vm, &class_lower)
+                    .map(|c| crate::string::msg_str(&c.name).to_string());
                 for (declaring, method_name) in method_info {
                     let declaring_lower: Vec<u8> = crate::errdisplay::raw_error_bytes(&declaring)
                         .iter()
@@ -4533,10 +4537,11 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     let declaring_canonical = rcls(vm, &declaring_lower)
                         .map(|c| crate::string::msg_str(&c.name).to_string())
                         .unwrap_or(declaring);
-                    result.push(create_reflection_method(
+                    result.push(create_reflection_method_with_lookup(
                         vm,
                         &declaring_canonical,
                         &method_name,
+                        lookup_canonical.as_deref(),
                     ));
                 }
                 // For Closure include an implicit __invoke method.
