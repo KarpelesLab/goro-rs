@@ -1965,7 +1965,8 @@ impl Vm {
 
     /// STATIC_PROP_FETCH at `ip` of `op_array` (see note_static_prop_site):
     /// the property's value, as static_prop_fetch() reads it, when it is set
-    /// and resolved. None: the general handler reads it.
+    /// and resolved (of a STATIC_PROP_ISSET: whether it is set, as
+    /// static_prop_isset() says). None: the general handler reads it.
     #[inline(never)]
     pub(crate) fn fast_static_prop_fetch(&self, op_array: &OpArray, ip: usize) -> Option<Value> {
         let sites = op_array.sites().borrow();
@@ -1989,8 +1990,16 @@ impl Vm {
             v => v.clone(),
         };
         match &v {
-            Value::Undef => None,
             Value::String(s) if s.as_bytes().starts_with(b"__deferred_") => None,
+            // (static_prop_isset())
+            _ if op_array.ops[ip].opcode == crate::opcode::OpCode::StaticPropIsset => {
+                Some(if matches!(v, Value::Null | Value::Undef) {
+                    Value::False
+                } else {
+                    Value::True
+                })
+            }
+            Value::Undef => None,
             _ => Some(v),
         }
     }

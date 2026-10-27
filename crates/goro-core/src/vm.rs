@@ -49765,6 +49765,19 @@ impl Vm {
                         };
                         match res {
                             Ok(set) => {
+                                // (the site of `isset(A::$p)` by constant names,
+                                // see fast_static_prop_fetch)
+                                if matches!(
+                                    (op.opcode, op.op1, op.op2, op.result),
+                                    (
+                                        OpCode::StaticPropIsset,
+                                        OperandType::Const(_),
+                                        OperandType::Const(_),
+                                        OperandType::Tmp(_)
+                                    )
+                                ) {
+                                    self.note_static_prop_site(op_array, ip - 1);
+                                }
                                 let result = if set { Value::True } else { Value::False };
                                 self.write_operand(
                                     &op.result,

@@ -3044,6 +3044,7 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::CastArray
             | OpCode::StaticPropGet
             | OpCode::StaticPropFetch
+            | OpCode::StaticPropIsset
             | OpCode::ConstLookup
             | OpCode::BooleanNot
             | OpCode::CastBool
@@ -3512,7 +3513,8 @@ impl crate::vm::Vm {
                 }
                 // A static property read its site located (see
                 // fast_static_prop_fetch).
-                OpCode::StaticPropFetch => {
+                // (and `isset(A::$p)`, `A::$p ?? ...`)
+                OpCode::StaticPropFetch | OpCode::StaticPropIsset => {
                     if !tmp_writable(&op.result, tmps) {
                         break 'run ip;
                     }
@@ -4710,10 +4712,13 @@ impl crate::vm::Vm {
         if !matches!(op.op2, OperandType::Unused) || !tmp_writable(&op.result, tmps) {
             return Fast::No;
         }
-        let OperandType::Cv(i) = op.op1 else {
-            return Fast::No;
+        // (a variable's or a temporary's: `$c ? $a : $b`, `f() ?: $x`)
+        let src = match op.op1 {
+            OperandType::Cv(i) => cvs.get(i as usize),
+            OperandType::Tmp(i) => tmps.get(i as usize),
+            _ => return Fast::No,
         };
-        let v = match cvs.get(i as usize) {
+        let v = match src {
             Some(Value::Reference(r)) => match r.try_borrow() {
                 Ok(b) => b.clone(),
                 Err(_) => return Fast::No,
@@ -6416,7 +6421,13 @@ impl crate::vm::Vm {
         let Some(p) = ce.properties.iter().find(|p| p.name == name) else {
             return false;
         };
-        if p.is_readonly || p.set_visibility.is_some() || ce.is_readonly {
+        // (a readonly property's initialization from its declaring class:
+        // what the general handler allows, a promoted constructor
+        // parameter's)
+        let init_in_scope = init
+            && p.is_readonly
+            && scope.is_some_and(|s| s.eq_ignore_ascii_case(&p.declaring_class));
+        if !init_in_scope && (p.is_readonly || p.set_visibility.is_some() || ce.is_readonly) {
             return false;
         }
         let Some(ty) = p.property_type.as_ref() else {
