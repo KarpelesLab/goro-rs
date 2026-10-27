@@ -293,7 +293,10 @@ pub fn get_item(vm: &mut Vm, o: &Obj, index: i64) -> Value {
     if let Some(v) = static_list(o, |v| v.get(idx).cloned()) {
         return v.unwrap_or(Value::Null);
     }
-    let node = match map_ref(o) {
+    let mr = map_ref(o);
+    // dom_map_cache_obj(): live lists keep the last item's object
+    let caches = matches!(&mr, Some(MapRef::List(l)) if !matches!(l, LK::Static | LK::Empty));
+    let node = match mr {
         Some(MapRef::List(l)) => match l {
             LK::Children(n) => {
                 let first = children_start(n);
@@ -336,7 +339,16 @@ pub fn get_item(vm: &mut Vm, o: &Obj, index: i64) -> Value {
         None => None,
     };
     mark_modern_notation(vm, o, node);
-    node_obj_opt(vm, node)
+    let v = node_obj_opt(vm, node);
+    if caches && node.is_some() {
+        if let Some(d) = data_of(o) {
+            // (the previous item is released after the new one is held)
+            if let Some(Value::Object(old)) = d.item_obj.replace(Some(v.clone())) {
+                goro_core::gc::note_dtor_candidate(&old);
+            }
+        }
+    }
+    v
 }
 
 /// Notation nodes are created on the fly without a document: give them the
