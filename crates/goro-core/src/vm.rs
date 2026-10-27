@@ -2046,6 +2046,13 @@ pub struct Vm {
     /// What plain_public_prop() answered in this request (see
     /// Vm::plain_prop_memo).
     pub(crate) plain_prop_memo: RefCell<crate::fastpath::PlainPropMemo>,
+    /// Vm::typed_plain_prop()'s answers, for ((site epoch, handler count),
+    /// plain_prop_key()).
+    #[allow(clippy::type_complexity)]
+    pub(crate) typed_prop_memo: RefCell<((u32, usize), crate::fxhash::FxHashMap<Box<[u8]>, u8>)>,
+    /// plain_public_prop() is asked about a typed property's write as if
+    /// it were untyped (see typed_plain_prop()).
+    pub(crate) plain_typed_ok: std::cell::Cell<bool>,
     /// EG(record_errors): non-fatal errors raised while linking a class are
     /// recorded here (type, message, line) instead of being raised.
     pub(crate) recorded_errors: Option<Vec<(i64, String, u32)>>,
@@ -2704,6 +2711,8 @@ impl Vm {
             last_call_by_ref: false,
             isset_get_cache: None,
             plain_prop_memo: Default::default(),
+            typed_prop_memo: Default::default(),
+            plain_typed_ok: Default::default(),
             recorded_errors: None,
             incdec_skip_set: false,
             prop_ptr_temp: None,
@@ -14442,6 +14451,30 @@ impl Vm {
         self.class_extends(class_a, class_b)
     }
 
+    /// Whether an object of class `obj_class_name` is an instance of the
+    /// class `class_lower` names (lowercased), as INSTANCEOF answers. (A
+    /// function of the classes in the table: remembered while they do not
+    /// change.)
+    pub(crate) fn object_class_is(&self, obj_class_name: &[u8], class_lower: &[u8]) -> bool {
+        let obj_lower = crate::class_table::LowerName::new(obj_class_name);
+        let stamp = self.classes.link_generation();
+        if let Some(r) = self
+            .instanceof_memo
+            .borrow_mut()
+            .get(stamp, obj_lower.get(), class_lower)
+        {
+            return r;
+        }
+        let r = self.object_class_instanceof(obj_lower.get(), class_lower);
+        // (what is said of a class not in the table may change)
+        if self.classes.contains_key(obj_lower.get()) {
+            self.instanceof_memo
+                .borrow_mut()
+                .set(stamp, obj_lower.get(), class_lower, r);
+        }
+        r
+    }
+
     /// `$obj instanceof C` for an object of class `obj_class_lower`
     /// (lowercased) and C's lowercased name.
     #[inline(never)]
@@ -25537,7 +25570,6 @@ impl Vm {
             if single_step.is_none()
                 && self.current_exception.is_none()
                 && !self.error_handler_threw
-                && !typed_ref::any()
                 && fast_failure.is_none()
             {
                 if !crate::fastpath::runs_fast(op_array.ops[ip].opcode) {
@@ -25550,7 +25582,7 @@ impl Vm {
                         cvs.as_mut_slice(),
                         tmps.as_mut_slice(),
                         internal_code,
-                        true,
+                        !typed_ref::any(),
                         no_release,
                         &mut crate::fastpath::FeView {
                             positions: foreach_positions,
@@ -46494,33 +46526,7 @@ impl Vm {
                             Value::False
                         }
                     } else if let Value::Object(obj) = &val {
-                        // (a function of the class table: remembered while it
-                        // does not change)
-                        let obj_lower =
-                            crate::class_table::LowerName::new(&obj.borrow().class_name);
-                        let stamp = self.classes.link_generation();
-                        let memo = self.instanceof_memo.borrow_mut().get(
-                            stamp,
-                            obj_lower.get(),
-                            &class_lower,
-                        );
-                        let found = match memo {
-                            Some(r) => r,
-                            None => {
-                                let r = self.object_class_instanceof(obj_lower.get(), &class_lower);
-                                // (what is said of a class not in the table
-                                // may change)
-                                if self.classes.contains_key(obj_lower.get()) {
-                                    self.instanceof_memo.borrow_mut().set(
-                                        stamp,
-                                        obj_lower.get(),
-                                        &class_lower,
-                                        r,
-                                    );
-                                }
-                                r
-                            }
-                        };
+                        let found = self.object_class_is(&obj.borrow().class_name, &class_lower);
                         if found { Value::True } else { Value::False }
                     } else {
                         Value::False

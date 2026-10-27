@@ -756,7 +756,7 @@ impl Vm {
                 &mut slots,
                 &mut ctmps,
                 false,
-                true,
+                !crate::vm::typed_ref::any(),
                 no_release,
                 &mut FeView {
                     positions,
@@ -1665,7 +1665,7 @@ impl Vm {
             &mut slots,
             &mut ctmps,
             false,
-            true,
+            !crate::vm::typed_ref::any(),
             no_release,
             &mut FeView {
                 positions,

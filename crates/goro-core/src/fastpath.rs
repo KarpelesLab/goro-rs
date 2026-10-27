@@ -2676,6 +2676,22 @@ pub(crate) struct PlainPropMemo {
     map: crate::fxhash::FxHashMap<Box<[u8]>, u8>,
 }
 
+/// Whether a variable operand of `op` is bound to a reference.
+#[inline(never)]
+fn cv_operand_is_ref(op: &Op, cvs: &[Value]) -> bool {
+    [op.op1, op.op2, op.result].iter().any(|o| {
+        matches!(o, OperandType::Cv(i) if matches!(cvs.get(*i as usize), Some(Value::Reference(_))))
+    })
+}
+
+/// Whether the write fetch `op` is the container of the next opcode's
+/// dimension write (`$o->p[k] = v`, `$o->p[] = v`): the array the property
+/// holds stays an array.
+fn feeds_dim_write(op: &Op, next: Option<&Op>) -> bool {
+    matches!(next, Some(n) if n.op1 == op.result
+        && matches!(n.opcode, OpCode::ArraySet | OpCode::ArrayAppend))
+}
+
 /// The PlainPropMemo key of a plain_public_prop() question, in `buf`
 /// (None: too long).
 fn plain_prop_key<'b>(
@@ -2859,6 +2875,12 @@ impl crate::vm::Vm {
                 if !cv_operands_bound(op, cvs, globals) {
                     break 'run ip;
                 }
+            }
+            // Typed references exist: no opcode here works on a variable
+            // bound to a reference (the general handlers check what is
+            // written through it).
+            if !refs_ok && cv_operand_is_ref(op, cvs) {
+                break 'run ip;
             }
             let fast = match op.opcode {
                 // A call by a constant plain function name (see the
@@ -4983,6 +5005,38 @@ impl crate::vm::Vm {
         p
     }
 
+    /// What plain_public_prop() says of a write to `prop` when its declared
+    /// type is no obstacle (0: not plain): what a fetch for a dimension
+    /// write, or the read of a compound assignment, of a typed property
+    /// may take as plain.
+    #[inline(never)]
+    fn typed_plain_prop(&self, class_name: &[u8], prop: &[u8], scope: Option<&[u8]>) -> u8 {
+        let mut kbuf = [0u8; 256];
+        let Some(key) = plain_prop_key(&mut kbuf, class_name, prop, true, scope) else {
+            return 0;
+        };
+        {
+            let Ok(mut m) = self.typed_prop_memo.try_borrow_mut() else {
+                return 0;
+            };
+            let epoch = crate::opcode::site_epoch();
+            let handlers = self.native_class_handlers.len();
+            if m.0 != (epoch, handlers) {
+                m.1.clear();
+                m.0 = (epoch, handlers);
+            } else if let Some(r) = m.1.get(key) {
+                return *r;
+            }
+        }
+        self.plain_typed_ok.set(true);
+        let plain = self.plain_public_prop_uncached(class_name, prop, true, scope);
+        self.plain_typed_ok.set(false);
+        if let Ok(mut m) = self.typed_prop_memo.try_borrow_mut() {
+            m.1.insert(key.into(), plain);
+        }
+        plain
+    }
+
     /// The memo of plain_public_prop() (for this request and these native
     /// class handlers).
     #[inline(never)]
@@ -5095,7 +5149,9 @@ impl crate::vm::Vm {
                 || p.has_set_hook
                 || p.is_virtual
                 || (write
-                    && (p.is_readonly || p.property_type.is_some() || p.set_visibility.is_some()))
+                    && (p.is_readonly
+                        || (p.property_type.is_some() && !self.plain_typed_ok.get())
+                        || p.set_visibility.is_some()))
             {
                 return false;
             }
@@ -5180,7 +5236,10 @@ impl crate::vm::Vm {
             || p.has_get_hook
             || p.has_set_hook
             || p.is_virtual
-            || (write && (p.is_readonly || p.property_type.is_some() || p.set_visibility.is_some()))
+            || (write
+                && (p.is_readonly
+                    || (p.property_type.is_some() && !self.plain_typed_ok.get())
+                    || p.set_visibility.is_some()))
         {
             return 0;
         }
@@ -5518,10 +5577,24 @@ impl crate::vm::Vm {
             drop(old);
             return Fast::Done;
         }
+        // A typed property (but for a write, above): the fetch of the array
+        // it holds for `$o->p[k] = v`, the read of `$o->p op= v` (whose
+        // write is judged then) are plain ones (not remembered by the site).
+        let mut typed = false;
+        let plain = if plain == 0
+            && ((w_fetch && feeds_dim_write(op, op_array.ops.get(ip + 1))) || rw)
+            && const_name
+        {
+            let p = self.typed_plain_prop(&ob.class_name, name, scope);
+            typed = p != 0;
+            p
+        } else {
+            plain
+        };
         if plain == 0 || (plain == PLAIN_UNMANGLED && mangled) {
             return Fast::No;
         }
-        if const_name {
+        if const_name && !typed {
             self.prop_ic_fill(
                 op_array,
                 ip,
