@@ -610,6 +610,11 @@ fn pcre_match(
     md: &mut MatchData,
     mctx: &MatchContext,
 ) -> i32 {
+    // php calls pcre2_jit_match() directly when the pattern is JIT-compiled
+    // and the options are just PCRE2_NO_UTF_CHECK.
+    if options == PCRE2_NO_UTF_CHECK {
+        return pce.re.jit_match_at(subject, start, options, md, mctx);
+    }
     pce.re.match_at(subject, start, options, md, mctx)
 }
 

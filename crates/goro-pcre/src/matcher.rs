@@ -3333,9 +3333,38 @@ impl Code {
         &self,
         subject: &[u8],
         start_offset: usize,
+        options: u32,
+        md: &mut MatchData,
+        mcontext: &MatchContext,
+    ) -> i32 {
+        self.match_impl(subject, start_offset, options, md, mcontext, true)
+    }
+
+    /// pcre2_jit_match() of a JIT-compiled pattern: unlike pcre2_match() it
+    /// does not turn a leading (*NOTEMPTY) / (*NOTEMPTY_ATSTART) into match
+    /// options, so the JIT code ignores them. A (*NO_JIT) pattern has no JIT
+    /// code, and its callers use pcre2_match().
+    #[inline(never)]
+    pub fn jit_match_at(
+        &self,
+        subject: &[u8],
+        start_offset: usize,
+        options: u32,
+        md: &mut MatchData,
+        mcontext: &MatchContext,
+    ) -> i32 {
+        let merge = self.flags & PCRE2_NOJIT != 0 || mcontext.jit_depth_limit.is_none();
+        self.match_impl(subject, start_offset, options, md, mcontext, merge)
+    }
+
+    fn match_impl(
+        &self,
+        subject: &[u8],
+        start_offset: usize,
         mut options: u32,
         md: &mut MatchData,
         mcontext: &MatchContext,
+        merge_pattern_options: bool,
     ) -> i32 {
         const PUBLIC_MATCH_OPTIONS: u32 = PCRE2_ANCHORED
             | PCRE2_ENDANCHORED
@@ -3361,10 +3390,10 @@ impl Code {
             return PCRE2_ERROR_BADOFFSET;
         }
         // (*NOTEMPTY) and (*NOTEMPTY_ATSTART) set in the pattern.
-        if (self.flags & PCRE2_NOTEMPTY_SET) != 0 {
+        if merge_pattern_options && (self.flags & PCRE2_NOTEMPTY_SET) != 0 {
             options |= PCRE2_NOTEMPTY;
         }
-        if (self.flags & PCRE2_NE_ATST_SET) != 0 {
+        if merge_pattern_options && (self.flags & PCRE2_NE_ATST_SET) != 0 {
             options |= PCRE2_NOTEMPTY_ATSTART;
         }
         let utf = (self.overall_options & PCRE2_UTF) != 0;
