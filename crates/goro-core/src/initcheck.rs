@@ -602,11 +602,32 @@ impl Vm {
         let Some(Value::String(named)) = named else {
             return;
         };
-        let named = named.as_bytes();
-        if named.eq_ignore_ascii_case(b"self")
-            || named.eq_ignore_ascii_case(b"parent")
-            || named.eq_ignore_ascii_case(b"static")
-        {
+        let mut named = named.as_bytes();
+        if named.eq_ignore_ascii_case(b"self") {
+            // (the memo's, by the scope's lowercase name, which the site
+            // finds again in the class scope stack: see cached_instanceof)
+            match self.scope_top() {
+                Some(s) if s.as_slice() == class_lower => named = class_lower,
+                _ => return,
+            }
+            let Ok(ob) = o.try_borrow() else {
+                return;
+            };
+            if ob.native.is_none() && self.classes.contains_key(class_lower) {
+                self.instanceof_site_memo.borrow_mut().set(
+                    self.classes.link_generation(),
+                    &ob.class_name,
+                    named,
+                    matches!(result, Value::True),
+                );
+                // (the site's slot stays unset: it only looks at the memo)
+                if let Ok(mut s) = op_array.sites().try_borrow_mut() {
+                    s.get_or_insert_with(Default::default);
+                }
+            }
+            return;
+        }
+        if named.eq_ignore_ascii_case(b"parent") || named.eq_ignore_ascii_case(b"static") {
             return;
         }
         let declared =
@@ -620,12 +641,13 @@ impl Vm {
         // (a class not declared: what an object of a declared class is
         // changes with a class_alias() naming it, which makes a new
         // link_generation; the site's own answers do not see that)
-        if !declared
-            && !self
-                .classes
-                .contains_key(crate::class_table::LowerName::new(&ob.class_name).get())
-        {
-            return;
+        // (an object of an internal class the table does not hold has the
+        // stub's ancestry)
+        if !declared {
+            let ol = crate::class_table::LowerName::new(&ob.class_name);
+            if !(self.classes.contains_key(ol.get()) || self.is_known_builtin_class(ol.get())) {
+                return;
+            }
         }
         self.instanceof_site_memo.borrow_mut().set(
             self.classes.link_generation(),
@@ -709,15 +731,24 @@ impl Vm {
                 Some(_) => {
                     let named = match op.op2 {
                         OperandType::Const(k) => match op_array.literals.get(k as usize) {
-                            Some(Value::String(n)) => n,
+                            Some(Value::String(n)) => n.as_bytes(),
                             _ => return Fast::No,
                         },
                         _ => return Fast::No,
                     };
+                    // (`instanceof self`: the scope's class, see note_instanceof)
+                    let named = if named.eq_ignore_ascii_case(b"self") {
+                        match self.scope_top() {
+                            Some(s) => s.as_slice(),
+                            None => return Fast::No,
+                        }
+                    } else {
+                        named
+                    };
                     match self.instanceof_site_memo.borrow_mut().get(
                         self.classes.link_generation(),
                         &ob.class_name,
-                        named.as_bytes(),
+                        named,
                     ) {
                         Some(r) => r,
                         None => return Fast::No,

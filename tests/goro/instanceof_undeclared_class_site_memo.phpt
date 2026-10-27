@@ -33,6 +33,14 @@ for ($i = 0; $i < 2; $i++) {
     echo implode(' ', array_map('t', $objs));
     echo "\n";
 }
+function r($o) {
+    return ($o instanceof ReflectionFunction ? 'F' : '-') . ($o instanceof ReflectionParameter ? 'P' : '-')
+        . ($o instanceof Reflector ? 'R' : '-') . ($o instanceof ReflectionNamedType ? 'N' : '-');
+}
+$rs = [(new ReflectionFunction('t'))->getParameters()[0], new ArrayIterator([]), new ReflectionFunction('r')];
+for ($i = 0; $i < 3; $i++) {
+    echo implode(' ', array_map('r', $rs)), "\n";
+}
 ?>
 --EXPECT--
 ----- ----I -C--- --S-- ----- -C---
@@ -43,3 +51,6 @@ L---- ----I -C--- --S-- L---- -C---
 L---- ----I -C--- --S-- L---- -C---
 L---- ----I -C--- --S-- L---- -C--- ---N-
 L---- ----I -C--- --S-- L---- -C--- ---N-
+-PR- ---- F-R-
+-PR- ---- F-R-
+-PR- ---- F-R-

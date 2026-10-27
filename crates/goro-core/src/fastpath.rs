@@ -3653,11 +3653,12 @@ impl crate::vm::Vm {
                 OpCode::Identical | OpCode::NotIdentical => {
                     match fast_op(op, cvs, tmps, literals, refs_ok, no_release) {
                         // (a temporary object or array the opcode consumes,
-                        // held elsewhere too: `null === self::$instance`)
+                        // held elsewhere too: `null === self::$instance`;
+                        // while objects with a destructor exist, its release
+                        // is a release point: see consumed_tmps())
                         Fast::No
-                            if no_release
-                                && (matches!(op.op1, OperandType::Tmp(_))
-                                    || matches!(op.op2, OperandType::Tmp(_))) =>
+                            if matches!(op.op1, OperandType::Tmp(_))
+                                || matches!(op.op2, OperandType::Tmp(_)) =>
                         {
                             let rel = consumed!('run, op, ip);
                             let f = fast_identical_tmp(op, cvs, tmps, literals);
@@ -6511,12 +6512,15 @@ impl crate::vm::Vm {
                                 return true;
                             }
                             // (a user class deriving from it: its class entry
-                            // lists its ancestors)
+                            // lists its ancestors; or implementing it, as
+                            // `instanceof` finds)
                             let mut cbuf = [0u8; 128];
                             match lower_into(&ob.class_name, &mut cbuf) {
                                 Some(cl) => {
                                     self.classes.contains_key(cl)
-                                        && self.class_extends_any(cl, &[class])
+                                        && (self.class_extends_any(cl, &[class])
+                                            || ob.native.is_none()
+                                                && self.object_class_is(&ob.class_name, class))
                                 }
                                 None => false,
                             }
