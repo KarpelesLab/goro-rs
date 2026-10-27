@@ -2499,6 +2499,9 @@ pub struct Vm {
     /// Stream-wrapper include hook: returns the source of an include/require
     /// target served by a userspace stream wrapper (None: not handled).
     pub include_stream_hook: Option<fn(&mut Vm, &str, u8) -> Option<Result<Vec<u8>, VmError>>>,
+    /// include/require of plain paths also go through include_stream_hook
+    /// (the file:// wrapper was replaced by a user wrapper).
+    pub include_plain_hooked: bool,
     /// Stream layer services for ext/sockets (socket_import_stream() /
     /// socket_export_stream()), installed by the standard extension.
     pub socket_stream_hooks: Option<SocketStreamHooks>,
@@ -3867,6 +3870,7 @@ impl Vm {
             module_constants: Vec::new(),
             output_start: None,
             include_stream_hook: None,
+            include_plain_hooked: false,
             socket_stream_hooks: None,
             crypto_hooks: None,
             include_resolve_hook: None,
@@ -48736,7 +48740,9 @@ impl Vm {
 
                     // Userspace stream wrappers provide the source themselves.
                     let hooked_source = match self.include_stream_hook {
-                        Some(hook) if is_stream_path => hook(self, &abs_path, include_kind as u8),
+                        Some(hook) if is_stream_path || self.include_plain_hooked => {
+                            hook(self, &abs_path, include_kind as u8)
+                        }
                         _ => None,
                     };
                     let hooked_source = match hooked_source {

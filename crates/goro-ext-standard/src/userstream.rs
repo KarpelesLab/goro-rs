@@ -5131,6 +5131,7 @@ fn h_stream_wrapper_register(vm: &mut Vm, args: &[Value]) -> Result<Option<Value
             },
         );
     });
+    sync_plain_include_hook(vm);
     Ok(Some(Value::True))
 }
 
@@ -5141,10 +5142,12 @@ fn h_stream_wrapper_unregister(vm: &mut Vm, args: &[Value]) -> Result<Option<Val
         .unwrap_or_default();
     let lower: Vec<u8> = protocol.iter().map(|b| b.to_ascii_lowercase()).collect();
     if USER_WRAPPERS.with(|w| w.borrow_mut().remove(&lower).is_some()) {
+        sync_plain_include_hook(vm);
         return Ok(Some(Value::True));
     }
     if is_builtin(&lower) && !builtin_disabled(&lower) {
         DISABLED_BUILTINS.with(|d| d.borrow_mut().push(lower));
+        sync_plain_include_hook(vm);
         return Ok(Some(Value::True));
     }
     warn(
@@ -5185,7 +5188,15 @@ fn h_stream_wrapper_restore(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>
         w.borrow_mut().remove(&lower);
     });
     DISABLED_BUILTINS.with(|d| d.borrow_mut().retain(|x| *x != lower));
+    sync_plain_include_hook(vm);
     Ok(Some(Value::True))
+}
+
+/// Whether include/require of a plain path goes through the stream layer
+/// (the file:// wrapper replaced by a user one, or disabled).
+#[inline(never)]
+fn sync_plain_include_hook(vm: &mut Vm) {
+    vm.include_plain_hooked = builtin_disabled(b"file") || user_wrapper(b"file").is_some();
 }
 
 fn h_stream_get_wrappers(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
@@ -5264,8 +5275,15 @@ pub(crate) fn include_hook(vm: &mut Vm, path: &str, kind: u8) -> Option<Result<V
     if !needs_locate(p) {
         return None;
     }
-    let n = scheme_len(p)?;
-    user_wrapper(&p[..n].to_ascii_lowercase())?;
+    // (a plain path: the file:// wrapper was replaced)
+    match scheme_len(p) {
+        Some(n) => {
+            user_wrapper(&p[..n].to_ascii_lowercase())?;
+        }
+        None => {
+            user_wrapper(b"file")?;
+        }
+    }
     let name: &'static str = match kind {
         1 => "include_once",
         2 => "require",

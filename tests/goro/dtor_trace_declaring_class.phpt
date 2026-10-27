@@ -9,9 +9,9 @@ $t = new S;
 echo "end\n";
 
 ?>
---EXPECT--
+--EXPECTF--
 P->__destruct
-#0 /tmp/claude-1000/-home-magicaltux-projects-goro-rs/3d2a04d8-60d8-47cf-8c66-cf536b5391ca/scratchpad/apps2/repro/p1/dtor3.php(4): P->__destruct()
+#0 %s(4): P->__destruct()
 #1 {main}
 end
 P->__destruct
