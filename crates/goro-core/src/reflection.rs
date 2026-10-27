@@ -4996,7 +4996,9 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 let has_constructor = rcls(vm, &class_lower)
                     .map(|c| c.get_method(b"__construct").is_some())
                     .unwrap_or(false)
-                    || native_ctor_in_chain(vm, &class_lower);
+                    || native_ctor_in_chain(vm, &class_lower)
+                    // (an internal ancestor's: Exception::__construct)
+                    || rmethod(vm, &class_lower, b"__construct").is_some();
 
                 // If no constructor and args were passed, throw
                 if !has_constructor && (args.len() > 1 || !fwd_named.is_empty()) {
@@ -5131,7 +5133,9 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 let has_constructor = rcls(vm, &class_lower)
                     .map(|c| c.get_method(b"__construct").is_some())
                     .unwrap_or(false)
-                    || native_ctor_in_chain(vm, &class_lower);
+                    || native_ctor_in_chain(vm, &class_lower)
+                    // (an internal ancestor's: Exception::__construct)
+                    || rmethod(vm, &class_lower, b"__construct").is_some();
 
                 // If no constructor and args were passed, throw
                 if !has_constructor && !ctor_args.is_empty() {
