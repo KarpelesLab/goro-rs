@@ -2485,8 +2485,8 @@ pub struct Vm {
     pub weak_refs: HashMap<u64, crate::weak::WeakTarget>,
     /// Next weak reference ID
     pub next_weak_ref_id: u64,
-    /// WeakReference singleton cache: maps target object_id to (weak_ref_id, WeakReference Value)
-    weak_ref_cache: HashMap<u64, (u64, Value)>,
+    /// WeakReference singleton cache: maps target object_id to (weak_ref_id, the WeakReference)
+    weak_ref_cache: HashMap<u64, (u64, Weak<RefCell<PhpObject>>)>,
     /// (user_functions.len(), classes.len(), any #[SensitiveParameter]) cache
     sensitive_cache: std::cell::Cell<(usize, usize, bool)>,
     /// WeakMap entries: weakmap object id -> [(key object id, key, value)]

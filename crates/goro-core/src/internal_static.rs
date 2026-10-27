@@ -331,8 +331,21 @@ impl Vm {
             self.current_exception = Some(exc);
             return Value::Null;
         };
-        if let Some((_, wr_val)) = self.weak_ref_cache.get(&target_oid) {
-            return wr_val.clone();
+        // (the WeakReference of a dead object whose handle was recycled is
+        // not this one's)
+        if let Some((cached_id, wr)) = self.weak_ref_cache.get(&target_oid) {
+            let same = self
+                .weak_refs
+                .get(cached_id)
+                .is_some_and(|t| t.is_alive() && t.as_ptr() == weak.as_ptr());
+            match wr.upgrade() {
+                Some(wr) if same => return Value::Object(wr),
+                Some(_) => {}
+                None => {
+                    let id = *cached_id;
+                    self.weak_refs.remove(&id);
+                }
+            }
         }
         let weak_id = self.next_weak_ref_id;
         self.next_weak_ref_id += 1;
@@ -340,10 +353,10 @@ impl Vm {
         let wr_id = self.alloc_object_id();
         let mut wr_obj = PhpObject::new(b"WeakReference".to_vec(), wr_id);
         wr_obj.set_property(b"__weak_ref_id".to_vec(), Value::Long(weak_id as i64));
-        let wr_val = Value::Object(Rc::new(RefCell::new(wr_obj)));
+        let wr_rc = Rc::new(RefCell::new(wr_obj));
         self.weak_ref_cache
-            .insert(target_oid, (weak_id, wr_val.clone()));
-        wr_val
+            .insert(target_oid, (weak_id, Rc::downgrade(&wr_rc)));
+        Value::Object(wr_rc)
     }
 
     /// `from()` / `tryFrom()` of the backed enum `class_part` (lowercase).
