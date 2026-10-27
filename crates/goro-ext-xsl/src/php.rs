@@ -90,8 +90,14 @@ fn class_display(o: &Obj) -> String {
     goro_core::value::display_class_name(&o.borrow().class_name).to_string()
 }
 
+/// zend_throw_error(): a pending exception becomes the new one's previous
+/// (each failing callback call of a transformation adds one).
 fn throw(vm: &mut Vm, class: &[u8], msg: &str) {
+    let prev = vm.current_exception.take();
     dom::throw_error(vm, class, msg);
+    if let (Some(pv), Some(e)) = (prev, vm.current_exception.as_ref()) {
+        Vm::exception_set_previous(e, pv);
+    }
 }
 
 /// xsl_objects_get_property_ptr_ptr + xsl_objects_read_property: the
@@ -648,7 +654,9 @@ impl Host {
             throw(vm, b"Error", "No callbacks were registered");
             return false;
         };
-        if vm.current_exception.is_some() {
+        // (a missing handler throws even with an exception pending; a call
+        // made then does not run)
+        if vm.current_exception.is_some() && (ns.all || ns.funcs.iter().any(|(n, _)| n == fname)) {
             return false;
         }
         let r = if ns.all {
@@ -1160,12 +1168,14 @@ fn register_php_functions(vm: &mut Vm, o: &Obj, a: &Args) -> R<Value> {
             st.borrow_mut().php_ns.get_or_insert_with(CbNs::default).all = true;
         }
         Some(Value::Array(arr)) => {
+            // php_dom_xpath_callbacks_ensure_ns() first: a failing entry
+            // leaves the namespace (and the entries before it) registered.
+            st.borrow_mut().php_ns.get_or_insert_with(CbNs::default);
             let entries: Vec<(ArrayKey, Value)> = arr
                 .borrow()
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            let mut add: Vec<(String, Value)> = Vec::new();
             for (k, v) in entries {
                 let v = v.deref();
                 if !is_callable(vm, &v) {
@@ -1209,15 +1219,12 @@ fn register_php_functions(vm: &mut Vm, o: &Obj, a: &Args) -> R<Value> {
                     );
                     return Err(());
                 }
-                add.push((name, v));
+                let mut s = st.borrow_mut();
+                let ns = s.php_ns.get_or_insert_with(CbNs::default);
+                ns.funcs.retain(|(x, _)| *x != name);
+                ns.funcs.push((name, v));
             }
-            let mut s = st.borrow_mut();
-            let ns = s.php_ns.get_or_insert_with(CbNs::default);
-            for (n, v) in add {
-                ns.funcs.retain(|(x, _)| *x != n);
-                ns.funcs.push((n, v));
-            }
-            ns.all = false;
+            st.borrow_mut().php_ns.get_or_insert_with(CbNs::default).all = false;
         }
         Some(v) => {
             let name = match &v {
@@ -1234,6 +1241,7 @@ fn register_php_functions(vm: &mut Vm, o: &Obj, a: &Args) -> R<Value> {
                     return Err(());
                 }
             };
+            st.borrow_mut().php_ns.get_or_insert_with(CbNs::default);
             if !valid_cb_name(&name, false) {
                 throw(
                     vm,
