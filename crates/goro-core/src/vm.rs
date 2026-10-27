@@ -64314,7 +64314,7 @@ impl Vm {
                             if ob.native.is_none() && ob.closure.is_none() {
                                 let cl = ob.class_name.to_ascii_lowercase();
                                 drop(ob);
-                                self.user_method_missing(&cl, method_name.as_bytes())
+                                self.user_method_missing(&cl, method_name.as_bytes(), true)
                             } else {
                                 None
                             }

@@ -110,22 +110,28 @@ impl Vm {
                 || self.native_class_handlers.contains_key(&cl)
                 || crate::stubs::find_class_lower(&cl).is_some()
             {
-                return self.user_method_missing(&cl, method);
+                return self.user_method_missing(&cl, method, false);
             }
             return Some(format!(
                 "Class \"{}\" not found",
                 crate::string::msg_cstr(cls)
             ));
         }
-        self.user_method_missing(&cl, method)
+        self.user_method_missing(&cl, method, false)
     }
 
     /// "Call to undefined method C::m()" when class `class_lower` and all
     /// of its ancestors are user classes (no internal method, handler or
     /// forwarding is involved) declaring neither `method` nor `__call()` /
-    /// `__callStatic()`. None otherwise.
+    /// `__callStatic()` (an `instance` call: no `__call()`; zend_std_get_method()
+    /// does not consider `__callStatic()`). None otherwise.
     #[inline(never)]
-    pub(crate) fn user_method_missing(&self, class_lower: &[u8], method: &[u8]) -> Option<String> {
+    pub(crate) fn user_method_missing(
+        &self,
+        class_lower: &[u8],
+        method: &[u8],
+        instance: bool,
+    ) -> Option<String> {
         if method.is_empty() || method.contains(&0) {
             return None;
         }
@@ -144,7 +150,7 @@ impl Vm {
         let has = |methods: &crate::fxhash::FxIndexMap<Vec<u8>, crate::object::MethodDef>| {
             methods.contains_key(&ml)
                 || methods.contains_key(b"__call".as_slice())
-                || methods.contains_key(b"__callstatic".as_slice())
+                || (!instance && methods.contains_key(b"__callstatic".as_slice()))
         };
         let missing = || {
             Some(format!(
