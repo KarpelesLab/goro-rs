@@ -361,8 +361,9 @@ impl Vm {
         };
         // (typed parameters: see recv_fast.rs)
         if f.lean_kind() & 4 != 0 {
+            // (a lean call has no named arguments, see lean_target_of)
             let args = &self.pending_calls.last().expect("pending call").args;
-            if !self.recv_has_nothing_to_do(f, args) {
+            if !self.recv_positional_nothing_to_do(f, args) {
                 return false;
             }
         }

@@ -18,11 +18,16 @@ use crate::vm::Vm;
 /// RECV checks run (they may still pass).
 #[inline]
 pub(crate) fn args_match_exactly(vm: &Vm, f: &OpArray, args: &[Value]) -> bool {
-    if f.variadic_param.is_some() {
-        return false;
-    }
+    f.variadic_param.is_none() && positional_args_match_exactly(vm, f, args)
+}
+
+/// args_match_exactly() of a call with positional arguments only: those a
+/// variadic parameter collects too (of its type).
+#[inline]
+pub(crate) fn positional_args_match_exactly(vm: &Vm, f: &OpArray, args: &[Value]) -> bool {
+    let variadic = f.variadic_param.map_or(usize::MAX, |v| v as usize);
     for (i, a) in args.iter().enumerate() {
-        let Some(t) = f.param_types.get(i) else {
+        let Some(t) = f.param_types.get(i.min(variadic)) else {
             break;
         };
         let Some(t) = t else {
@@ -183,5 +188,13 @@ impl crate::vm::Vm {
     #[inline]
     pub(crate) fn recv_has_nothing_to_do(&self, f: &OpArray, args: &[Value]) -> bool {
         self.pending_callable_deprecations.borrow().is_empty() && args_match_exactly(self, f, args)
+    }
+
+    /// recv_has_nothing_to_do() of a call without named arguments (a
+    /// variadic parameter's arguments checked too).
+    #[inline]
+    pub(crate) fn recv_positional_nothing_to_do(&self, f: &OpArray, args: &[Value]) -> bool {
+        self.pending_callable_deprecations.borrow().is_empty()
+            && positional_args_match_exactly(self, f, args)
     }
 }
