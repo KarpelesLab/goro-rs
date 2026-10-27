@@ -23,6 +23,15 @@ pub struct ConstTable {
 }
 
 impl ConstTable {
+    /// Room for `consts` constants and `ini` INI entries (the tables keep
+    /// insertion order: their capacity is not observable).
+    pub fn with_capacity(consts: usize, ini: usize) -> Self {
+        Self {
+            consts: Map::with_capacity_and_hasher(consts, Default::default()),
+            ini: Map::with_capacity_and_hasher(ini, Default::default()),
+        }
+    }
+
     #[inline]
     fn route(&self, key: &[u8]) -> &Map {
         if is_ini_entry_key(key) {

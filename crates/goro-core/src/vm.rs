@@ -2730,7 +2730,12 @@ impl Vm {
             dim_w_cv_ref: false,
             uncaught_severity: None,
             functions: Default::default(),
-            builtin_param_names: Default::default(),
+            // (looked up by name only: sized for the builtins registered at
+            // startup)
+            builtin_param_names: crate::fxhash::FxHashMap::with_capacity_and_hasher(
+                4096,
+                Default::default(),
+            ),
             user_functions: Default::default(),
             pending_calls: Vec::new(),
             static_vars: Default::default(),
@@ -2885,7 +2890,9 @@ impl Vm {
             fcc_scoped_arrays: Vec::new(),
             shutdown_functions: Vec::new(),
             constants: {
-                let mut c = crate::const_table::ConstTable::default();
+                // (sized for the internal constants and INI entries registered at
+                // startup: about 3100 and 250)
+                let mut c = crate::const_table::ConstTable::with_capacity(4096, 512);
                 // Default ini values
                 c.insert(
                     b"arg_separator.output".to_vec(),
