@@ -1134,7 +1134,11 @@ impl PhpGenerator {
                 };
                 if std::mem::take(&mut self.just_delegated) && r.is_ok() {
                     let f = self.trace_frame(vm, &outer_caller);
+                    let inst = f.4;
                     vm.call_stack.push(f);
+                    if let (true, Some(t)) = (inst, self.this_obj()) {
+                        vm.note_frame_this(&t);
+                    }
                     vm.push_delegating_generator(self);
                     if let Some(d) = self.live_delegate() {
                         path.push(d);
@@ -1256,7 +1260,11 @@ impl PhpGenerator {
             }
             if std::mem::take(&mut rb.just_delegated) && r.is_ok() {
                 let f = rb.trace_frame(vm, &Some(site));
+                let inst = f.4;
                 vm.call_stack.push(f);
+                if let (true, Some(t)) = (inst, rb.this_obj()) {
+                    vm.note_frame_this(&t);
+                }
                 vm.push_delegating_generator(&rb);
                 let d = rb.live_delegate();
                 drop(rb);

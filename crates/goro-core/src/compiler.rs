@@ -20989,12 +20989,17 @@ impl Compiler {
                 }
                 let val = self.compile_expr(inner)?;
                 let tmp = self.op_array.alloc_temp();
+                // (CG(zend_lineno) once the operand is compiled)
+                let mut line = Self::line_after_object(inner, self.zend_lineno.max(expr.span.line));
+                if let ExprKind::FunctionCall { name, .. } = &inner.kind {
+                    line = Self::line_after_object(name, line);
+                }
                 self.op_array.emit(Op {
                     opcode: OpCode::YieldFrom,
                     op1: val,
                     op2: OperandType::Unused,
                     result: OperandType::Tmp(tmp),
-                    line: expr.span.line,
+                    line,
                 });
                 Ok(OperandType::Tmp(tmp))
             }
