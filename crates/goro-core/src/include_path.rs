@@ -11,6 +11,23 @@ fn canonical(p: &std::path::Path) -> Option<String> {
         .map(|c| c.to_string_lossy().into_owned())
 }
 
+/// expand_filepath(): `.` and `..` components removed lexically (the
+/// plain-files wrapper opens `missing/../x` as `x`).
+fn lexical_normalize(p: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 impl Vm {
     /// Resolve a relative include path like php_resolve_path(): "./x" and
     /// "../x" are relative to the working directory only; other names are
@@ -57,7 +74,7 @@ impl Vm {
         canonical(std::path::Path::new(&joined))
             // (not found: the plain-files wrapper opens the name itself,
             // relative to the working directory)
-            .or_else(|| canonical(&cwd.join(path)))
+            .or_else(|| canonical(&lexical_normalize(&cwd.join(path))))
             .unwrap_or(joined)
     }
 }

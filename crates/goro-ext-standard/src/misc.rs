@@ -23921,9 +23921,15 @@ fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, 
         .first()
         .map(|v| v.to_php_string().to_string_lossy())
         .unwrap_or_default();
-    // Absolute paths resolve directly.
+    // Absolute paths, and "./x" / "../x" (relative to the working
+    // directory only), resolve directly (php_resolve_path()).
     let p = std::path::Path::new(&*filename);
-    if p.is_absolute() {
+    if p.is_absolute()
+        || filename.starts_with("./")
+        || filename.starts_with("../")
+        || filename == "."
+        || filename == ".."
+    {
         return Ok(match std::fs::canonicalize(p) {
             Ok(cp) => Value::String(PhpString::from_string(cp.to_string_lossy().into_owned())),
             Err(_) => Value::False,
@@ -23959,6 +23965,18 @@ fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, 
                     candidate.to_string_lossy().into_owned(),
                 )),
             });
+        }
+    }
+    // (then the directory of the executing script)
+    if !filename.is_empty() {
+        let exec = vm.current_file.to_string();
+        if let Some(pos) = exec.rfind('/') {
+            let candidate = std::path::PathBuf::from(&exec[..pos]).join(&*filename);
+            if let Ok(cp) = std::fs::canonicalize(&candidate) {
+                return Ok(Value::String(PhpString::from_string(
+                    cp.to_string_lossy().into_owned(),
+                )));
+            }
         }
     }
     Ok(Value::False)
