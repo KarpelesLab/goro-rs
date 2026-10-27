@@ -566,6 +566,8 @@ pub struct OpArray {
     /// The lines of the parameters' RECV opcodes (by parameter position),
     /// when one is not `decl_line` (empty otherwise): see `recv_line()`.
     pub param_lines: Vec<u32>,
+    /// The CVs of the parameters a constructor promotes to properties.
+    pub promoted_params: Vec<u32>,
     pub attributes: Vec<crate::object::RuntimeAttribute>,
     pub param_attributes: Vec<Vec<crate::object::RuntimeAttribute>>,
     /// Source filename (for closures, error reporting)
@@ -1292,6 +1294,7 @@ impl OpArray {
         self.by_ref_params.shrink_to_fit();
         self.param_has_default.shrink_to_fit();
         self.param_lines.shrink_to_fit();
+        self.promoted_params.shrink_to_fit();
         self.param_default_repr.shrink_to_fit();
     }
 
@@ -1364,6 +1367,7 @@ impl OpArray {
             by_ref_params: Vec::new(),
             param_has_default: Vec::new(),
             param_lines: Vec::new(),
+            promoted_params: Vec::new(),
             attributes: Vec::new(),
             fcc_target_name: None,
             param_attributes: Vec::new(),

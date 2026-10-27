@@ -1081,6 +1081,7 @@ impl Enc for OpArray {
             by_ref_params,
             param_has_default,
             param_lines,
+            promoted_params,
             attributes,
             param_attributes,
             filename,
@@ -1128,6 +1129,7 @@ impl Enc for OpArray {
         by_ref_params.enc(w)?;
         param_has_default.enc(w)?;
         param_lines.enc(w)?;
+        promoted_params.enc(w)?;
         attributes.enc(w)?;
         param_attributes.enc(w)?;
         filename.enc(w)?;
@@ -1175,6 +1177,7 @@ impl Dec for OpArray {
         o.by_ref_params = Vec::dec(r)?;
         o.param_has_default = Vec::dec(r)?;
         o.param_lines = Vec::dec(r)?;
+        o.promoted_params = Vec::dec(r)?;
         o.attributes = Vec::dec(r)?;
         o.param_attributes = Vec::dec(r)?;
         o.filename = Vec::dec(r)?;

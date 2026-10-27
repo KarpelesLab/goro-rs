@@ -9135,21 +9135,12 @@ pub fn reflection_property_method(
     }
 }
 
-/// Whether constructor `op` promotes its parameter `name` to a property:
-/// the compiler emits the promotion as `$this->name = $name` on line 0.
+/// Whether constructor `op` promotes its parameter `name` to a property.
 fn op_array_promotes(op: &OpArray, name: &[u8]) -> bool {
-    use crate::opcode::{OpCode, OperandType};
     let Some(cv) = op.cv_names.iter().position(|n| n == name) else {
         return false;
     };
-    op.ops.iter().any(|o| {
-        matches!(o.opcode, OpCode::PropertySet | OpCode::PropertySetRef)
-            && o.line == 0
-            && o.op1 == OperandType::Cv(0)
-            && o.op2 == OperandType::Cv(cv as u32)
-            && matches!(o.result, OperandType::Const(l)
-                if matches!(op.literals.get(l as usize), Some(Value::String(s)) if s.as_bytes() == name))
-    })
+    op.promoted_params.contains(&(cv as u32))
 }
 
 /// Find a property declaration (static or not) on `class_lower` or its

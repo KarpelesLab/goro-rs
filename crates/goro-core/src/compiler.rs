@@ -10512,6 +10512,7 @@ impl Compiler {
                                             let param_cv = method_compiler
                                                 .op_array
                                                 .get_or_create_cv(&param.name);
+                                            method_compiler.op_array.promoted_params.push(param_cv);
                                             let prop_name_idx = method_compiler
                                                 .op_array
                                                 .add_literal(Value::String(PhpString::from_vec(
@@ -14434,6 +14435,8 @@ impl Compiler {
         for a in &args[1..] {
             vals.push(self.compile_expr(&a.value)?);
         }
+        // (the rope follows the values: CG(zend_lineno))
+        let line = self.cur_lineno(line);
         let mut elems: Vec<OperandType> = Vec::new();
         let lit = |c: &mut Self, s: Vec<u8>| {
             OperandType::Const(
@@ -17051,7 +17054,7 @@ impl Compiler {
                             op1: obj,
                             op2: val,
                             result: prop_operand,
-                            line: expr.span.line,
+                            line: property.span.line.max(expr.span.line),
                         });
                         Ok(val)
                     }
@@ -17611,7 +17614,7 @@ impl Compiler {
                         op1: val,
                         op2: OperandType::Const(factor),
                         result: OperandType::Tmp(tmp),
-                        line: expr.span.line,
+                        line: self.cur_lineno(expr.span.line),
                     });
                     return Ok(OperandType::Tmp(tmp));
                 }
@@ -17888,7 +17891,8 @@ impl Compiler {
                     op1: val,
                     op2: OperandType::Unused,
                     result: OperandType::Tmp(tmp),
-                    line: expr.span.line,
+                    // (after its operand: CG(zend_lineno))
+                    line: self.cur_lineno(expr.span.line),
                 });
                 Ok(OperandType::Tmp(tmp))
             }
@@ -18298,7 +18302,7 @@ impl Compiler {
                     op1: val,
                     op2: OperandType::Unused,
                     result: OperandType::Tmp(tmp),
-                    line: expr.span.line,
+                    line: self.cur_lineno(expr.span.line),
                 });
                 Ok(OperandType::Tmp(tmp))
             }
@@ -18645,6 +18649,17 @@ impl Compiler {
                         };
                         return self.compile_expr(&folded);
                     }
+                }
+                if Self::array_has_illegal_ct_key(elements, 0) {
+                    // (zend_try_ct_eval_array(), on the array's line)
+                    return Err(CompileError {
+                        message: "Illegal offset type".into(),
+                        line: elements
+                            .first()
+                            .map(|e| e.value.span.line)
+                            .filter(|&l| l > 0)
+                            .unwrap_or(expr.span.line),
+                    });
                 }
                 let arr_tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
@@ -21606,7 +21621,7 @@ impl Compiler {
                             op1: OperandType::Const(name_idx),
                             op2: OperandType::Const(arg_count),
                             result: OperandType::Unused,
-                            line: expr.span.line,
+                            line: (*method_line).max(expr.span.line),
                         });
                     } else {
                         // Dynamic class expression: $obj::method() or expr::method()
@@ -21620,7 +21635,7 @@ impl Compiler {
                             op1: class_operand,
                             op2: OperandType::Const(method_idx),
                             result: OperandType::Const(arg_count),
-                            line: expr.span.line,
+                            line: (*method_line).max(expr.span.line),
                         });
                     }
 
@@ -23911,6 +23926,44 @@ impl Compiler {
             }
         }
         Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr))))
+    }
+
+    /// zend_try_ct_eval_array() of an array literal or of one nested in
+    /// it fails with "Illegal offset type": every element is constant and
+    /// a key is an array.
+    #[inline(never)]
+    fn array_has_illegal_ct_key(elements: &[ArrayElement], depth: usize) -> bool {
+        if depth > 64 {
+            return false;
+        }
+        let nested = |e: &Expr| match &e.kind {
+            ExprKind::Array(inner) => Self::array_has_illegal_ct_key(inner, depth + 1),
+            _ => false,
+        };
+        if elements
+            .iter()
+            .any(|e| nested(&e.value) || e.key.as_ref().is_some_and(&nested))
+        {
+            return true;
+        }
+        let all_const = elements.iter().all(|e| {
+            !e.by_ref
+                && Self::is_const_evaluable(&e.value)
+                && e.key.as_ref().is_none_or(|k| {
+                    matches!(k.kind, ExprKind::Array(_)) || Self::is_const_evaluable(k)
+                })
+        });
+        all_const
+            && elements.iter().any(|e| {
+                e.key.as_ref().is_some_and(|k| match &k.kind {
+                    ExprKind::Array(inner) => inner.iter().all(|ie| {
+                        !ie.by_ref
+                            && Self::is_const_evaluable(&ie.value)
+                            && ie.key.as_ref().is_none_or(Self::is_const_evaluable)
+                    }),
+                    _ => false,
+                })
+            })
     }
 
     /// `Self::eval_const_expr(expr).is_some()`, without building the values
