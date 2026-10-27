@@ -448,6 +448,9 @@ impl Vm {
     fn dit_iter(obj: &Rc<RefCell<PhpObject>>) -> Value {
         match prop(obj, b"__spl_inner_h") {
             Value::Object(h) if h.borrow().has_property(b"__spl_dll_target") => Value::Object(h),
+            Value::Object(h) if h.borrow().has_property(b"__spl_agg_it") => {
+                h.borrow().get_property(b"__spl_agg_it")
+            }
             _ => Self::dit_inner(obj),
         }
     }
@@ -460,7 +463,29 @@ impl Vm {
                 return self.dll_new_iterator_at(o, true);
             }
         }
-        self.spl_it_handle()
+        let h = self.spl_it_handle();
+        if matches!(inner, Value::Object(_))
+            && !self.obj_instanceof(inner, b"iterator")
+            && self.obj_instanceof(inner, b"iteratoraggregate")
+        {
+            self.spl_inner_agg_iterator(inner, &h);
+        }
+        h
+    }
+
+    /// An inner IteratorAggregate (one getIterator() returned another
+    /// aggregate) is iterated through its own getIterator() result, which
+    /// zend_user_it_get_new_iterator() fetches when the dual iterator is
+    /// constructed.
+    #[inline(never)]
+    fn spl_inner_agg_iterator(&mut self, inner: &Value, h: &Value) {
+        let it = self.spl_resolve_traversable(inner);
+        if self.exc() {
+            return;
+        }
+        if let Value::Object(ho) = h {
+            ho.borrow_mut().set_property_slice(b"__spl_agg_it", it);
+        }
     }
 
     fn dit_has_cur(obj: &Rc<RefCell<PhpObject>>) -> bool {
@@ -1105,6 +1130,9 @@ impl Vm {
         }
         // inner.iterator = inner.ce->get_iterator()
         let h = self.spl_inner_it_handle(&inner);
+        if self.exc() {
+            return false;
+        }
         set_prop(obj, b"__spl_inner_h", h);
         set_prop(obj, b"__spl_inner", inner);
         set_prop(obj, b"__spl_dit", Value::Long(dit));
