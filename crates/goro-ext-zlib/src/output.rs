@@ -175,7 +175,10 @@ fn running_flags(vm: &Vm) -> Option<i64> {
 /// php_zlib_output_handler()
 fn output_handler(vm: &mut Vm, input: &[u8], op: i64) -> Option<Vec<u8>> {
     if output_encoding(vm) == 0 {
-        if op & OB_OP_START != 0 && op != (OB_OP_START | OB_OP_CLEAN | OB_OP_FINAL) {
+        if op & OB_OP_START != 0
+            && op != (OB_OP_START | OB_OP_CLEAN | OB_OP_FINAL)
+            && !goro_ext_standard::misc::headers_already_sent_error(vm)
+        {
             sapi_add_header(b"Vary: Accept-Encoding", false);
         }
         return None;
@@ -425,12 +428,18 @@ pub(crate) fn ob_gzhandler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
         return Ok(Value::False);
     }
     if flags & OB_OP_START != 0 {
+        // (sapi_add_header_ex(): each refused once the headers are sent)
+        let add = |vm: &mut Vm, line: &[u8], replace: bool| {
+            if !goro_ext_standard::misc::headers_already_sent_error(vm) {
+                sapi_add_header(line, replace);
+            }
+        };
         match encoding {
-            PHP_ZLIB_ENCODING_GZIP => sapi_add_header(b"Content-Encoding: gzip", true),
-            PHP_ZLIB_ENCODING_DEFLATE => sapi_add_header(b"Content-Encoding: deflate", true),
+            PHP_ZLIB_ENCODING_GZIP => add(vm, b"Content-Encoding: gzip", true),
+            PHP_ZLIB_ENCODING_DEFLATE => add(vm, b"Content-Encoding: deflate", true),
             _ => {}
         }
-        sapi_add_header(b"Vary: Accept-Encoding", false);
+        add(vm, b"Vary: Accept-Encoding", false);
     }
     let mut ctx = ZLIBG
         .with(|g| g.borrow_mut().legacy.take())
