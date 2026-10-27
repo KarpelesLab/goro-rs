@@ -152,11 +152,7 @@ fn no_drop(v: &Value) -> bool {
 /// The parts of a call lean_direct() set up that hold something.
 #[cold]
 #[inline(never)]
-fn drop_call_parts(
-    args: Vec<Value>,
-    named_args: Vec<(Vec<u8>, Value)>,
-    target: super::CallTarget,
-) {
+fn drop_call_parts(args: Vec<Value>, named_args: Vec<(Vec<u8>, Value)>, target: super::CallTarget) {
     drop((args, named_args, target));
 }
 
@@ -420,7 +416,9 @@ impl Vm {
         if keep == 0 && f.variadic_param.is_none() {
             let mut slots = std::mem::take(&mut call.args);
             fill_undef_to(&mut slots, f.cv_names.len());
-            return self.lean_run(op_array, ip, &f, sep, slots, nargs, &mut call, cvs, tmps, false);
+            return self.lean_run(
+                op_array, ip, &f, sep, slots, nargs, &mut call, cvs, tmps, false,
+            );
         }
         // The parameters move to the callee's variables; `$this` stays
         // (DO_FCALL's fast path, move_args()).
@@ -455,7 +453,9 @@ impl Vm {
                 }
             }
         }
-        self.lean_run(op_array, ip, &f, sep, slots, nargs, &mut call, cvs, tmps, false)
+        self.lean_run(
+            op_array, ip, &f, sep, slots, nargs, &mut call, cvs, tmps, false,
+        )
     }
 
     /// The INIT_FCALL at `ip` of `op_array` just set up a call (the top
@@ -539,7 +539,10 @@ impl Vm {
             let (n, slots) = self.lean_direct_sends(&f, op_array, ip, cvs, tmps)?;
             (n, Some(slots))
         } else {
-            (self.lean_sends_ready(&f, None, op_array, ip, cvs, tmps)?, None)
+            (
+                self.lean_sends_ready(&f, None, op_array, ip, cvs, tmps)?,
+                None,
+            )
         };
         // (INIT_FCALL's result operand flags a name without global fallback)
         target.no_ns_fallback = !matches!(op_array.ops[ip].result, OperandType::Unused);
@@ -554,8 +557,9 @@ impl Vm {
         let next = match slots {
             Some(slots) => {
                 let do_ip = ip + 1 + nsends;
-                let done =
-                    self.lean_run(op_array, do_ip, &f, None, slots, nsends, &mut call, cvs, tmps, true);
+                let done = self.lean_run(
+                    op_array, do_ip, &f, None, slots, nsends, &mut call, cvs, tmps, true,
+                );
                 if done { do_ip + 1 } else { do_ip }
             }
             None => self.lean_fused_run(op_array, ip, &f, None, nsends, &mut call, cvs, tmps),

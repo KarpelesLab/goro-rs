@@ -120,7 +120,9 @@ pub(crate) fn type_kind_masks_of(f: &OpArray) -> Box<[u16]> {
     f.param_types
         .iter()
         .map(|t| t.as_ref().map_or(0, |t| type_kind_mask(&t.param_type)))
-        .chain(std::iter::once(f.return_type.as_ref().map_or(0, type_kind_mask)))
+        .chain(std::iter::once(
+            f.return_type.as_ref().map_or(0, type_kind_mask),
+        ))
         .collect()
 }
 
