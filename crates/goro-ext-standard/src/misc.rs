@@ -13361,7 +13361,12 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if !valid_mode {
         vm.emit_warning(&format!(
             "{}({}): Failed to open stream: `{}' is not a valid mode for fopen",
-            fopen_caller, filename, mode
+            fopen_caller,
+            filename,
+            // (the mode as given: its bytes, up to a NUL)
+            args.get(1)
+                .map(|v| goro_core::string::msg_cstr(v.to_php_string().as_bytes()).into_owned())
+                .unwrap_or_else(|| mode.clone())
         ));
         return Ok(Value::False);
     }
