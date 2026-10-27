@@ -392,9 +392,11 @@ fn prov_invalid_tag_length() {
 /// it.
 fn key_length_error(spec: &cipher::CipherSpec) {
     use cipher::{Algo, Mode};
-    if matches!(spec.algo, Algo::ChaCha20 | Algo::ChaCha20Poly1305) || spec.mode == Mode::Ocb {
+    if matches!(spec.algo, Algo::ChaCha20 | Algo::ChaCha20Poly1305)
+        || matches!(spec.mode, Mode::Ocb | Mode::CbcHmac | Mode::GcmSiv)
+    {
         err::push(err::LIB_PROV, 105, "invalid key length");
-    } else if spec.mode != Mode::Xts {
+    } else if !(spec.mode == Mode::Siv || (spec.mode == Mode::Xts && spec.algo == Algo::Aes)) {
         err::evp_invalid_key_length();
     }
 }
