@@ -363,7 +363,11 @@ impl Vm {
                     self.ucf_strict = false;
                     Some(self.ucf_call_line.replace(call_line))
                 };
+                let exiting = self.exit_requested;
                 let r = self.call_callback(&cb, &args);
+                // (exit() in the handler: zend_call_function() fails, the
+                // buffer, with what the handler wrote, is passed along)
+                let exited = self.exit_requested && !exiting;
                 if let Some(s) = saved_ucf {
                     self.ucf_call_line = s;
                 }
@@ -388,7 +392,7 @@ impl Vm {
                     return ObStatus::NoData;
                 }
                 match r {
-                    Ok(retval) if self.current_exception.is_none() => {
+                    Ok(retval) if self.current_exception.is_none() && !exited => {
                         if let Some(i) = self.ob_index_of(id) {
                             if self.ob_handlers[i].flags & OBH_PRODUCED_OUTPUT != 0 {
                                 self.ob_handlers[i].flags |= OBH_DISABLED;
