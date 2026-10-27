@@ -2723,9 +2723,11 @@ fn is_plain_value(v: &Value) -> bool {
 /// freed when it holds a few plain values (nothing to destroy). (No object with a
 /// destructor exists: `no_release`.) False (nothing done): the general
 /// handler releases them (they are not all such, or the cycle collector is
-/// due).
+/// due). `LISTED`: objects with a destructor exist (none of them is
+/// reached, see drops_quietly_listed: the release point the FREE_TMPS is
+/// would find nothing more to do, see Vm::quiet_release_budget).
 #[inline(never)]
-fn fast_free_containers(
+fn fast_free_containers<const LISTED: bool>(
     range: &mut [Value],
     globals: &Rc<RefCell<crate::array::PhpArray>>,
 ) -> bool {
@@ -2743,7 +2745,7 @@ fn fast_free_containers(
             // (a reference, `&$a[k]`'s: as the general handler, its slot
             // is emptied, no possible root buffered)
             Value::Array(_) | Value::Object(_) | Value::Reference(_) => {
-                if !drops_quietly_deep(v, &mut 256, globals) {
+                if !drops_quietly::<LISTED>(v, &mut 256, globals) {
                     return false;
                 }
                 heap = true;
@@ -3588,8 +3590,11 @@ impl crate::vm::Vm {
                         }
                         match rest {
                             Some(k)
-                                if !no_release
-                                    || !fast_free_containers(&mut range[k..], &self.globals) =>
+                                if !(if no_release {
+                                    fast_free_containers::<false>(&mut range[k..], &self.globals)
+                                } else {
+                                    fast_free_containers::<true>(&mut range[k..], &self.globals)
+                                }) =>
                             {
                                 break 'run ip;
                             }
