@@ -134,6 +134,26 @@ fn arg_to_php(vm: &mut Vm, v: XValue, to_string: bool) -> Value {
     }
 }
 
+/// zend_throw_error(): a pending exception becomes the new one's previous.
+#[inline(never)]
+fn throw_chain(vm: &mut Vm, class: &[u8], msg: &str) {
+    let prev = vm.current_exception.take();
+    throw_error(vm, class, msg);
+    if let (Some(pv), Some(e)) = (prev, vm.current_exception.as_ref()) {
+        Vm::exception_set_previous(e, pv);
+    }
+}
+
+/// The empty-string sentinel php_dom_xpath_callbacks_call_*_ns() push after
+/// a failed call: the evaluation goes on (later failures chain).
+fn sentinel() -> Result<XValue, XErr> {
+    Ok(XValue::Str(String::new()))
+}
+
+/// php_dom_xpath_callback_dispatch(). A failure throws and yields the
+/// sentinel; a registered callback that did not return (it threw, or was
+/// skipped by zend_call_function() as an exception is pending) pushes
+/// nothing, so libxml2 aborts the evaluation (stack error).
 fn dispatch(
     vm: &mut Vm,
     ns: Option<&CbNs>,
@@ -143,11 +163,14 @@ fn dispatch(
     let ns = match ns {
         Some(n) => n,
         None => {
-            throw_error(vm, b"Error", "No callbacks were registered");
-            return Err(XErr::Ext);
+            throw_chain(vm, b"Error", "No callbacks were registered");
+            return sentinel();
         }
     };
     let r = if ns.all {
+        if vm.current_exception.is_some() {
+            return sentinel();
+        }
         let cb = Value::String(PhpString::from_string(fname.to_string()));
         // zend_call_function() on an uncached callable: "Invalid callback"
         if let Some(err) = vm.callable_error(&cb) {
@@ -156,22 +179,29 @@ fn dispatch(
                 b"Error",
                 &format!("Invalid callback {}, {}", fname, err),
             );
-            return Err(XErr::Ext);
+            return sentinel();
         }
-        vm.call_callback(&cb, &params)
+        let r = vm.call_callback(&cb, &params);
+        if r.is_err() || vm.current_exception.is_some() {
+            return sentinel();
+        }
+        r
     } else {
         match ns.funcs.iter().find(|(n, _)| n == fname) {
             Some((_, cb)) => {
+                if vm.current_exception.is_some() {
+                    return Err(XErr::Ext);
+                }
                 let cb = cb.clone();
                 vm.call_callback(&cb, &params)
             }
             None => {
-                throw_error(
+                throw_chain(
                     vm,
                     b"Error",
                     &format!("No callback handler \"{}\" registered", fname),
                 );
-                return Err(XErr::Ext);
+                return sentinel();
             }
         }
     };
@@ -190,12 +220,12 @@ fn dispatch(
                     None => Ok(XValue::NodeSet(Vec::new())),
                 }
             } else {
-                throw_error(
+                throw_chain(
                     vm,
                     b"TypeError",
                     "Only objects that are instances of DOM nodes can be converted to an XPath expression",
                 );
-                Err(XErr::Ext)
+                sentinel()
             }
         }
         Value::True => Ok(XValue::Bool(true)),
@@ -207,9 +237,6 @@ fn dispatch(
                 vm.emit_warning("Array to string conversion");
             }
             let s = vm.value_to_string(&other);
-            if vm.current_exception.is_some() {
-                return Err(XErr::Ext);
-            }
             Ok(XValue::Str(s.to_string_lossy()))
         }
     }
@@ -279,12 +306,12 @@ fn eval(vm: &mut Vm, o: &Obj, a: &[Value], query: bool) -> R<Value> {
                 if uri == PHP_XPATH_NS && (name == "function" || name == "functionString") {
                     let to_string = name == "functionString";
                     if vals.is_empty() {
-                        throw_error(
+                        throw_chain(
                             vmr,
                             b"Error",
                             "Function name must be passed as the first argument",
                         );
-                        return Some(Err(XErr::Ext));
+                        return Some(sentinel());
                     }
                     let mut it = vals.into_iter();
                     let first = it.next().unwrap();
@@ -292,8 +319,8 @@ fn eval(vm: &mut Vm, o: &Obj, a: &[Value], query: bool) -> R<Value> {
                     let fname = match first {
                         XValue::Str(s) => s,
                         _ => {
-                            throw_error(vmr, b"TypeError", "Handler name must be a string");
-                            return Some(Err(XErr::Ext));
+                            throw_chain(vmr, b"TypeError", "Handler name must be a string");
+                            return Some(sentinel());
                         }
                     };
                     return Some(dispatch(vmr, php_ns.as_ref(), &fname, params));
@@ -419,7 +446,11 @@ fn m_register_php_functions(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            let mut add: Vec<(String, Value)> = Vec::new();
+            // php_dom_xpath_callbacks_ensure_ns() first: a failing entry
+            // leaves the namespace (and the entries before it) registered.
+            with_state(o, |s| {
+                s.php_ns.get_or_insert_with(CbNs::default);
+            });
             for (k, v) in entries {
                 let v = v.deref();
                 if !is_callable(vm, &v) {
@@ -463,15 +494,16 @@ fn m_register_php_functions(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
                     );
                     return Err(());
                 }
-                add.push((name, v));
+                with_state(o, |s| {
+                    let ns = s.php_ns.get_or_insert_with(CbNs::default);
+                    match ns.funcs.iter_mut().find(|(x, _)| *x == name) {
+                        Some(e) => e.1 = v,
+                        None => ns.funcs.push((name, v)),
+                    }
+                });
             }
             with_state(o, |s| {
-                let ns = s.php_ns.get_or_insert_with(CbNs::default);
-                for (n, v) in add {
-                    ns.funcs.retain(|(x, _)| *x != n);
-                    ns.funcs.push((n, v));
-                }
-                ns.all = false;
+                s.php_ns.get_or_insert_with(CbNs::default).all = false;
             });
         }
         Some(v) => {
@@ -489,6 +521,9 @@ fn m_register_php_functions(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
                     return Err(());
                 }
             };
+            with_state(o, |s| {
+                s.php_ns.get_or_insert_with(CbNs::default);
+            });
             if !valid_cb_name(&name, false) {
                 throw_error(
                     vm,
