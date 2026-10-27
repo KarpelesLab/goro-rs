@@ -1,16 +1,25 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 
-/// A name resolution table (use imports...): shared between the compilers
-/// of nested scopes, copied when one changes it.
-type NameMap = std::rc::Rc<crate::fxhash::FxHashMap<Vec<u8>, Vec<u8>>>;
-
 use goro_parser::ast::*;
 
 use crate::object::{ClassEntry, MethodDef, PropertyDef, Visibility as ObjVisibility};
 use crate::opcode::{Op, OpArray, OpCode, OperandType, ParamType, ParamTypeInfo};
 use crate::string::PhpString;
 use crate::value::Value;
+
+/// A name resolution table (use imports...): shared between the compilers
+/// of nested scopes, copied when one changes it.
+type NameMap = std::rc::Rc<crate::fxhash::FxHashMap<Vec<u8>, Vec<u8>>>;
+
+thread_local! {
+    static EMPTY_NAME_MAP: NameMap = NameMap::default();
+}
+
+/// An empty NameMap (shared: no allocation).
+fn empty_name_map() -> NameMap {
+    EMPTY_NAME_MAP.with(|m| m.clone())
+}
 
 thread_local! {
     /// The declarations PHP binds at compile time ahead of a file's compile
@@ -1171,9 +1180,9 @@ impl Compiler {
             finally_targets: Vec::new(),
             current_namespace: Vec::new(),
             const_property_name: Vec::new(),
-            use_map: NameMap::default(),
-            use_function_map: NameMap::default(),
-            use_const_map: NameMap::default(),
+            use_map: empty_name_map(),
+            use_function_map: empty_name_map(),
+            use_const_map: empty_name_map(),
             label_offsets: HashMap::new(),
             try_finally_ids: Vec::new(),
             try_finally_counter: 0,
@@ -1181,7 +1190,7 @@ impl Compiler {
             jumps: Box::default(),
             source_file: Vec::new(),
             has_never_return: false,
-            anon_class_name_map: NameMap::default(),
+            anon_class_name_map: empty_name_map(),
             hoisted_class_names: std::collections::HashSet::new(),
             hoisted_class_stmts: std::collections::HashSet::new(),
             leading_declare_stmts: std::collections::HashSet::new(),
@@ -2081,6 +2090,9 @@ impl Compiler {
         method: &[u8],
         line: u32,
     ) -> Vec<crate::object::RuntimeAttribute> {
+        if attrs.is_empty() {
+            return Vec::new();
+        }
         let owner = [class, b"::", method].concat();
         let saved = self.attr_owner_fn.replace(owner);
         let r = self.compile_attributes_at(attrs, "method", line);
@@ -2145,6 +2157,9 @@ impl Compiler {
         attrs: &[goro_parser::ast::Attribute],
         target: &str,
     ) -> Vec<crate::object::RuntimeAttribute> {
+        if attrs.is_empty() {
+            return Vec::new();
+        }
         // If #[DelayedTargetValidation] is present, skip compile-time target
         // validation for built-in attributes (PHP 8.5).
         let has_delayed = attrs.iter().any(|a| {
@@ -3633,7 +3648,7 @@ impl Compiler {
                     } else {
                         self.current_namespace = Vec::new();
                     }
-                    self.use_map = NameMap::default();
+                    self.use_map = empty_name_map();
                     if let Some(body_stmts) = body {
                         self.anon_class_map_pass(
                             body_stmts,
@@ -4006,9 +4021,9 @@ impl Compiler {
         let hoist_end = self.op_array.ops.len();
         // Reset namespace state for second pass (will be re-applied by NamespaceDecl/UseDecl)
         self.current_namespace = Vec::new();
-        self.use_map = NameMap::default();
-        self.use_function_map = NameMap::default();
-        self.use_const_map = NameMap::default();
+        self.use_map = empty_name_map();
+        self.use_function_map = empty_name_map();
+        self.use_const_map = empty_name_map();
         // Second pass: compile everything else
         self.in_main_pass = true;
         let main_pass = (|| -> CompileResult<()> {
@@ -4053,9 +4068,9 @@ impl Compiler {
                         } else {
                             self.current_namespace = Vec::new();
                         }
-                        self.use_map = NameMap::default();
-                        self.use_function_map = NameMap::default();
-                        self.use_const_map = NameMap::default();
+                        self.use_map = empty_name_map();
+                        self.use_function_map = empty_name_map();
+                        self.use_const_map = empty_name_map();
                         self.reset_seen_symbols();
 
                         if let Some(body_stmts) = body {
@@ -4097,9 +4112,9 @@ impl Compiler {
                             }
                             // Reset after block
                             self.current_namespace = Vec::new();
-                            self.use_map = NameMap::default();
-                            self.use_function_map = NameMap::default();
-                            self.use_const_map = NameMap::default();
+                            self.use_map = empty_name_map();
+                            self.use_function_map = empty_name_map();
+                            self.use_const_map = empty_name_map();
                             self.reset_seen_symbols();
                         }
                     }
@@ -4200,18 +4215,18 @@ impl Compiler {
                     } else {
                         self.current_namespace = Vec::new();
                     }
-                    self.use_map = NameMap::default();
-                    self.use_function_map = NameMap::default();
-                    self.use_const_map = NameMap::default();
+                    self.use_map = empty_name_map();
+                    self.use_function_map = empty_name_map();
+                    self.use_const_map = empty_name_map();
 
                     if let Some(body_stmts) = body {
                         // Recurse into bracketed namespace body
                         self.compile_hoisting_pass_inner(body_stmts)?;
                         // Reset after block
                         self.current_namespace = Vec::new();
-                        self.use_map = NameMap::default();
-                        self.use_function_map = NameMap::default();
-                        self.use_const_map = NameMap::default();
+                        self.use_map = empty_name_map();
+                        self.use_function_map = empty_name_map();
+                        self.use_const_map = empty_name_map();
                         self.reset_seen_symbols();
                     }
                 }
@@ -4376,9 +4391,9 @@ impl Compiler {
             return None;
         }
         self.current_namespace = Vec::new();
-        self.use_map = NameMap::default();
-        self.use_function_map = NameMap::default();
-        self.use_const_map = NameMap::default();
+        self.use_map = empty_name_map();
+        self.use_function_map = empty_name_map();
+        self.use_const_map = empty_name_map();
         self.in_main_pass = true;
         let mut earlier = None;
         for stmt in stmts {
@@ -12189,9 +12204,9 @@ impl Compiler {
                     self.current_namespace = Vec::new();
                 }
                 // Clear use maps when entering a new namespace
-                self.use_map = NameMap::default();
-                self.use_function_map = NameMap::default();
-                self.use_const_map = NameMap::default();
+                self.use_map = empty_name_map();
+                self.use_function_map = empty_name_map();
+                self.use_const_map = empty_name_map();
 
                 // If this is a block namespace { ... }, compile the body
                 if let Some(body_stmts) = body {
@@ -12200,9 +12215,9 @@ impl Compiler {
                     }
                     // After block namespace, reset to global
                     self.current_namespace = Vec::new();
-                    self.use_map = NameMap::default();
-                    self.use_function_map = NameMap::default();
-                    self.use_const_map = NameMap::default();
+                    self.use_map = empty_name_map();
+                    self.use_function_map = empty_name_map();
+                    self.use_const_map = empty_name_map();
                 }
                 Ok(())
             }
@@ -26937,7 +26952,9 @@ fn type_hint_admits(th: &TypeHint, ty: &[u8]) -> bool {
 /// Also the other per-parameter checks of zend_compile_params(), in its order:
 /// auto-globals, `$this`, a variadic that is not last, a variadic default.
 fn check_duplicate_params(params: &[Param], line: u32) -> CompileResult<()> {
+    // (a short list is searched as it is)
     let mut seen = std::collections::HashSet::new();
+    let small = params.len() <= 16;
     let mut saw_variadic = false;
     for p in params {
         // CG(zend_lineno) is the parameter's line.
@@ -26962,7 +26979,15 @@ fn check_duplicate_params(params: &[Param], line: u32) -> CompileResult<()> {
                 line,
             });
         }
-        if !seen.insert(p.name.as_slice()) {
+        let dup = if small {
+            params
+                .iter()
+                .take_while(|q| !std::ptr::eq(*q, p))
+                .any(|q| q.name == p.name)
+        } else {
+            !seen.insert(p.name.as_slice())
+        };
+        if dup {
             return Err(CompileError {
                 message: format!(
                     "Redefinition of parameter ${}",

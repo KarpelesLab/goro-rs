@@ -194,7 +194,8 @@ pub unsafe fn spawn_child(mut spec: ChildSpec<'_>) -> libc::pid_t {
         libc::sigfillset(&mut all);
         libc::pthread_sigmask(libc::SIG_SETMASK, &all, &mut spec.mask);
         let saved_environ = environ;
-        let mut stack = vec![0u8; STACK];
+        // (not zeroed: the child only touches the pages it uses)
+        let mut stack: Vec<std::mem::MaybeUninit<u8>> = Vec::with_capacity(STACK);
         let top = (stack.as_mut_ptr().add(STACK) as usize & !15) as *mut libc::c_void;
         let pid = libc::clone(
             child_main,

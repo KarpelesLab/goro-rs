@@ -16,3 +16,4 @@ goro-ext-hash = { path = "../goro-ext-hash" }
 goro-ext-bz2 = { path = "../goro-ext-bz2" }
 indexmap = "2"
 libc = "0.2"
+memchr = "2"
