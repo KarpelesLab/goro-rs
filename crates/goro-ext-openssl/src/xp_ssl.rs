@@ -1664,28 +1664,6 @@ impl SslStream {
             ));
             return Some(Hs::Failed);
         }
-        // purecrypto's TLS 1.2 server engine never answers below TLS 1.2
-        // when the client offers 1.2 (it ignores a max_version under 1.2),
-        // so refuse such a client like a TLS 1.0/1.1-only OpenSSL server
-        // whose answer the client rejects.
-        if version_rank(cfg.max_version) < version_rank(ProtocolVersion::TLSv1_2)
-            && self.hello.len() >= 11
-            && self.hello[5] == 1
-        {
-            let client_max = u16::from_be_bytes([self.hello[9], self.hello[10]]);
-            if client_max > cfg.max_version.as_u16() {
-                let _ = sock_send(fd, &[0x15, 0x03, 0x01, 0x00, 0x02, 0x02, 0x46]);
-                let f = self.func.clone();
-                vm.emit_warning(&format!(
-                    "{}(): {}",
-                    f,
-                    ssl_failed_warning(&[
-                        "error:0A000102:SSL routines::unsupported protocol".to_string()
-                    ])
-                ));
-                return Some(Hs::Failed);
-            }
-        }
         // A client whose highest version is below the server's floor:
         // OpenSSL answers protocol_version ("unsupported protocol").
         if let Some(client_max) = client_hello_max_version(&self.hello)
