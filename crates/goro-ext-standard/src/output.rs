@@ -318,6 +318,8 @@ fn zval_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u
             if obj.borrow().dtor_listed.get() {
                 rc = rc.saturating_sub(1);
             }
+            // (nor the second hold of a method frame's $this)
+            rc = rc.saturating_sub(vm.frames_with_this(obj)).max(1);
             // SplFixedArray's get_properties_for(DEBUG) table, built before
             // the refcount is read, references the elements once more.
             if class_extends(

@@ -111,6 +111,18 @@ impl Vm {
         unsafe { f.this_object() }
     }
 
+    /// How many running method frames have `obj` as `$this` (goro holds
+    /// such a `$this` twice: the frame's This and its first variable slot).
+    #[inline(never)]
+    pub fn frames_with_this(&self, obj: &std::rc::Rc<std::cell::RefCell<crate::object::PhpObject>>) -> usize {
+        self.gc_frames
+            .iter()
+            .filter(|f| !f.is_pin())
+            // SAFETY: the frames in gc_frames are running.
+            .filter(|f| matches!(unsafe { f.this_object() }, Some(Value::Object(o)) if std::rc::Rc::ptr_eq(&o, obj)))
+            .count()
+    }
+
     /// The class exists (without autoloading).
     fn callable_class_exists(&self, cl: &[u8]) -> bool {
         self.classes.contains_key(cl)
