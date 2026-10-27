@@ -1699,6 +1699,14 @@ impl Vm {
         let class = obj.borrow().class_name.clone();
         let cl: Vec<u8> = class.iter().map(|b| b.to_ascii_lowercase()).collect();
         let new_obj = self.spl_instantiate(&class);
+        // (a user subclass's destructor runs when the new iterator dies,
+        // once its constructor succeeded: zend_object_store_ctor_failed)
+        let listed = new_obj.borrow().dtor_listed.get();
+        if listed {
+            new_obj
+                .borrow_mut()
+                .set_property(b"__ctor_pending".to_vec(), Value::True);
+        }
         if self.spl_has_user_ctor(&cl) {
             self.call_object_method(&Value::Object(new_obj.clone()), b"__construct", args);
         } else {
@@ -1713,13 +1721,8 @@ impl Vm {
         if self.exc() {
             return Value::Null;
         }
-        // A user subclass's destructor runs when the new iterator dies.
-        if self
-            .classes
-            .get(&cl)
-            .is_some_and(|c| c.methods.contains_key(b"__destruct".as_slice()))
-        {
-            self.list_destructible(Value::Object(new_obj.clone()));
+        if listed {
+            new_obj.borrow_mut().remove_property(b"__ctor_pending");
         }
         Value::Object(new_obj)
     }

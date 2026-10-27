@@ -983,8 +983,13 @@ impl Vm {
             .unwrap_or_else(|| self.builtin_canonical_name(&cl).into_bytes());
         let id = self.alloc_object_id();
         let mut o = PhpObject::new(canonical, id);
-        self.apply_class_property_defaults(&mut o, &cl);
-        Rc::new(RefCell::new(o))
+        // (declared slots as for new: uninitialized typed properties are
+        // not unset ones)
+        self.init_native_object_props(&cl, &mut o);
+        let o = Rc::new(RefCell::new(o));
+        // a user class's __destruct runs once the object is released
+        self.lazy_list_destructible(&o);
+        o
     }
 
     /// Whether `class_lower` declares a userland constructor.
