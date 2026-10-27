@@ -6935,24 +6935,40 @@ fn class_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// aliases as they are declared.
 #[inline(never)]
 fn class_table_order(vm: &Vm, names: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
-    use std::collections::HashMap;
-    let mut rank: HashMap<Vec<u8>, (usize, usize)> = HashMap::new();
-    for (ext, list) in goro_core::ext_order::EXT_CLASSES {
-        let m = MODULE_ORDER
-            .iter()
-            .position(|n| n.eq_ignore_ascii_case(ext))
-            .unwrap_or(MODULE_ORDER.len());
-        for (i, c) in list.iter().enumerate() {
-            rank.entry(c.to_ascii_lowercase().into_bytes())
-                .or_insert((m, i));
+    // (module and position of every internal class: fixed tables, ranked
+    // once)
+    static RANK: std::sync::OnceLock<goro_core::fxhash::FxHashMap<Vec<u8>, (usize, usize)>> =
+        std::sync::OnceLock::new();
+    let rank = RANK.get_or_init(|| {
+        let mut rank = goro_core::fxhash::FxHashMap::default();
+        for (ext, list) in goro_core::ext_order::EXT_CLASSES {
+            let m = MODULE_ORDER
+                .iter()
+                .position(|n| n.eq_ignore_ascii_case(ext))
+                .unwrap_or(MODULE_ORDER.len());
+            for (i, c) in list.iter().enumerate() {
+                rank.entry(c.to_ascii_lowercase().into_bytes())
+                    .or_insert((m, i));
+            }
         }
-    }
+        rank
+    });
+    let mut buf = [0u8; 128];
     let mut keyed: Vec<((usize, usize, usize), Vec<u8>)> = names
         .into_iter()
         .enumerate()
         .map(|(pos, n)| {
-            let l = n.to_ascii_lowercase();
-            let internal = match vm.classes.get(&l) {
+            let heap;
+            let l: &[u8] = if n.len() <= buf.len() {
+                let l = &mut buf[..n.len()];
+                l.copy_from_slice(&n);
+                l.make_ascii_lowercase();
+                l
+            } else {
+                heap = n.to_ascii_lowercase();
+                &heap
+            };
+            let internal = match vm.classes.get(l) {
                 // (an alias is declared like a user class)
                 Some(c) => c.filename.is_none() && c.name.eq_ignore_ascii_case(&n),
                 None => true,
@@ -6960,7 +6976,7 @@ fn class_table_order(vm: &Vm, names: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
             let key = if !internal {
                 (2, 0, pos)
             } else {
-                match rank.get(&l) {
+                match rank.get(l) {
                     Some(&(m, i)) => (0, m, i),
                     None => (1, 0, pos),
                 }
