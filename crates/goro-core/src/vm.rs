@@ -50051,7 +50051,32 @@ impl Vm {
                     // eval()'d code starts in scripting mode (an opening
                     // tag in it is a syntax error).
                     let mut source = b"<?php ".to_vec();
-                    source.extend_from_slice(code.as_bytes());
+                    match code_val.deref() {
+                        Value::String(s) => source.extend_from_slice(s.as_bytes()),
+                        // (zval_try_get_string(): __toString(), or an Error)
+                        v => match self.value_to_string_checked(&v) {
+                            Ok(s) => source.extend_from_slice(s.as_bytes()),
+                            Err(e) => {
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                        exception_handlers.last()
+                                    {
+                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                        ip = *catch_target as usize;
+                                        return Ok(Flow::Continue);
+                                    }
+                                }
+                                return Err(e);
+                            }
+                        },
+                    }
+                    // (zend_compile_string() compiles nothing of an empty
+                    // string: eval() returns false)
+                    if source.len() == 6 {
+                        let r = Value::False;
+                        self.write_operand(&op.result, r, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Ok(Flow::Next);
+                    }
 
                     let result = {
                         let mut lexer = goro_parser::Lexer::new(&source);
