@@ -1421,6 +1421,65 @@ impl Compiler {
         n >= 2
     }
 
+    /// zend_compile_static_call(): whether the called method is known at
+    /// compile time (fbc): `self::` (taken as known), or a class the main
+    /// script declared before the call and bound while compiling (no
+    /// parent, interfaces - Stringable included - or traits) with a public
+    /// method of that name. `parent::`, `static::` and other classes are not.
+    #[inline(never)]
+    fn static_call_fbc_known(&self, class: &Expr, method: &[u8], line: u32) -> bool {
+        let ExprKind::Identifier(name) = &class.kind else {
+            return false;
+        };
+        // (self::: the class's methods compiled so far, which goro does not
+        // track: taken as unknown, like an inherited or later one)
+        if name.eq_ignore_ascii_case(b"self")
+            || name.eq_ignore_ascii_case(b"parent")
+            || name.eq_ignore_ascii_case(b"static")
+        {
+            return false;
+        }
+        if !self.op_array.name.is_empty() {
+            // (the classes declared by the file are only tracked here)
+            return true;
+        }
+        let resolved = self.resolve_class_name(name);
+        let resolved = resolved.strip_prefix(b"\\").unwrap_or(&resolved);
+        let ml = method.to_ascii_lowercase();
+        // A class bound at compile time: no interfaces (Stringable
+        // included) or traits, its parent (if any) bound before it.
+        let mut cur = resolved.to_vec();
+        let mut decl_line = line;
+        for _ in 0..16 {
+            let Some(c) = self
+                .compiled_classes
+                .iter()
+                .find(|c| c.name.eq_ignore_ascii_case(&cur) && c.start_line <= decl_line)
+            else {
+                return false;
+            };
+            if !c.interfaces.is_empty()
+                || !c.traits.is_empty()
+                || c.is_enum
+                || c.is_trait
+                || c.get_method(b"__tostring").is_some()
+            {
+                return false;
+            }
+            if let Some(m) = c.get_method(&ml) {
+                return m.visibility == crate::object::Visibility::Public;
+            }
+            match &c.parent {
+                Some(p) => {
+                    decl_line = c.start_line;
+                    cur = p.strip_prefix(b"\\").unwrap_or(p).to_vec();
+                }
+                None => return false,
+            }
+        }
+        false
+    }
+
     /// The line of a conditional jump emitted once its condition is
     /// compiled: CG(zend_lineno), the line of the condition's last compiled
     /// expression (`fallback` when unknown).
@@ -21699,6 +21758,8 @@ impl Compiler {
                         });
                     }
 
+                    self.send_unknown_fbc =
+                        !self.static_call_fbc_known(class, method, expr.span.line);
                     self.compile_send_args_with_name(args, expr.span.line, static_bridge)?;
 
                     self.op_array.emit(Op {
