@@ -59261,6 +59261,15 @@ impl Vm {
                                 for m in Self::override_builtin_iface_methods(&il) {
                                     interface_method_names.insert(m.to_vec());
                                 }
+                                // (an internal interface's methods, also
+                                // those of the interfaces it extends:
+                                // SeekableIterator's Iterator methods)
+                                if self.builtin_is_interface(&il) {
+                                    for (_, m) in crate::stubs::class_methods(&il) {
+                                        interface_method_names
+                                            .insert(m.name.as_bytes().to_ascii_lowercase());
+                                    }
+                                }
                             }
 
                             // Collect interface property names for property override checks
