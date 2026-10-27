@@ -43,6 +43,17 @@ pub(crate) struct RefSource {
     pub ty: ParamType,
 }
 
+/// Whether `ty` names self or parent.
+fn ty_has_relative(ty: &ParamType) -> bool {
+    match ty {
+        ParamType::Simple(n) => {
+            n.eq_ignore_ascii_case(b"self") || n.eq_ignore_ascii_case(b"parent")
+        }
+        ParamType::Nullable(i) => ty_has_relative(i),
+        ParamType::Union(v) | ParamType::Intersection(v) => v.iter().any(ty_has_relative),
+    }
+}
+
 struct Entry {
     cell: Weak<RefCell<Value>>,
     sources: Vec<RefSource>,
@@ -316,6 +327,13 @@ impl Vm {
         let (_, declaring, _, ty, _) = self.find_property_def(&lookup_class, name)?;
         let ty = ty?;
         let decl_lower = declaring.to_ascii_lowercase();
+        // (self / parent name the declaring class, not the writer's scope)
+        let ty = match self.classes.get(&decl_lower) {
+            Some(ce) if ty_has_relative(&ty) => {
+                super::static_props::resolve_relative_type(ty, &ce.name, ce.parent.as_deref())
+            }
+            _ => ty,
+        };
         let class = self
             .class_name_for_display(&decl_lower)
             .map(|n| crate::value::display_class_name(&n))

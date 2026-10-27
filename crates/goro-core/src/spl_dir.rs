@@ -47,7 +47,6 @@ const DIT_CTOR_GLOB: i64 = 2;
 const DT_UNKNOWN: i64 = 0;
 const DT_DIR: i64 = 4;
 const DT_REG: i64 = 8;
-const DT_LNK: i64 = 10;
 
 pub const DIR_CLASSES: &[&[u8]] = &[
     b"globiterator",
@@ -407,25 +406,14 @@ impl Vm {
             }
         } else {
             let p = crate::fspath::bytes_path(path);
-            match std::fs::read_dir(p) {
-                Ok(rd) => {
-                    let mut ents: Vec<(Vec<u8>, i64)> =
-                        vec![(b".".to_vec(), DT_DIR), (b"..".to_vec(), DT_DIR)];
-                    for e in rd.flatten() {
-                        let t = match e.file_type() {
-                            Ok(ft) if ft.is_symlink() => DT_LNK,
-                            Ok(ft) if ft.is_dir() => DT_DIR,
-                            Ok(ft) if ft.is_file() => DT_REG,
-                            _ => DT_UNKNOWN,
-                        };
-                        ents.push((crate::fspath::os_bytes(&e.file_name()).into_owned(), t));
-                    }
-                    ents.sort();
+            match crate::oslistdir::readdir_entries(path) {
+                Ok(ents) => {
+                    // readdir order, as php_stream_readdir() returns it.
                     let mut names = PhpArray::new();
                     let mut types = PhpArray::new();
                     for (n, t) in ents {
                         names.push(svec(n));
-                        types.push(Value::Long(t));
+                        types.push(Value::Long(t as i64));
                     }
                     set_prop(obj, b"__spl_dir_names", val_arr(names));
                     set_prop(obj, b"__spl_dir_types", val_arr(types));

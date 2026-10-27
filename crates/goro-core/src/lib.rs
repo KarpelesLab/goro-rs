@@ -38,6 +38,7 @@ pub mod internal_iterator;
 pub mod ob;
 pub mod object;
 pub mod opcode;
+pub mod oslistdir;
 pub mod preload;
 pub mod proptable;
 pub mod random;

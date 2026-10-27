@@ -7399,6 +7399,20 @@ fn method_this_hidden(lower: &[u8], op: &OpArray) -> usize {
         && op.cv_names.first().is_some_and(|n| n == b"this")) as usize
 }
 
+/// Whether "Class::method" names a static method.
+#[inline(never)]
+fn static_method_named(vm: &Vm, name: &[u8]) -> bool {
+    let Some(p) = name.windows(2).position(|w| w == b"::") else {
+        return false;
+    };
+    let class = name[..p]
+        .strip_prefix(b"\\")
+        .unwrap_or(&name[..p])
+        .to_ascii_lowercase();
+    let method = name[p + 2..].to_ascii_lowercase();
+    rmethod(vm, &class, &method).is_some_and(|m| m.is_static)
+}
+
 pub(crate) fn rfunc<'a>(vm: &'a Vm, lower: &[u8]) -> Option<&'a OpArray> {
     if let Some(op) = vm.user_functions.get(lower) {
         return Some(op);
@@ -8078,16 +8092,21 @@ pub fn reflection_function_method(
         }
         b"isstatic" => {
             // Closures declared `static function()` carry is_static_closure on
-            // their OpArray. For free functions this is always false.
-            if let Some(op_array) = vm.user_functions.get(func_lower.as_slice()) {
-                Some(if op_array.is_static_closure {
-                    Value::True
-                } else {
-                    Value::False
+            // their OpArray. For free functions this is always false; a
+            // closure of a static method (Class::m(...), fromCallable())
+            // is static.
+            let st = vm
+                .user_functions
+                .get(func_lower.as_slice())
+                .is_some_and(|op| {
+                    op.is_static_closure
+                        || op
+                            .fcc_target_name
+                            .as_deref()
+                            .is_some_and(|t| static_method_named(vm, t))
                 })
-            } else {
-                Some(Value::False)
-            }
+                || static_method_named(vm, &func_lower);
+            Some(if st { Value::True } else { Value::False })
         }
         b"innamespace" => {
             let ob = obj.borrow();

@@ -305,7 +305,6 @@ impl Vm {
         let n = call_args.len();
         let this_cv = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
         let first_obj = matches!(call_args.first(), Some(Value::Object(_)));
-        let hidden = lead;
         let callback_closure = self.callback_closure.take();
         // The frame's name (as execute_fn_with_named_args names it).
         let mut frame_display = self.string_pool.pop().unwrap_or_default();
@@ -318,8 +317,9 @@ impl Vm {
         for (slot, a) in func_cvs.iter_mut().zip(&call_args[..n.min(nparams)]) {
             *slot = a.clone();
         }
-        // By-value array parameters get their own copy.
-        for slot in func_cvs.iter_mut().skip(hidden) {
+        // By-value array parameters (and a closure's values captured by
+        // value: each call starts from them) get their own copy.
+        for slot in func_cvs.iter_mut() {
             if let Value::Array(a) = slot {
                 if Rc::strong_count(a) > 1 {
                     *slot = Value::Array(crate::array::cow_copy_new(a));

@@ -299,30 +299,10 @@ impl Vm {
     /// `pt` with self / parent replaced by the declaring class / its parent
     /// (an unresolvable parent by a type nothing satisfies).
     fn sp_resolve_relative_type(&self, pt: ParamType, slot: &StaticPropSlot) -> ParamType {
-        fn walk(pt: ParamType, selfn: &[u8], parent: Option<&[u8]>) -> ParamType {
-            match pt {
-                ParamType::Simple(n) if n.eq_ignore_ascii_case(b"self") => {
-                    ParamType::Simple(selfn.to_vec())
-                }
-                ParamType::Simple(n) if n.eq_ignore_ascii_case(b"parent") => ParamType::Simple(
-                    parent
-                        .map(|p| p.to_vec())
-                        .unwrap_or_else(|| b"\0never".to_vec()),
-                ),
-                ParamType::Nullable(i) => ParamType::Nullable(Box::new(walk(*i, selfn, parent))),
-                ParamType::Union(v) => {
-                    ParamType::Union(v.into_iter().map(|t| walk(t, selfn, parent)).collect())
-                }
-                ParamType::Intersection(v) => {
-                    ParamType::Intersection(v.into_iter().map(|t| walk(t, selfn, parent)).collect())
-                }
-                other => other,
-            }
-        }
         let Some((_, ce)) = self.classes.get_index(slot.decl) else {
             return pt;
         };
-        walk(pt, &ce.name, ce.parent.as_deref())
+        resolve_relative_type(pt, &ce.name, ce.parent.as_deref())
     }
 
     /// Lowercase key of the declaring class.
@@ -2033,5 +2013,39 @@ fn const_operand<'a>(op_array: &'a OpArray, o: &crate::opcode::OperandType) -> O
     match o {
         crate::opcode::OperandType::Const(c) => op_array.literals.get(*c as usize),
         _ => None,
+    }
+}
+
+/// `pt` with self / parent replaced by `selfn` / `parent` (an unresolvable
+/// parent by a type nothing satisfies).
+#[inline(never)]
+pub(crate) fn resolve_relative_type(
+    pt: ParamType,
+    selfn: &[u8],
+    parent: Option<&[u8]>,
+) -> ParamType {
+    match pt {
+        ParamType::Simple(n) if n.eq_ignore_ascii_case(b"self") => {
+            ParamType::Simple(selfn.to_vec())
+        }
+        ParamType::Simple(n) if n.eq_ignore_ascii_case(b"parent") => ParamType::Simple(
+            parent
+                .map(|p| p.to_vec())
+                .unwrap_or_else(|| b"\0never".to_vec()),
+        ),
+        ParamType::Nullable(i) => {
+            ParamType::Nullable(Box::new(resolve_relative_type(*i, selfn, parent)))
+        }
+        ParamType::Union(v) => ParamType::Union(
+            v.into_iter()
+                .map(|t| resolve_relative_type(t, selfn, parent))
+                .collect(),
+        ),
+        ParamType::Intersection(v) => ParamType::Intersection(
+            v.into_iter()
+                .map(|t| resolve_relative_type(t, selfn, parent))
+                .collect(),
+        ),
+        other => other,
     }
 }

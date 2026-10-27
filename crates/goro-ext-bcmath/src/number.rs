@@ -778,9 +778,10 @@ fn number_method_inner(vm: &mut Vm, args: &[Value]) -> R {
     }
 }
 
+/// The calling code's strict_types (the methods parse their own arguments,
+/// see Vm::internal_method_strict).
 fn strict(vm: &Vm) -> bool {
-    let _ = vm;
-    false
+    vm.internal_method_strict
 }
 
 /// Z_PARAM_STR_OR_LONG / BCMATH_PARAM_NUMBER_OR_STR_OR_LONG for argument
@@ -844,7 +845,7 @@ fn num_arg_zpp(
         }
     }
     let line = vm.current_line;
-    let coerced = if matches!(v, Value::Null | Value::Undef) {
+    let coerced = if matches!(v, Value::Null | Value::Undef) && !strict(vm) {
         let ty = if allow_number {
             "BcMath\\Number|string|int"
         } else {
@@ -958,7 +959,7 @@ fn construct(vm: &mut Vm, m: &Method, obj: &Rc<RefCell<PhpObject>>, list: &[Valu
     let v = list[0].clone();
     // Z_PARAM_STR_OR_LONG
     let line = vm.current_line;
-    let c = if matches!(v, Value::Null | Value::Undef) {
+    let c = if matches!(v, Value::Null | Value::Undef) && !strict(vm) {
         let msg = format!(
             "{}::__construct(): Passing null to parameter #1 ($num) of type string|int is deprecated",
             CLASS_DISPLAY

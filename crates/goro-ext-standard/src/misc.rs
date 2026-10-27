@@ -6973,7 +6973,6 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 | b"valid"
                 | b"getreturn"
         ),
-        b"stdclass" => method_lower == b"__construct",
         b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => matches!(
             method_lower.as_slice(),
             b"__construct"
@@ -7003,8 +7002,7 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         ),
         b"spldoublylinkedlist" | b"splstack" | b"splqueue" => matches!(
             method_lower.as_slice(),
-            b"__construct"
-                | b"count"
+            b"count"
                 | b"push"
                 | b"pop"
                 | b"shift"
@@ -11231,6 +11229,13 @@ fn class_is_a(vm: &Vm, class_name: &[u8], check_name: &[u8]) -> bool {
     let check_name = check_name.strip_prefix(b"\\").unwrap_or(check_name);
     let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
     let check_lower: Vec<u8> = check_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+    // (a class_alias() names the class it aliases)
+    let check_lower = vm
+        .alias_canonical_lower(&check_lower)
+        .unwrap_or(check_lower);
+    let class_lower = vm
+        .alias_canonical_lower(&class_lower)
+        .unwrap_or(class_lower);
 
     // Direct match
     if class_lower == check_lower {
@@ -11248,6 +11253,10 @@ fn class_is_a(vm: &Vm, class_name: &[u8], check_name: &[u8]) -> bool {
     if goro_core::vm::is_builtin_subclass(&class_lower, &check_lower) {
         return true;
     }
+    // (a class declaring __toString() implements Stringable, its subclasses too)
+    if check_lower == b"stringable" && vm.class_implements_interface(&class_lower, b"stringable") {
+        return true;
+    }
 
     // Walk the parent chain
     let mut current = class_lower;
@@ -11259,7 +11268,11 @@ fn class_is_a(vm: &Vm, class_name: &[u8], check_name: &[u8]) -> bool {
         // Check interfaces
         for iface in &class_entry.interfaces {
             let iface_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if iface_lower == check_lower {
+            if iface_lower == check_lower
+                || vm
+                    .alias_canonical_lower(&iface_lower)
+                    .is_some_and(|c| c == check_lower)
+            {
                 return true;
             }
             // Check parent interfaces too
@@ -11304,7 +11317,11 @@ fn class_is_a_interface(vm: &Vm, iface_name: &[u8], check_name: &[u8]) -> bool {
                 .iter()
                 .map(|b| b.to_ascii_lowercase())
                 .collect();
-            if pi_lower == check_name {
+            if pi_lower == check_name
+                || vm
+                    .alias_canonical_lower(&pi_lower)
+                    .is_some_and(|c| c == check_name)
+            {
                 return true;
             }
             if class_is_a_interface(vm, &pi_lower, check_name) {
@@ -11768,14 +11785,15 @@ pub(crate) struct DirHandle {
 }
 
 fn read_dir_entries(path: &str) -> std::io::Result<Vec<String>> {
-    let entries = std::fs::read_dir(msg_path(path))?;
-    let mut names: Vec<String> = vec![".".to_string(), "..".to_string()];
-    for e in entries.flatten() {
-        names.push(os_msg(&e.file_name()));
-    }
-    names.sort();
+    use std::os::unix::ffi::OsStrExt;
+    let p = msg_path(path);
+    let mut names: Vec<String> =
+        goro_core::oslistdir::readdir_entries(p.as_os_str().as_bytes())?
+            .into_iter()
+            .map(|(n, _)| os_msg(std::ffi::OsStr::from_bytes(&n)))
+            .collect();
     // Reverse so we can pop from the end efficiently while still feeding entries
-    // in ascending order.
+    // in readdir order.
     names.reverse();
     Ok(names)
 }
@@ -15144,12 +15162,13 @@ fn scandir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         goro_core::value::alloc_resource_id();
         return Ok(Value::Array(Rc::new(RefCell::new(arr))));
     }
-    match std::fs::read_dir(msg_path(&dir_str)) {
-        Ok(entries) => {
-            let mut names: Vec<Vec<u8>> = vec![b".".to_vec(), b"..".to_vec()];
-            for e in entries.flatten() {
-                names.push(goro_core::fspath::os_bytes(&e.file_name()).into_owned());
-            }
+    let dir_p = msg_path(&dir_str);
+    match goro_core::oslistdir::readdir_entries({
+        use std::os::unix::ffi::OsStrExt;
+        dir_p.as_os_str().as_bytes()
+    }) {
+        Ok(ents) => {
+            let mut names: Vec<Vec<u8>> = ents.into_iter().map(|(n, _)| n).collect();
             // PHP_SCANDIR_SORT_ASCENDING (0), _NONE (2), anything else descends.
             if sort_order == 0 {
                 names.sort();

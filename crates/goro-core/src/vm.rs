@@ -2522,6 +2522,10 @@ pub struct Vm {
     pub loadable_modules: Vec<(&'static [u8], fn(&mut Vm))>,
     /// Whether the current caller has strict_types=1 (set before calling builtins)
     pub caller_strict_types: bool,
+    /// strict_types of the code that last called a method of an internal
+    /// class declared by an extension's PHP prelude (internal_sig set): its
+    /// argument parsing follows that caller, not the prelude.
+    pub internal_method_strict: bool,
     pub stored_attr_op_arrays: Vec<OpArray>,
     /// Weak reference storage: maps a unique ID to a Weak<RefCell<PhpObject>>
     /// Used by WeakReference objects (store the weak_ref_id as an internal property)
@@ -3871,6 +3875,7 @@ impl Vm {
             loadable_modules: Vec::new(),
             shutdown_hooks: Vec::new(),
             caller_strict_types: false,
+            internal_method_strict: false,
             stored_attr_op_arrays: Vec::new(),
             weak_refs: HashMap::new(),
             next_weak_ref_id: 1,
@@ -12280,6 +12285,11 @@ impl Vm {
                 }
             }
             ob.remove_property(b"__lazy_state");
+        } else if state_bytes == b"proxy" {
+            // zend_lazy_object_init_proxy(): while its factory runs the proxy
+            // is a plain object (no reentrant initialization: a clone of it
+            // is not lazy); it is lazy again if the factory fails.
+            obj.borrow_mut().remove_property(b"__lazy_state");
         }
         let this_val = Value::Object(obj.clone());
         let exc_before = self.current_exception.is_some();
@@ -12332,6 +12342,8 @@ impl Vm {
             }
         }
         if state_bytes == b"proxy" {
+            obj.borrow_mut()
+                .set_property(b"__lazy_state".to_vec(), state.clone());
             // zend_lazy_object_init_proxy(): effects of a failed factory on
             // the proxy are kept; the proxy stays lazy.
             if threw {
@@ -14332,7 +14344,29 @@ impl Vm {
     /// Write to the output buffer
     /// Check if class_name extends target_name through the parent chain
     pub fn class_extends(&self, class_name: &[u8], target_name: &[u8]) -> bool {
+        if let Some(t) = self.alias_canonical_lower(target_name) {
+            return self.class_extends_any(class_name, &[&t]);
+        }
         self.class_extends_any(class_name, &[target_name])
+    }
+
+    /// The lowercase declared name of the class `lower` names when it is a
+    /// class_alias() (None: not an alias).
+    #[inline]
+    pub fn alias_canonical_lower(&self, lower: &[u8]) -> Option<Vec<u8>> {
+        if self.class_aliases.is_empty() {
+            return None;
+        }
+        self.alias_canonical_lower_slow(lower)
+    }
+
+    #[inline(never)]
+    fn alias_canonical_lower_slow(&self, lower: &[u8]) -> Option<Vec<u8>> {
+        let ce = self.classes.get(lower)?;
+        if ce.name.eq_ignore_ascii_case(lower) {
+            return None;
+        }
+        Some(ce.name.to_ascii_lowercase())
     }
 
     /// `class_extends(c, t1) || class_extends(c, t2) || ...` in one walk up
@@ -14641,6 +14675,14 @@ impl Vm {
     /// Walks up the parent chain and checks each class's interfaces list.
     #[inline(never)]
     fn class_implements_interface_walk(&self, class_name: &[u8], iface_name: &[u8]) -> bool {
+        // (an interface named by a class_alias() of it)
+        if let Some(t) = self.alias_canonical_lower(iface_name) {
+            return self.class_implements_interface_of(class_name, &t);
+        }
+        self.class_implements_interface_of(class_name, iface_name)
+    }
+
+    fn class_implements_interface_of(&self, class_name: &[u8], iface_name: &[u8]) -> bool {
         // Stringable: any class with __toString() automatically implements Stringable
         if iface_name == b"stringable" {
             let mut cur: Vec<u8> = class_name.to_vec();
@@ -14681,7 +14723,7 @@ impl Vm {
                     // class_implements_interface(I2, I1) won't find it via the
                     // `interfaces` loop, so we also walk the parent chain of
                     // the interface here.
-                    if self.class_implements_interface(&iface_lower, iface_name) {
+                    if self.class_implements_interface_of(&iface_lower, iface_name) {
                         return true;
                     }
                     // Walk the iface's parent chain explicitly so interface
@@ -20324,6 +20366,18 @@ impl Vm {
         self.throwable_builtin_method(obj, named_lower, method_lower)
     }
 
+    /// Exception::getMessage() / getFile() / getLine() of a property not of
+    /// its type: zval_get_string() (a Stringable's __toString()) /
+    /// zval_get_long().
+    #[inline(never)]
+    pub(crate) fn throwable_getter_cast(&mut self, method_lower: &[u8], v: Value) -> Value {
+        let v = v.deref();
+        if method_lower == b"getline" {
+            return Value::Long(v.to_long());
+        }
+        Value::String(self.value_to_string(&v))
+    }
+
     /// The internal methods of Exception / Error (final getters,
     /// getTraceAsString(), __toString()) called from internal code
     /// (call_user_func(), array_map(), ...).
@@ -20357,11 +20411,18 @@ impl Vm {
             return None;
         }
         let prop = |name: &[u8]| obj.borrow().get_property(name);
+        let cast = |vm: &mut Self, v: Value| {
+            if throwable_getter_needs_cast(method_lower, &v) {
+                vm.throwable_getter_cast(method_lower, v)
+            } else {
+                v
+            }
+        };
         Some(match method_lower {
-            b"getmessage" => prop(b"message"),
+            b"getmessage" => cast(self, prop(b"message")),
             b"getcode" => prop(b"code"),
-            b"getfile" => prop(b"file"),
-            b"getline" => prop(b"line"),
+            b"getfile" => cast(self, prop(b"file")),
+            b"getline" => cast(self, prop(b"line")),
             b"gettrace" => obj.borrow().throwable_get(b"trace"),
             b"getprevious" => obj.borrow().throwable_get(b"previous"),
             b"getseverity" => {
@@ -36665,6 +36726,9 @@ impl Vm {
                                 top.3 = call.args.iter().skip(skip).cloned().collect();
                             }
                         }
+                        if user_fn.internal_sig.is_some() {
+                            self.internal_method_strict = op_array.strict_types;
+                        }
 
                         // Check parameter types before executing
                         if !user_fn.param_types.is_empty()
@@ -46593,6 +46657,8 @@ impl Vm {
                             .unwrap_or(class_lower),
                         _ => class_lower,
                     };
+                    // (a class_alias() names the class it aliases)
+                    let class_lower = self.alias_canonical_lower(&class_lower).unwrap_or(class_lower);
 
                     let result = if class_lower == b"closure" {
                         // (a Closure object; a string or array is never an
@@ -64123,6 +64189,16 @@ impl Vm {
                         } else {
                             None
                         };
+                        let builtin_result = match builtin_result {
+                            Some(v)
+                                if is_throwable
+                                    && !has_user_method
+                                    && throwable_getter_needs_cast(&method_name_lower, &v) =>
+                            {
+                                Some(self.throwable_getter_cast(&method_name_lower, v))
+                            }
+                            r => r,
+                        };
                         if let Some(n) = &observed_getter {
                             self.observe_internal_end(n, builtin_result.as_ref());
                         }
@@ -69120,6 +69196,17 @@ impl Default for Vm {
 
 /// Whether internal class `child` extends or implements `parent` (both
 /// lowercased; a class is not its own subclass).
+/// Whether Throwable getter `method_lower`'s property value `v` needs
+/// Vm::throwable_getter_cast().
+#[inline]
+pub(crate) fn throwable_getter_needs_cast(method_lower: &[u8], v: &Value) -> bool {
+    match method_lower {
+        b"getmessage" | b"getfile" => !matches!(v, Value::String(_)),
+        b"getline" => !matches!(v, Value::Long(_)),
+        _ => false,
+    }
+}
+
 pub fn is_builtin_subclass(child: &[u8], parent: &[u8]) -> bool {
     child != parent && crate::stubs::stub_instanceof(child, parent).unwrap_or(false)
 }

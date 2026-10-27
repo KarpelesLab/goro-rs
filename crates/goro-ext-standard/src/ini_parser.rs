@@ -424,6 +424,12 @@ impl<'a> Scanner<'a> {
                 if e > start + 1 && self.at(e) == b'\'' {
                     cand(e + 1 - start, 2, &mut best);
                 }
+                // An unterminated raw string runs past the end of the
+                // buffer: YYFILL() ends the scan (an unexpected end of file).
+                if e >= self.d.len() {
+                    self.pos = self.d.len();
+                    return (Tok::End, Sv::empty());
+                }
             }
             if matches!(st, SectionRaw | SectionValue) && c0 == b']' {
                 let t = self.m_tabs(start + 1);
