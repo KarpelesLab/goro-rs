@@ -15696,14 +15696,33 @@ impl Compiler {
         } else {
             &args[1..]
         };
-        let rest: Vec<Argument> = rest
-            .iter()
-            .map(|a| Argument {
-                name: None,
-                value: a.value.clone(),
-                unpack: cufa,
-            })
-            .collect();
+        // (a literal list of arguments is passed as they are: extract()
+        // and compact() are compiled for plain arguments only)
+        let literal_list = match &args.get(1).map(|a| &a.value.kind) {
+            Some(ExprKind::Array(e)) if cufa && !e.is_empty() => e
+                .iter()
+                .all(|el| el.key.is_none() && !el.unpack && !el.by_ref)
+                .then_some(e),
+            _ => None,
+        };
+        let rest: Vec<Argument> = if let Some(elems) = literal_list {
+            elems
+                .iter()
+                .map(|el| Argument {
+                    name: None,
+                    value: el.value.clone(),
+                    unpack: false,
+                })
+                .collect()
+        } else {
+            rest.iter()
+                .map(|a| Argument {
+                    name: None,
+                    value: a.value.clone(),
+                    unpack: cufa,
+                })
+                .collect()
+        };
         let call = Expr {
             span: expr.span,
             kind: ExprKind::FunctionCall {

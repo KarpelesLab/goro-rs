@@ -5266,6 +5266,54 @@ impl Vm {
         true
     }
 
+    /// extract() checks its arguments (zpp, then $flags and $prefix)
+    /// before zend_forbid_dynamic_call().
+    #[inline(never)]
+    pub fn extract_args_error(args: &[Value]) -> Option<(&'static [u8], String)> {
+        let arr = args.first()?.deref();
+        if !matches!(arr, Value::Array(_)) {
+            return Some((
+                b"TypeError",
+                format!(
+                    "extract(): Argument #1 ($array) must be of type array, {} given",
+                    Self::value_type_name(&arr)
+                ),
+            ));
+        }
+        let flags = match args.get(1).map(|v| v.deref()) {
+            None => 0,
+            Some(Value::Long(n)) => n,
+            Some(_) => return None,
+        };
+        let ty = flags & 0xff;
+        if !(0..=6).contains(&ty) {
+            return Some((
+                b"ValueError",
+                "extract(): Argument #2 ($flags) must be a valid extract type".to_string(),
+            ));
+        }
+        if ty > 1 && ty <= 5 && args.len() < 3 {
+            return Some((
+                b"ValueError",
+                "extract(): Argument #3 ($prefix) is required when using this extract type"
+                    .to_string(),
+            ));
+        }
+        if let Some(Value::String(p)) = args.get(2).map(|v| v.deref()) {
+            let b = p.as_bytes();
+            let ok = b.first().is_none_or(|&c| c == b'_' || c.is_ascii_alphabetic() || c >= 0x80)
+                && b.iter()
+                    .all(|&c| c == b'_' || c.is_ascii_alphanumeric() || c >= 0x80);
+            if !ok {
+                return Some((
+                    b"ValueError",
+                    "extract(): Argument #3 ($prefix) must be a valid identifier".to_string(),
+                ));
+            }
+        }
+        None
+    }
+
     /// func_get_arg()/func_get_args()/func_num_args() called dynamically
     /// check their $position, then (when called from the code itself, not
     /// through an internal function's frame) the calling scope, before
@@ -5279,6 +5327,11 @@ impl Vm {
         msg: String,
         from_code: bool,
     ) -> (&'static [u8], String) {
+        if cls == b"Error" && lname == b"extract" {
+            if let Some(e) = Self::extract_args_error(args) {
+                return e;
+            }
+        }
         if cls != b"Error" || !lname.starts_with(b"func_") {
             return (cls, msg);
         }
@@ -6009,6 +6062,7 @@ impl Vm {
                         .strip_prefix(b"\\")
                         .unwrap_or(s.as_bytes())
                         .to_ascii_lowercase();
+                    let (cls, msg) = self.func_args_call_error(&lname, args, cls, msg, false);
                     self.push_builtin_frame(&lname, args, 0);
                     let exc = self.create_exception(cls, &msg, self.current_line);
                     self.pop_builtin_frame();

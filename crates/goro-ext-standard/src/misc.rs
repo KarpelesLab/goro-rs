@@ -2141,12 +2141,17 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 .strip_prefix(b"\\")
                 .unwrap_or(s.as_bytes())
                 .to_ascii_lowercase();
-            let direct = vm.ucf_call_line.is_some();
-            let (cls, msg) = vm.func_args_call_error(&lname, &args[1..], cls, msg, direct);
+            let direct = vm.ucf_call_line.take();
+            let (cls, msg) =
+                vm.func_args_call_error(&lname, &args[1..], cls, msg, direct.is_some());
+            // (the callee's frame: at the call site for a direct
+            // call_user_func(), else "[internal function]")
+            vm.push_builtin_frame(&lname, &args[1..], direct.unwrap_or(0));
             let exc = vm.create_exception(cls, &msg, vm.current_line);
+            vm.pop_builtin_frame();
             vm.current_exception = Some(exc);
             return Err(VmError {
-                message: format!("Uncaught Error: {}", msg),
+                message: format!("Uncaught {}: {}", String::from_utf8_lossy(cls), msg),
                 line: vm.current_line,
             });
         }
@@ -7050,11 +7055,19 @@ fn is_object(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         _ => Value::False,
     })
 }
-fn extract_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn extract_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // extract() is compiled to the dedicated OpCode::Extract since it modifies
-    // the caller's local scope. This stub exists only so that
-    // function_exists('extract') and call_user_func('extract', ...) don't fail.
-    Ok(Value::Long(0))
+    // the caller's local scope: this is a call through zend_call_function()
+    // (ReflectionFunction::invoke() & co.), which checks its arguments, then
+    // zend_forbid_dynamic_call().
+    let (cls, msg) = Vm::extract_args_error(args)
+        .unwrap_or((b"Error", "Cannot call extract() dynamically".to_string()));
+    let exc = vm.create_exception(cls, &msg, vm.current_line);
+    vm.current_exception = Some(exc);
+    Err(VmError {
+        message: format!("Uncaught {}: {}", String::from_utf8_lossy(cls), msg),
+        line: vm.current_line,
+    })
 }
 /// array_column_fetch_prop()
 fn array_column_fetch(vm: &mut Vm, data: &Value, name: &Value) -> Option<Value> {
