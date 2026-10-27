@@ -1506,81 +1506,14 @@ fn format_f0(d: f64) -> String {
     if s == "-0" { "-0".to_string() } else { s }
 }
 
-/// zend_gcvt(value, precision, '.', 'E')
+/// zend_gcvt(value, precision, '.', 'E') (INF/NAN cut to `ndigit`
+/// characters by its snprintf())
 pub fn gcvt_upper(value: f64, ndigit: i32) -> String {
-    let mode0 = ndigit < 0;
-    let ndigit = if mode0 { 17 } else { ndigit.max(1) };
-    if value.is_nan() {
-        return "NAN".to_string();
+    if !value.is_finite() {
+        let nd = if ndigit < 0 { 17 } else { ndigit as usize };
+        return goro_core::value::nonfinite_gcvt(value, nd);
     }
-    if value.is_infinite() {
-        return if value < 0.0 { "-INF" } else { "INF" }.to_string();
-    }
-    // digits and decimal point position (zend_dtoa mode 2 / mode 0)
-    let (digits, decpt): (Vec<u8>, i32) = if value == 0.0 {
-        (b"0".to_vec(), 1)
-    } else {
-        let a = value.abs();
-        let s = if mode0 {
-            format!("{:e}", a)
-        } else {
-            format!("{:.*e}", (ndigit - 1) as usize, a)
-        };
-        let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
-        let exp: i32 = exp.parse().unwrap_or(0);
-        let mut digits: Vec<u8> = mant.bytes().filter(|b| b.is_ascii_digit()).collect();
-        while digits.len() > 1 && digits.last() == Some(&b'0') {
-            digits.pop();
-        }
-        (digits, exp + 1)
-    };
-    let mut dst = String::new();
-    if value.is_sign_negative() && value != 0.0 {
-        dst.push('-');
-    }
-    let mut decpt = decpt;
-    if (decpt >= 0 && decpt > ndigit) || decpt < -3 {
-        decpt -= 1;
-        let neg = decpt < 0;
-        if neg {
-            decpt = -decpt;
-        }
-        dst.push(digits[0] as char);
-        dst.push('.');
-        if digits.len() == 1 {
-            dst.push('0');
-        } else {
-            for &d in &digits[1..] {
-                dst.push(d as char);
-            }
-        }
-        dst.push('E');
-        dst.push(if neg { '-' } else { '+' });
-        dst.push_str(&decpt.to_string());
-    } else if decpt < 0 {
-        dst.push_str("0.");
-        for _ in 0..(-decpt) {
-            dst.push('0');
-        }
-        for &d in &digits {
-            dst.push(d as char);
-        }
-    } else {
-        let dp = decpt as usize;
-        for i in 0..dp {
-            dst.push(digits.get(i).copied().unwrap_or(b'0') as char);
-        }
-        if digits.len() > dp {
-            if dp == 0 {
-                dst.push('0');
-            }
-            dst.push('.');
-            for &d in &digits[dp..] {
-                dst.push(d as char);
-            }
-        }
-    }
-    dst
+    String::from_utf8_lossy(&goro_core::value::zend_gcvt(value, ndigit, b'.', b'E')).into_owned()
 }
 
 fn to_xml_double(
