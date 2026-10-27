@@ -543,6 +543,10 @@ impl Ctx {
 
     /// The I/O warning of a failed xmlLoadExternalEntity.
     fn io_warning(&self, vm: &mut Vm, url: &str) {
+        // (a warning of the sub-parser, which uses the XInclude parse flags)
+        if self.parse_flags & crate::parser::XML_PARSE_NOWARNING != 0 {
+            return;
+        }
         // XML_IO_ENOENT
         let mut e = XmlError::simple(
             FROM_IO,
