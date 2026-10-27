@@ -7951,6 +7951,12 @@ impl Vm {
         } else {
             "function"
         };
+        // (a method is named after its scope: the class declaring it)
+        let display = if kind == "method" {
+            self.method_declaring_display(display.to_string())
+        } else {
+            display.to_string()
+        };
         let mut msg = format!(
             "The return value of {} {}() should either be used or intentionally ignored by casting it as (void)",
             kind, display

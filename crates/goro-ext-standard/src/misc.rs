@@ -11249,7 +11249,7 @@ fn class_is_a(vm: &Vm, class_name: &[u8], check_name: &[u8]) -> bool {
         .unwrap_or(class_lower);
 
     // Direct match
-    if class_lower == check_lower {
+    if class_lower == check_lower || canonical_class_lower(vm, &class_lower) == check_lower {
         return true;
     }
 
@@ -11315,6 +11315,15 @@ fn class_is_a(vm: &Vm, class_name: &[u8], check_name: &[u8]) -> bool {
     }
 
     false
+}
+
+/// The lower-cased name of the class entry `name` (maybe an alias) names.
+fn canonical_class_lower(vm: &Vm, name: &[u8]) -> Vec<u8> {
+    let l = name.to_ascii_lowercase();
+    match vm.classes.get(&l) {
+        Some(c) => c.name.to_ascii_lowercase(),
+        None => l,
+    }
 }
 
 fn class_is_a_interface(vm: &Vm, iface_name: &[u8], check_name: &[u8]) -> bool {
