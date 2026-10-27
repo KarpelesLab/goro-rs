@@ -789,7 +789,6 @@ pub(crate) fn drops_quietly_deep(
 /// drops_quietly_deep() while objects awaiting their destructor exist:
 /// no such object is reached either (one held by its list and by what is
 /// released would be garbage then: see Vm::quiet_release_budget).
-#[inline]
 pub(crate) fn drops_quietly_listed(
     v: &Value,
     budget: &mut u32,
@@ -798,6 +797,21 @@ pub(crate) fn drops_quietly_listed(
     drops_quietly::<true>(v, budget, globals)
 }
 
+/// (the recursion of drops_quietly(): through the function of its kind)
+#[inline(always)]
+fn drops_quietly_rec<const LISTED: bool>(
+    v: &Value,
+    budget: &mut u32,
+    globals: &Rc<RefCell<crate::array::PhpArray>>,
+) -> bool {
+    if LISTED {
+        drops_quietly_listed(v, budget, globals)
+    } else {
+        drops_quietly_deep(v, budget, globals)
+    }
+}
+
+#[inline(always)]
 fn drops_quietly<const LISTED: bool>(
     v: &Value,
     budget: &mut u32,
@@ -833,7 +847,7 @@ fn drops_quietly<const LISTED: bool>(
                         | Value::Long(_)
                         | Value::Double(_)
                         | Value::String(_)
-                ) || drops_quietly::<LISTED>(v, budget, globals)
+                ) || drops_quietly_rec::<LISTED>(v, budget, globals)
             })
         }
         Value::Object(o) => {
@@ -872,13 +886,13 @@ fn drops_quietly<const LISTED: bool>(
                         | Value::Long(_)
                         | Value::Double(_)
                         | Value::String(_)
-                ) || drops_quietly::<LISTED>(v, budget, globals)
+                ) || drops_quietly_rec::<LISTED>(v, budget, globals)
             })
         }
         Value::Reference(r) => {
             Rc::strong_count(r) > 1
                 || r.try_borrow()
-                    .is_ok_and(|b| drops_quietly::<LISTED>(&b, budget, globals))
+                    .is_ok_and(|b| drops_quietly_rec::<LISTED>(&b, budget, globals))
         }
         Value::Generator(g) => Rc::strong_count(g) > 1,
         Value::Resource(_) => false,
@@ -1246,7 +1260,7 @@ pub(crate) fn fast_op(
 /// handles on it are the cycle collector's own (its list of objects, its
 /// root buffer slot: PhpObject's drop releases the slot); any other one
 /// (WeakReference, a foreach over it...) takes the general handler.
-#[inline]
+#[inline(always)]
 pub(crate) fn object_release_quiet(o: &Rc<RefCell<crate::object::PhpObject>>) -> bool {
     if Rc::strong_count(o) != 1 {
         return false;
@@ -2452,6 +2466,11 @@ fn consumed_tmps(
     consumed_tmps_of(m, ops, ip, op, tmps, no_release, globals)
 }
 
+/// consumed_tmps()'s flag of a release made while objects with a
+/// destructor exist: the release point it is steps over its scan (see
+/// Vm::quiet_release_budget).
+pub(crate) const QUIET_REL: u8 = 0x80;
+
 /// consumed_tmps() of an opcode consuming temporaries (free mask `m`).
 #[inline(never)]
 fn consumed_tmps_of(
@@ -2483,25 +2502,37 @@ fn consumed_tmps_of(
         let OperandType::Tmp(i) = o else {
             continue;
         };
+        // (while objects with a destructor exist, the release is a release
+        // point that may find nothing to do: QUIET_REL; an object such
+        // that its list is its only other holder would be due then)
         let shared = match tmps.get(*i as usize) {
+            Some(Value::Object(x)) if !no_release => {
+                Rc::strong_count(x) > 2
+                    || Rc::strong_count(x) == 2 && x.try_borrow().is_ok_and(|o| !o.dtor_listed.get())
+            }
             Some(Value::Object(x)) => Rc::strong_count(x) > 1,
             Some(Value::Array(x)) => Rc::strong_count(x) > 1,
             _ => continue,
         };
-        if !no_release {
-            return None;
-        }
         if !shared {
             let stored = b == 2
                 && matches!(
                     op.opcode,
                     OpCode::ArraySet | OpCode::ArrayAppend | OpCode::PropertySet
                 );
-            if !stored || !drops_quietly_deep(&tmps[*i as usize], &mut 256, globals) {
+            let quiet = if no_release {
+                drops_quietly_deep(&tmps[*i as usize], &mut 256, globals)
+            } else {
+                drops_quietly_listed(&tmps[*i as usize], &mut 256, globals)
+            };
+            if !stored || !quiet {
                 return None;
             }
         }
         rel |= b;
+        if !no_release {
+            rel |= QUIET_REL;
+        }
     }
     Some(rel)
 }
@@ -3036,6 +3067,31 @@ impl crate::vm::Vm {
                 }
             };
         }
+        // The temporaries an opcode consumes (see consumed_tmps()); then
+        // their release once it ran (with the release point it is, see
+        // QUIET_REL).
+        macro_rules! consumed {
+            ($run:lifetime, $op:expr, $ip:expr) => {{
+                let Some(rel) =
+                    consumed_tmps(free_mask.get(), ops, $ip, $op, tmps, no_release, &self.globals)
+                else {
+                    break $run $ip;
+                };
+                if rel & QUIET_REL != 0 && !quiet_ok!() {
+                    break $run $ip;
+                }
+                rel
+            }};
+        }
+        macro_rules! released {
+            ($rel:expr, $f:expr, $op:expr) => {{
+                let f = release_consumed($rel, $f, $op, tmps);
+                if $rel & QUIET_REL != 0 && !matches!(f, Fast::No) {
+                    quiet_took!();
+                }
+                f
+            }};
+        }
         let next = 'run: loop {
             let Some(op) = ops.get(ip) else {
                 break 'run ip;
@@ -3058,6 +3114,9 @@ impl crate::vm::Vm {
                 // A call by a constant plain function name (see the
                 // INIT_FCALL arm of the dispatch loop).
                 OpCode::InitFCall => {
+                    // (a call made here steps over release points too: the
+                    // budget is looked at again)
+                    quiet_left = -1;
                     // (a builtin php-src compiles into an opcode of its own)
                     // (only when no destructor is due: the call's release of
                     // its arguments is then a no-op)
@@ -3068,7 +3127,7 @@ impl crate::vm::Vm {
                     };
                     match special {
                         Some(next) => Fast::Jump(next),
-                        None => match self.init_fcall_fast(op_array, ip, cvs, tmps, no_release) {
+                        None => match self.init_fcall_fast(op_array, ip, cvs, tmps) {
                             0 => match self.fast_func_num_args(op_array, ip, tmps) {
                                 Some(next) => Fast::Jump(next),
                                 None => break 'run ip,
@@ -3196,17 +3255,7 @@ impl crate::vm::Vm {
                     let rel = if matches!(op.op1, OperandType::Tmp(_))
                         || matches!(op.op2, OperandType::Tmp(_))
                     {
-                        let Some(rel) = consumed_tmps(
-                            free_mask.get(),
-                            ops,
-                            ip,
-                            op,
-                            tmps,
-                            no_release,
-                            &self.globals,
-                        ) else {
-                            break 'run ip;
-                        };
+                        let rel = consumed!('run, op, ip);
                         rel
                     } else {
                         0
@@ -3215,26 +3264,16 @@ impl crate::vm::Vm {
                         Some(f) => f,
                         None => self.fast_prop_op(op_array, ip, cvs, tmps),
                     };
-                    release_consumed(rel, f, op, tmps)
+                    released!(rel, f, op)
                 }
                 OpCode::ArrayGet | OpCode::ArraySet | OpCode::ArrayAppend => {
-                    let Some(rel) = consumed_tmps(
-                        free_mask.get(),
-                        ops,
-                        ip,
-                        op,
-                        tmps,
-                        no_release,
-                        &self.globals,
-                    ) else {
-                        break 'run ip;
-                    };
+                    let rel = consumed!('run, op, ip);
                     // (a write into the container the previous opcode fetched)
                     let tmp_container = op.opcode != OpCode::ArrayGet
                         && matches!(op.op1, OperandType::Tmp(_))
                         && fetched_container(op_array, ip, cvs, tmps, literals);
                     let f = self.fast_dim_op(op, cvs, tmps, literals, tmp_container);
-                    release_consumed(rel, f, op, tmps)
+                    released!(rel, f, op)
                 }
                 // `unset($a[k][j])` (see fast_dim_unset_pair)
                 OpCode::ArrayGetWUnset if no_release => {
@@ -3257,19 +3296,9 @@ impl crate::vm::Vm {
                 },
                 // FETCH_DIM_W of an array element (see fast_dim_fetch_w)
                 OpCode::ArrayGetW => {
-                    let Some(rel) = consumed_tmps(
-                        free_mask.get(),
-                        ops,
-                        ip,
-                        op,
-                        tmps,
-                        no_release,
-                        &self.globals,
-                    ) else {
-                        break 'run ip;
-                    };
+                    let rel = consumed!('run, op, ip);
                     let f = self.fast_dim_fetch_w(op_array, ip, cvs, tmps);
-                    release_consumed(rel, f, op, tmps)
+                    released!(rel, f, op)
                 }
                 // `(array) $v` (see fast_cast_array)
                 OpCode::CastArray => {
@@ -3281,53 +3310,23 @@ impl crate::vm::Vm {
                 }
                 // `clone $v` (see fast_clone_obj)
                 OpCode::CloneObj => {
-                    let Some(rel) = consumed_tmps(
-                        free_mask.get(),
-                        ops,
-                        ip,
-                        op,
-                        tmps,
-                        no_release,
-                        &self.globals,
-                    ) else {
-                        break 'run ip;
-                    };
+                    let rel = consumed!('run, op, ip);
                     let f = self.fast_clone_obj(op, cvs, tmps);
-                    release_consumed(rel, f, op, tmps)
+                    released!(rel, f, op)
                 }
                 // `&$cv[k]` (see fast_dim_get_ref)
                 OpCode::ArrayGetRef => fast_dim_get_ref(op, cvs, tmps, literals, &self.globals),
                 // (on an array, FETCH_DIM_IS's isset answers as ISSET_ISEMPTY_DIM's)
                 OpCode::ArrayIsset | OpCode::ArrayIssetFetch => {
-                    let Some(rel) = consumed_tmps(
-                        free_mask.get(),
-                        ops,
-                        ip,
-                        op,
-                        tmps,
-                        no_release,
-                        &self.globals,
-                    ) else {
-                        break 'run ip;
-                    };
+                    let rel = consumed!('run, op, ip);
                     let f = match self.fast_dim_isset(op, cvs, tmps, literals) {
                         Fast::No => fast_dim_isset_scalar(op_array, op, cvs, tmps, literals),
                         f => f,
                     };
-                    release_consumed(rel, f, op, tmps)
+                    released!(rel, f, op)
                 }
                 OpCode::IssetCheck => {
-                    let Some(rel) = consumed_tmps(
-                        free_mask.get(),
-                        ops,
-                        ip,
-                        op,
-                        tmps,
-                        no_release,
-                        &self.globals,
-                    ) else {
-                        break 'run ip;
-                    };
+                    let rel = consumed!('run, op, ip);
                     let f = match fast_isset_check(op, cvs, tmps, literals) {
                         // isset() of a variable that is null or undefined:
                         // false, unless it names a global looked up then
@@ -3356,7 +3355,7 @@ impl crate::vm::Vm {
                         },
                         f => f,
                     };
-                    release_consumed(rel, f, op, tmps)
+                    released!(rel, f, op)
                 }
                 OpCode::CastInt | OpCode::CastString => fast_cast(op, cvs, tmps, literals),
                 OpCode::InitCvNull => fast_init_cv_null(op, cvs),
@@ -3520,19 +3519,9 @@ impl crate::vm::Vm {
                                 && (matches!(op.op1, OperandType::Tmp(_))
                                     || matches!(op.op2, OperandType::Tmp(_))) =>
                         {
-                            let Some(rel) = consumed_tmps(
-                                free_mask.get(),
-                                ops,
-                                ip,
-                                op,
-                                tmps,
-                                no_release,
-                                &self.globals,
-                            ) else {
-                                break 'run ip;
-                            };
+                            let rel = consumed!('run, op, ip);
                             let f = fast_identical_tmp(op, cvs, tmps, literals);
-                            release_consumed(rel, f, op, tmps)
+                            released!(rel, f, op)
                         }
                         f => f,
                     }
@@ -3657,12 +3646,13 @@ impl crate::vm::Vm {
                 // A public method of a user class by a constant name (what
                 // the INIT_METHOD_CALL arm does first)
                 OpCode::InitMethodCall => {
+                    quiet_left = -1;
                     if matches!(op.op2, OperandType::Const(_))
                         && self.init_method_call_fast(op_array, ip, cvs, tmps)
                     {
                         // (with plain arguments: the whole call, see
                         // leancall.rs)
-                        let lean = no_release && self.lean_candidate();
+                        let lean = self.lean_candidate();
                         match lean.then(|| self.lean_fused(op_array, ip, cvs, tmps)) {
                             Some(Some(next)) => Fast::Jump(next),
                             _ => Fast::Done,
@@ -3683,19 +3673,9 @@ impl crate::vm::Vm {
                 },
                 // `list(...) = $v` (see fast_list_ops)
                 OpCode::LoadConst | OpCode::ListGet => {
-                    let Some(rel) = consumed_tmps(
-                        free_mask.get(),
-                        ops,
-                        ip,
-                        op,
-                        tmps,
-                        no_release,
-                        &self.globals,
-                    ) else {
-                        break 'run ip;
-                    };
+                    let rel = consumed!('run, op, ip);
                     let f = fast_list_ops(op, cvs, tmps, literals, &self.globals);
-                    release_consumed(rel, f, op, tmps)
+                    released!(rel, f, op)
                 }
                 // `$a = &$b` (see fast_assign_ref_cv)
                 OpCode::AssignRef if bound.is_none() => {
@@ -3725,7 +3705,8 @@ impl crate::vm::Vm {
                     if self.fast_call_failed.is_some() {
                         break 'run ip;
                     }
-                    if no_release && self.lean_candidate() {
+                    quiet_left = -1;
+                    if self.lean_candidate() {
                         if self.lean_call(op_array, ip, cvs, tmps) {
                             Fast::Done
                         } else if self.lean_depth >= 1 {
@@ -4125,7 +4106,6 @@ impl crate::vm::Vm {
         ip: usize,
         cvs: &[Value],
         tmps: &mut [Value],
-        no_release: bool,
     ) -> usize {
         let op = &op_array.ops[ip];
         let literals = &op_array.literals;
@@ -4143,9 +4123,8 @@ impl crate::vm::Vm {
         if let Some(name) = plain {
             // (a call of a user function with plain arguments: see
             // leancall.rs)
-            if no_release
-                && hint & (crate::opcode::CALL_NOT_DIRECT | crate::opcode::CALL_SENDS)
-                    < crate::opcode::CALL_SENDS
+            if hint & (crate::opcode::CALL_NOT_DIRECT | crate::opcode::CALL_SENDS)
+                < crate::opcode::CALL_SENDS
             {
                 if let Some(next) = self.lean_direct(op_array, ip, name, cvs, tmps) {
                     return next;
@@ -4187,7 +4166,7 @@ impl crate::vm::Vm {
         }
         // (a user function called with plain arguments: the whole call, see
         // leancall.rs)
-        if no_release && self.lean_candidate() {
+        if self.lean_candidate() {
             if let Some(next) = self.lean_fused(op_array, ip, cvs, tmps) {
                 return next;
             }

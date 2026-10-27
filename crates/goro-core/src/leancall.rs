@@ -151,9 +151,12 @@ impl Vm {
     /// the DO_FCALL `op` (its result stored in `tmps`).
     #[inline(always)]
     fn lean_ready(&self, op: &Op, tmps: &[Value]) -> bool {
+        // (objects with a destructor may exist: the callee's opcodes step
+        // over their release points only when they would do nothing, and
+        // the call's end makes those of DO_FCALL's fast path, see
+        // lean_release_point)
         self.lean_resume.is_empty()
             && self.observer.is_none()
-            && !self.has_release_work()
             && matches!(op.result, OperandType::Tmp(_) | OperandType::Unused)
             && tmp_writable(&op.result, tmps)
             && self.error_reporting != crate::errdisplay::ER_SILENT
@@ -229,8 +232,10 @@ impl Vm {
                     // (on an object: its `$this` leads the arguments; with the
                     // frame name and scope its call site resolved, see
                     // MethodCallInfo; a constructor too: the call would arm the
-                    // destructor of its object, but a lean call is only made while
-                    // no object has one, see lean_ready())
+                    // destructor of its object, but the call of one of an
+                    // object with a destructor is handed over, its `$this`
+                    // being one the end of the call may not release, see
+                    // lean_return())
                     Some((sep, false)) => {
                         let sep = sep as usize;
                         if !matches!(call.args.first(), Some(Value::Object(_)))
@@ -798,6 +803,8 @@ impl Vm {
         // it, see OpArray::free_mask(): as an unused one)
         let unused = matches!(op.result, OperandType::Unused)
             || op_array.free_mask().get(ip).is_some_and(|m| m & 4 != 0);
+        // (objects with a destructor exist: see lean_release_point)
+        let listed = self.has_release_work();
         let result = match vm_frame {
             // (the extra arguments a variadic parameter collected are
             // released after the frame too)
@@ -806,11 +813,15 @@ impl Vm {
                     let mut budget = 256u32;
                     call.args.iter().skip(vi as usize).all(|a| {
                         is_plain_scalar(a)
-                            || crate::fastpath::drops_quietly_deep(a, &mut budget, &self.globals)
+                            || if listed {
+                                crate::fastpath::drops_quietly_listed(a, &mut budget, &self.globals)
+                            } else {
+                                crate::fastpath::drops_quietly_deep(a, &mut budget, &self.globals)
+                            }
                     })
                 }) =>
             {
-                self.lean_return(&f, stop, &slots, &mut ctmps, unused)
+                self.lean_return(&f, stop, &slots, &mut ctmps, unused, listed)
             }
             _ => None,
         };
@@ -864,7 +875,14 @@ impl Vm {
         }
         self.recycle_values(ctmps);
         self.recycle_values(slots);
-        if !crate::gc::release_quiet() {
+        // (objects with a destructor exist: the release points of the end
+        // of the frame and of DO_FCALL's release of the arguments)
+        if listed {
+            if !self.lean_release_point(op_array, op.line) {
+                drop(vm_frame);
+                return self.lean_end_failed(result, call, op.line);
+            }
+        } else if !crate::gc::release_quiet() {
             // (frees memory only: no destructor is listed, nothing was
             // released that runs one)
             self.run_pending_destructors();
@@ -875,6 +893,12 @@ impl Vm {
         if let Some(vi) = f.variadic_param {
             for a in call.args.iter().skip(vi as usize) {
                 crate::gc::on_child_released(a);
+            }
+        }
+        if listed && nargs > 0 && self.has_release_work() {
+            call.args.clear();
+            if !self.lean_release_point(op_array, op.line) {
+                return self.lean_end_failed(result, call, op.line);
             }
         }
         // (DO_FCALL: the arguments' buffer is kept, the result stored)
@@ -888,6 +912,46 @@ impl Vm {
         let info = f.cv_name_info();
         info.lean_score.set((info.lean_score.get() + 1).min(64));
         true
+    }
+
+    /// A release point of the end of a lean call (`line`: of its DO_FCALL
+    /// in `op_array`) while objects with a destructor exist: the scan of
+    /// the destructible list it makes is stepped over when it would find
+    /// nothing (see Vm::quiet_release_budget), else made (with the frames
+    /// of the running lean calls, see enter_lean_frames). False: a
+    /// destructor threw.
+    #[inline(never)]
+    fn lean_release_point(&mut self, op_array: &OpArray, line: u32) -> bool {
+        if !self.destructible_objects.is_empty() && self.quiet_release_budget() > 0 {
+            self.destructible_objects.skip_scan();
+            return true;
+        }
+        let saved = if self.lean_depth > 0 {
+            self.enter_lean_frames(op_array)
+        } else {
+            None
+        };
+        self.current_line = line;
+        self.run_pending_destructors();
+        if let Some(s) = saved {
+            self.leave_lean_frames(s);
+        }
+        self.current_exception.is_none()
+    }
+
+    /// A destructor run by the end of a lean call threw (see
+    /// lean_release_point): the call fails with it, the DO_FCALL it stopped
+    /// at dispatches it (see fast_call_failed).
+    #[cold]
+    #[inline(never)]
+    fn lean_end_failed(&mut self, result: Value, mut call: PendingCall, line: u32) -> bool {
+        drop(result);
+        self.fast_call_failed = Some(VmError {
+            message: "Uncaught exception from destructor".into(),
+            line,
+        });
+        self.recycle_args(&mut call);
+        false
     }
 
     /// The end of a lean call whose callee's builtin call failed (see
@@ -939,10 +1003,10 @@ impl Vm {
         cvs: &[Value],
         tmps: &mut [Value],
         unused: bool,
+        listed: bool,
     ) -> Option<(Value, bool)> {
         let r = f.ops.get(ip)?;
-        if r.opcode != OpCode::Return || self.current_exception.is_some() || self.has_release_work()
-        {
+        if r.opcode != OpCode::Return || self.current_exception.is_some() {
             return None;
         }
         // (a returned temporary is moved out, not released: looked at in
@@ -986,6 +1050,8 @@ impl Vm {
         }
         // (containers of such values too, within a budget: a tree of
         // plain objects the callee built and drops, see drops_quietly_deep)
+        // (while objects with a destructor exist, no such object is
+        // released: see drops_quietly_listed)
         let mut budget = 256u32;
         let globals = &self.globals;
         let mut plain = true;
@@ -998,7 +1064,12 @@ impl Vm {
             | Value::Double(_) => true,
             v => {
                 plain = false;
-                is_plain_scalar(v) || crate::fastpath::drops_quietly_deep(v, &mut budget, globals)
+                is_plain_scalar(v)
+                    || if listed {
+                        crate::fastpath::drops_quietly_listed(v, &mut budget, globals)
+                    } else {
+                        crate::fastpath::drops_quietly_deep(v, &mut budget, globals)
+                    }
             }
         };
         if unused && !is_plain_scalar(v) {
@@ -1563,7 +1634,6 @@ impl Vm {
             && self.lean_frames.is_empty()
             && self.lean_depth == 0
             && self.observer.is_none()
-            && !self.has_release_work()
             && self.error_reporting != crate::errdisplay::ER_SILENT
             && !self.bind_next_frame
             && self.bind_next_tab.is_none()
@@ -1574,7 +1644,6 @@ impl Vm {
             && self.unowned_this == 0
             && self.fiber_depth == 0
             && !crate::fiber::in_fiber()
-            && !super::typed_ref::any()
             && self.stack_configured
             && crate::stack::has_room();
         if !ok {
@@ -1696,7 +1765,10 @@ impl Vm {
             self.current_line = saved_line;
             return Ok(Err(e));
         }
-        let Some((result, plain)) = self.lean_return(f, stop, &slots, &mut ctmps, false) else {
+        // (objects with a destructor exist: see lean_release_point)
+        let listed = self.has_release_work();
+        let Some((result, plain)) = self.lean_return(f, stop, &slots, &mut ctmps, false, listed)
+        else {
             // Handed over: the frame takes what the run left.
             drop(vm_frame);
             let info = f.cv_name_info();
@@ -1730,7 +1802,11 @@ impl Vm {
         }
         self.recycle_values(ctmps);
         self.recycle_values(slots);
-        if !crate::gc::release_quiet() {
+        if listed {
+            // (the release point of the end of the frame; a destructor that
+            // throws fails the call, below)
+            self.lean_release_point(f, saved_line);
+        } else if !crate::gc::release_quiet() {
             self.run_pending_destructors();
         }
         drop(vm_frame);
