@@ -18188,13 +18188,27 @@ pub fn class_all_interface_names(vm: &Vm, class_lower: &[u8]) -> Vec<String> {
         let mut declared: Vec<Vec<u8>> = Vec::new();
         declared.extend(ce.interfaces.iter().cloned());
         // add_stringable_interface(): a class declaring __toString() gets
-        // Stringable after its declared interfaces, at compile time.
-        // (or using a trait's: zend_do_bind_traits())
-        if !ce.is_trait
-            && ce.methods.get(b"__tostring".as_slice()).is_some_and(|m| {
-                m.declaring_class.eq_ignore_ascii_case(lower)
-                    || rcls(vm, &m.declaring_class.to_ascii_lowercase()).is_some_and(|d| d.is_trait)
-            })
+        // Stringable after its declared interfaces, at compile time; one
+        // using a trait's gets it once linked, after all its interfaces
+        // (zend_do_link_class()), unless it has it already.
+        let tostring = (!ce.is_trait)
+            .then(|| ce.methods.get(b"__tostring".as_slice()))
+            .flatten();
+        // (a trait's method is copied in with the using class as its
+        // declaring class: it is the trait's when its code is)
+        let trait_tostring = tostring.is_some_and(|m| {
+            ce.traits.iter().any(|t| {
+                rcls(vm, &t.to_ascii_lowercase()).is_some_and(|tc| {
+                    tc.methods.get(b"__tostring".as_slice()).is_some_and(|tm| {
+                        tm.op_array.decl_line == m.op_array.decl_line
+                            && tm.op_array.filename == m.op_array.filename
+                    })
+                })
+            }) || rcls(vm, &m.declaring_class.to_ascii_lowercase()).is_some_and(|d| d.is_trait)
+        });
+        let own_tostring = !trait_tostring
+            && tostring.is_some_and(|m| m.declaring_class.eq_ignore_ascii_case(lower));
+        if own_tostring
             && !declared
                 .iter()
                 .any(|i| i.eq_ignore_ascii_case(b"stringable"))
@@ -18233,6 +18247,9 @@ pub fn class_all_interface_names(vm: &Vm, class_lower: &[u8]) -> Vec<String> {
                     out.push(pi);
                 }
             }
+        }
+        if trait_tostring && !out.iter().any(|x| x.eq_ignore_ascii_case("stringable")) {
+            out.push("Stringable".to_string());
         }
         out
     }
