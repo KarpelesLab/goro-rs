@@ -45,6 +45,8 @@ pub(crate) struct BuiltinDesc {
     /// One of FRAMELESS: called by a lean callee, it runs without the
     /// callee's frames until something looks at the stack (see LazyLean).
     pub(crate) frameless: bool,
+    /// Its PURE_CALLS index + 1 (0: not one): see Vm::pure_dofcall.
+    pub(crate) pure: u8,
 }
 
 const SPECIAL_ALWAYS: u8 = 0x80;
@@ -204,6 +206,10 @@ impl BuiltinDesc {
                 lower: Box::leak(lower.to_vec().into_boxed_slice()),
                 special,
                 frameless: FRAMELESS.contains(&lower),
+                pure: super::PURE_CALLS
+                    .iter()
+                    .position(|p| p.0 == lower)
+                    .map_or(0, |i| i as u8 + 1),
             }));
             list.push(desc);
             desc
@@ -312,6 +318,12 @@ impl Vm {
         }
         let top = self.pending_calls.len().checked_sub(1)?;
         let desc = self.pending_calls[top].target.builtin?;
+        // (a builtin that needs no frame for these arguments)
+        if desc.pure != 0 {
+            if let Some(r) = self.pure_dofcall(op_array, ip, tmps, internal_code, free_mask) {
+                return Some(r);
+            }
+        }
         let op = &op_array.ops[ip];
         let mask = free_mask.get(ip).copied().unwrap_or(0);
         self.last_call_by_ref = false;
@@ -701,6 +713,18 @@ impl Vm {
         if !self.builtin_dofcall_ok(op_array, ip, tmps, free_mask) {
             return None;
         }
+        // (a builtin that needs no frame for these arguments: none for the
+        // lean callees either)
+        if self
+            .pending_calls
+            .last()
+            .and_then(|c| c.target.builtin)
+            .is_some_and(|d| d.pure != 0)
+        {
+            if let Some(r) = self.pure_dofcall(op_array, ip, tmps, false, free_mask) {
+                return Some(r);
+            }
+        }
         if self.lean_lazy.is_none()
             && self
                 .pending_calls
@@ -972,7 +996,7 @@ impl Vm {
 
     /// recycle_args() of the arguments taken out of a call.
     #[inline]
-    fn recycle_arg_vec(&mut self, mut args: Vec<Value>) {
+    pub(crate) fn recycle_arg_vec(&mut self, mut args: Vec<Value>) {
         super::clear_values(&mut args);
         self.recycle_values(args);
     }

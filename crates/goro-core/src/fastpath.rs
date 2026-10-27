@@ -549,6 +549,31 @@ fn defined_operand(
     (!matches!(v, Value::Undef | Value::Reference(_))).then_some(v)
 }
 
+/// Whether an operand that is not an undefined variable (through a CV's
+/// reference) is an array (None: it is undefined), as defined_operand()
+/// would find it, without a copy.
+#[inline(always)]
+fn defined_operand_is_array(
+    operand: &OperandType,
+    cvs: &[Value],
+    tmps: &[Value],
+    literals: &[Value],
+) -> Option<bool> {
+    let is = |v: &Value| match v {
+        Value::Undef | Value::Reference(_) => None,
+        v => Some(matches!(v, Value::Array(_))),
+    };
+    match operand {
+        OperandType::Cv(i) => match cvs.get(*i as usize)? {
+            Value::Reference(r) => is(&*r.try_borrow().ok()?),
+            v => is(v),
+        },
+        OperandType::Tmp(i) => is(tmps.get(*i as usize)?),
+        OperandType::Const(i) => is(literals.get(*i as usize)?),
+        _ => None,
+    }
+}
+
 /// `<`, `<=`, `>`, `>=` of two defined scalars (strings, null, bools,
 /// numbers) not both numbers: compared as the general handlers compare
 /// them (`a > b` is `b < a`), which has no side effect for scalars.
@@ -2637,34 +2662,32 @@ pub(crate) const SPECIAL_CALLS: &[(&[u8], SpecialArgs, usize)] = &[
     (b"array_key_exists", SpecialArgs::KeyArray, 2),
 ];
 
-/// Whether the INIT_FCALL `op` may call a builtin of SPECIAL_CALLS (is_*,
-/// count, sizeof, strlen, array_key_exists), from its name's first byte and
-/// length: other calls do not look for one (see fast_special_call).
+/// Whether the INIT_FCALL at `ip` of `op_array` may call a builtin of
+/// SPECIAL_CALLS or PURE_CALLS: its site resolved to one when last set up
+/// (see OpArray::mark_special_call); other calls do not look for one (see
+/// fast_special_call).
 #[inline(always)]
-fn maybe_special_call(op: &Op, literals: &[Value]) -> bool {
-    let OperandType::Const(i) = op.op1 else {
-        return false;
-    };
-    let Some(Value::String(name)) = literals.get(i as usize) else {
-        return false;
-    };
-    let nb = name.as_bytes();
-    match nb.first().map(u8::to_ascii_lowercase) {
-        Some(b'i') => nb.len() >= 6 && nb[..3].eq_ignore_ascii_case(b"is_"),
-        Some(b'c') => nb.len() == 5,
-        Some(b's') => nb.len() == 6,
-        Some(b'a') => nb.len() == 16,
-        _ => false,
-    }
+fn maybe_special_call(op_array: &crate::opcode::OpArray, ip: usize) -> bool {
+    // (with only sends between it and its DO_FCALL: see OpArray::fused_sends)
+    let hint = op_array.call_hint(ip);
+    hint & crate::opcode::CALL_SPECIAL != 0
+        && hint & crate::opcode::CALL_SENDS != crate::opcode::CALL_SENDS
 }
 
-/// The SPECIAL_CALLS index + 1 of the builtin `lower` (0: not one).
+/// The SPECIAL_CALLS index + 1 of the builtin `lower`, or PURE_BASE + its
+/// PURE_CALLS index (0: neither).
 pub(crate) fn special_call_index(lower: &[u8]) -> u8 {
-    SPECIAL_CALLS
+    if let Some(i) = SPECIAL_CALLS.iter().position(|(n, _, _)| *n == lower) {
+        return i as u8 + 1;
+    }
+    crate::vm::PURE_CALLS
         .iter()
-        .position(|(n, _, _)| *n == lower)
-        .map_or(0, |i| i as u8 + 1)
+        .position(|p| p.0 == lower)
+        .map_or(0, |i| PURE_BASE + i as u8)
 }
+
+/// See special_call_index().
+pub(crate) const PURE_BASE: u8 = 64;
 
 /// What Vm::plain_public_prop() answered (by plain_prop_key()), for the
 /// request of SITE_EPOCH `epoch`, with `handlers` native class handlers
@@ -2889,8 +2912,8 @@ impl crate::vm::Vm {
                     // (a builtin php-src compiles into an opcode of its own)
                     // (only when no destructor is due: the call's release of
                     // its arguments is then a no-op)
-                    let special = if no_release && maybe_special_call(op, literals) {
-                        self.fast_special_call(op_array, ip, cvs, tmps)
+                    let special = if no_release && maybe_special_call(op_array, ip) {
+                        self.fast_special_call(op_array, ip, cvs, tmps, bound.is_some())
                     } else {
                         None
                     };
@@ -2953,16 +2976,16 @@ impl crate::vm::Vm {
                                         .get(idx)
                                         .or_else(|| fi.params.last().filter(|p| p.variadic))
                                         .is_none_or(|p| p.by_ref == 0)
-                                        && match defined_operand(&op.op1, cvs, tmps, literals) {
+                                        && match defined_operand_is_array(&op.op1, cvs, tmps, literals) {
                                             None => false,
-                                            Some(Value::Array(_)) => {
+                                            Some(true) => {
                                                 ucf = idx != 0
                                                     || !crate::compiler::Compiler::is_array_ref_builtin(
                                                         Some(c.name.as_bytes()),
                                                     );
                                                 ucf
                                             }
-                                            Some(_) => true,
+                                            Some(false) => true,
                                         }
                                 }
                                 // (a builtin without generic zpp info: by
@@ -2976,16 +2999,16 @@ impl crate::vm::Vm {
                                     !self.builtin_arg_must_be_ref(c, idx)
                                         && !self.spl_deferred_arg_by_ref(c, idx)
                                         && !self.native_method_arg_by_ref(c, idx)
-                                        && match defined_operand(&op.op1, cvs, tmps, literals) {
+                                        && match defined_operand_is_array(&op.op1, cvs, tmps, literals) {
                                             None => false,
-                                            Some(Value::Array(_)) => {
+                                            Some(true) => {
                                                 ucf = idx != 0
                                                     || !crate::compiler::Compiler::is_array_ref_builtin(
                                                         Some(c.name.as_bytes()),
                                                     );
                                                 ucf
                                             }
-                                            Some(_) => true,
+                                            Some(false) => true,
                                         }
                                 }
                                 _ => false,
@@ -3638,12 +3661,16 @@ impl crate::vm::Vm {
         ip: usize,
         cvs: &[Value],
         tmps: &mut [Value],
+        bound: bool,
     ) -> Option<usize> {
         let ops = &op_array.ops;
         let literals = &op_array.literals;
         let op = &ops[ip];
         let fn_gen = self.user_functions.len() + 1;
         let (func, special) = Self::cached_special_call(op_array, ip, fn_gen)?;
+        if special >= PURE_BASE {
+            return self.fast_pure_call(op_array, ip, cvs, tmps, func, special - PURE_BASE, bound);
+        }
         let &(lower, kind, nargs) = SPECIAL_CALLS.get(special as usize - 1)?;
         // INIT_FCALL's op2 is the number of arguments; the sends follow it.
         if !matches!(op.op2, OperandType::Const(c)

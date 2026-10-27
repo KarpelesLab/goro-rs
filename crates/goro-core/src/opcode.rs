@@ -1078,6 +1078,22 @@ impl OpArray {
         }
     }
 
+    /// The INIT_FCALL at `ip` resolved to a builtin of fastpath's
+    /// SPECIAL_CALLS / PURE_CALLS: the next runs of it look for the
+    /// builtin's cached target (see CALL_SPECIAL; a stale mark only costs
+    /// that look).
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn mark_special_call(&self, ip: usize) {
+        let m = match self.fused_sends.0.get() {
+            Some(m) => m,
+            None => self.fused_sends_init(),
+        };
+        if let Some(c) = m.get(ip) {
+            c.set(c.get() | CALL_SPECIAL);
+        }
+    }
+
     #[cold]
     #[inline(never)]
     fn fused_sends_init(&self) -> &[std::cell::Cell<u8>] {
@@ -1441,6 +1457,10 @@ pub(crate) const CALL_SENDS: u8 = 0x1f;
 pub(crate) const CALL_PLAIN: u8 = 0x20;
 /// OpArray::call_hint(): see OpArray::no_direct_lean().
 pub(crate) const CALL_NOT_DIRECT: u8 = 0x80;
+/// OpArray::call_hint(): the INIT_FCALL resolved (when last set up) to a
+/// builtin Vm::fast_special_call() may run directly (see
+/// OpArray::mark_special_call).
+pub(crate) const CALL_SPECIAL: u8 = 0x40;
 
 /// OpArray::fused_sends() of the opcode at `ip` of `ops`.
 fn fused_sends_at(ops: &[Op], ip: usize) -> Option<usize> {

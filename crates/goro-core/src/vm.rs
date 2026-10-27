@@ -21,8 +21,11 @@ mod fastcall;
 mod fastcallback;
 #[path = "leancall.rs"]
 mod leancall;
+#[path = "purecall.rs"]
+mod purecall;
 pub(crate) use builtincall::BuiltinDesc;
 pub(crate) use fastcall::MethodSite;
+pub(crate) use purecall::PURE_CALLS;
 #[path = "internal_static.rs"]
 pub mod internal_static;
 #[path = "static_props.rs"]
@@ -24045,15 +24048,6 @@ impl Vm {
         if snapshot && !self.next_arg_by_value() {
             return false;
         }
-        // (a builtin's parameter a call's array result goes to as it is:
-        // all but the first of the builtins taking an `array &$array`,
-        // which the general handler separates it for)
-        let builtin_takes = matches!(op.op1, OperandType::Tmp(_))
-            && matches!(op.result, OperandType::Const(_))
-            && self.pending_calls.last().is_some_and(|c| {
-                c.target.builtin.is_some()
-                    && !self.builtin_array_ref_call_arg(&op.op1, &op.result, c.args.len())
-            });
         let Some(call) = self.pending_calls.last_mut() else {
             return false;
         };
@@ -24094,11 +24088,21 @@ impl Vm {
                 // whose parameters are all by value)
                 // (a user function the call was resolved to: its by-value
                 // parameter takes the result as it is)
+                // (a builtin's parameter a call's array result goes to as it
+                // is: all but the first of the builtins taking an `array
+                // &$array`, which the general handler separates it for)
                 Some(Value::Array(_))
                     if matches!(op.result, OperandType::Const(_))
                         && !by_value_builtin
                         && !user_target
-                        && !builtin_takes =>
+                        && !self.pending_calls.last().is_some_and(|c| {
+                            c.target.builtin.is_some()
+                                && !self.builtin_array_ref_call_arg(
+                                    &op.op1,
+                                    &op.result,
+                                    c.args.len(),
+                                )
+                        }) =>
                 {
                     return false;
                 }
@@ -24366,6 +24370,25 @@ impl Vm {
             t.method_info = Some(Rc::new(self.method_call_info(f, &name, sep as usize)));
         }
         let checkable = CachedCallTarget::checkable_of(&t, name);
+        // (a builtin php-src compiles into an opcode of its own is not one
+        // for a namespaced name's fallback to it, see BuiltinDesc::ns_fallback;
+        // one that runs directly, see fastpath::PURE_CALLS, is)
+        let special = if t.user.is_none() && t.builtin.is_some() {
+            match crate::fastpath::special_call_index(&resolved.to_ascii_lowercase()) {
+                i if i < crate::fastpath::PURE_BASE && t.ns_global => 0,
+                i => i,
+            }
+        } else {
+            0
+        };
+        if special != 0
+            && op_array
+                .ops
+                .get(ip)
+                .is_some_and(|op| op.opcode == OpCode::InitFCall)
+        {
+            op_array.mark_special_call(ip);
+        }
         op_array
             .sites()
             .borrow_mut()
@@ -24382,11 +24405,7 @@ impl Vm {
                     method_info: t.method_info.clone(),
                     fn_gen: t.fn_gen,
                     ns_global: t.ns_global,
-                    special: if t.user.is_none() && t.builtin.is_some() && !t.ns_global {
-                        crate::fastpath::special_call_index(&resolved.to_ascii_lowercase())
-                    } else {
-                        0
-                    },
+                    special,
                     epoch: crate::opcode::site_epoch(),
                     stable_gen: if checkable != 0 { fn_table_gen() } else { 0 },
                     checkable,
