@@ -6925,7 +6925,7 @@ fn class_table_order(vm: &Vm, names: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
             (key, n)
         })
         .collect();
-    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    keyed.sort_by_key(|a| a.0);
     keyed.into_iter().map(|(_, n)| n).collect()
 }
 

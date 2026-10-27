@@ -22518,7 +22518,7 @@ impl Vm {
                 (rank, k)
             })
             .collect();
-        ranked.sort_by(|a, b| a.0.cmp(&b.0));
+        ranked.sort_by_key(|a| a.0);
         ranked.into_iter().map(|(_, k)| k).collect()
     }
 

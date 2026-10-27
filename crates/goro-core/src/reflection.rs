@@ -4432,7 +4432,7 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     // (without a reflected closure, a temporary Closure
                     // object gives zend_get_closure_invoke_method() its
                     // method: it holds a handle meanwhile)
-                    let tmp_closure = reflected_closure_tmp_handle(vm, &obj);
+                    let tmp_closure = reflected_closure_tmp_handle(vm, obj);
                     let obj_id = vm.alloc_object_id();
                     if let Some(id) = tmp_closure {
                         crate::object::FREED_OBJECT_IDS.with(|f| f.borrow_mut().push(id));
@@ -4548,7 +4548,7 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     // (without a reflected closure, a temporary Closure
                     // object gives zend_get_closure_invoke_method() its
                     // method: it holds a handle meanwhile)
-                    let tmp_closure = reflected_closure_tmp_handle(vm, &obj);
+                    let tmp_closure = reflected_closure_tmp_handle(vm, obj);
                     let obj_id = vm.alloc_object_id();
                     if let Some(id) = tmp_closure {
                         crate::object::FREED_OBJECT_IDS.with(|f| f.borrow_mut().push(id));
