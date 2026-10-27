@@ -70464,6 +70464,7 @@ pub(crate) fn no_direct_construct_msg(class_lower: &[u8]) -> Option<&'static str
         b"addressinfo" => {
             "Cannot directly construct AddressInfo, use socket_addrinfo_lookup() instead"
         }
+        b"directory" => "Cannot directly construct Directory, use dir() instead",
         b"xmlparser" => {
             "Cannot directly construct XMLParser, use xml_parser_create() or xml_parser_create_ns() instead"
         }

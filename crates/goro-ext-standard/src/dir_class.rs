@@ -17,7 +17,7 @@ pub(crate) fn register(vm: &mut Vm) {
         b"directory".to_vec(),
         goro_core::vm::NativeClassHandler {
             has_method: |_c, m, _s| {
-                [&b"__construct"[..], b"read", b"rewind", b"close"]
+                [&b"read"[..], b"rewind", b"close"]
                     .iter()
                     .any(|n| m.eq_ignore_ascii_case(n))
             },
