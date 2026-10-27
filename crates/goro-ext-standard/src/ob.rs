@@ -246,6 +246,10 @@ fn ob_callable_name(vm: &mut Vm, cb: &Value) -> Result<Vec<u8>, String> {
             }
             let meth = match vals[1].deref() {
                 Value::String(m) => m.as_bytes().to_vec(),
+                // (zend_is_callable_impl(): the first member is checked first)
+                _ if !matches!(vals[0].deref(), Value::Object(_) | Value::String(_)) => {
+                    return Err("first array member is not a valid class name or object".into());
+                }
                 _ => return Err("second array member is not a valid method".into()),
             };
             match vals[0].deref() {

@@ -5180,8 +5180,19 @@ fn h_stream_get_wrappers(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, V
 /// VM include hook: returns None for paths not served by a user wrapper.
 /// Some(Ok(source)) with the file contents, Some(Err(..)) when opening
 /// failed (warnings / the require Error have been raised).
+/// php://memory or php://temp (php://temp/maxmemory:N): a local stream
+/// an include opens as an empty file.
+fn is_php_memory(p: &[u8]) -> bool {
+    p.eq_ignore_ascii_case(b"php://memory")
+        || p.eq_ignore_ascii_case(b"php://temp")
+        || p.len() > 21 && p[..21].eq_ignore_ascii_case(b"php://temp/maxmemory:")
+}
+
 pub(crate) fn include_hook(vm: &mut Vm, path: &str, kind: u8) -> Option<Result<Vec<u8>, VmError>> {
     let p = path.as_bytes();
+    if is_php_memory(p) {
+        return Some(Ok(Vec::new()));
+    }
     if is_data_url(p) {
         return Some(include_data_url(vm, path, kind));
     }
@@ -5531,7 +5542,7 @@ fn resolve_path_user(vm: &mut Vm, filename: &[u8]) -> Option<Result<Vec<u8>, VmE
 /// VM include resolver hook.
 pub(crate) fn include_resolve(vm: &mut Vm, path: &str) -> Option<Result<String, VmError>> {
     let p = path.as_bytes();
-    if is_data_url(p) || is_php_filter(p) {
+    if is_data_url(p) || is_php_filter(p) || is_php_memory(p) {
         return Some(Ok(path.to_string()));
     }
     if USER_WRAPPERS.with(|w| w.borrow().is_empty()) {
