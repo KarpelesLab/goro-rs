@@ -16391,6 +16391,14 @@ impl Compiler {
         };
         self.expr_nesting -= 1;
         crate::stack::leave_compile();
+        // zend_compile_func_decl() leaves CG(zend_lineno) at the closing
+        // line of a closure / arrow function.
+        if let ExprKind::Closure(_) | ExprKind::ArrowFunction(_) = &expr.kind {
+            let end = Self::line_after_object(expr, 0);
+            if end > 0 {
+                self.zend_lineno = end;
+            }
+        }
         r
     }
 

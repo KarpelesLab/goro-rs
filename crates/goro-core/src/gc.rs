@@ -243,6 +243,21 @@ pub fn track_object(rc: &Rc<RefCell<PhpObject>>) {
     });
 }
 
+/// The generator whose value is at `addr` (RefCell::as_ptr), among those
+/// the collector tracks.
+#[inline(never)]
+pub(crate) fn find_generator(addr: usize) -> Option<Rc<RefCell<PhpGenerator>>> {
+    TRACKED_GENERATORS
+        .try_with(|t| {
+            t.borrow()
+                .iter()
+                .filter_map(|w| w.upgrade())
+                .find(|g| RefCell::as_ptr(g) as usize == addr)
+        })
+        .ok()
+        .flatten()
+}
+
 /// Register a generator as a cycle-collection candidate.
 pub fn track_generator(rc: &Rc<RefCell<PhpGenerator>>) {
     match rc.try_borrow() {

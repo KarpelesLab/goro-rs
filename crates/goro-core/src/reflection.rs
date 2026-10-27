@@ -11900,9 +11900,11 @@ fn reflection_running_generator(
         .collect();
     // (the executing generator's position: where it called the frames
     // running above it, if any)
+    // (a generator delegating with `yield from` is at its YIELD_FROM: where
+    // it runs the next one)
     let at = vm
         .running_generators
-        .last()
+        .get(start)
         .and_then(|(_, _, _, d)| vm.call_stack.get(*d))
         .filter(|f| !f.1.is_empty() && f.2 > 0)
         .map(|f| (f.1.to_string(), f.2));
@@ -11912,7 +11914,14 @@ fn reflection_running_generator(
                 .unwrap_or_else(|| vm.current_file.to_string()),
         )),
         b"getexecutingline" => Value::Long(at.map_or(vm.current_line, |(_, l)| l) as i64),
-        b"getexecutinggenerator" => Value::Generator(g.clone()),
+        b"getexecutinggenerator" => {
+            // zend_generator_get_current(): the leaf of its `yield from` tree
+            let leaf = vm.running_generators.last().map(|e| e.0);
+            match leaf.and_then(crate::gc::find_generator) {
+                Some(l) => Value::Generator(l),
+                None => Value::Generator(g.clone()),
+            }
+        }
         b"getthis" => Value::Null,
         b"getfunction" => {
             let name = names.first().cloned().unwrap_or_default();
