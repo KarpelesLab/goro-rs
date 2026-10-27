@@ -6254,7 +6254,8 @@ impl Parser {
                         };
                         self.expect(&TokenKind::DoubleArrow)?;
                         let body = self.parse_expression()?;
-                        let end_line = body.span.line;
+                        // (CG(zend_lineno) at the reduction: the lookahead token's line)
+                        let end_line = self.span().line.max(body.span.line);
                         Ok(Expr {
                             span,
                             kind: ExprKind::ArrowFunction(Box::new(ArrowFnExpr {
@@ -7069,7 +7070,8 @@ impl Parser {
                 };
                 self.expect(&TokenKind::DoubleArrow)?;
                 let body = self.parse_expression()?;
-                let end_line = body.span.line;
+                // (CG(zend_lineno) at the reduction: the lookahead token's line)
+                        let end_line = self.span().line.max(body.span.line);
                 Ok(Expr {
                     span,
                     kind: ExprKind::ArrowFunction(Box::new(ArrowFnExpr {
@@ -7109,7 +7111,8 @@ impl Parser {
                     };
                     self.expect(&TokenKind::DoubleArrow)?;
                     let body = self.parse_expression()?;
-                    let end_line = body.span.line;
+                    // (CG(zend_lineno) at the reduction: the lookahead token's line)
+                        let end_line = self.span().line.max(body.span.line);
                     Ok(Expr {
                         span,
                         kind: ExprKind::ArrowFunction(Box::new(ArrowFnExpr {
