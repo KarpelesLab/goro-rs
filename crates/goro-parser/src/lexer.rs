@@ -230,7 +230,8 @@ impl<'a> Lexer<'a> {
                     if end.is_none() {
                         crate::push_lexer_error(
                             format!("Unterminated comment starting line {}", c_line),
-                            self.line,
+                            // (raised before the newlines are counted)
+                            c_line,
                         );
                     }
                     if self.preserve_trivia {
@@ -1797,6 +1798,9 @@ impl<'a> Lexer<'a> {
             }
         }
 
+        // (the closing label right after the opening one: found by the
+        // T_START_HEREDOC rule, on the closing label's line)
+        let no_body = content.is_empty();
         if !found_closing && label_newline {
             crate::push_lexer_error("syntax error, unexpected end of file, expecting variable or heredoc end or \"${\" or \"{$\"".into(), self.line);
         }
@@ -1817,7 +1821,11 @@ impl<'a> Lexer<'a> {
             let using_spaces = closing_indent[0] == b' ';
             let closing_line = self.line;
             let newlines = content.iter().filter(|&&c| c == b'\n').count() as u32;
-            let first_line = closing_line.saturating_sub(newlines + 1);
+            let first_line = if no_body {
+                closing_line
+            } else {
+                closing_line.saturating_sub(newlines + 1)
+            };
             // Found while scanning the body, before its newlines are counted.
             if closing_indent.iter().any(|&c| c != closing_indent[0]) {
                 crate::push_lexer_error(
