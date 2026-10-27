@@ -54,17 +54,25 @@ impl Vm {
         let mut buf = [0u8; 128];
         match callback {
             Value::String(s) => {
-                let name = s.as_bytes();
-                // (a leading `\`, a "Class::method" name: the general path)
-                if name.is_empty() || name[0] == b'\\' || name.contains(&b':') {
-                    return None;
-                }
-                let lower = lower_into(name, &mut buf)?;
-                let f = self.user_functions.get(lower)?;
-                if f.scope_class.is_some() || !f.attributes.is_empty() {
-                    return None;
-                }
-                let f = Rc::clone(f);
+                let f = match self.cached_callback_fn(s, 1) {
+                    Some(f) => f,
+                    None => {
+                        let name = s.as_bytes();
+                        // (a leading `\`, a "Class::method" name: the general
+                        // path)
+                        if name.is_empty() || name[0] == b'\\' || name.contains(&b':') {
+                            return None;
+                        }
+                        let lower = lower_into(name, &mut buf)?;
+                        let f = self.user_functions.get(lower)?;
+                        if f.scope_class.is_some() || !f.attributes.is_empty() {
+                            return None;
+                        }
+                        let f = Rc::clone(f);
+                        self.cache_callback_fn(s, 1, &f);
+                        f
+                    }
+                };
                 let lead = self.take_values(0);
                 self.fast_callback_call(&f, lead, args)
             }
@@ -85,13 +93,21 @@ impl Vm {
                     _ => return None,
                 };
                 drop(b);
-                let f = if crate::closure::is_closure_fn_name(name.as_bytes()) {
-                    lower_into(name.as_bytes(), &mut buf)
-                        .and_then(|l| self.user_functions.get(l))
-                        .filter(|f| f.attributes.is_empty())
-                        .map(Rc::clone)
-                } else {
-                    None
+                let f = match self.cached_callback_fn(&name, 2) {
+                    Some(f) => Some(f),
+                    None if crate::closure::is_closure_fn_name(name.as_bytes()) => {
+                        let f = lower_into(name.as_bytes(), &mut buf)
+                            .and_then(|l| self.user_functions.get(l))
+                            .filter(|f| f.attributes.is_empty())
+                            .map(Rc::clone);
+                        if let Some(f) = &f {
+                            if !name.as_bytes().contains(&b':') {
+                                self.cache_callback_fn(&name, 2, f);
+                            }
+                        }
+                        f
+                    }
+                    None => None,
                 };
                 // (the captured values move to the call, see
                 // call_callback_array)
@@ -130,6 +146,38 @@ impl Vm {
             }
             _ => None,
         }
+    }
+
+    /// The function fast_user_callback() found for the callback by the
+    /// function name `name` (`kind` 1) or of the closure whose function is
+    /// named `name` (2) last time, when it is that same string and no
+    /// function was added, replaced or removed since (see FnTable).
+    #[inline(always)]
+    fn cached_callback_fn(&self, name: &PhpString, kind: u8) -> Option<Rc<crate::opcode::OpArray>> {
+        match &self.callback_fn_cache {
+            Some((n, k, len, fgen, f))
+                if n.ptr_eq(name)
+                    && *k == kind
+                    && *len == self.user_functions.len()
+                    && *fgen == crate::vm::fn_table_gen() =>
+            {
+                f.upgrade()
+            }
+            _ => None,
+        }
+    }
+
+    /// Remember the function `f` found for the callback (see
+    /// cached_callback_fn; `name` has no `:`).
+    #[inline(never)]
+    fn cache_callback_fn(&mut self, name: &PhpString, kind: u8, f: &Rc<crate::opcode::OpArray>) {
+        self.callback_fn_cache = Some((
+            name.clone(),
+            kind,
+            self.user_functions.len(),
+            crate::vm::fn_table_gen(),
+            Rc::downgrade(f),
+        ));
     }
 
     /// fast_user_callback() of `[$obj, 'method']`: a public instance method

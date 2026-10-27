@@ -2021,6 +2021,11 @@ pub struct Vm {
     value_pool: Vec<Vec<Value>>,
     /// Emptied buffers of the class stack entries of finished calls.
     bytes_pool: Vec<Vec<u8>>,
+    /// The function the last callback by a function name or of a closure
+    /// called (see fastcallback.rs): that name (the same string), the kind
+    /// of callback, and user_functions' size and fn_table_gen() then. (Held
+    /// weakly: a function removed from the table goes as it would.)
+    callback_fn_cache: Option<(PhpString, u8, usize, u32, std::rc::Weak<OpArray>)>,
     /// The class stack entries (called class, class scope) of the lean
     /// method call that ended last, names kept: the next one's are often
     /// the same (see leancall.rs, Vm::lean_push_scopes).
@@ -2787,6 +2792,7 @@ impl Vm {
             value_pool: Vec::new(),
             foreach_pool: Vec::new(),
             bytes_pool: Vec::new(),
+            callback_fn_cache: None,
             lean_scopes: (Vec::new(), Vec::new()),
             string_pool: Vec::new(),
             call_stack: Vec::new(),
@@ -5793,13 +5799,21 @@ impl Vm {
     ) {
         // (the internal function's own frame is below it: entering the
         // callback materializes it anyway)
-        self.materialize_builtin_frames(false);
+        self.sync_builtin_frames();
         let depth = self.call_stack.len() + 1;
+        // (the names in the buffers of finished frames', see
+        // note_closure_frame)
         while self.closure_frames.last().is_some_and(|f| f.0 >= depth) {
-            self.closure_frames.pop();
+            if let Some((_, mut s, _)) = self.closure_frames.pop() {
+                if s.capacity() != 0 && s.capacity() <= 1024 && self.string_pool.len() < 64 {
+                    s.clear();
+                    self.string_pool.push(s);
+                }
+            }
         }
-        self.closure_frames
-            .push((depth, frame_name.to_string(), closure));
+        let mut name = self.string_pool.pop().unwrap_or_default();
+        name.push_str(frame_name);
+        self.closure_frames.push((depth, name, closure));
     }
 
     /// A `[C, 'm']` / `"C::m"` callback: the method runs in its declaring
