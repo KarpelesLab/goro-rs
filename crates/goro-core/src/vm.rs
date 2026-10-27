@@ -21381,6 +21381,12 @@ impl Vm {
     /// Run `op_array` as (part of) the main script in the global scope,
     /// without the request shutdown sequence. The CLI SAPI runs its
     /// -B / -R / -E code pieces this way, then calls finish_request().
+    /// A file the SAPI compiled itself (auto_prepend_file ...): included
+    /// for include_once / require_once.
+    pub fn mark_included_file(&mut self, path: &str) {
+        self.included_files.insert(path.to_string());
+    }
+
     pub fn execute_chunk(&mut self, op_array: &OpArray) -> Result<Value, VmError> {
         self.is_global_scope = true;
         self.arm_auto_globals(Some(op_array));

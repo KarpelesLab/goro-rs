@@ -486,6 +486,7 @@ pub fn run_auto_file(vm: &mut Vm, key: &[u8]) -> Option<Result<Value, VmError>> 
         let main = std::fs::canonicalize(&*vm.current_file)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| vm.current_file.to_string());
+        vm.mark_included_file(&main);
         vm.included_files_list.push(main);
     }
     let resolved = vm.resolve_include_path(&file);
@@ -520,6 +521,8 @@ pub fn run_auto_file(vm: &mut Vm, key: &[u8]) -> Option<Result<Value, VmError>> 
     let name = std::fs::canonicalize(&resolved)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or(resolved);
+    // (open_file_for_scanning(): an included file for the _once variants)
+    vm.mark_included_file(&name);
     vm.included_files_list.push(name.clone());
     let saved = std::mem::replace(&mut vm.current_file, name.as_str().into());
     let compiled = {
