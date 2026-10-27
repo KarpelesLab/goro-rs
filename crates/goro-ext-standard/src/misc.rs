@@ -4528,24 +4528,7 @@ fn array_walk_object_entries(
     {
         return Ok(Value::True);
     }
-    let (func_name, captured) = match callback {
-        Value::String(s) => (s.as_bytes().to_vec(), vec![]),
-        Value::Array(cb) => {
-            let cb = cb.borrow();
-            let vals: Vec<Value> = cb.values().cloned().collect();
-            if vals.is_empty() {
-                return Ok(Value::True);
-            }
-            (
-                vals[0].to_php_string().as_bytes().to_vec(),
-                vals[1..].to_vec(),
-            )
-        }
-        _ => return Ok(Value::True),
-    };
-    let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-
-    if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+    {
         for (key, prop_name, val) in entries {
             // The callback's by-reference parameter binds the property slot
             // itself (typed properties type the reference).
@@ -4553,32 +4536,17 @@ fn array_walk_object_entries(
             let val_ref = slot_ref
                 .clone()
                 .unwrap_or_else(|| Rc::new(RefCell::new(val.clone())));
-            let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
-            let mut idx = 0;
-            for cv in &captured {
-                if idx < fn_cvs.len() {
-                    fn_cvs[idx] = cv.clone();
-                    idx += 1;
-                }
-            }
-            if idx < fn_cvs.len() {
-                fn_cvs[idx] = Value::Reference(val_ref.clone());
-                idx += 1;
-            }
-            if idx < fn_cvs.len() {
-                let key_val = match key {
-                    ArrayKey::Int(n) => Value::Long(*n),
-                    ArrayKey::String(s) => Value::String(s.clone()),
-                };
-                fn_cvs[idx] = key_val;
-                idx += 1;
-            }
+            // (called as php_array_walk() calls it: zend_call_function(),
+            // from an internal function's frame)
+            let mut cargs = vec![
+                callback.clone(),
+                Value::Reference(val_ref.clone()),
+                walk_key_value(key),
+            ];
             if let Some(extra) = extra_data {
-                if idx < fn_cvs.len() {
-                    fn_cvs[idx] = extra.clone();
-                }
+                cargs.push(extra.clone());
             }
-            let r = vm.execute_fn(&user_fn, fn_cvs);
+            let r = call_user_func(vm, &cargs);
             if let Some(sr) = &slot_ref {
                 drop(val_ref);
                 vm.object_slot_unref(obj, prop_name, sr);
@@ -4635,10 +4603,6 @@ fn array_walk_object_entries(
                 continue;
             }
             obj.borrow_mut().set_property(prop_name.clone(), new_val);
-        }
-    } else if let Some(builtin) = vm.functions.get(&func_lower).copied() {
-        for (_, _, val) in entries {
-            vm.call_builtin_from_internal(builtin, &func_lower, std::slice::from_ref(val))?;
         }
     }
     Ok(Value::True)
