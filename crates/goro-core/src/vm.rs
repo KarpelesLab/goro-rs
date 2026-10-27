@@ -12649,6 +12649,30 @@ impl Vm {
         None
     }
 
+    /// An E_COMPILE_ERROR: of a top-level declaration bound while its file
+    /// compiles (`compile_time`), raised before an included file runs, so
+    /// without its include frame.
+    #[inline(never)]
+    fn compile_fatal_at(&mut self, msg: &str, line: u32, compile_time: bool) -> VmError {
+        let include_frame = compile_time
+            && self.call_stack.last().is_some_and(|f| {
+                matches!(
+                    f.0.as_str(),
+                    "include" | "include_once" | "require" | "require_once"
+                )
+            });
+        let hidden = if include_frame {
+            self.call_stack.pop()
+        } else {
+            None
+        };
+        let e = self.emit_fatal_typed_at(64, msg, line);
+        if let Some(h) = hidden {
+            self.call_stack.push(h);
+        }
+        e
+    }
+
     /// Register a user-defined function
     pub fn register_user_function(&mut self, name: &[u8], op_array: impl Into<Rc<OpArray>>) {
         self.user_functions
@@ -21064,9 +21088,14 @@ impl Vm {
     /// the top level reports once the frames unwound: their arguments are
     /// copied into them now, for its backtrace.
     #[inline(never)]
-    fn declare_class_fatal(&mut self, e: VmError) -> VmError {
+    fn declare_class_fatal(&mut self, e: VmError, early: bool) -> VmError {
         if self.current_exception.is_none() && !self.fatal_emitted && !self.exit_requested {
             self.sync_frame_args();
+            // zend_do_link_class()'s E_COMPILE_ERROR is reported where it
+            // is raised, with the frames running then (an autoloader's).
+            if !e.message.is_empty() && !e.message.starts_with("Uncaught ") {
+                return self.compile_fatal_at(&e.message, e.line, early);
+            }
         }
         e
     }
@@ -46195,6 +46224,9 @@ impl Vm {
                         if let OperandType::Const(c) = op.result {
                             if let Some(msg) = self.function_redeclaration_error(name.as_bytes()) {
                                 let ty = op_array.literals[c as usize].to_long();
+                                if ty == 64 {
+                                    return Err(self.compile_fatal_at(&msg, op.line, true));
+                                }
                                 return Err(self.emit_fatal_typed_at(ty, &msg, op.line));
                             }
                         }
@@ -59438,7 +59470,10 @@ impl Vm {
                     if r.is_ok() {
                         self.compile_time_binding = false;
                     }
-                    r.map_err(|e| self.declare_class_fatal(e))
+                    // (an early-binding attempt binds while the file compiles)
+                    let early = matches!(op.result, OperandType::Const(c)
+                        if matches!(op_array.literals.get(c as usize).map(|v| v.to_long()), Some(1 | 3)));
+                    r.map_err(|e| self.declare_class_fatal(e, early))
                 })? {
                     Flow::Next => {}
                     Flow::Continue => continue 'exec,

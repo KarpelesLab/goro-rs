@@ -1415,6 +1415,12 @@ impl Vm {
                 names.extend(unresolved);
             }
         }
+        // (zend_do_link_class(): only a class with unresolved variance
+        // loads the delayed autoloads; one that links fully leaves the
+        // queue to the class that registered them)
+        if names.is_empty() {
+            return Ok(());
+        }
         for n in names {
             register_delayed_autoload(&n);
         }
