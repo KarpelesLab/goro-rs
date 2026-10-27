@@ -379,7 +379,7 @@ impl Vm {
         if keep == 0 && f.variadic_param.is_none() {
             let mut slots = std::mem::take(&mut call.args);
             fill_undef_to(&mut slots, f.cv_names.len());
-            return self.lean_run(op_array, ip, f, sep, slots, nargs, call, cvs, tmps, false);
+            return self.lean_run(op_array, ip, &f, sep, slots, nargs, &mut call, cvs, tmps, false);
         }
         // The parameters move to the callee's variables; `$this` stays
         // (DO_FCALL's fast path, move_args()).
@@ -414,7 +414,7 @@ impl Vm {
                 }
             }
         }
-        self.lean_run(op_array, ip, f, sep, slots, nargs, call, cvs, tmps, false)
+        self.lean_run(op_array, ip, &f, sep, slots, nargs, &mut call, cvs, tmps, false)
     }
 
     /// The INIT_FCALL at `ip` of `op_array` just set up a call (the top
@@ -435,8 +435,8 @@ impl Vm {
     ) -> Option<usize> {
         let call = self.pending_calls.last()?;
         let (f, sep, nsends) = self.lean_fused_ready(call, op_array, ip, cvs, tmps)?;
-        let call = self.pop_lean_call();
-        Some(self.lean_fused_run(op_array, ip, f, sep, nsends, call, cvs, tmps))
+        let mut call = self.pop_lean_call();
+        Some(self.lean_fused_run(op_array, ip, &f, sep, nsends, &mut call, cvs, tmps))
     }
 
     /// The INIT_FCALL at `ip` of `op_array`, of plain function name `name`
@@ -480,7 +480,7 @@ impl Vm {
         }
         // (INIT_FCALL's result operand flags a name without global fallback)
         target.no_ns_fallback = !matches!(op_array.ops[ip].result, OperandType::Unused);
-        let call = PendingCall {
+        let mut call = PendingCall {
             name: name.clone(),
             args: Vec::new(),
             named_args: Vec::new(),
@@ -489,7 +489,7 @@ impl Vm {
         let (f, sep, nsends) = self.lean_fused_ready(&call, op_array, ip, cvs, tmps)?;
         // (what popping the call would do)
         self.trim_closure_pending_calls();
-        Some(self.lean_fused_run(op_array, ip, f, sep, nsends, call, cvs, tmps))
+        Some(self.lean_fused_run(op_array, ip, &f, sep, nsends, &mut call, cvs, tmps))
     }
 
     /// lean_fused(): whether the call `call`, set up by the INIT_* at `ip`
@@ -593,10 +593,10 @@ impl Vm {
         &mut self,
         op_array: &OpArray,
         ip: usize,
-        f: Rc<OpArray>,
+        f: &Rc<OpArray>,
         sep: Option<(usize, bool)>,
         nsends: usize,
-        mut call: PendingCall,
+        call: &mut PendingCall,
         cvs: &[Value],
         tmps: &mut [Value],
     ) -> usize {
@@ -654,11 +654,11 @@ impl Vm {
         &mut self,
         op_array: &OpArray,
         ip: usize,
-        f: Rc<OpArray>,
+        f: &Rc<OpArray>,
         sep: Option<(usize, bool)>,
         mut slots: Vec<Value>,
         nargs: usize,
-        mut call: PendingCall,
+        call: &mut PendingCall,
         caller_cvs: &[Value],
         tmps: &mut [Value],
         copied: bool,
@@ -720,7 +720,7 @@ impl Vm {
                         _ => None,
                     };
                     self.push_fast_method_scopes(
-                        &call,
+                        call,
                         sep,
                         this,
                         forward,
@@ -734,11 +734,11 @@ impl Vm {
             self.lean_depth += 1;
             // (for the builtin calls the callee makes, see builtincall.rs)
             self.lean_frames.push(LeanFrame {
-                f: &*f,
+                f: &**f,
                 slots: &slots,
                 tmps: &ctmps,
                 fe: &*fe,
-                call: &call,
+                call: &*call,
                 sep,
                 line: op.line,
                 nargs,
@@ -769,11 +769,11 @@ impl Vm {
             };
             let stop = if crate::vm::typed_ref::any() {
                 self.run_fast_ops::<false>(
-                    &f, 0, &mut slots, &mut ctmps, false, no_release, &mut fev, true, None,
+                    f, 0, &mut slots, &mut ctmps, false, no_release, &mut fev, true, None,
                 )
             } else {
                 self.run_fast_ops::<true>(
-                    &f, 0, &mut slots, &mut ctmps, false, no_release, &mut fev, true, None,
+                    f, 0, &mut slots, &mut ctmps, false, no_release, &mut fev, true, None,
                 )
             };
             // (the frames a call it made gave it: see enter_lean_frames)
@@ -822,7 +822,7 @@ impl Vm {
                     })
                 }) =>
             {
-                self.lean_return(&f, stop, &slots, &mut ctmps, unused, listed)
+                self.lean_return(f, stop, &slots, &mut ctmps, unused, listed)
             }
             _ => None,
         };
@@ -840,9 +840,9 @@ impl Vm {
                 caller: op_array,
                 caller_ip: ip,
                 depth,
-                user_fn: f,
+                user_fn: Rc::clone(f),
                 sep,
-                call,
+                call: call.take(),
                 cvs: slots,
                 frame: ResumeFrame {
                     tmps: ctmps,
@@ -879,7 +879,7 @@ impl Vm {
         // (objects with a destructor exist: the release points of the end
         // of the frame and of DO_FCALL's release of the arguments)
         if listed {
-            if !self.lean_end_listed(op_array, op.line, vm_frame, &f, &mut call, nargs) {
+            if !self.lean_end_listed(op_array, op.line, vm_frame, f, call, nargs) {
                 return self.lean_end_failed(result, call, op.line);
             }
         } else {
@@ -897,8 +897,11 @@ impl Vm {
                 }
             }
         }
-        // (DO_FCALL: the arguments' buffer is kept, the result stored)
-        self.recycle_args(&mut call);
+        // (DO_FCALL: the arguments' buffer is kept, the result stored; a
+        // call lean_direct() set up has none)
+        if call.args.capacity() != 0 {
+            self.recycle_args(call);
+        }
         match &result {
             Value::Object(o) => crate::gc::track_object(o),
             Value::Generator(g) => crate::gc::track_generator(g),
@@ -977,13 +980,13 @@ impl Vm {
     /// at dispatches it (see fast_call_failed).
     #[cold]
     #[inline(never)]
-    fn lean_end_failed(&mut self, result: Value, mut call: PendingCall, line: u32) -> bool {
+    fn lean_end_failed(&mut self, result: Value, call: &mut PendingCall, line: u32) -> bool {
         drop(result);
         self.fast_call_failed = Some(VmError {
             message: "Uncaught exception from destructor".into(),
             line,
         });
-        self.recycle_args(&mut call);
+        self.recycle_args(call);
         false
     }
 
@@ -1001,7 +1004,7 @@ impl Vm {
         mut ctmps: Vec<Value>,
         calls_base: usize,
         vm_frame: Option<crate::stack::VmFrameGuard>,
-        mut call: PendingCall,
+        call: &mut PendingCall,
     ) {
         if self.pending_calls.len() > calls_base {
             self.pending_calls.truncate(calls_base);
@@ -1019,7 +1022,7 @@ impl Vm {
             self.run_pending_destructors();
         }
         drop(vm_frame);
-        self.recycle_args(&mut call);
+        self.recycle_args(call);
     }
 
     /// The RETURN at `ip` of a lean call's callee (stopped there), when it

@@ -1539,6 +1539,21 @@ impl CallTarget {
 }
 
 impl PendingCall {
+    /// The call, `self` left an empty one (to be dropped).
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn take(&mut self) -> PendingCall {
+        std::mem::replace(
+            self,
+            PendingCall {
+                name: PhpString::empty(),
+                args: Vec::new(),
+                named_args: Vec::new(),
+                target: CallTarget::NONE,
+            },
+        )
+    }
+
     /// Resolve named arguments by matching them to parameter positions.
     /// Named args are placed at the correct index based on cv_names.
     /// Positional args keep their order; named args fill in remaining slots.
