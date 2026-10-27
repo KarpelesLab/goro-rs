@@ -579,7 +579,12 @@ impl Vm {
                 Some(Value::Null) => String::new(),
                 Some(t) => format!(
                     "\nStack trace:\n{}",
-                    Vm::format_exception_trace_value(&t, "", self.exception_string_param_max_len)
+                    Vm::format_exception_trace_value(
+                        &t,
+                        "",
+                        self.exception_string_param_max_len,
+                        &mut Vec::new(),
+                    )
                 ),
                 None => {
                     self.materialize_builtin_frames(false);

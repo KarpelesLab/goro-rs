@@ -14,9 +14,10 @@ impl Vm {
         trace_val: &Value,
         fallback_trace: &str,
         max_len: usize,
+        warnings: &mut Vec<String>,
     ) -> String {
         if matches!(trace_val, Value::Array(_)) {
-            return Self::trace_text(trace_val, true, max_len, &mut Vec::new());
+            return Self::trace_text(trace_val, true, max_len, warnings);
         }
         fallback_trace.to_string()
     }
@@ -339,6 +340,9 @@ impl Vm {
             };
             if let Value::Object(obj) = &exc {
                 let mut chain = Vec::new();
+                // (the warnings Exception::__toString() raises, from no
+                // active file)
+                let mut warnings = Vec::new();
                 {
                     let obj_ref = obj.borrow();
                     let class = crate::value::display_class_name(&obj_ref.class_name);
@@ -363,13 +367,23 @@ impl Vm {
                         e.line
                     };
                     let exc_trace = obj_ref.throwable_get(b"trace");
-                    let trace_str =
-                        Self::format_exception_trace_value(&exc_trace, &stack_trace, max_len);
+                    let trace_str = Self::format_exception_trace_value(
+                        &exc_trace,
+                        &stack_trace,
+                        max_len,
+                        &mut warnings,
+                    );
                     chain.push((class, msg_str, file_str, line_num, trace_str));
                     let mut prev = obj_ref.throwable_get(b"previous").clone();
+                    // (Z_PROTECT_RECURSION: an exception met again ends the chain)
+                    let mut seen = vec![Rc::as_ptr(obj)];
                     for _ in 0..100 {
                         let next_prev;
                         if let Value::Object(prev_obj) = &prev {
+                            if seen.contains(&Rc::as_ptr(prev_obj)) {
+                                break;
+                            }
+                            seen.push(Rc::as_ptr(prev_obj));
                             let prev_ref = prev_obj.borrow();
                             let pc = crate::value::display_class_name(&prev_ref.class_name);
                             drop(prev_ref);
@@ -387,8 +401,12 @@ impl Vm {
                             };
                             let pl_num = if pl > 0 { pl as u32 } else { 0 };
                             let pt = prev_ref.throwable_get(b"trace");
-                            let pt_str =
-                                Self::format_exception_trace_value(&pt, &stack_trace, max_len);
+                            let pt_str = Self::format_exception_trace_value(
+                                &pt,
+                                &stack_trace,
+                                max_len,
+                                &mut warnings,
+                            );
                             chain.push((pc, pm, pf_str, pl_num, pt_str));
                             next_prev = prev_ref.throwable_get(b"previous").clone();
                         } else {
@@ -431,6 +449,16 @@ impl Vm {
                     self.observe_uncaught_tostring(&exc, &chain, &fatal);
                 }
                 fatal.push_str("\n  thrown");
+                if !warnings.is_empty() {
+                    let saved_file = std::mem::replace(
+                        &mut self.current_file,
+                        crate::rcstr::RcStr::from("Unknown"),
+                    );
+                    for w in warnings {
+                        self.raise_error(crate::errdisplay::E_WARNING, &w, 0);
+                    }
+                    self.current_file = saved_file;
+                }
                 let severity = self
                     .uncaught_severity
                     .take()

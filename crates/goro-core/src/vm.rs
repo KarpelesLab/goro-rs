@@ -66237,6 +66237,9 @@ impl Vm {
         let mut out = String::new();
         let mut cur = Some(obj.clone());
         let mut guard = 0;
+        // (Z_PROTECT_RECURSION: a previous exception already visited ends
+        // the chain)
+        let mut seen: Vec<*const RefCell<PhpObject>> = Vec::new();
         while let Some(o) = cur {
             let part = self.throwable_single_string(&o, warnings);
             out = if out.is_empty() {
@@ -66244,8 +66247,9 @@ impl Vm {
             } else {
                 format!("{}\n\nNext {}", part, out)
             };
+            seen.push(Rc::as_ptr(&o));
             cur = match o.borrow().throwable_get(b"previous") {
-                Value::Object(p) => Some(p),
+                Value::Object(p) if !seen.contains(&Rc::as_ptr(&p)) => Some(p),
                 _ => None,
             };
             guard += 1;
