@@ -1607,8 +1607,11 @@ impl Vm {
         cvs: Vec<Value>,
         call: &PendingCall,
     ) -> Result<Value, VmError> {
+        // (while objects with a destructor exist, the frame: its arguments
+        // are released after its result, see the DO_FCALL arm)
         if f.callback_lean_kind() & 3 == 0
             || !self.builtin_frames_synced()
+            || self.has_release_work()
             || !self.callback_lean_ready(f)
         {
             return self.execute_op_array_vm(f, cvs);

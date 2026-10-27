@@ -530,6 +530,8 @@ impl Vm {
         // the general handler)
         if matches!(op.op1, OperandType::Const(_))
             || self.observer.is_some()
+            // (a lean callee's call: no destructor may run there)
+            || self.lean_depth != 0 && self.has_release_work()
             || !self.builtin_dofcall_ok(op_array, ip, tmps, free_mask)
         {
             return None;
@@ -697,7 +699,6 @@ impl Vm {
         let op = &op_array.ops[ip];
         let mask = free_mask.get(ip).copied().unwrap_or(0);
         mask & !4 == 0
-            && !self.has_release_work()
             && matches!(op.result, OperandType::Tmp(_) | OperandType::Unused)
             && tmp_writable(&op.result, tmps)
             && self.internal_function_decls.is_empty()
@@ -714,7 +715,8 @@ impl Vm {
         tmps: &mut [Value],
         free_mask: &[u8],
     ) -> Option<bool> {
-        if !self.builtin_dofcall_ok(op_array, ip, tmps, free_mask) {
+        // (no destructor may run there: see fast_builtin_dofcall)
+        if self.has_release_work() || !self.builtin_dofcall_ok(op_array, ip, tmps, free_mask) {
             return None;
         }
         // (a builtin that needs no frame for these arguments: none for the
@@ -985,7 +987,7 @@ impl Vm {
     /// (see fast_builtin_dofcall): what the dispatch loop's DO_FCALL takes.
     #[cold]
     #[inline(never)]
-    fn fast_call_fail(
+    pub(crate) fn fast_call_fail(
         &mut self,
         op_array: &OpArray,
         ip: usize,

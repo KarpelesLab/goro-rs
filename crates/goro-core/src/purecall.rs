@@ -140,6 +140,7 @@ impl Vm {
         func: BuiltinFn,
         which: u8,
         bound: bool,
+        listed: bool,
     ) -> Option<usize> {
         let &(lower, kind, min, max) = PURE_CALLS.get(which as usize)?;
         let ops = &op_array.ops;
@@ -202,7 +203,12 @@ impl Vm {
                 // container held elsewhere too)
                 OperandType::Tmp(c) => match tmps.get(c as usize)? {
                     Value::Array(a) if Rc::strong_count(a) == 1 => return None,
-                    Value::Object(o) if Rc::strong_count(o) == 1 => return None,
+                    Value::Object(o)
+                        if Rc::strong_count(o) == 1
+                            || !crate::fastpath::tmp_release_quiet(o, listed) =>
+                    {
+                        return None;
+                    }
                     v => v,
                 },
                 _ => return None,
@@ -299,7 +305,23 @@ impl Vm {
         } else {
             store_tmp(&op.result, result, tmps);
         }
+        // (while objects with a destructor exist: the release point of the
+        // arguments' release, as fast_builtin_dofcall() makes it; stepped
+        // over when it would find nothing, see quiet_release_budget)
+        let nargs = args.len();
         self.recycle_arg_vec(args);
+        if nargs != 0 && self.has_release_work() {
+            if !self.destructible_objects.is_empty() && self.quiet_release_budget() > 0 {
+                self.destructible_objects.skip_scan();
+            } else {
+                self.current_line = op.line;
+                self.run_pending_destructors();
+                if self.current_exception.is_some() {
+                    let message = "Uncaught exception from destructor".to_string();
+                    return Some(self.fast_call_fail(op_array, ip, message, Vec::new()));
+                }
+            }
+        }
         Some(true)
     }
 

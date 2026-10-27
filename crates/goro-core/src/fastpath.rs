@@ -2358,6 +2358,70 @@ pub(crate) fn fast_op_outlined(
     fast_op(op, cvs, tmps, literals, refs_ok, no_release)
 }
 
+/// Whether the release of a temporary's object `o` held elsewhere too
+/// (count above 1) makes no destructor due: `listed` (objects with a
+/// destructor exist) and `o` one of them, held by its list and the
+/// temporary alone, would be.
+#[inline]
+pub(crate) fn tmp_release_quiet(o: &Rc<RefCell<crate::object::PhpObject>>, listed: bool) -> bool {
+    !listed || Rc::strong_count(o) > 2 || o.try_borrow().is_ok_and(|b| !b.dtor_listed.get())
+}
+
+/// The kind of a value for typed_prop_mask(): one bit per kind.
+#[inline(always)]
+fn value_kind(v: &Value) -> u16 {
+    match v {
+        Value::Null => 1,
+        Value::True => 2,
+        Value::False => 4,
+        Value::Long(_) => 8,
+        Value::Double(_) => 16,
+        Value::String(_) => 32,
+        Value::Array(_) => 64,
+        // (objects, references, resources...: the full check)
+        _ => 0,
+    }
+}
+
+/// The value kinds (see value_kind) declared type `ty` takes as they are,
+/// as value_fits_type_exactly() judges them; 0 when it names a class or
+/// anything else (the full check then).
+fn type_kind_mask(ty: &crate::opcode::ParamType) -> u16 {
+    use crate::opcode::ParamType;
+    match ty {
+        ParamType::Nullable(inner) => match type_kind_mask(inner) {
+            0 => 0,
+            m => m | 1,
+        },
+        ParamType::Union(members) => {
+            let mut m = 0;
+            for t in members {
+                match type_kind_mask(t) {
+                    0 => return 0,
+                    k => m |= k,
+                }
+            }
+            m
+        }
+        ParamType::Simple(n) => {
+            let n = n.strip_prefix(b"\\").unwrap_or(n);
+            let mut buf = [0u8; 128];
+            match lower_into(n, &mut buf) {
+                Some(b"int") => 8,
+                Some(b"float") => 16,
+                Some(b"string") => 32,
+                Some(b"bool") => 6,
+                Some(b"true") => 2,
+                Some(b"false") => 4,
+                Some(b"array") => 64,
+                Some(b"null") => 1,
+                _ => 0,
+            }
+        }
+        _ => 0,
+    }
+}
+
 /// Lowercase `s` into `buf` (None when it does not fit: the caller then
 /// takes the general path).
 #[inline]
@@ -3120,13 +3184,18 @@ impl crate::vm::Vm {
                     // (a builtin php-src compiles into an opcode of its own)
                     // (only when no destructor is due: the call's release of
                     // its arguments is then a no-op)
-                    let special = if no_release && maybe_special_call(op_array, ip) {
-                        self.fast_special_call(op_array, ip, cvs, tmps, bound.is_some())
+                    // (while objects with a destructor exist, the release of
+                    // its arguments is a release point it steps over)
+                    let special = if maybe_special_call(op_array, ip) && quiet_ok!() {
+                        self.fast_special_call(op_array, ip, cvs, tmps, bound.is_some(), !no_release)
                     } else {
                         None
                     };
                     match special {
-                        Some(next) => Fast::Jump(next),
+                        Some(next) => {
+                            quiet_took!();
+                            Fast::Jump(next)
+                        }
                         None => match self.init_fcall_fast(op_array, ip, cvs, tmps) {
                             0 => match self.fast_func_num_args(op_array, ip, tmps) {
                                 Some(next) => Fast::Jump(next),
@@ -3723,15 +3792,17 @@ impl crate::vm::Vm {
                         } else {
                             break 'run ip;
                         }
-                    } else if no_release
-                        && bound.is_none()
+                    } else if bound.is_none()
                         && self.lean_depth == 0
                         // (a lean call handed over here: it takes the
                         // DO_FCALL, its pending call is not the top one)
                         && self.lean_resume.is_empty()
                         && self.fast_builtin_target()
                     {
-                        // A builtin by its plain name (see builtincall.rs).
+                        // A builtin by its plain name (see builtincall.rs;
+                        // with objects with a destructor around, it makes
+                        // the release points of the call, the run's fast
+                        // opcodes step over theirs as they may).
                         match self.fast_builtin_dofcall(
                             op_array,
                             ip,
@@ -3741,7 +3812,7 @@ impl crate::vm::Vm {
                         ) {
                             // (an object with a destructor came to be: the
                             // run's release-free assumption no longer holds)
-                            Some(true) if self.has_release_work() => {
+                            Some(true) if no_release && self.has_release_work() => {
                                 last = ip;
                                 break 'run ip + 1;
                             }
@@ -3764,7 +3835,7 @@ impl crate::vm::Vm {
                             Some(false) => break 'run ip,
                             None => return ip,
                         }
-                    } else if no_release
+                    } else if (no_release || self.lean_depth == 0)
                         && (self.lean_depth >= 1 || bound.is_none())
                         && self.lean_resume.is_empty()
                         && self.ucf_candidate()
@@ -3778,7 +3849,7 @@ impl crate::vm::Vm {
                             internal_code,
                             free_mask.get(),
                         ) {
-                            Some(true) if self.has_release_work() => {
+                            Some(true) if no_release && self.has_release_work() => {
                                 last = ip;
                                 break 'run ip + 1;
                             }
@@ -3853,6 +3924,7 @@ impl crate::vm::Vm {
         cvs: &[Value],
         tmps: &mut [Value],
         bound: bool,
+        listed: bool,
     ) -> Option<usize> {
         let ops = &op_array.ops;
         let literals = &op_array.literals;
@@ -3860,7 +3932,16 @@ impl crate::vm::Vm {
         let fn_gen = self.user_functions.len() + 1;
         let (func, special) = Self::cached_special_call(op_array, ip, fn_gen)?;
         if special >= PURE_BASE {
-            return self.fast_pure_call(op_array, ip, cvs, tmps, func, special - PURE_BASE, bound);
+            return self.fast_pure_call(
+                op_array,
+                ip,
+                cvs,
+                tmps,
+                func,
+                special - PURE_BASE,
+                bound,
+                listed,
+            );
         }
         let &(lower, kind, nargs) = SPECIAL_CALLS.get(special as usize - 1)?;
         // INIT_FCALL's op2 is the number of arguments; the sends follow it.
@@ -3909,7 +3990,9 @@ impl crate::vm::Vm {
                     Value::Undef | Value::Reference(_) => return None,
                     v if is_plain_scalar(v) => unsafe { std::ptr::read(v) },
                     v @ Value::Array(a) if Rc::strong_count(a) > 1 => unsafe { std::ptr::read(v) },
-                    v @ Value::Object(o) if Rc::strong_count(o) > 1 => unsafe { std::ptr::read(v) },
+                    v @ Value::Object(o) if Rc::strong_count(o) > 1 && tmp_release_quiet(o, listed) => unsafe {
+                        std::ptr::read(v)
+                    },
                     _ => return None,
                 },
                 _ => return None,
@@ -5687,7 +5770,7 @@ impl crate::vm::Vm {
             .as_mut()
             .and_then(|g| g.as_mut())
             .and_then(|s| s.prop_slot(&op_array.ops, ip));
-        let (cached, hint) = match &site {
+        let (cached, hint, typed_mask) = match &site {
             Some(c)
                 if c.set
                     && key_eq(&c.class, &ob.class_name)
@@ -5697,9 +5780,9 @@ impl crate::vm::Vm {
                         _ => false,
                     } =>
             {
-                (Some(c.plain), c.slot as usize)
+                (Some(c.plain), c.slot as usize, c.typed)
             }
-            _ => (None, usize::MAX),
+            _ => (None, usize::MAX, 0),
         };
         let idx = match ob.properties.get(hint) {
             Some((k, _)) if key_eq(k, name) => hint,
@@ -5777,16 +5860,36 @@ impl crate::vm::Vm {
                     c.plain = p;
                     c.slot = idx as u32;
                     c.set = true;
+                    c.typed = 0;
                 }
                 p
             }
         };
         drop(sites);
-        // A typed property, written with a value of its type.
+        // A typed property, written with a value of its type (of a type
+        // of plain kinds: as the site found it, see typed_prop_mask).
         if write && (plain == 0 || typed_init) {
-            let fits = new_val.as_ref().is_some_and(|v| {
-                self.typed_prop_store_ok(&ob.class_name, name, scope, v, typed_init)
-            });
+            let fits = match new_val.as_ref() {
+                None => false,
+                Some(v) if typed_mask != 0 && !typed_init => value_kind(v) & typed_mask != 0,
+                Some(v) => {
+                    let ok = self.typed_prop_store_ok(&ob.class_name, name, scope, v, typed_init);
+                    if ok && !typed_init && const_name && cached.is_some() {
+                        let m = self.typed_prop_mask(&ob.class_name, name);
+                        if m != 0 {
+                            if let Some(c) = op_array
+                                .sites()
+                                .borrow_mut()
+                                .as_mut()
+                                .and_then(|s| s.prop_slot(&op_array.ops, ip))
+                            {
+                                c.typed = m;
+                            }
+                        }
+                    }
+                    ok
+                }
+            };
             if !fits {
                 return Fast::No;
             }
@@ -6184,6 +6287,29 @@ impl crate::vm::Vm {
             }
         }
         self.value_fits_type_exactly(v, ty)
+    }
+
+    /// The kinds of values (see value_kind) the declared type of property
+    /// `name` of class `class_name` takes as they are, when typed_prop_store_ok()
+    /// found a write of it there plain (but for its type): what the site
+    /// remembers for the next writes, which only check the value's kind.
+    /// 0: a type with a class (or unsure): typed_prop_store_ok() each time.
+    #[cold]
+    #[inline(never)]
+    fn typed_prop_mask(&self, class_name: &[u8], name: &[u8]) -> u16 {
+        let mut buf = [0u8; 128];
+        let Some(lower) = lower_into(class_name, &mut buf) else {
+            return 0;
+        };
+        let Some(ty) = self
+            .classes
+            .get(lower)
+            .and_then(|ce| ce.properties.iter().find(|p| p.name == name))
+            .and_then(|p| p.property_type.as_ref())
+        else {
+            return 0;
+        };
+        type_kind_mask(ty)
     }
 
     /// Whether `v` is of type `ty` as it is (false when unsure).

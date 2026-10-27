@@ -696,6 +696,10 @@ pub(crate) struct PropSlot {
     pub(crate) plain: u8,
     pub(crate) slot: u32,
     pub(crate) set: bool,
+    /// Of a write to a typed property there: the kinds of values its type
+    /// takes as they are (see Vm::typed_prop_mask; 0: not known yet, or
+    /// not a type of plain kinds).
+    pub(crate) typed: u16,
 }
 
 /// What the read, isset() or write of a variable's object property (or
