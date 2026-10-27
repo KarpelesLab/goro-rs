@@ -32173,11 +32173,10 @@ impl Vm {
                                 && !self.is_known_builtin_class(&cl)
                                 && !self.class_aliases.contains_key(&cl)
                             {
+                                // (the name as given: `Class "\Foo" not found`)
                                 let err_msg = format!(
                                     "Class \"{}\" not found",
-                                    crate::string::msg_cstr(
-                                        class_name.strip_prefix(b"\\").unwrap_or(&class_name)
-                                    )
+                                    crate::string::msg_cstr(&class_name)
                                 );
                                 let exc = self.create_exception(b"Error", &err_msg, op.line);
                                 self.current_exception = Some(exc);
@@ -32195,6 +32194,12 @@ impl Vm {
                             }
                         }
                     }
+                    // (zend_lookup_class(): the leading "\" of a class name
+                    // string is not part of the name)
+                    let class_name = match class_name.strip_prefix(b"\\") {
+                        Some(rest) if matches!(class_val, Value::String(_)) => rest.to_vec(),
+                        _ => class_name,
+                    };
                     if !matches!(method_val, Value::String(_)) {
                         self.check_undefined_cv(&op.op2, &cvs, op_array, op.line);
                         native_exc_check!(
@@ -48112,7 +48117,11 @@ impl Vm {
                         let val = Value::String(PhpString::from_vec(canonical));
                         self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     } else {
+                        // (zend_lookup_class(): a leading "\" of a class name
+                        // string is not part of the name: `$c = '\Foo'; $c::K`)
                         let class_lower: Vec<u8> = resolved_class
+                            .strip_prefix(b"\\")
+                            .unwrap_or(&resolved_class)
                             .iter()
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
@@ -48324,7 +48333,12 @@ impl Vm {
                                         ) {
                                             crate::string::msg_str(raw).to_string()
                                         } else {
-                                            crate::string::msg_str(&resolved_class).to_string()
+                                            crate::string::msg_str(
+                                                resolved_class
+                                                    .strip_prefix(b"\\")
+                                                    .unwrap_or(&resolved_class),
+                                            )
+                                            .to_string()
                                         };
                                         let prop_display = prop_name.to_msg_string();
                                         let err_msg = format!(
@@ -48753,7 +48767,9 @@ impl Vm {
                                 builtin_val
                             } else if self.is_known_builtin_class(&class_lower) {
                                 // Builtin class exists but constant doesn't
-                                let class_display = crate::string::msg_str(&resolved_class);
+                                let class_display = crate::string::msg_str(
+                                    resolved_class.strip_prefix(b"\\").unwrap_or(&resolved_class),
+                                );
                                 let prop_display = prop_name.to_msg_string();
                                 let err_msg = format!(
                                     "Undefined constant {}::{}",

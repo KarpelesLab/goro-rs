@@ -16686,7 +16686,12 @@ fn get_class_methods_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
     let class_name = match &val {
         Value::String(s) => {
-            let name = s.as_bytes().to_vec();
+            // (zend_lookup_class(): a leading "\" is not part of the name)
+            let name = s
+                .as_bytes()
+                .strip_prefix(b"\\")
+                .unwrap_or(s.as_bytes())
+                .to_vec();
             let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
             if !vm.classes.contains_key(&lower) && !name.is_empty() {
                 vm.try_autoload_class(&name);
@@ -21126,13 +21131,11 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(Value::False)
         }
         Value::String(s) => {
-            let class_lower: Vec<u8> = s
-                .as_bytes()
-                .iter()
-                .map(|b| b.to_ascii_lowercase())
-                .collect();
+            // (zend_lookup_class(): a leading "\" is not part of the name)
+            let name = s.as_bytes().strip_prefix(b"\\").unwrap_or(s.as_bytes());
+            let class_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
             if !vm.classes.contains_key(&class_lower) && !vm.is_known_builtin_class(&class_lower) {
-                vm.try_autoload_class(s.as_bytes());
+                vm.try_autoload_class(name);
                 if vm.current_exception.is_some() {
                     return Err(VmError {
                         message: "Uncaught exception".into(),
