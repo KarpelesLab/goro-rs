@@ -1948,9 +1948,10 @@ impl Compiler {
     fn compile_hook_attributes(
         &mut self,
         attrs: &[goro_parser::ast::Attribute],
+        line: u32,
     ) -> Vec<crate::object::RuntimeAttribute> {
         self.in_hook_attrs = true;
-        let r = self.compile_attributes_target(attrs, "method");
+        let r = self.compile_attributes_at(attrs, "method", line);
         self.in_hook_attrs = false;
         r
     }
@@ -5938,7 +5939,7 @@ impl Compiler {
                         return Err(CompileError {
                             message: "Cannot declare promoted property outside a constructor"
                                 .to_string(),
-                            line: stmt.span.line,
+                            line: param.line,
                         });
                     }
                 }
@@ -7455,6 +7456,7 @@ impl Compiler {
                                 default,
                                 get_hook_abstract,
                                 set_hook_abstract,
+                                line: prop_line,
                                 ..
                             } if modifiers.is_interface
                                 && get_hook.is_none()
@@ -7465,10 +7467,14 @@ impl Compiler {
                             {
                                 return Err(CompileError {
                                     message: "Interfaces may only include hooked properties".into(),
-                                    line: default
-                                        .as_ref()
-                                        .map(|d| d.span.line)
-                                        .unwrap_or(stmt.span.line),
+                                    line: if *prop_line > 0 {
+                                        *prop_line
+                                    } else {
+                                        default
+                                            .as_ref()
+                                            .map(|d| d.span.line)
+                                            .unwrap_or(stmt.span.line)
+                                    },
                                 });
                             }
                             ClassMember::Method {
@@ -7599,7 +7605,8 @@ impl Compiler {
                 if let Some(ext) = extends {
                     self.current_parent_class = Some(self.resolve_class_name(ext));
                 }
-                class.attributes = self.compile_attributes_target(class_attributes, "class");
+                class.attributes =
+                    self.compile_attributes_at(class_attributes, "class", stmt.span.line);
                 check_class_attr_validators(&class, stmt.span.line)?;
 
                 // Enums automatically implement UnitEnum (and BackedEnum if backed)
@@ -8543,7 +8550,7 @@ impl Compiler {
                                     message:
                                         "Cannot use the final modifier on an abstract property"
                                             .to_string(),
-                                    line: stmt.span.line,
+                                    line: Self::member_line(*prop_line, stmt.span.line),
                                 });
                             }
                             // Final+private is not allowed
@@ -8553,49 +8560,32 @@ impl Compiler {
                                 return Err(CompileError {
                                     message: "Property cannot be both final and private"
                                         .to_string(),
-                                    line: stmt.span.line,
+                                    line: Self::member_line(*prop_line, stmt.span.line),
                                 });
                             }
-                            // Hook-level checks: final+private, final+abstract, abstract+private
-                            // `final+private` must be checked before `final+abstract` because the test
-                            // `private $prop { final get; }` is both, but the expected error is
-                            // "cannot be both final and private".
-                            if (*get_hook_final || *set_hook_final)
-                                && matches!(visibility, goro_parser::ast::Visibility::Private)
-                            {
-                                return Err(CompileError {
-                                    message: "Property hook cannot be both final and private"
-                                        .to_string(),
-                                    line: stmt.span.line,
-                                });
-                            }
-                            if let Some(message) = Self::hook_body_presence_error(
+                            // zend_compile_property_hooks(): each hook's
+                            // modifiers, on the hook's line.
+                            if let Some((message, l)) = Self::hook_decl_error(
                                 modifiers.is_interface,
                                 *prop_is_abstract,
-                                get_hook.is_some().then_some(*get_hook_abstract),
-                                set_hook.is_some().then_some(*set_hook_abstract),
+                                matches!(visibility, goro_parser::ast::Visibility::Private),
+                                [
+                                    get_hook
+                                        .is_some()
+                                        .then_some((*get_hook_final, *get_hook_abstract)),
+                                    set_hook
+                                        .is_some()
+                                        .then_some((*set_hook_final, *set_hook_abstract)),
+                                ],
+                                hook_attrs.lines,
                             ) {
                                 return Err(CompileError {
                                     message: message.to_string(),
-                                    line: stmt.span.line,
-                                });
-                            }
-                            if (*get_hook_final && *get_hook_abstract)
-                                || (*set_hook_final && *set_hook_abstract)
-                            {
-                                return Err(CompileError {
-                                    message: "Property hook cannot be both abstract and final"
-                                        .to_string(),
-                                    line: stmt.span.line,
-                                });
-                            }
-                            if *prop_is_abstract
-                                && matches!(visibility, goro_parser::ast::Visibility::Private)
-                            {
-                                return Err(CompileError {
-                                    message: "Property hook cannot be both abstract and private"
-                                        .to_string(),
-                                    line: stmt.span.line,
+                                    line: if l > 0 {
+                                        l
+                                    } else {
+                                        Self::member_line(*prop_line, stmt.span.line)
+                                    },
                                 });
                             }
                             // Abstract property in non-abstract, non-interface, non-trait class
@@ -8728,7 +8718,10 @@ impl Compiler {
                                     .bytes()
                                     .map(|b| b.to_ascii_lowercase())
                                     .collect();
-                                let get_attrs = self.compile_hook_attributes(&hook_attrs.get);
+                                let get_attrs = self.compile_hook_attributes(
+                                    &hook_attrs.get,
+                                    hook_attrs.lines[0].0,
+                                );
                                 class.methods.insert(
                                     lower_hook_name,
                                     MethodDef {
@@ -8819,7 +8812,10 @@ impl Compiler {
                                         &hook_attrs.set_param,
                                         "parameter",
                                     )];
-                                let set_attrs = self.compile_hook_attributes(&hook_attrs.set);
+                                let set_attrs = self.compile_hook_attributes(
+                                    &hook_attrs.set,
+                                    hook_attrs.lines[1].0,
+                                );
                                 hook_compiler.op_array.required_param_count = 1; // $value is required
 
                                 for s in hook_body {
@@ -9490,7 +9486,7 @@ impl Compiler {
                                         if is_promoted_param(param) {
                                             return Err(CompileError {
                                                 message: "Cannot declare promoted property outside a constructor".to_string(),
-                                                line: stmt.span.line,
+                                                line: param.line,
                                             });
                                         }
                                     }
@@ -9503,7 +9499,7 @@ impl Compiler {
                                         if is_promoted_param(param) {
                                             return Err(CompileError {
                                                 message: "Cannot declare promoted property in an abstract constructor".to_string(),
-                                                line: stmt.span.line,
+                                                line: param.line,
                                             });
                                         }
                                     }
@@ -9543,7 +9539,7 @@ impl Compiler {
                                                             crate::string::msg_str(name),
                                                             crate::string::msg_str(&param.name)
                                                         ),
-                                                        line: *method_line,
+                                                        line: param.line,
                                                     });
                                                 }
                                                 let vis_level = |v: &ObjVisibility| match v {
@@ -9559,7 +9555,7 @@ impl Compiler {
                                                                 crate::string::msg_str(name),
                                                                 crate::string::msg_str(&param.name)
                                                             ),
-                                                            line: *method_line,
+                                                            line: param.line,
                                                         });
                                                     }
                                                 }
@@ -9574,7 +9570,7 @@ impl Compiler {
                                                         crate::string::msg_str(name),
                                                         crate::string::msg_str(&param.name)
                                                     ),
-                                                    line: *method_line,
+                                                    line: param.line,
                                                 });
                                             }
                                             // Hooked promoted properties cannot be readonly (PHP-8.4 rule)
@@ -9585,7 +9581,7 @@ impl Compiler {
                                                 return Err(CompileError {
                                                     message: "Hooked properties cannot be readonly"
                                                         .to_string(),
-                                                    line: *method_line,
+                                                    line: param.line,
                                                 });
                                             }
                                             let declaring_class_lower: Vec<u8> = qualified_name
@@ -9605,7 +9601,7 @@ impl Compiler {
                                                     message:
                                                         "Cannot declare variadic promoted property"
                                                             .to_string(),
-                                                    line: *method_line,
+                                                    line: param.line,
                                                 });
                                             }
                                             // Check for duplicate property from promotion
@@ -9617,7 +9613,7 @@ impl Compiler {
                                                         crate::string::msg_str(name),
                                                         crate::string::msg_str(&param.name)
                                                     ),
-                                                    line: *method_line,
+                                                    line: param.line,
                                                 });
                                             }
                                             if let Some(hint) = param
@@ -9789,8 +9785,10 @@ impl Compiler {
                                                     .bytes()
                                                     .map(|b| b.to_ascii_lowercase())
                                                     .collect();
-                                                let get_attrs = self
-                                                    .compile_hook_attributes(&param.hook_attrs.get);
+                                                let get_attrs = self.compile_hook_attributes(
+                                                    &param.hook_attrs.get,
+                                                    param.hook_attrs.lines[0].0,
+                                                );
                                                 class.methods.insert(
                                                     lower_hook_name,
                                                     MethodDef {
@@ -9865,8 +9863,10 @@ impl Compiler {
                                                         &param.hook_attrs.set_param,
                                                         "parameter",
                                                     )];
-                                                let set_attrs = self
-                                                    .compile_hook_attributes(&param.hook_attrs.set);
+                                                let set_attrs = self.compile_hook_attributes(
+                                                    &param.hook_attrs.set,
+                                                    param.hook_attrs.lines[1].0,
+                                                );
                                                 hook_compiler.op_array.required_param_count = 1;
                                                 for s in hook_body.iter() {
                                                     hook_compiler.compile_stmt(s)?;
@@ -15083,6 +15083,47 @@ impl Compiler {
             line,
         });
         OperandType::Tmp(t)
+    }
+
+    /// zend_compile_property_hooks()'s checks of each hook (in source
+    /// order) of a property: `hooks` are Some((final, declared without a
+    /// body)) for the get / set hook, `lines` their (start, end) lines.
+    /// Returns the error and the line of the hook it is about.
+    #[inline(never)]
+    fn hook_decl_error(
+        in_interface: bool,
+        prop_abstract: bool,
+        prop_private: bool,
+        hooks: [Option<(bool, bool)>; 2],
+        lines: [(u32, u32); 2],
+    ) -> Option<(&'static str, u32)> {
+        let mut order = [0usize, 1];
+        if lines[1].0 > 0 && lines[0].0 > lines[1].0 {
+            order = [1, 0];
+        }
+        for i in order {
+            let Some((is_final, bodyless)) = hooks[i] else {
+                continue;
+            };
+            let line = lines[i].0;
+            if is_final && prop_private {
+                return Some(("Property hook cannot be both final and private", line));
+            }
+            if in_interface || (prop_abstract && bodyless) {
+                if !bodyless {
+                    return Some(("Abstract property hook cannot have body", line));
+                }
+                if prop_private {
+                    return Some(("Property hook cannot be both abstract and private", line));
+                }
+                if is_final {
+                    return Some(("Property hook cannot be both abstract and final", line));
+                }
+            } else if bodyless {
+                return Some(("Non-abstract property hook must have a body", line));
+            }
+        }
+        None
     }
 
     /// zend_compile_property_hooks(): an interface's hooks are abstract and

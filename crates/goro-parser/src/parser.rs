@@ -438,6 +438,29 @@ impl Parser {
         self.current().span
     }
 
+    /// The line of the first hook of the property just parsed (the
+    /// CG(zend_lineno) of zend_compile_property_hooks()'s first hook), or
+    /// `fallback`.
+    fn hooks_start_line(&self, fallback: u32) -> u32 {
+        let l = self.last_hook_attrs.lines;
+        match (l[0].0, l[1].0) {
+            (0, 0) => fallback,
+            (0, s) | (s, 0) => s,
+            (g, s) => g.min(s),
+        }
+    }
+
+    /// The end line of the last hook of the property just parsed (where
+    /// zend_verify_hooked_property() runs, after compiling the hooks), or
+    /// `fallback`.
+    fn hooks_end_line(&self, fallback: u32) -> u32 {
+        let l = self.last_hook_attrs.lines;
+        match l[0].1.max(l[1].1) {
+            0 => fallback,
+            e => e,
+        }
+    }
+
     fn advance(&mut self) -> &Token {
         let tok = &self.tokens[self.pos.min(self.tokens.len() - 1)];
         if self.pos < self.tokens.len() {
@@ -2130,7 +2153,7 @@ impl Parser {
                 param_get_hook_abstract,
                 param_set_hook_abstract,
             ) = if matches!(self.peek(), TokenKind::OpenBrace) {
-                self.parse_property_hooks(&name, type_hint.as_ref())?
+                self.parse_property_hooks(&name, type_hint.as_ref(), param_line)?
             } else {
                 (None, None, false, false, false, false)
             };
@@ -3245,7 +3268,7 @@ impl Parser {
                     get_hook_abstract,
                     set_hook_abstract,
                 ) = if matches!(self.peek(), TokenKind::OpenBrace) {
-                    self.parse_property_hooks(&name, None)?
+                    self.parse_property_hooks(&name, None, prop_line)?
                 } else {
                     // Parse comma-separated additional properties
                     self.pending_extra_properties.clear();
@@ -3307,19 +3330,19 @@ impl Parser {
                     if is_abstract {
                         return Err(ParseError {
                             message: "Property in interface cannot be explicitly abstract. All interface members are implicitly abstract".into(),
-                            span: self.span(),
+                            span: Span::new(0, 0, prop_line),
                         });
                     }
                     if is_final {
                         return Err(ParseError {
                             message: "Property in interface cannot be final".into(),
-                            span: self.span(),
+                            span: Span::new(0, 0, prop_line),
                         });
                     }
                     if matches!(visibility, Visibility::Protected | Visibility::Private) {
                         return Err(ParseError {
                             message: "Property in interface cannot be protected or private".into(),
-                            span: self.span(),
+                            span: Span::new(0, 0, prop_line),
                         });
                     }
                 }
@@ -3327,7 +3350,13 @@ impl Parser {
                 if is_abstract && get_hook.is_none() && set_hook.is_none() {
                     return Err(ParseError {
                         message: "Only hooked properties may be declared abstract".into(),
-                        span: self.span(),
+                        span: Span::new(0, 0, prop_line),
+                    });
+                }
+                if is_static && (get_hook.is_some() || set_hook.is_some()) {
+                    return Err(ParseError {
+                        message: "Cannot declare hooks for static property".into(),
+                        span: Span::new(0, 0, self.hooks_start_line(prop_line)),
                     });
                 }
                 // Abstract property must have at least one abstract hook
@@ -3343,13 +3372,7 @@ impl Parser {
                             class_name,
                             String::from_utf8_lossy(&name),
                         ),
-                        span: self.span(),
-                    });
-                }
-                if is_static && (get_hook.is_some() || set_hook.is_some()) {
-                    return Err(ParseError {
-                        message: "Cannot declare hooks for static property".into(),
-                        span: self.span(),
+                        span: Span::new(0, 0, self.hooks_end_line(prop_line)),
                     });
                 }
                 Ok(ClassMember::Property {
@@ -3408,7 +3431,7 @@ impl Parser {
                     get_hook_abstract,
                     set_hook_abstract,
                 ) = if matches!(self.peek(), TokenKind::OpenBrace) {
-                    self.parse_property_hooks(&name, Some(&type_hint))?
+                    self.parse_property_hooks(&name, Some(&type_hint), prop_line)?
                 } else {
                     // Parse comma-separated additional properties (they share the same type)
                     while self.eat(&TokenKind::Comma) {
@@ -3467,19 +3490,19 @@ impl Parser {
                     if is_abstract {
                         return Err(ParseError {
                             message: "Property in interface cannot be explicitly abstract. All interface members are implicitly abstract".into(),
-                            span: self.span(),
+                            span: Span::new(0, 0, prop_line),
                         });
                     }
                     if is_final {
                         return Err(ParseError {
                             message: "Property in interface cannot be final".into(),
-                            span: self.span(),
+                            span: Span::new(0, 0, prop_line),
                         });
                     }
                     if matches!(visibility, Visibility::Protected | Visibility::Private) {
                         return Err(ParseError {
                             message: "Property in interface cannot be protected or private".into(),
-                            span: self.span(),
+                            span: Span::new(0, 0, prop_line),
                         });
                     }
                 }
@@ -3487,7 +3510,13 @@ impl Parser {
                 if is_abstract && get_hook.is_none() && set_hook.is_none() {
                     return Err(ParseError {
                         message: "Only hooked properties may be declared abstract".into(),
-                        span: self.span(),
+                        span: Span::new(0, 0, prop_line),
+                    });
+                }
+                if is_static && (get_hook.is_some() || set_hook.is_some()) {
+                    return Err(ParseError {
+                        message: "Cannot declare hooks for static property".into(),
+                        span: Span::new(0, 0, self.hooks_start_line(prop_line)),
                     });
                 }
                 // Abstract property must have at least one abstract hook
@@ -3503,13 +3532,7 @@ impl Parser {
                             class_name,
                             String::from_utf8_lossy(&name),
                         ),
-                        span: self.span(),
-                    });
-                }
-                if is_static && (get_hook.is_some() || set_hook.is_some()) {
-                    return Err(ParseError {
-                        message: "Cannot declare hooks for static property".into(),
-                        span: self.span(),
+                        span: Span::new(0, 0, self.hooks_end_line(prop_line)),
                     });
                 }
                 Ok(ClassMember::Property {
@@ -3565,6 +3588,7 @@ impl Parser {
         &mut self,
         prop_name: &[u8],
         prop_type_hint: Option<&TypeHint>,
+        prop_line: u32,
     ) -> ParseResult<(
         Option<Vec<Statement>>,
         Option<(Vec<u8>, Vec<Statement>)>,
@@ -3587,27 +3611,9 @@ impl Parser {
             // Skip optional attributes and modifiers: #[...] final, public, protected, private, &
             let mut hook_doc = self.take_doc_comment();
             let mut hook_attrs = Vec::new();
-            let attr_span = self.span();
             while matches!(self.peek(), TokenKind::AttributeOpen) {
                 // Parse and discard attributes for now
                 hook_attrs.extend(self.parse_attributes()?);
-            }
-            // zend_compile_func_decl(): #[\NoDiscard] cannot apply to hooks
-            // (unless its validation is delayed).
-            let is_attr = |a: &Attribute, n: &[u8]| {
-                a.name
-                    .last()
-                    .is_some_and(|l| l.strip_prefix(b"\\").unwrap_or(l).eq_ignore_ascii_case(n))
-            };
-            if hook_attrs.iter().any(|a| is_attr(a, b"NoDiscard"))
-                && !hook_attrs
-                    .iter()
-                    .any(|a| is_attr(a, b"DelayedTargetValidation"))
-            {
-                return Err(ParseError {
-                    message: "#[\\NoDiscard] is not supported for property hooks".into(),
-                    span: attr_span,
-                });
             }
             let mut hook_is_final = false;
             let mut hook_is_static = false;
@@ -3678,6 +3684,23 @@ impl Parser {
             };
 
             let hook_line = self.span().line;
+            // zend_compile_func_decl(): #[\NoDiscard] cannot apply to hooks
+            // (unless its validation is delayed); reported on the hook's line.
+            let is_attr = |a: &Attribute, n: &[u8]| {
+                a.name
+                    .last()
+                    .is_some_and(|l| l.strip_prefix(b"\\").unwrap_or(l).eq_ignore_ascii_case(n))
+            };
+            if hook_attrs.iter().any(|a| is_attr(a, b"NoDiscard"))
+                && !hook_attrs
+                    .iter()
+                    .any(|a| is_attr(a, b"DelayedTargetValidation"))
+            {
+                return Err(ParseError {
+                    message: "#[\\NoDiscard] is not supported for property hooks".into(),
+                    span: self.span(),
+                });
+            }
             if hook_name.eq_ignore_ascii_case(b"get") {
                 if get_hook.is_some() {
                     return Err(ParseError {
@@ -3971,7 +3994,7 @@ impl Parser {
         if get_hook.is_none() && set_hook.is_none() {
             return Err(ParseError {
                 message: "Property hook list must not be empty".into(),
-                span: self.span(),
+                span: Span::new(0, 0, prop_line),
             });
         }
         Ok((

@@ -315,7 +315,9 @@ impl Vm {
     /// referring to it is compiled (php_startup_auto_globals() with
     /// auto_globals_jit).
     pub fn defer_auto_global(&self, name: &[u8], value: Value) {
-        self.jit_auto_globals.borrow_mut().push((name.to_vec(), value));
+        self.jit_auto_globals
+            .borrow_mut()
+            .push((name.to_vec(), value));
     }
 
     /// zend_is_auto_global(): put deferred auto-global `name` in the symbol

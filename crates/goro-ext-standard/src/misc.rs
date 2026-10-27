@@ -1616,10 +1616,7 @@ fn call_inaccessible_via_trampoline(
         }
     }
     vm.skip_callback_deprecation = true;
-    let r = call_user_func(
-        vm,
-        &[cb, name, Value::Array(Rc::new(RefCell::new(args)))],
-    );
+    let r = call_user_func(vm, &[cb, name, Value::Array(Rc::new(RefCell::new(args)))]);
     vm.skip_callback_deprecation = false;
     Some(r)
 }

@@ -177,6 +177,21 @@ thread_local! {
         RefCell::new(Default::default());
 }
 
+/// The end line of the last of property `prop`'s hooks `class` declares
+/// (where zend_verify_hooked_property() runs), if known.
+#[inline(never)]
+fn hooks_end_line(class: &ClassEntry, prop: &[u8]) -> Option<u32> {
+    let mut best = 0;
+    for kind in [&b"__property_get_"[..], b"__property_set_"] {
+        let mut m = kind.to_vec();
+        m.extend(prop.iter().map(|b| b.to_ascii_lowercase()));
+        if let Some(md) = class.methods.get(&m) {
+            best = best.max(md.op_array.end_line);
+        }
+    }
+    (best > 0).then_some(best)
+}
+
 /// How many leading CVs of `f` positional call arguments bind to: its
 /// parameters (counting $this / closure use-vars it receives as leading
 /// arguments). Extra arguments are only reachable through func_get_args().
@@ -59018,7 +59033,12 @@ impl Vm {
                                                 crate::string::msg_str(prop),
                                                 if is_set { "set" } else { "get" }
                                             ),
-                                            line: op.line,
+                                            // (at the hook's declaration)
+                                            line: if method.op_array.decl_line > 0 {
+                                                method.op_array.decl_line
+                                            } else {
+                                                op.line
+                                            },
                                         });
                                     }
                                     continue;
@@ -59218,7 +59238,9 @@ impl Vm {
                                             crate::string::msg_str(&class.name),
                                             crate::string::msg_str(&prop.name)
                                         ),
-                                        line: op.line,
+                                        // (zend_verify_hooked_property() runs after
+                                        // the hooks are compiled: at the last one's end)
+                                        line: hooks_end_line(&class, &prop.name).unwrap_or(op.line),
                                     });
                                 }
                                 // zend_verify_hooked_property(): a backed property's
