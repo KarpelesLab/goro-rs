@@ -194,10 +194,10 @@ impl Vm {
 
     pub fn it_valid(&mut self, it: &Value) -> bool {
         match it {
-            Value::Object(_) => self
-                .spl_call_method(it, b"valid", &[])
-                .map(|v| v.is_truthy())
-                .unwrap_or(false),
+            Value::Object(_) => match self.spl_call_method(it, b"valid", &[]) {
+                Some(v) => self.is_true(&v),
+                None => false,
+            },
             Value::Generator(g) => {
                 self.gen_prime(g);
                 !matches!(
@@ -565,7 +565,7 @@ impl Vm {
         while self.dit_fetch(obj, true) {
             let r = self.spl_call_method(&this, b"accept", &[]);
             if let Some(r) = r {
-                if !self.exc() && r.is_truthy() {
+                if !self.exc() && self.is_true(&r) {
                     return;
                 }
             }
@@ -672,7 +672,7 @@ impl Vm {
                     } else {
                         return;
                     }
-                } else if r.map(|v| v.is_truthy()).unwrap_or(false) {
+                } else if r.is_some_and(|v| self.is_true(&v)) {
                     let ch = self
                         .spl_call_method(&inner, b"getChildren", &[])
                         .unwrap_or(Value::Null);
@@ -2147,7 +2147,7 @@ impl Vm {
                         self.current_exception = None;
                     }
                     if let Some(r) = r {
-                        if r.is_truthy() {
+                        if self.is_true(&r) {
                             if max_depth == -1 || max_depth > level {
                                 match mode {
                                     RIT_LEAVES_ONLY | RIT_CHILD_FIRST => {

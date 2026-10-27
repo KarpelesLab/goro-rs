@@ -1689,7 +1689,7 @@ impl PhpGenerator {
                                     let valid = vm
                                         .spl_call_method_at(&source, b"valid", &[], false)
                                         .unwrap_or(Value::False);
-                                    if failed(vm) || !valid.is_truthy() {
+                                    if failed(vm) || !vm.is_true(&valid) {
                                         break 'step;
                                     }
                                     let value = vm

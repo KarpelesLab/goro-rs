@@ -11098,6 +11098,17 @@ impl Vm {
         v.is_truthy()
     }
 
+    /// zend_is_true() of a magic __isset() / offsetExists() result inside
+    /// isset() / empty() / `??`: its NAN warning is not silenced.
+    #[inline(never)]
+    pub(crate) fn warn_nan_bool_unsilenced(&mut self, v: &Value, line: u32) {
+        if matches!(v.deref(), Value::Double(d) if d.is_nan()) {
+            let saved = self.unsilence_begin();
+            self.warn_nan_coercion(v, "bool", line);
+            self.unsilence_end(saved);
+        }
+    }
+
     /// "unexpected NAN value was coerced to <type>" (zend_nan_coerced_to_type_warning).
     pub fn warn_nan_coercion(&mut self, v: &Value, type_name: &str, line: u32) {
         let is_nan = match v {
@@ -17591,7 +17602,7 @@ impl Vm {
                                     let valid = self
                                         .call_object_method(&inner, b"valid", &[])
                                         .unwrap_or(Value::False);
-                                    if !valid.is_truthy() {
+                                    if !self.is_true(&valid) {
                                         break;
                                     }
                                     self.call_object_method(&inner, b"next", &[]);
@@ -20753,7 +20764,7 @@ impl Vm {
             let valid = self
                 .call_object_method(obj_val, b"valid", &[])
                 .unwrap_or(Value::False);
-            if !valid.is_truthy() {
+            if !self.is_true(&valid) {
                 break;
             }
             let value = self
@@ -45792,6 +45803,7 @@ impl Vm {
                                 line: op.line,
                             });
                         }
+                        self.warn_nan_coercion(&valid, "bool", op.line);
                         let is_valid = valid.is_truthy();
 
                         if !is_valid {
@@ -50769,7 +50781,10 @@ impl Vm {
                                 self.class_scope_stack.pop();
                                 self.magic_prop_guards.remove(&isset_guard_key);
                                 self.magic_depth -= 1;
-                                if isset_result.is_truthy() {
+                                if {
+                                    self.warn_nan_bool_unsilenced(&isset_result, op.line);
+                                    isset_result.is_truthy()
+                                } {
                                     Value::True
                                 } else {
                                     Value::False
@@ -54577,7 +54592,10 @@ impl Vm {
                                         line: op.line,
                                     });
                                 }
-                                if exists_result.is_truthy() {
+                                if {
+                                    self.warn_nan_bool_unsilenced(&exists_result, op.line);
+                                    exists_result.is_truthy()
+                                } {
                                     // empty() on an SplFixedArray overriding
                                     // offsetExists(): its result alone
                                     // (spl_fixedarray_object_has_dimension()

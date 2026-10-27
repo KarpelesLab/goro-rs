@@ -1248,7 +1248,10 @@ impl Vm {
                         }
                         // zend_user_it_*() calls the internal method from
                         // the VM (foreach): its frame is at the current line.
-                        Some(false) if !internal => {
+                        // (So do the get_iterator handlers' calls of other
+                        // methods, like RecursiveIteratorIterator's
+                        // getChildren())
+                        Some(false) | None if !internal => {
                             let cl = obj_class_lower(o);
                             let ml = method.to_ascii_lowercase();
                             if let Some(name) = self.internal_method_frame_name(&cl, &ml) {
