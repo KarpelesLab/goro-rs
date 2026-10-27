@@ -14,10 +14,10 @@ pub fn display_class_name(name: &[u8]) -> String {
     // Anonymous class names are formatted as "{Base}@anonymous\0{file}:{line}${counter}"
     // Display only the part before the NUL byte.
     if let Some(nul_pos) = name.iter().position(|&b| b == b'\x00') {
-        String::from_utf8_lossy(&name[..nul_pos]).into_owned()
+        crate::string::lossy(&name[..nul_pos]).into_owned()
     } else {
         // Also handle legacy __anonymous_class_N names (for backward compatibility)
-        let s = String::from_utf8_lossy(name);
+        let s = crate::string::lossy(name);
         if s.contains("__anonymous_class_") {
             if let Some(pos) = s.find("__anonymous_class_") {
                 let prefix = &s[..pos];
@@ -2137,7 +2137,7 @@ fn format_php_float_with_precision(f: f64, sig_digits: usize) -> String {
 
 fn zend_gcvt_string(value: f64, ndigit: i32, dec_point: u8, exp_char: u8) -> String {
     String::from_utf8(zend_gcvt(value, ndigit, dec_point, exp_char))
-        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+        .unwrap_or_else(|e| crate::string::lossy(e.as_bytes()).into_owned())
 }
 
 /// zend_dtoa() mode 0 rounds an exact tie between two shortest
@@ -2259,7 +2259,7 @@ impl fmt::Debug for Value {
             Value::Array(arr) => write!(f, "array({})", arr.borrow().len()),
             Value::Object(obj) => {
                 let obj = obj.borrow();
-                write!(f, "object({})", String::from_utf8_lossy(&obj.class_name))
+                write!(f, "object({})", crate::string::lossy(&obj.class_name))
             }
             Value::Generator(_) => write!(f, "object(Generator)"),
             Value::Resource(n) => write!(f, "resource({})", n),
@@ -2437,7 +2437,7 @@ pub fn php_str_to_lval(b: &[u8]) -> i64 {
             return acc;
         }
     }
-    let text = String::from_utf8_lossy(&b[start..]);
+    let text = crate::string::lossy(&b[start..]);
     php_dval_to_lval_cap(parse_leading_float(&text))
 }
 

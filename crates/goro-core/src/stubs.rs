@@ -164,7 +164,7 @@ fn lower_str(name: &[u8]) -> String {
     } else {
         name
     };
-    String::from_utf8_lossy(n).to_ascii_lowercase()
+    crate::string::lossy(n).to_ascii_lowercase()
 }
 
 /// Look up the stub of an internal class/interface/trait/enum.
@@ -354,7 +354,7 @@ pub fn find_function(name: &[u8]) -> Option<&'static StubFunc> {
 
 /// Look up a global constant declared in a stub.
 pub fn find_constant(name: &[u8]) -> Option<&'static StubConst> {
-    let n = String::from_utf8_lossy(name);
+    let n = crate::string::lossy(name);
     crate::stub_sigs::CONSTANTS.iter().find(|c| c.name == n)
 }
 

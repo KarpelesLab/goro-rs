@@ -1239,7 +1239,7 @@ impl OpArray {
     pub fn dump(&self) -> String {
         use std::fmt::Write;
         let mut out = String::new();
-        let name = String::from_utf8_lossy(self.effective_name());
+        let name = crate::string::lossy(self.effective_name());
         let _ = writeln!(
             out,
             "== {} ({} cvs, {} tmps)",
@@ -1257,7 +1257,7 @@ impl OpArray {
                 "${}",
                 self.cv_names
                     .get(*i as usize)
-                    .map(|n| String::from_utf8_lossy(n).into_owned())
+                    .map(|n| crate::string::lossy(n).into_owned())
                     .unwrap_or_else(|| format!("cv{}", i))
             ),
             OperandType::Tmp(i) => format!("T{}", i),
@@ -1348,7 +1348,7 @@ impl OpArray {
     pub fn file_name(&self) -> crate::rcstr::RcStr {
         let f = self
             .filename_rc
-            .get_or_init(|| crate::rcstr::RcStr::from(String::from_utf8_lossy(&self.filename)));
+            .get_or_init(|| crate::rcstr::RcStr::from(crate::string::lossy(&self.filename)));
         debug_assert!(f.as_bytes() == self.filename.as_slice() || !f.is_ascii());
         f.clone()
     }

@@ -209,7 +209,7 @@ impl Vm {
                                 Visibility::Protected,
                                 &d.declaring_class,
                                 &ce.name,
-                                &String::from_utf8_lossy(name),
+                                &crate::string::lossy(name),
                                 true,
                                 Some(s),
                             )
@@ -421,7 +421,7 @@ impl Vm {
                         Visibility::Protected,
                         &d.declaring_class,
                         &ce.name,
-                        &String::from_utf8_lossy(name),
+                        &crate::string::lossy(name),
                         true,
                         Some(s),
                     )
@@ -464,7 +464,7 @@ impl Vm {
         self.classes
             .get(key)
             .map(|c| crate::value::display_class_name(&c.name))
-            .unwrap_or_else(|| String::from_utf8_lossy(key).to_string())
+            .unwrap_or_else(|| crate::string::lossy(key).to_string())
     }
 
     /// Asymmetric visibility (`private(set)` / `protected(set)`) check for
@@ -771,7 +771,7 @@ impl Vm {
             return Ok(());
         }
         let cd = self.sp_decl_display(slot);
-        let pd = String::from_utf8_lossy(name);
+        let pd = crate::string::lossy(name);
         let td = self.param_type_name(&declared);
         let msg = match overflow {
             Some(true) => format!(
@@ -1038,7 +1038,7 @@ impl Vm {
             SpErr::Throw(cls, msg) => {
                 let exc = self.create_exception(cls, &msg, line);
                 self.current_exception = Some(exc);
-                format!("Uncaught {}: {}", String::from_utf8_lossy(cls), msg)
+                format!("Uncaught {}: {}", crate::string::lossy(cls), msg)
             }
             SpErr::Pending => "Uncaught exception".to_string(),
         }
@@ -1610,7 +1610,7 @@ impl Vm {
                 decl_line
             };
             let pdecl = self.internal_class_display(&pm.declaring_class);
-            let mname = String::from_utf8_lossy(&child.name).to_string();
+            let mname = crate::string::lossy(&child.name).to_string();
             if pm.is_final {
                 return Err((
                     format!("Cannot override final method {}::{}()", pdecl, mname),
@@ -1650,7 +1650,7 @@ impl Vm {
                 return Err((
                     format!(
                         "Access level to {}::{}() must be {} (as in class {}){}",
-                        String::from_utf8_lossy(&class.name),
+                        crate::string::lossy(&class.name),
                         mname,
                         vis,
                         self.internal_class_display(&parent.name),
@@ -1753,7 +1753,7 @@ impl Vm {
             let what = format!(
                 "{}::{}",
                 self.sp_class_name_of(&decl),
-                String::from_utf8_lossy(name)
+                crate::string::lossy(name)
             );
             match self.eval_const_thunk(&t, Some(&decl), &what) {
                 Ok(v) => {
@@ -1809,8 +1809,8 @@ impl Vm {
     fn sp_class_name_of(&self, key: &[u8]) -> String {
         self.classes
             .get(key)
-            .map(|c| String::from_utf8_lossy(&c.name).to_string())
-            .unwrap_or_else(|| String::from_utf8_lossy(key).to_string())
+            .map(|c| crate::string::lossy(&c.name).to_string())
+            .unwrap_or_else(|| crate::string::lossy(key).to_string())
     }
 }
 

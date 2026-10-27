@@ -4672,7 +4672,7 @@ impl Vm {
                 meth.visibility,
                 &meth.declaring_class,
                 &c.name,
-                &String::from_utf8_lossy(&meth.name),
+                &crate::string::lossy(&meth.name),
                 false,
                 scope.as_deref(),
             ) {
@@ -4752,7 +4752,7 @@ impl Vm {
             m.visibility,
             &m.declaring_class,
             &c.name,
-            &String::from_utf8_lossy(&m.name),
+            &crate::string::lossy(&m.name),
             false,
             scope.as_deref(),
         )
@@ -4906,7 +4906,7 @@ impl Vm {
         }
         Some(format!(
             "Cannot call private {}::__construct()",
-            String::from_utf8_lossy(&ce.name)
+            crate::string::lossy(&ce.name)
         ))
     }
 
@@ -4933,7 +4933,7 @@ impl Vm {
                 if caller_bytes == b"closure" {
                     "scope Closure".to_string()
                 } else {
-                    format!("scope {}", String::from_utf8_lossy(caller_bytes))
+                    format!("scope {}", crate::string::lossy(caller_bytes))
                 }
             } else {
                 "global scope".to_string()
@@ -5385,7 +5385,7 @@ impl Vm {
         FORBIDDEN
             .iter()
             .find(|f| n.eq_ignore_ascii_case(f))
-            .map(|l| format!("Cannot call {}() dynamically", String::from_utf8_lossy(l)))
+            .map(|l| format!("Cannot call {}() dynamically", crate::string::lossy(l)))
     }
 
     /// A dynamic call (`$f()`) of a scope-introspection builtin: throws
@@ -5487,7 +5487,7 @@ impl Vm {
             } else {
                 format!(
                     "{}() cannot be called from the global scope",
-                    String::from_utf8_lossy(lname)
+                    crate::string::lossy(lname)
                 )
             };
             return (cls, m);
@@ -5536,7 +5536,7 @@ impl Vm {
                 b"ArgumentCountError",
                 format!(
                     "{}() expects {} {} argument{}, {} given",
-                    String::from_utf8_lossy(&lname),
+                    crate::string::lossy(&lname),
                     q,
                     k,
                     if k == 1 { "" } else { "s" },
@@ -5583,8 +5583,8 @@ impl Vm {
             .unwrap_or(decl);
         Some(format!(
             "Cannot call {}::{}() dynamically",
-            String::from_utf8_lossy(&decl_name),
-            String::from_utf8_lossy(&md.name)
+            crate::string::lossy(&decl_name),
+            crate::string::lossy(&md.name)
         ))
     }
 
@@ -6100,11 +6100,7 @@ impl Vm {
             .unwrap_or_else(|| crate::value::display_class_name(&magic.declaring_class));
         if let Some(custom) = self.get_deprecated_message(&attrs) {
             let msg = self.format_deprecated_message(
-                &format!(
-                    "Method {}::{}()",
-                    decl,
-                    String::from_utf8_lossy(method_name)
-                ),
+                &format!("Method {}::{}()", decl, crate::string::lossy(method_name)),
                 &custom,
             );
             let line = self.current_line;
@@ -7024,8 +7020,8 @@ impl Vm {
         let class = self
             .classes
             .get(declaring_lower)
-            .map(|c| String::from_utf8_lossy(&c.name).into_owned())
-            .unwrap_or_else(|| String::from_utf8_lossy(declaring_lower).into_owned());
+            .map(|c| crate::string::lossy(&c.name).into_owned())
+            .unwrap_or_else(|| crate::string::lossy(declaring_lower).into_owned());
         let (name, args) = if instance {
             (format!("{}::__call", class), fn_cvs.get(1..3))
         } else {
@@ -7753,7 +7749,7 @@ impl Vm {
         let attrs = op_array.attributes.clone();
         if let Some(custom_msg) = self.get_deprecated_message(&attrs) {
             let display = if !force_fallback && !op_array.display_name.is_empty() {
-                String::from_utf8_lossy(&op_array.display_name).into_owned()
+                crate::string::lossy(&op_array.display_name).into_owned()
             } else {
                 fallback_name.to_string()
             };
@@ -7807,7 +7803,7 @@ impl Vm {
                         }
                         let attrs = user_fn.attributes.clone();
                         if let Some(custom_msg) = self.get_deprecated_message(&attrs) {
-                            let display = String::from_utf8_lossy(&func_name).into_owned();
+                            let display = crate::string::lossy(&func_name).into_owned();
                             let prefix = format!("Function {}()", display);
                             let msg = self.format_deprecated_message(&prefix, &custom_msg);
                             self.emit_user_deprecated_at(&msg, line);
@@ -7845,7 +7841,7 @@ impl Vm {
                             .iter()
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
-                        let display = String::from_utf8_lossy(s.as_bytes()).into_owned();
+                        let display = crate::string::lossy(s.as_bytes()).into_owned();
                         (lower, display)
                     }
                     _ => return,
@@ -7860,7 +7856,7 @@ impl Vm {
                             let display = format!(
                                 "{}::{}",
                                 class_display,
-                                String::from_utf8_lossy(method_name.as_bytes())
+                                crate::string::lossy(method_name.as_bytes())
                             );
                             let prefix = format!("Method {}()", display);
                             let msg = self.format_deprecated_message(&prefix, &custom_msg);
@@ -7885,7 +7881,7 @@ impl Vm {
         }
         let display = match crate::arginfo::lookup(func_lower) {
             Some(info) => info.name.to_string(),
-            None => String::from_utf8_lossy(func_lower).into_owned(),
+            None => crate::string::lossy(func_lower).into_owned(),
         };
         if let Some(custom) = self.get_deprecated_message(&decl.attributes) {
             let msg = self.format_deprecated_message(&format!("Function {}()", display), &custom);
@@ -7924,7 +7920,7 @@ impl Vm {
             Value::Array(_) => "array".to_string(),
             Value::Object(o) => {
                 let obj = o.borrow();
-                String::from_utf8_lossy(&obj.class_name).to_string()
+                crate::string::lossy(&obj.class_name).to_string()
             }
             _ => "unknown".to_string(),
         }
@@ -7942,7 +7938,7 @@ impl Vm {
             Value::Array(_) => "Array".to_string(),
             Value::Object(o) => {
                 let obj = o.borrow();
-                format!("Object({})", String::from_utf8_lossy(&obj.class_name))
+                format!("Object({})", crate::string::lossy(&obj.class_name))
             }
             _ => "unknown".to_string(),
         }
@@ -8042,9 +8038,9 @@ impl Vm {
                         let lower = b.strip_prefix(b"\\").unwrap_or(b).to_ascii_lowercase();
                         let f = self.user_functions.get(&lower)?;
                         let display = if f.display_name.is_empty() {
-                            String::from_utf8_lossy(b.strip_prefix(b"\\").unwrap_or(b)).into_owned()
+                            crate::string::lossy(b.strip_prefix(b"\\").unwrap_or(b)).into_owned()
                         } else {
-                            String::from_utf8_lossy(&f.display_name).into_owned()
+                            crate::string::lossy(&f.display_name).into_owned()
                         };
                         return Some((f.attributes.clone(), display));
                     }
@@ -8075,8 +8071,8 @@ impl Vm {
         };
         let display = format!(
             "{}::{}",
-            String::from_utf8_lossy(&class.name),
-            String::from_utf8_lossy(&m.name)
+            crate::string::lossy(&class.name),
+            crate::string::lossy(&m.name)
         );
         Some((attrs, display))
     }
@@ -8619,7 +8615,7 @@ impl Vm {
             .classes
             .get(class_lower)
             .map(|c| crate::value::display_class_name(&c.name))
-            .unwrap_or_else(|| String::from_utf8_lossy(class_lower).to_string());
+            .unwrap_or_else(|| crate::string::lossy(class_lower).to_string());
         let from = match &scope {
             Some(sc) => format!(
                 "scope {}",
@@ -8807,7 +8803,7 @@ impl Vm {
                 b'D' => b"DivisionByZeroError",
                 _ => b"TypeError",
             };
-            return (class, String::from_utf8_lossy(&bytes[3..]).into_owned());
+            return (class, crate::string::lossy(&bytes[3..]).into_owned());
         }
         (b"TypeError", msg.to_string())
     }
@@ -9550,7 +9546,7 @@ impl Vm {
             }
             return Some(format!(
                 "{}(): Argument #{} could not be passed by reference",
-                String::from_utf8_lossy(op.effective_name()),
+                crate::string::lossy(op.effective_name()),
                 v - implicit + 1
             ));
         };
@@ -9559,9 +9555,9 @@ impl Vm {
         }
         Some(format!(
             "{}(): Argument #{} (${}) could not be passed by reference",
-            String::from_utf8_lossy(op.effective_name()),
+            crate::string::lossy(op.effective_name()),
             i - implicit + 1,
-            String::from_utf8_lossy(name)
+            crate::string::lossy(name)
         ))
     }
 
@@ -9597,7 +9593,7 @@ impl Vm {
         Some(format!(
             "Cannot modify readonly property {}::${}",
             decl_name,
-            String::from_utf8_lossy(name)
+            crate::string::lossy(name)
         ))
     }
 
@@ -9633,7 +9629,7 @@ impl Vm {
             vis,
             &decl,
             class_name,
-            &String::from_utf8_lossy(name),
+            &crate::string::lossy(name),
             true,
             caller.as_deref(),
         )
@@ -9715,7 +9711,7 @@ impl Vm {
         Some(format!(
             "{}::{}",
             cname,
-            String::from_utf8_lossy(&op.display_name)
+            crate::string::lossy(&op.display_name)
         ))
     }
 
@@ -9975,9 +9971,9 @@ impl Vm {
                         if let Some(scope) = self.scope_top() {
                             // Look up original case class name
                             if let Some(class_entry) = self.classes.get(scope) {
-                                return String::from_utf8_lossy(&class_entry.name).to_string();
+                                return crate::string::lossy(&class_entry.name).to_string();
                             }
-                            return String::from_utf8_lossy(scope).to_string();
+                            return crate::string::lossy(scope).to_string();
                         }
                     }
                     b"parent" => {
@@ -9990,10 +9986,10 @@ impl Vm {
                                         .map(|b| b.to_ascii_lowercase())
                                         .collect();
                                     if let Some(parent_entry) = self.classes.get(&parent_lower) {
-                                        return String::from_utf8_lossy(&parent_entry.name)
+                                        return crate::string::lossy(&parent_entry.name)
                                             .to_string();
                                     }
-                                    return String::from_utf8_lossy(parent_name).to_string();
+                                    return crate::string::lossy(parent_name).to_string();
                                 }
                             }
                         }
@@ -10003,9 +9999,9 @@ impl Vm {
                             let called_lower: Vec<u8> =
                                 called.iter().map(|b| b.to_ascii_lowercase()).collect();
                             if let Some(class_entry) = self.classes.get(&called_lower) {
-                                return String::from_utf8_lossy(&class_entry.name).to_string();
+                                return crate::string::lossy(&class_entry.name).to_string();
                             }
-                            return String::from_utf8_lossy(called).to_string();
+                            return crate::string::lossy(called).to_string();
                         }
                     }
                     b"iterable" => {
@@ -10013,7 +10009,7 @@ impl Vm {
                     }
                     _ => {}
                 }
-                String::from_utf8_lossy(name).to_string()
+                crate::string::lossy(name).to_string()
             }
             ParamType::Nullable(inner) => {
                 // If the inner type expands to a union (e.g., iterable -> Traversable|array),
@@ -10611,7 +10607,7 @@ impl Vm {
                     let param_name = if variadic {
                         String::new()
                     } else {
-                        format!(" (${})", String::from_utf8_lossy(&type_info.param_name))
+                        format!(" (${})", crate::string::lossy(&type_info.param_name))
                     };
                     // Argument number is 1-based, excluding implicit args like $this
                     let arg_num = i + 1 - implicit_args;
@@ -10714,7 +10710,7 @@ impl Vm {
         let implicit =
             usize::from(op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this"));
         let func = if !op_array.display_name.is_empty() {
-            String::from_utf8_lossy(&op_array.display_name).into_owned()
+            crate::string::lossy(&op_array.display_name).into_owned()
         } else if let Some(scope) = &op_array.scope_class {
             let class_display = self
                 .classes
@@ -10724,10 +10720,10 @@ impl Vm {
             format!(
                 "{}::{}",
                 class_display,
-                String::from_utf8_lossy(&op_array.name)
+                crate::string::lossy(&op_array.name)
             )
         } else {
-            String::from_utf8_lossy(&op_array.name).into_owned()
+            crate::string::lossy(&op_array.name).into_owned()
         };
         let (file, line) = self
             .call_stack
@@ -10738,7 +10734,7 @@ impl Vm {
             "{}(): Argument #{} (${}) must be of type {}, {} given, called in {} on line {}",
             func,
             (cv + 1).saturating_sub(implicit),
-            String::from_utf8_lossy(&info.param_name),
+            crate::string::lossy(&info.param_name),
             self.param_type_display(&info.param_type),
             Self::value_type_name(&v),
             file,
@@ -10785,9 +10781,9 @@ impl Vm {
                 let fname = if let Some(n) = self.closure_scoped_display(op_array) {
                     n
                 } else if !op_array.display_name.is_empty() {
-                    String::from_utf8_lossy(&op_array.display_name).into_owned()
+                    crate::string::lossy(&op_array.display_name).into_owned()
                 } else {
-                    let base = String::from_utf8_lossy(op_array.effective_name()).into_owned();
+                    let base = crate::string::lossy(op_array.effective_name()).into_owned();
                     match &op_array.scope_class {
                         Some(sc) if !base.contains("::") => {
                             let cname = self
@@ -10804,7 +10800,7 @@ impl Vm {
                 let name = if variadic {
                     String::new()
                 } else {
-                    format!(" (${})", String::from_utf8_lossy(&info.param_name))
+                    format!(" (${})", crate::string::lossy(&info.param_name))
                 };
                 err = Some(format!(
                     "{}(): Argument #{}{} must be of type {}, {} given",
@@ -10873,9 +10869,9 @@ impl Vm {
             return None;
         }
         let display = if !user_fn.display_name.is_empty() {
-            String::from_utf8_lossy(&user_fn.display_name).into_owned()
+            crate::string::lossy(&user_fn.display_name).into_owned()
         } else {
-            String::from_utf8_lossy(&user_fn.name).into_owned()
+            crate::string::lossy(&user_fn.name).into_owned()
         };
         let line = self.current_line;
         let param_err =
@@ -12155,7 +12151,7 @@ impl Vm {
                 'run: {
                     let class_name_orig = obj_rc.borrow().class_name.clone();
                     let display_fallback =
-                        format!("{}::__destruct", String::from_utf8_lossy(&class_name_orig));
+                        format!("{}::__destruct", crate::string::lossy(&class_name_orig));
                     let line = self.current_line;
                     self.check_user_function_deprecation(&destruct_op, &display_fallback, line);
                     // If the #[\Deprecated] check routed through an error handler that
@@ -12299,14 +12295,14 @@ impl Vm {
                     && p < op_array.required_param_count as usize
                 {
                     let fname = if !op_array.display_name.is_empty() {
-                        String::from_utf8_lossy(&op_array.display_name).to_string()
+                        crate::string::lossy(&op_array.display_name).to_string()
                     } else {
-                        String::from_utf8_lossy(op_array.effective_name()).to_string()
+                        crate::string::lossy(op_array.effective_name()).to_string()
                     };
                     let pname = op_array
                         .cv_names
                         .get(cv_idx)
-                        .map(|n| String::from_utf8_lossy(n).to_string())
+                        .map(|n| crate::string::lossy(n).to_string())
                         .unwrap_or_default();
                     let msg = format!("{}(): Argument #{} (${}) not passed", fname, p + 1, pname);
                     // (raised by the callee's RECV)
@@ -12343,7 +12339,7 @@ impl Vm {
                         call.args[i] = inner;
                     }
                 } else if !matches!(call.args[i], Value::Reference(_)) {
-                    let mut fname = String::from_utf8_lossy(op_array.effective_name()).to_string();
+                    let mut fname = crate::string::lossy(op_array.effective_name()).to_string();
                     if via_invoke {
                         fname = "Closure::__invoke".to_string();
                     } else if let Some(sc) = op_array.scope_class.as_ref().filter(|_| {
@@ -12359,15 +12355,15 @@ impl Vm {
                             let cname = self
                                 .classes
                                 .get(&sc.to_ascii_lowercase())
-                                .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                                .unwrap_or_else(|| String::from_utf8_lossy(sc).to_string());
+                                .map(|c| crate::string::lossy(&c.name).to_string())
+                                .unwrap_or_else(|| crate::string::lossy(sc).to_string());
                             fname = format!("{}::{}", cname, fname);
                         }
                     }
                     let pname = op_array
                         .cv_names
                         .get(cv_idx)
-                        .map(|n| String::from_utf8_lossy(n).to_string())
+                        .map(|n| crate::string::lossy(n).to_string())
                         .unwrap_or_default();
                     let msg = format!(
                         "{}(): Argument #{} (${}) must be passed by reference, value given",
@@ -12403,7 +12399,7 @@ impl Vm {
         } else if let Some(fcc) = &op_array.fcc_target_name {
             push_lossy(&mut frame_display, fcc);
         } else if let Some(sc) = &op_array.scope_class {
-            let raw = String::from_utf8_lossy(&op_array.name);
+            let raw = crate::string::lossy(&op_array.name);
             let m = raw.rsplit("::").next().unwrap_or(&raw);
             match self.classes.get(sc) {
                 Some(c) => push_lossy(&mut frame_display, &c.name),
@@ -12484,14 +12480,14 @@ impl Vm {
             };
             let is_special = ends(b"__call") || ends(b"__callstatic") || ends(b"__construct");
             if !is_special && provided < required {
-                let mut fname = String::from_utf8_lossy(op_array.effective_name()).to_string();
+                let mut fname = crate::string::lossy(op_array.effective_name()).to_string();
                 if op_array.display_name.is_empty() && !fname.contains("::") {
                     if let Some(sc) = &op_array.scope_class {
                         let cname = self
                             .classes
                             .get(&sc.to_ascii_lowercase())
-                            .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                            .unwrap_or_else(|| String::from_utf8_lossy(sc).to_string());
+                            .map(|c| crate::string::lossy(&c.name).to_string())
+                            .unwrap_or_else(|| crate::string::lossy(sc).to_string());
                         fname = format!("{}::{}", cname, fname);
                     }
                 }
@@ -13275,7 +13271,7 @@ impl Vm {
                 return Some(format!(
                     "Cannot redeclare function {}() (previously declared in {}:{})",
                     shown,
-                    String::from_utf8_lossy(&old.filename),
+                    crate::string::lossy(&old.filename),
                     old.decl_line
                 ));
             }
@@ -14018,7 +14014,7 @@ impl Vm {
         debug_assert!(
             !self.functions.contains_key(&lower),
             "function {} registered twice",
-            String::from_utf8_lossy(name)
+            crate::string::lossy(name)
         );
         self.functions.insert(lower, func);
     }
@@ -14041,7 +14037,7 @@ impl Vm {
         debug_assert!(
             !self.functions.contains_key(&lower),
             "function {} registered twice",
-            String::from_utf8_lossy(name)
+            crate::string::lossy(name)
         );
         self.functions.insert(lower.clone(), func);
         self.builtin_param_names
@@ -14190,7 +14186,7 @@ impl Vm {
             None => format!(
                 "{}::{}",
                 self.builtin_canonical_name(class_lower),
-                String::from_utf8_lossy(orig_method)
+                crate::string::lossy(orig_method)
             ),
         })
     }
@@ -14205,7 +14201,7 @@ impl Vm {
             None => format!(
                 "{}::{}",
                 self.builtin_canonical_name(class_lower),
-                String::from_utf8_lossy(method_lower)
+                crate::string::lossy(method_lower)
             ),
         }
     }
@@ -14404,7 +14400,7 @@ impl Vm {
                         b"from" => "from",
                         _ => "tryFrom",
                     };
-                    return Some(format!("{}::{}", String::from_utf8_lossy(&ce.name), m));
+                    return Some(format!("{}::{}", crate::string::lossy(&ce.name), m));
                 }
                 Some(ce) => cur = ce.parent.as_ref()?.to_ascii_lowercase(),
                 None => {
@@ -15787,7 +15783,7 @@ impl Vm {
                                 continue;
                             }
                             // Key may be a numeric string -> int key, otherwise string.
-                            let s = String::from_utf8_lossy(name);
+                            let s = crate::string::lossy(name);
                             if let Ok(n) = s.parse::<i64>() {
                                 if n.to_string() == *s {
                                     props_arr.set(ArrayKey::Int(n), val.clone());
@@ -18626,7 +18622,7 @@ impl Vm {
                                     Value::String(_) => "string".to_string(),
                                     Value::Array(_) => "array".to_string(),
                                     Value::Object(o) => {
-                                        String::from_utf8_lossy(&o.borrow().class_name).to_string()
+                                        crate::string::lossy(&o.borrow().class_name).to_string()
                                     }
                                     Value::True | Value::False => "bool".to_string(),
                                     _ => "value".to_string(),
@@ -18855,7 +18851,7 @@ impl Vm {
                                     if name == b"num" {
                                         continue;
                                     }
-                                    let prop_str = String::from_utf8_lossy(&name);
+                                    let prop_str = crate::string::lossy(&name);
                                     self.emit_deprecated(&format!(
                                         "Creation of dynamic property GMP::${} is deprecated",
                                         prop_str
@@ -19681,7 +19677,7 @@ fn declared_fn_name_slow<'a>(called: &[u8], fn_name: &'a [u8]) -> Option<&'a [u8
     base.eq_ignore_ascii_case(fn_name).then_some(fn_name)
 }
 
-/// Append `b` to `dst` as String::from_utf8_lossy() renders it.
+/// Append `b` to `dst` as crate::string::lossy() renders it.
 #[inline]
 fn push_lossy(dst: &mut String, b: &[u8]) {
     // (a function name is ASCII: no UTF-8 validation call)
@@ -19692,7 +19688,7 @@ fn push_lossy(dst: &mut String, b: &[u8]) {
     }
     match std::str::from_utf8(b) {
         Ok(s) => dst.push_str(s),
-        Err(_) => dst.push_str(&String::from_utf8_lossy(b)),
+        Err(_) => dst.push_str(&crate::string::lossy(b)),
     }
 }
 
@@ -19801,8 +19797,8 @@ impl Vm {
         }
         self.classes
             .get(class_lower)
-            .map(|c| String::from_utf8_lossy(&c.name).to_string())
-            .unwrap_or_else(|| String::from_utf8_lossy(class_lower).to_string())
+            .map(|c| crate::string::lossy(&c.name).to_string())
+            .unwrap_or_else(|| crate::string::lossy(class_lower).to_string())
     }
 
     /// The deprecation message of an extension-registered class constant
@@ -21071,17 +21067,17 @@ impl Vm {
     #[inline(never)]
     fn callee_error_name(&self, f: &OpArray) -> String {
         if f.display_name.starts_with(b"{closure") {
-            let d = String::from_utf8_lossy(&f.display_name).into_owned();
+            let d = crate::string::lossy(&f.display_name).into_owned();
             return self.closure_scoped_display(f).unwrap_or(d);
         }
-        let mut fname = String::from_utf8_lossy(f.effective_name()).to_string();
+        let mut fname = crate::string::lossy(f.effective_name()).to_string();
         if f.display_name.is_empty() && !fname.contains("::") {
             if let Some(sc) = &f.scope_class {
                 let cname = self
                     .classes
                     .get(&sc.to_ascii_lowercase())
-                    .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                    .unwrap_or_else(|| String::from_utf8_lossy(sc).to_string());
+                    .map(|c| crate::string::lossy(&c.name).to_string())
+                    .unwrap_or_else(|| crate::string::lossy(sc).to_string());
                 fname = format!("{}::{}", cname, fname);
             }
         }
@@ -21166,7 +21162,7 @@ impl Vm {
         let dep = self.get_deprecated_message(&attrs);
         self.deprecation_in_progress.remove(&key);
         if let Some(custom) = dep {
-            let prefix = format!("Constant {}", String::from_utf8_lossy(&key));
+            let prefix = format!("Constant {}", crate::string::lossy(&key));
             let msg = self.format_deprecated_message(&prefix, &custom);
             self.emit_user_deprecated_at(&msg, line);
         }
@@ -21214,7 +21210,7 @@ impl Vm {
                 .unwrap_or_else(|| crate::value::display_class_name(&c.name));
             Some((
                 m.attributes.clone(),
-                format!("{}::{}", decl, String::from_utf8_lossy(&m.name)),
+                format!("{}::{}", decl, crate::string::lossy(&m.name)),
             ))
         }) else {
             return false;
@@ -21323,7 +21319,7 @@ impl Vm {
                             .unwrap_or_else(|| crate::value::display_class_name(&class_def.name)),
                     );
                     frame_name.push_str(if method.is_static { "::" } else { "->" });
-                    frame_name.push_str(&String::from_utf8_lossy(&method.name));
+                    frame_name.push_str(&crate::string::lossy(&method.name));
                     let is_static = method.is_static;
                     // (in the buffers of finished calls' entries)
                     let mut declaring = self.bytes_pool.pop().unwrap_or_default();
@@ -22202,7 +22198,7 @@ impl Vm {
                         let new_exc = self.current_exception.take().unwrap();
                         let (class, msg) = if let Value::Object(o) = &new_exc {
                             let ob = o.borrow();
-                            let cls = String::from_utf8_lossy(&ob.class_name).to_string();
+                            let cls = crate::string::lossy(&ob.class_name).to_string();
                             let m = if let Value::String(s) = ob.get_property(b"message") {
                                 s.to_string_lossy()
                             } else {
@@ -22948,7 +22944,7 @@ impl Vm {
                 };
                 let class_name_orig = obj_rc.borrow().class_name.clone();
                 let display_fallback =
-                    format!("{}::__destruct", String::from_utf8_lossy(&class_name_orig));
+                    format!("{}::__destruct", crate::string::lossy(&class_name_orig));
                 let line = self.current_line;
                 self.check_user_function_deprecation(&destruct_op, &display_fallback, line);
                 let mut fn_cvs = vec![Value::Undef; destruct_op.cv_names.len()];
@@ -23952,7 +23948,7 @@ impl Vm {
                     m.visibility,
                     &m.declaring_class,
                     class,
-                    &String::from_utf8_lossy(&m.name),
+                    &crate::string::lossy(&m.name),
                     false,
                     caller_scope.as_deref(),
                 )
@@ -24262,11 +24258,11 @@ impl Vm {
         let display_name = if let Some(n) = &scoped {
             std::borrow::Cow::Borrowed(n.as_str())
         } else if !user_fn.display_name.is_empty() {
-            String::from_utf8_lossy(&user_fn.display_name)
+            crate::string::lossy(&user_fn.display_name)
         } else if let Some(n) = declared_fn_name(call.name.as_bytes(), &user_fn.name) {
-            String::from_utf8_lossy(n)
+            crate::string::lossy(n)
         } else {
-            String::from_utf8_lossy(call.name.as_bytes())
+            crate::string::lossy(call.name.as_bytes())
         };
         // For method calls like ClassName::method, format as ClassName::method
         // For regular functions, just the function name
@@ -25877,13 +25873,13 @@ impl Vm {
         }
         self.flush_callable_deprecations();
         if ret_mismatch {
-            let raw_name = String::from_utf8_lossy(&op_array.name);
+            let raw_name = crate::string::lossy(&op_array.name);
             // Include class name in the function display name for methods.
             // For closures, prefer the canonical PHP display name.
             let func_name = if let Some(n) = self.closure_scoped_display(op_array) {
                 n
             } else if !op_array.display_name.is_empty() {
-                String::from_utf8_lossy(&op_array.display_name).to_string()
+                crate::string::lossy(&op_array.display_name).to_string()
             } else if let Some(ref scope) = op_array.scope_class {
                 let class_display = self
                     .classes
@@ -31574,7 +31570,7 @@ impl Vm {
                                 b"Error",
                                 format!(
                                     "Cannot call {}() dynamically",
-                                    String::from_utf8_lossy(&l)
+                                    crate::string::lossy(&l)
                                 ),
                             ))
                         }
@@ -31733,8 +31729,8 @@ impl Vm {
                                                         b"Error",
                                                         format!(
                                                             "Non-static method {}::{}() cannot be called statically",
-                                                            String::from_utf8_lossy(&c.name),
-                                                            String::from_utf8_lossy(m.as_bytes())
+                                                            crate::string::lossy(&c.name),
+                                                            crate::string::lossy(m.as_bytes())
                                                         ),
                                                     ))
                                                 }
@@ -33872,7 +33868,7 @@ impl Vm {
                                 }
                                 let class_disp = match &self.current_exception {
                                     Some(Value::Object(o)) => {
-                                        String::from_utf8_lossy(&o.borrow().class_name).into_owned()
+                                        crate::string::lossy(&o.borrow().class_name).into_owned()
                                     }
                                     _ => "TypeError".to_string(),
                                 };
@@ -34510,7 +34506,7 @@ impl Vm {
                                         "{}{}{}",
                                         self.builtin_canonical_name(&native),
                                         if fwd_this.is_some() { "->" } else { "::" },
-                                        String::from_utf8_lossy(
+                                        crate::string::lossy(
                                             &call.name.as_bytes()[sep + 2..]
                                         )
                                     );
@@ -35274,7 +35270,7 @@ impl Vm {
                         let expects_mutable = func_name_lower.ends_with(b"::createfrommutable");
                         if let Some(Value::Object(o)) = call.args.first() {
                             let ob = o.borrow();
-                            let cls = String::from_utf8_lossy(&ob.class_name).to_string();
+                            let cls = crate::string::lossy(&ob.class_name).to_string();
                             let cls_lower: Vec<u8> =
                                 cls.bytes().map(|b| b.to_ascii_lowercase()).collect();
                             let inherits_immutable = cls_lower == b"datetimeimmutable"
@@ -36169,7 +36165,7 @@ impl Vm {
                             } else {
                                 // No param names registered for this builtin - error on unknown named params
                                 let first_name =
-                                    String::from_utf8_lossy(&call.named_args[0].0).into_owned();
+                                    crate::string::lossy(&call.named_args[0].0).into_owned();
                                 let err_msg =
                                     format!("Unknown named parameter ${}", first_name);
                                 let exc_val =
@@ -36312,7 +36308,7 @@ impl Vm {
                                                 .builtin_param_names
                                                 .get(&func_name_lower)
                                                 .and_then(|names| names.get(i))
-                                                .map(|n| String::from_utf8_lossy(n).to_string())
+                                                .map(|n| crate::string::lossy(n).to_string())
                                                 .unwrap_or_else(|| format!("arg{}", i + 1));
                                             let expected = self.param_type_display(pt);
                                             let msg = format!(
@@ -36342,7 +36338,7 @@ impl Vm {
                                         .builtin_param_names
                                         .get(&func_name_lower)
                                         .and_then(|names| names.get(i))
-                                        .map(|n| String::from_utf8_lossy(n).to_string())
+                                        .map(|n| crate::string::lossy(n).to_string())
                                         .unwrap_or_else(|| format!("arg{}", i + 1));
                                     let err_msg = format!(
                                         "{}(): Argument #{} (${}) must be of type {}, float given",
@@ -36389,7 +36385,7 @@ impl Vm {
                                                 .builtin_param_names
                                                 .get(&func_name_lower)
                                                 .and_then(|names| names.get(i))
-                                                .map(|n| String::from_utf8_lossy(n).to_string())
+                                                .map(|n| crate::string::lossy(n).to_string())
                                                 .unwrap_or_else(|| format!("arg{}", i + 1));
                                             strict_type_err = Some(format!(
                                                 "{}(): Argument #{} (${}) must be of type {}, {} given",
@@ -37280,20 +37276,20 @@ impl Vm {
 
                         // Push call stack frame early for proper error stack traces
                         let raw_display =
-                            String::from_utf8_lossy(call.name.as_bytes()).into_owned();
+                            crate::string::lossy(call.name.as_bytes()).into_owned();
                         // Format closure names for stack traces using the canonical
                         // display name (e.g. {closure:file:line} or {closure:Class::method():line}).
                         // FCC closures wrap an underlying function/method — show that name
                         // (e.g. "throws") rather than the internal __closure_fcc_N identifier.
                         let early_call_display = if raw_display.starts_with("__closure_fcc_") {
                             if let Some(t) = &user_fn.fcc_target_name {
-                                String::from_utf8_lossy(t).to_string()
+                                crate::string::lossy(t).to_string()
                             } else {
                                 raw_display.clone()
                             }
                         } else if !user_fn.display_name.is_empty() {
                             let name =
-                                String::from_utf8_lossy(&user_fn.display_name).to_string();
+                                crate::string::lossy(&user_fn.display_name).to_string();
                             // A closure's frame is qualified by its scope
                             // (Class::{closure:...}, or Class->... with $this).
                             match user_fn.scope_class.as_ref().filter(|_| {
@@ -37316,7 +37312,7 @@ impl Vm {
                             || raw_display.starts_with("__arrow_"))
                             && !raw_display.starts_with("__closure_fcc_")
                         {
-                            let file = String::from_utf8_lossy(&user_fn.filename).to_string();
+                            let file = crate::string::lossy(&user_fn.filename).to_string();
                             format!("{{closure:{}:{}}}", file, user_fn.decl_line)
                         } else if let Some(t) = user_fn
                             .fcc_target_name
@@ -37324,7 +37320,7 @@ impl Vm {
                             .filter(|_| raw_display.starts_with("__bound_closure_"))
                         {
                             // (a function given a $this: "Closure::f")
-                            String::from_utf8_lossy(t).into_owned()
+                            crate::string::lossy(t).into_owned()
                         } else if let Some(ref scope) = user_fn.scope_class {
                             // Use the method's declaring class (scope_class) for the stack trace
                             // instead of the runtime class, matching PHP behavior
@@ -37344,7 +37340,7 @@ impl Vm {
                             format!("{}::{}", class_display, method_name)
                         } else if let Some(n) = declared_fn_name(call.name.as_bytes(), &user_fn.name)
                         {
-                            String::from_utf8_lossy(n).into_owned()
+                            crate::string::lossy(n).into_owned()
                         } else {
                             raw_display
                         };
@@ -37411,7 +37407,7 @@ impl Vm {
                                 || func_name_lower.ends_with(b"::__callstatic");
                             if !is_special && provided < required {
                                 let display_name = if !user_fn.display_name.is_empty() {
-                                    String::from_utf8_lossy(&user_fn.display_name).into_owned()
+                                    crate::string::lossy(&user_fn.display_name).into_owned()
                                 } else {
                                     call.name.to_string_lossy()
                                 };
@@ -37565,7 +37561,7 @@ impl Vm {
                                         let param_name = user_fn
                                             .cv_names
                                             .get(param_idx)
-                                            .map(|n| String::from_utf8_lossy(n).into_owned())
+                                            .map(|n| crate::string::lossy(n).into_owned())
                                             .unwrap_or_else(|| format!("param{}", param_idx));
                                         let arg_num = param_idx - lead + 1;
                                         missing_param_err = Some((
@@ -38380,7 +38376,7 @@ impl Vm {
                                     }
                                 }
                                 let first_name =
-                                    String::from_utf8_lossy(&call.named_args[0].0).into_owned();
+                                    crate::string::lossy(&call.named_args[0].0).into_owned();
                                 let err_msg =
                                     format!("Unknown named parameter ${}", first_name);
                                 let exc_val =
@@ -38633,7 +38629,7 @@ impl Vm {
                                                         .and_then(|v| {
                                                             if let Value::Object(o) = v {
                                                                 Some(
-                                                                    String::from_utf8_lossy(
+                                                                    crate::string::lossy(
                                                                         &o.borrow().class_name,
                                                                     )
                                                                     .into_owned(),
@@ -41729,12 +41725,12 @@ impl Vm {
                                                     self.classes
                                                         .get(&declaring_class)
                                                         .map(|c| crate::value::display_class_name(&c.name))
-                                                        .unwrap_or_else(|| String::from_utf8_lossy(class_part).into_owned()),
+                                                        .unwrap_or_else(|| crate::string::lossy(class_part).into_owned()),
                                                     // (forwarded by a call trampoline: the magic method)
                                                     if op_array.name.starts_with(b"__closure_fcc_tramp_") {
                                                         std::borrow::Cow::Borrowed("__call")
                                                     } else {
-                                                        String::from_utf8_lossy(method_part)
+                                                        crate::string::lossy(method_part)
                                                     }
                                                 );
                                                 self.check_user_function_deprecation_named(
@@ -41779,12 +41775,12 @@ impl Vm {
                                                     "{}::__call",
                                                     self.classes
                                                         .get(&declaring_class)
-                                                        .map(|c| String::from_utf8_lossy(
+                                                        .map(|c| crate::string::lossy(
                                                             &c.name
                                                         )
                                                         .to_string())
                                                         .unwrap_or_else(|| {
-                                                            String::from_utf8_lossy(class_part)
+                                                            crate::string::lossy(class_part)
                                                                 .to_string()
                                                         })
                                                 );
@@ -41897,12 +41893,12 @@ impl Vm {
                                                     self.classes
                                                         .get(&declaring_class)
                                                         .map(|c| crate::value::display_class_name(&c.name))
-                                                        .unwrap_or_else(|| String::from_utf8_lossy(class_part).into_owned()),
+                                                        .unwrap_or_else(|| crate::string::lossy(class_part).into_owned()),
                                                     // (forwarded by a call trampoline: the magic method)
                                                     if op_array.name.starts_with(b"__closure_fcc_tramp_") {
                                                         std::borrow::Cow::Borrowed("__callStatic")
                                                     } else {
-                                                        String::from_utf8_lossy(method_part)
+                                                        crate::string::lossy(method_part)
                                                     }
                                                 );
                                                 self.check_user_function_deprecation_named(
@@ -41957,12 +41953,12 @@ impl Vm {
                                                     "{}::__callStatic",
                                                     self.classes
                                                         .get(&declaring_class)
-                                                        .map(|c| String::from_utf8_lossy(
+                                                        .map(|c| crate::string::lossy(
                                                             &c.name
                                                         )
                                                         .to_string())
                                                         .unwrap_or_else(|| {
-                                                            String::from_utf8_lossy(class_part)
+                                                            crate::string::lossy(class_part)
                                                                 .to_string()
                                                         })
                                                 );
@@ -42415,7 +42411,7 @@ impl Vm {
                                             .iter()
                                             .map(|b| b.to_ascii_lowercase())
                                             .collect();
-                                        let prop_s = String::from_utf8_lossy(prop).to_string();
+                                        let prop_s = crate::string::lossy(prop).to_string();
                                         let mut hook_err: Option<(&[u8], String)> = None;
                                         // The plain property's pseudo hooks take
                                         // `set(mixed $value)` / `get()`.
@@ -42432,7 +42428,7 @@ impl Vm {
                                                     b"Error",
                                                     format!(
                                                         "Unknown named parameter ${}",
-                                                        String::from_utf8_lossy(n)
+                                                        crate::string::lossy(n)
                                                     ),
                                                 ));
                                                 break;
@@ -42453,7 +42449,7 @@ impl Vm {
                                                             )
                                                         })
                                                         .unwrap_or_else(|| {
-                                                            String::from_utf8_lossy(class_part)
+                                                            crate::string::lossy(class_part)
                                                                 .to_string()
                                                         });
                                                     hook_err = Some((
@@ -48535,7 +48531,7 @@ impl Vm {
                                     {
                                         // Still unresolved - throw Undefined constant error
                                         // Parse "ClassName::ConstName" from the marker for a clean error message
-                                        let rest_str = String::from_utf8_lossy(
+                                        let rest_str = crate::string::lossy(
                                             &s.as_bytes()[b"__deferred_const__::".len()..],
                                         )
                                         .to_string();
@@ -48721,7 +48717,7 @@ impl Vm {
                                             Some(format!(
                                                 "Enum case type {} does not match enum backing type {}",
                                                 resolved_val.type_name(),
-                                                String::from_utf8_lossy(&bt)
+                                                crate::string::lossy(&bt)
                                             ))
                                         } else {
                                             None
@@ -49019,7 +49015,7 @@ impl Vm {
                                         let (class_n, msg_s) = if let Value::Object(o) = &exc {
                                             let ob = o.borrow();
                                             let cls =
-                                                String::from_utf8_lossy(&ob.class_name).to_string();
+                                                crate::string::lossy(&ob.class_name).to_string();
                                             let m = if let Value::String(s) =
                                                 ob.get_property(b"message")
                                             {
@@ -49134,7 +49130,7 @@ impl Vm {
                                             let exc = self.current_exception.take().unwrap();
                                             let (class, msg) = if let Value::Object(o) = &exc {
                                                 let ob = o.borrow();
-                                                let cls = String::from_utf8_lossy(&ob.class_name)
+                                                let cls = crate::string::lossy(&ob.class_name)
                                                     .to_string();
                                                 let m = if let Value::String(s) =
                                                     ob.get_property(b"message")
@@ -49550,7 +49546,7 @@ impl Vm {
                                 let dep_result = self.get_deprecated_message(&attrs);
                                 self.deprecation_in_progress.remove(&key);
                                 if let Some(custom_msg) = dep_result {
-                                    let display = String::from_utf8_lossy(&key).to_string();
+                                    let display = crate::string::lossy(&key).to_string();
                                     let prefix = format!("Constant {}", display);
                                     let msg = self.format_deprecated_message(&prefix, &custom_msg);
                                     self.emit_user_deprecated_at(&msg, op.line);
@@ -50215,7 +50211,7 @@ impl Vm {
                                         if !eval_warnings.is_empty() || !lex_diags.is_empty() {
                                             let saved = std::mem::replace(
                                                 &mut self.current_file,
-                                                String::from_utf8_lossy(&compiler_file)
+                                                crate::string::lossy(&compiler_file)
                                                     .into(),
                                             );
                                             self.replay_cached_diags(&crate::script_cache::merged_compile_diags(
@@ -51884,7 +51880,7 @@ impl Vm {
                                 let class_display =
                                     crate::value::display_class_name(&obj.borrow().class_name);
                                 let prop_str =
-                                    String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                    crate::string::lossy(prop_name.as_bytes()).to_string();
                                 let msg = format!(
                                     "Cannot unset hooked property {}::${}",
                                     class_display, prop_str
@@ -51907,7 +51903,7 @@ impl Vm {
                         // Enum readonly property protection
                         if obj.borrow().has_property(b"__enum_case") {
                             let prop_str =
-                                String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                crate::string::lossy(prop_name.as_bytes()).to_string();
                             let is_readonly = prop_str == "name"
                                 || (prop_str == "value"
                                     && obj.borrow().has_property(b"__enum_backing_type"));
@@ -52025,7 +52021,7 @@ impl Vm {
                                 let class_display =
                                     crate::value::display_class_name(&class_name_orig_u);
                                 let prop_str =
-                                    String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                    crate::string::lossy(prop_name.as_bytes()).to_string();
                                 let msg = format!(
                                     "Cannot unset readonly property {}::${}",
                                     class_display, prop_str
@@ -52058,7 +52054,7 @@ impl Vm {
                                 if sv != Visibility::Public {
                                     let caller_scope = self.current_class_scope();
                                     let prop_name_str =
-                                        String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                        crate::string::lossy(prop_name.as_bytes()).to_string();
                                     let raw_error = self.check_visibility(
                                         sv,
                                         &declaring_class,
@@ -56061,8 +56057,8 @@ impl Vm {
                                         if !tdef.methods.contains_key(&method_lower) {
                                             adapt_err = Some(format!(
                                                 "A precedence rule was defined for {}::{} but this method does not exist",
-                                                String::from_utf8_lossy(&tdef.name),
-                                                String::from_utf8_lossy(prec_method)
+                                                crate::string::lossy(&tdef.name),
+                                                crate::string::lossy(prec_method)
                                             ));
                                             break 'adapts;
                                         }
@@ -56086,8 +56082,8 @@ impl Vm {
                                             {
                                                 adapt_err = Some(format!(
                                                     "Failed to evaluate a trait precedence ({}). Method of trait {} was defined to be excluded multiple times",
-                                                    String::from_utf8_lossy(prec_method),
-                                                    String::from_utf8_lossy(&ex_name)
+                                                    crate::string::lossy(prec_method),
+                                                    crate::string::lossy(&ex_name)
                                                 ));
                                                 break 'adapts;
                                             }
@@ -56095,9 +56091,9 @@ impl Vm {
                                             if el == tl {
                                                 adapt_err = Some(format!(
                                                     "Inconsistent insteadof definition. The method {} is to be used from {}, but {} is also on the exclude list",
-                                                    String::from_utf8_lossy(prec_method),
-                                                    String::from_utf8_lossy(&tdef_name),
-                                                    String::from_utf8_lossy(&tdef_name)
+                                                    crate::string::lossy(prec_method),
+                                                    crate::string::lossy(&tdef_name),
+                                                    crate::string::lossy(&tdef_name)
                                                 ));
                                                 break 'adapts;
                                             }
@@ -56126,8 +56122,8 @@ impl Vm {
                                             if !tdef.methods.contains_key(&method_lower) {
                                                 adapt_err = Some(format!(
                                                     "An alias was defined for {}::{} but this method does not exist",
-                                                    String::from_utf8_lossy(&tdef.name),
-                                                    String::from_utf8_lossy(alias_method)
+                                                    crate::string::lossy(&tdef.name),
+                                                    crate::string::lossy(alias_method)
                                                 ));
                                                 break 'adapts;
                                             }
@@ -56139,9 +56135,9 @@ impl Vm {
                                                 .map(|t| t.name.clone())
                                                 .collect();
                                             if found.len() > 1 {
-                                                let m = String::from_utf8_lossy(alias_method);
-                                                let a0 = String::from_utf8_lossy(&found[0]);
-                                                let a1 = String::from_utf8_lossy(&found[1]);
+                                                let m = crate::string::lossy(alias_method);
+                                                let a0 = crate::string::lossy(&found[0]);
+                                                let a1 = crate::string::lossy(&found[1]);
                                                 adapt_err = Some(format!(
                                                     "An alias was defined for method {}(), which exists in both {} and {}. Use {}::{} or {}::{} to resolve the ambiguity",
                                                     m, a0, a1, a0, m, a1, m
@@ -56152,14 +56148,14 @@ impl Vm {
                                                 adapt_err = Some(if let Some(nn) = new_name {
                                                     format!(
                                                         "An alias ({}) was defined for method {}(), but this method does not exist",
-                                                        String::from_utf8_lossy(nn),
-                                                        String::from_utf8_lossy(alias_method)
+                                                        crate::string::lossy(nn),
+                                                        crate::string::lossy(alias_method)
                                                     )
                                                 } else {
                                                     let _ = new_visibility;
                                                     format!(
                                                         "The modifiers of the trait method {}() are changed, but this method does not exist. Error",
-                                                        String::from_utf8_lossy(alias_method)
+                                                        crate::string::lossy(alias_method)
                                                     )
                                                 });
                                                 break 'adapts;
@@ -56900,7 +56896,7 @@ impl Vm {
                                 // Check if parent is final
                                 if parent.is_final {
                                     let _parent_display =
-                                        String::from_utf8_lossy(parent_name).to_string();
+                                        crate::string::lossy(parent_name).to_string();
                                     let child_display = crate::string::msg_str(
                                         name_val.to_php_string().as_bytes(),
                                     )
@@ -57066,10 +57062,10 @@ impl Vm {
                                                             crate::string::msg_str(parent_name)
                                                                 .to_string()
                                                         });
-                                                    let mdisp = String::from_utf8_lossy(&cm.name)
+                                                    let mdisp = crate::string::lossy(&cm.name)
                                                         .to_string();
                                                     let cdisp =
-                                                        String::from_utf8_lossy(&class.name)
+                                                        crate::string::lossy(&class.name)
                                                             .to_string();
                                                     let msg = if cm.is_static {
                                                         format!(
@@ -58112,7 +58108,7 @@ impl Vm {
                                         .filter(|f| !f.is_empty())
                                     {
                                         self.current_file =
-                                            String::from_utf8_lossy(f).into_owned().into();
+                                            crate::string::lossy(f).into_owned().into();
                                     }
                                     return Err(e);
                                 }
@@ -58315,15 +58311,15 @@ impl Vm {
                                                 vm.classes
                                                     .get(d.to_ascii_lowercase().as_slice())
                                                     .map(|c| {
-                                                        String::from_utf8_lossy(&c.name).to_string()
+                                                        crate::string::lossy(&c.name).to_string()
                                                     })
                                                     .unwrap_or_else(|| {
-                                                        String::from_utf8_lossy(d).to_string()
+                                                        crate::string::lossy(d).to_string()
                                                     })
                                             };
                                             let pdecl = disp(self, &method.declaring_class);
                                             let cdecl = disp(self, &existing.declaring_class);
-                                            let mname = String::from_utf8_lossy(&existing.name);
+                                            let mname = crate::string::lossy(&existing.name);
                                             let message = if existing.is_static {
                                                 format!(
                                                     "Cannot make non static method {}::{}() static in class {}",
@@ -58399,15 +58395,15 @@ impl Vm {
                                         }
                                         let decl_display = |vm: &Self, d: &[u8]| -> String {
                                             if d == cls_lower.as_slice() {
-                                                String::from_utf8_lossy(&class.name).to_string()
+                                                crate::string::lossy(&class.name).to_string()
                                             } else {
                                                 vm.classes
                                                     .get(d)
                                                     .map(|c| {
-                                                        String::from_utf8_lossy(&c.name).to_string()
+                                                        crate::string::lossy(&c.name).to_string()
                                                     })
                                                     .unwrap_or_else(|| {
-                                                        String::from_utf8_lossy(d).to_string()
+                                                        crate::string::lossy(d).to_string()
                                                     })
                                             }
                                         };
@@ -59113,9 +59109,9 @@ impl Vm {
                                     .get(&iface_method.declaring_class.to_ascii_lowercase())
                                     .map(|c| crate::value::display_class_name(&c.name))
                                     .unwrap_or_else(|| {
-                                        String::from_utf8_lossy(iface_name_c).to_string()
+                                        crate::string::lossy(iface_name_c).to_string()
                                     });
-                                let mname = String::from_utf8_lossy(&existing.name).to_string();
+                                let mname = crate::string::lossy(&existing.name).to_string();
                                 // (ZEND_FN_SCOPE_NAME(child): an inherited method's class)
                                 let cname = crate::value::display_class_name(
                                     &self.declaring_class_name(&existing.declaring_class, &class.name),
@@ -59415,7 +59411,7 @@ impl Vm {
                                         .classes
                                         .get(&method.declaring_class.to_ascii_lowercase())
                                         .filter(|c| c.is_interface)
-                                        .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                                        .map(|c| crate::string::lossy(&c.name).to_string())
                                         .unwrap_or_default();
                                     for iface_name in
                                         iface_names.iter().filter(|_| iface_origin.is_empty())
@@ -59431,7 +59427,7 @@ impl Vm {
                                                 .map(|b| b.to_ascii_lowercase())
                                                 .collect();
                                             if iface.methods.contains_key(&method_lower) {
-                                                iface_origin = String::from_utf8_lossy(&iface.name)
+                                                iface_origin = crate::string::lossy(&iface.name)
                                                     .to_string();
                                                 break;
                                             }
@@ -59442,9 +59438,9 @@ impl Vm {
                                         let declaring = &method.declaring_class;
                                         if let Some(dc) = self.classes.get(declaring) {
                                             iface_origin =
-                                                String::from_utf8_lossy(&dc.name).to_string();
+                                                crate::string::lossy(&dc.name).to_string();
                                         } else {
-                                            iface_origin = String::from_utf8_lossy(
+                                            iface_origin = crate::string::lossy(
                                                 name_val.to_php_string().as_bytes(),
                                             )
                                             .to_string();
@@ -59454,17 +59450,17 @@ impl Vm {
                                     let method_name_str = {
                                         let mn = &method.name;
                                         if mn.starts_with(b"__property_get_") {
-                                            let prop = String::from_utf8_lossy(
+                                            let prop = crate::string::lossy(
                                                 &mn[b"__property_get_".len()..],
                                             );
                                             format!("${}::get", prop)
                                         } else if mn.starts_with(b"__property_set_") {
-                                            let prop = String::from_utf8_lossy(
+                                            let prop = crate::string::lossy(
                                                 &mn[b"__property_set_".len()..],
                                             );
                                             format!("${}::set", prop)
                                         } else {
-                                            String::from_utf8_lossy(mn).to_string()
+                                            crate::string::lossy(mn).to_string()
                                         }
                                     };
                                     abstract_methods
@@ -59505,7 +59501,7 @@ impl Vm {
                                         && !has_traits
                                     {
                                         self_declared_abstract.push((
-                                            String::from_utf8_lossy(&method.name).to_string(),
+                                            crate::string::lossy(&method.name).to_string(),
                                             method.op_array.decl_line,
                                         ));
                                     }
@@ -60246,7 +60242,7 @@ impl Vm {
                             // (user classes only).
                             let (canonical, prev_info, kind) =
                                 if let Some(existing) = self.classes.get(&name_lower) {
-                                    let name = String::from_utf8_lossy(&existing.name).to_string();
+                                    let name = crate::string::lossy(&existing.name).to_string();
                                     let prev = match &existing.filename {
                                         Some(f) if existing.start_line > 0 => format!(
                                             " (previously declared in {}:{})",
@@ -60269,7 +60265,7 @@ impl Vm {
                                     let found = self.lookup_class(&name_lower);
                                     let name = found
                                         .as_ref()
-                                        .map(|c| String::from_utf8_lossy(c.name).to_string())
+                                        .map(|c| crate::string::lossy(c.name).to_string())
                                         .unwrap_or_default();
                                     let kind = found.map_or("class", |c| c.kind.keyword());
                                     (name, String::new(), kind)
@@ -60757,7 +60753,7 @@ impl Vm {
                                                         crate::string::msg_str(&class.name);
                                                     let prop_display =
                                                         crate::string::msg_str(&prop.name);
-                                                    let param_name = String::from_utf8_lossy(
+                                                    let param_name = crate::string::lossy(
                                                         &param_info.param_name,
                                                     );
                                                     return Err(VmError {
@@ -62134,7 +62130,7 @@ impl Vm {
                         let hook_method_lower: Vec<u8> = if may_hook {
                             let hook_method_name = format!(
                                 "__property_get_{}",
-                                String::from_utf8_lossy(prop_name_bytes)
+                                crate::string::lossy(prop_name_bytes)
                             );
                             hook_method_name
                                 .bytes()
@@ -62337,7 +62333,7 @@ impl Vm {
                             if vis != Visibility::Public {
                                 let caller_scope = self.current_class_scope();
                                 let prop_name_str =
-                                    String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                    crate::string::lossy(prop_name.as_bytes()).to_string();
                                 let raw_err = self.check_visibility(
                                     vis,
                                     &declaring_class,
@@ -63622,7 +63618,7 @@ impl Vm {
                         let set_hook_method_lower: Vec<u8> = if may_hook {
                             let set_hook_method_name = format!(
                                 "__property_set_{}",
-                                String::from_utf8_lossy(prop_name_bytes_set)
+                                crate::string::lossy(prop_name_bytes_set)
                             );
                             set_hook_method_name
                                 .bytes()
@@ -63736,7 +63732,7 @@ impl Vm {
                                     if effective_write_vis != Visibility::Public {
                                         let caller_scope = self.current_class_scope();
                                         let prop_name_str =
-                                            String::from_utf8_lossy(prop_name_bytes_set)
+                                            crate::string::lossy(prop_name_bytes_set)
                                                 .to_string();
                                         let raw_error = self.check_visibility(
                                             effective_write_vis,
@@ -63866,7 +63862,7 @@ impl Vm {
                             && self.undeclared_prop_of(&obj_val, &class_lower, prop_name.as_bytes())
                         {
                             let prop_str =
-                                String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                crate::string::lossy(prop_name.as_bytes()).to_string();
                             let class_display = crate::value::display_class_name(&class_name_orig);
                             let msg = format!(
                                 "Cannot create dynamic property {}::${}",
@@ -63891,7 +63887,7 @@ impl Vm {
                         if obj.borrow().has_property(b"__enum_case") {
                             let class_name = crate::value::display_class_name(&class_name_orig);
                             let prop_str =
-                                String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                crate::string::lossy(prop_name.as_bytes()).to_string();
                             // name and value are readonly properties on enums
                             let is_readonly_prop = prop_str == "name"
                                 || (prop_str == "value"
@@ -63933,7 +63929,7 @@ impl Vm {
                                     let class_display =
                                         crate::value::display_class_name(&class_name_orig);
                                     let prop_str =
-                                        String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                        crate::string::lossy(prop_name.as_bytes()).to_string();
                                     let msg = format!(
                                         "Cannot create dynamic property {}::${}",
                                         class_display, prop_str
@@ -64011,7 +64007,7 @@ impl Vm {
                             if effective_write_vis != Visibility::Public {
                                 let caller_scope = self.current_class_scope();
                                 let prop_name_str =
-                                    String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                    crate::string::lossy(prop_name.as_bytes()).to_string();
                                 let raw_error = self.check_visibility(
                                     effective_write_vis,
                                     &declaring_class,
@@ -64067,7 +64063,7 @@ impl Vm {
                                     let should_error = if in_clone_window {
                                         let modified_key = format!(
                                             "__clone_modified_{}",
-                                            String::from_utf8_lossy(prop_name.as_bytes())
+                                            crate::string::lossy(prop_name.as_bytes())
                                         );
                                         matches!(
                                             obj.borrow().get_property(modified_key.as_bytes()),
@@ -64525,7 +64521,7 @@ impl Vm {
                                 ) {
                                     let modified_key = format!(
                                         "__clone_modified_{}",
-                                        String::from_utf8_lossy(prop_name.as_bytes())
+                                        crate::string::lossy(prop_name.as_bytes())
                                     );
                                     obj.borrow_mut()
                                         .set_property(modified_key.into_bytes(), Value::True);
@@ -66229,7 +66225,7 @@ impl Vm {
         Some(format!(
             "Cannot create dynamic property {}::${}",
             crate::value::display_class_name(&ob.class_name),
-            String::from_utf8_lossy(prop)
+            crate::string::lossy(prop)
         ))
     }
 
@@ -66338,7 +66334,7 @@ impl Vm {
                             b"Error",
                             format!(
                                 "Named parameter ${} overwrites previous argument",
-                                String::from_utf8_lossy(&n)
+                                crate::string::lossy(&n)
                             ),
                         ));
                     }
@@ -66483,8 +66479,8 @@ impl Vm {
                         .unwrap_or(decl.0);
                     format!(
                         "{}::{}",
-                        String::from_utf8_lossy(&cname),
-                        String::from_utf8_lossy(&decl.1)
+                        crate::string::lossy(&cname),
+                        crate::string::lossy(&decl.1)
                     )
                 };
                 // ("[internal function]" when a builtin converts it)
@@ -67087,14 +67083,14 @@ impl Vm {
                                 return global_val;
                             }
                             if is_auto_global_name(name) {
-                                let varname = String::from_utf8_lossy(name);
+                                let varname = crate::string::lossy(name);
                                 self.emit_warning_at(
                                     &format!("Undefined global variable ${}", varname),
                                     line,
                                 );
                             }
                         } else {
-                            let varname = String::from_utf8_lossy(name);
+                            let varname = crate::string::lossy(name);
                             self.emit_warning_at(&format!("Undefined variable ${}", varname), line);
                         }
                     }
@@ -67178,7 +67174,7 @@ impl Vm {
                 if is_undef {
                     if let Some(name) = op_array.cv_names.get(i) {
                         if name.as_slice() != b"this" && name.as_slice() != b"GLOBALS" {
-                            let varname = String::from_utf8_lossy(name);
+                            let varname = crate::string::lossy(name);
                             if is_auto_global_name(name) {
                                 if !self.global_exists(name.as_slice()) {
                                     self.emit_warning_at(
@@ -68048,9 +68044,9 @@ impl Vm {
                 // frame for non-generator calls; generator_do_fcall historically
                 // didn't, so backtraces inside a generator-called function lost
                 // the intermediate frame.)
-                let raw_name = String::from_utf8_lossy(&user_fn.name).to_string();
+                let raw_name = crate::string::lossy(&user_fn.name).to_string();
                 let display = if !user_fn.display_name.is_empty() {
-                    String::from_utf8_lossy(&user_fn.display_name).to_string()
+                    crate::string::lossy(&user_fn.display_name).to_string()
                 } else {
                     raw_name
                 };
@@ -68496,24 +68492,24 @@ impl Vm {
     /// for closures, the function name or `Class::method` otherwise).
     pub fn callable_display_name(&self, callback: &Value) -> String {
         if callback.is_closure_obj() {
-            return String::from_utf8_lossy(&self.closure_function_name(callback)).to_string();
+            return crate::string::lossy(&self.closure_function_name(callback)).to_string();
         }
         match callback {
             Value::String(s) => {
                 let name_bytes = s.as_bytes();
                 let lower: Vec<u8> = name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
                 if let Some(uf) = self.user_functions.get(&lower) {
-                    let raw = String::from_utf8_lossy(&uf.name).to_string();
+                    let raw = crate::string::lossy(&uf.name).to_string();
                     if !uf.display_name.is_empty() {
-                        String::from_utf8_lossy(&uf.display_name).to_string()
+                        crate::string::lossy(&uf.display_name).to_string()
                     } else if raw.starts_with("__closure_") || raw.starts_with("__arrow_") {
-                        let file = String::from_utf8_lossy(&uf.filename).to_string();
+                        let file = crate::string::lossy(&uf.filename).to_string();
                         format!("{{closure:{}:{}}}", file, uf.decl_line)
                     } else {
                         raw
                     }
                 } else {
-                    String::from_utf8_lossy(name_bytes).to_string()
+                    crate::string::lossy(name_bytes).to_string()
                 }
             }
             Value::Array(arr) => {
@@ -68525,24 +68521,24 @@ impl Vm {
                     let lower: Vec<u8> =
                         name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
                     if let Some(uf) = self.user_functions.get(&lower) {
-                        let raw = String::from_utf8_lossy(&uf.name).to_string();
+                        let raw = crate::string::lossy(&uf.name).to_string();
                         if !uf.display_name.is_empty() {
-                            String::from_utf8_lossy(&uf.display_name).to_string()
+                            crate::string::lossy(&uf.display_name).to_string()
                         } else if raw.starts_with("__closure_") || raw.starts_with("__arrow_") {
-                            let file = String::from_utf8_lossy(&uf.filename).to_string();
+                            let file = crate::string::lossy(&uf.filename).to_string();
                             format!("{{closure:{}:{}}}", file, uf.decl_line)
                         } else {
                             raw
                         }
                     } else {
-                        String::from_utf8_lossy(name_bytes).to_string()
+                        crate::string::lossy(name_bytes).to_string()
                     }
                 } else {
                     "fiber-callback".to_string()
                 }
             }
             Value::Object(obj) => {
-                let cls = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                let cls = crate::string::lossy(&obj.borrow().class_name).to_string();
                 format!("{}->__invoke", cls)
             }
             _ => "fiber-callback".to_string(),
@@ -69200,7 +69196,7 @@ impl Vm {
                     vis,
                     &decl,
                     class_name_orig,
-                    &String::from_utf8_lossy(pn),
+                    &crate::string::lossy(pn),
                     true,
                     scope.as_deref(),
                 )
@@ -69278,7 +69274,7 @@ impl Vm {
         let name = format!(
             "{}::{}",
             crate::value::display_class_name(&class_name),
-            String::from_utf8_lossy(&hook.name)
+            crate::string::lossy(&hook.name)
         );
         // A #[\Deprecated] hook (zend_deprecated_function()).
         if let Some(attrs) = self.hook_method_attributes(&decl, &hook.name) {
@@ -69398,7 +69394,7 @@ impl Vm {
         let mut msg = format!(
             "{}(): Argument #1 (${}) must be of type {}, {} given",
             name.split('\0').next().unwrap_or_default(),
-            String::from_utf8_lossy(&info.param_name),
+            crate::string::lossy(&info.param_name),
             self.param_type_display(&info.param_type),
             Self::value_type_name(&v)
         );
@@ -69538,7 +69534,7 @@ impl Vm {
         {
             if vis != Visibility::Public {
                 let caller_scope = self.current_class_scope();
-                let pn_s = String::from_utf8_lossy(pn).to_string();
+                let pn_s = crate::string::lossy(pn).to_string();
                 if self
                     .check_visibility(
                         vis,
@@ -72554,7 +72550,7 @@ impl Vm {
         Some(format!(
             "Cannot access private property {}::${}",
             pd,
-            String::from_utf8_lossy(prop)
+            crate::string::lossy(prop)
         ))
     }
 }

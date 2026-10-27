@@ -363,7 +363,7 @@ impl Vm {
                             .classes
                             .get(class)
                             .map(|c| crate::value::display_class_name(&c.name).to_string())
-                            .unwrap_or_else(|| String::from_utf8_lossy(class).into_owned());
+                            .unwrap_or_else(|| crate::string::lossy(class).into_owned());
                         let msg = format!(
                             "{}::{}() expects exactly {} argument{}, {} given",
                             disp,
@@ -459,7 +459,7 @@ impl Vm {
         let Some(class) = self.classes.get(class_part).cloned() else {
             return Value::Null;
         };
-        let class_name = String::from_utf8_lossy(&class.name).into_owned();
+        let class_name = crate::string::lossy(&class.name).into_owned();
         let method = if try_from { "tryFrom" } else { "from" };
         let Some(bt) = class.enum_backing_type.as_ref() else {
             // A pure enum has no from()/tryFrom() (BackedEnum declares them).
@@ -739,7 +739,7 @@ impl Vm {
                 if let Some((n, _)) = named.first() {
                     Some((
                         &b"Error"[..],
-                        format!("Unknown named parameter ${}", String::from_utf8_lossy(n)),
+                        format!("Unknown named parameter ${}", crate::string::lossy(n)),
                     ))
                 } else if given != want {
                     Some((

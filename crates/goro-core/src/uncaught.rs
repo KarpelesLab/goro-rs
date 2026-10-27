@@ -58,7 +58,7 @@ impl Vm {
         let c_str = |s: &PhpString| {
             let b = s.as_bytes();
             let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
-            String::from_utf8_lossy(&b[..end]).into_owned()
+            crate::string::lossy(&b[..end]).into_owned()
         };
         for (k, frame_val) in arr.iter() {
             let Value::Array(frame) = frame_val.deref() else {
@@ -102,7 +102,7 @@ impl Vm {
                     Some(_) => {
                         warnings.push(format!(
                             "Value for {} is not a string",
-                            String::from_utf8_lossy(k)
+                            crate::string::lossy(k)
                         ));
                         out.push_str("[unknown]");
                     }

@@ -919,14 +919,14 @@ pub(crate) fn type_to_string(tv: &TypeView, scope: Option<&LinkClass>) -> String
             .position(|b| *b == 0)
             .map(|p| &r[..p])
             .unwrap_or(&r[..]);
-        String::from_utf8_lossy(cut).to_string()
+        crate::string::lossy(cut).to_string()
     };
     let mut parts: Vec<String> = Vec::new();
     if tv.is_intersection {
         let s: Vec<String> = tv
             .all_names()
             .iter()
-            .map(|n| String::from_utf8_lossy(n).to_string())
+            .map(|n| crate::string::lossy(n).to_string())
             .collect();
         parts.push(s.join("&"));
     } else {
@@ -936,7 +936,7 @@ pub(crate) fn type_to_string(tv: &TypeView, scope: Option<&LinkClass>) -> String
                 TElem::Inter(ns) => {
                     let s: Vec<String> = ns
                         .iter()
-                        .map(|n| String::from_utf8_lossy(n).to_string())
+                        .map(|n| crate::string::lossy(n).to_string())
                         .collect();
                     parts.push(format!("({})", s.join("&")));
                 }
@@ -1144,7 +1144,7 @@ pub(crate) fn function_declaration(
         .position(|b| *b == 0)
         .map(|p| &class_display[..p])
         .unwrap_or(class_display);
-    s.push_str(&String::from_utf8_lossy(cut));
+    s.push_str(&crate::string::lossy(cut));
     s.push_str("::");
     // Property hooks display as `$prop::get` / `$prop::set`.
     let lname = m.name.to_ascii_lowercase();
@@ -1158,11 +1158,11 @@ pub(crate) fn function_declaration(
     match hook {
         Some((prop, kind)) => {
             s.push('$');
-            s.push_str(&String::from_utf8_lossy(prop));
+            s.push_str(&crate::string::lossy(prop));
             s.push_str("::");
             s.push_str(kind);
         }
-        None => s.push_str(&String::from_utf8_lossy(&m.name)),
+        None => s.push_str(&crate::string::lossy(&m.name)),
     }
     s.push('(');
     let a = FnArgs::of(m);
@@ -1181,7 +1181,7 @@ pub(crate) fn function_declaration(
         }
         s.push('$');
         if let Some(n) = oa.cv_names.get(cv) {
-            s.push_str(&String::from_utf8_lossy(n));
+            s.push_str(&crate::string::lossy(n));
         }
         if i >= a.required && !is_variadic {
             s.push_str(" = ");
@@ -1310,8 +1310,8 @@ impl Vm {
                         return Some((
                             format!(
                                 "During inheritance of {}, while autoloading {}: Uncaught {}",
-                                String::from_utf8_lossy(&cur.name),
-                                String::from_utf8_lossy(n),
+                                crate::string::lossy(&cur.name),
+                                crate::string::lossy(n),
                                 shown
                             ),
                             false,
@@ -1445,8 +1445,8 @@ impl Vm {
                 self.current_exception = None;
                 return Err(format!(
                     "During inheritance of {}, while autoloading {}: Uncaught {}",
-                    String::from_utf8_lossy(&class.name),
-                    String::from_utf8_lossy(&n),
+                    crate::string::lossy(&class.name),
+                    crate::string::lossy(&n),
                     shown
                 ));
             }
@@ -1773,10 +1773,10 @@ impl Vm {
         Some((
             format!(
                 "Type of {}::{} must be compatible with {}::{} of type {}",
-                String::from_utf8_lossy(&cur.name),
-                String::from_utf8_lossy(const_name),
-                String::from_utf8_lossy(&parent_lc.name),
-                String::from_utf8_lossy(const_name),
+                crate::string::lossy(&cur.name),
+                crate::string::lossy(const_name),
+                crate::string::lossy(&parent_lc.name),
+                crate::string::lossy(const_name),
                 type_to_string(&pt, Some(&parent_lc))
             ),
             st == Status::Unresolved,
@@ -1990,7 +1990,7 @@ impl Vm {
                     format!(
                         "Enum case type {} does not match enum backing type {}",
                         v.type_name(),
-                        String::from_utf8_lossy(&bt)
+                        crate::string::lossy(&bt)
                     ),
                 ));
             }
@@ -1999,9 +1999,9 @@ impl Vm {
                     b"Error",
                     format!(
                         "Duplicate value in enum {} for cases {} and {}",
-                        String::from_utf8_lossy(&class.name),
-                        String::from_utf8_lossy(prev),
-                        String::from_utf8_lossy(case_name)
+                        crate::string::lossy(&class.name),
+                        crate::string::lossy(prev),
+                        crate::string::lossy(case_name)
                     ),
                 ));
             }

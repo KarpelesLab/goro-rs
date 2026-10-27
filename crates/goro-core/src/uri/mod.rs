@@ -327,7 +327,7 @@ fn strict_prop_write(vm: &mut Vm, o: &Obj, name: &[u8], kind: u8) -> bool {
         _ => false,
     };
     let disp = class_name_of(o);
-    let pname = String::from_utf8_lossy(name);
+    let pname = crate::string::lossy(name);
     let declared = o.borrow().properties.iter().any(|(k, _)| k == name);
     let msg = if readonly {
         if kind != 0 {

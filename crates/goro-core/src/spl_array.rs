@@ -1245,7 +1245,7 @@ impl Vm {
         fname: &[u8],
         extra: Option<Value>,
     ) -> Option<Value> {
-        let fname_s = String::from_utf8_lossy(fname).to_string();
+        let fname_s = crate::string::lossy(fname).to_string();
         if self.disabled_functions_contains(fname) || !self.functions.contains_key(fname) {
             let msg = format!(
                 "Cannot call method {} when function {} is disabled",
@@ -1488,7 +1488,7 @@ impl Vm {
             b"asort" | b"ksort" => {
                 let fl = match a.first() {
                     Some(v) => match self.spl_arg_long(
-                        &format!("{}::{}", cls_name, String::from_utf8_lossy(method)),
+                        &format!("{}::{}", cls_name, crate::string::lossy(method)),
                         1,
                         "flags",
                         v,
@@ -1509,7 +1509,7 @@ impl Vm {
                     }
                     let msg = format!(
                         "{}(): Argument #2 ($callback) must be a valid callback, {}",
-                        String::from_utf8_lossy(method),
+                        crate::string::lossy(method),
                         e
                     );
                     return self.spl_throw(b"TypeError", &msg);

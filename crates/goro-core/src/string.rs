@@ -10,6 +10,17 @@ fn zstr_size(len: usize) -> usize {
     crate::value::zend_mm_size(len + 25)
 }
 
+/// `String::from_utf8_lossy()`, with std's fast UTF-8 validation first:
+/// the lossy decoder walks valid text byte by byte (names and messages
+/// are nearly always valid UTF-8).
+#[inline]
+pub fn lossy(b: &[u8]) -> std::borrow::Cow<'_, str> {
+    match std::str::from_utf8(b) {
+        Ok(s) => std::borrow::Cow::Borrowed(s),
+        Err(_) => String::from_utf8_lossy(b),
+    }
+}
+
 /// Whether `b` holds the byte `c`, eight bytes at a time (a name or a
 /// key: short).
 #[inline]
@@ -334,7 +345,7 @@ impl PhpString {
 
     /// Lossy conversion to a Rust String (for display purposes)
     pub fn to_string_lossy(&self) -> String {
-        String::from_utf8_lossy(&self.inner.data).into_owned()
+        crate::string::lossy(&self.inner.data).into_owned()
     }
 
     /// The string for a diagnostic message (see [`msg_str`]).

@@ -78,7 +78,7 @@ impl Vm {
         self.builtin_frames.last().map(|f| {
             // SAFETY: the name is borrowed for as long as the frame is live.
             let name = unsafe { std::slice::from_raw_parts(f.name, f.name_len) };
-            String::from_utf8_lossy(name).into_owned()
+            crate::string::lossy(name).into_owned()
         })
     }
 
@@ -199,7 +199,7 @@ impl Vm {
                 let args = unsafe { std::slice::from_raw_parts(f.args, f.nargs) };
                 let display = match crate::arginfo::lookup(name) {
                     Some(info) => info.name.to_string(),
-                    None => String::from_utf8_lossy(name).into_owned(),
+                    None => crate::string::lossy(name).into_owned(),
                 };
                 // (by-reference arguments are kept as references: the frame
                 // must not hold a copy of the value the builtin works on)
@@ -667,7 +667,7 @@ impl Vm {
         }
         let name = match crate::arginfo::lookup(lname) {
             Some(info) => info.name.to_string(),
-            None => String::from_utf8_lossy(lname).into_owned(),
+            None => crate::string::lossy(lname).into_owned(),
         };
         let frame = crate::vm::ObservedFrame::Internal(&name);
         (h.begin)(self, &frame);

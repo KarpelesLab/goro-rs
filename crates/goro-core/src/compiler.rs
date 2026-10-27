@@ -584,12 +584,12 @@ fn hook_doc_string(doc: Option<&Vec<u8>>) -> Option<std::rc::Rc<str>> {
     doc.map(|d| doc_string(d))
 }
 
-/// `String::from_utf8_lossy(d)`, validating a doc comment (all but always
+/// `crate::string::lossy(d)`, validating a doc comment (all but always
 /// UTF-8) the fast way; shared by the copies of a class entry.
 fn doc_string(d: &[u8]) -> std::rc::Rc<str> {
     match std::str::from_utf8(d) {
         Ok(s) => s.into(),
-        Err(_) => String::from_utf8_lossy(d).into(),
+        Err(_) => crate::string::lossy(d).into(),
     }
 }
 
@@ -1274,7 +1274,7 @@ impl Compiler {
             }
         }
         if let Some((name, locs)) = self.jumps.pending_gotos.iter().next() {
-            let label = String::from_utf8_lossy(name).into_owned();
+            let label = crate::string::lossy(name).into_owned();
             let line = locs.first().map(|(_, l)| *l).unwrap_or(0);
             return Err(CompileError {
                 message: format!("'goto' to undefined label '{}'", label),
@@ -1697,7 +1697,7 @@ impl Compiler {
         if is_fcc {
             return err("Cannot create Closure for parent property hook call".into());
         }
-        let prop_s = String::from_utf8_lossy(prop);
+        let prop_s = crate::string::lossy(prop);
         let n = &self.op_array.name;
         let active =
             if n.len() > 6 && n[0] == b'$' && (n.ends_with(b"::get") || n.ends_with(b"::set")) {
@@ -1716,7 +1716,7 @@ impl Compiler {
                 "Must not use parent::${}::{}() in a different property (${})",
                 prop_s,
                 kind,
-                String::from_utf8_lossy(active_prop)
+                crate::string::lossy(active_prop)
             ));
         }
         if active_kind != kind.as_bytes() {
@@ -1724,7 +1724,7 @@ impl Compiler {
                 "Must not use parent::${}::{}() in a different property hook ({})",
                 prop_s,
                 kind,
-                String::from_utf8_lossy(active_kind)
+                crate::string::lossy(active_kind)
             ));
         }
         Ok(false)
@@ -1891,7 +1891,7 @@ impl Compiler {
             if flag != 0 && cfg.flags & flag == 0 {
                 return Some(format!(
                     "Attribute \"{}\" cannot target {} (allowed targets: {})",
-                    String::from_utf8_lossy(bare),
+                    crate::string::lossy(bare),
                     target,
                     attribute_target_names(cfg.flags)
                 ));
@@ -2204,10 +2204,7 @@ impl Compiler {
                     Some(n) => {
                         if seen_named.contains(&n.as_slice()) {
                             self.deferred_fatal_errors.push((
-                                format!(
-                                    "Duplicate named parameter ${}",
-                                    String::from_utf8_lossy(n)
-                                ),
+                                format!("Duplicate named parameter ${}", crate::string::lossy(n)),
                                 line,
                             ));
                         }
@@ -2344,7 +2341,7 @@ impl Compiler {
                     .iter()
                     .map(|a| {
                         self.default_value_repr(&a.value).map(|r| match &a.name {
-                            Some(n) => format!("{} = {}", String::from_utf8_lossy(n), r),
+                            Some(n) => format!("{} = {}", crate::string::lossy(n), r),
                             None => r,
                         })
                     })
@@ -2996,7 +2993,7 @@ impl Compiler {
                                     b"Only variables should be passed by reference".to_vec(),
                                 )
                             } else {
-                                let disp = String::from_utf8_lossy(fname).to_string();
+                                let disp = crate::string::lossy(fname).to_string();
                                 (OpCode::ThrowErrorMsg, format!("{}(): Argument #1 ($array) could not be passed by reference", disp).into_bytes())
                             };
                             let msg_idx = self.op_array.add_literal(Value::String(
@@ -7737,7 +7734,7 @@ impl Compiler {
                 // Member declaration checks done by zend_compile_class_decl's members
                 // (in declaration order).
                 {
-                    let cname = String::from_utf8_lossy(&qualified_name).to_string();
+                    let cname = crate::string::lossy(&qualified_name).to_string();
                     let mut seen_consts: Vec<Vec<u8>> = Vec::new();
                     for member in body.iter() {
                         // Property defaults and enum case values are constant
@@ -8191,13 +8188,13 @@ impl Compiler {
                                         // Format the type name for the error message
                                         let type_name = match hint {
                                             TypeHint::Simple(n) => {
-                                                String::from_utf8_lossy(n).to_string()
+                                                crate::string::lossy(n).to_string()
                                             }
                                             TypeHint::Union(types) => types
                                                 .iter()
                                                 .map(|t| match t {
                                                     TypeHint::Simple(n) => {
-                                                        String::from_utf8_lossy(n).to_string()
+                                                        crate::string::lossy(n).to_string()
                                                     }
                                                     _ => "?".to_string(),
                                                 })
@@ -8207,7 +8204,7 @@ impl Compiler {
                                                 .iter()
                                                 .map(|t| match t {
                                                     TypeHint::Simple(n) => {
-                                                        String::from_utf8_lossy(n).to_string()
+                                                        crate::string::lossy(n).to_string()
                                                     }
                                                     _ => "?".to_string(),
                                                 })
@@ -8218,7 +8215,7 @@ impl Compiler {
                                                     "?{}",
                                                     match inner.as_ref() {
                                                         TypeHint::Simple(n) =>
-                                                            String::from_utf8_lossy(n).to_string(),
+                                                            crate::string::lossy(n).to_string(),
                                                         _ => "?".to_string(),
                                                     }
                                                 )
@@ -8230,7 +8227,7 @@ impl Compiler {
                                                     .iter()
                                                     .map(|t| match t {
                                                         TypeHint::Simple(n) => {
-                                                            String::from_utf8_lossy(n).to_string()
+                                                            crate::string::lossy(n).to_string()
                                                         }
                                                         _ => "?".to_string(),
                                                     })
@@ -8972,15 +8969,15 @@ impl Compiler {
                                     if has_g {
                                         parts.push(format!(
                                             "{}::${}::get",
-                                            String::from_utf8_lossy(name),
-                                            String::from_utf8_lossy(prop_name)
+                                            crate::string::lossy(name),
+                                            crate::string::lossy(prop_name)
                                         ));
                                     }
                                     if has_s {
                                         parts.push(format!(
                                             "{}::${}::set",
-                                            String::from_utf8_lossy(name),
-                                            String::from_utf8_lossy(prop_name)
+                                            crate::string::lossy(name),
+                                            crate::string::lossy(prop_name)
                                         ));
                                     }
                                     let remaining_word = if is_plural {
@@ -9022,10 +9019,8 @@ impl Compiler {
 
                             // Compile property get hook as a method: __property_get_$propname
                             if let Some(hook_body) = get_hook {
-                                let hook_method_name = format!(
-                                    "__property_get_{}",
-                                    String::from_utf8_lossy(prop_name)
-                                );
+                                let hook_method_name =
+                                    format!("__property_get_{}", crate::string::lossy(prop_name));
                                 // Display name for __METHOD__: $prop::get
                                 let hook_display_name =
                                     format!("${}::get", crate::string::msg_str(prop_name));
@@ -9103,10 +9098,8 @@ impl Compiler {
                             }
                             // Compile property set hook as a method: __property_set_$propname
                             if let Some((param_name, hook_body)) = set_hook {
-                                let hook_method_name = format!(
-                                    "__property_set_{}",
-                                    String::from_utf8_lossy(prop_name)
-                                );
+                                let hook_method_name =
+                                    format!("__property_set_{}", crate::string::lossy(prop_name));
                                 // Display name for __METHOD__: $prop::set
                                 let hook_display_name =
                                     format!("${}::set", crate::string::msg_str(prop_name));
@@ -10089,7 +10082,7 @@ impl Compiler {
                                             if let Some(hook_body) = &param.get_hook {
                                                 let hook_method_name = format!(
                                                     "__property_get_{}",
-                                                    String::from_utf8_lossy(&param.name)
+                                                    crate::string::lossy(&param.name)
                                                 );
                                                 let hook_display_name = format!(
                                                     "${}::get",
@@ -10181,7 +10174,7 @@ impl Compiler {
                                             {
                                                 let hook_method_name = format!(
                                                     "__property_set_{}",
-                                                    String::from_utf8_lossy(&param.name)
+                                                    crate::string::lossy(&param.name)
                                                 );
                                                 let hook_display_name = format!(
                                                     "${}::set",
@@ -12049,7 +12042,7 @@ impl Compiler {
                             if modifiers.is_interface {
                                 let trait_list: Vec<String> = traits
                                     .iter()
-                                    .map(|t| String::from_utf8_lossy(t).to_string())
+                                    .map(|t| crate::string::lossy(t).to_string())
                                     .collect();
                                 return Err(CompileError {
                                     message: format!(
@@ -16502,13 +16495,13 @@ impl Compiler {
         Some(match pname {
             Some(p) => format!(
                 "{}(): Argument #{} (${}) could not be passed by reference",
-                String::from_utf8_lossy(shown),
+                crate::string::lossy(shown),
                 i + 1,
-                String::from_utf8_lossy(p)
+                crate::string::lossy(p)
             ),
             None => format!(
                 "{}(): Argument #{} could not be passed by reference",
-                String::from_utf8_lossy(shown),
+                crate::string::lossy(shown),
                 i + 1
             ),
         })
@@ -23661,8 +23654,8 @@ impl Compiler {
                 } else {
                     " or import the class with \"use\""
                 };
-                let name = String::from_utf8_lossy(name);
-                let class_name = String::from_utf8_lossy(&class_name);
+                let name = crate::string::lossy(name);
+                let class_name = crate::string::lossy(&class_name);
                 let msg = match correct {
                     Some(c) => format!(
                         "\"{}\" will be interpreted as a class name. Did you mean \"{}\"? Write \"\\{}\"{} to suppress this warning",
@@ -23697,7 +23690,7 @@ impl Compiler {
                             {
                                 return Some(format!(
                                     "Type {} cannot be part of an intersection type",
-                                    String::from_utf8_lossy(n)
+                                    crate::string::lossy(n)
                                 ));
                             }
                         }
@@ -23754,7 +23747,7 @@ impl Compiler {
         }
         fn join(ns: &[Vec<u8>]) -> String {
             ns.iter()
-                .map(|n| String::from_utf8_lossy(n).to_string())
+                .map(|n| crate::string::lossy(n).to_string())
                 .collect::<Vec<_>>()
                 .join("&")
         }
@@ -23768,7 +23761,7 @@ impl Compiler {
                     if contains_ci(&ns[..i], &ns[i]) {
                         return Some(format!(
                             "Duplicate type {} is redundant",
-                            String::from_utf8_lossy(&ns[i])
+                            crate::string::lossy(&ns[i])
                         ));
                     }
                 }
@@ -23788,7 +23781,7 @@ impl Compiler {
                                 if contains_ci(&new[..i], &new[i]) {
                                     return Some(format!(
                                         "Duplicate type {} is redundant",
-                                        String::from_utf8_lossy(&new[i])
+                                        crate::string::lossy(&new[i])
                                     ));
                                 }
                             }
@@ -23829,7 +23822,7 @@ impl Compiler {
                                             return Some(format!(
                                                 "Type {} is redundant as it is more restrictive than type {}",
                                                 join(&new),
-                                                String::from_utf8_lossy(c)
+                                                crate::string::lossy(c)
                                             ));
                                         }
                                     }
@@ -23845,7 +23838,7 @@ impl Compiler {
                                             return Some(format!(
                                                 "Type {} is redundant as it is more restrictive than type {}",
                                                 join(old),
-                                                String::from_utf8_lossy(n)
+                                                crate::string::lossy(n)
                                             ));
                                         }
                                     }
@@ -23853,7 +23846,7 @@ impl Compiler {
                                         if c.eq_ignore_ascii_case(n) {
                                             return Some(format!(
                                                 "Duplicate type {} is redundant",
-                                                String::from_utf8_lossy(n)
+                                                crate::string::lossy(n)
                                             ));
                                         }
                                     }
@@ -25268,7 +25261,7 @@ fn reserved_type_name_error(pt: &ParamType) -> Option<String> {
             .then(|| {
                 format!(
                     "Cannot use \"{}\" as a type name as it is reserved",
-                    String::from_utf8_lossy(name)
+                    crate::string::lossy(name)
                 )
             })
         }
@@ -25458,7 +25451,7 @@ fn is_type_nullable_or_mixed(pt: &ParamType) -> bool {
 /// Format a TypeHint as a display string for error messages
 fn type_hint_display(hint: &TypeHint) -> String {
     match hint {
-        TypeHint::Simple(name) => String::from_utf8_lossy(name).to_string(),
+        TypeHint::Simple(name) => crate::string::lossy(name).to_string(),
         TypeHint::Nullable(inner) => format!("?{}", type_hint_display(inner)),
         TypeHint::Union(types) => types
             .iter()
@@ -25526,12 +25519,12 @@ fn qualified_type_name_error(hint: &TypeHint) -> Option<String> {
                 b"null" | b"true" | b"false" | b"int" | b"float" | b"string" | b"bool"
                 | b"void" | b"never" | b"iterable" | b"object" | b"mixed" => Some(format!(
                     "Type declaration '{}' must be unqualified",
-                    String::from_utf8_lossy(&lower)
+                    crate::string::lossy(&lower)
                 )),
                 b"self" | b"parent" | b"static" => Some(format!(
                     "'{}{}' is an invalid class name",
                     prefix,
-                    String::from_utf8_lossy(rest)
+                    crate::string::lossy(rest)
                 )),
                 _ => None,
             }
@@ -25618,7 +25611,7 @@ fn validate_type_hint_full(
 
                         // The display name for error messages: resolved class name or canonical built-in
                         let display_name: String = if let Some(ref r) = resolved {
-                            String::from_utf8_lossy(r).to_string()
+                            crate::string::lossy(r).to_string()
                         } else if matches!(
                             lower.as_slice(),
                             b"int"
@@ -25640,10 +25633,10 @@ fn validate_type_hint_full(
                                 | b"never"
                         ) {
                             // For built-in types, display the canonical (lowercase) form
-                            String::from_utf8_lossy(&canonical).to_string()
+                            crate::string::lossy(&canonical).to_string()
                         } else {
                             // For class types, preserve original case
-                            String::from_utf8_lossy(n).to_string()
+                            crate::string::lossy(n).to_string()
                         };
 
                         // Check for standalone types in union
@@ -25801,7 +25794,7 @@ fn relative_type_in_intersection(hint: &TypeHint, in_trait: bool) -> Option<Stri
             {
                 Some(format!(
                     "Type {} cannot be part of an intersection type",
-                    String::from_utf8_lossy(n)
+                    crate::string::lossy(n)
                 ))
             }
             _ => None,
@@ -26439,18 +26432,18 @@ fn expr_to_source_string(expr: &Expr) -> String {
         ExprKind::Float(f) => format!("{}", f),
         ExprKind::String(s) => {
             // Escape the string content
-            let escaped = String::from_utf8_lossy(s)
+            let escaped = crate::string::lossy(s)
                 .replace('\\', "\\\\")
                 .replace('\'', "\\'");
             format!("'{}'", escaped)
         }
         ExprKind::Variable(name) => {
-            format!("${}", String::from_utf8_lossy(name))
+            format!("${}", crate::string::lossy(name))
         }
-        ExprKind::Identifier(parts) => String::from_utf8_lossy(parts).to_string(),
+        ExprKind::Identifier(parts) => crate::string::lossy(parts).to_string(),
         ExprKind::ConstantAccess(parts) => parts
             .iter()
-            .map(|p| String::from_utf8_lossy(p).to_string())
+            .map(|p| crate::string::lossy(p).to_string())
             .collect::<Vec<_>>()
             .join("\\"),
         ExprKind::BinaryOp { op, left, right } => {
@@ -26535,7 +26528,7 @@ fn expr_to_source_string(expr: &Expr) -> String {
             ..
         } => {
             let class_str = expr_to_source_string(class);
-            let method_str = String::from_utf8_lossy(method).to_string();
+            let method_str = crate::string::lossy(method).to_string();
             let args_str = args_to_source_string(args);
             format!("{}::{}({})", class_str, method_str, args_str)
         }
@@ -26561,7 +26554,7 @@ fn expr_to_source_string(expr: &Expr) -> String {
             format!(
                 "{}::${}",
                 expr_to_source_string(class),
-                String::from_utf8_lossy(property)
+                crate::string::lossy(property)
             )
         }
         ExprKind::DynamicStaticPropertyAccess { class, property } => {
@@ -26577,7 +26570,7 @@ fn expr_to_source_string(expr: &Expr) -> String {
             format!(
                 "{}::{}",
                 expr_to_source_string(class),
-                String::from_utf8_lossy(constant)
+                crate::string::lossy(constant)
             )
         }
         ExprKind::Instanceof { expr, class } => {
@@ -26745,7 +26738,7 @@ fn args_to_source_string(args: &[Argument]) -> String {
             let name_prefix = arg
                 .name
                 .as_ref()
-                .map(|n| format!("{}: ", String::from_utf8_lossy(n)))
+                .map(|n| format!("{}: ", crate::string::lossy(n)))
                 .unwrap_or_default();
             format!(
                 "{}{}{}",
@@ -26966,14 +26959,14 @@ impl Compiler {
     fn export_class_name(&self, name: &[u8]) -> String {
         let lower = name.to_ascii_lowercase();
         if matches!(lower.as_slice(), b"self" | b"parent" | b"static") {
-            return String::from_utf8_lossy(name).to_string();
+            return crate::string::lossy(name).to_string();
         }
         let resolved = if lower.starts_with(b"namespace\\") {
             self.prefix_with_namespace(&name[b"namespace\\".len()..])
         } else {
             self.resolve_class_name(name)
         };
-        format!("\\{}", String::from_utf8_lossy(&resolved))
+        format!("\\{}", crate::string::lossy(&resolved))
     }
 
     /// Fold a literal-only constant expression into a value (what PHP
@@ -27272,19 +27265,19 @@ impl Compiler {
             ExprKind::Identifier(n) => {
                 let lower = n.to_ascii_lowercase();
                 match lower.as_slice() {
-                    b"true" | b"false" | b"null" => String::from_utf8_lossy(&lower).to_string(),
+                    b"true" | b"false" | b"null" => crate::string::lossy(&lower).to_string(),
                     _ => {
                         if let Some(rest) = n.strip_prefix(b"\\") {
-                            String::from_utf8_lossy(rest).to_string()
+                            crate::string::lossy(rest).to_string()
                         } else if lower.starts_with(b"namespace\\") {
-                            String::from_utf8_lossy(
+                            crate::string::lossy(
                                 &self.prefix_with_namespace(&n[b"namespace\\".len()..]),
                             )
                             .to_string()
                         } else if n.contains(&b'\\') {
-                            String::from_utf8_lossy(&self.resolve_class_name(n)).to_string()
+                            crate::string::lossy(&self.resolve_class_name(n)).to_string()
                         } else {
-                            String::from_utf8_lossy(&self.prefix_with_namespace(n)).to_string()
+                            crate::string::lossy(&self.prefix_with_namespace(n)).to_string()
                         }
                     }
                 }
@@ -27298,14 +27291,14 @@ impl Compiler {
                         // changed it (or it was written that way).
                         let full = self.export_class_name(n);
                         if !n.starts_with(b"\\") && full.as_bytes().get(1..) == Some(&n[..]) {
-                            String::from_utf8_lossy(n).to_string()
+                            crate::string::lossy(n).to_string()
                         } else {
                             full
                         }
                     }
                     _ => return None,
                 };
-                format!("{}::{}", cls, String::from_utf8_lossy(constant))
+                format!("{}::{}", cls, crate::string::lossy(constant))
             }
             ExprKind::UnaryOp {
                 op: UnaryOp::Negate,
@@ -27433,7 +27426,7 @@ impl Compiler {
                 for a in args {
                     let v = self.export_const_expr(&a.value, 0)?;
                     parts.push(match &a.name {
-                        Some(n) => format!("{}: {}", String::from_utf8_lossy(n), v),
+                        Some(n) => format!("{}: {}", crate::string::lossy(n), v),
                         None if a.unpack => format!("...{}", v),
                         None => v,
                     });
@@ -27443,7 +27436,7 @@ impl Compiler {
             // ZEND_AST_OP_ARRAY: the closure's function name.
             ExprKind::Closure(_) => format!(
                 "Closure({})",
-                String::from_utf8_lossy(&self.closure_display_name(expr.span.line))
+                crate::string::lossy(&self.closure_display_name(expr.span.line))
             ),
             // zend_ast_export_ns_name(): an unqualified function name is
             // the namespaced one (not fully qualified), others resolve to a
@@ -27452,7 +27445,7 @@ impl Compiler {
                 let ExprKind::Identifier(n) = &name.kind else {
                     return None;
                 };
-                let resolved = String::from_utf8_lossy(&self.resolve_function_name(n)).to_string();
+                let resolved = crate::string::lossy(&self.resolve_function_name(n)).to_string();
                 let unqualified = !n.contains(&b'\\')
                     && !self.use_function_map.contains_key(&n.to_ascii_lowercase());
                 if unqualified {
@@ -27468,7 +27461,7 @@ impl Compiler {
                 format!(
                     "{}::{}(...)",
                     self.export_class_name(n),
-                    String::from_utf8_lossy(method)
+                    crate::string::lossy(method)
                 )
             }
             _ => return None,

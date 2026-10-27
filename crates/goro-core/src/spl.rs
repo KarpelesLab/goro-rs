@@ -243,7 +243,7 @@ impl Vm {
             Some(c) => std::borrow::Cow::Borrowed(c.name),
             None => std::borrow::Cow::Owned(self.builtin_canonical_name(&decl)),
         };
-        let method_disp = String::from_utf8_lossy(method_orig);
+        let method_disp = crate::string::lossy(method_orig);
         // SplHeap::compare() (and the Min/Max overrides) is protected.
         if method_lower == b"compare" && &*decl != b"splpriorityqueue" {
             let scope = self.current_class_scope();
@@ -895,10 +895,10 @@ impl Vm {
                         let decl_disp = self
                             .classes
                             .get(&m.declaring_class)
-                            .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                            .map(|c| crate::string::lossy(&c.name).to_string())
                             .unwrap_or(disp_cls);
                         let fname =
-                            format!("{}{}{}", decl_disp, sep, String::from_utf8_lossy(&m.name));
+                            format!("{}{}{}", decl_disp, sep, crate::string::lossy(&m.name));
                         self.call_stack.push((
                             fname,
                             site_file,
@@ -1203,10 +1203,10 @@ impl Vm {
                         let mut name = self.string_pool.pop().unwrap_or_default();
                         match self.classes.get(&m.declaring_class) {
                             Some(dc) => name.push_str(&crate::value::display_class_name(&dc.name)),
-                            None => name.push_str(&String::from_utf8_lossy(&m.declaring_class)),
+                            None => name.push_str(&crate::string::lossy(&m.declaring_class)),
                         }
                         name.push_str(if m.is_static { "::" } else { "->" });
-                        name.push_str(&String::from_utf8_lossy(&m.name));
+                        name.push_str(&crate::string::lossy(&m.name));
                         Some(name)
                     }
                     None => None,

@@ -39,6 +39,6 @@ pub fn readdir_entries(path: &[u8]) -> std::io::Result<Vec<(Vec<u8>, u8)>> {
 pub fn readdir_names(path: &str) -> std::io::Result<Vec<String>> {
     Ok(readdir_entries(path.as_bytes())?
         .into_iter()
-        .map(|(n, _)| String::from_utf8_lossy(&n).into_owned())
+        .map(|(n, _)| crate::string::lossy(&n).into_owned())
         .collect())
 }

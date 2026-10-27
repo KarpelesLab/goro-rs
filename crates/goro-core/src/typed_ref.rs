@@ -344,7 +344,7 @@ impl Vm {
             decl: decl_lower,
             slot: slot.to_vec(),
             class,
-            prop: String::from_utf8_lossy(name).into_owned(),
+            prop: crate::string::lossy(name).into_owned(),
             ty,
         })
     }
@@ -717,14 +717,14 @@ impl Vm {
             .classes
             .get(&decl)
             .map(|c| crate::value::display_class_name(&c.name))
-            .unwrap_or_else(|| String::from_utf8_lossy(&decl).into_owned());
+            .unwrap_or_else(|| crate::string::lossy(&decl).into_owned());
         RefSource {
             owner: Weak::new(),
             is_static: true,
             decl,
             slot: prop.to_vec(),
             class,
-            prop: String::from_utf8_lossy(prop).into_owned(),
+            prop: crate::string::lossy(prop).into_owned(),
             ty,
         }
     }

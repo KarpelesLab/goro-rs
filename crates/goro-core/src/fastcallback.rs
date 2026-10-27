@@ -477,7 +477,7 @@ impl Vm {
             push_lossy(out, fcc);
             true
         } else if let Some(sc) = &f.scope_class {
-            let raw = String::from_utf8_lossy(&f.name);
+            let raw = crate::string::lossy(&f.name);
             let m = raw.rsplit("::").next().unwrap_or(&raw);
             let found = match self.classes.get(sc) {
                 Some(c) => {

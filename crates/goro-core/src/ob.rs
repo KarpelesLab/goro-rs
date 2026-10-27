@@ -398,7 +398,7 @@ impl Vm {
                                 self.ob_handlers[i].flags |= OBH_DISABLED;
                                 self.ob_handlers[i].flags &= !OBH_PRODUCED_OUTPUT;
                                 let name =
-                                    String::from_utf8_lossy(&self.ob_handlers[i].name).to_string();
+                                    crate::string::lossy(&self.ob_handlers[i].name).to_string();
                                 let origin = self.ob_origin();
                                 self.current_line = call_line;
                                 if origin == "PHP Request Shutdown" {
@@ -737,7 +737,7 @@ impl Vm {
                 } else {
                     "send"
                 };
-                let name = String::from_utf8_lossy(&self.ob_handlers[top].name).to_string();
+                let name = crate::string::lossy(&self.ob_handlers[top].name).to_string();
                 let origin = self.ob_origin();
                 let line = self.current_line;
                 self.emit_notice_at(

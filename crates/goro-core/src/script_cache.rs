@@ -435,7 +435,7 @@ mod shm {
                 let mut s = [0u8; 8];
                 std::ptr::copy_nonoverlapping(d.add(12 + n), s.as_mut_ptr(), 8);
                 out.push((
-                    String::from_utf8_lossy(path).into_owned(),
+                    crate::string::lossy(path).into_owned(),
                     i64::from_ne_bytes(t),
                     i64::from_ne_bytes(s),
                 ));

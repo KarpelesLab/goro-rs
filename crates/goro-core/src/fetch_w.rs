@@ -715,7 +715,7 @@ impl Vm {
                     if call.name.as_bytes().windows(2).any(|w| w == b"::") || f.name.is_empty() {
                         call.name.to_string_lossy().to_string()
                     } else {
-                        String::from_utf8_lossy(f.effective_name()).to_string()
+                        crate::string::lossy(f.effective_name()).to_string()
                     };
                 (disp, usize::from(is_method))
             }
@@ -738,7 +738,7 @@ impl Vm {
                     {
                         call.name.to_string_lossy().to_string()
                     } else {
-                        String::from_utf8_lossy(f.effective_name()).to_string()
+                        crate::string::lossy(f.effective_name()).to_string()
                     };
                     let num = if is_method { arg_index } else { arg_index + 1 };
                     // (a variadic parameter is not named)
@@ -756,7 +756,7 @@ impl Vm {
                 "{}(): Argument #{} (${}) could not be passed by reference",
                 fname,
                 num,
-                String::from_utf8_lossy(&p)
+                crate::string::lossy(&p)
             ),
             None => format!(
                 "{}(): Argument #{} could not be passed by reference",
@@ -888,7 +888,7 @@ impl Vm {
             vis,
             &decl,
             &class_name,
-            &String::from_utf8_lossy(prop),
+            &crate::string::lossy(prop),
             true,
             caller_scope.as_deref(),
         )
@@ -914,7 +914,7 @@ impl Vm {
                             vis,
                             &decl,
                             &class_name,
-                            &String::from_utf8_lossy(prop),
+                            &crate::string::lossy(prop),
                             true,
                             scope.as_deref(),
                         )
@@ -944,7 +944,7 @@ impl Vm {
         if is_readonly && operation == "indirectly modify" {
             return None;
         }
-        let prop_str = String::from_utf8_lossy(prop).to_string();
+        let prop_str = crate::string::lossy(prop).to_string();
         let caller_scope = self.current_class_scope();
         self.check_visibility(
             sv,

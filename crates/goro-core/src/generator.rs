@@ -800,7 +800,7 @@ impl PhpGenerator {
 
     fn frame_name(&self, vm: &Vm) -> (String, bool) {
         let op = &self.op_array;
-        let raw_name = String::from_utf8_lossy(&op.name).to_string();
+        let raw_name = crate::string::lossy(&op.name).to_string();
         let is_instance = op.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
         // Format closure names for stack traces using the canonical display name.
         let is_closure = (raw_name.starts_with("__closure_")
@@ -809,9 +809,9 @@ impl PhpGenerator {
             && !raw_name.starts_with("__closure_fcc_");
         let name = if !op.display_name.is_empty() || is_closure {
             let n = if !op.display_name.is_empty() {
-                String::from_utf8_lossy(&op.display_name).to_string()
+                crate::string::lossy(&op.display_name).to_string()
             } else {
-                let file = String::from_utf8_lossy(&op.filename).to_string();
+                let file = crate::string::lossy(&op.filename).to_string();
                 format!("{{closure:{}:{}}}", file, op.decl_line)
             };
             // A closure's frame is its scope's (Class->{closure} with a
@@ -824,8 +824,8 @@ impl PhpGenerator {
                     let class = vm
                         .classes
                         .get(scope)
-                        .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                        .unwrap_or_else(|| String::from_utf8_lossy(scope).to_string());
+                        .map(|c| crate::string::lossy(&c.name).to_string())
+                        .unwrap_or_else(|| crate::string::lossy(scope).to_string());
                     return (format!("{}::{}", class, n), self.this_obj().is_some());
                 }
                 _ => n,
@@ -835,8 +835,8 @@ impl PhpGenerator {
             let class = vm
                 .classes
                 .get(scope)
-                .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                .unwrap_or_else(|| String::from_utf8_lossy(scope).to_string());
+                .map(|c| crate::string::lossy(&c.name).to_string())
+                .unwrap_or_else(|| crate::string::lossy(scope).to_string());
             format!("{}::{}", class, raw_name)
         } else {
             raw_name
@@ -2773,7 +2773,7 @@ impl PhpGenerator {
                     .op_array
                     .cv_names
                     .get(*idx as usize)
-                    .map(|n| String::from_utf8_lossy(n).to_string())
+                    .map(|n| crate::string::lossy(n).to_string())
                     .unwrap_or_default();
                 vm.emit_warning_at(&format!("Undefined variable ${}", name), line);
                 return Value::Null;
@@ -2870,17 +2870,17 @@ impl Vm {
     }
 
     fn generator_function_name_of(&self, gen_ref: &PhpGenerator) -> String {
-        let raw_name = String::from_utf8_lossy(&gen_ref.op_array.name).to_string();
+        let raw_name = crate::string::lossy(&gen_ref.op_array.name).to_string();
         // - Closures: __closure_N -> {closure:file:line}
         // - Class methods: prepend declaring class (with anonymous classes
         //   rendered as 'class@anonymous...')
         // - Plain functions: keep as-is
         if !gen_ref.op_array.display_name.is_empty() {
-            String::from_utf8_lossy(&gen_ref.op_array.display_name).to_string()
+            crate::string::lossy(&gen_ref.op_array.display_name).to_string()
         } else if (raw_name.starts_with("__closure_") || raw_name.starts_with("__arrow_"))
             && !raw_name.starts_with("__closure_fcc_")
         {
-            let file = String::from_utf8_lossy(&gen_ref.op_array.filename).to_string();
+            let file = crate::string::lossy(&gen_ref.op_array.filename).to_string();
             format!("{{closure:{}:{}}}", file, gen_ref.op_array.decl_line)
         } else if let Some(ref scope) = gen_ref.class_scope {
             // The scope may be stored lowercased: show the declared name

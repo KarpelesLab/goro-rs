@@ -443,7 +443,7 @@ impl Vm {
         for (k, f) in self.user_functions.iter() {
             if !fns_before.contains(k) {
                 functions.push(f.name.clone());
-                let file = String::from_utf8_lossy(&f.filename).into_owned();
+                let file = crate::string::lossy(&f.filename).into_owned();
                 file_functions.entry(file).or_default().insert(k.clone());
             }
         }

@@ -37,7 +37,7 @@ pub fn vec_path(v: Vec<u8>) -> PathBuf {
 
 #[cfg(not(unix))]
 pub fn vec_path(v: Vec<u8>) -> PathBuf {
-    PathBuf::from(String::from_utf8_lossy(&v).into_owned())
+    PathBuf::from(crate::string::lossy(&v).into_owned())
 }
 
 /// The OS path of a path in the message encoding (see the module doc).

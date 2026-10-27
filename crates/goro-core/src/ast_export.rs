@@ -58,7 +58,7 @@ pub fn export_expr(e: &Expr) -> String {
 }
 
 fn lossy(b: &[u8]) -> std::borrow::Cow<'_, str> {
-    String::from_utf8_lossy(b)
+    crate::string::lossy(b)
 }
 
 fn indent_to(s: &mut String, indent: usize) {

@@ -464,7 +464,7 @@ impl Vm {
             } else {
                 format!(
                     "{{closure:{}:{}}}",
-                    String::from_utf8_lossy(&op.filename),
+                    crate::string::lossy(&op.filename),
                     op.decl_line
                 )
                 .into_bytes()
@@ -656,7 +656,7 @@ impl Vm {
                 }
                 format!(
                     "{{closure:{}:{}}}",
-                    String::from_utf8_lossy(&op.filename),
+                    crate::string::lossy(&op.filename),
                     op.decl_line
                 )
                 .into_bytes()
@@ -924,7 +924,7 @@ impl Vm {
                 b"Error",
                 format!(
                     "Cannot access \"{}\" when no class scope is active",
-                    String::from_utf8_lossy(&lower(cls))
+                    crate::string::lossy(&lower(cls))
                 ),
             ));
         };
@@ -973,7 +973,7 @@ impl Vm {
             b"Error",
             format!(
                 "Call to undefined function {}()",
-                String::from_utf8_lossy(name)
+                crate::string::lossy(name)
             ),
         ))
     }
@@ -1246,7 +1246,7 @@ impl Vm {
                     b"Error",
                     format!(
                         "Call to a member function {}() on {}",
-                        String::from_utf8_lossy(m),
+                        crate::string::lossy(m),
                         Vm::value_type_name(other)
                     ),
                 ));
@@ -1327,7 +1327,7 @@ impl Vm {
                     vis,
                     &decl,
                     &class_name,
-                    &String::from_utf8_lossy(&mname),
+                    &crate::string::lossy(&mname),
                     false,
                     scope.as_deref(),
                 ) {
@@ -1436,8 +1436,8 @@ impl Vm {
             .unwrap_or_else(|| called.to_vec());
         let name = format!(
             "__bound_closure_sfwd_{}@{}",
-            String::from_utf8_lossy(&lower(n)).replace("::", ":"),
-            String::from_utf8_lossy(&called_l)
+            crate::string::lossy(&lower(n)).replace("::", ":"),
+            crate::string::lossy(&called_l)
         )
         .into_bytes();
         if !self.user_functions.contains_key(&name) {
@@ -1596,7 +1596,7 @@ impl Vm {
                     vis,
                     &decl,
                     &canon,
-                    &String::from_utf8_lossy(&mname),
+                    &crate::string::lossy(&mname),
                     false,
                     scope.as_deref(),
                 ) {
@@ -1623,8 +1623,8 @@ impl Vm {
                         b"Error",
                         format!(
                             "Cannot call abstract method {}::{}()",
-                            String::from_utf8_lossy(&decl_name),
-                            String::from_utf8_lossy(&mname)
+                            crate::string::lossy(&decl_name),
+                            crate::string::lossy(&mname)
                         ),
                     ));
                 }
@@ -1666,8 +1666,8 @@ impl Vm {
                         b"Error",
                         format!(
                             "Non-static method {}::{}() cannot be called statically",
-                            String::from_utf8_lossy(&canon),
-                            String::from_utf8_lossy(&mname)
+                            crate::string::lossy(&canon),
+                            crate::string::lossy(&mname)
                         ),
                     )),
                 }
@@ -1721,7 +1721,7 @@ impl Vm {
             if obj.is_some() { "i" } else { "s" },
             if fcc { "p" } else { "" },
             // (no "::": the name must not read as a "Class::method" callable)
-            String::from_utf8_lossy(&lower(&target)).replace("::", ":")
+            crate::string::lossy(&lower(&target)).replace("::", ":")
         )
         .into_bytes();
         let has_obj = obj.is_some();
@@ -2085,7 +2085,7 @@ impl Vm {
                     vis,
                     &decl,
                     &canon,
-                    &String::from_utf8_lossy(&mname),
+                    &crate::string::lossy(&mname),
                     false,
                     scope.as_deref(),
                 ) {
@@ -2277,7 +2277,7 @@ impl Vm {
         let scope_display = |vm: &Vm, l: &[u8]| -> String {
             vm.classes
                 .get(l)
-                .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                .map(|c| crate::string::lossy(&c.name).to_string())
                 .unwrap_or_else(|| vm.builtin_canonical_name(l))
         };
         if has_this {
@@ -2710,7 +2710,7 @@ impl Vm {
             Some(p) => name[..p].to_vec(),
             None => name.clone(),
         };
-        let new_name = format!("{}#{}", String::from_utf8_lossy(&base), id).into_bytes();
+        let new_name = format!("{}#{}", crate::string::lossy(&base), id).into_bytes();
         // Keys are compiled from the original function name.
         let key_name = op
             .ops

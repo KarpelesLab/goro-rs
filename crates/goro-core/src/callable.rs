@@ -255,7 +255,7 @@ impl Vm {
         }
         Some((
             self.callable_class_name(&mi.decl),
-            String::from_utf8_lossy(&mi.name).into_owned(),
+            crate::string::lossy(&mi.name).into_owned(),
         ))
     }
 
@@ -468,7 +468,7 @@ impl Vm {
                     fcc.deprecations.push(format!(
                         "Callables of the form [\"{}\", \"{}\"] are deprecated",
                         self.callable_class_name(org),
-                        String::from_utf8_lossy(callable)
+                        crate::string::lossy(callable)
                     ));
                 }
             }
@@ -547,7 +547,7 @@ impl Vm {
         if retval {
             if let (Some(m), false) = (&handler, via_handler) {
                 let cname = self.callable_class_name(&cs);
-                let fname = String::from_utf8_lossy(&m.name).into_owned();
+                let fname = crate::string::lossy(&m.name).into_owned();
                 if m.is_abstract {
                     retval = false;
                     *error = Some(format!(

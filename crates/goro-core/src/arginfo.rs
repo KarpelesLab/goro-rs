@@ -1190,7 +1190,7 @@ impl Vm {
         let (cls, msg): (&[u8], String) = if let Some((n, _)) = named.first() {
             (
                 b"Error",
-                format!("Unknown named parameter ${}", String::from_utf8_lossy(n)),
+                format!("Unknown named parameter ${}", crate::string::lossy(n)),
             )
         } else {
             match info.arity_error(args.len().saturating_sub(1)) {

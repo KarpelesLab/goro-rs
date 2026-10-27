@@ -222,7 +222,7 @@ impl Vm {
                 meth.visibility,
                 &meth.declaring_class,
                 &c.name,
-                &String::from_utf8_lossy(&meth.name),
+                &crate::string::lossy(&meth.name),
                 false,
                 scope.as_deref(),
             ) {

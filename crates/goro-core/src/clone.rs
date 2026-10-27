@@ -108,7 +108,7 @@ impl Vm {
         };
         if !accessible {
             let scope_str = current_scope
-                .map(|s| String::from_utf8_lossy(&s).to_string())
+                .map(|s| crate::string::lossy(&s).to_string())
                 .unwrap_or_else(|| "global scope".to_string());
             let vis_str = match clone_method.visibility {
                 crate::object::Visibility::Private => "private",
@@ -510,7 +510,7 @@ impl Vm {
                                     .get(&decl)
                                     .map(|c| c.name.clone())
                                     .unwrap_or(decl);
-                                format!("{}::__clone", String::from_utf8_lossy(&name))
+                                format!("{}::__clone", crate::string::lossy(&name))
                             };
                             self.call_stack.push((
                                 clone_frame,
