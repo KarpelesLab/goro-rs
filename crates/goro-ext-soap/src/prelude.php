@@ -133,7 +133,9 @@ namespace {
 
         public function __soapCall($name = null, $args = null, $options = null, $inputHeaders = null, &$outputHeaders = null)
         {
-            $r = \__soap_method('SoapClient::__soapCall', $this, \func_get_args());
+            $a = \func_get_args();
+            if (\func_num_args() > 4) { $a[4] = &$outputHeaders; }
+            $r = \__soap_method('SoapClient::__soapCall', $this, $a);
             if (\func_num_args() > 4) { $outputHeaders = \__soap_method('SoapClient::__soapCall', null, null); }
             return $r;
         }

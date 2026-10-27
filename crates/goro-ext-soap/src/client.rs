@@ -1052,6 +1052,11 @@ pub fn soap_call(vm: &mut Vm, f: &Func, this: &Obj, args: &[Value]) -> SR<Value>
     let output_headers = if args.len() > 4 {
         let a = new_arr();
         OUT_HEADERS.with(|o| *o.borrow_mut() = Some(a.clone()));
+        // zend_try_array_init(): the by-reference argument is an empty
+        // array from here on (its trace frames show it so).
+        if let Some(Value::Reference(r)) = args.get(4) {
+            let _ = vm.try_assign_ref(r, Value::Array(a.clone()));
+        }
         Some(a)
     } else {
         None
