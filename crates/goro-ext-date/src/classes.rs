@@ -2703,6 +2703,28 @@ fn base_date_class(vm: &Vm, ce: &[u8]) -> &'static [u8] {
 const ITER_HANDLE: &[u8] = b"__timestamp_iter_handle";
 const ITER_CURRENT: &[u8] = b"__timestamp_iter_current";
 
+/// date_period_it_rewind() of a period with no start. The iterator foreach
+/// (or iterator_to_array()) got from the get_iterator handler is no object
+/// whose methods run: its rewind has no frame of its own.
+#[inline(never)]
+fn period_iter_uninitialized(vm: &mut Vm, it: &Obj) -> VmError {
+    let lifted = if !it.borrow().has_property(ITER_HANDLE)
+        && vm
+            .call_stack
+            .last()
+            .is_some_and(|f| f.0 == "InternalIterator->rewind")
+    {
+        vm.call_stack.pop()
+    } else {
+        None
+    };
+    let e = uninitialized_error(vm, b"DatePeriod");
+    if let Some(f) = lifted {
+        vm.call_stack.push(f);
+    }
+    e
+}
+
 fn iterator_method(vm: &mut Vm, method: &[u8], it: &Obj) -> R<Value> {
     let period = match it.borrow().get_property(b"__timestamp_iter_period") {
         Value::Object(o) => o,
@@ -2726,7 +2748,7 @@ fn iterator_method(vm: &mut Vm, method: &[u8], it: &Obj) -> R<Value> {
         b"rewind" => {
             let start = match &p.start {
                 Some(s) => s.clone(),
-                None => return Err(uninitialized_error(vm, b"DatePeriod")),
+                None => return Err(period_iter_uninitialized(vm, it)),
             };
             let mut cur = start;
             if !p.include_start_date {
