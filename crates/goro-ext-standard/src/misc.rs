@@ -6359,7 +6359,7 @@ extern "C" fn execution_timeout_handler(_sig: libc::c_int) {
     use std::sync::atomic::Ordering;
     if TIMED_OUT.load(Ordering::Relaxed) {
         // Async-signal-safe formatting into a stack buffer.
-        let mut buf = [0u8; 160];
+        let mut buf = [0u8; 2048];
         let mut n = 0;
         let mut put = |bytes: &[u8]| {
             for &b in bytes {
@@ -6389,7 +6389,18 @@ extern "C" fn execution_timeout_handler(_sig: libc::c_int) {
         put(b"+");
         let i = num(HARD_TIMEOUT.load(Ordering::Relaxed), &mut d);
         put(&d[i..]);
-        put(b" seconds exceeded (terminated) in Unknown on line 0\n");
+        put(b" seconds exceeded (terminated) in ");
+        // zend_get_executed_filename() / lineno
+        match unsafe { Vm::executing_location() } {
+            Some((file, line)) => {
+                put(file);
+                put(b" on line ");
+                let i = num(line as i64, &mut d);
+                put(&d[i..]);
+            }
+            None => put(b"Unknown on line 0"),
+        }
+        put(b"\n");
         unsafe {
             libc::write(2, buf.as_ptr() as *const libc::c_void, n);
             libc::_exit(124);

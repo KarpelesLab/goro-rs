@@ -25,8 +25,13 @@ thread_local! {
     /// Compile-time warnings raised by this compile and the nested compilers
     /// it spawns (function, method, closure and hook bodies); drained by the
     /// top-level `compile()` so none are lost.
-    static COMPILE_WARNINGS: std::cell::RefCell<Vec<(String, u32)>>
+    static COMPILE_WARNINGS: std::cell::RefCell<Vec<(String, u32, u32)>>
         = const { std::cell::RefCell::new(Vec::new()) };
+    /// The top-level statements of the file being compiled (address, count)
+    /// and the position of the one being compiled: the order php-src
+    /// compiles them in (goro compiles the hoisted declarations first).
+    static TOP_STMTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+    static TOP_STMT_POS: Cell<u32> = const { Cell::new(0) };
     /// FC(declarables).ticks of the file being compiled (shared with the
     /// nested compilers of its functions, methods and closures).
     static TICKS: Cell<u32> = const { Cell::new(0) };
@@ -458,7 +463,20 @@ fn anon_class_rtd_key(seq: u32) -> u32 {
 }
 
 fn push_compile_warning(msg: String, line: u32) {
-    COMPILE_WARNINGS.with(|w| w.borrow_mut().push((msg, line)));
+    let pos = TOP_STMT_POS.with(|p| p.get());
+    COMPILE_WARNINGS.with(|w| w.borrow_mut().push((msg, line, pos)));
+}
+
+/// `stmt` is about to be compiled: when it is a top-level statement of the
+/// file, its position orders the diagnostics raised compiling it.
+#[inline(never)]
+fn mark_top_stmt(stmt: &Statement) {
+    let (base, len) = TOP_STMTS.with(|t| t.get());
+    let a = stmt as *const Statement as usize;
+    let size = std::mem::size_of::<Statement>();
+    if size > 0 && a >= base && a < base + len * size {
+        TOP_STMT_POS.with(|p| p.set(((a - base) / size) as u32));
+    }
 }
 
 /// Drain compile-time diagnostics collected during the most recent compile pass.
@@ -3546,6 +3564,22 @@ impl Compiler {
         crate::ast_export::register_program(program);
         let warnings_base = COMPILE_WARNINGS.with(|w| w.borrow().len());
         let pending_diag_base = PENDING_COMPILE_DIAGNOSTICS.with(|w| w.borrow().len());
+        let saved_top = TOP_STMTS.with(|t| {
+            t.replace((program.statements.as_ptr() as usize, program.statements.len()))
+        });
+        let saved_pos = TOP_STMT_POS.with(|p| p.replace(0));
+        let r = self.compile_file_inner(program, warnings_base, pending_diag_base);
+        TOP_STMTS.with(|t| t.set(saved_top));
+        TOP_STMT_POS.with(|p| p.set(saved_pos));
+        r
+    }
+
+    fn compile_file_inner(
+        mut self,
+        program: &Program,
+        warnings_base: usize,
+        pending_diag_base: usize,
+    ) -> CompileResult<(OpArray, Vec<ClassEntry>, Vec<(String, u32)>)> {
         // Pre-pass: build the anonymous class name map (NUL-byte PHP names)
         // (CG(rtd_key_counter) runs on across files and eval()s; the keys
         // of this file are taken)
@@ -3823,6 +3857,7 @@ impl Compiler {
         self.in_main_pass = true;
         let main_pass = (|| -> CompileResult<()> {
             for stmt in &program.statements {
+                mark_top_stmt(stmt);
                 match &stmt.kind {
                     StmtKind::FunctionDecl { name, .. } => {
                         // Already compiled in first pass
@@ -3941,7 +3976,10 @@ impl Compiler {
         if let Some((msg, line)) = self.deferred_fatal_errors.into_iter().next() {
             return Err(CompileError { message: msg, line });
         }
-        let mut warnings = std::mem::take(&mut self.warnings);
+        let mut warnings: Vec<(String, u32, u32)> = std::mem::take(&mut self.warnings)
+            .into_iter()
+            .map(|(m, l)| (m, l, 0))
+            .collect();
         COMPILE_WARNINGS.with(|w| {
             let mut w = w.borrow_mut();
             let base = warnings_base.min(w.len());
@@ -3949,7 +3987,8 @@ impl Compiler {
         });
         // php-src compiles a file top to bottom, function bodies in place;
         // goro compiles the hoisted declarations first.
-        warnings.sort_by_key(|w| w.1);
+        warnings.sort_by_key(|w| (w.1, w.2));
+        let warnings = warnings.into_iter().map(|(m, l, _)| (m, l)).collect();
         Ok((self.op_array, self.compiled_classes, warnings))
     }
 
@@ -3986,6 +4025,7 @@ impl Compiler {
 
     fn compile_hoisting_pass_inner(&mut self, stmts: &[Statement]) -> CompileResult<()> {
         for stmt in stmts {
+            mark_top_stmt(stmt);
             if let Some(n) = Self::declare_ticks_value(stmt) {
                 TICKS.with(|t| t.set(n));
             }

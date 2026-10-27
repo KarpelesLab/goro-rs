@@ -21378,7 +21378,31 @@ impl Vm {
         let cvs = vec![Value::Undef; op_array.cv_names.len()];
         self.bind_next_frame = true;
         self.observe_code = true;
-        self.execute_op_array(op_array, cvs)
+        // (the executing VM, for the hard timeout's location)
+        let me = self as *mut Vm as usize;
+        let prev = crate::value::EXECUTING_VM.swap(me, std::sync::atomic::Ordering::Relaxed);
+        let r = self.execute_op_array(op_array, cvs);
+        crate::value::EXECUTING_VM.store(prev, std::sync::atomic::Ordering::Relaxed);
+        r
+    }
+
+    /// zend_get_executed_filename() / lineno for a signal handler: the file
+    /// and line of the VM executing a script (see EXECUTING_VM), if any.
+    ///
+    /// # Safety
+    /// Only for the hard timeout's handler, which exits right after: the
+    /// VM is read while its thread is interrupted.
+    pub unsafe fn executing_location() -> Option<(&'static [u8], u32)> {
+        let p = crate::value::EXECUTING_VM.load(std::sync::atomic::Ordering::Relaxed);
+        if p == 0 {
+            return None;
+        }
+        let vm = unsafe { &*(p as *const Vm) };
+        let file: &'static [u8] = unsafe { &*(vm.current_file.as_bytes() as *const [u8]) };
+        if file.is_empty() {
+            return None;
+        }
+        Some((file, vm.current_line))
     }
 
     /// A file failed to compile: bind the classes PHP early-binds at compile
