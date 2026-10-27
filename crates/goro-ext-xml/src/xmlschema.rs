@@ -248,6 +248,8 @@ pub struct Item {
 pub struct IdcSelect {
     pub xpath: String,
     pub index: i32,
+    /// the compiled XPath (xpathComp)
+    pub comp: Option<Rc<crate::pattern::Pattern>>,
 }
 
 /// A facet of a simple type (xmlSchemaFacet with its schema node).

@@ -3,7 +3,7 @@
 //! tree (`validate_doc`, `validate_one_element`) or as a stream of events
 //! (`start_element` / `characters` / `end_element`, for XMLReader).
 //!
-//! Identity constraints (xs:key/xs:unique/xs:keyref) are not evaluated.
+//! Identity constraints (xs:key/xs:unique/xs:keyref) are in `idc`.
 
 use super::fixup::is_particle_emptiable;
 use super::simple::{
@@ -11,6 +11,8 @@ use super::simple::{
     normalize_value,
 };
 use super::*;
+
+mod idc;
 
 // attribute info states (XML_SCHEMAS_ATTR_*)
 const ATTR_UNKNOWN: i32 = 1;
@@ -78,6 +80,11 @@ struct ElemInfo {
     val: Option<VList>,
     regex: Option<ExecCtxt>,
     ns_bindings: Vec<(Option<String>, String)>,
+    // identity constraints
+    idc_matchers: Vec<usize>,
+    idc_table: Vec<idc::Binding>,
+    has_keyrefs: bool,
+    applied_xpath: bool,
 }
 
 /// An attribute pushed by a streaming producer.
@@ -110,6 +117,7 @@ pub struct ValidCtxt {
     validation_root: Option<NodeId>,
     active: Active,
     tree_mode: bool,
+    idc: idc::IdcState,
 }
 
 impl ValidCtxt {
@@ -130,6 +138,7 @@ impl ValidCtxt {
             validation_root: None,
             active: Active::None,
             tree_mode: false,
+            idc: idc::IdcState::default(),
         }
     }
 
@@ -362,6 +371,7 @@ impl ValidCtxt {
         self.attrs.clear();
         self.active = Active::None;
         self.ec.inode = None;
+        self.idc_pre_run();
     }
 
     /// xmlSchemaValidateDoc: returns 0 if valid, a positive error code,
@@ -810,6 +820,16 @@ impl ValidCtxt {
             self.verror(E::SCHEMAV_CVC_TYPE_2, "The type definition is abstract");
             exit!(E::SCHEMAV_CVC_TYPE_2);
         }
+        // Evaluate IDCs (before attribute validation, after the matchers
+        // of the declaration were registered).
+        if self.idc.has_states() {
+            ret = self.idc_xpath_evaluate(crate::pattern::ELEMENT_NODE);
+            self.inode().applied_xpath = true;
+            if ret == -1 {
+                self.verror_int("xmlSchemaValidateElem", "calling xmlSchemaXPathEvaluate()");
+                return -1;
+            }
+        }
         ret = 0;
         if s.is_complex(td) {
             if !self.attrs.is_empty() || !s.it(td).attr_uses.is_empty() {
@@ -1177,6 +1197,10 @@ impl ValidCtxt {
                 }
             }
         }
+        // IDC: register identity-constraint XPath matchers
+        if !s.it(decl).idcs.is_empty() && self.idc_register_matchers(decl) == -1 {
+            return -1;
+        }
         if actual.is_none() {
             self.verror(E::SCHEMAV_CVC_TYPE_1, "The type definition is absent");
             return E::SCHEMAV_CVC_TYPE_1;
@@ -1314,117 +1338,148 @@ impl ValidCtxt {
                 Some(t) => t,
             };
             self.set_active(Active::Attr(i));
-            let u = self.attrs[i].use_;
-            let decl = self.attrs[i].decl.unwrap();
-            if st == ATTR_DEFAULT {
-                if def_owner.is_some() {
-                    let (value, val) = match u.and_then(|u| s.it(u).def_value.clone()) {
-                        Some(v) => (v, None::<Val>),
-                        None => (
-                            s.it(decl).def_value.clone().unwrap_or_default(),
-                            s.it(decl).def_val.clone(),
-                        ),
-                    };
-                    // use->defVal is never computed by libxml2
-                    let has_val = if u.and_then(|u| s.it(u).def_value.clone()).is_some() {
-                        false
-                    } else {
-                        val.is_some()
-                    };
-                    if !has_val {
-                        self.verror_int(
-                            "xmlSchemaVAttributesComplex",
-                            "default/fixed value on an attribute use was not precomputed",
-                        );
-                        self.activate_elem();
-                        return -1;
-                    }
-                    self.attrs[i].value = value;
-                }
-                if let Some(owner) = def_owner {
-                    let value = self.attrs[i].value.clone();
-                    let value = normalize_value(&s, td, &value).unwrap_or(value);
-                    let (local, ans) = (self.attrs[i].local.clone(), self.attrs[i].ns.clone());
-                    let root = self.validation_root;
-                    let ok = tree::with(|t| {
-                        match &ans {
-                            None => {
-                                t.new_prop(owner, None, &local, Some(&value));
-                            }
-                            Some(href) => {
-                                let mut ns = t.search_ns_by_href(owner, href);
-                                if ns.is_none() {
-                                    let mut counter = 0;
-                                    let mut prefix;
-                                    loop {
-                                        prefix = format!("p{}", counter);
-                                        counter += 1;
-                                        if t.search_ns(owner, Some(&prefix)).is_none() {
-                                            break;
-                                        }
-                                        if counter > 1000 {
-                                            return false;
-                                        }
-                                    }
-                                    ns = t.new_ns(root, href, Some(&prefix));
-                                }
-                                t.new_prop(owner, ns, &local, Some(&value));
-                            }
-                        }
-                        true
-                    });
-                    if !ok {
-                        self.verror_int(
-                            "xmlSchemaVAttributesComplex",
-                            "could not compute a ns prefix for a default/fixed attribute",
-                        );
-                        self.activate_elem();
-                        return -1;
-                    }
-                }
-                continue;
-            }
-            let fixed = s.it(decl).flags & ATTR_FIXED != 0
-                || u.map(|u| s.it(u).flags & ATTR_FIXED != 0).unwrap_or(false);
-            let node = self.attrs[i].node;
-            let value = self.attrs[i].value.clone();
-            let (res, val) = if fixed {
-                self.attrs[i].flags |= NODE_INFO_VALUE_NEEDED;
-                self.check_simple(node, td, &value, true, true)
-            } else {
-                self.check_simple(node, td, &value, false, false)
-            };
-            if res != 0 {
-                if res == -1 {
+            let xpath_res = if self.idc.has_states() {
+                let r = self.idc_xpath_evaluate(crate::pattern::ATTRIBUTE_NODE);
+                if r == -1 {
                     self.verror_int(
                         "xmlSchemaVAttributesComplex",
-                        "calling xmlSchemaStreamValidateSimpleTypeValue()",
+                        "calling xmlSchemaXPathEvaluate()",
                     );
                     self.activate_elem();
                     return -1;
                 }
-                self.attrs[i].state = ATTR_INVALID_VALUE;
-                continue;
+                r
+            } else {
+                0
+            };
+            let u = self.attrs[i].use_;
+            let decl = self.attrs[i].decl.unwrap();
+            'body: {
+                if st == ATTR_DEFAULT {
+                    if xpath_res != 0 || def_owner.is_some() {
+                        let (value, val) = match u.and_then(|u| s.it(u).def_value.clone()) {
+                            Some(v) => (v, None::<Val>),
+                            None => (
+                                s.it(decl).def_value.clone().unwrap_or_default(),
+                                s.it(decl).def_val.clone(),
+                            ),
+                        };
+                        // use->defVal is never computed by libxml2
+                        let has_val = if u.and_then(|u| s.it(u).def_value.clone()).is_some() {
+                            false
+                        } else {
+                            val.is_some()
+                        };
+                        if !has_val {
+                            self.verror_int(
+                                "xmlSchemaVAttributesComplex",
+                                "default/fixed value on an attribute use was not precomputed",
+                            );
+                            self.activate_elem();
+                            return -1;
+                        }
+                        self.attrs[i].value = value;
+                        // IDCs consume a copy of the precomputed default value
+                        self.attrs[i].val = val.map(|v| vec![v]);
+                    }
+                    if let Some(owner) = def_owner {
+                        let value = self.attrs[i].value.clone();
+                        let value = normalize_value(&s, td, &value).unwrap_or(value);
+                        let (local, ans) = (self.attrs[i].local.clone(), self.attrs[i].ns.clone());
+                        let root = self.validation_root;
+                        let ok = tree::with(|t| {
+                            match &ans {
+                                None => {
+                                    t.new_prop(owner, None, &local, Some(&value));
+                                }
+                                Some(href) => {
+                                    let mut ns = t.search_ns_by_href(owner, href);
+                                    if ns.is_none() {
+                                        let mut counter = 0;
+                                        let mut prefix;
+                                        loop {
+                                            prefix = format!("p{}", counter);
+                                            counter += 1;
+                                            if t.search_ns(owner, Some(&prefix)).is_none() {
+                                                break;
+                                            }
+                                            if counter > 1000 {
+                                                return false;
+                                            }
+                                        }
+                                        ns = t.new_ns(root, href, Some(&prefix));
+                                    }
+                                    t.new_prop(owner, ns, &local, Some(&value));
+                                }
+                            }
+                            true
+                        });
+                        if !ok {
+                            self.verror_int(
+                                "xmlSchemaVAttributesComplex",
+                                "could not compute a ns prefix for a default/fixed attribute",
+                            );
+                            self.activate_elem();
+                            return -1;
+                        }
+                    }
+                    break 'body;
+                }
+                let fixed = s.it(decl).flags & ATTR_FIXED != 0
+                    || u.map(|u| s.it(u).flags & ATTR_FIXED != 0).unwrap_or(false);
+                let node = self.attrs[i].node;
+                let value = self.attrs[i].value.clone();
+                let (res, val) = if fixed || xpath_res != 0 {
+                    self.attrs[i].flags |= NODE_INFO_VALUE_NEEDED;
+                    self.check_simple(node, td, &value, true, true)
+                } else {
+                    self.check_simple(node, td, &value, false, false)
+                };
+                if res != 0 {
+                    if res == -1 {
+                        self.verror_int(
+                            "xmlSchemaVAttributesComplex",
+                            "calling xmlSchemaStreamValidateSimpleTypeValue()",
+                        );
+                        self.activate_elem();
+                        return -1;
+                    }
+                    self.attrs[i].state = ATTR_INVALID_VALUE;
+                    break 'body;
+                }
+                self.attrs[i].val = val.clone();
+                if fixed {
+                    let v = match &val {
+                        None => break 'body,
+                        Some(v) => v.clone(),
+                    };
+                    if let Some(udv) = u.and_then(|u| s.it(u).def_value.clone()) {
+                        // use->defVal is never precomputed
+                        let _ = udv;
+                        break 'body;
+                    }
+                    let dv = match &s.it(decl).def_val {
+                        None => break 'body,
+                        Some(d) => vec![d.clone()],
+                    };
+                    self.attrs[i].vc_value = s.it(decl).def_value.clone();
+                    if super::simple::values_equal(&s, &v, &dv) == 0 {
+                        self.attrs[i].state = ATTR_ERR_FIXED_VALUE;
+                    }
+                }
             }
-            self.attrs[i].val = val.clone();
-            if fixed {
-                let v = match &val {
-                    None => continue,
-                    Some(v) => v.clone(),
-                };
-                if let Some(udv) = u.and_then(|u| s.it(u).def_value.clone()) {
-                    // use->defVal is never precomputed
-                    let _ = udv;
-                    continue;
+            // eval_idcs:
+            if xpath_res != 0 {
+                if self.idc_process_history(self.depth + 1) == -1 {
+                    self.verror_int(
+                        "xmlSchemaVAttributesComplex",
+                        "calling xmlSchemaXPathEvaluate()",
+                    );
+                    self.activate_elem();
+                    return -1;
                 }
-                let dv = match &s.it(decl).def_val {
-                    None => continue,
-                    Some(d) => vec![d.clone()],
-                };
-                self.attrs[i].vc_value = s.it(decl).def_value.clone();
-                if super::simple::values_equal(&s, &v, &dv) == 0 {
-                    self.attrs[i].state = ATTR_ERR_FIXED_VALUE;
-                }
+            } else if self.idc.has_states() {
+                self.idc_xpath_pop();
             }
         }
         for i in 0..self.attrs.len() {
@@ -1748,6 +1803,14 @@ impl ValidCtxt {
         }
         if self.depth == self.skip_depth {
             self.skip_depth = -1;
+        }
+        if (self.ino().applied_xpath
+            || !self.ino().idc_matchers.is_empty()
+            || !self.ino().idc_table.is_empty())
+            && self.idc_end_elem() == -1
+        {
+            self.ec.err = -1;
+            return -1;
         }
         let d = self.depth as usize;
         self.elems[d] = ElemInfo::default();

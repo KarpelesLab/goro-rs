@@ -587,7 +587,12 @@ impl<'a> PCtxt<'a> {
     }
 
     /// xmlSchemaParseIDCSelectorAndField
-    fn parse_idc_selector_and_field(&mut self, idc: ItemId, node: NodeId) -> IdcSelect {
+    fn parse_idc_selector_and_field(
+        &mut self,
+        idc: ItemId,
+        node: NodeId,
+        is_field: bool,
+    ) -> IdcSelect {
         let _ = idc;
         self.check_attrs(node, &["id", "xpath"]);
         let mut item = IdcSelect::default();
@@ -595,7 +600,24 @@ impl<'a> PCtxt<'a> {
             None => {
                 self.missing_attr_err(E::SCHEMAP_S4S_ATTR_MISSING, None, Some(node), "name", None)
             }
-            Some(a) => item.xpath = node_content(a),
+            Some(a) => {
+                item.xpath = node_content(a);
+                // xmlSchemaCheckCSelectorXPath
+                let flags = if is_field {
+                    crate::pattern::PATTERN_XSFIELD
+                } else {
+                    crate::pattern::PATTERN_XSSEL
+                };
+                let nss = ns_list(node);
+                item.comp = crate::pattern::Pattern::compile(&item.xpath, flags, &nss).map(Rc::new);
+                if item.comp.is_none() {
+                    let m = format!(
+                        "The XPath expression '{}' could not be compiled",
+                        item.xpath
+                    );
+                    self.pcustom_err(E::SCHEMAP_S4S_ATTR_INVALID_VALUE, None, Some(a), &m);
+                }
+            }
         }
         self.pval_attr_id(node, "id");
         let mut child = first_child(node);
@@ -692,12 +714,12 @@ impl<'a> PCtxt<'a> {
             );
         }
         if is_schema(child, "selector") {
-            let sel = self.parse_idc_selector_and_field(item, child.unwrap());
+            let sel = self.parse_idc_selector_and_field(item, child.unwrap(), false);
             self.s.itm(item).selector = Some(sel);
             child = next_sibling(child.unwrap());
             if is_schema(child, "field") {
                 loop {
-                    let mut f = self.parse_idc_selector_and_field(item, child.unwrap());
+                    let mut f = self.parse_idc_selector_and_field(item, child.unwrap(), true);
                     f.index = self.s.it(item).fields.len() as i32;
                     self.s.itm(item).fields.push(f);
                     child = next_sibling(child.unwrap());
@@ -1039,4 +1061,26 @@ impl<'a> PCtxt<'a> {
             Some(p)
         }
     }
+}
+
+/// xmlGetNsList: the namespace declarations in scope of `node`, innermost
+/// first, as (href, prefix) pairs.
+fn ns_list(node: NodeId) -> Vec<(String, Option<String>)> {
+    tree::with(|t| {
+        let mut out: Vec<(String, Option<String>)> = Vec::new();
+        let mut cur = Some(node);
+        while let Some(n) = cur {
+            if t.nodes[n].t != NType::Element {
+                break;
+            }
+            for &ns in &t.nodes[n].ns_def {
+                let d = &t.nss[ns];
+                if !out.iter().any(|(_, p)| *p == d.prefix) {
+                    out.push((d.href.clone(), d.prefix.clone()));
+                }
+            }
+            cur = t.nodes[n].parent;
+        }
+        out
+    })
 }

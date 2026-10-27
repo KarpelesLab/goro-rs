@@ -6,6 +6,7 @@ mod image_svg;
 pub mod io;
 pub mod libxml;
 pub mod parser;
+pub mod pattern;
 pub mod relaxng;
 pub mod sax2;
 pub mod serialize;
