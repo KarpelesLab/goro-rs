@@ -322,12 +322,15 @@ fn iterator_to_array_impl(
                 // (an internal class's get_iterator handler: the one
                 // zend_object_iterator, as for foreach)
                 vm.foreach_native_iter = u8::from(obj.borrow().native.is_some());
-                let iter_val = vm.spl_resolve_traversable(val);
+                let mut held = Vec::new();
+                let iter_val = vm.spl_resolve_traversable_held(val, &mut held);
                 let native_iter = std::mem::take(&mut vm.foreach_native_iter) == 2;
                 if vm.current_exception.is_some() {
                     return Ok(Value::Null);
                 }
                 let handle = (take_handle && !native_iter).then(|| vm.internal_iterator_handle());
+                // (the aggregates in between go once the iterator exists)
+                Vm::release_aggregates(held);
                 let r = iterator_to_array_impl(
                     vm,
                     &[iter_val, if use_keys { Value::True } else { Value::False }],
@@ -652,13 +655,16 @@ fn spl_get_iterator(vm: &mut Vm, v: &Value) -> Option<(Value, Option<Value>)> {
     match v {
         Value::Object(o) => {
             vm.foreach_native_iter = u8::from(o.borrow().native.is_some());
-            let r = vm.spl_resolve_traversable(v);
+            let mut held = Vec::new();
+            let r = vm.spl_resolve_traversable_held(v, &mut held);
             let native_iter = std::mem::take(&mut vm.foreach_native_iter) == 2;
             if vm.current_exception.is_some() {
                 return None;
             }
             let handle = (!native_iter && matches!(r, Value::Object(_) | Value::Generator(_)))
                 .then(|| vm.internal_iterator_handle());
+            // (the aggregates in between go once the iterator exists)
+            Vm::release_aggregates(held);
             Some((r, handle))
         }
         other => {

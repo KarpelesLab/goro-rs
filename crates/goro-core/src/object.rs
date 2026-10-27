@@ -796,6 +796,22 @@ impl GcSlot {
 fn release_object_storage(props: &mut [(Vec<u8>, crate::value::Value)]) {
     use crate::value::Value;
     let find = |props: &[(Vec<u8>, Value)], n: &[u8]| props.iter().position(|(k, _)| k == n);
+    // RecursiveIteratorIterator (spl_RecursiveIteratorIterator_free_iterators()):
+    // the deepest level first, each one's iterator handle, then its object.
+    if let (Some(hi), Some(ii)) = (find(props, b"__spl_rii_hs"), find(props, b"__spl_rii_its")) {
+        if let (Value::Array(hs), Value::Array(its)) = (&props[hi].1, &props[ii].1) {
+            if std::rc::Rc::strong_count(hs) == 1 && std::rc::Rc::strong_count(its) == 1 {
+                let mut hs = std::mem::take(&mut *hs.borrow_mut());
+                let mut its = std::mem::take(&mut *its.borrow_mut());
+                let keys: Vec<_> = its.keys().cloned().collect();
+                for k in keys.iter().rev() {
+                    drop(hs.remove(k));
+                    drop(its.remove(k));
+                }
+            }
+        }
+        return;
+    }
     let (Some(oi), Some(ii)) = (find(props, b"__spl_objects"), find(props, b"__spl_array")) else {
         return;
     };

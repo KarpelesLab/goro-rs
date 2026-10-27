@@ -76,6 +76,10 @@ pub struct PhpGenerator {
     /// The zend_object_iterator (an object handle of its own) of a
     /// `yield from` over a Traversable object.
     pub(crate) yield_from_iter_h: Option<Value>,
+    /// The Generator an IteratorAggregate's getIterator() returned for a
+    /// `yield from`: iterated through its iterator (yield_from_source, the
+    /// handle), not delegated to.
+    pub(crate) yield_from_wrapped: Option<Value>,
     /// Yield from (Generator only): set after we yielded a value from the inner
     /// generator's current state. On re-entry to YieldFrom we must first advance
     /// the inner before yielding again. Without this flag we either advance too
@@ -274,6 +278,7 @@ impl PhpGenerator {
             yield_from_source: None,
             yield_from_pos: 0,
             yield_from_iter_h: None,
+            yield_from_wrapped: None,
             yield_from_observed: false,
             fiber_suspend_result: None,
             is_running: false,
@@ -475,6 +480,7 @@ impl PhpGenerator {
         for v in self
             .yield_from_source
             .iter()
+            .chain(self.yield_from_wrapped.iter())
             .chain(self.pending_return.iter())
             .chain(self.pending_exception.iter())
             .chain(self.closure.iter())
@@ -544,6 +550,48 @@ impl PhpGenerator {
         out
     }
 
+    /// One step of a `yield from` over the Generator `g` an aggregate
+    /// returned, through its zend_object_iterator (no method frames): the
+    /// next (key, value), None when done or on an exception.
+    #[inline(never)]
+    fn yield_from_wrapped_step(
+        vm: &mut Vm,
+        g: &Value,
+        idx: usize,
+        had: bool,
+    ) -> Option<(Value, Value)> {
+        let failed = |vm: &Vm| !had && vm.current_exception.is_some();
+        if idx > 0 {
+            vm.it_next(g);
+            if failed(vm) {
+                return None;
+            }
+        }
+        if !vm.it_valid(g) || failed(vm) {
+            return None;
+        }
+        let value = vm.it_current(g);
+        if failed(vm) {
+            return None;
+        }
+        let key = vm.it_key(g);
+        if failed(vm) {
+            return None;
+        }
+        Some((key, value))
+    }
+
+    /// Release the Generator a `yield from` walked through its iterator
+    /// (destroyed now, finally blocks included, before the iterator's
+    /// handle is freed).
+    #[inline(never)]
+    fn release_yield_from_wrapped(&mut self, vm: &mut Vm) {
+        if let Some(w) = self.yield_from_wrapped.take() {
+            drop(w);
+            vm.close_released_generators();
+        }
+    }
+
     /// Detach everything the frame owns (the generator is garbage).
     pub(crate) fn take_gc_children(&mut self) -> Vec<Value> {
         let mut out: Vec<Value> = Vec::new();
@@ -554,6 +602,7 @@ impl PhpGenerator {
         out.push(std::mem::replace(&mut self.current_key, Value::Null));
         out.push(std::mem::replace(&mut self.send_value, Value::Null));
         out.push(std::mem::replace(&mut self.return_value, Value::Null));
+        out.extend(self.yield_from_wrapped.take());
         out.extend(self.yield_from_source.take());
         out.extend(self.yield_from_iter_h.take());
         out.extend(self.pending_return.take());
@@ -623,6 +672,8 @@ impl PhpGenerator {
         // finally blocks) before ours run (zend_generator_dtor_storage()).
         if let Some(src) = self.yield_from_source.take() {
             let delegate = matches!(src, Value::Generator(_));
+            // (the iterator frees its generator, then its own handle)
+            self.release_yield_from_wrapped(vm);
             drop(src);
             drop(self.yield_from_iter_h.take());
             if delegate {
@@ -1677,38 +1728,49 @@ impl PhpGenerator {
                                 self.write_operand(&op.result, Value::Null);
                             }
                             Value::Object(_) => {
+                                // (a Generator an aggregate returned, behind
+                                // its iterator handle `source`)
+                                let wrapped = self.yield_from_wrapped.clone();
                                 let idx = self.yield_from_pos;
                                 self.yield_from_pos += 1;
                                 vm.current_line = op.line;
                                 let had = vm.current_exception.is_some();
                                 let failed = |vm: &Vm| !had && vm.current_exception.is_some();
                                 let mut item = None;
-                                'step: {
-                                    if idx > 0 {
-                                        vm.spl_call_method_at(&source, b"next", &[], false);
+                                if let Some(g) = &wrapped {
+                                    // (zend_generator_iterator_funcs: no calls)
+                                    let prev = vm.generator_caller.take();
+                                    vm.generator_caller = Some((vm.current_file.clone(), op.line));
+                                    item = Self::yield_from_wrapped_step(vm, g, idx, had);
+                                    vm.generator_caller = prev;
+                                } else {
+                                    'step: {
+                                        if idx > 0 {
+                                            vm.spl_call_method_at(&source, b"next", &[], false);
+                                            if failed(vm) {
+                                                break 'step;
+                                            }
+                                        }
+                                        let valid = vm
+                                            .spl_call_method_at(&source, b"valid", &[], false)
+                                            .unwrap_or(Value::False);
+                                        if failed(vm) || !vm.is_true(&valid) {
+                                            break 'step;
+                                        }
+                                        let value = vm
+                                            .spl_call_method_at(&source, b"current", &[], false)
+                                            .unwrap_or(Value::Null);
                                         if failed(vm) {
                                             break 'step;
                                         }
+                                        let key = vm
+                                            .spl_call_method_at(&source, b"key", &[], false)
+                                            .unwrap_or(Value::Null);
+                                        if failed(vm) {
+                                            break 'step;
+                                        }
+                                        item = Some((key, value));
                                     }
-                                    let valid = vm
-                                        .spl_call_method_at(&source, b"valid", &[], false)
-                                        .unwrap_or(Value::False);
-                                    if failed(vm) || !vm.is_true(&valid) {
-                                        break 'step;
-                                    }
-                                    let value = vm
-                                        .spl_call_method_at(&source, b"current", &[], false)
-                                        .unwrap_or(Value::Null);
-                                    if failed(vm) {
-                                        break 'step;
-                                    }
-                                    let key = vm
-                                        .spl_call_method_at(&source, b"key", &[], false)
-                                        .unwrap_or(Value::Null);
-                                    if failed(vm) {
-                                        break 'step;
-                                    }
-                                    item = Some((key, value));
                                 }
                                 if let Some((key, value)) = item {
                                     self.current_value = value;
@@ -1717,9 +1779,11 @@ impl PhpGenerator {
                                     self.ip = ip - 1;
                                     return Ok(true);
                                 }
-                                self.yield_from_source = None;
                                 // (the iterator is freed after what it walked)
                                 drop(source);
+                                drop(wrapped);
+                                self.release_yield_from_wrapped(vm);
+                                self.yield_from_source = None;
                                 self.yield_from_iter_h = None;
                                 self.yield_from_pos = 0;
                                 if failed(vm) {
@@ -1753,6 +1817,12 @@ impl PhpGenerator {
                             }
                         }
                         let mut iterable = iterable;
+                        // (zend_user_it_get_new_iterator(): the aggregates
+                        // are released once the zend_object_iterator, an
+                        // object handle, exists; then FREE_OP1)
+                        let mut held: Vec<Value> = Vec::new();
+                        let mut agg: Option<Value> = None;
+                        let mut native_iter = false;
                         // IteratorAggregate: delegate to what getIterator() returns.
                         if let Value::Object(obj) = &iterable {
                             let class_lower: Vec<u8> = obj
@@ -1767,7 +1837,11 @@ impl PhpGenerator {
                                     || vm.class_implements_interface(&class_lower, b"traversable"))
                             {
                                 let had = vm.current_exception.is_some();
-                                let it = vm.aggregate_get_iterator_chain(&iterable);
+                                // (an internal class's get_iterator handler
+                                // makes the one zend_object_iterator)
+                                vm.foreach_native_iter = u8::from(obj.borrow().native.is_some());
+                                let it = vm.aggregate_get_iterator_chain(&iterable, &mut held);
+                                native_iter = std::mem::take(&mut vm.foreach_native_iter) == 2;
                                 if !had && vm.current_exception.is_some() {
                                     if let Some(t) = self.dispatch_exception() {
                                         ip = t;
@@ -1781,10 +1855,62 @@ impl PhpGenerator {
                                         line: op.line,
                                     });
                                 }
-                                iterable = it.unwrap_or(Value::Null);
+                                agg = Some(std::mem::replace(
+                                    &mut iterable,
+                                    it.unwrap_or(Value::Null),
+                                ));
+                            }
+                        }
+                        // A Generator an aggregate returned is iterated
+                        // through its zend_object_iterator, not delegated to.
+                        if agg.is_some() {
+                            if let Value::Generator(g) = &iterable {
+                                let closed = g
+                                    .try_borrow()
+                                    .map(|b| b.state == GeneratorState::Completed)
+                                    .unwrap_or(false);
+                                if closed {
+                                    error = Some((
+                                        b"Exception",
+                                        "Cannot traverse an already closed generator".into(),
+                                    ));
+                                    iterable = Value::Undef;
+                                } else {
+                                    let h = vm.foreach_iterator_handle();
+                                    Vm::release_aggregates(std::mem::take(&mut held));
+                                    drop(agg.take());
+                                    let had = vm.current_exception.is_some();
+                                    vm.current_line = op.line;
+                                    let prev = vm.generator_caller.take();
+                                    vm.generator_caller = Some((vm.current_file.clone(), op.line));
+                                    vm.it_rewind(&iterable);
+                                    vm.generator_caller = prev;
+                                    self.yield_from_source = Some(h);
+                                    self.yield_from_wrapped = Some(iterable.clone());
+                                    self.yield_from_pos = 0;
+                                    if !had && vm.current_exception.is_some() {
+                                        self.release_yield_from_wrapped(vm);
+                                        self.yield_from_source = None;
+                                        if let Some(t) = self.dispatch_exception() {
+                                            ip = t;
+                                            continue;
+                                        }
+                                        self.state = GeneratorState::Completed;
+                                        self.current_value = Value::Null;
+                                        self.ip = ip;
+                                        return Err(VmError {
+                                            message: "Uncaught exception in generator".to_string(),
+                                            line: op.line,
+                                        });
+                                    }
+                                    ip -= 1;
+                                    iterable = Value::Undef;
+                                }
                             }
                         }
                         match &iterable {
+                            // (handled above)
+                            Value::Undef => {}
                             Value::Array(_) => {
                                 self.yield_from_source = Some(iterable);
                                 self.yield_from_pos = 0;
@@ -1854,7 +1980,12 @@ impl PhpGenerator {
                                     // Iterated lazily, one element per resume.
                                     let had = vm.current_exception.is_some();
                                     vm.current_line = op.line;
-                                    self.yield_from_iter_h = Some(vm.foreach_iterator_handle());
+                                    // (an internal aggregate's InternalIterator
+                                    // is that zend_object_iterator)
+                                    self.yield_from_iter_h =
+                                        (!native_iter).then(|| vm.foreach_iterator_handle());
+                                    Vm::release_aggregates(std::mem::take(&mut held));
+                                    drop(agg.take());
                                     vm.spl_call_method_at(&iterable, b"rewind", &[], false);
                                     if !had && vm.current_exception.is_some() {
                                         if let Some(t) = self.dispatch_exception() {
@@ -1876,6 +2007,8 @@ impl PhpGenerator {
                                     .class_implements_interface(&class_lower, b"traversable")
                                 {
                                     self.yield_from_iter_h = Some(vm.foreach_iterator_handle());
+                                    Vm::release_aggregates(std::mem::take(&mut held));
+                                    drop(agg.take());
                                     let arr = vm.iterator_to_array(&iterable);
                                     self.yield_from_source =
                                         Some(Value::Array(Rc::new(RefCell::new(arr))));
@@ -2642,6 +2775,7 @@ impl PhpGenerator {
             }
             let src = self.yield_from_source.take();
             self.yield_from_pos = 0;
+            self.release_yield_from_wrapped(vm);
             drop(src);
             vm.run_pending_destructors_pub();
             vm.current_line = saved_line;

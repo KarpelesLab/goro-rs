@@ -2508,16 +2508,19 @@ fn period_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Value
             };
             let it = new_object(vm, b"InternalIterator");
             {
+                // (in date_period_it_dtor()'s release order: the current
+                // object, the period, then the iterator's own handle)
                 let mut ib = it.borrow_mut();
-                if let Some(h) = handle {
-                    ib.set_property(ITER_HANDLE.to_vec(), Value::Object(h));
-                }
+                ib.set_property(ITER_CURRENT.to_vec(), Value::Null);
                 ib.set_property(
                     b"__timestamp_iter_period".to_vec(),
                     Value::Object(o.clone()),
                 );
                 ib.set_property(b"__timestamp_iter_index".to_vec(), Value::Long(0));
                 ib.set_property(b"__timestamp_iter_started".to_vec(), Value::False);
+                if let Some(h) = handle {
+                    ib.set_property(ITER_HANDLE.to_vec(), Value::Object(h));
+                }
             }
             Ok(Value::Object(it))
         }

@@ -451,8 +451,9 @@ impl Vm {
         let it = self.spl_instantiate(b"InternalIterator");
         {
             let mut ob = it.borrow_mut();
-            ob.set_property_slice(b"__spl_fa_h", h);
+            // (the iterator releases the array before its own handle)
             ob.set_property_slice(b"__spl_fa_target", Value::Object(obj.clone()));
+            ob.set_property_slice(b"__spl_fa_h", h);
             ob.set_property_slice(b"__spl_pos", Value::Long(0));
         }
         Value::Object(it)

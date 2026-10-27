@@ -20863,8 +20863,9 @@ impl Vm {
         let it = self.spl_instantiate(b"InternalIterator");
         {
             let mut b = it.borrow_mut();
-            b.set_property(b"__spl_iter_h".to_vec(), h);
+            // (released before the handle, by the iterator's dtor)
             b.set_property(b"__spl_wm_target".to_vec(), wm.clone());
+            b.set_property(b"__spl_iter_h".to_vec(), h);
             b.set_property(b"__spl_pos".to_vec(), Value::Long(0));
         }
         Value::Object(it)
@@ -25806,7 +25807,13 @@ impl Vm {
     /// aggregate it returns in turn (a recursion in C, so a chain that never
     /// ends runs out of stack). None when getIterator() threw.
     #[inline(never)]
-    pub(crate) fn aggregate_get_iterator_chain(&mut self, agg: &Value) -> Option<Value> {
+    /// The intermediate aggregates are kept in `held` (see
+    /// spl_resolve_traversable_held()).
+    pub(crate) fn aggregate_get_iterator_chain(
+        &mut self,
+        agg: &Value,
+        held: &mut Vec<Value>,
+    ) -> Option<Value> {
         let cost = crate::stack::REENTRY_COST;
         let mut nested = 0usize;
         let mut it = self.call_object_method(agg, b"getIterator", &[]);
@@ -25842,6 +25849,7 @@ impl Vm {
             nested += 1;
             let cur = Value::Object(o.clone());
             it = self.call_object_method(&cur, b"getIterator", &[]);
+            held.push(cur);
         }
         crate::stack::leave_native(nested * cost);
         it
@@ -45977,7 +45985,9 @@ impl Vm {
                             }
                             // zend_user_it_get_new_iterator(): what getIterator()
                             // returns must be traversable (an aggregate is asked in
-                            // turn).
+                            // turn). The aggregates in between are released once
+                            // the iterator (a handle) exists, innermost first.
+                            let mut fe_held: Vec<Value> = Vec::new();
                             if !had_exc && self.current_exception.is_none() {
                                 let mut agg = obj.clone();
                                 // (each nested aggregate recurses in C)
@@ -45996,6 +46006,7 @@ impl Vm {
                                             } else if is(self, b"iterator") {
                                                 break;
                                             } else if is(self, b"iteratoraggregate") {
+                                                fe_held.push(Value::Object(o.clone()));
                                                 agg = o.clone();
                                                 if !crate::stack::enter_native(
                                                     crate::stack::REENTRY_COST,
@@ -46063,6 +46074,7 @@ impl Vm {
                                     let h = self.foreach_iterator_handle();
                                     foreach_iter_handles.insert(t, h);
                                 }
+                                Self::release_aggregates(std::mem::take(&mut fe_held));
                                 // FE_RESET frees a temporary aggregate once
                                 // it has its iterator.
                                 if let OperandType::Tmp(src) = op.op1 {

@@ -346,16 +346,42 @@ impl Vm {
     /// Throws LogicException like spl_get_iterator_from_aggregate when the
     /// result is not Traversable.
     pub fn spl_resolve_traversable(&mut self, v: &Value) -> Value {
+        let mut held = Vec::new();
+        let r = self.spl_resolve_traversable_held(v, &mut held);
+        Self::release_aggregates(held);
+        r
+    }
+
+    /// spl_resolve_traversable(), keeping the intermediate aggregates
+    /// (what a getIterator() returned that was itself asked for its
+    /// iterator) in `held`: zend_user_it_get_new_iterator() releases them
+    /// only once the innermost get_iterator made its zend_object_iterator
+    /// (an object handle), innermost first (Self::release_aggregates).
+    pub fn spl_resolve_traversable_held(&mut self, v: &Value, held: &mut Vec<Value>) -> Value {
         // Each nested aggregate recurses in C (zend_user_it_get_new_iterator):
         // a getIterator() chain that never ends runs out of stack.
         let mut nested = 0usize;
-        let r = self.spl_resolve_traversable_charged(v, &mut nested);
+        let r = self.spl_resolve_traversable_charged(v, &mut nested, held);
         crate::stack::leave_native(nested * crate::stack::REENTRY_COST);
         r
     }
 
-    fn spl_resolve_traversable_charged(&mut self, v: &Value, nested: &mut usize) -> Value {
+    /// Release what spl_resolve_traversable_held() kept, innermost first.
+    #[inline(never)]
+    pub fn release_aggregates(mut held: Vec<Value>) {
+        while let Some(v) = held.pop() {
+            drop(v);
+        }
+    }
+
+    fn spl_resolve_traversable_charged(
+        &mut self,
+        v: &Value,
+        nested: &mut usize,
+        held: &mut Vec<Value>,
+    ) -> Value {
         let mut cur = v.clone();
+        let mut first = true;
         loop {
             if !matches!(cur, Value::Object(_)) {
                 return cur;
@@ -392,7 +418,11 @@ impl Vm {
                 self.spl_throw(b"Exception", &msg);
                 return Value::Null;
             }
-            cur = r;
+            let prev = std::mem::replace(&mut cur, r);
+            if !first {
+                held.push(prev);
+            }
+            first = false;
         }
     }
 
@@ -903,13 +933,17 @@ impl Vm {
                 ob.set_property_slice(b"__spl_pos", Value::Long(0));
                 ob.set_property_slice(b"__spl_flags", Value::Long(0));
             }
-            set_prop(obj, b"__spl_append_it", Value::Object(ai));
             // u.append.iterator = ArrayIterator's get_iterator()
             let h = self.spl_it_handle();
-            set_prop(obj, b"__spl_append_h", h);
+            // (slots in spl_dual_it_free_storage()'s release order: the
+            // current element, the inner iterator, then u.append's)
             set_prop(obj, b"__spl_dit", Value::Long(DIT_APPEND));
-            set_prop(obj, b"__spl_pos", Value::Long(0));
             Self::dit_free(obj);
+            set_prop(obj, b"__spl_inner_h", Value::Null);
+            set_prop(obj, b"__spl_inner", Value::Null);
+            set_prop(obj, b"__spl_append_h", h);
+            set_prop(obj, b"__spl_append_it", Value::Object(ai));
+            set_prop(obj, b"__spl_pos", Value::Long(0));
             return true;
         }
         // Inner iterator type check.
@@ -920,6 +954,8 @@ impl Vm {
             _ => b"iterator",
         };
         let mut inner = args[0].deref();
+        let mut tail_cache: Option<Value> = None;
+        let mut tail_callback: Option<Value> = None;
         if !self.obj_instanceof(&inner, inner_iface) {
             let msg = format!(
                 "{}(): Argument #1 ($iterator) must be of type {}, {} given",
@@ -986,7 +1022,7 @@ impl Vm {
                     return false;
                 }
                 Self::cit_set_flags(obj, flags & CIT_PUBLIC);
-                set_prop(obj, b"__spl_cache", val_arr(PhpArray::new()));
+                tail_cache = Some(val_arr(PhpArray::new()));
             }
             DIT_ITERATOR => {
                 let is_iter = self.obj_instanceof(&inner, b"iterator");
@@ -1124,7 +1160,7 @@ impl Vm {
                     self.spl_throw(b"TypeError", &msg);
                     return false;
                 }
-                set_prop(obj, b"__spl_callback", cb);
+                tail_callback = Some(cb);
             }
             _ => {}
         }
@@ -1133,11 +1169,20 @@ impl Vm {
         if self.exc() {
             return false;
         }
+        // (slots in spl_dual_it_free_storage()'s release order: the current
+        // element, inner.iterator, inner.zobject, u.caching.zcache, then
+        // u.callback_filter)
+        set_prop(obj, b"__spl_dit", Value::Long(dit));
+        Self::dit_free(obj);
         set_prop(obj, b"__spl_inner_h", h);
         set_prop(obj, b"__spl_inner", inner);
-        set_prop(obj, b"__spl_dit", Value::Long(dit));
+        if let Some(c) = tail_cache {
+            set_prop(obj, b"__spl_cache", c);
+        }
+        if let Some(cb) = tail_callback {
+            set_prop(obj, b"__spl_callback", cb);
+        }
         set_prop(obj, b"__spl_pos", Value::Long(0));
-        Self::dit_free(obj);
         true
     }
 
