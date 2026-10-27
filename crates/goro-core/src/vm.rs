@@ -2103,7 +2103,7 @@ pub struct Vm {
     /// Vm::typed_plain_prop()'s answers, for ((site epoch, handler count),
     /// plain_prop_key()).
     #[allow(clippy::type_complexity)]
-    pub(crate) typed_prop_memo: RefCell<((u32, usize), crate::fxhash::FxHashMap<Box<[u8]>, u8>)>,
+    pub(crate) typed_prop_memo: RefCell<((u32, usize), crate::class_table::FrontMap<u8>)>,
     /// plain_public_prop() is asked about a typed property's write as if
     /// it were untyped (see typed_plain_prop()).
     pub(crate) plain_typed_ok: std::cell::Cell<bool>,
@@ -2323,7 +2323,7 @@ pub struct Vm {
     #[allow(clippy::type_complexity)]
     native_handler_memo: RefCell<(
         (u64, usize),
-        crate::fxhash::FxHashMap<Box<[u8]>, Option<(Box<[u8]>, NativeClassHandler)>>,
+        crate::class_table::FrontMap<Option<(Box<[u8]>, NativeClassHandler)>>,
     )>,
     /// The answers of the INSTANCEOF handler for objects (see
     /// Vm::object_class_instanceof()).

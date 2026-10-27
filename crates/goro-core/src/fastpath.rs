@@ -2926,7 +2926,7 @@ pub(crate) const PURE_BASE: u8 = 64;
 pub(crate) struct PlainPropMemo {
     epoch: u32,
     handlers: usize,
-    map: crate::fxhash::FxHashMap<Box<[u8]>, u8>,
+    map: crate::class_table::FrontMap<u8>,
 }
 
 /// Whether a variable operand of `op` is bound to a reference.

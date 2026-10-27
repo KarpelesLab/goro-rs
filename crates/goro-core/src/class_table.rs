@@ -11,7 +11,6 @@ use crate::object::ClassEntry;
 use crate::stubs::{self, K_ENUM, K_INTERFACE, K_TRAIT, StubClass};
 use crate::value::Value;
 use crate::vm::Vm;
-use std::hash::Hash;
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,6 +181,79 @@ pub struct ClassMap {
     /// name not in the table before: what is derived from the classes
     /// already there (and their ancestors) holds while it does not change.
     link_stamp: u64,
+    /// A cache in front of the lookups by name: slot (front_slot() of a
+    /// name) -> 1 + the index of the entry last found by a name of that
+    /// slot (0: none). An entry keeps its index (entries are only added or
+    /// replaced), so a slot needs no invalidation: a hit is the entry whose
+    /// key is the name looked up.
+    front: Box<[std::cell::Cell<u32>; 1 << FRONT_BITS]>,
+    /// The names last looked up and not found, by front slot / 4: (the
+    /// `stamp` then, the name). One holds while `stamp` does not change
+    /// (it changes with every insertion). Empty until the first one.
+    missing: std::cell::RefCell<Vec<(u64, Vec<u8>)>>,
+}
+
+/// log2 of the number of ClassMap::front slots.
+const FRONT_BITS: u32 = 10;
+
+/// A cheap hash of a name (before mixing): its length, first, middle and
+/// last 8 bytes.
+#[inline]
+fn name_mix(k: &[u8]) -> u64 {
+    let n = k.len();
+    let w = |i: usize| u64::from_le_bytes(k[i..i + 8].try_into().unwrap());
+    let h = if n >= 8 {
+        let mut h = w(0) ^ w(n - 8).rotate_left(29);
+        if n > 16 {
+            h ^= w(n / 2 - 4).rotate_left(47);
+        }
+        h
+    } else if n >= 4 {
+        let v = |i: usize| u32::from_le_bytes(k[i..i + 4].try_into().unwrap()) as u64;
+        (v(0) << 32) | v(n - 4)
+    } else if n > 0 {
+        k[0] as u64 | (k[n / 2] as u64) << 8 | (k[n - 1] as u64) << 16
+    } else {
+        0
+    };
+    h ^ n as u64
+}
+
+/// The ClassMap::front slot of a name.
+#[inline]
+fn front_slot(k: &[u8]) -> usize {
+    (name_mix(k).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - FRONT_BITS)) as usize
+}
+
+fn new_front() -> Box<[std::cell::Cell<u32>; 1 << FRONT_BITS]> {
+    Box::new(std::array::from_fn(|_| std::cell::Cell::new(0)))
+}
+
+/// `a == b` for names of the same length, without a call to memcmp.
+#[inline]
+fn same_name(a: &[u8], b: &[u8]) -> bool {
+    let n = a.len();
+    if n != b.len() {
+        return false;
+    }
+    let w = |s: &[u8], i: usize| u64::from_le_bytes(s[i..i + 8].try_into().unwrap());
+    if n >= 8 {
+        let mut i = 0;
+        while i + 8 < n {
+            if w(a, i) != w(b, i) {
+                return false;
+            }
+            i += 8;
+        }
+        w(a, n - 8) == w(b, n - 8)
+    } else if n >= 4 {
+        let v = |s: &[u8], i: usize| u32::from_le_bytes(s[i..i + 4].try_into().unwrap());
+        v(a, 0) == v(b, 0) && v(a, n - 4) == v(b, n - 4)
+    } else if n > 0 {
+        a[0] == b[0] && a[n / 2] == b[n / 2] && a[n - 1] == b[n - 1]
+    } else {
+        true
+    }
 }
 
 thread_local! {
@@ -203,6 +275,8 @@ impl Default for ClassMap {
             map: Default::default(),
             stamp: fresh_gen(),
             link_stamp: fresh_gen(),
+            front: new_front(),
+            missing: Default::default(),
         }
     }
 }
@@ -238,52 +312,87 @@ impl ClassMap {
         }
     }
 
-    #[inline]
-    pub fn get<Q: ?Sized + Hash + indexmap::Equivalent<Vec<u8>>>(
-        &self,
-        key: &Q,
-    ) -> Option<&ClassEntry> {
-        self.map.get(key).map(|c| &**c)
+    /// The entry named `key` (exact bytes), and its index.
+    #[inline(never)]
+    fn find_entry(&self, key: &[u8]) -> Option<(usize, &Rc<ClassEntry>)> {
+        let slot = front_slot(key);
+        let i = self.front[slot].get().wrapping_sub(1) as usize;
+        if let Some((k, c)) = self.map.get_index(i) {
+            if same_name(k, key) {
+                return Some((i, c));
+            }
+        }
+        let i = self.find_slow(key, slot)?;
+        self.map.get_index(i).map(|(_, c)| (i, c))
+    }
+
+    /// The index of the entry named `key` (exact bytes).
+    #[inline(always)]
+    fn find(&self, key: &[u8]) -> Option<usize> {
+        self.find_entry(key).map(|(i, _)| i)
+    }
+
+    #[inline(never)]
+    fn find_slow(&self, key: &[u8], slot: usize) -> Option<usize> {
+        let ms = slot >> 2;
+        if let Some((stamp, name)) = self.missing.borrow().get(ms) {
+            if *stamp == self.stamp && same_name(name, key) {
+                return None;
+            }
+        }
+        let Some(i) = self.map.get_index_of(key) else {
+            let mut m = self.missing.borrow_mut();
+            if m.is_empty() {
+                m.resize((1 << FRONT_BITS) >> 2, (0, Vec::new()));
+            }
+            let (stamp, name) = &mut m[ms];
+            *stamp = self.stamp;
+            name.clear();
+            name.extend_from_slice(key);
+            return None;
+        };
+        if let Ok(v) = u32::try_from(i + 1) {
+            self.front[slot].set(v);
+        }
+        Some(i)
+    }
+
+    #[inline(always)]
+    pub fn get<Q: ?Sized + AsRef<[u8]>>(&self, key: &Q) -> Option<&ClassEntry> {
+        self.find_entry(key.as_ref()).map(|(_, c)| &**c)
     }
 
     /// The shared entry (cloning it holds the entry as it is now).
-    #[inline]
-    pub fn get_rc<Q: ?Sized + Hash + indexmap::Equivalent<Vec<u8>>>(
-        &self,
-        key: &Q,
-    ) -> Option<&Rc<ClassEntry>> {
-        self.map.get(key)
+    #[inline(always)]
+    pub fn get_rc<Q: ?Sized + AsRef<[u8]>>(&self, key: &Q) -> Option<&Rc<ClassEntry>> {
+        self.find_entry(key.as_ref()).map(|(_, c)| c)
     }
 
     /// The entry, to change (copied first when shared).
     #[inline]
-    pub fn get_mut<Q: ?Sized + Hash + indexmap::Equivalent<Vec<u8>>>(
-        &mut self,
-        key: &Q,
-    ) -> Option<&mut ClassEntry> {
+    pub fn get_mut<Q: ?Sized + AsRef<[u8]>>(&mut self, key: &Q) -> Option<&mut ClassEntry> {
         self.changed();
-        self.map.get_mut(key).map(Rc::make_mut)
+        let i = self.find(key.as_ref())?;
+        Some(Rc::make_mut(&mut self.map[i]))
     }
 
     #[inline]
-    pub fn get_full<Q: ?Sized + Hash + indexmap::Equivalent<Vec<u8>>>(
+    pub fn get_full<Q: ?Sized + AsRef<[u8]>>(
         &self,
         key: &Q,
     ) -> Option<(usize, &Vec<u8>, &ClassEntry)> {
-        self.map.get_full(key).map(|(i, k, c)| (i, k, &**c))
+        let i = self.find(key.as_ref())?;
+        self.map.get_index(i).map(|(k, c)| (i, k, &**c))
     }
 
-    #[inline]
-    pub fn get_index_of<Q: ?Sized + Hash + indexmap::Equivalent<Vec<u8>>>(
-        &self,
-        key: &Q,
-    ) -> Option<usize> {
-        self.map.get_index_of(key)
+    #[inline(always)]
+    pub fn get_index_of<Q: ?Sized + AsRef<[u8]>>(&self, key: &Q) -> Option<usize> {
+        self.find(key.as_ref())
     }
 
-    #[inline]
-    pub fn contains_key<Q: ?Sized + Hash + indexmap::Equivalent<Vec<u8>>>(&self, key: &Q) -> bool {
-        self.map.contains_key(key)
+    #[inline(always)]
+    pub fn contains_key<Q: ?Sized + AsRef<[u8]>>(&self, key: &Q) -> bool {
+        self.find(key.as_ref()).is_some()
     }
 
     #[inline]
@@ -409,6 +518,101 @@ impl<'a> IntoIterator for &'a ClassMap {
     }
 }
 
+/// A map of names (byte strings) to answers, with a cache in front of
+/// its hash lookups: for the memos looked up with the same few keys over
+/// and over. Entries are only added (or replaced), until clear().
+pub(crate) struct FrontMap<V> {
+    /// key -> index in `entries`.
+    map: crate::fxhash::NameHashMap<Box<[u8]>, u32>,
+    entries: Vec<(Box<[u8]>, V)>,
+    /// slot (map_slot()) -> 1 + the index in `entries` of the key last
+    /// found with that slot (0: none; empty until the first insertion).
+    front: Vec<std::cell::Cell<u32>>,
+}
+
+impl<V> std::fmt::Debug for FrontMap<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FrontMap({} entries)", self.entries.len())
+    }
+}
+
+impl<V> Default for FrontMap<V> {
+    fn default() -> Self {
+        FrontMap {
+            map: Default::default(),
+            entries: Vec::new(),
+            front: Vec::new(),
+        }
+    }
+}
+
+/// log2 of the number of FrontMap::front slots.
+const FRONT_MAP_BITS: u32 = 11;
+
+#[inline]
+fn map_slot(k: &[u8]) -> usize {
+    (name_mix(k).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - FRONT_MAP_BITS)) as usize
+}
+
+impl<V> FrontMap<V> {
+    #[inline]
+    pub(crate) fn get(&self, key: &[u8]) -> Option<&V> {
+        let slot = map_slot(key);
+        if let Some(f) = self.front.get(slot) {
+            if let Some((k, v)) = self.entries.get(f.get().wrapping_sub(1) as usize) {
+                if same_name(k, key) {
+                    return Some(v);
+                }
+            }
+        }
+        self.get_slow(slot, key)
+    }
+
+    #[inline(never)]
+    fn get_slow(&self, slot: usize, key: &[u8]) -> Option<&V> {
+        let &i = self.map.get(key)?;
+        if let Some(f) = self.front.get(slot) {
+            f.set(i + 1);
+        }
+        self.entries.get(i as usize).map(|e| &e.1)
+    }
+
+    pub(crate) fn insert(&mut self, key: Box<[u8]>, v: V) {
+        let slot = map_slot(&key);
+        let i = match self.map.get(&key) {
+            Some(&i) => {
+                self.entries[i as usize].1 = v;
+                i
+            }
+            None => {
+                let Ok(i) = u32::try_from(self.entries.len()) else {
+                    return;
+                };
+                if i == u32::MAX {
+                    return;
+                }
+                self.map.insert(key.clone(), i);
+                self.entries.push((key, v));
+                i
+            }
+        };
+        if self.front.is_empty() {
+            self.front = (0..1 << FRONT_MAP_BITS)
+                .map(|_| Default::default())
+                .collect();
+        }
+        self.front[slot].set(i + 1);
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.map.clear();
+        self.entries.clear();
+        for f in &self.front {
+            f.set(0);
+        }
+    }
+}
+
 /// The ancestry of a class name as the walks over parents see it: the
 /// name, then each parent (lowercased), the class table's parent while the
 /// class is there with one, else the stub's (at most 65 names).
@@ -428,44 +632,99 @@ pub(crate) struct ClassChain {
 #[derive(Default)]
 pub(crate) struct ClassChainMemo {
     stamp: u64,
-    map: crate::fxhash::FxHashMap<Vec<u8>, Rc<ClassChain>>,
+    map: FrontMap<Rc<ClassChain>>,
 }
 
 /// Vm::class_implements_interface()'s answers, for one class table link
 /// generation (ClassMap::link_generation()), about classes in the table:
-/// class -> interface -> answer.
+/// class -> interface -> answer. (Also the other memos of relations
+/// between two names: see their Vm fields.)
 #[derive(Default)]
 pub(crate) struct ImplementsMemo {
     stamp: u64,
-    map: crate::fxhash::FxHashMap<Vec<u8>, crate::fxhash::FxHashMap<Vec<u8>, bool>>,
+    /// class -> interface -> index in `answers`.
+    map: crate::fxhash::NameHashMap<Vec<u8>, crate::fxhash::NameHashMap<Vec<u8>, u32>>,
+    /// (class, interface, answer)
+    answers: Vec<(Box<[u8]>, Box<[u8]>, bool)>,
+    /// A cache in front of `map`: slot (pair_slot()) -> 1 + the index in
+    /// `answers` of the pair last found with that slot (0: none; empty
+    /// until the first answer).
+    front: Vec<u32>,
+}
+
+/// log2 of the number of ImplementsMemo::front slots.
+const PAIR_BITS: u32 = 12;
+
+#[inline]
+fn pair_slot(class: &[u8], iface: &[u8]) -> usize {
+    let h = name_mix(class) ^ name_mix(iface).rotate_left(31);
+    (h.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - PAIR_BITS)) as usize
 }
 
 impl ImplementsMemo {
     #[inline]
     pub(crate) fn get(&mut self, stamp: u64, class: &[u8], iface: &[u8]) -> Option<bool> {
         if self.stamp != stamp {
-            self.map.clear();
-            self.stamp = stamp;
+            self.reset(stamp);
             return None;
         }
-        self.map.get(class)?.get(iface).copied()
+        let slot = pair_slot(class, iface);
+        if let Some(&f) = self.front.get(slot) {
+            if let Some((c, i, r)) = self.answers.get(f.wrapping_sub(1) as usize) {
+                if same_name(c, class) && same_name(i, iface) {
+                    return Some(*r);
+                }
+            }
+        }
+        self.get_slow(slot, class, iface)
+    }
+
+    #[inline(never)]
+    fn get_slow(&mut self, slot: usize, class: &[u8], iface: &[u8]) -> Option<bool> {
+        let k = *self.map.get(class)?.get(iface)?;
+        if let Some(f) = self.front.get_mut(slot) {
+            *f = k + 1;
+        }
+        self.answers.get(k as usize).map(|a| a.2)
+    }
+
+    #[inline(never)]
+    fn reset(&mut self, stamp: u64) {
+        self.map.clear();
+        self.answers.clear();
+        self.front.fill(0);
+        self.stamp = stamp;
     }
 
     pub(crate) fn set(&mut self, stamp: u64, class: &[u8], iface: &[u8], r: bool) {
         if self.stamp != stamp {
-            self.map.clear();
-            self.stamp = stamp;
+            self.reset(stamp);
         }
-        match self.map.get_mut(class) {
-            Some(m) => {
-                m.insert(iface.to_vec(), r);
+        let Ok(k) = u32::try_from(self.answers.len()) else {
+            return;
+        };
+        if k == u32::MAX {
+            return;
+        }
+        let m = match self.map.get_mut(class) {
+            Some(m) => m,
+            None => self.map.entry(class.to_vec()).or_default(),
+        };
+        let k = match m.get(iface) {
+            Some(&old) => {
+                self.answers[old as usize].2 = r;
+                old
             }
             None => {
-                let mut m = crate::fxhash::FxHashMap::default();
-                m.insert(iface.to_vec(), r);
-                self.map.insert(class.to_vec(), m);
+                m.insert(iface.to_vec(), k);
+                self.answers.push((class.into(), iface.into(), r));
+                k
             }
+        };
+        if self.front.is_empty() {
+            self.front = vec![0; 1 << PAIR_BITS];
         }
+        self.front[pair_slot(class, iface)] = k + 1;
     }
 }
 
@@ -512,7 +771,7 @@ impl Vm {
         self.class_chain_memo
             .borrow_mut()
             .map
-            .insert(name.to_vec(), c.clone());
+            .insert(name.into(), c.clone());
         c
     }
 }
