@@ -7101,16 +7101,9 @@ impl Vm {
             let Value::Object(obj) = o else {
                 return None;
             };
-            let cl = obj.borrow().class_name.to_ascii_lowercase();
             // zend_call_function() calls nothing while an exception is
             // pending: the cast fails.
-            if vm.current_exception.is_some()
-                || obj.borrow().native.is_some()
-                || !vm
-                    .classes
-                    .get(&cl)
-                    .is_some_and(|c| c.get_method(b"__tostring").is_some())
-            {
+            if vm.current_exception.is_some() || !vm.object_casts_by_tostring(obj) {
                 return None;
             }
             let s = vm.value_to_string(o);
@@ -7143,6 +7136,23 @@ impl Vm {
             }
             _ => (a, b),
         }
+    }
+
+    /// Whether comparing object `obj` with a string casts it with its
+    /// __toString() (zend_std_cast_object_tostring()): an extension object
+    /// casts itself, unless a user subclass declares __toString() (a
+    /// DateTime subclass's).
+    #[inline(never)]
+    fn object_casts_by_tostring(&self, obj: &Rc<RefCell<PhpObject>>) -> bool {
+        let ob = obj.borrow();
+        let Some(m) = self
+            .classes
+            .get(&ob.class_name.to_ascii_lowercase())
+            .and_then(|c| c.get_method(b"__tostring"))
+        else {
+            return false;
+        };
+        ob.native.is_none() || m.op_array.internal_sig.is_none() && !m.op_array.ops.is_empty()
     }
 
     /// Two distinct objects of one class compared property by property
@@ -7333,12 +7343,7 @@ impl Vm {
         };
         let has_tostring = |vm: &Vm, v: &Value| -> bool {
             let Value::Object(obj) = v else { return false };
-            let ob = obj.borrow();
-            ob.native.is_none()
-                && vm
-                    .classes
-                    .get(&ob.class_name.to_ascii_lowercase())
-                    .is_some_and(|c| c.get_method(b"__tostring").is_some())
+            vm.object_casts_by_tostring(obj)
         };
         let mut changed = false;
         let mut na = ea.clone();
