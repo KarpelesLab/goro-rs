@@ -318,7 +318,7 @@ impl Vm {
             .borrow()
             .as_ref()
             .and_then(|s| s.internal_new_sites.get(&(ip as u32)).cloned())?;
-        if !self.internal_template_valid(&t) {
+        if self.current_exception.is_some() || !self.internal_template_valid(&t) {
             return None;
         }
         // Recycle the old object ID from the result slot before allocating
@@ -537,7 +537,7 @@ impl Vm {
         cvs: &[Value],
         tmps: &[Value],
     ) -> bool {
-        if self.observer.is_some() {
+        if self.observer.is_some() || self.current_exception.is_some() {
             return false;
         }
         let op = &op_array.ops[ip];

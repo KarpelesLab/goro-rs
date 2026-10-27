@@ -22560,6 +22560,7 @@ impl Vm {
     #[inline]
     fn fast_internal_ctor_target(&self) -> bool {
         self.observer.is_none()
+            && self.current_exception.is_none()
             && self.pending_calls.last().is_some_and(|c| {
                 c.target.internal_ctor != 0
                     && c.named_args.is_empty()
