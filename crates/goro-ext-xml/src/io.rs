@@ -251,6 +251,21 @@ pub fn read_resource(vm: &mut Vm, filename: &str) -> Option<Vec<u8>> {
         let f = vm.functions.get(&b"file_get_contents"[..]).copied()?;
         let silenced = vm.error_reporting;
         vm.error_reporting = goro_core::errdisplay::ER_SILENT;
+        // php_libxml_streams_IO_open_wrapper(): a wrapper with url_stat (a
+        // user wrapper, phar://, ftp://) is stat()ed quietly first, and a
+        // failed stat is a failed open
+        if wrapper_has_url_stat(&lower) {
+            let exists = vm.functions.get(&b"file_exists"[..]).copied().map(|fe| {
+                fe(
+                    vm,
+                    &[Value::String(PhpString::from_string(filename.to_string()))],
+                )
+            });
+            if !matches!(exists, Some(Ok(Value::True))) {
+                vm.error_reporting = silenced;
+                return None;
+            }
+        }
         let mut fargs = vec![Value::String(PhpString::from_string(filename.to_string()))];
         if let Some(ctx) = crate::libxml::streams_context() {
             fargs.push(Value::False);
@@ -283,6 +298,30 @@ pub fn read_resource(vm: &mut Vm, filename: &str) -> Option<Vec<u8>> {
     }
     let full = resolve_path(vm, &path);
     std::fs::read(&full).ok()
+}
+
+/// Whether the wrapper of `url` (lowercase) has a url_stat operation: the
+/// built-in wrappers without one are http(s), php, data, glob, zip and the
+/// compression ones.
+fn wrapper_has_url_stat(url: &str) -> bool {
+    let Some(i) = url
+        .find("://")
+        .or_else(|| url.find(':').filter(|_| url.starts_with("data:")))
+    else {
+        return false;
+    };
+    !matches!(
+        &url[..i],
+        "http"
+            | "https"
+            | "php"
+            | "data"
+            | "glob"
+            | "zip"
+            | "compress.zlib"
+            | "compress.bzip2"
+            | "file"
+    )
 }
 
 /// xmlURIUnescapeString

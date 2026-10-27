@@ -6769,7 +6769,9 @@ impl Vm {
                 .position(|c| same(c, &callback))
             {
                 Some(j) => j + 1,
-                None => i,
+                // (the loader unregistered itself: zend_hash_move_forward_ex()
+                // from its deleted bucket steps over the next one)
+                None => i + 1,
             };
             if let Some(e) = r {
                 if self.current_exception.is_none() {

@@ -3136,6 +3136,20 @@ thread_local! {
     static LEAKED_NAMES: RefCell<HashMap<String, &'static str>> = RefCell::new(HashMap::new());
 }
 
+/// The SplFileObject method running a stream function on its user-wrapper
+/// stream (the active function of its diagnostics).
+#[inline(never)]
+fn spl_file_caller(vm: &Vm) -> Option<&'static str> {
+    let n = vm
+        .current_builtin_name()
+        .filter(|n| n.starts_with("SplFileObject::"))?;
+    Some(LEAKED_NAMES.with(|m| {
+        *m.borrow_mut()
+            .entry(n.clone())
+            .or_insert_with(|| Box::leak(n.into_boxed_str()))
+    }))
+}
+
 /// Name the next intercepted builtin's diagnostics after `name`.
 pub fn set_caller_override(name: Option<&str>) {
     let n = name.map(|n| {
@@ -3151,6 +3165,7 @@ pub fn set_caller_override(name: Option<&str>) {
 fn run(vm: &mut Vm, name: &'static str, args: &[Value], h: Handler) -> Result<Value, VmError> {
     let shown = CALLER_OVERRIDE
         .with(|c| c.borrow_mut().take())
+        .or_else(|| spl_file_caller(vm))
         .unwrap_or(name);
     FN_STACK.with(|s| s.borrow_mut().push(shown));
     let r = h(vm, args);
