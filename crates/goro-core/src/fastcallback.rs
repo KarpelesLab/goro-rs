@@ -65,7 +65,9 @@ impl Vm {
                         }
                         let lower = lower_into(name, &mut buf)?;
                         let f = self.user_functions.get(lower)?;
-                        if f.scope_class.is_some() || !crate::object::call_attributes_inert(&f.attributes) {
+                        if f.scope_class.is_some()
+                            || !crate::object::call_attributes_inert(&f.attributes)
+                        {
                             return None;
                         }
                         let f = Rc::clone(f);

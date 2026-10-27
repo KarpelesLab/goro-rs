@@ -100,7 +100,10 @@ impl MethodMemo {
         if self.epoch != crate::opcode::site_epoch() {
             return None;
         }
-        let e = self.slots.get(memo_slot(class_name, method, scope))?.as_deref()?;
+        let e = self
+            .slots
+            .get(memo_slot(class_name, method, scope))?
+            .as_deref()?;
         (crate::string::bytes_eq(&e.0, method) && e.1.is_for(class_name, scope)).then_some(&e.1)
     }
 
@@ -1298,7 +1301,14 @@ impl Vm {
                 Some(w) => Some(w.upgrade()?),
                 None => None,
             };
-            Some((method, s.func_name.clone(), s.sep, s.is_static, 0, s.info.clone()))
+            Some((
+                method,
+                s.func_name.clone(),
+                s.sep,
+                s.is_static,
+                0,
+                s.info.clone(),
+            ))
         })
     }
 
