@@ -1917,7 +1917,8 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
         s.set(sym_key(b"REQUEST_TIME_FLOAT"), Value::Double(now));
         s.set(sym_key(b"REQUEST_TIME"), Value::Long(now as i64));
     }
-    // argv / argc (php_build_argv(), when register_argc_argv is on)
+    // argv / argc: php_build_argv() registers them for the CLI whatever
+    // register_argc_argv says (it only gates deriving them from the query string)
     if !req.cgi {
         // (php_hash_environment(): a SAPI passing arguments (the CLI's
         // SG(request_info).argc) registers them whatever the setting)
