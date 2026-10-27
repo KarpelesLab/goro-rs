@@ -184,6 +184,9 @@ impl Vm {
     }
 
     pub fn report_uncaught(&mut self, e: &VmError) {
+        // (the frames are unwound: shutdown functions and destructors run
+        // in their own files again)
+        let _ = std::mem::take(&mut self.include_fatal_file);
         self.sync_frame_args();
         let stack_trace = self.format_stack_trace();
         let max_len = self.exception_string_param_max_len;

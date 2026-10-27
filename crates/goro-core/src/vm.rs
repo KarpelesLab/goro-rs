@@ -2545,6 +2545,9 @@ pub struct Vm {
     /// A declaration bound at compile time (early binding) is running: a
     /// fatal error it raises happens before an eval() frame exists.
     pub compile_time_binding: bool,
+    /// A fatal error raised in an included file is unwinding: the frames
+    /// it leaves keep that file as the executing one, which reports it.
+    pub(crate) include_fatal_file: bool,
     /// The write-back op of a read-modify-write dimension whose key the
     /// read already converted: (op array, op index).
     pub rw_dim_set: Option<(usize, usize)>,
@@ -3887,6 +3890,7 @@ impl Vm {
             sensitive_cache: std::cell::Cell::new((usize::MAX, 0, false)),
             weak_map_entries: HashMap::new(),
             compile_time_binding: false,
+            include_fatal_file: false,
             rw_dim_set: None,
             class_aliases: Default::default(),
             disabled_functions: std::collections::HashSet::new(),
@@ -25195,6 +25199,9 @@ impl Vm {
     #[inline]
     pub(crate) fn leave_op_array_file(&mut self, saved: Option<RcStr>) {
         if let Some(f) = saved {
+            if self.include_fatal_file && self.current_exception.is_none() {
+                return;
+            }
             self.current_file = f;
         }
     }
@@ -48953,6 +48960,9 @@ impl Vm {
                                                     // A fatal error in the included file ends
                                                     // the script; it is reported against that
                                                     // file (current_file is left pointing at it).
+                                                    if !self.exit_requested {
+                                                        self.include_fatal_file = true;
+                                                    }
                                                     self.pending_classes = saved_pending;
                                                     return Err(e);
                                                 }
