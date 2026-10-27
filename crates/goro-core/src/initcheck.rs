@@ -131,12 +131,16 @@ impl Vm {
             return None;
         }
         let call = self.pending_calls.last()?;
-        if call.target.closure || call.target.forward.is_some() || !call.named_args.is_empty() {
+        if call.target.closure || !call.named_args.is_empty() {
             return None;
         }
-        if !call.args.is_empty() {
-            return None;
-        }
+        // (no argument is sent yet: an object is the frame's $this the
+        // call carries)
+        let with_this = match call.args.as_slice() {
+            [] => false,
+            [Value::Object(_)] => true,
+            _ => return None,
+        };
         let name = call.name.as_bytes();
         if name.contains(&0) {
             return None;
@@ -147,11 +151,34 @@ impl Vm {
         if cls.is_empty() || method.is_empty() || method.contains(&b':') {
             return None;
         }
-        let cl = cls.to_ascii_lowercase();
-        if matches!(cl.as_slice(), b"self" | b"static" | b"parent") {
+        let mut cl = cls.to_ascii_lowercase();
+        match cl.as_slice() {
+            b"self" => cl = self.scope_top()?.to_ascii_lowercase(),
+            b"static" => {
+                cl = self
+                    .called_class_stack
+                    .last()
+                    .filter(|s| !s.is_empty())?
+                    .to_ascii_lowercase()
+            }
+            b"parent" => {
+                let scope = self.scope_top()?;
+                cl = self
+                    .classes
+                    .get(scope.as_slice())?
+                    .parent
+                    .as_ref()?
+                    .to_ascii_lowercase();
+            }
+            _ => {}
+        }
+        // (a keyword names a user class: its frame's $this decides)
+        let has_this = has_this || with_this;
+        let ml = method.to_ascii_lowercase();
+        // (constructors and magic methods have errors of their own)
+        if ml.starts_with(b"__") {
             return None;
         }
-        let ml = method.to_ascii_lowercase();
         let Some(c) = self
             .classes
             .get(cl.as_slice())

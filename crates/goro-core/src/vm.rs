@@ -31197,7 +31197,9 @@ impl Vm {
                         };
                         if let Some(name) = forward_fcall_name(op, &op_array.literals) {
                             self.push_forward_call(op_array, ip - 1, name, this.as_ref());
-                            if self.top_call_unresolved() {
+                            // (resolved too: an inaccessible / abstract method
+                            // fails at INIT, see init_static_call_error())
+                            {
                                 init_undefined_check!(
                                     self,
                                     exception_handlers,
@@ -31840,12 +31842,15 @@ impl Vm {
                                     });
                                 }
                             }
-                            if self
-                                .classes
-                                .get(&cls_lower)
-                                .map(|c| c.is_trait)
-                                .unwrap_or(false)
-                            {
+                            // (an abstract method fails first: no deprecation)
+                            if self.classes.get(&cls_lower).is_some_and(|c| {
+                                c.is_trait
+                                    && !c
+                                        .get_method(
+                                            &name.as_bytes()[pos + 2..].to_ascii_lowercase(),
+                                        )
+                                        .is_some_and(|m| m.is_abstract)
+                            }) {
                                 let tn = self
                                     .classes
                                     .get(&cls_lower)

@@ -4305,8 +4305,9 @@ impl crate::vm::Vm {
                 None
             };
             self.push_forward_call(op_array, ip, name, this.as_ref());
-            // (no such method: the dispatch loop's handler may throw)
-            if self.top_call_unresolved() {
+            // (no such method, or one INIT_STATIC_METHOD_CALL rejects: the
+            // dispatch loop's handler throws)
+            if self.top_call_unresolved() || self.init_static_call_error(this.is_some()).is_some() {
                 if let Some(mut call) = self.pending_calls.pop() {
                     self.recycle_args(&mut call);
                 }
