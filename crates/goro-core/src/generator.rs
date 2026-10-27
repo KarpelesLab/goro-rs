@@ -1190,11 +1190,18 @@ impl PhpGenerator {
                     };
                     let f = c.trace_frame(vm, &site);
                     vm.call_stack.push(f);
+                    // (at the child's `yield from`)
+                    let (yf_file, yf_line) = c.yield_from_site();
+                    let saved_file =
+                        (yf_line > 0).then(|| std::mem::replace(&mut vm.current_file, yf_file));
                     let exc = vm.create_exception(
                         b"ClosedGeneratorException",
                         "Generator yielded from aborted, no return value available",
-                        0,
+                        yf_line,
                     );
+                    if let Some(f) = saved_file {
+                        vm.current_file = f;
+                    }
                     vm.call_stack.pop();
                     vm.current_exception = Some(exc);
                     kick = Kick::Throw;

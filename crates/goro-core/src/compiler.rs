@@ -18319,6 +18319,13 @@ impl Compiler {
                 let lits_start = self.op_array.literals.len();
 
                 for elem in elements {
+                    // (ADD_ARRAY_ELEMENT / ADD_ARRAY_UNPACK: on the line
+                    // the element's value was compiled at)
+                    let el_line = if elem.value.span.line > 0 {
+                        elem.value.span.line
+                    } else {
+                        expr.span.line
+                    };
                     if elem.key.is_none()
                         && matches!(elem.value.kind, ExprKind::Null)
                         && elem.value.span.start == elem.value.span.end
@@ -18348,7 +18355,7 @@ impl Compiler {
                                             "Only arrays and Traversables can be unpacked, {} given",
                                             tname
                                         ),
-                                        line: expr.span.line,
+                                        line: el_line,
                                     });
                                 }
                             }
@@ -18359,7 +18366,7 @@ impl Compiler {
                             op1: OperandType::Tmp(arr_tmp),
                             op2: val,
                             result: OperandType::Unused,
-                            line: expr.span.line,
+                            line: el_line,
                         });
                     } else if elem.by_ref {
                         if matches!(&elem.value.kind, ExprKind::Variable(n) if n == b"GLOBALS") {
@@ -18382,15 +18389,14 @@ impl Compiler {
                                 Some(k) => Some(self.compile_expr(k)?),
                                 None => None,
                             };
-                            let ref_tmp =
-                                self.compile_property_ref(object, property, expr.span.line)?;
+                            let ref_tmp = self.compile_property_ref(object, property, el_line)?;
                             if let Some(key) = key {
                                 self.op_array.emit(Op {
                                     opcode: OpCode::ArraySetRef,
                                     op1: OperandType::Tmp(arr_tmp),
                                     op2: OperandType::Tmp(ref_tmp),
                                     result: key,
-                                    line: expr.span.line,
+                                    line: el_line,
                                 });
                             } else {
                                 self.op_array.emit(Op {
@@ -18398,7 +18404,7 @@ impl Compiler {
                                     op1: OperandType::Tmp(arr_tmp),
                                     op2: OperandType::Tmp(ref_tmp),
                                     result: OperandType::Unused,
-                                    line: expr.span.line,
+                                    line: el_line,
                                 });
                             }
                             continue;
@@ -18409,8 +18415,7 @@ impl Compiler {
                         };
                         // [&$a[k]]: the element binds to the (created) dimension.
                         if let ExprKind::ArrayAccess { array, index } = &elem.value.kind {
-                            let ref_tmp =
-                                self.compile_dim_ref(array, index.as_deref(), expr.span.line)?;
+                            let ref_tmp = self.compile_dim_ref(array, index.as_deref(), el_line)?;
                             self.op_array.emit(Op {
                                 opcode: if key.is_some() {
                                     OpCode::ArraySetRef
@@ -18420,7 +18425,7 @@ impl Compiler {
                                 op1: OperandType::Tmp(arr_tmp),
                                 op2: OperandType::Tmp(ref_tmp),
                                 result: key.unwrap_or(OperandType::Unused),
-                                line: expr.span.line,
+                                line: el_line,
                             });
                             continue;
                         }
@@ -18435,7 +18440,7 @@ impl Compiler {
                                 op1: OperandType::Cv(cv),
                                 op2: OperandType::Unused,
                                 result: OperandType::Unused,
-                                line: expr.span.line,
+                                line: el_line,
                             });
                             if let Some(key) = key {
                                 self.op_array.emit(Op {
@@ -18443,7 +18448,7 @@ impl Compiler {
                                     op1: OperandType::Tmp(arr_tmp),
                                     op2: OperandType::Cv(cv),
                                     result: key,
-                                    line: expr.span.line,
+                                    line: el_line,
                                 });
                             } else {
                                 self.op_array.emit(Op {
@@ -18451,7 +18456,7 @@ impl Compiler {
                                     op1: OperandType::Tmp(arr_tmp),
                                     op2: OperandType::Cv(cv),
                                     result: OperandType::Unused,
-                                    line: expr.span.line,
+                                    line: el_line,
                                 });
                             }
                         } else {
@@ -18462,7 +18467,7 @@ impl Compiler {
                                     op1: OperandType::Tmp(arr_tmp),
                                     op2: val,
                                     result: key,
-                                    line: expr.span.line,
+                                    line: el_line,
                                 });
                             } else {
                                 self.op_array.emit(Op {
@@ -18470,7 +18475,7 @@ impl Compiler {
                                     op1: OperandType::Tmp(arr_tmp),
                                     op2: val,
                                     result: OperandType::Unused,
-                                    line: expr.span.line,
+                                    line: el_line,
                                 });
                             }
                         }
@@ -18482,7 +18487,7 @@ impl Compiler {
                             op1: OperandType::Tmp(arr_tmp),
                             op2: val,
                             result: key,
-                            line: expr.span.line,
+                            line: el_line,
                         });
                     } else {
                         let val = self.compile_expr(&elem.value)?;
@@ -18491,7 +18496,7 @@ impl Compiler {
                             op1: OperandType::Tmp(arr_tmp),
                             op2: val,
                             result: OperandType::Unused,
-                            line: expr.span.line,
+                            line: el_line,
                         });
                     }
                 }
