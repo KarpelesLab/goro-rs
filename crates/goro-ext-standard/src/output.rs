@@ -304,7 +304,26 @@ fn zval_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u
             );
             for (name, value) in &props {
                 vm.write_output(&[prefix.as_bytes(), b"  [\"", name, b"\"]=>\n"].concat());
-                ZVAL_BIAS.with(|b| b.set(1));
+                if let (b"value", Value::String(s)) = (*name, value) {
+                    // A backed case's value is the declaration's literal
+                    // (a one-byte one is interned); goro's case table holds
+                    // it once more.
+                    if s.len() <= 1 {
+                        vm.write_output(
+                            &[
+                                prefix.as_bytes(),
+                                format!("  string({}) \"", s.len()).as_bytes(),
+                                s.as_bytes(),
+                                b"\" interned\n",
+                            ]
+                            .concat(),
+                        );
+                        continue;
+                    }
+                    ZVAL_BIAS.with(|b| b.set(2));
+                } else {
+                    ZVAL_BIAS.with(|b| b.set(1));
+                }
                 var_dump_value(vm, value, indent + 2, seen);
                 ZVAL_BIAS.with(|b| b.set(0));
             }
