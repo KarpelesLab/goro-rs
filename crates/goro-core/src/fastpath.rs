@@ -3162,6 +3162,19 @@ impl crate::vm::Vm {
         }
         // (`bound`'s $GLOBALS index, u32::MAX for none: a CV index is below)
         let bound_globals = bound.map(|g| g.unwrap_or(u32::MAX));
+        // (with typed references around: whether a variable may be bound to
+        // a reference, as one is when the run starts, or once an opcode
+        // that may bind one ran: see refs_may_bind!)
+        let mut check_refs = !refs_ok && cvs.iter().any(|v| matches!(v, Value::Reference(_)));
+        // (an opcode that may bind a variable to a reference: sends, calls,
+        // `&`, `global`, `static`, closures' captures, list(), foreach)
+        macro_rules! refs_may_bind {
+            () => {
+                if !refs_ok {
+                    check_refs = true;
+                }
+            };
+        }
         let next = 'run: loop {
             let Some(op) = ops.get(ip) else {
                 break 'run ip;
@@ -3177,13 +3190,16 @@ impl crate::vm::Vm {
             // Typed references exist: no opcode here works on a variable
             // bound to a reference (the general handlers check what is
             // written through it).
-            if !refs_ok && cv_operand_is_ref(op, cvs) {
+            // (looked at while a variable may be bound to one: see
+            // check_refs)
+            if !refs_ok && check_refs && cv_operand_is_ref(op, cvs) {
                 break 'run ip;
             }
             let fast = match op.opcode {
                 // A call by a constant plain function name (see the
                 // INIT_FCALL arm of the dispatch loop).
                 OpCode::InitFCall => {
+                    refs_may_bind!();
                     // (a call made here steps over release points too: the
                     // budget is looked at again)
                     quiet_left = -1;
@@ -3215,6 +3231,7 @@ impl crate::vm::Vm {
                 // A by-value argument of a call resolved when it was set up
                 // (see the SEND_VAL handler).
                 OpCode::SendVal => {
+                    refs_may_bind!();
                     let snapshot = send_snapshot(op_array, ip, op, cvs);
                     if self.send_val_fast(op, cvs, tmps, literals, snapshot, false)
                         || (matches!(op.op1, OperandType::Tmp(_))
@@ -3229,6 +3246,7 @@ impl crate::vm::Vm {
                 // A by-reference argument known as such at compile time
                 // (see send_ref_fast).
                 OpCode::SendRef => {
+                    refs_may_bind!();
                     if send_ref_fast(op_array, op, cvs, tmps, &mut self.pending_calls) {
                         Fast::Done
                     } else {
@@ -3238,6 +3256,7 @@ impl crate::vm::Vm {
                 // A non-variable argument of a user function's by-value
                 // parameter (SEND_VAL_EX / SEND_VAR_NO_REF_EX): sent as is.
                 OpCode::SendValChecked => {
+                    refs_may_bind!();
                     // (or of an internal function's by-value parameter; an
                     // array not as the first argument of the builtins taking
                     // an `array &$array` there: the general handler separates
@@ -3390,7 +3409,10 @@ impl crate::vm::Vm {
                     released!(rel, f, op)
                 }
                 // `&$cv[k]` (see fast_dim_get_ref)
-                OpCode::ArrayGetRef => fast_dim_get_ref(op, cvs, tmps, literals, &self.globals),
+                OpCode::ArrayGetRef => {
+                    refs_may_bind!();
+                    fast_dim_get_ref(op, cvs, tmps, literals, &self.globals)
+                }
                 // (on an array, FETCH_DIM_IS's isset answers as ISSET_ISEMPTY_DIM's)
                 OpCode::ArrayIsset | OpCode::ArrayIssetFetch => {
                     let rel = consumed!('run, op, ip);
@@ -3721,6 +3743,7 @@ impl crate::vm::Vm {
                 // A public method of a user class by a constant name (what
                 // the INIT_METHOD_CALL arm does first)
                 OpCode::InitMethodCall => {
+                    refs_may_bind!();
                     quiet_left = -1;
                     if matches!(op.op2, OperandType::Const(_))
                         && self.init_method_call_fast(op_array, ip, cvs, tmps)
@@ -3741,24 +3764,33 @@ impl crate::vm::Vm {
                     Fast::No => self.cached_instanceof(op_array, ip, cvs, tmps),
                     f => f,
                 },
-                OpCode::ForeachInit => self.fast_foreach_init(op, cvs, tmps, literals, fe),
+                OpCode::ForeachInit => {
+                    refs_may_bind!();
+                    self.fast_foreach_init(op, cvs, tmps, literals, fe)
+                }
                 OpCode::NewObject => match self.fast_new_object(op_array, ip, tmps) {
                     Some(next) => Fast::Jump(next),
                     None => break 'run ip,
                 },
                 // `list(...) = $v` (see fast_list_ops)
                 OpCode::LoadConst | OpCode::ListGet => {
+                    refs_may_bind!();
                     let rel = consumed!('run, op, ip);
                     let f = fast_list_ops(op, cvs, tmps, literals, &self.globals);
                     released!(rel, f, op)
                 }
                 // `$a = &$b` (see fast_assign_ref_cv)
                 OpCode::AssignRef if bound.is_none() => {
+                    refs_may_bind!();
                     fast_assign_ref_cv(op, cvs, tmps, no_release)
                 }
                 // The creation of a closure (see closure.rs).
-                OpCode::DeclareFunction if self.fast_declare_closure(op_array, op) => Fast::Done,
+                OpCode::DeclareFunction if self.fast_declare_closure(op_array, op) => {
+                    refs_may_bind!();
+                    Fast::Done
+                }
                 OpCode::MakeClosure => {
+                    refs_may_bind!();
                     let take = free_mask.get().get(ip).is_some_and(|m| m & 1 != 0);
                     if self.fast_make_closure(op_array, op, cvs, tmps, take) {
                         Fast::Done
@@ -3767,14 +3799,19 @@ impl crate::vm::Vm {
                     }
                 }
                 // (a frame bound to a symbol table rebinds itself: the general handler)
-                OpCode::BindGlobal if bound.is_none() => self.fast_bind_global(op, cvs, literals),
+                OpCode::BindGlobal if bound.is_none() => {
+                    refs_may_bind!();
+                    self.fast_bind_global(op, cvs, literals)
+                }
                 // A `static $v` (see leancall.rs).
                 OpCode::StaticVarInit | OpCode::StaticVarInitOrJmp if bound.is_none() => {
+                    refs_may_bind!();
                     self.fast_static_var(op_array, ip, cvs, tmps)
                 }
                 // A call of a plain user function: its callee's opcodes run
                 // here too, without a frame (see leancall.rs).
                 OpCode::DoFCall => {
+                    refs_may_bind!();
                     // (a lean call that failed in its callee, see
                     // builtincall.rs: the dispatch loop's DO_FCALL takes it)
                     if self.fast_call_failed.is_some() {

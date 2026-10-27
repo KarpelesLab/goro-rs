@@ -627,6 +627,9 @@ pub struct OpArray {
     fused_sends: FreshOnClone<Box<[std::cell::Cell<u8>]>>,
     /// See OpArray::static_sites().
     static_sites: FreshOnClone<std::cell::RefCell<Vec<StaticSite>>>,
+    /// The name of the frame of a call of this function a builtin makes
+    /// (see Vm::push_callback_display), once made.
+    callback_display: FreshOnClone<Box<str>>,
 }
 
 /// The cell of a static variable a declaration of it (StaticVarInit, at
@@ -1020,6 +1023,12 @@ impl OpArray {
         }
     }
 
+    /// See `callback_display`.
+    #[inline]
+    pub(crate) fn callback_display(&self) -> &std::cell::OnceCell<Box<str>> {
+        &self.callback_display.0
+    }
+
     /// Whether calls of this code may run without a frame of their own (see
     /// vm::leancall): 1 for a function, 2 for an instance method (its first
     /// variable is `$this`), 0 when its frame has to check or set up
@@ -1398,6 +1407,7 @@ impl OpArray {
             prop_ics: Default::default(),
             fused_sends: Default::default(),
             static_sites: Default::default(),
+            callback_display: Default::default(),
         }
     }
 

@@ -437,32 +437,64 @@ impl Vm {
     /// names it).
     #[inline]
     pub(crate) fn push_callback_display(&self, f: &crate::opcode::OpArray, out: &mut String) {
+        // (a function of the function and of its class's name, kept once
+        // the class was found)
+        if let Some(d) = f.callback_display().get() {
+            out.push_str(d);
+            return;
+        }
+        let start = out.len();
+        if self.push_callback_display_uncached(f, out) {
+            let _ = f.callback_display().set(out[start..].into());
+        }
+    }
+
+    /// push_callback_display(): the name made; whether it may be kept.
+    fn push_callback_display_uncached(&self, f: &crate::opcode::OpArray, out: &mut String) -> bool {
         if !f.display_name.is_empty() {
             // (a closure is qualified by its scope: Class::{closure:...})
             if let Some(sc) = f.scope_class.as_ref().filter(|_| {
                 crate::closure::is_closure_fn_name(&f.name)
                     && f.display_name.starts_with(b"{closure")
             }) {
-                match self.classes.get(sc) {
-                    Some(c) => push_lossy(out, &c.name),
-                    None => out.push_str(&self.builtin_canonical_name(sc)),
-                }
+                let found = match self.classes.get(sc) {
+                    Some(c) => {
+                        push_lossy(out, &c.name);
+                        true
+                    }
+                    None => {
+                        out.push_str(&self.builtin_canonical_name(sc));
+                        false
+                    }
+                };
                 out.push_str("::");
+                push_lossy(out, &f.display_name);
+                return found;
             }
             push_lossy(out, &f.display_name);
+            true
         } else if let Some(fcc) = &f.fcc_target_name {
             push_lossy(out, fcc);
+            true
         } else if let Some(sc) = &f.scope_class {
             let raw = String::from_utf8_lossy(&f.name);
             let m = raw.rsplit("::").next().unwrap_or(&raw);
-            match self.classes.get(sc) {
-                Some(c) => push_lossy(out, &c.name),
-                None => push_lossy(out, sc),
-            }
+            let found = match self.classes.get(sc) {
+                Some(c) => {
+                    push_lossy(out, &c.name);
+                    true
+                }
+                None => {
+                    push_lossy(out, sc);
+                    false
+                }
+            };
             out.push_str("::");
             out.push_str(m);
+            found
         } else {
             push_lossy(out, &f.name);
+            true
         }
     }
 }
