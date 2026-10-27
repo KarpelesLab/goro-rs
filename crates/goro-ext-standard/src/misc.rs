@@ -20454,6 +20454,10 @@ fn fstat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if fh.wrapper_type == "http" {
                 return Ok(Value::False);
             }
+            // php_stream_input_ops / php_stream_output_ops have no stat.
+            if fh.stream_type == "Input" || fh.stream_type == "Output" {
+                return Ok(Value::False);
+            }
             #[cfg(unix)]
             {
                 use std::os::unix::io::AsRawFd;
