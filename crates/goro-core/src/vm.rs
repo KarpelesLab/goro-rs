@@ -25674,24 +25674,31 @@ impl Vm {
         // The function's locals are released as its frame is left
         // (zend_leave_helper): their destructors run in the caller's context,
         // at the call's line, without this frame in backtraces.
-        let left_frame = if self.has_release_work() && self.top_frame_is_call_of(op_array) {
-            let f = self.call_stack.pop().unwrap();
-            let saved = (self.current_line, self.current_file.clone());
-            if f.2 > 0 {
-                self.current_line = f.2;
-            }
-            if !f.1.is_empty() && f.1 != "[internal function]" {
-                self.current_file = f.1.clone();
-            }
-            Some((f, saved))
+        // (a release point that would find nothing: stepped over, as
+        // run_pending_destructors() steps over it, without the frame
+        // juggling)
+        if !self.destructible_objects.is_empty() && self.quiet_release_budget() > 0 {
+            self.destructible_objects.skip_scan();
         } else {
-            None
-        };
-        self.run_pending_destructors();
-        if let Some((f, (line, file))) = left_frame {
-            self.call_stack.push(f);
-            self.current_line = line;
-            self.current_file = file;
+            let left_frame = if self.has_release_work() && self.top_frame_is_call_of(op_array) {
+                let f = self.call_stack.pop().unwrap();
+                let saved = (self.current_line, self.current_file.clone());
+                if f.2 > 0 {
+                    self.current_line = f.2;
+                }
+                if !f.1.is_empty() && f.1 != "[internal function]" {
+                    self.current_file = f.1.clone();
+                }
+                Some((f, saved))
+            } else {
+                None
+            };
+            self.run_pending_destructors_now();
+            if let Some((f, (line, file))) = left_frame {
+                self.call_stack.push(f);
+                self.current_line = line;
+                self.current_file = file;
+            }
         }
         // An exception thrown by a destructor run as the function's locals
         // are released propagates to the caller.
