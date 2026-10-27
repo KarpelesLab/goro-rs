@@ -5972,7 +5972,13 @@ pub fn ini_caller() -> &'static str {
 
 /// ini_set() called as `fname` (ini_set or its alias ini_alter)
 fn ini_set_as(vm: &mut Vm, args: &[Value], fname: &'static str) -> Result<Value, VmError> {
-    let prev = INI_CALLER.with(|c| c.replace(if c.get() == "ini_restore" { "ini_restore" } else { fname }));
+    let prev = INI_CALLER.with(|c| {
+        c.replace(if c.get() == "ini_restore" {
+            "ini_restore"
+        } else {
+            fname
+        })
+    });
     let r = ini_set_as_inner(vm, args, fname);
     INI_CALLER.with(|c| c.set(prev));
     r

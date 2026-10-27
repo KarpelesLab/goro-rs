@@ -114,7 +114,10 @@ impl Vm {
     /// How many running method frames have `obj` as `$this` (goro holds
     /// such a `$this` twice: the frame's This and its first variable slot).
     #[inline(never)]
-    pub fn frames_with_this(&self, obj: &std::rc::Rc<std::cell::RefCell<crate::object::PhpObject>>) -> usize {
+    pub fn frames_with_this(
+        &self,
+        obj: &std::rc::Rc<std::cell::RefCell<crate::object::PhpObject>>,
+    ) -> usize {
         self.gc_frames
             .iter()
             .filter(|f| !f.is_pin())

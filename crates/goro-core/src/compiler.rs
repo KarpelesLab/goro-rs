@@ -16145,6 +16145,36 @@ impl Compiler {
         }
     }
 
+    /// can_match_use_jumptable() folds the conditions (zend_eval_const_expr())
+    /// until one is no int or string: a folded constant expression is a new
+    /// ZVAL node on the line of the match's subject (CG(zend_lineno) then).
+    /// The conditions so folded (addresses).
+    #[inline(never)]
+    fn match_folded_conds(arms: &[goro_parser::ast::MatchArm]) -> Vec<usize> {
+        let mut out = Vec::new();
+        for arm in arms {
+            let Some(conds) = &arm.conditions else {
+                continue;
+            };
+            for c in conds {
+                match &c.kind {
+                    ExprKind::Int(_) | ExprKind::String(_) => continue,
+                    ExprKind::Float(_) => return out,
+                    _ => match Self::eval_const_expr(c) {
+                        Some(v) => {
+                            out.push(c as *const Expr as usize);
+                            if !matches!(v, Value::Long(_) | Value::String(_)) {
+                                return out;
+                            }
+                        }
+                        None => return out,
+                    },
+                }
+            }
+        }
+        out
+    }
+
     /// The line of a `const` declaration's ZEND_DECLARE_CONST: that of the
     /// last constant its value looks up at runtime (`stmt_line` if none);
     /// the value's oplines (evaluated by it in php-src) take it too.
@@ -19140,6 +19170,7 @@ impl Compiler {
                 let result_tmp = self.op_array.alloc_temp();
                 let mut end_jumps = Vec::new();
                 let mut default_start: Option<u32> = None;
+                let folded = Self::match_folded_conds(arms);
 
                 for arm in arms {
                     if let Some(conditions) = &arm.conditions {
@@ -19148,7 +19179,11 @@ impl Compiler {
                         for cond in conditions {
                             let cond_val = self.compile_expr(cond)?;
                             let cmp_tmp = self.op_array.alloc_temp();
-                            let cond_line = self.cur_lineno(expr.span.line);
+                            let cond_line = if folded.contains(&(cond as *const Expr as usize)) {
+                                subject_line
+                            } else {
+                                self.cur_lineno(expr.span.line)
+                            };
                             if !jumptable {
                                 match_error_line = cond_line;
                             }
