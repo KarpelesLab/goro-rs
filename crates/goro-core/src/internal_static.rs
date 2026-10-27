@@ -98,6 +98,64 @@ impl Vm {
         }
     }
 
+    /// zpp of Closure::bind(Closure $closure, ?object $newThis,
+    /// object|string|null $newScope = "static").
+    #[inline(never)]
+    fn closure_bind_zpp_error(args: &[Value]) -> Option<String> {
+        let n = args.iter().filter(|a| !matches!(a, Value::Undef)).count();
+        if !(2..=3).contains(&n) {
+            return Some(format!(
+                "Closure::bind() expects {} {} arguments, {} given",
+                if n < 2 { "at least" } else { "at most" },
+                if n < 2 { 2 } else { 3 },
+                n
+            ));
+        }
+        let c = args[0].deref();
+        if !c.is_closure_obj() {
+            return Some(format!(
+                "Closure::bind(): Argument #1 ($closure) must be of type Closure, {} given",
+                crate::vm::Vm::value_type_name(&c)
+            ));
+        }
+        let t = args[1].deref();
+        if !matches!(t, Value::Null | Value::Object(_)) {
+            return Some(format!(
+                "Closure::bind(): Argument #2 ($newThis) must be of type ?object, {} given",
+                crate::vm::Vm::value_type_name(&t)
+            ));
+        }
+        None
+    }
+
+    /// The frame name ("Class::method") of the VM-implemented static method
+    /// `target` (a `vm_static_builtin_target()` result).
+    #[inline(never)]
+    pub(crate) fn vm_static_builtin_frame_name(&self, target: &[u8]) -> String {
+        let sep = target
+            .windows(2)
+            .position(|w| w == b"::")
+            .unwrap_or(target.len());
+        let (class, method) = (&target[..sep], target.get(sep + 2..).unwrap_or(b""));
+        let class_display = if method == b"tokenize" {
+            "PhpToken".to_string()
+        } else {
+            self.classes
+                .get(class)
+                .map(|c| crate::value::display_class_name(&c.name).to_string())
+                .unwrap_or_else(|| self.builtin_canonical_name(class))
+        };
+        let method_display = match method {
+            b"tryfrom" => "tryFrom",
+            b"fromarray" => "fromArray",
+            b"fromcallable" => "fromCallable",
+            b"bindto" => "bindTo",
+            b"getcurrent" => "getCurrent",
+            m => return format!("{}::{}", class_display, crate::string::msg_str(m)),
+        };
+        format!("{}::{}", class_display, method_display)
+    }
+
     /// `Fiber::suspend()` called as a callback (call_user_func(), a
     /// ReflectionMethod, ...): its frame is already on the call stack. A
     /// FiberError, or an exception Fiber::throw() resumes it with, is left
@@ -161,11 +219,28 @@ impl Vm {
                 match cur {
                     Some(c) => c,
                     None => {
+                        // (thrown from its own frame)
+                        let push = self
+                            .call_stack
+                            .last()
+                            .is_none_or(|f| f.0 != "Closure::getCurrent");
+                        if push {
+                            self.call_stack.push((
+                                "Closure::getCurrent".to_string(),
+                                self.current_file.clone(),
+                                line,
+                                Vec::new(),
+                                false,
+                            ));
+                        }
                         let exc = self.create_exception(
                             b"Error",
                             "Current function is not a closure",
                             line,
                         );
+                        if push {
+                            self.call_stack.pop();
+                        }
                         self.current_exception = Some(exc);
                         Value::Null
                     }
@@ -228,6 +303,18 @@ impl Vm {
             b"closure::bind" | b"closure::bindto" => {
                 // Closure::bind($closure, $newThis, $newScope)
                 let closure = args.first().cloned().unwrap_or(Value::Null);
+                if name_lower == b"closure::bind" {
+                    if let Some(msg) = Self::closure_bind_zpp_error(args) {
+                        let cls: &[u8] = if msg.contains("expects") {
+                            b"ArgumentCountError"
+                        } else {
+                            b"TypeError"
+                        };
+                        let exc = self.create_exception(cls, &msg, line);
+                        self.current_exception = Some(exc);
+                        return Value::Null;
+                    }
+                }
                 let new_this = args.get(1).cloned().unwrap_or(Value::Null);
                 let scope = args
                     .get(2)

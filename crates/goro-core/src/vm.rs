@@ -34146,17 +34146,28 @@ impl Vm {
                             } else {
                                 None
                             };
+                        // The internal method has its own frame (in the
+                        // traces of what it throws, the user code it runs);
+                        // Closure::getCurrent() looks at its caller's.
                         // PhpToken::tokenize() runs user code (error handlers,
-                        // property defaults): it has its own frame.
+                        // property defaults): it has a real one.
                         let own_frame = func_name_lower.ends_with(b"::tokenize");
+                        let builtin_frame = !own_frame && !target.ends_with(b"::getcurrent");
+                        let frame_name = if own_frame || builtin_frame {
+                            self.vm_static_builtin_frame_name(&target)
+                        } else {
+                            String::new()
+                        };
                         if own_frame {
                             self.call_stack.push((
-                                "PhpToken::tokenize".to_string(),
+                                frame_name.clone(),
                                 self.current_file.clone(),
                                 op.line,
                                 call.args.clone(),
                                 false,
                             ));
+                        } else if builtin_frame {
+                            self.push_builtin_frame(frame_name.as_bytes(), &call.args, op.line);
                         }
                         let result = self.vm_static_builtin(
                             &target,
@@ -34168,7 +34179,10 @@ impl Vm {
                         );
                         if own_frame {
                             self.call_stack.pop();
+                        } else if builtin_frame {
+                            self.pop_builtin_frame();
                         }
+                        drop(frame_name);
                         if self.current_exception.is_some() {
                             if let Some((catch_target, _, _, _, saved_pc)) =
                                 exception_handlers.pop()
