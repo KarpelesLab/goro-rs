@@ -2796,12 +2796,17 @@ impl Compiler {
                             let msg_idx = self.op_array.add_literal(Value::String(
                                 crate::string::PhpString::from_vec(msg),
                             ));
+                            // (the send of the argument: on its line)
                             self.op_array.emit(Op {
                                 opcode,
                                 op1: OperandType::Const(msg_idx),
                                 op2: OperandType::Unused,
                                 result: OperandType::Unused,
-                                line,
+                                line: if arg.value.span.line > 0 {
+                                    arg.value.span.line
+                                } else {
+                                    line
+                                },
                             });
                         }
                     }
@@ -2848,6 +2853,17 @@ impl Compiler {
                             )
                             .into_bytes(),
                         ),
+                        // (a user function declared before: an expression
+                        // that is no function result, e.g. strlen($s)
+                        // compiled to an opcode, cannot be passed either)
+                        (false, None) => match self.declared_fn_cannot_pass_by_ref(func_name, i, line)
+                        {
+                            Some(m) => (OpCode::ThrowErrorMsg, m.into_bytes()),
+                            None => (
+                                OpCode::EmitNotice,
+                                b"Only variables should be passed by reference".to_vec(),
+                            ),
+                        },
                         _ => (
                             OpCode::EmitNotice,
                             b"Only variables should be passed by reference".to_vec(),
@@ -2856,12 +2872,17 @@ impl Compiler {
                     let msg_idx = self
                         .op_array
                         .add_literal(Value::String(crate::string::PhpString::from_vec(msg)));
+                    // (the send of the argument: on its line)
                     self.op_array.emit(Op {
                         opcode,
                         op1: OperandType::Const(msg_idx),
                         op2: OperandType::Unused,
                         result: OperandType::Unused,
-                        line,
+                        line: if arg.value.span.line > 0 {
+                                    arg.value.span.line
+                                } else {
+                                    line
+                                },
                     });
                 }
                 // For by-ref builtin args on $arr[$key], compile as
@@ -3057,6 +3078,9 @@ impl Compiler {
                     && !known_byval
                     && func_name.is_some()
                     && Self::is_call_expr(&arg.value)
+                    // (strlen($s) & co. compile to an opcode: a TMP, sent
+                    // with SEND_VAL_EX)
+                    && !self.is_special_builtin_call(&arg.value)
                 {
                     // f(g()) with f's parameter by reference: g()'s returned
                     // reference is passed; a by-value result raises a notice.
@@ -3219,7 +3243,9 @@ impl Compiler {
                     op1: val,
                     op2: OperandType::Const(pos_idx),
                     result: checked_kind.unwrap_or(OperandType::Unused),
-                    line,
+                    // (SEND_* is emitted once the argument is compiled:
+                    // CG(zend_lineno))
+                    line: self.zend_lineno.max(line),
                 });
             }
         }
@@ -15970,6 +15996,46 @@ impl Compiler {
         }
     }
 
+    /// zend_cannot_pass_by_reference() of argument `i` of the user function
+    /// `func_name` declared earlier in this file (None if it is not).
+    #[inline(never)]
+    fn declared_fn_cannot_pass_by_ref(
+        &self,
+        func_name: Option<&[u8]>,
+        i: usize,
+        line: u32,
+    ) -> Option<String> {
+        let n = func_name?;
+        let n = n.strip_prefix(b"\\").unwrap_or(n);
+        let f = self
+            .op_array
+            .child_functions
+            .iter()
+            .find(|f| f.name.eq_ignore_ascii_case(n) && f.decl_line <= line)?;
+        let shown = if f.display_name.is_empty() {
+            &f.name
+        } else {
+            &f.display_name
+        };
+        let pname = f
+            .cv_names
+            .get(i)
+            .filter(|_| f.variadic_param.is_none_or(|v| (i as u32) < v));
+        Some(match pname {
+            Some(p) => format!(
+                "{}(): Argument #{} (${}) could not be passed by reference",
+                String::from_utf8_lossy(shown),
+                i + 1,
+                String::from_utf8_lossy(p)
+            ),
+            None => format!(
+                "{}(): Argument #{} could not be passed by reference",
+                String::from_utf8_lossy(shown),
+                i + 1
+            ),
+        })
+    }
+
     /// A call zend_try_compile_special_func() turns into an opcode (the
     /// commonly used subset): a global internal function, unqualified only
     /// outside a namespace, called with plain positional arguments.
@@ -16299,8 +16365,29 @@ impl Compiler {
                 self.chain_base = false;
                 self.compile_variable_read(expr, name)
             }
+            ExprKind::FunctionCall { .. } if self.is_special_builtin_call(expr) => {
+                self.compile_special_builtin_call(expr)
+            }
             _ => self.compile_expr_other(expr),
         }
+    }
+
+    /// A call zend_try_compile_special_func() compiles to an opcode
+    /// (ZEND_STRLEN, ZEND_TYPE_CHECK, ...): emitted once its argument is
+    /// compiled, so on CG(zend_lineno), not the call's line.
+    #[inline(never)]
+    fn compile_special_builtin_call(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        let start = self.op_array.ops.len();
+        let r = self.compile_expr_other(expr)?;
+        let line = self.zend_lineno.max(expr.span.line);
+        if let Some(op) = self.op_array.ops[start..]
+            .iter_mut()
+            .rev()
+            .find(|o| o.opcode == OpCode::DoFCall)
+        {
+            op.line = line;
+        }
+        Ok(r)
     }
 
     /// compile_expr_inner() of a variable.
@@ -21534,12 +21621,15 @@ impl Compiler {
                         line: expr.span.line,
                     });
                 }
+                // (FETCH_OBJ_R is emitted once the property name is
+                // compiled: on its line)
+                let fetch_line = self.zend_lineno.max(property.span.line).max(expr.span.line);
                 self.op_array.emit(Op {
                     opcode: OpCode::PropertyGet,
                     op1: obj,
                     op2: prop_operand,
                     result: OperandType::Tmp(tmp),
-                    line: expr.span.line,
+                    line: fetch_line,
                 });
 
                 if let Some(jmp) = jmp_null {
