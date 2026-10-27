@@ -99,7 +99,43 @@ pub fn local_offset(t: &Time) -> TimeOffset {
 }
 
 /// php_date.c date_format()
+/// date_format() of "x-m-d H:i:s.u" (the `date` property of every
+/// DateTime) for a year of 0..=9999 and fields in range: what the general
+/// loop makes, without its formatting machinery. None otherwise.
+#[inline(never)]
+fn date_prop_format(t: &Time) -> Option<Vec<u8>> {
+    let two = |v: i64| (0..100).contains(&v).then_some(v as u8);
+    let (m, d, h, i, s) = (two(t.m)?, two(t.d)?, two(t.h)?, two(t.i)?, two(t.s)?);
+    if !(0..=9999).contains(&t.y) || !(0..1_000_000).contains(&t.us) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(26);
+    let y = t.y as u32;
+    out.extend_from_slice(&[
+        b'0' + (y / 1000) as u8,
+        b'0' + (y / 100 % 10) as u8,
+        b'0' + (y / 10 % 10) as u8,
+        b'0' + (y % 10) as u8,
+    ]);
+    for (sep, v) in [(b'-', m), (b'-', d), (b' ', h), (b':', i), (b':', s)] {
+        out.extend_from_slice(&[sep, b'0' + v / 10, b'0' + v % 10]);
+    }
+    out.push(b'.');
+    let us = t.us as u32;
+    let mut div = 100_000;
+    while div > 0 {
+        out.push(b'0' + (us / div % 10) as u8);
+        div /= 10;
+    }
+    Some(out)
+}
+
 pub fn date_format(format: &[u8], t: &Time, localtime: bool) -> Vec<u8> {
+    if format == b"x-m-d H:i:s.u" {
+        if let Some(s) = date_prop_format(t) {
+            return s;
+        }
+    }
     let mut out: Vec<u8> = Vec::new();
     if format.is_empty() {
         return out;

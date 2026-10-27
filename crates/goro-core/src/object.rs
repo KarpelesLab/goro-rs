@@ -185,7 +185,8 @@ pub(crate) struct InternalNewTemplate {
     pub(crate) tag: u32,
     /// The extension create_object hook its objects get, and how many hooks
     /// there were when it was looked up.
-    pub(crate) create_hook: Option<fn(&mut crate::vm::Vm, &std::rc::Rc<std::cell::RefCell<PhpObject>>)>,
+    pub(crate) create_hook:
+        Option<fn(&mut crate::vm::Vm, &std::rc::Rc<std::cell::RefCell<PhpObject>>)>,
     pub(crate) hooks_len: usize,
 }
 

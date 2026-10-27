@@ -438,9 +438,7 @@ impl Vm {
         };
         let throwable = if throwable {
             let at = |k: &[u8]| obj.properties.iter().position(|(n, _)| n.as_slice() == k);
-            let trace = obj
-                .throwable_private_key(b"trace")
-                .or_else(|| at(b"trace"));
+            let trace = obj.throwable_private_key(b"trace").or_else(|| at(b"trace"));
             match (at(b"file"), at(b"line"), trace) {
                 (Some(f), Some(l), Some(t)) => Some((f, l, t)),
                 _ => return,
@@ -505,7 +503,11 @@ impl Vm {
     /// The object the INIT_METHOD_CALL `op` calls a method of, when its
     /// operand holds one (a variable's reference is followed).
     #[inline]
-    fn method_call_object(op: &Op, cvs: &[Value], tmps: &[Value]) -> Option<Rc<RefCell<PhpObject>>> {
+    fn method_call_object(
+        op: &Op,
+        cvs: &[Value],
+        tmps: &[Value],
+    ) -> Option<Rc<RefCell<PhpObject>>> {
         match op.op1 {
             OperandType::Cv(i) => match cvs.get(i as usize)? {
                 Value::Object(o) => Some(Rc::clone(o)),
@@ -642,7 +644,12 @@ impl Vm {
     /// object as its only argument, the site's next calls for objects of
     /// the class are set up the same way (see init_internal_ctor_fast).
     #[inline(never)]
-    pub(crate) fn note_internal_ctor_site(&self, op_array: &OpArray, ip: usize, p: InternalCtorProbe) {
+    pub(crate) fn note_internal_ctor_site(
+        &self,
+        op_array: &OpArray,
+        ip: usize,
+        p: InternalCtorProbe,
+    ) {
         if self.current_exception.is_some()
             || self.pending_calls.len() != p.pending + 1
             || self.call_stack.len() != p.frames
@@ -767,7 +774,9 @@ impl Vm {
                 b"reflectionfunction" => 5,
                 b"reflectionproperty" => 6,
                 b"reflectionparameter" => 7,
-                b"reflectionclassconstant" | b"reflectionenumunitcase" | b"reflectionenumbackedcase" => 8,
+                b"reflectionclassconstant"
+                | b"reflectionenumunitcase"
+                | b"reflectionenumbackedcase" => 8,
                 _ => 0,
             };
             if k != 0 {
@@ -796,11 +805,15 @@ impl Vm {
             b"multipleiterator",
         ];
         let special_ancestor = h.parents_lower.iter().any(|p| {
-            SPECIAL.contains(&p.as_slice()) || p.starts_with(b"reflection") || p.ends_with(b"iterator")
+            SPECIAL.contains(&p.as_slice())
+                || p.starts_with(b"reflection")
+                || p.ends_with(b"iterator")
         });
         if chain.len() == 1 + h.parents_lower.len()
             && !special_ancestor
-            && self.object_construct_handlers.contains_key(lower.as_slice())
+            && self
+                .object_construct_handlers
+                .contains_key(lower.as_slice())
         {
             return 2;
         }
@@ -830,7 +843,10 @@ impl Vm {
                 break;
             };
             let pl = p.to_ascii_lowercase();
-            cur = self.classes.get(pl.as_slice()).and_then(|c| c.parent.clone());
+            cur = self
+                .classes
+                .get(pl.as_slice())
+                .and_then(|c| c.parent.clone());
             chain.push(pl);
         }
         if chain

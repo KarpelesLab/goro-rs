@@ -2332,10 +2332,8 @@ pub struct Vm {
     /// "class::method" (lowercase) -> whether the stub of that internal
     /// class (with its ancestors) lacks the method (see user_method_missing).
     pub(crate) stub_method_missing_memo: RefCell<crate::fxhash::FxHashMap<Vec<u8>, bool>>,
-    pub(crate) zpp_ctor_cache: crate::fxhash::FxHashMap<
-        Vec<u8>,
-        (usize, Option<(&'static crate::arginfo::FuncInfo, u8)>),
-    >,
+    pub(crate) zpp_ctor_cache:
+        crate::fxhash::FxHashMap<Vec<u8>, (usize, Option<(&'static crate::arginfo::FuncInfo, u8)>)>,
     /// Pending-call names of internal methods run at INIT time (see arginfo.rs)
     pub(crate) zpp_return_names:
         crate::fxhash::FxHashMap<Vec<u8>, crate::fxhash::FxHashMap<Vec<u8>, PhpString>>,
