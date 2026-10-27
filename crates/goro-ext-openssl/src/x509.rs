@@ -861,10 +861,10 @@ pub fn x509_req_print(c: &Csr) -> String {
             }
         }
     }
-    if c.attributes.iter().any(|(o, _)| is_ext_req(o)) {
-        s.push_str("            Requested Extensions:\n");
-        s.push_str(&print_exts(&c.extensions(), 16));
-    }
+    // X509_REQ_get_extensions() returns an empty stack (not NULL) when the
+    // request has no extensionRequest, so the header is always printed
+    s.push_str("            Requested Extensions:\n");
+    s.push_str(&print_exts(&c.extensions(), 16));
     s.push_str(&signature_print(&c.sig_alg, Some(&c.signature)));
     s
 }

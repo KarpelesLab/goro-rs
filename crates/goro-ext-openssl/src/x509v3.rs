@@ -447,6 +447,11 @@ pub fn ext_print(e: &Ext) -> Option<Vec<u8>> {
                     _ => {}
                 }
             }
+            // i2v_AUTHORITY_KEYID() of an empty AKID (self-signed) returns
+            // no list: X509V3_EXT_print() fails, the raw value is used
+            if lines.is_empty() {
+                return None;
+            }
             lines.join("\n")
         }
         OID_SAN | OID_IAN => {
@@ -817,8 +822,10 @@ fn make_general_name(
     value: &str,
     out: &mut Vec<Vec<u8>>,
 ) -> bool {
-    let lname = name.to_ascii_lowercase();
-    match lname.as_str() {
+    // ossl_v3_name_cmp(): case-sensitive, an optional ".suffix" allowed
+    // (the keys of an @section: DNS.1, IP.2, ...)
+    let base = name.split('.').next().unwrap_or(name);
+    match base {
         "email" => {
             if value == "copy" || value == "move" {
                 if let Some(n) = ctx.subject_name {
@@ -832,16 +839,16 @@ fn make_general_name(
             }
             out.push(asn1::implicit(1, value.as_bytes()));
         }
-        "dns" => out.push(asn1::implicit(2, value.as_bytes())),
-        "uri" => out.push(asn1::implicit(6, value.as_bytes())),
-        "ip" => match parse_ip(value) {
+        "DNS" => out.push(asn1::implicit(2, value.as_bytes())),
+        "URI" => out.push(asn1::implicit(6, value.as_bytes())),
+        "IP" => match parse_ip(value) {
             Some(b) => out.push(asn1::implicit(7, &b)),
             None => {
                 x509v3_err(118, "bad ip address");
                 return false;
             }
         },
-        "rid" => match obj::txt2obj(value) {
+        "RID" => match obj::txt2obj(value) {
             Some(o) => out.push(asn1::implicit(
                 8,
                 &asn1::oid_content(&o.oid).unwrap_or_default(),
@@ -851,7 +858,7 @@ fn make_general_name(
                 return false;
             }
         },
-        "dirname" => {
+        "dirName" => {
             let Some(sect) = conf.section(value) else {
                 x509v3_err(150, "section not found");
                 return false;
@@ -877,7 +884,7 @@ fn make_general_name(
             }
             out.push(asn1::explicit(4, &n.to_der()));
         }
-        "othername" => {
+        "otherName" => {
             // OID;TYPE:value  (UTF8 only)
             let Some((oidpart, rest)) = value.split_once(';') else {
                 x509v3_err(147, "invalid othername");
@@ -931,6 +938,384 @@ fn general_names(
     Some(asn1::seq(&out))
 }
 
+fn asn1_gen_err(reason: u32, text: &str) {
+    crate::err::push(crate::err::LIB_ASN1, reason, text);
+}
+
+/// ASN1_generate_v3(): the "[modifier,]...TYPE:value" mini-language of
+/// generic configuration extensions (primitive types, SEQUENCE/SET from a
+/// section, EXPLICIT/IMPLICIT tagging, OCTWRAP/SEQWRAP/SETWRAP/BITWRAP and
+/// FORMAT:ASCII|UTF8|HEX|BITLIST).
+#[inline(never)]
+fn asn1_generate(conf: &Conf, s: &str, depth: usize) -> Option<Vec<u8>> {
+    if depth > 50 {
+        asn1_gen_err(181, "illegal nested tagging");
+        return None;
+    }
+    // modifiers, then the type
+    // EXPLICIT tags and *WRAPs in order (the last listed is innermost);
+    // a single IMPLICIT tag replaces the base type's
+    let mut outer: Vec<Result<u8, &str>> = Vec::new();
+    let mut implicit: Option<u8> = None;
+    let mut format = "ASCII";
+    let mut rest = s.trim_start();
+    let parse_tag = |v: &str| -> Option<u8> {
+        let v = v.trim();
+        let (num, class) = match v.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
+            Some((i, _)) => (&v[..i], &v[i..]),
+            None => (v, ""),
+        };
+        let n: u8 = num.parse().ok().filter(|n| *n < 31)?;
+        let cls = match class {
+            "" | "C" => 0x80,
+            "A" => 0x40,
+            "P" => 0xc0,
+            "U" => 0x00,
+            _ => return None,
+        };
+        Some(cls | n)
+    };
+    let (ty, value) = loop {
+        let (item, tail) = match rest.find(',') {
+            Some(i)
+                if rest[..i].split(':').next().is_some_and(|k| {
+                    matches!(
+                        k.trim(),
+                        "EXP"
+                            | "EXPLICIT"
+                            | "IMP"
+                            | "IMPLICIT"
+                            | "OCTWRAP"
+                            | "SEQWRAP"
+                            | "SETWRAP"
+                            | "BITWRAP"
+                            | "FORM"
+                            | "FORMAT"
+                    )
+                }) =>
+            {
+                (&rest[..i], Some(&rest[i + 1..]))
+            }
+            _ => (rest, None),
+        };
+        let (k, v) = match item.split_once(':') {
+            Some((k, v)) => (k.trim(), Some(v)),
+            None => (item.trim(), None),
+        };
+        match k {
+            "EXP" | "EXPLICIT" | "IMP" | "IMPLICIT" => {
+                let Some(t) = v.and_then(parse_tag) else {
+                    asn1_gen_err(186, "invalid modifier");
+                    return None;
+                };
+                if k.starts_with("EXP") {
+                    outer.push(Ok(t));
+                } else if implicit.replace(t).is_some() {
+                    asn1_gen_err(179, "illegal implicit tag");
+                    return None;
+                }
+            }
+            "OCTWRAP" | "SEQWRAP" | "SETWRAP" | "BITWRAP" => outer.push(Err(k)),
+            "FORM" | "FORMAT" => match v.map(str::trim) {
+                Some(f @ ("ASCII" | "UTF8" | "HEX" | "BITLIST")) => format = f,
+                _ => {
+                    asn1_gen_err(177, "illegal format");
+                    return None;
+                }
+            },
+            _ => break (k, v.unwrap_or("")),
+        }
+        match tail {
+            Some(t) => rest = t.trim_start(),
+            None => {
+                asn1_gen_err(194, "unknown tag");
+                return None;
+            }
+        }
+    };
+    let str_tag = |t: &str| -> Option<u8> {
+        Some(match t {
+            "UNIVERSALSTRING" | "UNIV" => 0x1c,
+            "IA5" | "IA5STRING" => asn1::IA5_STRING,
+            "UTF8" | "UTF8String" => asn1::UTF8_STRING,
+            "BMP" | "BMPSTRING" => 0x1e,
+            "VISIBLESTRING" | "VISIBLE" => 0x1a,
+            "PRINTABLESTRING" | "PRINTABLE" => 0x13,
+            "T61" | "T61STRING" | "TELETEXSTRING" => 0x14,
+            "GeneralString" | "GENSTR" => 0x1b,
+            "NUMERIC" | "NUMERICSTRING" => 0x12,
+            _ => return None,
+        })
+    };
+    let text = |v: &str| -> Option<Vec<u8>> {
+        match format {
+            "HEX" => {
+                let b = hexstr2buf(v);
+                if b.is_none() {
+                    asn1_gen_err(178, "illegal hex");
+                }
+                b
+            }
+            _ => Some(v.as_bytes().to_vec()),
+        }
+    };
+    let mut der = match ty {
+        "BOOL" | "BOOLEAN" => match get_bool(value.trim()) {
+            Some(b) if format == "ASCII" => asn1::boolean(b),
+            r => {
+                if format == "ASCII" && r.is_none() {
+                    // X509V3_bool_from_string()
+                    x509v3_err(104, "invalid boolean string");
+                }
+                asn1_gen_err(176, "illegal boolean");
+                return None;
+            }
+        },
+        "NULL" => {
+            if !value.is_empty() {
+                asn1_gen_err(182, "illegal null value");
+                return None;
+            }
+            asn1::null()
+        }
+        "INT" | "INTEGER" | "ENUM" | "ENUMERATED" => {
+            if format != "ASCII" {
+                asn1_gen_err(185, "integer not ascii format");
+                return None;
+            }
+            let v = value.trim();
+            let (neg, digits) = match v.strip_prefix('-') {
+                Some(d) => (true, d),
+                None => (false, v),
+            };
+            let n = match digits
+                .strip_prefix("0x")
+                .or_else(|| digits.strip_prefix("0X"))
+            {
+                Some(h) => i64::from_str_radix(h, 16).ok(),
+                None => digits.parse::<i64>().ok(),
+            };
+            let Some(n) = n else {
+                // s2i_ASN1_INTEGER()
+                x509v3_err(100, "bn dec2bn error");
+                asn1_gen_err(180, "illegal integer");
+                return None;
+            };
+            let mut d = asn1::int_i64(if neg { -n } else { n });
+            if ty.starts_with("ENUM") {
+                d[0] = 0x0a;
+            }
+            d
+        }
+        "OID" | "OBJECT" => match obj::txt2obj(value.trim()) {
+            Some(o) if format == "ASCII" => asn1::oid(&o.oid),
+            _ => {
+                asn1_gen_err(183, "illegal object");
+                return None;
+            }
+        },
+        "UTCTIME" | "UTC" | "GENERALIZEDTIME" | "GENTIME" => {
+            let t = if ty.starts_with('U') {
+                asn1::UTC_TIME
+            } else {
+                asn1::GENERALIZED_TIME
+            };
+            if format != "ASCII" {
+                asn1_gen_err(193, "time not ascii format");
+                return None;
+            }
+            if crate::cert::asn1_time_to_unix(t, value.as_bytes()).is_none() {
+                asn1_gen_err(184, "illegal time value");
+                return None;
+            }
+            asn1::tlv(t, value.as_bytes())
+        }
+        "OCT" | "OCTETSTRING" => asn1::octet(&text(value)?),
+        "BITSTR" | "BITSTRING" => {
+            if format == "BITLIST" {
+                let mut bits = Vec::new();
+                for b in value.split(',') {
+                    match b.trim().parse::<usize>() {
+                        Ok(i) => bits.push(i),
+                        Err(_) => {
+                            asn1_gen_err(187, "invalid number");
+                            return None;
+                        }
+                    }
+                }
+                encode_bits(&bits)
+            } else {
+                asn1::bitstr(&text(value)?)
+            }
+        }
+        "SEQUENCE" | "SEQ" | "SET" => {
+            let mut items = Vec::new();
+            if !value.trim().is_empty() {
+                let Some(sect) = conf.section(value.trim()) else {
+                    return None;
+                };
+                for (_, v) in sect {
+                    items.push(asn1_generate(conf, v, depth + 1)?);
+                }
+            }
+            if ty == "SET" {
+                asn1::set_of(&items)
+            } else {
+                asn1::seq(&items)
+            }
+        }
+        t => match str_tag(t) {
+            Some(tag) => {
+                let raw = text(value)?;
+                let content = match (tag, format) {
+                    (0x1e, "ASCII" | "UTF8") => String::from_utf8_lossy(&raw)
+                        .encode_utf16()
+                        .flat_map(|u| u.to_be_bytes())
+                        .collect(),
+                    (0x1c, "ASCII" | "UTF8") => String::from_utf8_lossy(&raw)
+                        .chars()
+                        .flat_map(|c| (c as u32).to_be_bytes())
+                        .collect(),
+                    _ => raw,
+                };
+                asn1::tlv(tag, &content)
+            }
+            None => {
+                // asn1_cb() and then ASN1_generate_v3() both report it
+                asn1_gen_err(194, "unknown tag");
+                asn1_gen_err(194, "unknown tag");
+                return None;
+            }
+        },
+    };
+    if let Some(t) = implicit {
+        der[0] = t | (der[0] & 0x20);
+    }
+    for op in outer.iter().rev() {
+        der = match op {
+            Ok(t) => asn1::tlv(*t | 0x20, &der),
+            Err("OCTWRAP") => asn1::octet(&der),
+            Err("SEQWRAP") => asn1::tlv(asn1::SEQUENCE, &der),
+            Err("SETWRAP") => asn1::tlv(asn1::SET, &der),
+            Err(_) => asn1::bitstr(&der),
+        };
+    }
+    Some(der)
+}
+
+/// ossl_v3_name_cmp(): `name` is `cmp` or `cmp.<anything>`.
+fn v3_name_is(name: &str, cmp: &str) -> bool {
+    name == cmp
+        || name
+            .strip_prefix(cmp)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
+/// policy_section(): one PolicyInformation from an @section.
+fn policy_section(conf: &Conf, sect: &[(String, String)], ia5org: bool) -> Result<Vec<u8>, ()> {
+    let mut pid = None;
+    let mut quals = Vec::new();
+    for (k, v) in sect {
+        if k == "policyIdentifier" {
+            match obj::txt2obj(v) {
+                Some(o) => pid = Some(o.oid),
+                None => {
+                    x509v3_err(110, "invalid object identifier");
+                    return Err(());
+                }
+            }
+        } else if v3_name_is(k, "CPS") {
+            quals.push(asn1::seq(&[asn1::oid("1.3.6.1.5.5.7.2.1"), ia5(v)]));
+        } else if v3_name_is(k, "userNotice") {
+            let Some(name) = v.strip_prefix('@') else {
+                x509v3_err(137, "expected a section name");
+                return Err(());
+            };
+            let Some(unot) = conf.section(name) else {
+                x509v3_err(135, "invalid section");
+                return Err(());
+            };
+            quals.push(notice_section(unot, ia5org)?);
+        } else {
+            x509v3_err(138, "invalid option");
+            return Err(());
+        }
+    }
+    let Some(pid) = pid else {
+        // no NULL check: the absent policyIdentifier fails at i2d time
+        crate::err::push(crate::err::LIB_ASN1, 222, "illegal zero content");
+        x509v3_err(crate::err::RFLAG_COMMON | 13, "ASN1 lib");
+        return Err(());
+    };
+    let mut p = vec![asn1::oid(&pid)];
+    if !quals.is_empty() {
+        p.push(asn1::seq(&quals));
+    }
+    Ok(asn1::seq(&p))
+}
+
+/// notice_section(): a UserNotice policy qualifier.
+fn notice_section(unot: &[(String, String)], ia5org: bool) -> Result<Vec<u8>, ()> {
+    let mut exptext = None;
+    let mut org: Option<Vec<u8>> = None;
+    let mut nos: Option<Vec<Vec<u8>>> = None;
+    for (k, v) in unot {
+        match k.as_str() {
+            "explicitText" => {
+                // displaytext_get_tag_len(): an optional string type prefix
+                let (tag, text) = match v.split_once(':') {
+                    Some(("UTF8" | "UTF8String", t)) => (asn1::UTF8_STRING, t),
+                    Some(("BMP" | "BMPString", t)) => (0x1e, t),
+                    Some(("VISIBLE" | "VisibleString", t)) => (0x1a, t),
+                    _ => (0x1a, v.as_str()),
+                };
+                let content = if tag == 0x1e {
+                    text.encode_utf16().flat_map(|u| u.to_be_bytes()).collect()
+                } else {
+                    text.as_bytes().to_vec()
+                };
+                exptext = Some(asn1::tlv(tag, &content));
+            }
+            "organization" => {
+                let tag = if ia5org { asn1::IA5_STRING } else { 0x1a };
+                org = Some(asn1::tlv(tag, v.as_bytes()));
+            }
+            "noticeNumbers" => {
+                let list = parse_list(v);
+                if list.is_empty() {
+                    x509v3_err(141, "invalid numbers");
+                    return Err(());
+                }
+                let mut ints = nos.take().unwrap_or_default();
+                for (n, _) in list {
+                    match n.trim().parse::<i64>() {
+                        Ok(i) => ints.push(asn1::int_i64(i)),
+                        Err(_) => {
+                            x509v3_err(141, "invalid numbers");
+                            return Err(());
+                        }
+                    }
+                }
+                nos = Some(ints);
+            }
+            _ => {
+                x509v3_err(138, "invalid option");
+                return Err(());
+            }
+        }
+    }
+    let mut un = Vec::new();
+    if org.is_some() || nos.is_some() {
+        let tag = if ia5org { asn1::IA5_STRING } else { 0x1a };
+        let o = org.unwrap_or_else(|| asn1::tlv(tag, b""));
+        un.push(asn1::seq(&[o, asn1::seq(&nos.unwrap_or_default())]));
+    }
+    if let Some(t) = exptext {
+        un.push(t);
+    }
+    Ok(asn1::seq(&[asn1::oid("1.3.6.1.5.5.7.2.2"), asn1::seq(&un)]))
+}
+
 fn ia5(v: &str) -> Vec<u8> {
     asn1::tlv(asn1::IA5_STRING, v.as_bytes())
 }
@@ -948,8 +1333,31 @@ pub fn make_ext(conf: &Conf, ctx: &V3Ctx, name: &str, value: &str) -> Result<Opt
             x509v3_err(129, "extension name error");
             return Err(());
         };
+        // OPENSSL_hexstr2buf()
+        let digits = rest.chars().filter(|c| *c != ':').count();
         let Some(b) = hexstr2buf(rest) else {
-            x509v3_err(115, "invalid extension string");
+            if rest.chars().any(|c| c != ':' && !c.is_ascii_hexdigit()) {
+                crate::err::push(crate::err::LIB_CRYPTO, 102, "illegal hex digit");
+            } else if digits % 2 == 1 {
+                crate::err::push(crate::err::LIB_CRYPTO, 103, "odd number of digits");
+            }
+            x509v3_err(116, "extension value error");
+            return Err(());
+        };
+        return Ok(Some(Ext {
+            oid: o.oid,
+            critical,
+            value: b,
+        }));
+    }
+    if let Some(rest) = value.strip_prefix("ASN1:") {
+        // v3_generic_extension() with ASN1_generate_v3()
+        let Some(o) = obj::txt2obj(name) else {
+            x509v3_err(115, "extension name error");
+            return Err(());
+        };
+        let Some(b) = asn1_generate(conf, rest, 0) else {
+            x509v3_err(116, "extension value error");
             return Err(());
         };
         return Ok(Some(Ext {
@@ -1200,34 +1608,24 @@ pub fn make_ext(conf: &Conf, ctx: &V3Ctx, name: &str, value: &str) -> Result<Opt
             asn1::seq(&ads)
         }
         OID_CERTPOL => {
+            // r2i_certpol()
             let mut pols = Vec::new();
-            for (n, _) in parse_list(value) {
+            let mut ia5org = false;
+            for (n, v) in parse_list(value) {
+                if v.is_some() {
+                    x509v3_err(134, "invalid policy identifier");
+                    return Err(());
+                }
                 if n == "ia5org" {
+                    ia5org = true;
                     continue;
                 }
                 if let Some(sect) = n.strip_prefix('@') {
                     let Some(s) = conf.section(sect) else {
-                        x509v3_err(150, "section not found");
+                        x509v3_err(135, "invalid section");
                         return Err(());
                     };
-                    let mut pid = None;
-                    let mut quals = Vec::new();
-                    for (k, v) in s {
-                        if k == "policyIdentifier" {
-                            pid = obj::txt2obj(v).map(|o| o.oid);
-                        } else if k.starts_with("CPS") {
-                            quals.push(asn1::seq(&[asn1::oid("1.3.6.1.5.5.7.2.1"), ia5(v)]));
-                        }
-                    }
-                    let Some(pid) = pid else {
-                        x509v3_err(136, "no policy identifier");
-                        return Err(());
-                    };
-                    let mut p = vec![asn1::oid(&pid)];
-                    if !quals.is_empty() {
-                        p.push(asn1::seq(&quals));
-                    }
-                    pols.push(asn1::seq(&p));
+                    pols.push(policy_section(conf, s, ia5org)?);
                 } else {
                     match obj::txt2obj(&n) {
                         Some(o) => pols.push(asn1::seq(&[asn1::oid(&o.oid)])),
@@ -1280,12 +1678,17 @@ pub fn add_section(conf: &Conf, ctx: &mut V3Ctx, section: &str, out: &mut Vec<Ex
             Ok(Some(e)) => out.push(e),
             Ok(None) => {}
             Err(()) => {
-                err::push_str(
-                    format!("error:11000000:X509 V3 routines::name={}, value={}", n, v).replace(
-                        "error:11000000:X509 V3 routines::",
-                        "error:11000080:X509 V3 routines::error in extension: ",
-                    ),
-                );
+                // ERR_raise_data(..., "name=%s, value=%s"): the data is not
+                // part of ERR_error_string_n()'s text. Generic DER:/ASN1:
+                // extensions (v3_generic_extension()) add nothing.
+                let v = v.trim();
+                let v = v
+                    .strip_prefix("critical,")
+                    .map(str::trim_start)
+                    .unwrap_or(v);
+                if !v.starts_with("DER:") && !v.starts_with("ASN1:") {
+                    x509v3_err(128, "error in extension");
+                }
                 return false;
             }
         }
