@@ -14961,6 +14961,12 @@ fn mkdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = path_v.to_msg_string();
     let path = strip_file_scheme(&path).unwrap_or(path);
     let recursive = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
+    // php_plain_files_mkdir(): expand_filepath_with_mode() of an empty
+    // path fails.
+    if recursive && path.is_empty() {
+        vm.emit_warning("mkdir(): Invalid path");
+        return Ok(Value::False);
+    }
     // php_plain_files_mkdir(): a recursive mkdir of an existing path fails
     // like a plain one ("File exists").
     // mkdir(2) with the requested mode (the umask applies), for each missing
