@@ -341,6 +341,27 @@ impl Vm {
         v
     }
 
+    /// recycle_values() of `a` then `b` (emptied), at once.
+    #[inline(always)]
+    fn recycle_pair(&mut self, a: Vec<Value>, b: Vec<Value>) {
+        let pool = &mut self.value_pool;
+        let ok = |v: &Vec<Value>| v.capacity() != 0 && v.capacity() <= 256;
+        if pool.len() + 2 <= 64 && pool.capacity() - pool.len() >= 2 && ok(&a) && ok(&b) {
+            debug_assert!(a.is_empty() && b.is_empty());
+            let n = pool.len();
+            // SAFETY: within the capacity checked; both are written.
+            unsafe {
+                let p = pool.as_mut_ptr().add(n);
+                p.write(a);
+                p.add(1).write(b);
+                pool.set_len(n + 2);
+            }
+        } else {
+            self.recycle_values(a);
+            self.recycle_values(b);
+        }
+    }
+
     /// The top pending call, taken for a lean call of its function.
     #[inline(always)]
     fn pop_lean_call(&mut self) -> PendingCall {
@@ -1062,8 +1083,7 @@ impl Vm {
             release_slots(&mut ctmps);
             release_slots(&mut slots);
         }
-        self.recycle_values(ctmps);
-        self.recycle_values(slots);
+        self.recycle_pair(ctmps, slots);
         // (objects with a destructor exist: the release points of the end
         // of the frame and of DO_FCALL's release of the arguments)
         if listed {
@@ -2161,8 +2181,7 @@ impl Vm {
             release_slots(&mut ctmps);
             release_slots(&mut slots);
         }
-        self.recycle_values(ctmps);
-        self.recycle_values(slots);
+        self.recycle_pair(ctmps, slots);
         if listed {
             // (the release point of the end of the frame; a destructor that
             // throws fails the call, below)
