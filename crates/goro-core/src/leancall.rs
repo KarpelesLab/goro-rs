@@ -1263,6 +1263,13 @@ impl Vm {
             }
             display.push_str("::");
             push_lossy(&mut display, &call.name.as_bytes()[sep + 2..]);
+        } else if let Some(n) = method_sep
+            .is_none()
+            .then(|| super::declared_fn_name(call.name.as_bytes(), &user_fn.name))
+            .flatten()
+        {
+            // (a function's frame is named as declared, not as called)
+            push_lossy(&mut display, n);
         } else {
             push_lossy(&mut display, call.name.as_bytes());
         }

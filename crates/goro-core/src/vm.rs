@@ -19589,6 +19589,29 @@ pub(crate) fn forward_fcall_name<'a>(
     Some(s)
 }
 
+/// The declared name of the plain function `fn_name` a call by `called`
+/// runs (a frame shows it, not the call's spelling): `called` in another
+/// case, or the namespaced name that fell back to the global function.
+#[inline]
+pub(crate) fn declared_fn_name<'a>(called: &[u8], fn_name: &'a [u8]) -> Option<&'a [u8]> {
+    if called == fn_name {
+        return None;
+    }
+    declared_fn_name_slow(called, fn_name)
+}
+
+#[inline(never)]
+fn declared_fn_name_slow<'a>(called: &[u8], fn_name: &'a [u8]) -> Option<&'a [u8]> {
+    if fn_name.is_empty() || called.windows(2).any(|w| w == b"::") {
+        return None;
+    }
+    let base = match called.iter().rposition(|&b| b == b'\\') {
+        Some(p) if !fn_name.contains(&b'\\') => &called[p + 1..],
+        _ => called,
+    };
+    base.eq_ignore_ascii_case(fn_name).then_some(fn_name)
+}
+
 /// Append `b` to `dst` as String::from_utf8_lossy() renders it.
 #[inline]
 fn push_lossy(dst: &mut String, b: &[u8]) {
@@ -24167,6 +24190,8 @@ impl Vm {
             std::borrow::Cow::Borrowed(n.as_str())
         } else if !user_fn.display_name.is_empty() {
             String::from_utf8_lossy(&user_fn.display_name)
+        } else if let Some(n) = declared_fn_name(call.name.as_bytes(), &user_fn.name) {
+            String::from_utf8_lossy(n)
         } else {
             String::from_utf8_lossy(call.name.as_bytes())
         };
@@ -33243,6 +33268,12 @@ impl Vm {
                             }
                             display.push_str("::");
                             push_lossy(&mut display, &call.name.as_bytes()[sep + 2..]);
+                        } else if let Some(n) = method_sep
+                            .is_none()
+                            .then(|| declared_fn_name(call.name.as_bytes(), &user_fn.name))
+                            .flatten()
+                        {
+                            push_lossy(&mut display, n);
                         } else {
                             push_lossy(&mut display, call.name.as_bytes());
                         }
@@ -37220,6 +37251,9 @@ impl Vm {
                                 .map(|c| crate::string::msg_str(&c.name).to_string())
                                 .unwrap_or_else(|| crate::string::msg_str(scope).to_string());
                             format!("{}::{}", class_display, method_name)
+                        } else if let Some(n) = declared_fn_name(call.name.as_bytes(), &user_fn.name)
+                        {
+                            String::from_utf8_lossy(n).into_owned()
                         } else {
                             raw_display
                         };

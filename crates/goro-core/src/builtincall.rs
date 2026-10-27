@@ -929,6 +929,10 @@ impl Vm {
                     display.push_str("::");
                     push_lossy(&mut display, &call.name.as_bytes()[sep + 2..]);
                 }
+                (None, _, _) => match super::declared_fn_name(call.name.as_bytes(), &f.name) {
+                    Some(n) => push_lossy(&mut display, n),
+                    None => push_lossy(&mut display, call.name.as_bytes()),
+                },
                 _ => push_lossy(&mut display, call.name.as_bytes()),
             }
             let base = usize::from(lf.sep.is_some_and(|(_, this)| this));
