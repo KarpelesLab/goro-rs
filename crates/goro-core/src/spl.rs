@@ -50,37 +50,9 @@ impl Vm {
     /// compared against strings (calls the user's __toString); an
     /// uncomparable pair is 1 (ZEND_UNCOMPARABLE).
     pub(crate) fn spl_compare_values(&mut self, a: &Value, b: &Value) -> i64 {
-        let a = a.deref();
-        let b = b.deref();
-        match (&a, &b) {
-            (Value::Object(_), Value::String(_)) | (Value::String(_), Value::Object(_)) => {
-                let obj_left = matches!(a, Value::Object(_));
-                let o = if obj_left { &a } else { &b };
-                let cl = if let Value::Object(ob) = o {
-                    obj_class_lower(ob)
-                } else {
-                    Vec::new()
-                };
-                let has_ts = self
-                    .classes
-                    .get(&cl)
-                    .map(|c| c.get_method(b"__tostring").is_some())
-                    .unwrap_or(false);
-                if has_ts {
-                    let s = Value::String(self.value_to_string(o));
-                    if self.current_exception.is_some() {
-                        return 0;
-                    }
-                    return if obj_left {
-                        s.compare_zend(&b)
-                    } else {
-                        a.compare_zend(&s)
-                    };
-                }
-                a.compare_zend(&b)
-            }
-            _ => a.compare_zend(&b),
-        }
+        // zend_compare(): object handlers, __toString(), and the "could not
+        // be converted" notices of an uncomparable object
+        self.zend_compare(&a.deref(), &b.deref())
     }
 
     /// Properties of the object as zend_std_get_properties would expose
@@ -155,6 +127,12 @@ impl Vm {
         }
     }
 
+    /// A callback `[$splObject, 'method']` run as the method's deferred call
+    /// (spl_should_defer()).
+    pub fn spl_callback_deferred(&self, class_lower: &[u8], method_lower: &[u8]) -> bool {
+        self.spl_should_defer(class_lower, method_lower)
+    }
+
     /// `parent::m()` / `self::m()` / `SplX::m()` naming a stubbed method of
     /// the built-in SPL class `class_lower` with `this` an instance of it:
     /// run as the deferred method call (deprecation, arity, named
@@ -203,6 +181,20 @@ impl Vm {
         named: &[(Vec<u8>, Value)],
         line: u32,
         strict: bool,
+    ) -> Value {
+        self.spl_deferred_call_ex(method_orig, args, named, line, strict, false)
+    }
+
+    /// spl_deferred_call() of a callback an internal function (or
+    /// Reflection) calls when `internal`: its frame is "[internal function]".
+    pub fn spl_deferred_call_ex(
+        &mut self,
+        method_orig: &[u8],
+        args: &[Value],
+        named: &[(Vec<u8>, Value)],
+        line: u32,
+        strict: bool,
+        internal: bool,
     ) -> Value {
         let obj = match args.first() {
             Some(Value::Object(o)) => o.clone(),
@@ -360,10 +352,14 @@ impl Vm {
         frame.push_str(&method_disp);
         let mut frame2 = self.string_pool.pop().unwrap_or_default();
         frame2.push_str(&frame);
-        let file = self.current_file.clone();
+        let (file, frame_line) = if internal {
+            (crate::rcstr::RcStr::new(), 0)
+        } else {
+            (self.current_file.clone(), line)
+        };
         let mut frame_args = self.take_values(0);
         frame_args.extend_from_slice(&call_args[1..]);
-        self.call_stack.push((frame, file, line, frame_args, true));
+        self.call_stack.push((frame, file, frame_line, frame_args, true));
         self.spl_internal_frames
             .push((self.call_stack.len(), frame2));
         let r = self.spl_invoke_builtin(&obj, class_lower, method_lower, &call_args);

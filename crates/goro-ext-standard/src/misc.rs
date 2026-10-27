@@ -2555,6 +2555,30 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         }
                     }
                     // Built-in class methods (SPL, ext-provided native classes).
+                    if vm.spl_callback_deferred(&class_lower, &method_lower) {
+                        // (deprecation, zpp and frame as the method's own call)
+                        let direct = vm.ucf_call_line.take();
+                        let line = vm.current_line;
+                        let mut all = Vec::with_capacity(call_args.len() + 1);
+                        all.push(Value::Object(obj.clone()));
+                        all.extend(call_args);
+                        let had_exc = vm.current_exception.is_some();
+                        let r = vm.spl_deferred_call_ex(
+                            method_name.as_bytes(),
+                            &all,
+                            &named_args,
+                            direct.unwrap_or(line),
+                            false,
+                            direct.is_none(),
+                        );
+                        if !had_exc && vm.current_exception.is_some() {
+                            return Err(VmError {
+                                message: vm.uncaught_exception_message(),
+                                line,
+                            });
+                        }
+                        return Ok(r);
+                    }
                     let mut call_args = call_args;
                     if !vm.place_internal_method_named_args(
                         obj,

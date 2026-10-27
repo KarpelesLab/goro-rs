@@ -177,7 +177,7 @@ pub fn date_format(format: &[u8], t: &Time, localtime: bool) -> Vec<u8> {
             b'Y' => format!(
                 "{}{:04}",
                 if t.y < 0 { "-" } else { "" },
-                t.y.unsigned_abs()
+                t.y.wrapping_abs() /* php_date_llabs() */
             ),
             b'x' => format!(
                 "{}{:04}",
@@ -188,12 +188,12 @@ pub fn date_format(format: &[u8], t: &Time, localtime: bool) -> Vec<u8> {
                 } else {
                     ""
                 },
-                t.y.unsigned_abs()
+                t.y.wrapping_abs() /* php_date_llabs() */
             ),
             b'X' => format!(
                 "{}{:04}",
                 if t.y < 0 { "-" } else { "+" },
-                t.y.unsigned_abs()
+                t.y.wrapping_abs() /* php_date_llabs() */
             ),
             b'a' => (if t.h >= 12 { "pm" } else { "am" }).to_string(),
             b'A' => (if t.h >= 12 { "PM" } else { "AM" }).to_string(),

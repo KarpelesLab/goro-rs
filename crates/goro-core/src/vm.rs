@@ -6264,6 +6264,27 @@ impl Vm {
                             }
                             return Ok(r);
                         }
+                    } else if self.spl_callback_deferred(&class_lower, &method_lower) {
+                        // (deprecation, zpp, frame: as the method's own call)
+                        let mut call_args = vec![vals[0].clone()];
+                        call_args.extend_from_slice(args);
+                        let had_exc = self.current_exception.is_some();
+                        let line = self.current_line;
+                        let r = self.spl_deferred_call_ex(
+                            method_name.as_bytes(),
+                            &call_args,
+                            &[],
+                            line,
+                            false,
+                            true,
+                        );
+                        if !had_exc && self.current_exception.is_some() {
+                            return Err(VmError {
+                                message: self.uncaught_exception_message(),
+                                line,
+                            });
+                        }
+                        return Ok(r);
                     } else if let Some(r) = self.call_object_method(&vals[0], &method_lower, args) {
                         // Builtin class method
                         return Ok(r);
