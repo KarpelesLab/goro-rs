@@ -950,6 +950,30 @@ impl Default for SiteCaches {
     }
 }
 
+thread_local! {
+    /// The JIT auto-globals ($_ENV, $_REQUEST) compiled code referred to
+    /// since the last take_auto_global_refs() (bit 0: _ENV, bit 1: _REQUEST).
+    static AUTO_GLOBAL_REFS: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// A variable named `name` is compiled (zend_is_auto_global() arms a JIT
+/// auto-global the compiler meets).
+#[inline]
+fn note_auto_global_ref(name: &[u8]) {
+    let bit = match name {
+        b"_ENV" => 1,
+        b"_REQUEST" => 2,
+        _ => return,
+    };
+    AUTO_GLOBAL_REFS.with(|c| c.set(c.get() | bit));
+}
+
+/// The JIT auto-globals referred to by code compiled since the last call
+/// (see note_auto_global_ref()).
+pub fn take_auto_global_refs() -> u8 {
+    AUTO_GLOBAL_REFS.with(|c| c.replace(0))
+}
+
 impl OpArray {
     /// Whether calls of this code may run without a frame of their own (see
     /// vm::leancall): 1 for a function, 2 for an instance method (its first
@@ -1346,6 +1370,7 @@ impl OpArray {
             return idx as u32;
         }
         let idx = self.cv_names.len() as u32;
+        note_auto_global_ref(name);
         self.cv_names.push(name.to_vec());
         self.cv_names_changed();
         idx

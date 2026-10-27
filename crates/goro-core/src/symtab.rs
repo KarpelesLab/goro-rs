@@ -311,8 +311,65 @@ impl Vm {
         self.globals_gen.set(self.globals_gen.get().wrapping_add(1));
     }
 
+    /// Keep JIT auto-global `name` out of the symbol table until code
+    /// referring to it is compiled (php_startup_auto_globals() with
+    /// auto_globals_jit).
+    pub fn defer_auto_global(&self, name: &[u8], value: Value) {
+        self.jit_auto_globals.borrow_mut().push((name.to_vec(), value));
+    }
+
+    /// zend_is_auto_global(): put deferred auto-global `name` in the symbol
+    /// table; false when it was not deferred.
+    #[inline(never)]
+    pub fn arm_auto_global(&self, name: &[u8]) -> bool {
+        let v = {
+            let mut p = self.jit_auto_globals.borrow_mut();
+            match p.iter().position(|(n, _)| n == name) {
+                Some(i) => p.remove(i).1,
+                None => return false,
+            }
+        };
+        let key = ArrayKey::String(PhpString::from_vec(name.to_vec()));
+        // (one the script made itself stays)
+        if self.globals.borrow().get(&key).is_some() {
+            return true;
+        }
+        self.globals.borrow_mut().set(key, v);
+        self.bump_globals_gen();
+        true
+    }
+
+    /// Arm the deferred auto-globals the code compiled since the last call
+    /// refers to (see crate::opcode::take_auto_global_refs()), and those
+    /// `code` (about to run in the global scope: possibly a cached
+    /// compilation) has variables for.
+    pub fn arm_auto_globals(&self, code: Option<&OpArray>) {
+        if self.jit_auto_globals.borrow().is_empty() {
+            return;
+        }
+        let mut refs = crate::opcode::take_auto_global_refs();
+        if let Some(op) = code {
+            for n in &op.cv_names {
+                match n.as_slice() {
+                    b"_ENV" => refs |= 1,
+                    b"_REQUEST" => refs |= 2,
+                    _ => {}
+                }
+            }
+        }
+        if refs & 1 != 0 {
+            self.arm_auto_global(b"_ENV");
+        }
+        if refs & 2 != 0 {
+            self.arm_auto_global(b"_REQUEST");
+        }
+    }
+
     /// Current value of a global (dereferenced), None when unset.
     pub fn global_lookup(&self, name: &[u8]) -> Option<Value> {
+        if matches!(name, b"_ENV" | b"_REQUEST") && !self.jit_auto_globals.borrow().is_empty() {
+            self.arm_auto_global(name);
+        }
         let g = self.globals.borrow();
         match g.get_name(name)? {
             Value::Reference(r) => {

@@ -2387,6 +2387,10 @@ pub struct Vm {
     /// trampoline's caller reported the called method (see
     /// trampoline_deprecation()).
     pub skip_callback_deprecation: bool,
+    /// JIT auto-globals ($_ENV, $_REQUEST) built at request startup but
+    /// not yet in the symbol table (auto_globals_jit: added when code
+    /// referring to them is compiled, see arm_auto_globals()).
+    pub jit_auto_globals: RefCell<Vec<(Vec<u8>, Value)>>,
     /// The call being type-checked is made by Closure::__invoke().
     pub(crate) pending_call_via_invoke: bool,
     /// The `$this` of the call whose arguments are being type-checked (the
@@ -3791,6 +3795,7 @@ impl Vm {
             release_call_at: None,
             closure_invoke_call: false,
             skip_callback_deprecation: false,
+            jit_auto_globals: RefCell::new(Vec::new()),
             pending_call_via_invoke: false,
             recv_this: None,
             ephemeral_closures: Vec::new(),
@@ -20926,6 +20931,7 @@ impl Vm {
     /// -B / -R / -E code pieces this way, then calls finish_request().
     pub fn execute_chunk(&mut self, op_array: &OpArray) -> Result<Value, VmError> {
         self.is_global_scope = true;
+        self.arm_auto_globals(Some(op_array));
         if self.included_files_list.is_empty() && !self.current_file.is_empty() {
             let main = std::fs::canonicalize(&self.current_file)
                 .map(|p| p.to_string_lossy().into_owned())
@@ -48508,6 +48514,7 @@ impl Vm {
                                                 ),
                                             };
                                             let inc_op_array = &shared.op_array;
+                                            self.arm_auto_globals(Some(inc_op_array));
                                             // The scanner's diagnostics, then the compiler's
                                             self.replay_cached_diags(&crate::script_cache::merged_compile_diags(
                                                 &lex_diags,
@@ -48780,6 +48787,7 @@ impl Vm {
                                 };
                                 match compiled {
                                     Ok((eval_op_array, eval_classes, eval_warnings)) => {
+                                        self.arm_auto_globals(Some(&eval_op_array));
                                         // Emit the scanner's and the compiler's
                                         // diagnostics (in the eval()'d code)
                                         if !eval_warnings.is_empty() || !lex_diags.is_empty() {

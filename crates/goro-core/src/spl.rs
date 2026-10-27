@@ -755,6 +755,7 @@ impl Vm {
                 }
                 let saved_pending =
                     std::mem::replace(&mut self.pending_classes, std::rc::Rc::new(classes));
+                self.arm_auto_globals(Some(&op_array));
                 let cvs = vec![Value::Undef; op_array.cv_names.len()];
                 let _ = self.execute_op_array_pub(&op_array, cvs);
                 self.pending_classes = saved_pending;

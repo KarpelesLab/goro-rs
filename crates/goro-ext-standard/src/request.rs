@@ -1979,15 +1979,36 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
         }
     }
 
+    // zend_activate_auto_globals(): the non-JIT auto-globals in their
+    // registration order (GET, POST, COOKIE, SERVER, ENV, REQUEST, FILES);
+    // with auto_globals_jit, $_ENV and $_REQUEST are only in the symbol
+    // table once code referring to them is compiled, and the CLI arms
+    // $_SERVER (JIT when there are arguments) after the others.
+    let jit = ini_bool(ini("auto_globals_jit"), true);
+    let server_jit = jit && !req.cgi;
+    check_http_proxy(&server);
+    check_http_proxy(&env);
     vm.set_global(b"_GET".to_vec(), Value::Array(get));
     vm.set_global(b"_POST".to_vec(), Value::Array(post));
     vm.set_global(b"_COOKIE".to_vec(), Value::Array(cookie));
+    let server = Value::Array(server);
+    if !server_jit {
+        vm.set_global(b"_SERVER".to_vec(), server.clone());
+    }
+    if !jit {
+        vm.set_global(b"_ENV".to_vec(), Value::Array(env.clone()));
+        vm.set_global(b"_REQUEST".to_vec(), Value::Array(request.clone()));
+    }
     vm.set_global(b"_FILES".to_vec(), Value::Array(files));
-    check_http_proxy(&server);
-    check_http_proxy(&env);
-    vm.set_global(b"_SERVER".to_vec(), Value::Array(server));
-    vm.set_global(b"_ENV".to_vec(), Value::Array(env));
-    vm.set_global(b"_REQUEST".to_vec(), Value::Array(request));
+    if server_jit {
+        vm.set_global(b"_SERVER".to_vec(), server);
+    }
+    if jit {
+        vm.defer_auto_global(b"_ENV", Value::Array(env));
+        vm.defer_auto_global(b"_REQUEST", Value::Array(request));
+        // (the main script may be compiled already)
+        vm.arm_auto_globals(None);
+    }
     crate::misc::set_request_body(input_body);
     crate::misc::set_sapi_body(req.body.clone(), sapi_read);
     // Output sent by a request-startup error has no script position
