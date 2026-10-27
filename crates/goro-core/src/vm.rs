@@ -20513,6 +20513,41 @@ impl Vm {
         Ok(())
     }
 
+    /// The line an interrupt (max_execution_time) at `ip` reports. php-src
+    /// checks it at a loop's backward jump, whose target is the loop body
+    /// (its condition is compiled after the body): at a for / while
+    /// condition goro compiles first, the body's first opcode.
+    #[cold]
+    #[inline(never)]
+    fn interrupt_line(op_array: &OpArray, ip: usize) -> Option<u32> {
+        let ops = &op_array.ops;
+        let at = ops.get(ip)?;
+        // The innermost loop holding `ip`: [its head, the backward jump
+        // closing it].
+        let mut best: Option<(usize, usize)> = None;
+        for (i, o) in ops.iter().enumerate().skip(ip) {
+            if let (OpCode::Jmp, OperandType::JmpTarget(t)) = (o.opcode, &o.op1) {
+                let t = *t as usize;
+                if t <= ip && best.is_none_or(|(bt, bb)| i - t < bb - bt) {
+                    best = Some((t, i));
+                }
+            }
+        }
+        if let Some((head, back)) = best {
+            // A condition at its head exits past the loop: the body follows.
+            let exit = ops[head..back].iter().position(|o| {
+                matches!(o.opcode, OpCode::JmpZ | OpCode::JmpNz)
+                    && matches!(o.op2, OperandType::JmpTarget(t) if t as usize == back + 1)
+            });
+            if let Some(e) = exit {
+                if let Some(body) = ops.get(head + e + 1).filter(|o| o.line > 0) {
+                    return Some(body.line);
+                }
+            }
+        }
+        (at.line > 0).then_some(at.line)
+    }
+
     /// zend_timeout(): the "Maximum execution time" fatal error.
     pub fn timeout_fatal(&mut self) -> VmError {
         use std::sync::atomic::Ordering;
@@ -26085,7 +26120,7 @@ impl Vm {
                 if TIMED_OUT.load(Relaxed) {
                     VM_INTERRUPT.store(true, Relaxed);
                     // (raised at the opcode about to run)
-                    if let Some(l) = op_array.ops.get(ip).map(|o| o.line).filter(|&l| l > 0) {
+                    if let Some(l) = Self::interrupt_line(op_array, ip) {
                         self.current_line = l;
                     }
                     return Err(self.timeout_fatal());
