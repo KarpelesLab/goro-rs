@@ -1479,8 +1479,10 @@ impl Vm {
                 let mut res = Ok(());
                 if let Some(gp) = gp {
                     for (cm, pm) in Self::variance_overrides(parent, &gp) {
+                        // (check_variance_obligation(): one still unresolved
+                        // is an error too)
                         let (status, _, msg) = self.variance_status(parent, cm, &gp.name, pm);
-                        if status == Status::Error {
+                        if status != Status::Success {
                             res = Err((msg, cm.op_array.decl_line));
                             break;
                         }

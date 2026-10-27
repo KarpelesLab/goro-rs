@@ -6681,14 +6681,22 @@ impl Compiler {
                         line: stmt.span.line,
                     });
                     // Send value as second arg
+                    let value_start = self.op_array.ops.len();
                     let val_op = self.compile_const_expr_value(value)?;
+                    // ZEND_DECLARE_CONST evaluates the whole expression, on
+                    // CG(zend_lineno): the line of the last constant it
+                    // references (zend_compile_const_expr_const()).
+                    let decl_line = Self::const_decl_line(
+                        &mut self.op_array.ops[value_start..],
+                        stmt.span.line,
+                    );
                     let pos1 = self.op_array.add_literal(Value::Long(1));
                     self.op_array.emit(Op {
                         opcode: OpCode::SendVal,
                         op1: val_op,
                         op2: OperandType::Const(pos1),
                         result: OperandType::Unused,
-                        line: stmt.span.line,
+                        line: decl_line,
                     });
                     // Call define()
                     let tmp = self.op_array.alloc_temp();
@@ -6697,7 +6705,7 @@ impl Compiler {
                         op1: OperandType::Unused,
                         op2: OperandType::Unused,
                         result: OperandType::Tmp(tmp),
-                        line: stmt.span.line,
+                        line: decl_line,
                     });
                 }
                 // If body exists, compile it (a declare(ticks) block only
@@ -15942,6 +15950,22 @@ impl Compiler {
                 }
             }
         }
+    }
+
+    /// The line of a `const` declaration's ZEND_DECLARE_CONST: that of the
+    /// last constant its value looks up at runtime (`stmt_line` if none);
+    /// the value's oplines (evaluated by it in php-src) take it too.
+    #[inline(never)]
+    fn const_decl_line(ops: &mut [Op], stmt_line: u32) -> u32 {
+        let line = ops
+            .iter()
+            .rev()
+            .find(|o| o.opcode == OpCode::ConstLookup)
+            .map_or(stmt_line, |o| o.line);
+        for op in ops.iter_mut() {
+            op.line = line;
+        }
+        line
     }
 
     fn compile_const_expr_value(&mut self, e: &Expr) -> CompileResult<OperandType> {
