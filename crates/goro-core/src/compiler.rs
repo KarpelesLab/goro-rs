@@ -1989,6 +1989,21 @@ impl Compiler {
         ret: Option<&TypeHint>,
         line: u32,
     ) {
+        self.push_signature_deprecations_upto(params, func, by_ref, ret, line, params.len());
+    }
+
+    /// push_signature_deprecations() for the parameters before `limit` (a
+    /// compile error in parameter `limit` stops zend_compile_params()).
+    #[inline(never)]
+    fn push_signature_deprecations_upto(
+        &self,
+        params: &[Param],
+        func: &[u8],
+        by_ref: bool,
+        ret: Option<&TypeHint>,
+        line: u32,
+        limit: usize,
+    ) {
         // (%s of a name holding a NUL, as an anonymous class's, stops there)
         let func = func.split(|b| *b == 0).next().unwrap_or_default();
         let func = crate::string::msg_str(func);
@@ -2004,7 +2019,7 @@ impl Compiler {
         let last_req = params
             .iter()
             .rposition(|p| !p.variadic && p.default.is_none());
-        for (i, p) in params.iter().enumerate() {
+        for (i, p) in params.iter().enumerate().take(limit) {
             let promoted = p.visibility.is_some() || p.set_visibility.is_some() || p.readonly;
             let forced = !promoted
                 && matches!(&p.default, Some(d) if matches!(d.kind, ExprKind::Null))
@@ -6317,61 +6332,96 @@ impl Compiler {
                     }
                 }
 
-                // Validate parameter types
-                for param in params.iter() {
-                    if let Some(hint) = &param.type_hint {
-                        // Check for self/parent/static outside class scope
-                        if self.current_class.is_none() {
-                            if let Some(err) = check_relative_type_outside_class(hint) {
-                                return Err(CompileError {
-                                    message: err,
-                                    line: stmt.span.line,
-                                });
-                            }
-                        }
-                        // Validate type hint for redundancy and standalone constraints
-                        if let Some(err) = validate_type_hint(hint, self.current_class.as_deref())
-                            .or_else(|| self.type_redundancy_error(hint, stmt.span.line))
-                        {
-                            return Err(CompileError {
-                                message: err,
-                                line: stmt.span.line,
-                            });
-                        }
-                        let simple_hint = match hint {
-                            TypeHint::Simple(n) => Some(n),
-                            TypeHint::Nullable(inner) => {
-                                if let TypeHint::Simple(n) = inner.as_ref() {
-                                    Some(n)
-                                } else {
-                                    None
+                // Validate parameter types (zend_compile_params(): a parameter's
+                // error comes after the deprecations of those before it)
+                let param_check = (|| {
+                    for (pi, param) in params.iter().enumerate() {
+                        if let Some(hint) = &param.type_hint {
+                            // Check for self/parent/static outside class scope
+                            if self.current_class.is_none() {
+                                if let Some(err) = check_relative_type_outside_class(hint) {
+                                    return Err((
+                                        pi,
+                                        CompileError {
+                                            message: err,
+                                            line: stmt.span.line,
+                                        },
+                                    ));
                                 }
                             }
-                            _ => None,
-                        };
-                        if let Some(n) = simple_hint {
-                            let lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            if lower == b"void" {
-                                return Err(CompileError {
-                                    message: "void cannot be used as a parameter type".to_string(),
-                                    line: stmt.span.line,
-                                });
+                            // Validate type hint for redundancy and standalone constraints
+                            if let Some(err) =
+                                validate_type_hint(hint, self.current_class.as_deref())
+                                    .or_else(|| self.type_redundancy_error(hint, stmt.span.line))
+                            {
+                                return Err((
+                                    pi,
+                                    CompileError {
+                                        message: err,
+                                        line: stmt.span.line,
+                                    },
+                                ));
                             }
-                            if lower == b"never" {
-                                return Err(CompileError {
-                                    message: "never cannot be used as a parameter type".to_string(),
-                                    line: stmt.span.line,
-                                });
-                            }
-                            if lower == b"static" {
-                                return Err(CompileError {
-                                    message: "Cannot use the static modifier on a parameter"
-                                        .to_string(),
-                                    line: stmt.span.line,
-                                });
+                            let simple_hint = match hint {
+                                TypeHint::Simple(n) => Some(n),
+                                TypeHint::Nullable(inner) => {
+                                    if let TypeHint::Simple(n) = inner.as_ref() {
+                                        Some(n)
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            };
+                            if let Some(n) = simple_hint {
+                                let lower: Vec<u8> =
+                                    n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if lower == b"void" {
+                                    return Err((
+                                        pi,
+                                        CompileError {
+                                            message: "void cannot be used as a parameter type"
+                                                .to_string(),
+                                            line: stmt.span.line,
+                                        },
+                                    ));
+                                }
+                                if lower == b"never" {
+                                    return Err((
+                                        pi,
+                                        CompileError {
+                                            message: "never cannot be used as a parameter type"
+                                                .to_string(),
+                                            line: stmt.span.line,
+                                        },
+                                    ));
+                                }
+                                if lower == b"static" {
+                                    return Err((
+                                        pi,
+                                        CompileError {
+                                            message:
+                                                "Cannot use the static modifier on a parameter"
+                                                    .to_string(),
+                                            line: stmt.span.line,
+                                        },
+                                    ));
+                                }
                             }
                         }
                     }
+                    Ok(())
+                })();
+                if let Err((pi, err)) = param_check {
+                    self.push_signature_deprecations_upto(
+                        params,
+                        &qualified_name,
+                        *func_returns_by_ref,
+                        return_type.as_ref(),
+                        stmt.span.line,
+                        pi,
+                    );
+                    return Err(err);
                 }
 
                 // Check for duplicate parameter names and reserved names
