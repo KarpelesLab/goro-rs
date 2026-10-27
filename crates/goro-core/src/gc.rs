@@ -957,11 +957,12 @@ impl<'a> Graph<'a> {
                     for (k, v) in b.properties.iter() {
                         if let Some(c) = self.add_value(v) {
                             if matches!(v, Value::Array(_)) && crate::spl_array::is_hidden_prop(k) {
-                                self.uncounted[c] = if k == b"__spl_array"
-                                    && self.class_has_array_storage(&b.class_name)
+                                self.uncounted[c] = if (k == b"__spl_array"
+                                    && self.class_has_array_storage(&b.class_name))
+                                    || k == b"__spl_cache"
                                 {
-                                    // (ArrayObject's own array: allocated even
-                                    // when empty)
+                                    // (ArrayObject's own array, CachingIterator's
+                                    // zcache: allocated even when empty)
                                     COUNT_ALWAYS
                                 } else {
                                     COUNT_NEVER
