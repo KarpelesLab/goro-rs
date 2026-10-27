@@ -1786,6 +1786,111 @@ pub trait GcHost {
 /// `limit`: `None` for gc_collect_cycles() (also scans every tracked object
 /// and generator), `Some(_)` for an automatic run over the buffered roots.
 #[allow(clippy::needless_range_loop)] // index loop mirrors the reference algorithm
+/// A garbage node while the garbage is destroyed: objects and arrays are
+/// held weakly so that they are freed as soon as their last holder is.
+enum Doomed {
+    Obj(Weak<RefCell<PhpObject>>),
+    Arr(Weak<RefCell<PhpArray>>),
+}
+
+/// Destroy the garbage the way zend_gc's "Destroy zvals" loop does, slot by
+/// slot in root buffer order: an object's properties are released (freeing
+/// what only it held, its handle going back to the free list right then)
+/// and then its own handle goes back to the free list, also while other
+/// garbage still holds it. Returns the count of collected values.
+#[inline(never)]
+fn free_garbage(
+    free_nodes: Vec<(Node, u8)>,
+    dead_vals: &mut Vec<Value>,
+    dead_gens: &mut Vec<Vec<Value>>,
+) -> i64 {
+    let mut count = 0i64;
+    let mut doomed: Vec<Doomed> = Vec::with_capacity(free_nodes.len());
+    for (node, uncounted) in &free_nodes {
+        match node {
+            Node::Obj(o) => {
+                if o.try_borrow_mut().is_ok() {
+                    count += 1;
+                    doomed.push(Doomed::Obj(Rc::downgrade(o)));
+                }
+            }
+            Node::Arr(a) => {
+                if let Ok(b) = a.try_borrow_mut() {
+                    // An empty array is almost always Zend's immutable
+                    // zend_empty_array, which is not refcounted and so never
+                    // counted.
+                    if *uncounted == COUNT_ALWAYS || (*uncounted == COUNT_NORMAL && !b.is_empty())
+                    {
+                        count += 1;
+                    }
+                    doomed.push(Doomed::Arr(Rc::downgrade(a)));
+                }
+            }
+            Node::Ref(r) => {
+                if let Ok(mut b) = r.try_borrow_mut() {
+                    dead_vals.push(std::mem::replace(&mut *b, Value::Null));
+                }
+            }
+            Node::Gen(gr) => {
+                if let Ok(mut b) = gr.try_borrow_mut() {
+                    dead_gens.push(b.take_gc_children());
+                    count += 1;
+                }
+            }
+            // (released with the last of the garbage arrays holding it)
+            Node::Store(_) => {}
+        }
+    }
+    // Let go of our clones: the garbage now only holds itself.
+    drop(free_nodes);
+    for d in doomed {
+        match d {
+            Doomed::Obj(w) => {
+                let Some(o) = w.upgrade() else {
+                    continue;
+                };
+                let Ok(mut b) = o.try_borrow_mut() else {
+                    continue;
+                };
+                let props = b.properties.take_vec();
+                let closure = b.closure.take();
+                let native = if b.native.as_ref().and_then(native_gc_of).is_some() {
+                    b.native.take()
+                } else {
+                    None
+                };
+                // (a WeakMap key or map recycles its handle when freed)
+                let weak = b.weak_key.get() || b.class_name.eq_ignore_ascii_case(b"WeakMap");
+                let id = if weak {
+                    0
+                } else {
+                    std::mem::replace(&mut b.object_id, 0)
+                };
+                drop(b);
+                drop(native);
+                drop(props);
+                drop(closure);
+                if id != 0 {
+                    crate::object::FREED_OBJECT_IDS.with(|f| f.borrow_mut().push(id));
+                }
+                drop(o);
+            }
+            Doomed::Arr(w) => {
+                let Some(a) = w.upgrade() else {
+                    continue;
+                };
+                let content = match a.try_borrow_mut() {
+                    Ok(mut b) => std::mem::take(&mut *b),
+                    Err(_) => continue,
+                };
+                drop(content);
+                drop(a);
+            }
+        }
+    }
+    count
+}
+
 pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
     if GC_ACTIVE.with(|c| c.get()) {
         return 0;
@@ -1824,7 +1929,8 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
         // (A suspended generator's dtor_obj, zend_generator_dtor_storage,
         // runs its pending finally blocks: it is one too.)
         let mut dtor_idx: Vec<usize> = Vec::new();
-        for idx in buffer_order(&an) {
+        let order = buffer_order(&an);
+        for &idx in &order {
             match &an.graph.nodes[idx] {
                 Node::Obj(o) if host.gc_needs_destructor(o) => dtor_idx.push(idx),
                 Node::Gen(g) if generator_needs_close(g) => dtor_idx.push(idx),
@@ -1869,10 +1975,21 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
             .collect();
         // Keep the plain garbage (our clones) for the free phase; release
         // every other clone so destructors see true refcounts.
-        let free_nodes: Vec<(Node, u8)> = (0..len)
-            .filter(|&i| free[i])
-            .map(|i| (an.graph.nodes[i].clone(), an.graph.uncounted[i]))
+        // (in root buffer order: Zend destroys the garbage slot by slot)
+        let mut in_order = vec![false; len];
+        let mut free_order: Vec<usize> = Vec::with_capacity(len);
+        for &i in &order {
+            if free[i] && !in_order[i] {
+                in_order[i] = true;
+                free_order.push(i);
+            }
+        }
+        free_order.extend((0..len).filter(|&i| free[i] && !in_order[i]));
+        let free_nodes: Vec<(Node, u8)> = free_order
+            .iter()
+            .map(|&i| (an.graph.nodes[i].clone(), an.graph.uncounted[i]))
             .collect();
+        drop(order);
         drop(an);
         drop(zombies);
         // Zend calls the destructors first, then destroys the garbage.
@@ -1921,11 +2038,8 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
         // A garbage generator its close freed (the close released the
         // variables of its frame that made the cycle) was collected.
         let mut count = dtor_gens.iter().filter(|w| w.strong_count() == 0).count() as i64;
-        let mut dead_props: Vec<Vec<(Vec<u8>, Value)>> = Vec::new();
-        let mut dead_arrays: Vec<PhpArray> = Vec::new();
         let mut dead_vals: Vec<Value> = Vec::new();
         let mut dead_gens: Vec<Vec<Value>> = Vec::new();
-        let mut dead_natives: Vec<crate::object::NativeData> = Vec::new();
         if !free_nodes.is_empty() {
             let ptrs: PtrSet = free_nodes.iter().map(|(n, _)| n.ptr()).collect();
             let weakmaps: Vec<u64> = free_nodes
@@ -1940,57 +2054,11 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
                 })
                 .collect();
             host.gc_forget_objects(&ptrs, &weakmaps);
-            for (node, uncounted) in &free_nodes {
-                match node {
-                    Node::Obj(o) => {
-                        if let Ok(mut b) = o.try_borrow_mut() {
-                            dead_props.push(b.properties.take_vec());
-                            if let Some(c) = b.closure.take() {
-                                dead_vals.push(*c);
-                            }
-                            if b.native.as_ref().and_then(native_gc_of).is_some() {
-                                dead_natives.extend(b.native.take());
-                            }
-                            count += 1;
-                        }
-                    }
-                    Node::Arr(a) => {
-                        if let Ok(mut b) = a.try_borrow_mut() {
-                            // An empty array is almost always Zend's
-                            // immutable zend_empty_array, which is not
-                            // refcounted and so never counted.
-                            if *uncounted == COUNT_ALWAYS
-                                || (*uncounted == COUNT_NORMAL && !b.is_empty())
-                            {
-                                count += 1;
-                            }
-                            dead_arrays.push(std::mem::take(&mut *b));
-                        }
-                    }
-                    Node::Ref(r) => {
-                        if let Ok(mut b) = r.try_borrow_mut() {
-                            dead_vals.push(std::mem::replace(&mut *b, Value::Null));
-                        }
-                    }
-                    Node::Gen(gr) => {
-                        if let Ok(mut b) = gr.try_borrow_mut() {
-                            dead_gens.push(b.take_gc_children());
-                            count += 1;
-                        }
-                    }
-                    // (released with the last of the garbage arrays holding it)
-                    Node::Store(_) => {}
-                }
-            }
+            count += free_garbage(free_nodes, &mut dead_vals, &mut dead_gens);
         }
-        // Release our clones first, then the detached contents: this is
-        // where the cycles actually get freed.
-        drop(free_nodes);
-        drop(dead_natives);
+        // The values of garbage references and generator frames go last.
         drop(dead_vals);
         drop(dead_gens);
-        drop(dead_arrays);
-        drop(dead_props);
         add_time(2, free_start);
         total += count;
         for z in &new_zombies {
