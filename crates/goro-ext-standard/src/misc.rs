@@ -11787,11 +11787,10 @@ pub(crate) struct DirHandle {
 fn read_dir_entries(path: &str) -> std::io::Result<Vec<String>> {
     use std::os::unix::ffi::OsStrExt;
     let p = msg_path(path);
-    let mut names: Vec<String> =
-        goro_core::oslistdir::readdir_entries(p.as_os_str().as_bytes())?
-            .into_iter()
-            .map(|(n, _)| os_msg(std::ffi::OsStr::from_bytes(&n)))
-            .collect();
+    let mut names: Vec<String> = goro_core::oslistdir::readdir_entries(p.as_os_str().as_bytes())?
+        .into_iter()
+        .map(|(n, _)| os_msg(std::ffi::OsStr::from_bytes(&n)))
+        .collect();
     // Reverse so we can pop from the end efficiently while still feeding entries
     // in readdir order.
     names.reverse();

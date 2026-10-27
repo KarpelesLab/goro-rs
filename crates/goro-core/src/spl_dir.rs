@@ -746,7 +746,6 @@ impl Vm {
             }
             _ => {}
         }
-        let p = crate::fspath::bytes_path(fname);
         let st = if is_wrapper_url(fname) {
             self.fs_wrapper_stat(fname, link_op)
         } else {
