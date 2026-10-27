@@ -2076,8 +2076,8 @@ fn gcm_siv(op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail> {
     y = gf_mul(y ^ rev(&lens), h);
     let mut tag = y.to_be_bytes();
     tag.reverse();
-    for i in 0..12 {
-        tag[i] ^= op.iv[i];
+    for (t, n) in tag.iter_mut().zip(&op.iv[..12]) {
+        *t ^= n;
     }
     tag[15] &= 0x7f;
     ek.enc(&mut tag);

@@ -1178,9 +1178,7 @@ fn asn1_generate(conf: &Conf, s: &str, depth: usize) -> Option<Vec<u8>> {
         "SEQUENCE" | "SEQ" | "SET" => {
             let mut items = Vec::new();
             if !value.trim().is_empty() {
-                let Some(sect) = conf.section(value.trim()) else {
-                    return None;
-                };
+                let sect = conf.section(value.trim())?;
                 for (_, v) in sect {
                     items.push(asn1_generate(conf, v, depth + 1)?);
                 }
