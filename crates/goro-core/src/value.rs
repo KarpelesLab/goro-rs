@@ -11,6 +11,21 @@ use crate::string::PhpString;
 /// For anonymous classes (which contain a NUL byte separator): returns the part before the NUL.
 /// For regular classes: returns the name as-is.
 pub fn display_class_name(name: &[u8]) -> String {
+    // (the common case: an ASCII name without NUL nor "__", kept as it is)
+    let mut prev = 0u8;
+    let plain = name.iter().all(|&b| {
+        let ok = b != 0 && b < 0x80 && !(b == b'_' && prev == b'_');
+        prev = b;
+        ok
+    });
+    match std::str::from_utf8(name) {
+        Ok(s) if plain => s.to_owned(),
+        _ => display_class_name_slow(name),
+    }
+}
+
+#[inline(never)]
+fn display_class_name_slow(name: &[u8]) -> String {
     // Anonymous class names are formatted as "{Base}@anonymous\0{file}:{line}${counter}"
     // Display only the part before the NUL byte.
     if let Some(nul_pos) = name.iter().position(|&b| b == b'\x00') {

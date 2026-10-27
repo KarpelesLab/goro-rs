@@ -125,37 +125,155 @@ impl StubFunc {
     }
 }
 
-fn class_index() -> &'static crate::fxhash::FxHashMap<Vec<u8>, usize> {
-    static IDX: OnceLock<crate::fxhash::FxHashMap<Vec<u8>, usize>> = OnceLock::new();
-    IDX.get_or_init(|| {
-        crate::stub_sigs::CLASSES
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (c.name.to_ascii_lowercase().into_bytes(), i))
-            .collect()
-    })
+/// FNV-1a of the ASCII-lowercased `b` (the stub name tables' hash).
+#[inline]
+const fn lower_hash(b: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut i = 0;
+    while i < b.len() {
+        h ^= b[i].to_ascii_lowercase() as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+        i += 1;
+    }
+    h
+}
+
+const fn eq_lower(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i].to_ascii_lowercase() != b[i].to_ascii_lowercase() {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Lowercased name -> index of a stub table's entry: an open-addressing
+/// table built at compile time (no startup cost).
+pub(crate) struct NameIndex<const N: usize> {
+    slots: [u16; N],
+    names: fn(usize) -> &'static str,
+}
+
+const EMPTY: u16 = u16::MAX;
+
+/// Slots for `len` names: a power of two at least twice as large.
+const fn index_size(len: usize) -> usize {
+    let mut n = 16;
+    while n < len * 2 {
+        n *= 2;
+    }
+    n
+}
+
+impl<const N: usize> NameIndex<N> {
+    /// Index of the entry named `lower` (an ASCII-lowercased name).
+    #[inline]
+    pub(crate) fn get(&self, lower: &[u8]) -> Option<usize> {
+        let mask = N - 1;
+        let mut j = lower_hash(lower) as usize & mask;
+        loop {
+            let i = self.slots[j];
+            if i == EMPTY {
+                return None;
+            }
+            let name = (self.names)(i as usize).as_bytes();
+            if name.len() == lower.len()
+                && name
+                    .iter()
+                    .zip(lower)
+                    .all(|(a, b)| a.to_ascii_lowercase() == *b)
+            {
+                return Some(i as usize);
+            }
+            j = (j + 1) & mask;
+        }
+    }
+
+    /// Index of the entry named `name` in any (ASCII) case.
+    #[inline]
+    pub(crate) fn get_any_case(&self, name: &[u8]) -> Option<usize> {
+        let mask = N - 1;
+        let mut j = lower_hash(name) as usize & mask;
+        loop {
+            let i = self.slots[j];
+            if i == EMPTY {
+                return None;
+            }
+            if (self.names)(i as usize)
+                .as_bytes()
+                .eq_ignore_ascii_case(name)
+            {
+                return Some(i as usize);
+            }
+            j = (j + 1) & mask;
+        }
+    }
+}
+
+/// The slots of a NameIndex over `$table` (a stub table with `.name`s);
+/// a later entry of the same name replaces an earlier one.
+macro_rules! name_slots {
+    ($table:expr, $n:expr) => {{
+        let t = $table;
+        assert!(t.len() < EMPTY as usize);
+        let mut slots = [EMPTY; $n];
+        let mut i = 0;
+        while i < t.len() {
+            let name = t[i].name.as_bytes();
+            let mut j = lower_hash(name) as usize & ($n - 1);
+            while slots[j] != EMPTY && !eq_lower(t[slots[j] as usize].name.as_bytes(), name) {
+                j = (j + 1) & ($n - 1);
+            }
+            slots[j] = i as u16;
+            i += 1;
+        }
+        slots
+    }};
+}
+
+const CLASS_SLOTS: usize = index_size(crate::stub_sigs::CLASSES.len());
+static CLASS_INDEX: NameIndex<CLASS_SLOTS> = NameIndex {
+    slots: name_slots!(crate::stub_sigs::CLASSES, CLASS_SLOTS),
+    names: |i| crate::stub_sigs::CLASSES[i].name,
+};
+
+const FUNCTION_SLOTS: usize = index_size(crate::stub_sigs::FUNCTIONS.len());
+static FUNCTION_INDEX: NameIndex<FUNCTION_SLOTS> = NameIndex {
+    slots: name_slots!(crate::stub_sigs::FUNCTIONS, FUNCTION_SLOTS),
+    names: |i| crate::stub_sigs::FUNCTIONS[i].name,
+};
+
+#[inline]
+fn class_index() -> &'static NameIndex<CLASS_SLOTS> {
+    &CLASS_INDEX
 }
 
 /// Index in CLASSES of an internal class (any case, optional leading
 /// backslash).
 fn class_index_of(name: &[u8]) -> Option<usize> {
     let n = name.strip_prefix(b"\\").unwrap_or(name);
-    if n.iter().any(|b| b.is_ascii_uppercase()) {
-        class_index().get(&n.to_ascii_lowercase()).copied()
-    } else {
-        class_index().get(n).copied()
-    }
+    class_index().get_any_case(n)
 }
 
-fn function_index() -> &'static crate::fxhash::FxHashMap<Vec<u8>, usize> {
-    static IDX: OnceLock<crate::fxhash::FxHashMap<Vec<u8>, usize>> = OnceLock::new();
-    IDX.get_or_init(|| {
-        crate::stub_sigs::FUNCTIONS
-            .iter()
-            .enumerate()
-            .map(|(i, f)| (f.name.to_ascii_lowercase().into_bytes(), i))
-            .collect()
-    })
+#[inline]
+fn function_index() -> &'static NameIndex<FUNCTION_SLOTS> {
+    &FUNCTION_INDEX
+}
+
+/// Index in FUNCTIONS of an internal function (any case, optional leading
+/// backslash).
+pub(crate) fn function_index_of(name: &[u8]) -> Option<usize> {
+    let n = name.strip_prefix(b"\\").unwrap_or(name);
+    if n.is_ascii() {
+        function_index().get_any_case(n)
+    } else {
+        function_index().get(lower_str(name).as_bytes())
+    }
 }
 
 fn lower_str(name: &[u8]) -> String {
@@ -179,7 +297,7 @@ pub fn own_properties(vm: &crate::vm::Vm, lower: &[u8]) -> Vec<PropertyDef> {
     let Some(c) = find_class(&lower).or_else(|| find_self_declared_class(&lower)) else {
         return Vec::new();
     };
-    build_entry(vm, c)
+    build_entry_opts(vm, c, false)
         .properties
         .into_iter()
         .filter(|p| p.declaring_class == lower)
@@ -211,11 +329,6 @@ pub struct StubHierarchy {
     pub parents_lower: Vec<Vec<u8>>,
     /// Lowercased `interfaces`.
     pub interfaces_lower: Vec<Vec<u8>>,
-}
-
-struct StubTable {
-    by_lower: crate::fxhash::FxHashMap<Vec<u8>, usize>,
-    hierarchy: Vec<StubHierarchy>,
 }
 
 /// `ce->interfaces` of an internal class as php-src builds it at
@@ -258,45 +371,33 @@ fn ce_interfaces(c: &'static StubClass, depth: usize) -> Vec<&'static str> {
     out
 }
 
-fn stub_table() -> &'static StubTable {
-    static T: OnceLock<StubTable> = OnceLock::new();
-    T.get_or_init(|| {
-        let classes = crate::stub_sigs::CLASSES;
-        let by_lower: crate::fxhash::FxHashMap<Vec<u8>, usize> = classes
+/// The hierarchy of CLASSES[i], computed on first use.
+fn hierarchy_of(i: usize) -> &'static StubHierarchy {
+    const N: usize = crate::stub_sigs::CLASSES.len();
+    static HIERARCHY: [OnceLock<StubHierarchy>; N] = [const { OnceLock::new() }; N];
+    HIERARCHY[i].get_or_init(|| {
+        let c = &crate::stub_sigs::CLASSES[i];
+        let mut parents_lower = Vec::new();
+        let mut cur = c;
+        while let Some(p) = cur.parent.and_then(|p| find_class(p.as_bytes())) {
+            if parents_lower.len() > 32 {
+                break;
+            }
+            parents_lower.push(p.name.to_ascii_lowercase().into_bytes());
+            cur = p;
+        }
+        let interfaces = ce_interfaces(c, 0);
+        let interfaces_lower = interfaces
             .iter()
-            .enumerate()
-            .map(|(i, c)| (c.name.to_ascii_lowercase().into_bytes(), i))
+            .map(|i| i.to_ascii_lowercase().into_bytes())
             .collect();
-        let hierarchy = classes
-            .iter()
-            .map(|c| {
-                let mut parents_lower = Vec::new();
-                let mut cur = c;
-                while let Some(p) = cur.parent.and_then(|p| find_class(p.as_bytes())) {
-                    if parents_lower.len() > 32 {
-                        break;
-                    }
-                    parents_lower.push(p.name.to_ascii_lowercase().into_bytes());
-                    cur = p;
-                }
-                let interfaces = ce_interfaces(c, 0);
-                let interfaces_lower = interfaces
-                    .iter()
-                    .map(|i| i.to_ascii_lowercase().into_bytes())
-                    .collect();
-                StubHierarchy {
-                    parent: c
-                        .parent
-                        .map(|p| find_class(p.as_bytes()).map(|pc| pc.name).unwrap_or(p)),
-                    interfaces,
-                    parents_lower,
-                    interfaces_lower,
-                }
-            })
-            .collect();
-        StubTable {
-            by_lower,
-            hierarchy,
+        StubHierarchy {
+            parent: c
+                .parent
+                .map(|p| find_class(p.as_bytes()).map(|pc| pc.name).unwrap_or(p)),
+            interfaces,
+            parents_lower,
+            interfaces_lower,
         }
     })
 }
@@ -311,18 +412,16 @@ pub fn is_pseudo_class(name: &str) -> bool {
 /// Allocation-free stub lookup by an already lowercased name (no leading
 /// backslash).
 pub fn find_class_lower(lower: &[u8]) -> Option<&'static StubClass> {
-    stub_table()
-        .by_lower
+    class_index()
         .get(lower)
-        .map(|&i| &crate::stub_sigs::CLASSES[i])
+        .map(|i| &crate::stub_sigs::CLASSES[i])
 }
 
 /// The stub and precomputed hierarchy of an internal class (lowercased name).
 pub fn class_hierarchy(lower: &[u8]) -> Option<(&'static StubClass, &'static StubHierarchy)> {
-    let t = stub_table();
-    t.by_lower
+    class_index()
         .get(lower)
-        .map(|&i| (&crate::stub_sigs::CLASSES[i], &t.hierarchy[i]))
+        .map(|i| (&crate::stub_sigs::CLASSES[i], hierarchy_of(i)))
 }
 
 /// instanceof between internal classes (both lowercased): Some(result) when
@@ -338,18 +437,7 @@ pub fn stub_instanceof(child: &[u8], ancestor: &[u8]) -> Option<bool> {
 
 /// Look up the stub of an internal function.
 pub fn find_function(name: &[u8]) -> Option<&'static StubFunc> {
-    let n = name.strip_prefix(b"\\").unwrap_or(name);
-    let mut buf = [0u8; 64];
-    let i = if n.len() <= buf.len() && n.is_ascii() {
-        // (lower_str() without the copies: ASCII is its own lossy UTF-8)
-        let lower = &mut buf[..n.len()];
-        lower.copy_from_slice(n);
-        lower.make_ascii_lowercase();
-        function_index().get(&*lower)
-    } else {
-        function_index().get(lower_str(name).as_bytes())
-    };
-    i.map(|&i| &crate::stub_sigs::FUNCTIONS[i])
+    function_index_of(name).map(|i| &crate::stub_sigs::FUNCTIONS[i])
 }
 
 /// Look up a global constant declared in a stub.
@@ -654,7 +742,23 @@ pub fn class_entry(vm: &crate::vm::Vm, name: &[u8]) -> Option<&'static ClassEntr
     Some(built)
 }
 
+/// The entry class_entry() gives, without its methods (for an extension
+/// whose native class handler serves them): not cached.
+pub fn class_entry_without_methods(vm: &crate::vm::Vm, name: &[u8]) -> Option<ClassEntry> {
+    let idx = class_index_of(name)?;
+    if let Some(e) = ENTRY_CACHE.with(|c| c.borrow().get(idx).copied().flatten()) {
+        let mut ce = e.clone();
+        ce.methods.clear();
+        return Some(ce);
+    }
+    Some(build_entry_opts(vm, &crate::stub_sigs::CLASSES[idx], false))
+}
+
 fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
+    build_entry_opts(vm, c, true)
+}
+
+fn build_entry_opts(vm: &crate::vm::Vm, c: &'static StubClass, with_methods: bool) -> ClassEntry {
     let mut ce = ClassEntry::new(c.name.as_bytes().to_vec());
     ce.parent = c.parent.map(|p| {
         find_class(p.as_bytes())
@@ -711,7 +815,12 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
         let v = case.value.and_then(literal_value).unwrap_or(Value::Null);
         ce.enum_cases.push((case.name.as_bytes().to_vec(), v));
     }
-    for (decl, m) in class_methods(c.name.as_bytes()) {
+    let methods = if with_methods {
+        class_methods(c.name.as_bytes())
+    } else {
+        Vec::new()
+    };
+    for (decl, m) in methods {
         let decl_lower = decl.name.to_ascii_lowercase().into_bytes();
         let mut is_abstract = m.flags & F_ABSTRACT != 0;
         if decl.kind == K_INTERFACE {

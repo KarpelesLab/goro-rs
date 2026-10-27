@@ -451,26 +451,17 @@ pub fn type_display(t: &str) -> String {
 
 /// Arginfo of the internal function `lname` (lowercase), from its stub.
 pub fn lookup(lname: &[u8]) -> Option<&'static FuncInfo> {
-    static MAP: std::sync::OnceLock<crate::fxhash::FxHashMap<&'static str, FuncInfo>> =
-        std::sync::OnceLock::new();
-    let map = MAP.get_or_init(|| {
-        crate::stub_sigs::FUNCTIONS
-            .iter()
-            .map(|f| {
-                let mut info = FuncInfo::from_stub(f);
-                info.mark_class_params();
-                (f.name, info)
-            })
-            .collect()
-    });
-    let s = std::str::from_utf8(lname).ok()?;
-    match map.get(s) {
-        Some(f) => Some(f),
-        None => {
-            let f = crate::stubs::find_function(lname)?;
-            map.get(f.name)
-        }
-    }
+    // (each function's FuncInfo is built on its first lookup: building all
+    // of them was a good part of every process's startup)
+    const N: usize = crate::stub_sigs::FUNCTIONS.len();
+    static INFOS: [std::sync::OnceLock<FuncInfo>; N] = [const { std::sync::OnceLock::new() }; N];
+    std::str::from_utf8(lname).ok()?;
+    let i = crate::stubs::function_index_of(lname)?;
+    Some(INFOS[i].get_or_init(|| {
+        let mut info = FuncInfo::from_stub(&crate::stub_sigs::FUNCTIONS[i]);
+        info.mark_class_params();
+        info
+    }))
 }
 
 /// CHECK_* flags verified for `lname`.

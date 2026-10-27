@@ -632,6 +632,12 @@ pub fn array_diff(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }))));
     }
     check_rest(vm)?;
+    if let Some(r) = array_diff_strings(&first, &arrs[1..]) {
+        if vm.current_exception.is_some() {
+            return Ok(Value::Null);
+        }
+        return Ok(Value::Array(Rc::new(RefCell::new(r))));
+    }
     let mut exclude: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
     let mut total = 0;
     for a in &arrs[1..] {
@@ -664,6 +670,50 @@ pub fn array_diff(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Null);
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+/// array_diff() of arrays holding only strings (get_declared_classes()
+/// lists, file lists...): nothing to convert, warn about or call, so the
+/// strings are compared where they are. None when a value is anything else.
+#[inline(never)]
+fn array_diff_strings(first: &Rc<RefCell<PhpArray>>, rest: &[Value]) -> Option<PhpArray> {
+    let all_strings = |a: &PhpArray| a.values().all(|v| matches!(v, Value::String(_)));
+    let fb = first.borrow();
+    if !all_strings(&fb) {
+        return None;
+    }
+    let rest: Vec<std::cell::Ref<'_, PhpArray>> = rest
+        .iter()
+        .map(|a| match a {
+            Value::Array(a) => a.borrow(),
+            _ => unreachable!(),
+        })
+        .collect();
+    if !rest.iter().all(|a| all_strings(a)) {
+        return None;
+    }
+    let total: usize = rest.iter().map(|a| a.len()).sum();
+    if total == 0 {
+        return Some(fb.clone());
+    }
+    let mut exclude: goro_core::fxhash::FxHashSet<&[u8]> = Default::default();
+    exclude.reserve(total);
+    for a in &rest {
+        for v in a.values() {
+            if let Value::String(s) = v {
+                exclude.insert(s.as_bytes());
+            }
+        }
+    }
+    let mut result = PhpArray::new();
+    for (k, v) in fb.iter() {
+        if let Value::String(s) = v {
+            if !exclude.contains(s.as_bytes()) {
+                result.set(k.clone(), v.clone());
+            }
+        }
+    }
+    Some(result)
 }
 
 pub fn array_diff_key(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> {

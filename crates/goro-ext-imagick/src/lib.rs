@@ -517,12 +517,9 @@ pub(crate) fn ini_bool(vm: &Vm, name: &str) -> bool {
 }
 
 fn register_class(vm: &mut Vm, lower: &[u8], name: &str, interfaces: &[&[u8]]) {
-    let mut ce = match goro_core::stubs::class_entry(vm, name.as_bytes()) {
-        Some(stub) => stub.clone(),
-        None => ClassEntry::new(name.as_bytes().to_vec()),
-    };
-    // the methods are served by the native class handler
-    ce.methods.clear();
+    // (the methods are served by the native class handler)
+    let mut ce = goro_core::stubs::class_entry_without_methods(vm, name.as_bytes())
+        .unwrap_or_else(|| ClassEntry::new(name.as_bytes().to_vec()));
     for i in interfaces {
         if !ce.interfaces.iter().any(|x| x.eq_ignore_ascii_case(i)) {
             ce.interfaces.push(i.to_vec());
