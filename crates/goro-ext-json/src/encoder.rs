@@ -92,87 +92,9 @@ fn is_valid_double(d: f64) -> bool {
     d.is_finite()
 }
 
-/// zend_dtoa(): the significant digits of |d| and the decimal point
-/// position. Mode 0 gives the shortest round-trip digits, mode 2 `ndigit`
-/// correctly rounded significant digits (trailing zeros suppressed).
-fn dtoa(d: f64, mode: u8, ndigit: i32) -> (Vec<u8>, i32) {
-    let a = d.abs();
-    if a == 0.0 {
-        return (b"0".to_vec(), 1);
-    }
-    let s = if mode == 0 {
-        format!("{:e}", a)
-    } else {
-        format!("{:.*e}", (ndigit.max(1) - 1) as usize, a)
-    };
-    let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
-    let exp: i32 = exp.parse().unwrap_or(0);
-    let mut digits: Vec<u8> = mant.bytes().filter(|b| b.is_ascii_digit()).collect();
-    while digits.len() > 1 && digits.last() == Some(&b'0') {
-        digits.pop();
-    }
-    if mode == 0 {
-        goro_core::value::shortest_tie_to_even(a, &mut digits, exp);
-    }
-    (digits, exp + 1)
-}
-
 /// zend_gcvt(value, ndigit, '.', 'e')
 pub fn gcvt(value: f64, ndigit: i32) -> Vec<u8> {
-    let mode = if ndigit >= 0 { 2 } else { 0 };
-    let ndigit = if mode == 0 { 17 } else { ndigit };
-    if value.is_nan() {
-        return b"NAN".to_vec();
-    }
-    if value.is_infinite() {
-        return if value < 0.0 {
-            b"-INF".to_vec()
-        } else {
-            b"INF".to_vec()
-        };
-    }
-    let (digits, mut decpt) = dtoa(value, mode, ndigit);
-    let mut dst = Vec::with_capacity(32);
-    if value.is_sign_negative() {
-        dst.push(b'-');
-    }
-    if (decpt >= 0 && decpt > ndigit) || decpt < -3 {
-        // exponential format (e.g. 1.2345e+13)
-        decpt -= 1;
-        let neg = decpt < 0;
-        if neg {
-            decpt = -decpt;
-        }
-        dst.push(digits[0]);
-        dst.push(b'.');
-        if digits.len() == 1 {
-            dst.push(b'0');
-        } else {
-            dst.extend_from_slice(&digits[1..]);
-        }
-        dst.push(b'e');
-        dst.push(if neg { b'-' } else { b'+' });
-        dst.extend_from_slice(decpt.to_string().as_bytes());
-    } else if decpt < 0 {
-        // standard format 0.
-        dst.extend_from_slice(b"0.");
-        dst.extend(std::iter::repeat_n(b'0', (-decpt) as usize));
-        dst.extend_from_slice(&digits);
-    } else {
-        // standard format
-        let decpt = decpt as usize;
-        for i in 0..decpt {
-            dst.push(digits.get(i).copied().unwrap_or(b'0'));
-        }
-        if digits.len() > decpt {
-            if decpt == 0 {
-                dst.push(b'0');
-            }
-            dst.push(b'.');
-            dst.extend_from_slice(&digits[decpt..]);
-        }
-    }
-    dst
+    goro_core::value::zend_gcvt(value, ndigit, b'.', b'e')
 }
 
 fn encode_double(buf: &mut Vec<u8>, d: f64, options: i64) {

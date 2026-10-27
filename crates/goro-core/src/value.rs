@@ -2194,6 +2194,29 @@ pub fn shortest_tie_to_even(v: f64, digits: &mut [u8], exp: i32) {
     }
 }
 
+/// zend_dtoa() mode 2 of an integer below 1e15 whose `ndigit`-digit
+/// rounding is an exact tie kept at its even last digit: the quick path
+/// cannot decide it, and the "small integer" path returns the `ndigit`
+/// digits without stripping their trailing zeros (1.0000000000000E+14 for
+/// 100000000000005.0 at precision 14).
+#[cold]
+#[inline(never)]
+fn small_integer_tie_digits(v: f64, ndigit: i32, digits: &mut Vec<u8>) {
+    if !(1.0..1e15).contains(&v) || ndigit > 14 {
+        return;
+    }
+    let exact = (v as u64).to_string().into_bytes();
+    let n = ndigit as usize;
+    if exact.len() > n
+        && exact[n] == b'5'
+        && exact[n + 1..].iter().all(|&c| c == b'0')
+        && (exact[n - 1] - b'0').is_multiple_of(2)
+    {
+        digits.clear();
+        digits.extend_from_slice(&exact[..n]);
+    }
+}
+
 /// zend_gcvt(): `ndigit` significant digits (mode 2), or the shortest
 /// round-trip digits when `ndigit` is negative (mode 0, 17 max).
 pub fn zend_gcvt(value: f64, ndigit: i32, dec_point: u8, exp_char: u8) -> Vec<u8> {
@@ -2222,6 +2245,8 @@ pub fn zend_gcvt(value: f64, ndigit: i32, dec_point: u8, exp_char: u8) -> Vec<u8
         }
         if ndigit < 0 {
             shortest_tie_to_even(neg_zero_free, &mut digits, exp);
+        } else if (digits.len() as i32) < ndigit && neg_zero_free.fract() == 0.0 {
+            small_integer_tie_digits(neg_zero_free, ndigit, &mut digits);
         }
         let decpt = if value == 0.0 { 1 } else { exp + 1 };
         (if ndigit < 0 { 17 } else { ndigit }, digits, decpt)
