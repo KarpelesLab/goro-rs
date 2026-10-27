@@ -226,6 +226,84 @@ impl FuncInfo {
     }
 }
 
+/// The Z_PARAM_PATH ("p") parameters of internal functions (indexes), from
+/// php-src's ZEND_PARSE_PARAMETERS blocks.
+const PATH_PARAMS: &[(&str, &[u8])] = &[
+    ("DateTime::createFromFormat", &[1]),
+    ("DateTimeImmutable::createFromFormat", &[1]),
+    ("SplFileObject::__construct", &[0]),
+    ("chmod", &[0]),
+    ("clearstatcache", &[1]),
+    ("copy", &[0, 1]),
+    ("date_create_from_format", &[1]),
+    ("date_create_immutable_from_format", &[1]),
+    ("date_parse_from_format", &[1]),
+    ("error_log", &[2]),
+    ("file", &[0]),
+    ("file_get_contents", &[0]),
+    ("file_put_contents", &[0]),
+    ("fnmatch", &[0, 1]),
+    ("fopen", &[0]),
+    ("ftok", &[0]),
+    ("get_headers", &[0]),
+    ("get_meta_tags", &[0]),
+    ("getservbyname", &[0, 1]),
+    ("getservbyport", &[1]),
+    ("glob", &[0]),
+    ("hash_update_file", &[1]),
+    ("highlight_file", &[0]),
+    ("iptcembed", &[1]),
+    ("link", &[0, 1]),
+    ("mail", &[0, 1, 2, 4]),
+    ("mb_send_mail", &[0, 1, 2, 4]),
+    ("md5_file", &[0]),
+    ("mkdir", &[0]),
+    ("move_uploaded_file", &[0, 1]),
+    ("parse_ini_file", &[0]),
+    ("popen", &[0]),
+    ("readfile", &[0]),
+    ("rename", &[0, 1]),
+    ("rmdir", &[0]),
+    ("scandir", &[0]),
+    ("sha1_file", &[0]),
+    ("symlink", &[0, 1]),
+    ("tempnam", &[0, 1]),
+    ("touch", &[0]),
+    ("unlink", &[0]),
+];
+
+/// A Z_PARAM_PATH argument before `before` holding a NUL byte: zpp's
+/// "must not contain any null bytes" ValueError.
+#[inline(never)]
+fn path_param_nul_error(info: &FuncInfo, args: &[Value], before: usize) -> Option<ZppError> {
+    if before == 0 {
+        return None;
+    }
+    let (_, idxs) = PATH_PARAMS
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(info.name))?;
+    for &i in idxs.iter() {
+        let i = i as usize;
+        if i >= before {
+            break;
+        }
+        let nul = match args.get(i) {
+            Some(Value::String(s)) => s.as_bytes().contains(&0),
+            Some(Value::Reference(r)) => {
+                matches!(&*r.borrow(), Value::String(s) if s.as_bytes().contains(&0))
+            }
+            _ => false,
+        };
+        if nul {
+            return Some(ZppError::Throw(
+                b"ValueError",
+                format!("{} must not contain any null bytes", info.arg_prefix(i)),
+            ));
+        }
+    }
+    None
+}
+
 /// Type mask of a stub type (`iterable` is Traversable|array, as zend_compile makes it).
 pub fn type_mask(t: &str) -> u16 {
     let mut t = t.trim();
@@ -1510,10 +1588,47 @@ impl Vm {
         Ok(())
     }
 
-    /// zpp_check() from argument `start` on (those before it are checked).
+    /// zpp_check() from argument `start` on: a Z_PARAM_PATH argument before
+    /// it with a NUL byte is the ValueError zpp stops at (the function's own
+    /// check of it would come after the later arguments' errors).
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     fn zpp_check_from(
+        &mut self,
+        info: &'static FuncInfo,
+        flags: u8,
+        args: &mut [Value],
+        orig: &mut Option<Vec<Value>>,
+        strict: bool,
+        line: u32,
+        frame_at: Option<u32>,
+        start: usize,
+    ) -> Result<(), ZppError> {
+        if let Some(e) = path_param_nul_error(info, args, start) {
+            return Err(e);
+        }
+        let r = self.zpp_check_from_args(info, flags, args, orig, strict, line, frame_at, start);
+        // (likewise one between `start` and the argument rejected)
+        if let Err(ZppError::Throw(_, msg)) = &r {
+            let at = msg
+                .split_once("(): Argument #")
+                .and_then(|(_, rest)| {
+                    let n = rest.bytes().take_while(u8::is_ascii_digit).count();
+                    rest[..n].parse::<usize>().ok()
+                })
+                .unwrap_or(0);
+            if at > start + 1 {
+                if let Some(e) = path_param_nul_error(info, args, at - 1) {
+                    return Err(e);
+                }
+            }
+        }
+        r
+    }
+
+    /// zpp_check_from() past the earlier path arguments' check.
+    #[allow(clippy::too_many_arguments)]
+    fn zpp_check_from_args(
         &mut self,
         info: &'static FuncInfo,
         flags: u8,
