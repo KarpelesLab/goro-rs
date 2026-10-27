@@ -25408,8 +25408,13 @@ impl Vm {
             // slot so reads, writes and unset of elements act on the real global.
             for &i in names.auto_globals.iter() {
                 let (i, cv_name) = (i as usize, &op_array.cv_names[i as usize]);
-                if matches!(cvs.get(i), Some(Value::Undef)) && self.global_exists(cv_name) {
-                    cvs[i] = Value::Reference(self.global_cell(cv_name));
+                if matches!(cvs.get(i), Some(Value::Undef)) {
+                    if self.global_exists(cv_name) {
+                        cvs[i] = Value::Reference(self.global_cell(cv_name));
+                    } else if cv_name.as_slice() == b"_SESSION" {
+                        // session_start() may set it up later in this call
+                        cvs[i] = Value::Reference(self.global_undef_cell(cv_name));
+                    }
                 }
             }
         }

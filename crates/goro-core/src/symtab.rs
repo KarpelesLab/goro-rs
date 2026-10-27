@@ -130,6 +130,29 @@ impl SymTab {
         (r, true)
     }
 
+    /// The reference cell of a variable, leaving an undefined one undefined
+    /// (an IS_INDIRECT slot to an UNDEF CV): writes through the cell define it.
+    #[inline(never)]
+    pub fn undef_cell(&self, name: &[u8]) -> Cell {
+        let mut g = self.arr.borrow_mut();
+        if let Some(slot) = g.get_name_mut(name) {
+            if let Value::Reference(r) = slot {
+                return r.clone();
+            }
+            let v = std::mem::replace(slot, Value::Undef);
+            let r = Rc::new(RefCell::new(v));
+            *slot = Value::Reference(r.clone());
+            drop(g);
+            self.bump();
+            return r;
+        }
+        let r = Rc::new(RefCell::new(Value::Undef));
+        g.set(gkey(name), Value::Reference(r.clone()));
+        drop(g);
+        self.bump();
+        r
+    }
+
     /// Assign a variable (writes through an existing binding).
     pub fn assign(&self, name: &[u8], value: Value) {
         let key = gkey(name);
@@ -398,6 +421,17 @@ impl Vm {
             self.global_ref_names.insert(name.to_vec());
         }
         self.globals_tab().cell(name).0
+    }
+
+    /// The cell of global `$_SESSION` for a function's auto-global CV while
+    /// the session has not set it up yet (see Vm::bind_auto_global_cvs):
+    /// session_start() fills that same cell.
+    #[inline(never)]
+    pub fn global_undef_cell(&mut self, name: &[u8]) -> Cell {
+        if !self.global_ref_names.contains(name) {
+            self.global_ref_names.insert(name.to_vec());
+        }
+        self.globals_tab().undef_cell(name)
     }
 
     /// Assign a global (writes through an existing binding).

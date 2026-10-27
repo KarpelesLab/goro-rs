@@ -1410,9 +1410,12 @@ impl PhpGenerator {
             for (i, cv_name) in self.op_array.cv_names.iter().enumerate() {
                 if crate::vm::is_auto_global_name(cv_name)
                     && matches!(self.cvs.get(i), Some(Value::Undef))
-                    && vm.global_exists(cv_name)
                 {
-                    self.cvs[i] = Value::Reference(vm.global_cell(cv_name));
+                    if vm.global_exists(cv_name) {
+                        self.cvs[i] = Value::Reference(vm.global_cell(cv_name));
+                    } else if cv_name.as_slice() == b"_SESSION" {
+                        self.cvs[i] = Value::Reference(vm.global_undef_cell(cv_name));
+                    }
                 }
             }
         }
