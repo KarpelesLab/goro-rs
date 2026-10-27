@@ -12525,6 +12525,29 @@ impl Compiler {
 
     /// Destructuring that contains `&` elements: each element is bound
     /// directly against `src[key]` (which must be a writable place).
+    /// The line "Cannot mix keyed and unkeyed array entries" is reported
+    /// on: zend_compile_list_assign() raises it at the first element not
+    /// keyed like the first one, while CG(zend_lineno) is the line the
+    /// previous element's assignment was compiled at (or the statement's).
+    #[inline(never)]
+    fn mixed_list_error_line(elems: &[ArrayElement], line: u32) -> u32 {
+        let mut present = elems
+            .iter()
+            .filter(|e| !matches!(&e.value.kind, ExprKind::Null));
+        let Some(first) = present.next() else {
+            return line;
+        };
+        let keyed = first.key.is_some();
+        let mut prev = first.value.span.line;
+        for e in present {
+            if e.key.is_some() != keyed {
+                return prev;
+            }
+            prev = e.value.span.line;
+        }
+        line
+    }
+
     fn compile_list_destructure_ref(
         &mut self,
         elems: &[ArrayElement],
@@ -12548,7 +12571,7 @@ impl Compiler {
         if has_keyed && has_unkeyed {
             return Err(CompileError {
                 message: "Cannot mix keyed and unkeyed array entries in assignments".into(),
-                line,
+                line: Self::mixed_list_error_line(elems, line),
             });
         }
         for (i, elem) in elems.iter().enumerate() {
@@ -12629,7 +12652,7 @@ impl Compiler {
         if has_keyed && has_unkeyed {
             return Err(CompileError {
                 message: "Cannot mix keyed and unkeyed array entries in assignments".into(),
-                line,
+                line: Self::mixed_list_error_line(elems, line),
             });
         }
 
@@ -15636,7 +15659,7 @@ impl Compiler {
             return Err(CompileError {
                 message: "Arrow functions on the right hand side of |> must be parenthesized"
                     .into(),
-                line: callable.span.line,
+                line: expr.span.line,
             });
         }
         let saved = self.tmp_aliases.len();
