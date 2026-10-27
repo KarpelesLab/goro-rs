@@ -465,13 +465,4 @@ impl Vm {
             push_lossy(out, &f.name);
         }
     }
-
-    #[inline(never)]
-    fn push_closure_scope(&self, scope: &[u8], out: &mut String) {
-        match self.classes.get(scope) {
-            Some(c) => push_lossy(out, &c.name),
-            None => out.push_str(&self.builtin_canonical_name(scope)),
-        }
-        out.push_str("::");
-    }
 }
