@@ -20597,9 +20597,25 @@ fn stream_get_contents_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
         crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
     if has_read_filters {
         if offset >= 0 {
+            // _php_stream_seek(): a position within the read buffer (the
+            // filtered data not read yet) is reached in it; another one
+            // seeks the file and drops the buffer.
+            let pos = filter_stream_tell(fid);
             FILE_HANDLES.with(|h| {
                 if let Some(fh) = h.borrow_mut().get_mut(&fid) {
-                    let _ = fh.file.seek(SeekFrom::Start(offset as u64));
+                    let ready = fh.filter_read_ready.len() as i64;
+                    match pos {
+                        Some(p) if offset == p => {}
+                        Some(p) if offset > p && offset <= p + ready => {
+                            fh.filter_read_ready.drain(..(offset - p) as usize);
+                        }
+                        _ => {
+                            fh.filter_read_ready.clear();
+                            if fh.file.seek(SeekFrom::Start(offset as u64)).is_ok() {
+                                fh.eof = false;
+                            }
+                        }
+                    }
                 }
             });
         }
