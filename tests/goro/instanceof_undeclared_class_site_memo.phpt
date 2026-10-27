@@ -18,19 +18,19 @@ function t($o) {
 }
 $objs = [new A, new B, new C, new S, new D, new ArrayObject([])];
 for ($i = 0; $i < 3; $i++) {
-    foreach ($objs as $o) echo t($o), ' ';
+    echo implode(' ', array_map('t', $objs));
     echo "\n";
 }
 class_alias('A', 'Later');
 for ($i = 0; $i < 3; $i++) {
-    foreach ($objs as $o) echo t($o), ' ';
+    echo implode(' ', array_map('t', $objs));
     echo "\n";
 }
 interface NeverDeclared {}
 class E implements NeverDeclared {}
 $objs[] = new E;
 for ($i = 0; $i < 2; $i++) {
-    foreach ($objs as $o) echo t($o), ' ';
+    echo implode(' ', array_map('t', $objs));
     echo "\n";
 }
 ?>

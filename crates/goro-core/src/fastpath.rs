@@ -2288,7 +2288,7 @@ fn foreach_live_end(
     let OperandType::JmpTarget(target) = op.op2 else {
         return Fast::No;
     };
-    if !no_release || (!fe.cur_key.is_empty() && fe.cur_key.contains_key(&it)) {
+    if !fe.cur_key.is_empty() && fe.cur_key.contains_key(&it) {
         return Fast::No;
     }
     let Some(slot) = tmps.get_mut(it as usize) else {
@@ -2301,7 +2301,13 @@ fn foreach_live_end(
             return Fast::No;
         }
     }
-    if !drops_quietly_deep(slot, &mut 256, globals) {
+    // (objects with a destructor exist: none is reached, the general
+    // handler's release of the iterator makes no release point either)
+    if !(if no_release {
+        drops_quietly_deep(slot, &mut 256, globals)
+    } else {
+        drops_quietly_listed(slot, &mut 256, globals)
+    }) {
         return Fast::No;
     }
     *slot = Value::Undef;
