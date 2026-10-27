@@ -11081,8 +11081,8 @@ fn usleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     _vm.flush_cli_output();
     if usecs > 0 {
-        // Sleep the actual duration, capped at 2s (like sleep()).
-        let actual = (usecs as u64).min(2_000_000);
+        // (the full duration, as sleep(): a retry backoff relies on it)
+        let actual = usecs as u64;
         // usleep(): a signal ends it early.
         let req = libc::timespec {
             tv_sec: (actual / 1_000_000) as libc::time_t,
