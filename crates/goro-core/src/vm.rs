@@ -26114,6 +26114,9 @@ impl Vm {
                     }
                 },
                 OpCode::Div => match outlined(|| -> Result<Flow, VmError> {
+                    if crate::fastpath::div_mod_quick(&op, &cvs, &mut tmps, &op_array.literals) {
+                        return Ok(Flow::Next);
+                    }
                     let a = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -26234,6 +26237,9 @@ impl Vm {
                     }
                 },
                 OpCode::Mod => match outlined(|| -> Result<Flow, VmError> {
+                    if crate::fastpath::div_mod_quick(&op, &cvs, &mut tmps, &op_array.literals) {
+                        return Ok(Flow::Next);
+                    }
                     let a = self.read_operand_warn(
                         &op.op1,
                         &cvs,

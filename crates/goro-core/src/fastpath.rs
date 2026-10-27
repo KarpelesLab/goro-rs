@@ -201,6 +201,27 @@ pub(crate) fn cv_num_writable(i: u32, cvs: &[Value], refs_ok: bool) -> bool {
     }
 }
 
+/// The general Div / Mod handlers' first try: numbers into a temporary
+/// (div_mod()). False when the general path is needed.
+#[inline(never)]
+pub(crate) fn div_mod_quick(
+    op: &Op,
+    cvs: &[Value],
+    tmps: &mut [Value],
+    literals: &[Value],
+) -> bool {
+    let (Some(a), Some(b)) = (
+        num_operand(&op.op1, cvs, tmps, literals),
+        num_operand(&op.op2, cvs, tmps, literals),
+    ) else {
+        return false;
+    };
+    match div_mod(op.opcode == OpCode::Mod, a, b) {
+        Some(v) => store_tmp(&op.result, v, tmps),
+        None => false,
+    }
+}
+
 /// ZEND_DIV / ZEND_MOD of numbers, when no error is raised: None for a
 /// zero divisor (DivisionByZeroError) and for `%` of a float (which
 /// converts with a possible deprecation): the general handler's.
@@ -2694,8 +2715,6 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
         OpCode::Add
             | OpCode::Sub
             | OpCode::Mul
-            | OpCode::Div
-            | OpCode::Mod
             | OpCode::Less
             | OpCode::LessEqual
             | OpCode::Greater
@@ -3259,8 +3278,6 @@ impl crate::vm::Vm {
                 OpCode::Add => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::Sub => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::Mul => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
-                OpCode::Div => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
-                OpCode::Mod => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::Less => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::LessEqual => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::Greater => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
