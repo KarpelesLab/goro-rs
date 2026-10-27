@@ -3374,7 +3374,9 @@ impl Compiler {
                     // (SEND_* is emitted once the argument is compiled:
                     // CG(zend_lineno))
                     line: match cv_list_line {
-                        Some(l) if matches!(arg.value.kind, ExprKind::Variable(_)) && !is_byref => l,
+                        Some(l) if matches!(arg.value.kind, ExprKind::Variable(_)) && !is_byref => {
+                            l
+                        }
                         _ => self.zend_lineno.max(line),
                     },
                 });
@@ -6446,7 +6448,8 @@ impl Compiler {
                         Self::emit_recv_default_check(
                             &mut func_compiler.op_array,
                             cv,
-                            default_expr, param.recv_line,
+                            default_expr,
+                            param.recv_line,
                         );
                         let after = func_compiler.op_array.current_offset();
                         func_compiler.op_array.patch_jump(jmp_skip, after);
@@ -10507,7 +10510,8 @@ impl Compiler {
                                         Self::emit_recv_default_check(
                                             &mut method_compiler.op_array,
                                             cv,
-                                            default_expr, param.recv_line,
+                                            default_expr,
+                                            param.recv_line,
                                         );
                                         let after = method_compiler.op_array.current_offset();
                                         method_compiler.op_array.patch_jump(jmp_skip, after);
@@ -18253,11 +18257,9 @@ impl Compiler {
                         let lower = r.to_ascii_lowercase();
                         crate::arginfo::lookup(&lower).is_none()
                             && self.op_array.name.is_empty()
-                            && !self
-                                .op_array
-                                .child_functions
-                                .iter()
-                                .any(|f| f.name.eq_ignore_ascii_case(r) && f.decl_line <= expr.span.line)
+                            && !self.op_array.child_functions.iter().any(|f| {
+                                f.name.eq_ignore_ascii_case(r) && f.decl_line <= expr.span.line
+                            })
                     }
                     (ExprKind::Identifier(_), _) => fallback_name.is_some(),
                     _ => true,
@@ -20735,7 +20737,8 @@ impl Compiler {
                         Self::emit_recv_default_check(
                             &mut closure_compiler.op_array,
                             cv,
-                            default_expr, param.recv_line,
+                            default_expr,
+                            param.recv_line,
                         );
                         let after = closure_compiler.op_array.current_offset();
                         closure_compiler.op_array.patch_jump(jmp_skip, after);
@@ -21087,7 +21090,8 @@ impl Compiler {
                         Self::emit_recv_default_check(
                             &mut closure_compiler.op_array,
                             cv,
-                            default_expr, param.recv_line,
+                            default_expr,
+                            param.recv_line,
                         );
                         let after = closure_compiler.op_array.current_offset();
                         closure_compiler.op_array.patch_jump(jmp_skip, after);
@@ -22071,7 +22075,8 @@ impl Compiler {
                     .and_then(|m| Self::builtin_method_to_bridge_func(m));
                 // (no fbc: except $this's private / final methods, which
                 // goro does not resolve here)
-                self.send_unknown_fbc = !matches!(&object.kind, ExprKind::Variable(n) if n == b"this");
+                self.send_unknown_fbc =
+                    !matches!(&object.kind, ExprKind::Variable(n) if n == b"this");
                 self.compile_send_args_with_name(args, init_line, bridge_name.as_deref())?;
 
                 // The call is on the method name's line (GH-8810).
@@ -23559,7 +23564,11 @@ impl Compiler {
             op1: OperandType::Cv(cv),
             op2: OperandType::Unused,
             result: OperandType::Unused,
-            line: if line > 0 { line } else { default_expr.span.line },
+            line: if line > 0 {
+                line
+            } else {
+                default_expr.span.line
+            },
         });
     }
 
@@ -23994,7 +24003,7 @@ impl Compiler {
         };
         if elements
             .iter()
-            .any(|e| nested(&e.value) || e.key.as_ref().is_some_and(&nested))
+            .any(|e| nested(&e.value) || e.key.as_ref().is_some_and(nested))
         {
             return true;
         }
@@ -26403,7 +26412,13 @@ fn param_recv_lines(params: &[Param], decl_line: u32) -> Vec<u32> {
     }
     params
         .iter()
-        .map(|p| if p.recv_line == 0 { decl_line } else { p.recv_line })
+        .map(|p| {
+            if p.recv_line == 0 {
+                decl_line
+            } else {
+                p.recv_line
+            }
+        })
         .collect()
 }
 

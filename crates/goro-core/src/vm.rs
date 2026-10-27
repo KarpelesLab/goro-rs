@@ -4470,9 +4470,11 @@ impl Vm {
             if pp.visibility == Visibility::Private {
                 continue;
             }
-            let Some(cp) = class.properties.iter().find(|p| {
-                p.name == pp.name && p.declaring_class.eq_ignore_ascii_case(&class.name)
-            }) else {
+            let Some(cp) = class
+                .properties
+                .iter()
+                .find(|p| p.name == pp.name && p.declaring_class.eq_ignore_ascii_case(&class.name))
+            else {
                 continue;
             };
             // (named as declared: the stub entry's are lowercase)
