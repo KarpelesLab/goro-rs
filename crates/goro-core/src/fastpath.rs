@@ -2677,7 +2677,7 @@ pub(crate) struct PlainPropMemo {
 }
 
 /// Whether a variable operand of `op` is bound to a reference.
-#[inline(never)]
+#[inline]
 fn cv_operand_is_ref(op: &Op, cvs: &[Value]) -> bool {
     [op.op1, op.op2, op.result].iter().any(|o| {
         matches!(o, OperandType::Cv(i) if matches!(cvs.get(*i as usize), Some(Value::Reference(_))))

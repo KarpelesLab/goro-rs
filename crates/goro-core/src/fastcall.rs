@@ -52,6 +52,59 @@ pub(crate) struct MethodSite {
     /// `user_functions.len() + 1` when the method was last seen registered
     /// under func_name (0: not checked).
     reg_gen: usize,
+    /// What the site found for the other classes (and scopes) it met last
+    /// (the first one met again is moved here, see take_method_site()).
+    others: Vec<MethodSite>,
+}
+
+/// How many classes a method call site remembers besides the last one.
+const METHOD_SITE_OTHERS: usize = 3;
+
+impl MethodSite {
+    #[inline]
+    fn is_for(&self, class_name: &[u8], scope: Option<&[u8]>) -> bool {
+        crate::string::bytes_eq(&self.class_name, class_name)
+            && match (self.scope.as_deref(), scope) {
+                (None, None) => true,
+                (Some(a), Some(b)) => crate::string::bytes_eq(a, b),
+                _ => false,
+            }
+    }
+}
+
+/// Remember `site` for the call at `ip`: the site's previous answers (for
+/// other classes or scopes) are kept among its others.
+fn store_method_site(op_array: &OpArray, ip: usize, site: MethodSite) {
+    let mut sites = op_array.sites().borrow_mut();
+    let map = &mut sites.get_or_insert_with(Default::default).method_sites;
+    let Some(mut old) = map.insert(ip as u32, site) else {
+        return;
+    };
+    let Some(new) = map.get_mut(&(ip as u32)) else {
+        return;
+    };
+    let mut others = std::mem::take(&mut old.others);
+    others.insert(0, old);
+    others.retain(|o| !o.is_for(&new.class_name, new.scope.as_deref()));
+    others.truncate(METHOD_SITE_OTHERS);
+    new.others = others;
+}
+
+/// The site's answer for objects of `class_name` called from `scope`
+/// among its others, made its current one (see MethodSite::others).
+#[inline(never)]
+fn other_method_site<'a>(
+    s: &'a mut MethodSite,
+    class_name: &[u8],
+    scope: Option<&[u8]>,
+) -> Option<&'a MethodSite> {
+    let i = s.others.iter().position(|o| o.is_for(class_name, scope))?;
+    let mut hit = s.others.remove(i);
+    std::mem::swap(&mut hit.others, &mut s.others);
+    std::mem::swap(s, &mut hit);
+    // (`hit` is now the previous current answer, without others)
+    s.others.insert(0, hit);
+    Some(s)
 }
 
 /// What internal_ctor_probe() saw before the general INIT_METHOD_CALL
@@ -1090,17 +1143,20 @@ impl Vm {
                 return false;
             }
             let scope = self.class_scope_ref();
-            let sites = op_array.sites().borrow();
+            let Ok(mut sites) = op_array.sites().try_borrow_mut() else {
+                return false;
+            };
             match sites
-                .as_ref()
-                .and_then(|s| s.method_sites.get(&(ip as u32)))
-                .filter(|s| {
-                    crate::string::bytes_eq(&s.class_name, &ob.class_name)
-                        && match (s.scope.as_deref(), scope) {
-                            (None, None) => true,
-                            (Some(a), Some(b)) => crate::string::bytes_eq(a, b),
-                            _ => false,
-                        }
+                .as_mut()
+                .and_then(|s| s.method_sites.get_mut(&(ip as u32)))
+                .and_then(|s| {
+                    if s.is_for(&ob.class_name, scope) {
+                        Some(&*s)
+                    } else if s.others.is_empty() {
+                        None
+                    } else {
+                        other_method_site(s, &ob.class_name, scope)
+                    }
                 }) {
                 Some(s) if s.fallback => return false,
                 Some(s) => match &s.method {
@@ -1182,25 +1238,22 @@ impl Vm {
         let scope = self.class_scope_ref().map(|s| s.to_vec());
         // (what the call site remembers when the general handler is to run)
         let fallback = |class_name: Vec<u8>, scope: Option<Vec<u8>>| {
-            op_array
-                .sites()
-                .borrow_mut()
-                .get_or_insert_with(Default::default)
-                .method_sites
-                .insert(
-                    ip as u32,
-                    MethodSite {
-                        class_name,
-                        scope,
-                        method: None,
-                        fallback: true,
-                        func_name: PhpString::empty(),
-                        info: None,
-                        sep: 0,
-                        is_static: false,
-                        reg_gen: 0,
-                    },
-                );
+            store_method_site(
+                op_array,
+                ip,
+                MethodSite {
+                    class_name,
+                    scope,
+                    method: None,
+                    fallback: true,
+                    func_name: PhpString::empty(),
+                    info: None,
+                    sep: 0,
+                    is_static: false,
+                    reg_gen: 0,
+                    others: Vec::new(),
+                },
+            );
             false
         };
         let Some(class) = self.classes.get(class_lower) else {
@@ -1216,25 +1269,22 @@ impl Vm {
             func_name.extend_from_slice(b"::__construct");
             // (the call site's, not counted by memory_get_usage(), see MethodSite)
             let func_name = PhpString::from_bytes_untracked(&func_name);
-            op_array
-                .sites()
-                .borrow_mut()
-                .get_or_insert_with(Default::default)
-                .method_sites
-                .insert(
-                    ip as u32,
-                    MethodSite {
-                        class_name: class_name_orig,
-                        scope,
-                        method: None,
-                        fallback: false,
-                        func_name: func_name.clone(),
-                        info: None,
-                        sep: 0,
-                        is_static: false,
-                        reg_gen: 0,
-                    },
-                );
+            store_method_site(
+                op_array,
+                ip,
+                MethodSite {
+                    class_name: class_name_orig,
+                    scope,
+                    method: None,
+                    fallback: false,
+                    func_name: func_name.clone(),
+                    info: None,
+                    sep: 0,
+                    is_static: false,
+                    reg_gen: 0,
+                    others: Vec::new(),
+                },
+            );
             self.push_noctor_call(func_name, obj);
             return true;
         };
@@ -1304,25 +1354,22 @@ impl Vm {
         func_name.extend_from_slice(&method.name);
         let func_name = PhpString::from_bytes_untracked(&func_name);
         let info = Rc::new(self.method_call_info(&method_op_array, &func_name, sep));
-        op_array
-            .sites()
-            .borrow_mut()
-            .get_or_insert_with(Default::default)
-            .method_sites
-            .insert(
-                ip as u32,
-                MethodSite {
-                    class_name: class_name_orig,
-                    scope,
-                    method: Some(Rc::downgrade(&method_op_array)),
-                    fallback: false,
-                    func_name: func_name.clone(),
-                    info: Some(info.clone()),
-                    sep,
-                    is_static,
-                    reg_gen: 0,
-                },
-            );
+        store_method_site(
+            op_array,
+            ip,
+            MethodSite {
+                class_name: class_name_orig,
+                scope,
+                method: Some(Rc::downgrade(&method_op_array)),
+                fallback: false,
+                func_name: func_name.clone(),
+                info: Some(info.clone()),
+                sep,
+                is_static,
+                reg_gen: 0,
+                others: Vec::new(),
+            },
+        );
         self.push_method_call(
             op_array,
             ip,
