@@ -164,12 +164,11 @@ const fn lower_hash(b: &[u8]) -> u64 {
 fn lower_hash_rt(b: &[u8]) -> u64 {
     const K: u64 = 0x517c_c1b7_2722_0a95;
     let mut h: u64 = b.len() as u64;
-    let mut chunks = b.chunks_exact(8);
-    for c in &mut chunks {
-        let w = u64::from_le_bytes(c.try_into().unwrap_or([0; 8]));
+    let (chunks, rest) = b.as_chunks::<8>();
+    for c in chunks {
+        let w = u64::from_le_bytes(*c);
         h = (h.rotate_left(5) ^ lower8(w)).wrapping_mul(K);
     }
-    let rest = chunks.remainder();
     if !rest.is_empty() {
         let mut buf = [0u8; 8];
         buf[..rest.len()].copy_from_slice(rest);
@@ -184,7 +183,7 @@ const fn eq_lower(a: &[u8], b: &[u8]) -> bool {
     }
     let mut i = 0;
     while i < a.len() {
-        if a[i].to_ascii_lowercase() != b[i].to_ascii_lowercase() {
+        if !a[i].eq_ignore_ascii_case(&b[i]) {
             return false;
         }
         i += 1;
