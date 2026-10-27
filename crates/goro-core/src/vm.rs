@@ -25814,6 +25814,13 @@ impl Vm {
         val: &mut Value,
         implicit_return: bool,
     ) -> Result<(), VmError> {
+        // (a value of the declared type already: nothing is coerced or
+        // reported; an object of it matches a class part of the type, a
+        // weak-mode string type does not take it as a string)
+        if crate::recv_fast::return_matches_exactly(self, op_array, val, implicit_return) {
+            self.flush_callable_deprecations();
+            return Ok(());
+        }
         // Note: implicit float-to-int deprecation is emitted at the
         // OpCode::Return site (before finally blocks run), not here.
         // (strict mode only widens int to float)
