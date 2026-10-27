@@ -23,7 +23,8 @@ $p = popen('cat /proc/self/status', 'r'); echo "popen: ", sig(stream_get_content
 pcntl_signal(SIGUSR1, SIG_IGN);
 pcntl_sigprocmask(SIG_BLOCK, [SIGHUP]);
 echo "after: ", sig(shell_exec('cat /proc/self/status')), "\n";
-$p = proc_open('cat /proc/self/status', [1 => ['pipe', 'w']], $pipes);
+// (the argv form: /bin/sh as dash would reset the mask of its child)
+$p = proc_open(['cat', '/proc/self/status'], [1 => ['pipe', 'w']], $pipes);
 echo "after proc_open: ", sig(stream_get_contents($pipes[1])), "\n"; proc_close($p);
 pcntl_sigprocmask(SIG_UNBLOCK, [SIGHUP]);
 pcntl_signal(SIGPIPE, SIG_DFL);
@@ -49,7 +50,7 @@ exec: pipe-ignored=1 usr1-ignored=0 hup-blocked=0
 proc_open: pipe-ignored=1 usr1-ignored=0 hup-blocked=0
 popen: pipe-ignored=1 usr1-ignored=0 hup-blocked=0
 after: pipe-ignored=1 usr1-ignored=1 hup-blocked=0
-after proc_open: pipe-ignored=1 usr1-ignored=1 hup-blocked=0
+after proc_open: pipe-ignored=1 usr1-ignored=1 hup-blocked=1
 dfl: pipe-ignored=0 usr1-ignored=1 hup-blocked=0
 int(7)
 bool(true)
