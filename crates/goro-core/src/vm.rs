@@ -2255,6 +2255,14 @@ pub struct Vm {
     pub(crate) class_chain_memo: RefCell<crate::class_table::ClassChainMemo>,
     /// See Vm::class_implements_interface().
     pub(crate) implements_memo: RefCell<crate::class_table::ImplementsMemo>,
+    /// recv_fast::class_is_a()'s answers (by the class name an object
+    /// holds and the type's name, as written), for one class table link
+    /// generation, when the type names a class in the table.
+    pub(crate) isa_memo: RefCell<crate::class_table::ImplementsMemo>,
+    /// What INSTANCEOF sites answered (note_instanceof) for an object's
+    /// class name and the class named, for one class table link generation:
+    /// a site meeting more classes than it remembers looks there.
+    pub(crate) instanceof_site_memo: RefCell<crate::class_table::ImplementsMemo>,
     /// See Vm::find_native_class_handler(): ((class table link generation,
     /// handler count), class -> answer).
     #[allow(clippy::type_complexity)]
@@ -3778,6 +3786,8 @@ impl Vm {
             native_class_handlers: Default::default(),
             class_chain_memo: Default::default(),
             implements_memo: Default::default(),
+            isa_memo: Default::default(),
+            instanceof_site_memo: Default::default(),
             native_handler_memo: Default::default(),
             instanceof_memo: Default::default(),
             ext_class_constants: Default::default(),
@@ -11771,6 +11781,12 @@ impl Vm {
     }
 
     fn run_pending_destructors(&mut self) {
+        // (nothing to do, the scan of the list's tail would find nothing:
+        // counted as made, see quiet_release_budget)
+        if !self.destructible_objects.is_empty() && self.quiet_release_budget() > 0 {
+            self.destructible_objects.skip_scan();
+            return;
+        }
         if crate::gc::weak_dirty() {
             crate::gc::purge_weakmaps(self);
         }

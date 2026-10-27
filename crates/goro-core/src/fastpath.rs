@@ -2470,15 +2470,19 @@ fn dim_key(
 }
 
 /// Whether the CVs `op` names all hold references, none of them `globals`.
-#[inline]
-fn cv_operands_bound(op: &Op, cvs: &[Value], globals: Option<u32>) -> bool {
-    let ok = |o: OperandType| match o {
-        OperandType::Cv(i) => {
-            Some(i) != globals && matches!(cvs.get(i as usize), Some(Value::Reference(_)))
+/// (`globals`: its CV index, u32::MAX for none)
+#[inline(always)]
+fn cv_operands_bound(op: &Op, cvs: &[Value], globals: u32) -> bool {
+    #[inline(always)]
+    fn ok(o: &OperandType, cvs: &[Value], globals: u32) -> bool {
+        match *o {
+            OperandType::Cv(i) => {
+                i != globals && matches!(cvs.get(i as usize), Some(Value::Reference(_)))
+            }
+            _ => true,
         }
-        _ => true,
-    };
-    ok(op.op1) && ok(op.op2) && ok(op.result)
+    }
+    ok(&op.op1, cvs, globals) && ok(&op.op2, cvs, globals) && ok(&op.result, cvs, globals)
 }
 
 /// OpArray::free_mask() of the code run_fast_ops() runs, looked up once
@@ -3156,6 +3160,8 @@ impl crate::vm::Vm {
                 f
             }};
         }
+        // (`bound`'s $GLOBALS index, u32::MAX for none: a CV index is below)
+        let bound_globals = bound.map(|g| g.unwrap_or(u32::MAX));
         let next = 'run: loop {
             let Some(op) = ops.get(ip) else {
                 break 'run ip;
@@ -3163,7 +3169,7 @@ impl crate::vm::Vm {
             // A frame bound to a symbol table: only opcodes whose variables
             // are all bound (references), none of them $GLOBALS, run here
             // (the dispatch loop repairs bindings after the others).
-            if let Some(globals) = bound {
+            if let Some(globals) = bound_globals {
                 if !cv_operands_bound(op, cvs, globals) {
                     break 'run ip;
                 }

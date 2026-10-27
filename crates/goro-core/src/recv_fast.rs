@@ -108,10 +108,26 @@ fn simple_exactly(vm: &Vm, v: &Value, n: &[u8]) -> bool {
 
 /// Whether the declared class `class` extends or implements the declared
 /// class or interface `n` (as instanceof answers: no autoload).
+/// (Remembered while the classes in the table do not change: the answer
+/// is a function of them when `n` names one.)
 #[inline(never)]
 fn class_is_a(vm: &Vm, class: &[u8], n: &[u8]) -> bool {
-    let n = n.to_ascii_lowercase();
-    let Some(target) = vm.classes.get(&n) else {
+    let stamp = vm.classes.link_generation();
+    if let Some(r) = vm.isa_memo.borrow_mut().get(stamp, class, n) {
+        return r;
+    }
+    let lower = n.to_ascii_lowercase();
+    if !vm.classes.contains_key(&lower) {
+        return false;
+    }
+    let r = class_is_a_walk(vm, class, &lower);
+    vm.isa_memo.borrow_mut().set(stamp, class, n, r);
+    r
+}
+
+/// class_is_a() of the class `n` (lowercase) in the table.
+fn class_is_a_walk(vm: &Vm, class: &[u8], n: &[u8]) -> bool {
+    let Some(target) = vm.classes.get(n) else {
         return false;
     };
     // (a class_alias() names the aliased class)

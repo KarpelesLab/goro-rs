@@ -376,6 +376,12 @@ impl Vm {
         if ob.native.is_some() {
             return;
         }
+        self.instanceof_site_memo.borrow_mut().set(
+            self.classes.link_generation(),
+            &ob.class_name,
+            named,
+            matches!(result, Value::True),
+        );
         let mut sites = op_array.sites().borrow_mut();
         if let Some(c) = sites
             .get_or_insert_with(Default::default)
@@ -444,6 +450,25 @@ impl Vm {
                 Some(c) if c.set && c.class == ob.class_name => c.plain != 0,
                 Some(c) if c.set && c.scope.as_deref() == Some(ob.class_name.as_slice()) => {
                     c.slot != 0
+                }
+                // (a class the site does not remember: what another answer
+                // of a site said of it, see note_instanceof)
+                Some(c) if c.set => {
+                    let named = match op.op2 {
+                        OperandType::Const(k) => match op_array.literals.get(k as usize) {
+                            Some(Value::String(n)) => n,
+                            _ => return Fast::No,
+                        },
+                        _ => return Fast::No,
+                    };
+                    match self.instanceof_site_memo.borrow_mut().get(
+                        self.classes.link_generation(),
+                        &ob.class_name,
+                        named.as_bytes(),
+                    ) {
+                        Some(r) => r,
+                        None => return Fast::No,
+                    }
                 }
                 _ => return Fast::No,
             }
