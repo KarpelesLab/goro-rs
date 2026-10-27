@@ -21234,6 +21234,11 @@ impl Vm {
             {
                 return None;
             }
+            // WeakMap::getIterator() (iterator_to_array(), yield from, ...
+            // of a WeakMap: zend_user_it_get_new_iterator())
+            if class_lower == b"weakmap" && method_lower == b"getiterator" {
+                return Some(self.weakmap_iterator(obj_val));
+            }
             if let Some(class_def) = self.classes.get(&class_lower) {
                 if let Some(method) = class_def.get_method(&method_lower) {
                     let method_op = method.op_array.clone();
