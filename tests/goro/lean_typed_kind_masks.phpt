@@ -1,5 +1,5 @@
 --TEST--
-Lean calls with typed parameters and returns: scalar types checked by kind, coercions and errors by the full checks
+Lean calls with typed parameters and returns: scalar and class types checked by kind, coercions and errors by the full checks
 --FILE--
 <?php
 function fi(int $x) { return var_export($x, true); }
@@ -34,6 +34,16 @@ for ($i = 0; $i < 3; $i++) {
 echo implode(",", array_map('fi', [1, "2", 3.0])), "\n";
 echo implode(",", array_map(fn(int $x): int => $x * 2, [1, "2"])), "\n";
 echo implode(",", array_map([$p, 'm'], [1, 2], [1.5, null])), "\n";
+interface I {} class Q extends P implements I {} class R {}
+function fc(P $p): P { return $p; } function fnc(?I $i): ?I { return $i; } function fq(\Q $q) { return 1; }
+function fself(P|I $x) { return 2; }
+$q = new Q; $rr = new R;
+for ($i = 0; $i < 3; $i++) {
+    echo get_class(fc($p)), get_class(fc($q)), var_export(fnc(null), true), get_class(fnc($q)), fq($q), fself($q), "\n";
+    try { fc($rr); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    try { fnc($p); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    try { fc(null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+}
 --EXPECTF--
 5671
 1.52.03.5
@@ -77,3 +87,15 @@ TypeError: fn_(): Argument #1 ($x) must be of type ?false, true given, called in
 1,2,3
 2,4
 2,2
+PQNULLQ12
+fc(): Argument #1 ($p) must be of type P, R given, called in %s on line 40
+fnc(): Argument #1 ($i) must be of type ?I, P given, called in %s on line 41
+fc(): Argument #1 ($p) must be of type P, null given, called in %s on line 42
+PQNULLQ12
+fc(): Argument #1 ($p) must be of type P, R given, called in %s on line 40
+fnc(): Argument #1 ($i) must be of type ?I, P given, called in %s on line 41
+fc(): Argument #1 ($p) must be of type P, null given, called in %s on line 42
+PQNULLQ12
+fc(): Argument #1 ($p) must be of type P, R given, called in %s on line 40
+fnc(): Argument #1 ($i) must be of type ?I, P given, called in %s on line 41
+fc(): Argument #1 ($p) must be of type P, null given, called in %s on line 42

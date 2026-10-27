@@ -40,7 +40,7 @@ pub(crate) fn positional_args_match_exactly(vm: &Vm, f: &OpArray, args: &[Value]
             continue;
         }
         let ok = match masks.get(i) {
-            Some(&m) if m != 0 => m & kind_bit(a) != 0,
+            Some(&m) if m != 0 => masked_exactly(vm, a, m, &t.param_type),
             _ => value_is_exactly(vm, a, &t.param_type),
         };
         if !ok {
@@ -58,7 +58,7 @@ pub(crate) fn arg_matches_exactly(vm: &Vm, f: &OpArray, i: usize, v: &Value) -> 
         Some(Some(t)) => {
             matches!(v, Value::Undef)
                 || match f.type_kind_masks().get(i) {
-                    Some(&m) if m != 0 => m & kind_bit(v) != 0,
+                    Some(&m) if m != 0 => masked_exactly(vm, v, m, &t.param_type),
                     _ => value_is_exactly(vm, v, &t.param_type),
                 }
         }
@@ -83,6 +83,38 @@ fn kind_bit(v: &Value) -> u16 {
     }
 }
 
+/// type_kind_mask(): a class (or interface) name, maybe nullable: a
+/// `Simple` type or a `Nullable` one of it.
+const CLASS: u16 = 0x8000;
+
+/// value_is_exactly() of `v` and the type `t`, whose type_kind_mask() is
+/// `m` (not 0).
+#[inline(always)]
+fn masked_exactly(vm: &Vm, v: &Value, m: u16, t: &ParamType) -> bool {
+    if m & CLASS == 0 {
+        return m & kind_bit(v) != 0;
+    }
+    match v {
+        Value::Null => m & 1 != 0,
+        Value::Object(o) => {
+            let n = match t {
+                ParamType::Nullable(inner) => match &**inner {
+                    ParamType::Simple(n) => n,
+                    _ => return value_is_exactly(vm, v, t),
+                },
+                ParamType::Simple(n) => n,
+                _ => return value_is_exactly(vm, v, t),
+            };
+            let n = n.strip_prefix(b"\\").unwrap_or(n);
+            o.try_borrow().is_ok_and(|b| {
+                b.class_name.eq_ignore_ascii_case(n)
+                    || (b.native.is_none() && class_is_a(vm, &b.class_name, n))
+            })
+        }
+        _ => false,
+    }
+}
+
 /// OpArray::type_kind_masks() of `f`.
 pub(crate) fn type_kind_masks_of(f: &OpArray) -> Box<[u16]> {
     f.param_types
@@ -93,7 +125,7 @@ pub(crate) fn type_kind_masks_of(f: &OpArray) -> Box<[u16]> {
 }
 
 /// The value kinds (see kind_bit) `t` takes as they are, as
-/// value_is_exactly() judges them; 0 when it names a class or anything
+/// value_is_exactly() judges them, or CLASS (see there); 0 for anything
 /// else.
 fn type_kind_mask(t: &ParamType) -> u16 {
     match t {
@@ -106,6 +138,7 @@ fn type_kind_mask(t: &ParamType) -> u16 {
             for t in members {
                 match type_kind_mask(t) {
                     0 => return 0,
+                    k if k & CLASS != 0 => return 0,
                     k => m |= k,
                 }
             }
@@ -122,6 +155,10 @@ fn type_kind_mask(t: &ParamType) -> u16 {
                 4 if n.eq_ignore_ascii_case(b"null") => 1,
                 4 if n.eq_ignore_ascii_case(b"true") => 2,
                 5 if n.eq_ignore_ascii_case(b"false") => 4,
+                5 if n.eq_ignore_ascii_case(b"mixed") => 0,
+                6 if n.eq_ignore_ascii_case(b"object") => 0,
+                8 if n.eq_ignore_ascii_case(b"iterable") => 0,
+                _ if !n.is_empty() && !is_reserved_type(n) => CLASS,
                 _ => 0,
             }
         }
@@ -144,7 +181,7 @@ pub(crate) fn return_matches_exactly(vm: &Vm, f: &OpArray, v: &Value, implicit: 
         // ("none returned" for any other type)
         _ if implicit => false,
         t => match f.type_kind_masks().last() {
-            Some(&m) if m != 0 => m & kind_bit(v) != 0,
+            Some(&m) if m != 0 => masked_exactly(vm, v, m, t),
             _ => value_is_exactly(vm, v, t),
         },
     }
