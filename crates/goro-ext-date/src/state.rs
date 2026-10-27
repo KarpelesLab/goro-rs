@@ -604,8 +604,46 @@ const P_IVAL_SEEN: &[u8] = b"__timestamp_ival_seen";
 static IVAL_HANDLERS: goro_core::vm::NativeObjectHandlers = goro_core::vm::NativeObjectHandlers {
     get_properties: Some(interval_get_properties),
     clone_obj: Some(native_clone_obj),
+    unset_property: Some(interval_unset_property),
     ..goro_core::vm::NativeObjectHandlers::EMPTY
 };
+
+/// unset() of one of an interval's fields: zend_std_unset_property() drops
+/// it from the property table, and the next get_properties puts it back
+/// (zend_hash_str_update(): at the end) from the interval itself, so it
+/// only moves once the table was built. Reads keep going to the interval.
+#[inline(never)]
+fn interval_unset_property(_vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8]) -> bool {
+    let Some(iv) = interval_get(o) else {
+        return false;
+    };
+    let props = interval_props(&iv);
+    let Some(idx) = props.iter().position(|(k, _)| *k == name) else {
+        return false;
+    };
+    let mut ob = o.borrow_mut();
+    if !ob.has_property(P_IVAL_SEEN) {
+        return true;
+    }
+    // The fields unset since the table was last built are appended in
+    // the handler's order.
+    let mut moved = match ob.get_property(P_IVAL_MOVED) {
+        Value::Long(m) => m as u64,
+        _ => 0,
+    };
+    moved |= 1 << idx;
+    for (i, (k, v)) in props.into_iter().enumerate() {
+        if moved & (1 << i) != 0 {
+            ob.remove_property(k);
+            ob.set_property(k.to_vec(), v);
+        }
+    }
+    ob.set_property(P_IVAL_MOVED.to_vec(), Value::Long(moved as i64));
+    true
+}
+
+/// The fields interval_unset_property() moved since the last build.
+const P_IVAL_MOVED: &[u8] = b"__timestamp_ival_moved";
 
 fn interval_get_properties(
     _vm: &mut Vm,
@@ -613,8 +651,9 @@ fn interval_get_properties(
     _purpose: u8,
 ) -> Option<PhpArray> {
     if o.borrow().has_property(P_IVAL) {
-        o.borrow_mut()
-            .set_property(P_IVAL_SEEN.to_vec(), Value::True);
+        let mut ob = o.borrow_mut();
+        ob.set_property(P_IVAL_SEEN.to_vec(), Value::True);
+        ob.remove_property(P_IVAL_MOVED);
     }
     None
 }
