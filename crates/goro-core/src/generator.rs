@@ -1309,6 +1309,17 @@ impl PhpGenerator {
             Err(crate::stack::Exhausted) => Err(vm.stack_exhausted_error(false)),
         };
         let rv = match &result {
+            // (a generator delegating with `yield from` keeps its value,
+            // moved aside while it runs)
+            Ok(true) if matches!(self.current_value, Value::Undef) => {
+                let addr = self as *const PhpGenerator as usize;
+                vm.running_gen_values
+                    .iter()
+                    .rev()
+                    .find(|(a, _)| *a == addr)
+                    .and_then(|(_, v)| v.as_ref().map(|(v, _)| v.deref()))
+                    .or(Some(Value::Null))
+            }
             Ok(true) => Some(self.current_value.deref()),
             Ok(false) => Some(self.return_value.deref()),
             Err(_) => None,
