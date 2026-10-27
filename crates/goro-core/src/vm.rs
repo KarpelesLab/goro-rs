@@ -61077,8 +61077,22 @@ impl Vm {
                         }
                         _ => self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals),
                     };
-                    // zval_try_get_string() of the property name
-                    let name_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    // zval_try_get_string() of the property name (an undefined
+                    // variable warns; ++/--'s write-back reports it)
+                    let name_val = if matches!(op.op2, OperandType::Cv(_))
+                        && matches!(op.opcode, OpCode::PropertyGet | OpCode::PropertyGetRW)
+                    {
+                        self.read_operand_warn(
+                            &op.op2,
+                            &cvs,
+                            &tmps,
+                            &op_array.literals,
+                            op_array,
+                            op.line,
+                        )
+                    } else {
+                        self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                    };
                     // ++ / -- of an undefined property of an internal class
                     // without dynamic properties (get_property_ptr_ptr())
                     if op.opcode == OpCode::PropertyGetIncDec {
@@ -62795,15 +62809,20 @@ impl Vm {
                         op.line,
                     );
                     value = self.dup_stored_array(&op.op2, value);
-                    // (an undefined variable naming the property warns)
-                    let prop_name_val = self.read_operand_warn(
-                        &op.result,
-                        &cvs,
-                        &tmps,
-                        &op_array.literals,
-                        op_array,
-                        op.line,
-                    );
+                    // (an undefined variable naming the property warns; that
+                    // of a compound assignment warned at its fetch)
+                    let prop_name_val = if Self::is_compound_prop_store(op_array, ip, &op.op2) {
+                        self.read_operand(&op.result, &cvs, &tmps, &op_array.literals)
+                    } else {
+                        self.read_operand_warn(
+                            &op.result,
+                            &cvs,
+                            &tmps,
+                            &op_array.literals,
+                            op_array,
+                            op.line,
+                        )
+                    };
                     // zval_try_get_tmp_string() of an array property name
                     if matches!(prop_name_val.deref(), Value::Array(_)) {
                         self.emit_warning_at("Array to string conversion", op.line);
