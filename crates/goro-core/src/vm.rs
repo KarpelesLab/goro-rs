@@ -11374,6 +11374,20 @@ impl Vm {
         }
     }
 
+    /// The trace frame of a destructor call: the class declaring the
+    /// destructor (the function's scope), `->__destruct`.
+    #[inline(never)]
+    pub(crate) fn dtor_frame_name(&self, class_name: &[u8]) -> String {
+        let decl = self
+            .classes
+            .get(&class_name.to_ascii_lowercase())
+            .and_then(|c| c.get_method(b"__destruct"))
+            .and_then(|m| self.classes.get(&m.declaring_class.to_ascii_lowercase()))
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| class_name.to_vec());
+        format!("{}->__destruct", crate::value::display_class_name(&decl))
+    }
+
     /// Call __destruct on a garbage object found by the cycle collector
     /// (which then drops it from `destructible_objects`, in one batch).
     pub(crate) fn gc_run_destructor(&mut self, obj_rc: &Rc<RefCell<PhpObject>>) {
@@ -11390,15 +11404,17 @@ impl Vm {
             .classes
             .get(&class_lower)
             .and_then(|c| c.get_method(b"__destruct"))
-            .map(|m| m.op_array.clone());
-        if let Some(destruct_op) = destruct_op {
+            .map(|m| (m.op_array.clone(), m.declaring_class.to_ascii_lowercase()));
+        if let Some((destruct_op, decl)) = destruct_op {
             let class_name_orig = obj_rc.borrow().class_name.clone();
             let mut fn_cvs = vec![Value::Undef; destruct_op.cv_names.len()];
             if !fn_cvs.is_empty() {
                 fn_cvs[0] = Value::Object(obj_rc.clone());
             }
             self.called_class_stack.push(class_name_orig);
-            self.class_scope_stack.push(class_lower);
+            // (an inherited destructor runs in its declaring class's scope)
+            self.class_scope_stack
+                .push(if decl.is_empty() { class_lower } else { decl });
             let _ = self.execute_fn(&destruct_op, fn_cvs);
             self.class_scope_stack.pop();
             self.called_class_stack.pop();
@@ -11635,10 +11651,7 @@ impl Vm {
                     }
                     // The destructor frame is called from the releasing statement,
                     // or from internal code when a builtin releases the object.
-                    let frame = format!(
-                        "{}->__destruct",
-                        crate::value::display_class_name(&class_name_orig)
-                    );
+                    let frame = self.dtor_frame_name(&class_name_orig);
                     self.sync_builtin_frames();
                     let frameless = self.no_execute_data();
                     let (file, fline) = if frameless || self.in_builtin_frame() {
@@ -14012,6 +14025,7 @@ impl Vm {
             return true;
         };
         let destruct_op = m.op_array.clone();
+        let decl = m.declaring_class.to_ascii_lowercase();
         let class_name_orig = obj.borrow().class_name.clone();
         let mut fn_cvs = vec![Value::Undef; destruct_op.cv_names.len()];
         if !fn_cvs.is_empty() {
@@ -14019,14 +14033,15 @@ impl Vm {
         }
         let had_exc = self.current_exception.is_some();
         self.call_stack.push((
-            format!("{}->__destruct", String::from_utf8_lossy(&class_name_orig)),
+            self.dtor_frame_name(&class_name_orig),
             RcStr::new(),
             0,
             Vec::new(),
             true,
         ));
         self.called_class_stack.push(class_name_orig);
-        self.class_scope_stack.push(class_lower);
+        self.class_scope_stack
+            .push(if decl.is_empty() { class_lower } else { decl });
         let was_global = self.is_global_scope;
         self.is_global_scope = false;
         let _ = self.execute_op_array(&destruct_op, fn_cvs);
@@ -22141,10 +22156,7 @@ impl Vm {
                     fn_cvs[0] = obj_val.clone(); // $this
                 }
                 // Shutdown destructors are called from [internal function].
-                let frame = format!(
-                    "{}->__destruct",
-                    crate::value::display_class_name(&class_name_orig)
-                );
+                let frame = self.dtor_frame_name(&class_name_orig);
                 self.call_stack
                     .push((frame, RcStr::new(), 0, Vec::new(), true));
                 self.called_class_stack.push(class_name_orig);

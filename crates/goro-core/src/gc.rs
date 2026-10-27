@@ -2065,10 +2065,8 @@ impl GcHost for crate::vm::Vm {
         // A pending exception is set aside while the destructor runs and
         // becomes the previous of whatever it throws.
         let prev = self.current_exception.take();
-        let name = format!(
-            "{}->__destruct",
-            crate::value::display_class_name(&obj.borrow().class_name)
-        );
+        let cn = obj.borrow().class_name.clone();
+        let name = self.dtor_frame_name(&cn);
         self.call_stack
             .push((name, crate::rcstr::RcStr::new(), 0, Vec::new(), true));
         self.gc_run_destructor(obj);

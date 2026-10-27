@@ -3828,6 +3828,8 @@ pub fn reflection_class_method(
             }
             let rc = Rc::new(RefCell::new(new_obj));
             vm.run_object_create_hook(&rc);
+            // (destructed once released, like an object made by `new`)
+            vm.lazy_list_destructible(&rc);
             Some(Value::Object(rc))
         }
         b"getextension" | b"getextensionname" => {
