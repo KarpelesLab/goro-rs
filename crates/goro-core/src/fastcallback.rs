@@ -375,7 +375,10 @@ impl Vm {
             }
         }
         let mut frame_args = self.take_values(0);
-        frame_args.extend(call_args.iter().skip(lead).map(|v| v.deref()));
+        frame_args.extend(call_args.iter().skip(lead).map(|v| match v {
+            Value::Reference(r) => r.borrow().clone(),
+            v => v.clone(),
+        }));
         let is_instance = this_cv && lead > 0 && first_obj;
         let call = PendingCall {
             name: PhpString::empty(),
@@ -449,7 +452,13 @@ impl Vm {
         if n < hidden || ((n - hidden) as u32) < f.required_param_count {
             return None;
         }
-        let typed = f.param_types.iter().any(|t| t.is_some());
+        // (what callback_lean_kind() knows of them, when it is one)
+        let kind = f.callback_lean_kind();
+        let typed = if kind != 0 {
+            kind & 4 != 0
+        } else {
+            f.param_types.iter().any(|t| t.is_some())
+        };
         if typed && !self.pending_callable_deprecations.borrow().is_empty() {
             return None;
         }

@@ -5802,8 +5802,15 @@ impl Vm {
         self.sync_builtin_frames();
         let depth = self.call_stack.len() + 1;
         // (the names in the buffers of finished frames', see
-        // note_closure_frame)
+        // note_closure_frame; the last callback's entry, of the same name,
+        // updated in place)
         while self.closure_frames.last().is_some_and(|f| f.0 >= depth) {
+            if let Some(last) = self.closure_frames.last_mut() {
+                if last.0 == depth && last.1 == frame_name {
+                    last.2 = closure;
+                    return;
+                }
+            }
             if let Some((_, mut s, _)) = self.closure_frames.pop() {
                 if s.capacity() != 0 && s.capacity() <= 1024 && self.string_pool.len() < 64 {
                     s.clear();
