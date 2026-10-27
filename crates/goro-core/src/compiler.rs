@@ -13372,6 +13372,16 @@ impl Compiler {
                         object.kind,
                         ExprKind::ArrayAccess { .. } | ExprKind::PropertyAccess { .. }
                     ) && Self::lvalue_needs_memo(object)
+                    // (`f()->p = v()`: the object is computed first,
+                    // zend_delayed_compile_prop())
+                    || matches!(
+                        object.kind,
+                        ExprKind::FunctionCall { .. }
+                            | ExprKind::MethodCall { .. }
+                            | ExprKind::StaticMethodCall { .. }
+                            | ExprKind::DynamicStaticMethodCall { .. }
+                            | ExprKind::New { .. }
+                    )
             }
             _ => false,
         }
