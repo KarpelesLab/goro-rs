@@ -17,6 +17,7 @@ use crate::fastpath::{is_plain_scalar, store_tmp, tmp_writable};
 use crate::opcode::{OpArray, OpCode, OperandType};
 use crate::string::PhpString;
 use crate::value::Value;
+use std::rc::Rc;
 
 /// What a builtin of PURE_CALLS does (see there).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -37,8 +38,19 @@ pub(crate) enum Pure {
     StrPad,
     /// strtolower(string), strtoupper(string)
     Case,
-    /// str_contains / str_starts_with / str_ends_with(string, string)
+    /// str_contains / str_starts_with / str_ends_with, strpos / stripos /
+    /// strrpos(string, string)
     StrStr,
+    /// trim / ltrim / rtrim(string), ucfirst / lcfirst(string)
+    StrCopy,
+    /// str_repeat(string, int >= 0)
+    StrRepeat,
+    /// explode(non-empty string, string)
+    Explode,
+    /// spl_object_id(object), get_class(object)
+    Obj,
+    /// array_key_first / array_key_last(array)
+    ArrKey,
 }
 
 /// The builtins Vm::fast_pure_call() runs without a frame: (lowercase
@@ -56,6 +68,20 @@ pub(crate) const PURE_CALLS: &[(&[u8], Pure, u8, u8)] = &[
     (b"str_contains", Pure::StrStr, 2, 2),
     (b"str_starts_with", Pure::StrStr, 2, 2),
     (b"str_ends_with", Pure::StrStr, 2, 2),
+    (b"strpos", Pure::StrStr, 2, 2),
+    (b"stripos", Pure::StrStr, 2, 2),
+    (b"strrpos", Pure::StrStr, 2, 2),
+    (b"trim", Pure::StrCopy, 1, 1),
+    (b"ltrim", Pure::StrCopy, 1, 1),
+    (b"rtrim", Pure::StrCopy, 1, 1),
+    (b"ucfirst", Pure::StrCopy, 1, 1),
+    (b"lcfirst", Pure::StrCopy, 1, 1),
+    (b"str_repeat", Pure::StrRepeat, 2, 2),
+    (b"explode", Pure::Explode, 2, 2),
+    (b"spl_object_id", Pure::Obj, 1, 1),
+    (b"get_class", Pure::Obj, 1, 1),
+    (b"array_key_first", Pure::ArrKey, 1, 1),
+    (b"array_key_last", Pure::ArrKey, 1, 1),
 ];
 
 /// Whether `need` more bytes stay well below memory_limit: what a call
@@ -64,11 +90,13 @@ pub(crate) const PURE_CALLS: &[(&[u8], Pure, u8, u8)] = &[
 #[inline]
 fn memory_room(need: usize) -> bool {
     let limit = crate::value::memory_get_limit();
-    limit == 0
-        || crate::value::memory_get_usage()
-            .saturating_add(need)
-            .saturating_add(8192)
-            <= limit
+    // (a huge one is left to the builtin: its own checks)
+    need <= 1 << 28
+        && (limit == 0
+            || crate::value::memory_get_usage()
+                .saturating_add(need)
+                .saturating_add(8192)
+                <= limit)
 }
 
 /// substr()'s result (see strings.rs's substr): the bytes of `s` it keeps.
@@ -159,7 +187,7 @@ impl Vm {
                 OperandType::Cv(c) => match cvs.get(c as usize)? {
                     Value::Reference(r) => {
                         let b = r.try_borrow().ok()?;
-                        if !is_plain_scalar(&b) || matches!(*b, Value::Undef) {
+                        if !self.pure_arg(&b) {
                             return None;
                         }
                         // SAFETY: the referenced value stays where it is
@@ -170,15 +198,21 @@ impl Vm {
                     v => v,
                 },
                 OperandType::Const(c) => literals.get(c as usize)?,
-                OperandType::Tmp(c) => tmps.get(c as usize)?,
+                // (a temporary the send releases: a plain value, or a
+                // container held elsewhere too)
+                OperandType::Tmp(c) => match tmps.get(c as usize)? {
+                    Value::Array(a) if Rc::strong_count(a) == 1 => return None,
+                    Value::Object(o) if Rc::strong_count(o) == 1 => return None,
+                    v => v,
+                },
                 _ => return None,
             };
-            if !is_plain_scalar(v) || matches!(v, Value::Undef) {
+            if !self.pure_arg(v) {
                 return None;
             }
-            // SAFETY: a bitwise copy of a plain value that stays where it
-            // is for the call, never dropped (`args` is ManuallyDrop; the
-            // Null replaced holds nothing to drop).
+            // SAFETY: a bitwise copy of a value that stays where it is for
+            // the call, never dropped (`args` is ManuallyDrop; the Null
+            // replaced holds nothing to drop).
             args[i] = unsafe { std::ptr::read(v) };
         }
         let args = &args[..nargs];
@@ -224,10 +258,7 @@ impl Vm {
             || t.method_info.is_some()
             || t.forward.is_some()
             || !(min as usize..=max as usize).contains(&call.args.len())
-            || call
-                .args
-                .iter()
-                .any(|v| !is_plain_scalar(v) || matches!(v, Value::Undef))
+            || call.args.iter().any(|v| !self.pure_arg(v))
             || crate::value::VM_INTERRUPT.load(std::sync::atomic::Ordering::Relaxed)
             || self.closure_pending_calls.last() == Some(&top)
         {
@@ -258,6 +289,10 @@ impl Vm {
             self.current_line = op.line;
         }
         self.note_call_result(op, lower);
+        // (the arguments are released after the result is stored, as
+        // fast_builtin_dofcall() releases them when the builtin made no
+        // destructor due: one their release makes due runs once the run
+        // of fast opcodes hands control back)
         if free_mask.get(ip).copied().unwrap_or(0) & 4 != 0 {
             // (the result's last user is the call: a plain value)
             drop(result);
@@ -336,7 +371,38 @@ impl Vm {
                 }
                 self.pure_builtin(func, args)?
             }
-            Pure::Case => {
+            Pure::StrRepeat => {
+                let (Value::String(s), Value::Long(times @ 0..)) = (&args[0], &args[1]) else {
+                    return None;
+                };
+                if !memory_room(s.len().checked_mul(*times as usize)?) {
+                    return None;
+                }
+                self.pure_builtin(func, args)?
+            }
+            Pure::Explode => {
+                let (Value::String(d), Value::String(s)) = (&args[0], &args[1]) else {
+                    return None;
+                };
+                // (each piece a string of its own, an array element)
+                if d.is_empty() || !memory_room(s.len().checked_mul(96)?) {
+                    return None;
+                }
+                self.pure_builtin(func, args)?
+            }
+            Pure::Obj => {
+                if !matches!(args[0], Value::Object(_)) {
+                    return None;
+                }
+                self.pure_builtin(func, args)?
+            }
+            Pure::ArrKey => {
+                if !matches!(args[0], Value::Array(_)) {
+                    return None;
+                }
+                self.pure_builtin(func, args)?
+            }
+            Pure::Case | Pure::StrCopy => {
                 let Value::String(s) = &args[0] else {
                     return None;
                 };
@@ -366,6 +432,19 @@ impl Vm {
             }
         };
         Some(result)
+    }
+
+    /// Whether `v` may be an argument of a call fast_pure_call() /
+    /// pure_dofcall() make: a defined plain value, an array or an object
+    /// (not $GLOBALS: its copy is the general handlers').
+    #[inline]
+    fn pure_arg(&self, v: &Value) -> bool {
+        match v {
+            Value::Undef => false,
+            Value::Array(a) => !Rc::ptr_eq(a, &self.globals),
+            Value::Object(_) => true,
+            v => is_plain_scalar(v),
+        }
     }
 
     /// pure_compute(): the builtin `func` itself, with `args` (which make
