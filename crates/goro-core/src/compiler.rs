@@ -19125,7 +19125,7 @@ impl Compiler {
                             op1: OperandType::Tmp(result_tmp),
                             op2: body_val,
                             result: OperandType::Unused,
-                            line: expr.span.line,
+                            line: self.cur_lineno(expr.span.line),
                         });
                         let jmp_end = self.op_array.emit(Op {
                             opcode: OpCode::Jmp,
@@ -19156,7 +19156,7 @@ impl Compiler {
                             op1: OperandType::Tmp(result_tmp),
                             op2: body_val,
                             result: OperandType::Unused,
-                            line: expr.span.line,
+                            line: self.cur_lineno(expr.span.line),
                         });
                         let jmp_end = self.op_array.emit(Op {
                             opcode: OpCode::Jmp,
