@@ -1359,27 +1359,33 @@ pub fn implicit_args(op_array: &crate::opcode::OpArray) -> usize {
 /// Whether call_stack frame `name` is the frame of a call to `op_array`.
 fn frame_is_for(name: &str, op_array: &crate::opcode::OpArray) -> bool {
     // `{closure:...}`, or `Class::{closure:...}` for a closure with a scope
-    // (no other frame name ends with `}`)
-    if name.ends_with('}') && (name.starts_with("{closure") || name.contains("::{closure")) {
-        return crate::closure::is_closure_fn_name(&op_array.name);
+    // (no other frame name ends with `}`): the frame of a closure. (Only a
+    // closure's name is looked at for it: the part after the last ':' of
+    // such a frame name ends with `}`, which no other function's does.)
+    if crate::closure::is_closure_fn_name(&op_array.name)
+        && name.ends_with('}')
+        && (name.starts_with("{closure") || name.contains("::{closure"))
+    {
+        return true;
     }
-    // (the parts after the last ':' or '>' of both, case-insensitively:
-    // compared from their ends, in one pass)
-    let sep = |c: u8| c == b':' || c == b'>';
+    // (the parts after the last ':' or '>' of both, case-insensitively,
+    // compared from their ends)
     let (n, o) = (name.as_bytes(), op_array.name.as_slice());
     let (mut i, mut j) = (n.len(), o.len());
-    loop {
-        let a = if i > 0 { Some(n[i - 1]) } else { None };
-        let b = if j > 0 { Some(o[j - 1]) } else { None };
-        match (a.filter(|&c| !sep(c)), b.filter(|&c| !sep(c))) {
-            (None, None) => return true,
-            (Some(x), Some(y)) if x.eq_ignore_ascii_case(&y) => {
-                i -= 1;
-                j -= 1;
-            }
-            _ => return false,
+    while i > 0 && j > 0 {
+        let (x, y) = (n[i - 1], o[j - 1]);
+        let (sx, sy) = (x == b':' || x == b'>', y == b':' || y == b'>');
+        if sx || sy {
+            return sx && sy;
         }
+        if !x.eq_ignore_ascii_case(&y) {
+            return false;
+        }
+        i -= 1;
+        j -= 1;
     }
+    (i == 0 || n[i - 1] == b':' || n[i - 1] == b'>')
+        && (j == 0 || o[j - 1] == b':' || o[j - 1] == b'>')
 }
 
 /// Whether two call_stack frame names name the same function ("A->f" and
