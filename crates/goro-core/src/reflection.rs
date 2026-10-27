@@ -2038,6 +2038,18 @@ fn internal_method_rf_construct(
     true
 }
 
+/// ReflectionClass of Closure without a closure object: getMethod() /
+/// getMethods() make a temporary Closure for its `__invoke` (its handle,
+/// taken before the ReflectionMethod's and freed after).
+#[inline(never)]
+fn reflected_closure_tmp_handle(vm: &mut Vm, refl: &Rc<RefCell<PhpObject>>) -> Option<u64> {
+    let has_obj = matches!(
+        refl.borrow().get_property(b"__reflection_object"),
+        Value::Object(_)
+    );
+    (!has_obj).then(|| vm.alloc_object_id())
+}
+
 /// ReflectionMethod of the `__invoke` of a closure of an internal method
 /// (zend_get_closure_invoke_method(): a public Closure::__invoke with the
 /// method's signature): set up like a ReflectionMethod of the method, which
@@ -4417,7 +4429,14 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                             _ => None,
                         }
                     };
+                    // (without a reflected closure, a temporary Closure
+                    // object gives zend_get_closure_invoke_method() its
+                    // method: it holds a handle meanwhile)
+                    let tmp_closure = reflected_closure_tmp_handle(vm, &obj);
                     let obj_id = vm.alloc_object_id();
+                    if let Some(id) = tmp_closure {
+                        crate::object::FREED_OBJECT_IDS.with(|f| f.borrow_mut().push(id));
+                    }
                     let mut rm_obj = PhpObject::new(b"ReflectionMethod".to_vec(), obj_id);
                     rm_obj.set_property(
                         b"name".to_vec(),
@@ -4526,7 +4545,14 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                             _ => None,
                         }
                     };
+                    // (without a reflected closure, a temporary Closure
+                    // object gives zend_get_closure_invoke_method() its
+                    // method: it holds a handle meanwhile)
+                    let tmp_closure = reflected_closure_tmp_handle(vm, &obj);
                     let obj_id = vm.alloc_object_id();
+                    if let Some(id) = tmp_closure {
+                        crate::object::FREED_OBJECT_IDS.with(|f| f.borrow_mut().push(id));
+                    }
                     let mut rm_obj = PhpObject::new(b"ReflectionMethod".to_vec(), obj_id);
                     rm_obj.set_property(
                         b"name".to_vec(),
