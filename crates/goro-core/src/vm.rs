@@ -13347,6 +13347,9 @@ impl Vm {
                     }
                     other => (other.to_php_string(), Vec::new()),
                 };
+                // (the closure's function: a method of it is called whatever
+                // the calling scope, see DO_FCALL's via_closure)
+                self.closure_pending_calls.push(self.pending_calls.len());
                 self.pending_calls.push(PendingCall {
                     name,
                     args,

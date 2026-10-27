@@ -2151,6 +2151,9 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     let callback_v = args[0].closure_callable();
+    // (a Closure over a method calls it whatever the calling scope: its
+    // visibility was checked when the closure was made)
+    let from_closure = args[0].is_closure_obj();
     let callback = &callback_v;
     if let Value::String(s) = callback {
         if let Some((cls, msg)) = vm.forbidden_dynamic_call_error(s.as_bytes(), args.len() - 1) {
@@ -2467,6 +2470,7 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         if let Some(method) = shadow.as_ref().or(class_method.as_ref()) {
                             // Check visibility before executing
                             let accessible = match method.visibility {
+                                _ if from_closure => true,
                                 goro_core::object::Visibility::Public => true,
                                 goro_core::object::Visibility::Protected
                                 | goro_core::object::Visibility::Private => {
@@ -4266,6 +4270,23 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// zend_is_callable_error(): None if `cb` is callable from the current scope,
 /// otherwise the reason PHP reports after "must be a valid callback, ".
+/// array_walk()'s callback: a closure's function, but a Closure over a
+/// method stays the closure (called whatever the walking scope).
+fn walk_callback(cb: &Value) -> Value {
+    let inner = cb.unwrap_closure();
+    if let Value::Array(a) = &inner {
+        let a = a.borrow();
+        if let (2, Some(Value::String(n)), Some(Value::Object(_))) =
+            (a.len(), a.get_int(0), a.get_int(1))
+        {
+            if !n.as_bytes().starts_with(b"__") && n.as_bytes().windows(2).any(|w| w == b"::") {
+                return cb.deref();
+            }
+        }
+    }
+    inner
+}
+
 pub(crate) fn callable_error(vm: &mut Vm, cb: &Value) -> Option<String> {
     vm.callable_error(cb)
 }
@@ -4486,7 +4507,7 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     let callback_v = match args.get(1) {
-        Some(cb) => cb.unwrap_closure(),
+        Some(cb) => walk_callback(cb),
         None => return Ok(Value::True),
     };
     let callback = &callback_v;
@@ -17669,7 +17690,7 @@ fn array_walk_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     let arr_val = args.first().unwrap_or(&Value::Null);
     let callback_v = args
         .get(1)
-        .map(|c| c.unwrap_closure())
+        .map(walk_callback)
         .unwrap_or(Value::Null);
     let callback = &callback_v;
     let extra_data = args.get(2).cloned();
