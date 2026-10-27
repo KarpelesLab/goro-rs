@@ -256,7 +256,7 @@ fn move_args(cvs: &mut [Value], args: &mut [Value], n: usize, keep: usize) {
 /// Append the short byte string `src` (a class name) to the empty `dst`:
 /// as extend_from_slice(), without a call of memcpy() for up to 32 bytes.
 #[inline(always)]
-fn push_name_bytes(dst: &mut Vec<u8>, src: &[u8]) {
+pub(crate) fn push_name_bytes(dst: &mut Vec<u8>, src: &[u8]) {
     let n = src.len();
     if !(1..=32).contains(&n) || !dst.is_empty() {
         dst.extend_from_slice(src);
@@ -2021,6 +2021,10 @@ pub struct Vm {
     value_pool: Vec<Vec<Value>>,
     /// Emptied buffers of the class stack entries of finished calls.
     bytes_pool: Vec<Vec<u8>>,
+    /// The class stack entries (called class, class scope) of the lean
+    /// method call that ended last, names kept: the next one's are often
+    /// the same (see leancall.rs, Vm::lean_push_scopes).
+    lean_scopes: (Vec<u8>, Vec<u8>),
     /// Emptied foreach states of finished frames (see execute_op_array_inner).
     #[allow(clippy::vec_box)] // (the boxes are handed to frames)
     foreach_pool: Vec<Box<ForeachState>>,
@@ -2783,6 +2787,7 @@ impl Vm {
             value_pool: Vec::new(),
             foreach_pool: Vec::new(),
             bytes_pool: Vec::new(),
+            lean_scopes: (Vec::new(), Vec::new()),
             string_pool: Vec::new(),
             call_stack: Vec::new(),
             error_reporting_stack: Vec::new(),
@@ -24137,7 +24142,7 @@ impl Vm {
 
     // (inlined in DO_FCALL's fast path, and in lean calls of methods)
     #[inline(always)]
-    fn push_fast_method_scopes(
+    pub(crate) fn push_fast_method_scopes(
         &mut self,
         call: &PendingCall,
         sep: usize,
@@ -24250,7 +24255,7 @@ impl Vm {
     /// Keep the buffer of a finished call's class stack entry (see
     /// bytes_pool).
     #[inline]
-    fn recycle_bytes(&mut self, mut v: Vec<u8>) {
+    pub(crate) fn recycle_bytes(&mut self, mut v: Vec<u8>) {
         if v.capacity() <= 256 && self.bytes_pool.len() < 32 {
             v.clear();
             self.bytes_pool.push(v);

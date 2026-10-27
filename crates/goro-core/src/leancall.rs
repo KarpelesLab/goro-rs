@@ -719,7 +719,7 @@ impl Vm {
                         }
                         _ => None,
                     };
-                    self.push_fast_method_scopes(
+                    self.lean_push_scopes(
                         call,
                         sep,
                         this,
@@ -783,12 +783,7 @@ impl Vm {
             self.lean_frames.pop();
             self.lean_depth -= 1;
             if sep.is_some() {
-                if let Some(v) = self.called_class_stack.pop() {
-                    self.recycle_bytes(v);
-                }
-                if let Some(v) = self.class_scope_stack.pop() {
-                    self.recycle_bytes(v);
-                }
+                self.lean_pop_scopes();
             } else {
                 self.class_scope_stack.pop();
             }
@@ -911,6 +906,73 @@ impl Vm {
         let info = f.cv_name_info();
         info.lean_score.set((info.lean_score.get() + 1).min(64));
         true
+    }
+
+    /// The class stack entries of a lean call of a method, as
+    /// push_fast_method_scopes() makes them: of a call that does not
+    /// forward and whose call site resolved its scope, in the buffers the
+    /// last lean method call to end left (see lean_pop_scopes), whose names
+    /// are often these.
+    #[inline(always)]
+    fn lean_push_scopes(
+        &mut self,
+        call: &PendingCall,
+        sep: usize,
+        this: bool,
+        forward: bool,
+        caller_this: Option<&Rc<RefCell<crate::object::PhpObject>>>,
+        scope: Option<&[u8]>,
+    ) {
+        let Some(scope) = scope.filter(|_| !forward) else {
+            self.push_fast_method_scopes(call, sep, this, forward, caller_this, scope);
+            return;
+        };
+        let (mut called, mut defining) = std::mem::take(&mut self.lean_scopes);
+        let obj = match call.args.first() {
+            Some(Value::Object(o)) if this => Some(o.borrow()),
+            _ => None,
+        };
+        let name = match &obj {
+            Some(o) => o.class_name.as_slice(),
+            None => &call.name.as_bytes()[..sep],
+        };
+        if called.capacity() == 0 {
+            called = self.bytes_pool.pop().unwrap_or_default();
+        }
+        if !crate::string::bytes_eq_inline(&called, name) {
+            called.clear();
+            super::push_name_bytes(&mut called, name);
+        }
+        drop(obj);
+        if defining.capacity() == 0 {
+            defining = self.bytes_pool.pop().unwrap_or_default();
+        }
+        if !crate::string::bytes_eq_inline(&defining, scope) {
+            defining.clear();
+            super::push_name_bytes(&mut defining, scope);
+        }
+        self.called_class_stack.push(called);
+        self.class_scope_stack.push(defining);
+    }
+
+    /// The end of a lean call of a method: its class stack entries go,
+    /// kept for the next one (see lean_push_scopes).
+    #[inline(always)]
+    fn lean_pop_scopes(&mut self) {
+        let called = self.called_class_stack.pop().unwrap_or_default();
+        let defining = self.class_scope_stack.pop().unwrap_or_default();
+        if called.capacity() > 256 || defining.capacity() > 256 {
+            self.recycle_bytes(called);
+            self.recycle_bytes(defining);
+            return;
+        }
+        let (c, d) = std::mem::replace(&mut self.lean_scopes, (called, defining));
+        if c.capacity() != 0 {
+            self.recycle_bytes(c);
+        }
+        if d.capacity() != 0 {
+            self.recycle_bytes(d);
+        }
     }
 
     /// A release point of the end of a lean call (`line`: of its DO_FCALL

@@ -66,6 +66,12 @@ pub fn find_double_colon(s: &[u8]) -> Option<usize> {
 /// loads (a name, an array key or a property name is usually short).
 #[inline]
 pub fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    bytes_eq_inline(a, b)
+}
+
+/// bytes_eq(), always inlined (for the few hot callers it pays off in).
+#[inline(always)]
+pub fn bytes_eq_inline(a: &[u8], b: &[u8]) -> bool {
     let n = a.len();
     if n != b.len() {
         return false;
