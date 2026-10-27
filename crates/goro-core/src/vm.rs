@@ -45085,6 +45085,22 @@ impl Vm {
                                 Value::Null
                             }
                         }
+                    } else if let Some(v) = match &arr_val {
+                        // An extension object's read_dimension (BP_VAR_R):
+                        // `[$a, $b] = $domNodeList`
+                        Value::Object(obj) => native_handlers(obj)
+                            .and_then(|h| h.read_dimension)
+                            .and_then(|f| f(self, obj, Some(&key_val.deref()), 0)),
+                        _ => None,
+                    } {
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
+                        v
                     } else if let Value::Object(obj) = &arr_val {
                         // ArrayAccess: $obj[$key] -> offsetGet($key)
                         let class_lower: Vec<u8> = obj
