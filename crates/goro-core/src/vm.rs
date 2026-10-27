@@ -47256,20 +47256,47 @@ impl Vm {
 
                 OpCode::TypeCheck => match outlined(|| -> Result<Flow, VmError> {
                     // instanceof check: op1 = value, op2 = class name
-                    let val = self.read_operand_warn(
-                        &op.op1,
-                        &cvs,
-                        &tmps,
-                        &op_array.literals,
-                        op_array,
-                        op.line,
-                    );
-                    let class_val = self
-                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
-                        .deref();
-                    // (ZEND_FETCH_CLASS of a dynamic class operand)
-                    if matches!(op.op2, OperandType::Cv(_) | OperandType::Tmp(_)) {
-                        if let Some(exc) = self.invalid_class_name_operand(&class_val, op.line) {
+                    let dynamic_class = matches!(op.op2, OperandType::Cv(_) | OperandType::Tmp(_));
+                    // (a dynamic class is ZEND_FETCH_CLASS's, before INSTANCEOF
+                    // reads its operand: an undefined variable warns first)
+                    let class_val = if dynamic_class {
+                        self.read_operand_warn(
+                            &op.op2,
+                            &cvs,
+                            &tmps,
+                            &op_array.literals,
+                            op_array,
+                            op.line,
+                        )
+                        .deref()
+                    } else {
+                        self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                            .deref()
+                    };
+                    let bad_class = dynamic_class
+                        && !matches!(
+                            class_val,
+                            Value::String(_) | Value::Object(_) | Value::Generator(_)
+                        );
+                    let val = if bad_class {
+                        Value::Null
+                    } else {
+                        self.read_operand_warn(
+                            &op.op1,
+                            &cvs,
+                            &tmps,
+                            &op_array.literals,
+                            op_array,
+                            op.line,
+                        )
+                    };
+                    // (ZEND_FETCH_CLASS of a dynamic class operand; an error
+                    // handler throwing for its warning ends it too)
+                    if dynamic_class {
+                        let thrown = if bad_class { self.current_exception.take() } else { None };
+                        if let Some(exc) = thrown
+                            .or_else(|| self.invalid_class_name_operand(&class_val, op.line))
+                        {
                             self.current_exception = Some(exc);
                             if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                 exception_handlers.last()
