@@ -220,7 +220,7 @@ fn strip_url_passwd(url: &str) -> String {
             let mut out = b[..start].to_vec();
             out.extend(std::iter::repeat_n(b'.', dots));
             out.extend_from_slice(&b[at..]);
-            return String::from_utf8_lossy(&out).into_owned();
+            return goro_core::string::msg_str(&out).into_owned();
         }
     }
     url.to_string()
@@ -267,7 +267,7 @@ fn open_for_scanning(vm: &mut Vm, fname: &str, path: &str) -> Option<Vec<u8>> {
     }
     if path.contains("://") && !lower.starts_with("file://") || lower.starts_with("data:") {
         let args = [
-            Value::String(PhpString::from_string(path.to_string())),
+            Value::String(PhpString::from_msg(path)),
             Value::String(PhpString::from_bytes(b"rb")),
         ];
         let fp = crate::misc::fopen_fn(vm, &args).ok()?;
@@ -288,7 +288,8 @@ fn open_for_scanning(vm: &mut Vm, fname: &str, path: &str) -> Option<Vec<u8>> {
         return None;
     }
     let resolved = crate::misc::resolve_with_include_path(vm, plain, true);
-    let result = if std::path::Path::new(&resolved).is_dir() {
+    let resolved = goro_core::fspath::msg_path(&resolved);
+    let result = if resolved.is_dir() {
         Err(std::io::Error::from_raw_os_error(21))
     } else {
         std::fs::read(&resolved)
@@ -381,7 +382,7 @@ fn highlight_file_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value
         ));
     }
     let ret = arg_bool(args, 1);
-    let path = path.to_string_lossy().to_string();
+    let path = path.to_msg_string();
     if !path.contains("://") || path.starts_with("file://") {
         let plain = path.strip_prefix("file://").unwrap_or(&path).to_string();
         if !goro_core::basedir::check_open_basedir_ex(vm, fname, &plain, true) {
@@ -429,7 +430,7 @@ fn php_strip_whitespace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
                 .to_string(),
         ));
     }
-    let path = path.to_string_lossy().to_string();
+    let path = path.to_msg_string();
     if path.is_empty() {
         // (php_stream_open_wrapper())
         return Err(value_error(vm, "Path must not be empty".to_string()));

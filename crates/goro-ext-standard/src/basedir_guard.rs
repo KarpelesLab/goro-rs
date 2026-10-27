@@ -58,7 +58,7 @@ fn arg_str(args: &[Value], i: usize) -> Option<String> {
     if s.as_bytes().is_empty() || s.as_bytes().contains(&0) {
         return None;
     }
-    Some(s.to_string_lossy().to_string())
+    Some(s.to_msg_string())
 }
 
 fn active(vm: &Vm) -> bool {
@@ -169,8 +169,8 @@ fn guarded(vm: &mut Vm, fname: &'static str, kind: Kind, args: &[Value]) -> Resu
             if let (Some(target), Some(link)) = (arg_str(args, 0), arg_str(args, 1)) {
                 if let Some(source_p) = basedir::expand_filepath(&link) {
                     // virtual_file_ex(CWD_FILEPATH) resolves an existing path's symlinks.
-                    let source_p = std::fs::canonicalize(&source_p)
-                        .map(|p| p.to_string_lossy().into_owned())
+                    let source_p = std::fs::canonicalize(goro_core::fspath::msg_path(&source_p))
+                        .map(|p| goro_core::fspath::path_msg(&p))
                         .unwrap_or(source_p);
                     let dir = dirname(&source_p);
                     let dest_p = if target.starts_with('/') {
@@ -200,7 +200,7 @@ fn guarded(vm: &mut Vm, fname: &'static str, kind: Kind, args: &[Value]) -> Resu
         Kind::Realpath => {
             let r = call_orig(vm, fname, args)?;
             if let Value::String(s) = &r {
-                let p = s.to_string_lossy().to_string();
+                let p = s.to_msg_string();
                 if !vm.check_open_basedir(fname, &p) {
                     return Ok(Value::False);
                 }
@@ -214,7 +214,7 @@ fn guarded(vm: &mut Vm, fname: &'static str, kind: Kind, args: &[Value]) -> Resu
                 let mut out = goro_core::array::PhpArray::new();
                 let mut limited = false;
                 for v in vals {
-                    let p = v.to_php_string().to_string_lossy().to_string();
+                    let p = v.to_php_string().to_msg_string();
                     if vm.check_open_basedir_silent(&p) {
                         out.push(v);
                     } else {
@@ -251,7 +251,7 @@ fn guarded(vm: &mut Vm, fname: &'static str, kind: Kind, args: &[Value]) -> Resu
             } else if name == "open_basedir" {
                 let new_val = args
                     .get(1)
-                    .map(|v| v.to_php_string().to_string_lossy().to_string())
+                    .map(|v| v.to_php_string().to_msg_string())
                     .unwrap_or_default();
                 // ini_set() returns (and ini_get() then gives) the value as
                 // set; PG(open_basedir) gets its entries resolved.
@@ -264,7 +264,7 @@ fn guarded(vm: &mut Vm, fname: &'static str, kind: Kind, args: &[Value]) -> Resu
                     Some(v) => {
                         vm.constants.insert(
                             b"open_basedir".to_vec(),
-                            Value::String(PhpString::from_string(new_val)),
+                            Value::String(PhpString::from_msg(&new_val)),
                         );
                         vm.open_basedir_resolved = Some(v);
                         Ok(Value::String(old))

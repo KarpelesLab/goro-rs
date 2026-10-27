@@ -1,4 +1,5 @@
 use goro_core::array::{ArrayKey, PhpArray};
+use goro_core::fspath::{msg_cstring, msg_path, os_msg, path_msg};
 use goro_core::object::{ClassEntry, PhpObject, PropertyDef, Visibility};
 use goro_core::string::PhpString;
 use goro_core::value::Value;
@@ -8653,10 +8654,10 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 // === File stubs ===
 fn file_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("file_exists", &path.to_string_lossy()) {
+    if !vm.check_open_basedir("file_exists", &path.to_msg_string()) {
         return Ok(Value::False);
     }
-    Ok(if std::path::Path::new(&path.to_string_lossy()).exists() {
+    Ok(if msg_path(&path.to_msg_string()).exists() {
         Value::True
     } else {
         Value::False
@@ -8664,10 +8665,10 @@ fn file_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn is_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("is_file", &path.to_string_lossy()) {
+    if !vm.check_open_basedir("is_file", &path.to_msg_string()) {
         return Ok(Value::False);
     }
-    Ok(if std::path::Path::new(&path.to_string_lossy()).is_file() {
+    Ok(if msg_path(&path.to_msg_string()).is_file() {
         Value::True
     } else {
         Value::False
@@ -8694,12 +8695,12 @@ fn strip_file_scheme(path: &str) -> Option<String> {
 
 fn is_dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
     let path_resolved = strip_file_scheme(&path_str).unwrap_or_else(|| path_str.to_string());
     if !vm.check_open_basedir("is_dir", &path_resolved) {
         return Ok(Value::False);
     }
-    Ok(if std::path::Path::new(&path_resolved).is_dir() {
+    Ok(if msg_path(&path_resolved).is_dir() {
         Value::True
     } else {
         Value::False
@@ -8710,7 +8711,7 @@ fn is_readable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     #[cfg(unix)]
     {
         Ok(
-            if check_access_bit(&path.to_string_lossy(), 0o400, 0o040, 0o004) {
+            if check_access_bit(&path.to_msg_string(), 0o400, 0o040, 0o004) {
                 Value::True
             } else {
                 Value::False
@@ -8719,7 +8720,7 @@ fn is_readable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     #[cfg(not(unix))]
     {
-        Ok(if std::path::Path::new(&path.to_string_lossy()).exists() {
+        Ok(if msg_path(&path.to_msg_string()).exists() {
             Value::True
         } else {
             Value::False
@@ -8731,7 +8732,7 @@ fn is_writable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     #[cfg(unix)]
     {
         Ok(
-            if check_access_bit(&path.to_string_lossy(), 0o200, 0o020, 0o002) {
+            if check_access_bit(&path.to_msg_string(), 0o200, 0o020, 0o002) {
                 Value::True
             } else {
                 Value::False
@@ -8740,7 +8741,7 @@ fn is_writable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     #[cfg(not(unix))]
     {
-        Ok(if std::path::Path::new(&path.to_string_lossy()).exists() {
+        Ok(if msg_path(&path.to_msg_string()).exists() {
             Value::True
         } else {
             Value::False
@@ -8753,7 +8754,7 @@ fn is_writable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 #[cfg(unix)]
 fn check_access_bit(path: &str, owner_bit: u32, group_bit: u32, other_bit: u32) -> bool {
     use std::os::unix::fs::MetadataExt;
-    let m = match std::fs::metadata(path) {
+    let m = match std::fs::metadata(msg_path(path)) {
         Ok(m) => m,
         Err(_) => return false,
     };
@@ -8845,12 +8846,17 @@ pub(crate) fn read_path_with_wrappers(path_str: &str) -> std::io::Result<Vec<u8>
 
 fn read_path_with_wrappers_inner(path_str: &str) -> std::io::Result<Vec<u8>> {
     // Apply lexical normalization for plain filesystem paths.
+    // The plain-files wrapper also serves file:// URLs.
+    let path_str = match path_str.get(..7) {
+        Some(p) if p.eq_ignore_ascii_case("file://") => &path_str[7..],
+        _ => path_str,
+    };
     let normalized = if !path_str.contains("://") {
         normalize_path_lexical(path_str)
     } else {
         path_str.to_string()
     };
-    std::fs::read(&normalized)
+    std::fs::read(msg_path(&normalized))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -9189,7 +9195,7 @@ fn get_meta_tags_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// _php_stream_copy_to_mem(): its first read asks for the stat size
 /// (when positive) plus a chunk, e.g. on a directory.
 fn copy_to_mem_first_read(path: &str) -> u64 {
-    match std::fs::metadata(path) {
+    match std::fs::metadata(msg_path(path)) {
         Ok(m) if m.len() > 0 => m.len() + STREAM_CHUNK_SIZE as u64,
         _ => STREAM_CHUNK_SIZE as u64,
     }
@@ -9255,12 +9261,12 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // If use_include_path and path is relative + plain (no scheme), look up
     // through include_path entries, then fall back to the script's directory.
     let path = {
-        let path_str = path.to_string_lossy();
+        let path_str = path.to_msg_string();
         let resolved = resolve_with_include_path(vm, &path_str, use_include_path);
         if resolved == path_str {
             path
         } else {
-            PhpString::from_string(resolved)
+            PhpString::from_msg(&resolved)
         }
     };
 
@@ -9278,7 +9284,7 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
     // data: and data:// URIs: route through fopen (which already handles
     // base64-decoding, urldecoding, etc.) to avoid duplicating the logic.
     // Reject datafoo: and similar malformed schemes.
@@ -9320,7 +9326,7 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         || lower_path.starts_with("php://temp")
     {
         let mut inner_args = vec![
-            Value::String(PhpString::from_string(path_str.to_string())),
+            Value::String(PhpString::from_msg(&path_str)),
             Value::String(PhpString::from_bytes(b"r")),
             Value::False,
         ];
@@ -9382,7 +9388,7 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     // If path is an existing directory, emit a notice rather than failing
     // silently. PHP says: "Read of N bytes failed with errno=21 Is a directory".
-    if !path_str.contains("://") && std::path::Path::new(&*path_str).is_dir() {
+    if !path_str.contains("://") && msg_path(&path_str).is_dir() {
         // The directory opens as a plain-file stream.
         goro_core::value::alloc_resource_id();
         let line = vm.current_line;
@@ -9449,7 +9455,7 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    if !vm.check_open_basedir("file_put_contents", &path.to_string_lossy()) {
+    if !vm.check_open_basedir("file_put_contents", &path.to_msg_string()) {
         return Ok(Value::False);
     }
     // The http:// wrapper does not open streams for writing.
@@ -9567,7 +9573,7 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         },
         _ => data_val.to_php_string().as_bytes().to_vec(),
     };
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
 
     // php:// streams (php://stdout, php://fd/N, php://output, ...): open the
     // stream and write to it (php_stream_open_wrapper_ex + php_stream_write).
@@ -9594,7 +9600,7 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return r;
     }
 
-    let p = std::path::Path::new(&*path_str);
+    let p = msg_path(&path_str);
     if let Some(parent) = p.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             vm.emit_warning(&format!(
@@ -9610,13 +9616,13 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             std::fs::OpenOptions::new()
                 .append(true)
                 .create(true)
-                .open(&*path_str)
+                .open(msg_path(&path_str))
         } else {
             std::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true)
-                .open(&*path_str)
+                .open(msg_path(&path_str))
         };
         if file_result.is_ok() {
             // The opened stream's resource id.
@@ -9866,8 +9872,8 @@ fn realpath_cache_get_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError>
 
 fn getcwd_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     match std::env::current_dir() {
-        Ok(p) => Ok(Value::String(PhpString::from_string(
-            p.to_string_lossy().to_string(),
+        Ok(p) => Ok(Value::String(PhpString::from_vec(
+            goro_core::fspath::os_bytes(p.as_os_str()).into_owned(),
         ))),
         Err(_) => Ok(Value::False),
     }
@@ -9877,7 +9883,7 @@ fn chdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), "chdir", 1, "directory") {
         return Err(e);
     }
-    match std::env::set_current_dir(&*path.to_string_lossy() as &str) {
+    match std::env::set_current_dir(goro_core::fspath::bytes_path(path.as_bytes())) {
         Ok(_) => Ok(Value::True),
         Err(e) => {
             let errno = e.raw_os_error().unwrap_or(0);
@@ -9923,14 +9929,14 @@ fn filesize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if stat_nul_byte(vm, "filesize", path.as_bytes()) {
         return Ok(Value::False);
     }
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
     if path_str.is_empty() {
         return Ok(Value::False);
     }
     if !vm.check_open_basedir("filesize", &path_str) {
         return Ok(Value::False);
     }
-    match std::fs::metadata(&*path_str as &str) {
+    match std::fs::metadata(msg_path(&path_str)) {
         Ok(m) => Ok(Value::Long(m.len() as i64)),
         Err(_) => {
             vm.emit_warning(&format!("filesize(): stat failed for {}", path_str));
@@ -9940,7 +9946,7 @@ fn filesize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn touch_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
     // PHP 8+: when $atime is an integer but $mtime is null, throw ValueError.
     if args.len() >= 3
         && matches!(args.get(1), Some(Value::Null))
@@ -9963,7 +9969,7 @@ fn touch_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if !vm.check_open_basedir("touch", &path_str) {
         return Ok(Value::False);
     }
-    let p = std::path::Path::new(&*path_str);
+    let p = &*msg_path(&path_str);
     if !p.exists() {
         if let Some(parent) = p.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -9995,7 +10001,7 @@ fn touch_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // Use libc::utimes (atime, mtime) to set both.
     use std::ffi::CString;
-    let c_path = match CString::new(path_str.as_bytes()) {
+    let c_path = match CString::new(goro_core::fspath::msg_bytes(&path_str).into_owned()) {
         Ok(c) => c,
         Err(_) => return Ok(Value::True),
     };
@@ -10015,7 +10021,7 @@ fn touch_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn is_link_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     Ok(
-        if std::path::Path::new(&*path.to_string_lossy() as &str)
+        if goro_core::fspath::bytes_path(path.as_bytes())
             .read_link()
             .is_ok()
         {
@@ -10030,7 +10036,7 @@ fn stat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if stat_nul_byte(vm, "stat", path.as_bytes()) {
         return Ok(Value::False);
     }
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
     let res = stat_path(&path_str, false)?;
     // php_stat(): an empty filename fails silently.
     if matches!(res, Value::False) && !path_str.is_empty() {
@@ -10043,7 +10049,8 @@ fn stat_path(path_str: &str, is_lstat: bool) -> Result<Value, VmError> {
     #[cfg(unix)]
     {
         use std::ffi::CString;
-        let c_path = CString::new(path_str.as_bytes()).unwrap_or_default();
+        let c_path =
+            CString::new(goro_core::fspath::msg_bytes(path_str).into_owned()).unwrap_or_default();
         let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
         let ret = if is_lstat {
             unsafe { libc::lstat(c_path.as_ptr(), &mut stat_buf) }
@@ -10083,7 +10090,7 @@ fn stat_path(path_str: &str, is_lstat: bool) -> Result<Value, VmError> {
     }
     #[cfg(not(unix))]
     {
-        match std::fs::metadata(path_str) {
+        match std::fs::metadata(msg_path(path_str)) {
             Ok(m) => {
                 let mut result = PhpArray::new();
                 let size = m.len() as i64;
@@ -10210,7 +10217,7 @@ fn php_is_numeric_string(s: &[u8]) -> bool {
 }
 fn dirname_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    let s = path.to_string_lossy();
+    let s = path.to_msg_string();
     let levels_raw = args.get(1).map(|v| v.to_long()).unwrap_or(1);
     if levels_raw < 1 {
         let msg = "dirname(): Argument #2 ($levels) must be greater than or equal to 1".to_string();
@@ -10258,7 +10265,7 @@ fn dirname_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             result = ".".to_string();
         }
     }
-    Ok(Value::String(PhpString::from_string(result)))
+    Ok(Value::String(PhpString::from_msg(&result)))
 }
 
 fn basename_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -11705,10 +11712,10 @@ pub(crate) struct DirHandle {
 }
 
 fn read_dir_entries(path: &str) -> std::io::Result<Vec<String>> {
-    let entries = std::fs::read_dir(path)?;
+    let entries = std::fs::read_dir(msg_path(path))?;
     let mut names: Vec<String> = vec![".".to_string(), "..".to_string()];
     for e in entries.flatten() {
-        names.push(e.file_name().to_string_lossy().to_string());
+        names.push(os_msg(&e.file_name()));
     }
     names.sort();
     // Reverse so we can pop from the end efficiently while still feeding entries
@@ -11721,14 +11728,14 @@ fn read_dir_entries(path: &str) -> std::io::Result<Vec<String>> {
 /// pattern's matches, those outside open_basedir left out.
 fn glob_stream_entries(vm: &mut Vm, pattern: &str) -> Vec<String> {
     let mut glob_buf: libc::glob_t = unsafe { std::mem::zeroed() };
-    let c_pattern = std::ffi::CString::new(pattern.as_bytes()).unwrap_or_default();
+    let c_pattern = msg_cstring(pattern).unwrap_or_default();
     let ret = unsafe { libc::glob(c_pattern.as_ptr(), 0, None, &mut glob_buf) };
     let mut names = Vec::new();
     if ret == 0 {
         for i in 0..glob_buf.gl_pathc {
             let path = unsafe {
                 let p = *glob_buf.gl_pathv.add(i);
-                std::ffi::CStr::from_ptr(p).to_string_lossy().to_string()
+                goro_core::string::msg_str(std::ffi::CStr::from_ptr(p).to_bytes()).into_owned()
             };
             if !goro_core::basedir::check_open_basedir_ex(vm, "", &path, false) {
                 continue;
@@ -12738,7 +12745,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .first()
         .unwrap_or(&Value::Null)
         .to_php_string()
-        .to_string_lossy();
+        .to_msg_string();
     // Empty filename → ValueError, matching PHP's behavior.
     if filename.is_empty() {
         let msg = "Path must not be empty";
@@ -12795,7 +12802,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     // glob:// has no stream opener (php_glob_stream_wrapper).
-    if filename.len() >= 7 && filename[..7].eq_ignore_ascii_case("glob://") {
+    if filename.len() >= 7 && filename.as_bytes()[..7].eq_ignore_ascii_case(b"glob://") {
         vm.emit_warning(&format!(
             "{}({}): Failed to open stream: wrapper does not support stream open",
             fopen_caller, filename
@@ -12805,8 +12812,8 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // http:// and https:// (php_stream_url_wrap_http()): the socket stream
     // of the request, positioned at the body.
     if filename.len() > 7
-        && (filename[..7].eq_ignore_ascii_case("http://")
-            || (filename.len() > 8 && filename[..8].eq_ignore_ascii_case("https://")))
+        && (filename.as_bytes()[..7].eq_ignore_ascii_case(b"http://")
+            || (filename.len() > 8 && filename.as_bytes()[..8].eq_ignore_ascii_case(b"https://")))
     {
         let caller = fopen_caller.clone();
         let opened =
@@ -12848,7 +12855,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     // php://filter/<chain>/resource=<inner_url> (php_stream_url_wrap_php).
-    if filename.len() >= 13 && filename[..13].eq_ignore_ascii_case("php://filter/") {
+    if filename.len() >= 13 && filename.as_bytes()[..13].eq_ignore_ascii_case(b"php://filter/") {
         let rest = &filename[12..];
         let mut mode_rw = 0;
         if mode.contains('r') || mode.contains('+') {
@@ -13240,7 +13247,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let inc = vm
             .constants
             .get(b"include_path".as_ref())
-            .map(|v| v.to_php_string().to_string_lossy())
+            .map(|v| v.to_php_string().to_msg_string())
             .unwrap_or_else(|| ".".to_string());
         let mut found: Option<String> = None;
         for entry in inc.split(':') {
@@ -13253,7 +13260,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             } else {
                 format!("{}/{}", entry.trim_end_matches('/'), filename)
             };
-            if std::fs::metadata(&candidate).is_ok() {
+            if std::fs::metadata(msg_path(&candidate)).is_ok() {
                 found = Some(candidate);
                 break;
             }
@@ -13261,10 +13268,10 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Fall back to the script's directory.
         if found.is_none() {
             let script = vm.current_file.clone();
-            if let Some(parent) = std::path::Path::new(&script).parent() {
-                let candidate = parent.join(&filename);
+            if let Some(parent) = msg_path(&script).parent() {
+                let candidate = parent.join(msg_path(&filename));
                 if candidate.exists() {
-                    found = Some(candidate.to_string_lossy().to_string());
+                    found = Some(path_msg(&candidate));
                 }
             }
         }
@@ -13283,48 +13290,48 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     let file = match mode_clean.as_str() {
-        "r" => std::fs::File::open(&open_path),
+        "r" => std::fs::File::open(&*msg_path(&open_path)),
         "r+" => std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(&open_path),
-        "w" => std::fs::File::create(&open_path),
+            .open(&*msg_path(&open_path)),
+        "w" => std::fs::File::create(&*msg_path(&open_path)),
         "w+" => std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(true)
-            .open(&open_path),
+            .open(&*msg_path(&open_path)),
         "a" => std::fs::OpenOptions::new()
             .append(true)
             .create(true)
-            .open(&open_path),
+            .open(&*msg_path(&open_path)),
         "a+" => std::fs::OpenOptions::new()
             .read(true)
             .append(true)
             .create(true)
-            .open(&open_path),
+            .open(&*msg_path(&open_path)),
         "x" => std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&open_path),
+            .open(&*msg_path(&open_path)),
         "x+" => std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
-            .open(&open_path),
+            .open(&*msg_path(&open_path)),
         "c" => std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&open_path),
+            .open(&*msg_path(&open_path)),
         "c+" => std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&open_path),
-        _ => std::fs::File::open(&open_path), // default to read
+            .open(&*msg_path(&open_path)),
+        _ => std::fs::File::open(&*msg_path(&open_path)), // default to read
     };
 
     match file {
@@ -13337,9 +13344,18 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         Err(e) => {
             let msg = strip_os_error(&e.to_string());
+            // (the name as passed: a file:// URL keeps its scheme)
             vm.emit_warning(&format!(
                 "{}({}): Failed to open stream: {}",
-                fopen_caller, filename, msg
+                fopen_caller,
+                if original_uri.len() > 7
+                    && original_uri.as_bytes()[..7].eq_ignore_ascii_case(b"file://")
+                {
+                    &original_uri
+                } else {
+                    &filename
+                },
+                msg
             ));
             Ok(Value::False)
         }
@@ -14868,7 +14884,7 @@ fn mkdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    let path = path_v.to_string_lossy().to_string();
+    let path = path_v.to_msg_string();
     let path = strip_file_scheme(&path).unwrap_or(path);
     let recursive = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
     // php_plain_files_mkdir(): a recursive mkdir of an existing path fails
@@ -14883,9 +14899,9 @@ fn mkdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let result = {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new()
-            .recursive(recursive && !std::path::Path::new(&path).exists())
+            .recursive(recursive && !msg_path(&path).exists())
             .mode(mode & 0o7777)
-            .create(&path)
+            .create(msg_path(&path))
     };
     match result {
         Ok(_) => Ok(Value::True),
@@ -14913,14 +14929,14 @@ fn rmdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    let path = path_v.to_string_lossy().to_string();
+    let path = path_v.to_msg_string();
     // Support file:// scheme for tests.
     let path = if let Some(rest) = path.strip_prefix("file://") {
         rest.to_string()
     } else {
         path
     };
-    match std::fs::remove_dir(&path) {
+    match std::fs::remove_dir(msg_path(&path)) {
         Ok(_) => Ok(Value::True),
         Err(e) => {
             let msg = strip_os_error(&e.to_string());
@@ -14964,11 +14980,11 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         );
         return Ok(Value::False);
     }
-    let pattern_str = pattern.to_string_lossy();
+    let pattern_str = pattern.to_msg_string();
 
     // Use libc glob
     let mut glob_buf: libc::glob_t = unsafe { std::mem::zeroed() };
-    let c_pattern = std::ffi::CString::new(pattern_str.as_bytes()).unwrap_or_default();
+    let c_pattern = std::ffi::CString::new(pattern.as_bytes()).unwrap_or_default();
 
     let mut libc_flags = 0i32;
     for (php, c) in [
@@ -15001,13 +15017,13 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         for i in 0..glob_buf.gl_pathc {
             let path = unsafe {
                 let p = *glob_buf.gl_pathv.add(i);
-                std::ffi::CStr::from_ptr(p).to_string_lossy().to_string()
+                goro_core::string::msg_str(std::ffi::CStr::from_ptr(p).to_bytes()).into_owned()
             };
             if only_dir {
                 // Strip trailing slash before testing is_dir (so GLOB_MARK
                 // entries still work).
                 let test_path = path.trim_end_matches('/');
-                if !std::fs::metadata(test_path)
+                if !std::fs::metadata(msg_path(test_path))
                     .map(|m| m.is_dir())
                     .unwrap_or(false)
                 {
@@ -15021,7 +15037,7 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             } else {
                 path
             };
-            arr.push(Value::String(PhpString::from_string(path)));
+            arr.push(Value::String(PhpString::from_msg(&path)));
         }
     }
     unsafe {
@@ -15030,9 +15046,7 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // GLOB_NOCHECK: if no matches, return the pattern itself
     if ret != 0 && flags & G_NOCHECK != 0 {
-        arr.push(Value::String(PhpString::from_string(
-            pattern_str.to_string(),
-        )));
+        arr.push(Value::String(PhpString::from_msg(&pattern_str)));
     }
 
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
@@ -15045,7 +15059,7 @@ fn scandir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(e) = path_arg_nul_error(vm, dir.as_bytes(), "scandir", 1, "directory") {
         return Err(e);
     }
-    let dir_str = dir.to_string_lossy();
+    let dir_str = dir.to_msg_string();
     let sort_order = args.get(1).map(|v| v.to_long()).unwrap_or(0); // 0 = ascending, 1 = descending
 
     if dir.is_empty() {
@@ -15058,7 +15072,10 @@ fn scandir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
     if let Some(pattern) = dir_str.strip_prefix("glob://") {
-        let mut names = glob_stream_entries(vm, pattern);
+        let mut names: Vec<Vec<u8>> = glob_stream_entries(vm, pattern)
+            .iter()
+            .map(|n| goro_core::fspath::msg_bytes(n).into_owned())
+            .collect();
         if sort_order != 0 && sort_order != 2 {
             names.sort_by(|a, b| b.cmp(a));
         } else if sort_order == 0 {
@@ -15066,16 +15083,16 @@ fn scandir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         let mut arr = PhpArray::new();
         for name in names {
-            arr.push(Value::String(PhpString::from_string(name)));
+            arr.push(Value::String(PhpString::from_vec(name)));
         }
         goro_core::value::alloc_resource_id();
         return Ok(Value::Array(Rc::new(RefCell::new(arr))));
     }
-    match std::fs::read_dir(&*dir_str) {
+    match std::fs::read_dir(msg_path(&dir_str)) {
         Ok(entries) => {
-            let mut names: Vec<String> = vec![".".to_string(), "..".to_string()];
+            let mut names: Vec<Vec<u8>> = vec![b".".to_vec(), b"..".to_vec()];
             for e in entries.flatten() {
-                names.push(e.file_name().to_string_lossy().to_string());
+                names.push(goro_core::fspath::os_bytes(&e.file_name()).into_owned());
             }
             // PHP_SCANDIR_SORT_ASCENDING (0), _NONE (2), anything else descends.
             if sort_order == 0 {
@@ -15085,7 +15102,7 @@ fn scandir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             let mut arr = PhpArray::new();
             for name in names {
-                arr.push(Value::String(PhpString::from_string(name)));
+                arr.push(Value::String(PhpString::from_vec(name)));
             }
             // php_stream_scandir() opened a directory stream.
             goro_core::value::alloc_resource_id();
@@ -16797,7 +16814,7 @@ fn opendir_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmErr
     if path.as_bytes().is_empty() {
         return Ok(Value::False);
     }
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
     if let Some(pattern) = path_str.strip_prefix("glob://") {
         let names = glob_stream_entries(vm, pattern);
         return Ok(Value::resource(alloc_dir_handle_entries(
@@ -16805,7 +16822,7 @@ fn opendir_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmErr
             names,
         )));
     }
-    let dir_path = std::path::Path::new(&*path_str);
+    let dir_path = &*msg_path(&path_str);
     if dir_path.is_dir() {
         match std::fs::read_dir(dir_path) {
             Ok(_) => {
@@ -16939,7 +16956,7 @@ fn readdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut handles = dh.borrow_mut();
         if let Some(entries) = handles.get_mut(&id) {
             if let Some(name) = entries.remaining.pop() {
-                Ok(Value::String(PhpString::from_string(name)))
+                Ok(Value::String(PhpString::from_msg(&name)))
             } else {
                 Ok(Value::False)
             }
@@ -16982,9 +16999,9 @@ fn chmod_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let path = filename.to_string_lossy().to_string();
+        let path = goro_core::fspath::bytes_path(filename.as_bytes());
         let perms = std::fs::Permissions::from_mode(mode as u32 & 0o7777);
-        match std::fs::set_permissions(&path, perms) {
+        match std::fs::set_permissions(path, perms) {
             Ok(_) => Ok(Value::True),
             Err(e) => {
                 let msg = strip_os_error(&e.to_string());
@@ -17008,17 +17025,17 @@ fn symlink_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     {
         return Err(e);
     }
-    let target_s = target.to_string_lossy();
-    let link_s = link.to_string_lossy();
+    let target_s = target.to_msg_string();
+    let link_s = link.to_msg_string();
     // expand_filepath_ex() of the target, relative to the link's directory
     // (CWD_FILEPATH): a leading component that exists but is not a
     // directory makes it fail.
     {
-        let base = std::path::Path::new(&*link_s)
+        let base = msg_path(&link_s)
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_default();
-        let full = base.join(&*target_s);
+        let full = base.join(msg_path(&target_s));
         let comps: Vec<_> = full.components().collect();
         let mut cur = std::path::PathBuf::new();
         for (i, c) in comps.iter().enumerate() {
@@ -17042,7 +17059,7 @@ fn symlink_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     #[cfg(unix)]
     {
-        match std::os::unix::fs::symlink(&*target_s, &*link_s) {
+        match std::os::unix::fs::symlink(msg_path(&target_s), msg_path(&link_s)) {
             Ok(_) => Ok(Value::True),
             Err(e) => {
                 let msg = strip_os_error(&e.to_string());
@@ -17064,10 +17081,10 @@ fn readlink_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), "readlink", 1, "path") {
         return Err(e);
     }
-    let path_str = path.to_string_lossy();
-    match std::fs::read_link(&*path_str) {
-        Ok(p) => Ok(Value::String(PhpString::from_string(
-            p.to_string_lossy().to_string(),
+    let path_str = path.to_msg_string();
+    match std::fs::read_link(msg_path(&path_str)) {
+        Ok(p) => Ok(Value::String(PhpString::from_vec(
+            goro_core::fspath::os_bytes(p.as_os_str()).into_owned(),
         ))),
         Err(e) => {
             // Strip "(os error N)" trailer and other Rust-isms.
@@ -17379,7 +17396,7 @@ fn stat_nul_byte(vm: &mut Vm, func: &str, path: &[u8]) -> bool {
 
 fn fileperms_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
     if path_str.is_empty() {
         return Ok(Value::False);
     }
@@ -17394,7 +17411,7 @@ fn fileperms_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path_str) {
+        match std::fs::metadata(msg_path(&path_str)) {
             Ok(m) => Ok(Value::Long(m.mode() as i64)),
             Err(_) => {
                 vm.emit_warning(&format!("fileperms(): stat failed for {}", path_str));
@@ -17414,8 +17431,8 @@ fn filetype_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if stat_nul_byte(vm, "filetype", path.as_bytes()) {
         return Ok(Value::False);
     }
-    let path_str = path.to_string_lossy();
-    let p = std::path::Path::new(&*path_str);
+    let path_str = path.to_msg_string();
+    let p = msg_path(&path_str);
     // Use symlink_metadata so that symlinks are reported as "link" (not whatever they point to)
     let md = match std::fs::symlink_metadata(p) {
         Ok(m) => m,
@@ -17555,7 +17572,10 @@ fn link_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     {
         return Err(e);
     }
-    match std::fs::hard_link(&*target.to_string_lossy(), &*link.to_string_lossy()) {
+    match std::fs::hard_link(
+        goro_core::fspath::bytes_path(target.as_bytes()),
+        goro_core::fspath::bytes_path(link.as_bytes()),
+    ) {
         Ok(_) => Ok(Value::True),
         Err(e) => {
             let msg = strip_os_error(&e.to_string());
@@ -17581,8 +17601,8 @@ fn unlink_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    let path_str = path.to_string_lossy();
-    match std::fs::remove_file(&*path_str) {
+    let path_str = path.to_msg_string();
+    match std::fs::remove_file(msg_path(&path_str)) {
         Ok(_) => Ok(Value::True),
         Err(e) => {
             let msg = strip_os_error(&e.to_string());
@@ -17600,9 +17620,9 @@ fn rename_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     REALPATH_CACHE.with(|c| c.borrow_mut().clear());
     let from = args.first().unwrap_or(&Value::Null).to_php_string();
     let to = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let from_str = from.to_string_lossy();
-    let to_str = to.to_string_lossy();
-    match std::fs::rename(&*from_str, &*to_str) {
+    let from_str = from.to_msg_string();
+    let to_str = to.to_msg_string();
+    match std::fs::rename(msg_path(&from_str), msg_path(&to_str)) {
         Ok(_) => Ok(Value::True),
         Err(e) => {
             let msg = strip_os_error(&e.to_string());
@@ -17618,8 +17638,8 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let from = args.first().unwrap_or(&Value::Null).to_php_string();
     let to = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let from_str = from.to_string_lossy();
-    let to_str = to.to_string_lossy();
+    let from_str = from.to_msg_string();
+    let to_str = to.to_msg_string();
     // PHP: if source and destination resolve to the same file (using cwd to
     // resolve relative paths, lexically normalized), return false with NO
     // warning, regardless of whether either file exists.
@@ -17677,7 +17697,7 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let _ = call_registered(vm, b"fclose", fclose_fn, &[Value::resource(dn.id())]);
         return Ok(Value::True);
     }
-    let from_path = std::path::Path::new(&*from_str);
+    let from_path = msg_path(&from_str);
     if !from_path.exists() {
         vm.emit_warning(&format!(
             "copy({}): Failed to open stream: No such file or directory",
@@ -17691,15 +17711,15 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::False);
     }
     // PHP: destination cannot be a directory
-    if std::path::Path::new(&*to_str).is_dir() {
+    if msg_path(&to_str).is_dir() {
         vm.emit_warning("copy(): The second argument to copy() function cannot be a directory");
         return Ok(Value::False);
     }
     // PHP: copy of same source -> destination returns false (no warning),
     // resolved via canonicalize as a fallback.
     if let (Ok(c1), Ok(c2)) = (
-        std::fs::canonicalize(&*from_str),
-        std::fs::canonicalize(&*to_str),
+        std::fs::canonicalize(msg_path(&from_str)),
+        std::fs::canonicalize(msg_path(&to_str)),
     ) {
         if c1 == c2 {
             return Ok(Value::False);
@@ -17708,7 +17728,7 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // php_copy_file_ctx(): the source is read and the destination opened
     // like fopen($to, "wb") (a new file gets 0666 & ~umask, an existing one
     // keeps its permissions; std::fs::copy() would copy the source's).
-    let src = match std::fs::File::open(&*from_str) {
+    let src = match std::fs::File::open(msg_path(&from_str)) {
         Ok(f) => f,
         Err(e) => {
             let msg = strip_os_error(&e.to_string());
@@ -17723,7 +17743,7 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .write(true)
         .create(true)
         .truncate(true)
-        .open(&*to_str)
+        .open(msg_path(&to_str))
     {
         Ok(f) => f,
         Err(e) => {
@@ -17758,7 +17778,7 @@ fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), "readfile", 1, "filename") {
         return Err(e);
     }
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
     if path_str.is_empty() {
         let msg = "Path must not be empty".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
@@ -17795,7 +17815,7 @@ fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let resolved = resolve_with_include_path(vm, &path_str, use_include_path);
     // A directory opens as a plain-file stream whose first read fails.
-    if std::path::Path::new(&resolved).is_dir() {
+    if msg_path(&resolved).is_dir() {
         goro_core::value::alloc_resource_id();
         let line = vm.current_line;
         vm.emit_notice_at(
@@ -17833,7 +17853,7 @@ pub(crate) fn resolve_with_include_path(vm: &Vm, filename: &str, use_include_pat
     let inc = vm
         .constants
         .get(b"include_path".as_ref())
-        .map(|v| v.to_php_string().to_string_lossy())
+        .map(|v| v.to_php_string().to_msg_string())
         .unwrap_or_else(|| ".".to_string());
     for entry in inc.split(':') {
         if entry.is_empty() {
@@ -17844,15 +17864,15 @@ pub(crate) fn resolve_with_include_path(vm: &Vm, filename: &str, use_include_pat
         } else {
             format!("{}/{}", entry.trim_end_matches('/'), filename)
         };
-        if std::fs::metadata(&candidate).is_ok() {
+        if std::fs::metadata(msg_path(&candidate)).is_ok() {
             return candidate;
         }
     }
     let script = vm.current_file.clone();
-    if let Some(parent) = std::path::Path::new(&script).parent() {
+    if let Some(parent) = msg_path(&script).parent() {
         let candidate = parent.join(filename);
         if candidate.exists() {
-            return candidate.to_string_lossy().to_string();
+            return path_msg(&candidate);
         }
     }
     filename.to_string()
@@ -17884,10 +17904,10 @@ fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let ignore_new_lines = flags & 2 != 0; // FILE_IGNORE_NEW_LINES
     let skip_empty = flags & 4 != 0; // FILE_SKIP_EMPTY_LINES
     let use_inc = flags & 1 != 0; // FILE_USE_INCLUDE_PATH
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
     let path_str = resolve_with_include_path(vm, &path_str, use_inc);
     // A directory opens as a plain-file stream whose first read fails.
-    if !path_str.contains("://") && std::path::Path::new(&*path_str).is_dir() {
+    if !path_str.contains("://") && msg_path(&path_str).is_dir() {
         goro_core::value::alloc_resource_id();
         let line = vm.current_line;
         vm.emit_notice_at(
@@ -17898,7 +17918,8 @@ fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     // php:// streams (php://filter, php://memory, ...) go through the
     // stream layer.
-    let content = if (path_str.len() > 6 && path_str[..6].eq_ignore_ascii_case("php://"))
+    let content = if (path_str.len() > 6
+        && path_str.as_bytes()[..6].eq_ignore_ascii_case(b"php://"))
         || path.as_bytes().starts_with(b"data:")
         || is_http_url(path.as_bytes())
     {
@@ -17980,7 +18001,7 @@ fn lstat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if stat_nul_byte(vm, "lstat", path.as_bytes()) {
         return Ok(Value::False);
     }
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
     let res = stat_path(&path_str, true)?;
     if matches!(res, Value::False) && !path_str.is_empty() {
         vm.emit_warning(&format!("lstat(): Lstat failed for {}", path_str));
@@ -17993,7 +18014,7 @@ fn is_executable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     #[cfg(unix)]
     {
         Ok(
-            if check_access_bit(&path.to_string_lossy(), 0o100, 0o010, 0o001) {
+            if check_access_bit(&path.to_msg_string(), 0o100, 0o010, 0o001) {
                 Value::True
             } else {
                 Value::False
@@ -18044,7 +18065,7 @@ fn tempnam_fn3(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     pfx.truncate(63);
 
     // php_open_temporary_fd_ex(dir, pfx, PHP_TMP_FILE_OPEN_BASEDIR_CHECK_ALWAYS)
-    let dir_s = dir.to_string_lossy();
+    let dir_s = dir.to_msg_string();
     if !dir_s.is_empty() {
         if !vm.check_open_basedir("tempnam", &dir_s) {
             return Ok(Value::False);
@@ -18074,7 +18095,7 @@ pub(crate) fn php_get_temporary_directory(vm: &Vm) -> String {
     let sys = vm
         .constants
         .get(b"sys_temp_dir".as_slice())
-        .map(|v| v.to_php_string().to_string_lossy())
+        .map(|v| v.to_php_string().to_msg_string())
         .unwrap_or_default();
     let pick = |s: String| -> Option<String> {
         if s.len() >= 2 && s.ends_with('/') {
@@ -18102,7 +18123,7 @@ pub(crate) fn php_get_temporary_directory(vm: &Vm) -> String {
 /// php_do_open_temporary_file(): mkstemp() of "<realpath(dir)>/<pfx>XXXXXX".
 fn do_open_temporary_file(_vm: &mut Vm, dir: &str, pfx: &[u8]) -> Option<Vec<u8>> {
     use std::os::unix::ffi::OsStrExt;
-    let real = std::fs::canonicalize(dir).ok()?;
+    let real = std::fs::canonicalize(msg_path(dir)).ok()?;
     let mut path = real.as_os_str().as_bytes().to_vec();
     if path.last() != Some(&b'/') {
         path.push(b'/');
@@ -18137,8 +18158,8 @@ fn do_open_temporary_file(_vm: &mut Vm, dir: &str, pfx: &[u8]) -> Option<Vec<u8>
 }
 
 fn sys_get_temp_dir_fn3(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::from_string(
-        php_get_temporary_directory(vm),
+    Ok(Value::String(PhpString::from_msg(
+        &php_get_temporary_directory(vm),
     )))
 }
 
@@ -18682,14 +18703,14 @@ fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if stat_nul_byte(vm, "filemtime", path.as_bytes()) {
         return Ok(Value::False);
     }
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
     if path_str.is_empty() {
         return Ok(Value::False);
     }
     if !vm.check_open_basedir("filemtime", &path_str) {
         return Ok(Value::False);
     }
-    match std::fs::metadata(&*path_str) {
+    match std::fs::metadata(msg_path(&path_str)) {
         Ok(meta) => {
             // (st_mtime: signed, a time before the epoch is negative)
             #[cfg(unix)]
@@ -18722,14 +18743,14 @@ fn fileatime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if stat_nul_byte(vm, "fileatime", path.as_bytes()) {
         return Ok(Value::False);
     }
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
     if path_str.is_empty() {
         return Ok(Value::False);
     }
     if !vm.check_open_basedir("fileatime", &path_str) {
         return Ok(Value::False);
     }
-    match std::fs::metadata(&*path_str) {
+    match std::fs::metadata(msg_path(&path_str)) {
         Ok(meta) => {
             // (st_atime: signed, a time before the epoch is negative)
             #[cfg(unix)]
@@ -18762,7 +18783,7 @@ fn filectime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if stat_nul_byte(vm, "filectime", path.as_bytes()) {
         return Ok(Value::False);
     }
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
     if path_str.is_empty() {
         return Ok(Value::False);
     }
@@ -18772,7 +18793,7 @@ fn filectime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path_str) {
+        match std::fs::metadata(msg_path(&path_str)) {
             Ok(meta) => Ok(Value::Long(meta.ctime())),
             Err(_) => {
                 vm.emit_warning(&format!("filectime(): stat failed for {}", path_str));
@@ -18783,7 +18804,7 @@ fn filectime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     #[cfg(not(unix))]
     {
         // Fall back to created on non-Unix
-        match std::fs::metadata(&*path_str) {
+        match std::fs::metadata(msg_path(&path_str)) {
             Ok(meta) => {
                 if let Ok(c) = meta.created() {
                     let secs = c
@@ -18805,7 +18826,7 @@ fn filectime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fileinode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
     if path_str.is_empty() {
         return Ok(Value::False);
     }
@@ -18820,7 +18841,7 @@ fn fileinode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path_str) {
+        match std::fs::metadata(msg_path(&path_str)) {
             Ok(meta) => Ok(Value::Long(meta.ino() as i64)),
             Err(_) => {
                 vm.emit_warning(&format!("fileinode(): stat failed for {}", path_str));
@@ -18834,7 +18855,7 @@ fn fileinode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fileowner_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
     if path_str.is_empty() {
         return Ok(Value::False);
     }
@@ -18849,7 +18870,7 @@ fn fileowner_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path_str) {
+        match std::fs::metadata(msg_path(&path_str)) {
             Ok(meta) => Ok(Value::Long(meta.uid() as i64)),
             Err(_) => {
                 vm.emit_warning(&format!("fileowner(): stat failed for {}", path_str));
@@ -18863,7 +18884,7 @@ fn fileowner_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn filegroup_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
     if path_str.is_empty() {
         return Ok(Value::False);
     }
@@ -18878,7 +18899,7 @@ fn filegroup_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path_str) {
+        match std::fs::metadata(msg_path(&path_str)) {
             Ok(meta) => Ok(Value::Long(meta.gid() as i64)),
             Err(_) => {
                 vm.emit_warning(&format!("filegroup(): stat failed for {}", path_str));
@@ -19075,11 +19096,11 @@ fn linkinfo_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), "linkinfo", 1, "path") {
         return Err(e);
     }
-    let path_s = path.to_string_lossy();
+    let path_s = path.to_msg_string();
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::symlink_metadata(&*path_s) {
+        match std::fs::symlink_metadata(msg_path(&path_s)) {
             Ok(meta) => Ok(Value::Long(meta.dev() as i64)),
             Err(e) => {
                 let msg = strip_os_error(&e.to_string());
@@ -19101,7 +19122,7 @@ fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), "parse_ini_file", 1, "filename") {
         return Err(e);
     }
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_msg_string();
     if path.as_bytes().is_empty() {
         return Err(throw_value_error_in(
             vm,
@@ -19114,19 +19135,19 @@ fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let scanner_mode = args.get(2).map(|v| v.to_long()).unwrap_or(0);
 
     // Search include_path for relative filenames.
-    let read_result = std::fs::read_to_string(&*path_str).or_else(|e| {
+    let read_result = std::fs::read(msg_path(&path_str)).or_else(|e| {
         // Only fall back to include_path for non-absolute, non-current-dir paths.
         if path_str.starts_with('/') || path_str.starts_with("./") || path_str.starts_with("../") {
             return Err(e);
         }
         // include_path, then the running script's directory
-        std::fs::read_to_string(vm.resolve_include_path(&path_str)).map_err(|_| e)
+        std::fs::read(msg_path(&vm.resolve_include_path(&path_str))).map_err(|_| e)
     });
 
     match read_result {
         Ok(content) => Ok(crate::ini_parser::parse_ini(
             vm,
-            content.as_bytes(),
+            &content,
             process_sections,
             scanner_mode,
             &path_str,
@@ -19648,7 +19669,7 @@ fn ftok_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "ftok(): Argument #2 ($project_id) must be a single character",
         ));
     }
-    let p = path.to_string_lossy();
+    let p = path.to_msg_string();
     if !vm.check_open_basedir("ftok", &p) {
         return Ok(Value::Long(-1));
     }
@@ -19693,14 +19714,14 @@ fn statpage(vm: &Vm) -> Option<std::fs::Metadata> {
                 s.borrow().get(&ArrayKey::String(PhpString::from_bytes(k)))
             {
                 if !p.as_bytes().is_empty() {
-                    path = Some(p.to_string_lossy());
+                    path = Some(p.to_msg_string());
                     break;
                 }
             }
         }
     }
     let path = path.unwrap_or_else(|| vm.current_file.to_string());
-    std::fs::metadata(path).ok()
+    std::fs::metadata(msg_path(&path)).ok()
 }
 
 fn getlastmod_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -20602,7 +20623,7 @@ fn stream_get_contents_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
 fn get_included_files_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut arr = PhpArray::new();
     for f in &vm.included_files_list {
-        arr.push(Value::String(PhpString::from_string(f.clone())));
+        arr.push(Value::String(PhpString::from_msg(f)));
     }
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
@@ -22497,10 +22518,7 @@ fn stream_get_meta_data_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
                     Value::Long(fh.filter_read_ready.len() as i64),
                 );
                 put(b"seekable", Value::True);
-                put(
-                    b"uri",
-                    Value::String(PhpString::from_string(fh.uri.clone())),
-                );
+                put(b"uri", Value::String(PhpString::from_msg(&fh.uri)));
                 return;
             }
             // PHP_STREAM_OPTION_META_DATA_API: sockets report their own
@@ -22574,7 +22592,7 @@ fn stream_get_meta_data_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
             if !fh.uri.is_empty() {
                 arr.set(
                     ArrayKey::String(PhpString::from_bytes(b"uri")),
-                    Value::String(PhpString::from_string(fh.uri.clone())),
+                    Value::String(PhpString::from_msg(&fh.uri)),
                 );
             }
         }
@@ -23125,12 +23143,12 @@ fn error_log_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "TCP/IP option is not available for error logging",
         )),
         3 => {
-            let dest = destination.map(|d| d.to_string_lossy()).unwrap_or_default();
+            let dest = destination.map(|d| d.to_msg_string()).unwrap_or_default();
             use std::io::Write;
             match std::fs::OpenOptions::new()
                 .append(true)
                 .create(true)
-                .open(&dest)
+                .open(msg_path(&dest))
             {
                 Ok(mut f) => {
                     if f.write_all(message.as_bytes()).is_ok() {
@@ -23201,8 +23219,7 @@ fn disk_space_impl(
     if path_bytes.is_empty() {
         return Ok(Value::False);
     }
-    let path_string = String::from_utf8_lossy(path_bytes).to_string();
-    let path = std::path::Path::new(&path_string);
+    let path = goro_core::fspath::bytes_path(path_bytes);
     if !path.exists() {
         let line = vm.current_line;
         vm.emit_warning_at(&format!("{}(): No such file or directory", called_as), line);
@@ -23898,11 +23915,11 @@ fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, 
     }
     let filename = args
         .first()
-        .map(|v| v.to_php_string().to_string_lossy())
+        .map(|v| v.to_php_string().to_msg_string())
         .unwrap_or_default();
     // Absolute paths, and "./x" / "../x" (relative to the working
     // directory only), resolve directly (php_resolve_path()).
-    let p = std::path::Path::new(&*filename);
+    let p = &*msg_path(&filename);
     if p.is_absolute()
         || filename.starts_with("./")
         || filename.starts_with("../")
@@ -23910,7 +23927,7 @@ fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, 
         || filename == ".."
     {
         return Ok(match std::fs::canonicalize(p) {
-            Ok(cp) => Value::String(PhpString::from_string(cp.to_string_lossy().into_owned())),
+            Ok(cp) => Value::String(goro_core::fspath::path_php(&cp)),
             Err(_) => Value::False,
         });
     }
@@ -23918,7 +23935,7 @@ fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, 
     let include_path = vm
         .constants
         .get(b"include_path".as_ref())
-        .map(|v| v.to_php_string().to_string_lossy())
+        .map(|v| v.to_php_string().to_msg_string())
         .unwrap_or_else(|| ".".to_string());
     let sep = if cfg!(target_os = "windows") {
         ';'
@@ -23931,18 +23948,16 @@ fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, 
         }
         // (an empty name is the include_path directory itself: "./")
         let candidate = if filename.is_empty() {
-            std::path::PathBuf::from(entry)
+            msg_path(entry).into_owned()
         } else if entry == "." {
-            std::path::PathBuf::from(&*filename)
+            msg_path(&filename).into_owned()
         } else {
-            std::path::PathBuf::from(entry).join(&*filename)
+            msg_path(entry).into_owned().join(msg_path(&filename))
         };
         if candidate.exists() {
             return Ok(match std::fs::canonicalize(&candidate) {
-                Ok(cp) => Value::String(PhpString::from_string(cp.to_string_lossy().into_owned())),
-                Err(_) => Value::String(PhpString::from_string(
-                    candidate.to_string_lossy().into_owned(),
-                )),
+                Ok(cp) => Value::String(goro_core::fspath::path_php(&cp)),
+                Err(_) => Value::String(goro_core::fspath::path_php(&candidate)),
             });
         }
     }
@@ -23950,11 +23965,11 @@ fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, 
     if !filename.is_empty() {
         let exec = vm.current_file.to_string();
         if let Some(pos) = exec.rfind('/') {
-            let candidate = std::path::PathBuf::from(&exec[..pos]).join(&*filename);
+            let candidate = msg_path(&exec[..pos])
+                .into_owned()
+                .join(msg_path(&filename));
             if let Ok(cp) = std::fs::canonicalize(&candidate) {
-                return Ok(Value::String(PhpString::from_string(
-                    cp.to_string_lossy().into_owned(),
-                )));
+                return Ok(Value::String(goro_core::fspath::path_php(&cp)));
             }
         }
     }

@@ -1860,6 +1860,7 @@ fn open_and_read(vm: &mut Vm, func: &str, path: &str) -> Option<Vec<u8>> {
                 return None;
             }
             let np = crate::misc::normalize_path_lexical(&p);
+            let np = goro_core::fspath::msg_path(&np);
             match std::fs::File::open(&np) {
                 Ok(mut f) => {
                     if std::fs::metadata(&np).map(|m| m.is_dir()).unwrap_or(false) {
@@ -1971,7 +1972,7 @@ fn getimagesize_from_any(vm: &mut Vm, args: &[Value], from_path: bool) -> Result
                 "Path must not be empty".to_string(),
             ));
         }
-        match open_and_read(vm, func, &input.to_string_lossy()) {
+        match open_and_read(vm, func, &input.to_msg_string()) {
             Some(d) => d,
             None => return Ok(Value::False),
         }
@@ -2131,21 +2132,25 @@ fn iptcembed_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         0
     };
-    let path = jpeg_file.to_string_lossy().to_string();
+    let path = jpeg_file.to_msg_string();
     if !vm.check_open_basedir("iptcembed", &path) {
         return Ok(Value::False);
     }
-    let file = match std::fs::read(crate::misc::normalize_path_lexical(&path)) {
-        Ok(d) if !std::path::Path::new(&path).is_dir() => d,
+    let file = match std::fs::read(goro_core::fspath::msg_path(
+        &crate::misc::normalize_path_lexical(&path),
+    )) {
+        Ok(d) if !goro_core::fspath::msg_path(&path).is_dir() => d,
         _ => {
             let line = vm.current_line;
             vm.emit_warning_at(&format!("iptcembed(): Unable to open {}", path), line);
             return Ok(Value::False);
         }
     };
-    let st_size = std::fs::metadata(crate::misc::normalize_path_lexical(&path))
-        .map(|m| m.len() as usize)
-        .unwrap_or(0);
+    let st_size = std::fs::metadata(goro_core::fspath::msg_path(
+        &crate::misc::normalize_path_lexical(&path),
+    ))
+    .map(|m| m.len() as usize)
+    .unwrap_or(0);
     let mut iptc = iptcdata.as_bytes().to_vec();
     let mut iptcdata_len = iptc.len();
     let mut psheader: [u8; 28] = *b"\xFF\xED\0\0Photoshop 3.0\x008BIM\x04\x04\0\0\0\0";

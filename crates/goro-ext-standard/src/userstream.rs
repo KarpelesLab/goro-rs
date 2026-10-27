@@ -366,8 +366,10 @@ fn s(v: &[u8]) -> Value {
     Value::String(PhpString::from_bytes(v))
 }
 
+/// The text of `v` for a message or a path kept in the message encoding
+/// (see `goro_core::fspath`).
 fn lossy(v: &[u8]) -> String {
-    String::from_utf8_lossy(v).to_string()
+    goro_core::string::msg_str(v).into_owned()
 }
 
 fn arg_str(args: &[Value], i: usize) -> Option<Vec<u8>> {
@@ -527,7 +529,7 @@ fn invoke_method_inner(
         if op.decl_line > 0 {
             vm.current_line = op.decl_line;
             if !op.filename.is_empty() {
-                vm.current_file = String::from_utf8_lossy(&op.filename).into_owned().into();
+                vm.current_file = lossy(&op.filename).into();
             }
         }
         let e = throw(vm, b"ArgumentCountError", &msg);
@@ -865,7 +867,7 @@ fn locate(vm: &mut Vm, path: &[u8], options: i64) -> Loc {
         // form is only used when it names an existing file.)
         let plain_path = if n_opt.is_some() && protocol.is_none() {
             let np = normalize_path_lexical(&lossy(path));
-            if std::path::Path::new(&np).exists() {
+            if goro_core::fspath::msg_path(&np).exists() {
                 np.into_bytes()
             } else {
                 path.to_vec()
@@ -2857,9 +2859,9 @@ fn stat_path_any(vm: &mut Vm, path: &[u8], flags: i64) -> Result<Option<StatBuf>
     }
     let local = strip_file_scheme(&lossy(path)).unwrap_or_else(|| lossy(path));
     let md = if flags & PHP_STREAM_URL_STAT_LINK != 0 {
-        std::fs::symlink_metadata(&local)
+        std::fs::symlink_metadata(goro_core::fspath::msg_path(&local))
     } else {
-        std::fs::metadata(&local)
+        std::fs::metadata(goro_core::fspath::msg_path(&local))
     };
     match md {
         Ok(m) => {
@@ -3494,7 +3496,11 @@ fn h_stream_get_meta_data(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, 
         set(&mut a, b"unread_bytes", Value::Long(bb.buffered() as i64));
         set(&mut a, b"seekable", b(bb.flags & FLAG_NO_SEEK == 0));
         if !bb.orig_path.is_empty() {
-            set(&mut a, b"uri", s(bb.orig_path.as_bytes()));
+            set(
+                &mut a,
+                b"uri",
+                Value::String(PhpString::from_msg(&bb.orig_path)),
+            );
         }
         return Ok(Some(arr_val(a)));
     }
@@ -3512,7 +3518,11 @@ fn h_stream_get_meta_data(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, 
     set(&mut a, b"mode", s(bb.mode.as_bytes()));
     set(&mut a, b"unread_bytes", Value::Long(bb.buffered() as i64));
     set(&mut a, b"seekable", b(bb.flags & FLAG_NO_SEEK == 0));
-    set(&mut a, b"uri", s(bb.orig_path.as_bytes()));
+    set(
+        &mut a,
+        b"uri",
+        Value::String(PhpString::from_msg(&bb.orig_path)),
+    );
     Ok(Some(arr_val(a)))
 }
 
@@ -5213,7 +5223,9 @@ fn is_php_memory(p: &[u8]) -> bool {
 }
 
 pub(crate) fn include_hook(vm: &mut Vm, path: &str, kind: u8) -> Option<Result<Vec<u8>, VmError>> {
-    let p = path.as_bytes();
+    // (the path is in the message encoding: the raw bytes)
+    let pb = goro_core::fspath::msg_bytes(path);
+    let p: &[u8] = &pb;
     if is_php_memory(p) {
         return Some(Ok(Vec::new()));
     }
@@ -5379,9 +5391,7 @@ fn include_php_filter(vm: &mut Vm, path: &str, kind: u8) -> Result<Vec<u8>, VmEr
         let saved = vm.warning_capture.replace(Vec::new());
         let r = read(
             vm,
-            &[Value::String(goro_core::string::PhpString::from_string(
-                url,
-            ))],
+            &[Value::String(goro_core::string::PhpString::from_msg(&url))],
         );
         let captured = std::mem::replace(&mut vm.warning_capture, saved).unwrap_or_default();
         // A filter that failed (PSFS_ERR_FATAL): the read fails, and the
@@ -5483,7 +5493,7 @@ fn include_data_url(vm: &mut Vm, path: &str, kind: u8) -> Result<Vec<u8>, VmErro
 fn include_path_value(vm: &Vm) -> String {
     vm.constants
         .get(b"include_path".as_slice())
-        .map(|v| v.to_php_string().to_string_lossy())
+        .map(|v| v.to_php_string().to_msg_string())
         .unwrap_or_else(|| ".".into())
 }
 
@@ -5560,7 +5570,7 @@ fn resolve_path_user(vm: &mut Vm, filename: &[u8]) -> Option<Result<Vec<u8>, VmE
             }
             continue;
         }
-        if std::path::Path::new(&lossy(&trypath)).exists() {
+        if goro_core::fspath::bytes_path(&trypath).exists() {
             return None;
         }
     }
@@ -5569,7 +5579,9 @@ fn resolve_path_user(vm: &mut Vm, filename: &[u8]) -> Option<Result<Vec<u8>, VmE
 
 /// VM include resolver hook.
 pub(crate) fn include_resolve(vm: &mut Vm, path: &str) -> Option<Result<String, VmError>> {
-    let p = path.as_bytes();
+    // (the path is in the message encoding: the raw bytes)
+    let pb = goro_core::fspath::msg_bytes(path);
+    let p: &[u8] = &pb;
     if is_data_url(p) || is_php_filter(p) || is_php_memory(p) {
         return Some(Ok(path.to_string()));
     }
