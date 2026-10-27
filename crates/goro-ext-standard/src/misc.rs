@@ -982,8 +982,10 @@ fn trigger_error_as(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, V
     let file = vm.current_file.clone();
     vm.error_cb(error_type, &message, &file, line);
     if error_type == E_USER_ERROR {
-        // php_error_cb() bails out after a fatal error.
+        // php_error_cb() bails out after a fatal error, with every object
+        // marked destructed.
         vm.fatal_emitted = true;
+        vm.mark_objects_destructed();
         return Err(VmError { message, line });
     }
     Ok(Value::True)

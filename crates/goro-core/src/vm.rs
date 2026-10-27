@@ -6725,6 +6725,7 @@ impl Vm {
         self.fatal_emitted = fatal_before;
         self.current_exception = None;
         self.fatal_error_cb_ex(crate::errdisplay::E_ERROR, msg, file, line, false);
+        self.mark_objects_destructed();
     }
 
     /// Emit a PHP notice
@@ -22876,6 +22877,12 @@ impl Vm {
         self.fatal_bailout = true;
         // (an exception in flight is abandoned with everything else)
         self.current_exception = None;
+        self.mark_objects_destructed();
+    }
+
+    /// zend_objects_store_mark_destructed(): no destructor runs any more.
+    #[inline(never)]
+    pub fn mark_objects_destructed(&mut self) {
         for v in std::mem::take(&mut *self.destructible_objects) {
             if let Value::Object(o) = &v {
                 o.borrow().dtor_listed.set(false);
@@ -49630,6 +49637,8 @@ impl Vm {
                                                     e.line,
                                                 );
                                             }
+                                            // (a bailout: no destructor runs)
+                                            self.mark_objects_destructed();
                                             self.fatal_emitted = true;
                                             return Err(VmError {
                                                 message: e.message,

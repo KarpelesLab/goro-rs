@@ -378,6 +378,12 @@ impl Vm {
     /// php_error_cb() for a fatal error (the caller bails out afterwards).
     pub fn fatal_error_cb(&mut self, ty: i64, msg: &str, file: &str, line: u32) {
         self.fatal_error_cb_ex(ty, msg, file, line, true);
+        // php_error_cb(): a fatal error (not an uncaught exception's
+        // E_DONT_BAIL report) bails out with every object marked destructed,
+        // the locals of the frames it abandons included.
+        if ty & E_FATAL_ERRORS != 0 && !msg.starts_with("Uncaught ") {
+            self.mark_objects_destructed();
+        }
     }
 
     /// fatal_error_cb(); `backtrace` false is zend_error_cb() called
