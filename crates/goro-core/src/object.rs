@@ -390,6 +390,20 @@ impl PropTable {
         self.internal
     }
 
+    /// No key is an internal state marker but those of a Reflection
+    /// object's own state (`__reflection_*`, a ReflectionType's), which say
+    /// nothing of how its other properties are accessed.
+    pub fn internal_markers_reflection_only(&self) -> bool {
+        self.items.iter().all(|(k, _)| {
+            !k.starts_with(b"__")
+                || k.starts_with(b"__reflection_")
+                || matches!(
+                    k.as_slice(),
+                    b"__allows_null" | b"__types" | b"__type_name" | b"__is_builtin"
+                )
+        })
+    }
+
     /// Some key may be a NUL-mangled private property's.
     #[inline]
     pub fn has_mangled(&self) -> bool {

@@ -2358,6 +2358,15 @@ pub(crate) fn fast_op_outlined(
     fast_op(op, cvs, tmps, literals, refs_ok, no_release)
 }
 
+/// Whether the internal state markers of an object's properties `props`
+/// leave property `name` a plain one: only a Reflection object's own (see
+/// PropTable::internal_markers_reflection_only), `name` not one.
+#[cold]
+#[inline(never)]
+fn markers_leave_prop(props: &crate::object::PropTable, name: &[u8]) -> bool {
+    !name.starts_with(b"__") && props.internal_markers_reflection_only()
+}
+
 /// Whether the release of a temporary's object `o` held elsewhere too
 /// (count above 1) makes no destructor due: `listed` (objects with a
 /// destructor exist) and `o` one of them, held by its list and the
@@ -3166,12 +3175,26 @@ impl crate::vm::Vm {
         // a reference, as one is when the run starts, or once an opcode
         // that may bind one ran: see refs_may_bind!)
         let mut check_refs = !refs_ok && cvs.iter().any(|v| matches!(v, Value::Reference(_)));
-        // (an opcode that may bind a variable to a reference: sends, calls,
-        // `&`, `global`, `static`, closures' captures, list(), foreach)
+        // (an opcode that may bind a variable to a reference: `&`,
+        // `global`, `static`, closures' captures, list(), foreach)
         macro_rules! refs_may_bind {
             () => {
                 if !refs_ok {
                     check_refs = true;
+                }
+            };
+        }
+        // (a send: its variable once sent, bound to a reference when the
+        // parameter is one; calls bind none of the caller's variables but
+        // through their sends)
+        macro_rules! send_may_bind {
+            ($op:expr) => {
+                if !refs_ok {
+                    if let OperandType::Cv(i) = $op.op1 {
+                        if matches!(cvs.get(i as usize), Some(Value::Reference(_))) {
+                            check_refs = true;
+                        }
+                    }
                 }
             };
         }
@@ -3199,7 +3222,6 @@ impl crate::vm::Vm {
                 // A call by a constant plain function name (see the
                 // INIT_FCALL arm of the dispatch loop).
                 OpCode::InitFCall => {
-                    refs_may_bind!();
                     // (a call made here steps over release points too: the
                     // budget is looked at again)
                     quiet_left = -1;
@@ -3231,13 +3253,13 @@ impl crate::vm::Vm {
                 // A by-value argument of a call resolved when it was set up
                 // (see the SEND_VAL handler).
                 OpCode::SendVal => {
-                    refs_may_bind!();
                     let snapshot = send_snapshot(op_array, ip, op, cvs);
                     if self.send_val_fast(op, cvs, tmps, literals, snapshot, false)
                         || (matches!(op.op1, OperandType::Tmp(_))
                             && self.send_val_ucf(op, cvs, tmps, literals, snapshot))
                         || (bound.is_none() && self.send_ref_cv_fast(op_array, op, cvs))
                     {
+                        send_may_bind!(op);
                         Fast::Done
                     } else {
                         break 'run ip;
@@ -3246,8 +3268,8 @@ impl crate::vm::Vm {
                 // A by-reference argument known as such at compile time
                 // (see send_ref_fast).
                 OpCode::SendRef => {
-                    refs_may_bind!();
                     if send_ref_fast(op_array, op, cvs, tmps, &mut self.pending_calls) {
+                        send_may_bind!(op);
                         Fast::Done
                     } else {
                         break 'run ip;
@@ -3256,7 +3278,6 @@ impl crate::vm::Vm {
                 // A non-variable argument of a user function's by-value
                 // parameter (SEND_VAL_EX / SEND_VAR_NO_REF_EX): sent as is.
                 OpCode::SendValChecked => {
-                    refs_may_bind!();
                     // (or of an internal function's by-value parameter; an
                     // array not as the first argument of the builtins taking
                     // an `array &$array` there: the general handler separates
@@ -3326,6 +3347,7 @@ impl crate::vm::Vm {
                             ucf,
                         )
                     {
+                        send_may_bind!(op);
                         Fast::Done
                     } else {
                         break 'run ip;
@@ -3743,7 +3765,6 @@ impl crate::vm::Vm {
                 // A public method of a user class by a constant name (what
                 // the INIT_METHOD_CALL arm does first)
                 OpCode::InitMethodCall => {
-                    refs_may_bind!();
                     quiet_left = -1;
                     if matches!(op.op2, OperandType::Const(_))
                         && self.init_method_call_fast(op_array, ip, cvs, tmps)
@@ -3811,7 +3832,6 @@ impl crate::vm::Vm {
                 // A call of a plain user function: its callee's opcodes run
                 // here too, without a frame (see leancall.rs).
                 OpCode::DoFCall => {
-                    refs_may_bind!();
                     // (a lean call that failed in its callee, see
                     // builtincall.rs: the dispatch loop's DO_FCALL takes it)
                     if self.fast_call_failed.is_some() {
@@ -5795,10 +5815,11 @@ impl crate::vm::Vm {
         let Ok(ob) = obj.try_borrow() else {
             return Fast::No;
         };
-        // (no internal state marker: see PropTable)
+        // (no internal state marker: see PropTable; but a Reflection
+        // object's own, for another property)
         if (ob.native.is_some() && !self.native_props_plain(&ob.class_name))
             || ob.closure.is_some()
-            || ob.properties.has_internal()
+            || ob.properties.has_internal() && !markers_leave_prop(&ob.properties, name)
         {
             return Fast::No;
         }
@@ -6079,16 +6100,6 @@ impl crate::vm::Vm {
             _ => return None,
         };
         let ob = obj.try_borrow().ok()?;
-        // (no internal state marker: see PropTable)
-        if ob.class_tag() != tag
-            || (ob.native.is_some() && !ic.native_ok.get())
-            || ob.closure.is_some()
-            || ob.properties.has_internal()
-            || (ic.plain.get() == PLAIN_UNMANGLED && ob.properties.has_mangled())
-            || !(ic.any_scope.get() || self.prop_ic_scope_ok(ic))
-        {
-            return None;
-        }
         let opc = op.opcode;
         let write = opc == OpCode::PropertySet;
         let is_isset = matches!(opc, OpCode::PropertyIsset | OpCode::PropertyIssetFetch);
@@ -6098,6 +6109,17 @@ impl crate::vm::Vm {
         let Some(Value::String(name)) = op_array.literals.get(ni as usize) else {
             return None;
         };
+        // (no internal state marker: see PropTable; but a Reflection
+        // object's own, for another property)
+        if ob.class_tag() != tag
+            || (ob.native.is_some() && !ic.native_ok.get())
+            || ob.closure.is_some()
+            || ob.properties.has_internal() && !markers_leave_prop(&ob.properties, name.as_bytes())
+            || (ic.plain.get() == PLAIN_UNMANGLED && ob.properties.has_mangled())
+            || !(ic.any_scope.get() || self.prop_ic_scope_ok(ic))
+        {
+            return None;
+        }
         let slot = ic.slot.get() as usize;
         let (k, cur) = ob.properties.get(slot)?;
         if !short_bytes_eq(k, name.as_bytes()) {
@@ -6579,7 +6601,10 @@ impl crate::vm::Vm {
             None
         };
         let ob = obj.try_borrow().ok()?;
-        if ob.native.is_some() || ob.closure.is_some() || ob.properties.has_internal() {
+        if ob.native.is_some()
+            || ob.closure.is_some()
+            || ob.properties.has_internal() && !markers_leave_prop(&ob.properties, name)
+        {
             return None;
         }
         // (class_scope_ref())
@@ -6765,9 +6790,21 @@ fn plain_internal_base(lower: &[u8], prop: &[u8], write: bool) -> bool {
         }
         match c.parent {
             None => {
+                // (and the Reflection classes, whose objects keep their own
+                // state in internal markers, see markers_leave_prop)
                 return matches!(
                     c.name,
-                    "Exception" | "Error" | "PDO" | "PDOStatement" | "PhpToken"
+                    "Exception"
+                        | "Error"
+                        | "PDO"
+                        | "PDOStatement"
+                        | "PhpToken"
+                        | "ReflectionClass"
+                        | "ReflectionFunctionAbstract"
+                        | "ReflectionProperty"
+                        | "ReflectionParameter"
+                        | "ReflectionClassConstant"
+                        | "ReflectionType"
                 );
             }
             Some(p) => cur = crate::stubs::find_class(p.as_bytes()),
