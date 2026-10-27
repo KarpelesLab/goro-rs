@@ -161,6 +161,7 @@ impl Vm {
                     .filter(|t| t.fits(ce))
                     .cloned()
             }
+            None if name_lower == b"stdclass" => return self.new_std_object(op, tmps),
             _ => return NewFast::No,
         };
         if let Some(t) = template {
@@ -246,6 +247,21 @@ impl Vm {
             }
         }
         NewFast::Obj(obj_value, false)
+    }
+
+    /// `new stdClass`: an object without properties, of a class without a
+    /// constructor.
+    #[inline(never)]
+    fn new_std_object(&mut self, op: &Op, tmps: &[Value]) -> NewFast {
+        if let OperandType::Tmp(idx) = &op.result {
+            if let Some(old_val) = tmps.get(*idx as usize) {
+                self.maybe_recycle_object_id(old_val);
+            }
+        }
+        let obj_id = self.alloc_object_id();
+        let rc = Rc::new(RefCell::new(PhpObject::new(b"stdClass".to_vec(), obj_id)));
+        self.run_object_create_hook(&rc);
+        NewFast::Obj(Value::Object(rc), true)
     }
 
     /// The NewTemplate the NEW at `ip` used last, while its class still has
