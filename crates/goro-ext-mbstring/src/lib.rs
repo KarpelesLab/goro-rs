@@ -81,10 +81,14 @@ pub fn register(vm: &mut Vm) {
         }
     }
     goro_core::reflection::register_ini_access("mbstring.encoding_translation", 6);
-    vm.ini_validators
-        .insert(b"mbstring.regex_retry_limit".to_vec(), on_update_retry_limit);
-    vm.ini_validators
-        .insert(b"mbstring.regex_stack_limit".to_vec(), on_update_stack_limit);
+    vm.ini_validators.insert(
+        b"mbstring.regex_retry_limit".to_vec(),
+        on_update_retry_limit,
+    );
+    vm.ini_validators.insert(
+        b"mbstring.regex_stack_limit".to_vec(),
+        on_update_stack_limit,
+    );
 }
 
 /// OnUpdateLong: zend_ini_parse_quantity_warn() of the value (accepted).

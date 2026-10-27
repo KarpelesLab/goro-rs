@@ -5301,7 +5301,9 @@ impl Vm {
         }
         if let Some(Value::String(p)) = args.get(2).map(|v| v.deref()) {
             let b = p.as_bytes();
-            let ok = b.first().is_none_or(|&c| c == b'_' || c.is_ascii_alphabetic() || c >= 0x80)
+            let ok = b
+                .first()
+                .is_none_or(|&c| c == b'_' || c.is_ascii_alphabetic() || c >= 0x80)
                 && b.iter()
                     .all(|&c| c == b'_' || c.is_ascii_alphanumeric() || c >= 0x80);
             if !ok {
@@ -10806,9 +10808,25 @@ impl Vm {
             return false;
         }
         const SCALAR: [&[u8]; 19] = [
-            b"null", b"false", b"true", b"bool", b"int", b"integer", b"float", b"double",
-            b"string", b"array", b"mixed", b"callable", b"iterable", b"object", b"void",
-            b"never", b"static", b"self", b"parent",
+            b"null",
+            b"false",
+            b"true",
+            b"bool",
+            b"int",
+            b"integer",
+            b"float",
+            b"double",
+            b"string",
+            b"array",
+            b"mixed",
+            b"callable",
+            b"iterable",
+            b"object",
+            b"void",
+            b"never",
+            b"static",
+            b"self",
+            b"parent",
         ];
         !matches!(v, Value::Undef) && !SCALAR.iter().any(|t| name.eq_ignore_ascii_case(t))
     }

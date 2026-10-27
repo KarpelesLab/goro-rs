@@ -359,7 +359,8 @@ impl Vm {
         };
         let mut frame_args = self.take_values(0);
         frame_args.extend_from_slice(&call_args[1..]);
-        self.call_stack.push((frame, file, frame_line, frame_args, true));
+        self.call_stack
+            .push((frame, file, frame_line, frame_args, true));
         self.spl_internal_frames
             .push((self.call_stack.len(), frame2));
         let r = self.spl_invoke_builtin(&obj, class_lower, method_lower, &call_args);

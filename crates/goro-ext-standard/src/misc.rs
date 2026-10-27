@@ -6390,8 +6390,7 @@ fn ini_restore(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if let Some(hook) = vm.ini_set_hooks.get(&key).copied() {
                     hook(vm, &key, &Value::Null);
                 }
-                vm.constants
-                    .insert(key, Value::String(PhpString::empty()));
+                vm.constants.insert(key, Value::String(PhpString::empty()));
                 return Ok(Value::Null);
             }
         }

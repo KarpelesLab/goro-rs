@@ -18,7 +18,13 @@ pub fn register(vm: &mut Vm) {
         let s = || Some(ParamType::Simple(b"string".to_vec()));
         vm.register_builtin_param_types(
             b"mb_encode_mimeheader",
-            vec![s(), None, None, s(), Some(ParamType::Simple(b"int".to_vec()))],
+            vec![
+                s(),
+                None,
+                None,
+                s(),
+                Some(ParamType::Simple(b"int".to_vec())),
+            ],
         );
     }
     vm.register_function(b"mb_decode_mimeheader", mb_decode_mimeheader);
