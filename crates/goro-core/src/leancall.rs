@@ -879,27 +879,22 @@ impl Vm {
         // (objects with a destructor exist: the release points of the end
         // of the frame and of DO_FCALL's release of the arguments)
         if listed {
-            if !self.lean_release_point(op_array, op.line) {
-                drop(vm_frame);
+            if !self.lean_end_listed(op_array, op.line, vm_frame, &f, &mut call, nargs) {
                 return self.lean_end_failed(result, call, op.line);
             }
-        } else if !crate::gc::release_quiet() {
-            // (frees memory only: no destructor is listed, nothing was
-            // released that runs one)
-            self.run_pending_destructors();
-        }
-        drop(vm_frame);
-        // zend_free_extra_args(): extra arguments still shared elsewhere
-        // become possible roots.
-        if let Some(vi) = f.variadic_param {
-            for a in call.args.iter().skip(vi as usize) {
-                crate::gc::on_child_released(a);
+        } else {
+            if !crate::gc::release_quiet() {
+                // (frees memory only: no destructor is listed, nothing was
+                // released that runs one)
+                self.run_pending_destructors();
             }
-        }
-        if listed && nargs > 0 && self.has_release_work() {
-            call.args.clear();
-            if !self.lean_release_point(op_array, op.line) {
-                return self.lean_end_failed(result, call, op.line);
+            drop(vm_frame);
+            // zend_free_extra_args(): extra arguments still shared elsewhere
+            // become possible roots.
+            if let Some(vi) = f.variadic_param {
+                for a in call.args.iter().skip(vi as usize) {
+                    crate::gc::on_child_released(a);
+                }
             }
         }
         // (DO_FCALL: the arguments' buffer is kept, the result stored)
@@ -938,6 +933,43 @@ impl Vm {
             self.leave_lean_frames(s);
         }
         self.current_exception.is_none()
+    }
+
+    /// The end of lean_run() while objects with a destructor exist: the
+    /// release point of the end of the frame, the VM stack frame `vm_frame`
+    /// left, the extra arguments released, then the release point of
+    /// DO_FCALL's release of the arguments (`nargs` of `call`). False: a
+    /// destructor threw (see lean_end_failed).
+    #[cold]
+    #[inline(never)]
+    fn lean_end_listed(
+        &mut self,
+        op_array: &OpArray,
+        line: u32,
+        vm_frame: Option<crate::stack::VmFrameGuard>,
+        f: &OpArray,
+        call: &mut PendingCall,
+        nargs: usize,
+    ) -> bool {
+        if !self.lean_release_point(op_array, line) {
+            drop(vm_frame);
+            return false;
+        }
+        drop(vm_frame);
+        // zend_free_extra_args(): extra arguments still shared elsewhere
+        // become possible roots.
+        if let Some(vi) = f.variadic_param {
+            for a in call.args.iter().skip(vi as usize) {
+                crate::gc::on_child_released(a);
+            }
+        }
+        if nargs > 0 && self.has_release_work() {
+            call.args.clear();
+            if !self.lean_release_point(op_array, line) {
+                return false;
+            }
+        }
+        true
     }
 
     /// A destructor run by the end of a lean call threw (see
