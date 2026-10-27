@@ -982,7 +982,7 @@ fn ini_set_hook(vm: &mut Vm, key: &[u8], value: &Value) -> bool {
         return false;
     }
     let v = value.to_php_string().as_bytes().to_vec();
-    let _g = FnGuard::new(vm, "ini_set");
+    let _g = FnGuard::new(vm, goro_ext_standard::misc::ini_caller());
     let ok = on_update(vm, e.0, &v, Stage::Runtime);
     if ok {
         record_modified(vm, key);

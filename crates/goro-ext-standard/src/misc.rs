@@ -5959,8 +5959,26 @@ fn ini_alter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     ini_set_as(vm, args, "ini_alter")
 }
 
+thread_local! {
+    /// The function setting an INI entry (for its handlers' messages).
+    static INI_CALLER: std::cell::Cell<&'static str> = const { std::cell::Cell::new("ini_set") };
+}
+
+/// The function (ini_set, ini_alter, ini_restore) whose change an INI
+/// entry's handler is running for.
+pub fn ini_caller() -> &'static str {
+    INI_CALLER.with(|c| c.get())
+}
+
 /// ini_set() called as `fname` (ini_set or its alias ini_alter)
-fn ini_set_as(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError> {
+fn ini_set_as(vm: &mut Vm, args: &[Value], fname: &'static str) -> Result<Value, VmError> {
+    let prev = INI_CALLER.with(|c| c.replace(if c.get() == "ini_restore" { "ini_restore" } else { fname }));
+    let r = ini_set_as_inner(vm, args, fname);
+    INI_CALLER.with(|c| c.set(prev));
+    r
+}
+
+fn ini_set_as_inner(vm: &mut Vm, args: &[Value], fname: &'static str) -> Result<Value, VmError> {
     if args.len() != 2 {
         let msg = format!(
             "{}() expects exactly 2 arguments, {} given",
@@ -6406,7 +6424,9 @@ fn ini_restore(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     match vm.ini_originals.remove(&key) {
         Some(Some(orig)) => {
+            let prev = INI_CALLER.with(|c| c.replace("ini_restore"));
             let _ = ini_set(vm, &[Value::String(name), orig]);
+            INI_CALLER.with(|c| c.set(prev));
             vm.ini_originals.remove(&key);
         }
         Some(None) => {
