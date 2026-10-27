@@ -17737,6 +17737,16 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if resolve_rel(&from_str) == resolve_rel(&to_str) {
         return Ok(Value::False);
     }
+    // php_stream_open_wrapper_ex() of an empty source path
+    if from.is_empty() {
+        let msg = "Path must not be empty";
+        let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: msg.into(),
+            line: vm.current_line,
+        });
+    }
     // php_copy_file_ctx() through the stream layer for data:/php:// sources.
     let fb = from.as_bytes();
     if fb.starts_with(b"data:")

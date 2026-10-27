@@ -2462,7 +2462,13 @@ pub fn copy_resampled(
                         xportion = 1.0;
                     }
                     let pcontribution = xportion * yportion;
-                    let p = src.get_true_color_pixel(sx as i32 + src_x, sy as i32 + src_y);
+                    // (copying within one image, libgd reads the pixels
+                    // already written)
+                    let p = if same {
+                        dst.get_true_color_pixel(sx as i32 + src_x, sy as i32 + src_y)
+                    } else {
+                        src.get_true_color_pixel(sx as i32 + src_x, sy as i32 + src_y)
+                    };
                     let alpha_factor = (ALPHA_MAX - true_color_get_alpha(p)) as f64 * pcontribution;
                     red += true_color_get_red(p) as f64 * alpha_factor;
                     green += true_color_get_green(p) as f64 * alpha_factor;

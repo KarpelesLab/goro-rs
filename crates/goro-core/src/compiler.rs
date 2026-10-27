@@ -2753,6 +2753,65 @@ impl Compiler {
                 {
                     is_byref = Self::is_writable_lvalue(&arg.value);
                 }
+                // `array_push($a, f())` where a later argument may change $a:
+                // the array is sent by reference (the builtin works on what
+                // the reference holds when it is called).
+                // (a closure literal runs no code when it is sent: usort()
+                // & co. keep the handle, whose sorted copy they write back)
+                if !is_byref
+                    && i == 0
+                    && Self::is_array_ref_builtin(func_name)
+                    && args.iter().skip(1).any(|a| {
+                        !Self::key_is_pure(&a.value)
+                            && !matches!(
+                                a.value.kind,
+                                ExprKind::Closure(_) | ExprKind::ArrowFunction(_)
+                            )
+                    })
+                {
+                    let ref_op = match &arg.value.kind {
+                        ExprKind::Variable(vname)
+                            if vname.as_slice() != b"this" && !Self::is_superglobal_name(vname) =>
+                        {
+                            Some(OperandType::Cv(self.op_array.get_or_create_cv(vname)))
+                        }
+                        ExprKind::PropertyAccess {
+                            object,
+                            property,
+                            nullsafe: false,
+                        } => Some(OperandType::Tmp(
+                            self.compile_property_ref(object, property, line)?,
+                        )),
+                        ExprKind::ArrayAccess {
+                            array,
+                            index: Some(idx),
+                        } => {
+                            let arr_op = self.compile_dim_write_base(array)?;
+                            let idx_op = self.compile_expr(idx)?;
+                            let t = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayGetRef,
+                                op1: arr_op,
+                                op2: idx_op,
+                                result: OperandType::Tmp(t),
+                                line,
+                            });
+                            Some(OperandType::Tmp(t))
+                        }
+                        _ => None,
+                    };
+                    if let Some(op1) = ref_op {
+                        let pos_idx = self.op_array.add_literal(Value::Long(0));
+                        self.op_array.emit(Op {
+                            opcode: OpCode::SendRef,
+                            op1,
+                            op2: OperandType::Const(pos_idx),
+                            result: OperandType::Unused,
+                            line,
+                        });
+                        continue;
+                    }
+                }
                 // Builtins taking `array &$array`: goro passes arrays by shared
                 // handle, but the by-reference diagnostics still apply.
                 if !is_byref && i == 0 && Self::is_array_ref_builtin(func_name) {
@@ -23383,11 +23442,35 @@ impl Compiler {
         )
     }
 
+    /// compile_assign_coalesce(): memoize the computed base and keys of the
+    /// `??=` target `e` (base first, then the keys outward).
+    #[inline(never)]
+    fn memoize_chain_keys(&mut self, e: &Expr) -> CompileResult<()> {
+        let key = match &e.kind {
+            ExprKind::ArrayAccess { array, index } => {
+                self.memoize_chain_keys(array)?;
+                index.as_deref()
+            }
+            ExprKind::PropertyAccess {
+                object, property, ..
+            } => {
+                self.memoize_chain_keys(object)?;
+                Some(&**property)
+            }
+            _ => Some(e),
+        };
+        if let Some(k) = key.filter(|k| Self::is_memoizable(k)) {
+            self.compile_memoized_expr(k)?;
+        }
+        Ok(())
+    }
+
     /// zend_compile_memoized_expr()
     fn compile_memoized_expr(&mut self, expr: &Expr) -> CompileResult<OperandType> {
         let key = expr as *const Expr as usize;
         let mode = self.memoize_mode;
-        if mode == 2 {
+        // (mode 1: a key memoize_chain_keys() evaluated already)
+        if mode != 0 {
             if let Some(op) = self.memoized_exprs.get(&key) {
                 return Ok(*op);
             }
@@ -23447,7 +23530,16 @@ impl Compiler {
         };
         self.memoize_mode = 1;
         self.memoize_root = &is_expr as *const Expr as usize;
-        let is_val = self.compile_expr(&is_expr);
+        // The computed keys (and a computed base) are evaluated whether or
+        // not the quiet fetch finds the containers: the isset pass may jump
+        // past where it would compile them (`self::$r[self::K] ??= v` with
+        // self::$r uninitialized).
+        let pre = if let ExprKind::NullCoalesce { left, .. } = &is_expr.kind {
+            self.memoize_chain_keys(left)
+        } else {
+            Ok(())
+        };
+        let is_val = pre.and_then(|()| self.compile_expr(&is_expr));
         self.memoize_mode = 0;
         let result = (|| -> CompileResult<OperandType> {
             let is_val = is_val?;

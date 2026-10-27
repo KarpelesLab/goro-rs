@@ -33164,9 +33164,13 @@ impl Vm {
                                 });
                             }
                         }
-                        // (`sort(...$args)`: the array sent by reference is
-                        // handed over by handle, as a positional one is)
-                        if call.named_args.capacity() != 0 {
+                        // (`sort(...$args)`, or `array_push($a, f())` sending
+                        // $a by reference: the array is handed over by handle,
+                        // as a positional one is)
+                        if call.named_args.capacity() != 0
+                            || (matches!(call.args.first(), Some(Value::Reference(_)))
+                                && !Self::callback_array_ref_builtin(func_name_lower))
+                        {
                             if let Some(a0 @ Value::Reference(_)) = call.args.first() {
                                 if let Some(arr) =
                                     Self::array_ref_builtin_arg(func_name_lower, 0, a0)
@@ -36068,8 +36072,19 @@ impl Vm {
                                                         // Clone needed values before borrowing ends
                                                         let class_part_owned: Vec<u8> =
                                                             class_part_lower.to_vec();
-                                                        let method_part_owned: Vec<u8> =
-                                                            method_part_lower.to_vec();
+                                                        // (the magic method gets the name
+                                                        // as the call spelled it)
+                                                        let method_part_owned: Vec<u8> = call
+                                                            .name
+                                                            .as_bytes()
+                                                            .get(sep_pos + 2..)
+                                                            .filter(|m| {
+                                                                m.eq_ignore_ascii_case(
+                                                                    method_part_lower,
+                                                                )
+                                                            })
+                                                            .unwrap_or(method_part_lower)
+                                                            .to_vec();
                                                         let class_display_owned: Vec<u8> =
                                                             class_display.to_vec();
                                                         // Prefer __call when calling from an instance method
@@ -45099,8 +45114,9 @@ impl Vm {
                                 ip = target as usize;
                             }
                         } else {
-                            // Get current value and key
-                            let value = gen_borrow.current_value.clone();
+                            // Get current value and key (by value: the
+                            // value of a by-reference generator's yield)
+                            let value = gen_borrow.current_value.deref();
                             let key = gen_borrow.current_key.clone();
                             drop(gen_borrow);
 
@@ -52797,9 +52813,19 @@ impl Vm {
 
                 OpCode::PropertyGetRef => match outlined(|| -> Result<Flow, VmError> {
                     let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let prop_name = self
-                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
-                        .to_php_string();
+                    let prop_name =
+                        match self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).deref() {
+                            // A dynamic name object is converted with __toString().
+                            o @ Value::Object(_) => self.value_to_string(&o),
+                            v => v.to_php_string(),
+                        };
+                    native_exc_check!(
+                        self,
+                        exception_handlers,
+                        pending_calls_catch_depth,
+                        ip,
+                        op.line
+                    );
                     let obj_val = self.lazy_ref_fetch_target(obj_val, prop_name.as_bytes());
                     native_exc_check!(
                         self,

@@ -11123,6 +11123,14 @@ fn reflection_parameter_method_body(
                 b"__reflection_target".to_vec(),
                 Value::String(func_target.clone()),
             );
+            // (a closure's function: isAnonymous() & co)
+            if crate::closure::is_closure_fn_name(func_target.as_bytes()) {
+                rf_obj.set_property(b"__reflection_is_closure".to_vec(), Value::True);
+                let closure = obj.borrow().get_property(b"__reflection_param_closure");
+                if matches!(closure, Value::Object(_)) {
+                    rf_obj.set_property(b"__reflection_closure_obj".to_vec(), closure);
+                }
+            }
             Some(Value::Object(Rc::new(RefCell::new(rf_obj))))
         }
         b"getdeclaringclass" => {

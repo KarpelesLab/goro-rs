@@ -338,9 +338,13 @@ impl Vm {
         let mut args = std::mem::take(&mut call.args);
         let ns_fallback = desc.ns_fallback(call.name.as_bytes());
         let func_name_lower = desc.lower;
-        // (`sort(...$args)`: the array sent by reference is handed over by
-        // handle, as a positional one is)
-        if unpacked {
+        // (`sort(...$args)`, or `array_push($a, f())` sending $a by
+        // reference: the array is handed over by handle, as a positional
+        // one is)
+        if unpacked
+            || (matches!(args.first(), Some(Value::Reference(_)))
+                && !Self::callback_array_ref_builtin(func_name_lower))
+        {
             if let Some(a0 @ Value::Reference(_)) = args.first() {
                 if let Some(arr) = Self::array_ref_builtin_arg(func_name_lower, 0, a0) {
                     args[0] = arr;

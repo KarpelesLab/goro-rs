@@ -1168,6 +1168,9 @@ impl PhpGenerator {
                 if vm.running_generators.len() > base_rg {
                     vm.running_generators.pop();
                 }
+                // (the child continues from its `yield from`: it has not
+                // produced the value DO_INIT keeps, it runs on)
+                self.do_init = false;
                 let closed = !returned && !matches!(kick, Kick::Throw);
                 let child = path.last().cloned();
                 let mut child_ref;

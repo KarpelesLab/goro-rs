@@ -505,6 +505,17 @@ impl Vm {
         r
     }
 
+    /// The `array &$array` builtins calling back into user code (which may
+    /// replace the variable): they take the reference itself, and write
+    /// their result back to it.
+    #[inline(never)]
+    pub(crate) fn callback_array_ref_builtin(lname: &[u8]) -> bool {
+        matches!(
+            lname,
+            b"usort" | b"uasort" | b"uksort" | b"array_walk" | b"array_walk_recursive"
+        )
+    }
+
     /// A reference to an array given for the `array &$array` parameter of a
     /// builtin that sorts/modifies the array it is handed (goro passes those
     /// arrays by handle, see Compiler::is_array_ref_builtin): the referenced
