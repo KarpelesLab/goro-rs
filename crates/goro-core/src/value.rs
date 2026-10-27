@@ -736,6 +736,30 @@ pub fn touch_default_stream_context() {
     }
 }
 
+/// A wrapper's url_stat called directly, past the stat cache (Some(found)),
+/// or None when `path` is not a user wrapper's.
+pub type UrlStatHook = fn(&mut crate::vm::Vm, &[u8], i64) -> Option<bool>;
+
+thread_local! {
+    static URL_STAT_HOOK: std::cell::Cell<Option<UrlStatHook>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Installed by the streams extension (user stream wrappers).
+pub fn set_url_stat_hook(f: UrlStatHook) {
+    URL_STAT_HOOK.with(|h| h.set(Some(f)));
+}
+
+/// wrapper->wops->url_stat(wrapper, path, flags, ...) of a user wrapper,
+/// as libxml's php_libxml_streams_IO_open_wrapper() makes it (no stat
+/// cache): Some(stat succeeded), None when it is no user wrapper's URL.
+#[inline(never)]
+pub fn user_wrapper_url_stat(vm: &mut crate::vm::Vm, path: &[u8], flags: i64) -> Option<bool> {
+    URL_STAT_HOOK
+        .with(|h| h.get())
+        .and_then(|f| f(vm, path, flags))
+}
+
 /// Mark an integer id as representing a resource of the given type.
 pub fn register_resource(id: i64, resource_type: &[u8]) {
     RESOURCE_REGISTRY.with(|r| {

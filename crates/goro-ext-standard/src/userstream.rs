@@ -2897,6 +2897,23 @@ fn wrapper_bool_op(
     }
 }
 
+/// goro_core::value::user_wrapper_url_stat(): a user wrapper's url_stat
+/// called directly (no stat cache), as libxml's open does.
+#[inline(never)]
+fn direct_user_url_stat(vm: &mut Vm, path: &[u8], flags: i64) -> Option<bool> {
+    let n = scheme_len(path)?;
+    let lower: Vec<u8> = path[..n].iter().map(|b| b.to_ascii_lowercase()).collect();
+    let uw = user_wrapper(&lower)?;
+    let shown = spl_file_caller(vm).unwrap_or("");
+    FN_STACK.with(|st| st.borrow_mut().push(shown));
+    let r = wrapper_url_stat(vm, &uw, path, flags);
+    FN_STACK.with(|st| st.borrow_mut().pop());
+    match r {
+        Ok(r) => Some(r.is_some()),
+        Err(_) => Some(false),
+    }
+}
+
 /// php_stream_stat_path_ex() for any path: user wrappers dispatch to
 /// url_stat, other paths use the plain/builtin implementation.
 fn stat_path_any(vm: &mut Vm, path: &[u8], flags: i64) -> Result<Option<StatBuf>, VmError> {
@@ -3137,12 +3154,13 @@ thread_local! {
 }
 
 /// The SplFileObject method running a stream function on its user-wrapper
-/// stream (the active function of its diagnostics).
+/// stream, or the XMLReader method opening or reading its input
+/// (Vm::with_active_fn), the active function of its diagnostics.
 #[inline(never)]
 fn spl_file_caller(vm: &Vm) -> Option<&'static str> {
     let n = vm
         .current_builtin_name()
-        .filter(|n| n.starts_with("SplFileObject::"))?;
+        .filter(|n| n.starts_with("SplFileObject::") || n.starts_with("XMLReader::"))?;
     Some(LEAKED_NAMES.with(|m| {
         *m.borrow_mut()
             .entry(n.clone())
@@ -5821,6 +5839,7 @@ macro_rules! intercepts {
             )*
             vm.include_stream_hook = Some(include_hook);
             vm.include_resolve_hook = Some(include_resolve);
+            goro_core::value::set_url_stat_hook(direct_user_url_stat);
             vm.resource_shutdown_hooks.push(shutdown_streams);
             vm.startup_hooks.push(check_deprecated_directives);
         }

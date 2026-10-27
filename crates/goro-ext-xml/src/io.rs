@@ -254,17 +254,10 @@ pub fn read_resource(vm: &mut Vm, filename: &str) -> Option<Vec<u8>> {
         // php_libxml_streams_IO_open_wrapper(): a wrapper with url_stat (a
         // user wrapper, phar://, ftp://) is stat()ed quietly first, and a
         // failed stat is a failed open
-        if wrapper_has_url_stat(&lower) {
-            let exists = vm.functions.get(&b"file_exists"[..]).copied().map(|fe| {
-                fe(
-                    vm,
-                    &[Value::String(PhpString::from_string(filename.to_string()))],
-                )
-            });
-            if !matches!(exists, Some(Ok(Value::True))) {
-                vm.error_reporting = silenced;
-                return None;
-            }
+        let quiet = vm.error_reporting;
+        if wrapper_has_url_stat(&lower) && !wrapper_stat_ok(vm, filename, quiet) {
+            vm.error_reporting = silenced;
+            return None;
         }
         let mut fargs = vec![Value::String(PhpString::from_string(filename.to_string()))];
         if let Some(ctx) = crate::libxml::streams_context() {
@@ -298,6 +291,99 @@ pub fn read_resource(vm: &mut Vm, filename: &str) -> Option<Vec<u8>> {
     }
     let full = resolve_path(vm, &path);
     std::fs::read(&full).ok()
+}
+
+/// An input opened for incremental reading (xmlParserInputBufferCreateUrl
+/// through php_libxml_streams_IO_open_read_wrapper()).
+pub enum Opened {
+    /// A plain local file.
+    File(std::fs::File),
+    /// A PHP stream (stream wrappers), read with fread().
+    Stream(Value),
+    /// The data in full (a user entity loader answered).
+    Data(Vec<u8>),
+}
+
+/// Open a resource for reading without reading it (read_resource()'s
+/// lazy counterpart). None when it cannot be opened. The stream layer
+/// reports its errors (the caller names them: Vm::with_active_fn).
+#[inline(never)]
+pub fn open_resource(vm: &mut Vm, filename: &str) -> Option<Opened> {
+    if crate::libxml::entity_loader().is_some() {
+        return read_resource(vm, filename).map(Opened::Data);
+    }
+    REPORTED.with(|r| r.set(false));
+    TRANSPORT_CHARSET.with(|c| *c.borrow_mut() = None);
+    if percent_nul(vm, filename) {
+        return None;
+    }
+    if crate::libxml::entity_loader_disabled() {
+        return None;
+    }
+    let path = strip_file_scheme(filename);
+    let lower = filename.to_ascii_lowercase();
+    if path.contains("://") || path.starts_with("php://") || path.starts_with("data:") {
+        let f = vm.functions.get(&b"fopen"[..]).copied()?;
+        let er = vm.error_reporting;
+        if wrapper_has_url_stat(&lower) && !wrapper_stat_ok(vm, filename, er) {
+            return None;
+        }
+        // php_stream_open_wrapper_ex(REPORT_ERRORS)
+        let mut fargs = vec![
+            Value::String(PhpString::from_string(filename.to_string())),
+            Value::String(PhpString::from_bytes(b"rb")),
+        ];
+        if let Some(ctx) = crate::libxml::streams_context() {
+            fargs.push(Value::False);
+            fargs.push(ctx);
+        }
+        let r = goro_core::value::call_builtin_adopting(vm, f, &fargs);
+        return match r {
+            Ok(h @ Value::Resource(_)) => {
+                // PHP_STREAM_FLAG_NO_FCLOSE
+                if let Value::Resource(id) = &h {
+                    goro_core::value::set_resource_no_fclose(id.id(), true);
+                }
+                Some(Opened::Stream(h))
+            }
+            _ => None,
+        };
+    }
+    let path = match crate::uri::parse_uri(filename) {
+        Some(u)
+            if u.scheme.as_deref().is_none_or(|s| s.starts_with("file")) && path.contains('%') =>
+        {
+            strip_file_scheme(&uri_unescape(filename))
+        }
+        _ => path,
+    };
+    if !goro_core::basedir::check_open_basedir_ex(vm, "", &path, false) {
+        return None;
+    }
+    let full = resolve_path(vm, &path);
+    if full.is_dir() {
+        return None;
+    }
+    std::fs::File::open(&full).ok().map(Opened::File)
+}
+
+/// wrapper->wops->url_stat(PHP_STREAM_URL_STAT_QUIET) succeeds (a user
+/// wrapper's is called directly, past the stat cache).
+/// (User code runs with the error_reporting `er` of the caller.)
+fn wrapper_stat_ok(vm: &mut Vm, filename: &str, er: i64) -> bool {
+    let quiet = std::mem::replace(&mut vm.error_reporting, er);
+    let r = goro_core::value::user_wrapper_url_stat(vm, filename.as_bytes(), 2);
+    vm.error_reporting = quiet;
+    if let Some(ok) = r {
+        return ok;
+    }
+    let exists = vm.functions.get(&b"file_exists"[..]).copied().map(|fe| {
+        fe(
+            vm,
+            &[Value::String(PhpString::from_string(filename.to_string()))],
+        )
+    });
+    matches!(exists, Some(Ok(Value::True)))
 }
 
 /// Whether the wrapper of `url` (lowercase) has a url_stat operation: the

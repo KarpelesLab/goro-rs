@@ -67,6 +67,19 @@ impl Vm {
         });
     }
 
+    /// Run `f` with `name` as the active function of the builtins an
+    /// extension calls from Rust (php_error_docref() names the method
+    /// running them: "XMLReader::open(): ...").
+    #[inline(never)]
+    pub fn with_active_fn<R>(&mut self, name: &str, f: impl FnOnce(&mut Vm) -> R) -> R {
+        let saved = self
+            .spl_active_fn
+            .replace((name.to_string(), self.builtin_frames.len()));
+        let r = f(self);
+        self.spl_active_fn = saved;
+        r
+    }
+
     /// Name of the innermost builtin call in progress (for
     /// php_error_docref()-style "func(): " message prefixes).
     pub fn current_builtin_name(&self) -> Option<String> {

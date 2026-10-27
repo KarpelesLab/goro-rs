@@ -363,13 +363,18 @@ impl Drop for Engine {
 enum Source {
     /// Everything is in the buffer already.
     Memory,
-    /// A file read in full; handed out progressively (with the stream
-    /// resource it stands for while open).
+    /// Data loaded in full (a user entity loader); handed out
+    /// progressively (with the stream resource it stands for while open).
     Data(Vec<u8>, usize, #[allow(dead_code)] Value),
-    /// A PHP stream (fromStream), read with fread().
+    /// A local file read as the parser needs it (with the stream resource
+    /// it stands for while open).
+    File(std::fs::File, Value),
+    /// A PHP stream (fromStream(), or a stream wrapper open()ed), read with
+    /// fread() as the parser needs it.
     Stream(Value),
-    /// The read callback reported end of input or an error (endOfInput).
-    Done,
+    /// The read callback reported end of input or an error (endOfInput);
+    /// the stream stays open until the reader is freed.
+    Done(#[allow(dead_code)] Option<Value>),
 }
 
 // ---------------------------------------------------------------------------
@@ -430,9 +435,10 @@ impl Core {
             xsd: None,
         }));
         let mut src = src;
-        // xmlTextReaderSetup: make sure 4 bytes are available
+        // xmlTextReaderSetup: make sure 4 bytes are available (the read
+        // callback is asked for MINLEN, 4000 bytes: xmlParserInputBufferGrow)
         if buf.len() < 4 {
-            let mut tmp = Core::read_source(vm, &mut src, 4);
+            let mut tmp = Core::read_source(vm, &mut src, 4000);
             if let Ok(d) = &mut tmp {
                 buf.append(d);
             }
@@ -483,12 +489,26 @@ impl Core {
     /// The read callback: Ok(bytes) (empty at the end), Err on I/O error.
     fn read_source(vm: &mut Vm, src: &mut Source, len: usize) -> Result<Vec<u8>, ()> {
         let r = match src {
-            Source::Memory | Source::Done => return Ok(Vec::new()),
+            Source::Memory | Source::Done(_) => return Ok(Vec::new()),
             Source::Data(d, pos, _) => {
                 let n = len.min(d.len() - *pos);
                 let v = d[*pos..*pos + n].to_vec();
                 *pos += n;
                 Ok(v)
+            }
+            Source::File(f, _) => {
+                use std::io::Read;
+                let mut v = vec![0u8; len];
+                loop {
+                    match f.read(&mut v) {
+                        Ok(n) => {
+                            v.truncate(n);
+                            break Ok(v);
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(_) => break Err(()),
+                    }
+                }
             }
             Source::Stream(h) => {
                 let h = h.clone();
@@ -496,7 +516,11 @@ impl Core {
             }
         };
         if !matches!(r, Ok(ref v) if !v.is_empty()) {
-            *src = Source::Done;
+            let keep = match std::mem::replace(src, Source::Done(None)) {
+                Source::Data(_, _, h) | Source::File(_, h) | Source::Stream(h) => Some(h),
+                _ => None,
+            };
+            *src = Source::Done(keep);
         }
         r
     }
@@ -1984,12 +2008,11 @@ fn stream_read(vm: &mut Vm, h: &Value, len: usize) -> Result<Vec<u8>, ()> {
         Some(f) => f,
         None => return Err(()),
     };
+    // (an exception thrown by a user wrapper's stream_read() stays pending:
+    // the read fails and libxml's messages are not displayed)
     match f(vm, &[h.clone(), Value::Long(len as i64)]) {
         Ok(Value::String(s)) => Ok(s.as_bytes().to_vec()),
-        _ => {
-            vm.current_exception = None;
-            Err(())
-        }
+        _ => Err(()),
     }
 }
 
@@ -2310,7 +2333,9 @@ fn call_method(
         }
     };
     let a = Args::new(fname.clone(), args);
-    let r = match m {
+    // (the method is the active function of the stream layer's diagnostics
+    // while it opens or reads its input)
+    let r = vm.with_active_fn(&fname, |vm| match m {
         "open" | "fromUri" => m_open(vm, &a, o.as_ref(), called, m == "fromUri"),
         "XML" | "fromString" => m_xml(vm, &a, o.as_ref(), called, m == "fromString"),
         "fromStream" => m_from_stream(vm, &a, called),
@@ -2325,7 +2350,7 @@ fn call_method(
             };
             instance_method(vm, &a, m, &o, &d)
         }
-    };
+    });
     r.unwrap_or(Value::Null)
 }
 
@@ -2547,19 +2572,26 @@ fn m_open(
     }
     let source = String::from_utf8_lossy(&source).into_owned();
     let (valid, is_local) = resolve_file(&source);
-    let data = match &valid {
+    // xmlReaderForFile(): the input is pulled as read() advances.
+    let opened = match &valid {
         Some(p) if is_local => {
             if std::path::Path::new(p).is_dir() {
                 None
             } else {
-                std::fs::read(p).ok()
+                std::fs::File::open(p).ok().map(crate::io::Opened::File)
             }
         }
-        Some(p) => crate::io::read_resource(vm, p),
+        Some(p) => crate::io::open_resource(vm, p),
         None => None,
     };
-    let data = match data {
-        Some(d) => d,
+    let src = match opened {
+        Some(crate::io::Opened::File(f)) => {
+            Source::File(f, goro_core::spl_dir::owned_stream_resource())
+        }
+        Some(crate::io::Opened::Stream(h)) => Source::Stream(h),
+        Some(crate::io::Opened::Data(d)) => {
+            Source::Data(d, 0, goro_core::spl_dir::owned_stream_resource())
+        }
         None => {
             if use_exceptions {
                 throw(vm, b"Error", "Unable to open source data");
@@ -2571,7 +2603,7 @@ fn m_open(
     };
     let enc = encoding.map(|e| String::from_utf8_lossy(&e).into_owned());
     let core = Box::new(Core::new(
-        Source::Data(data, 0, goro_core::spl_dir::owned_stream_resource()),
+        src,
         Vec::new(),
         valid,
         enc.as_deref(),
