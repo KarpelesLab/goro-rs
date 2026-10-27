@@ -1039,6 +1039,8 @@ fn table() -> &'static [CipherSpec] {
 
 /// Look up a cipher by name (case-insensitive, names or aliases).
 pub fn by_name(name: &str) -> Option<&'static CipherSpec> {
+    // OpenSSL sees the C string: a NUL byte ends the name
+    let name = name.split('\0').next().unwrap_or_default();
     let n = name.to_ascii_lowercase();
     table()
         .iter()

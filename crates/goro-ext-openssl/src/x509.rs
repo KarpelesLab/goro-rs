@@ -37,12 +37,35 @@ fn next_id() -> u64 {
     })
 }
 
+/// zend_objects_not_comparable: distinct objects are never equal.
+fn not_comparable(a: &Value, b: &Value) -> Option<i64> {
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) if Rc::ptr_eq(x, y) => Some(0),
+        (Value::Object(_), Value::Object(_)) => Some(1),
+        _ => None,
+    }
+}
+
+static OBJ_HANDLERS: goro_core::vm::NativeObjectHandlers = goro_core::vm::NativeObjectHandlers {
+    compare: Some(not_comparable),
+    ..goro_core::vm::NativeObjectHandlers::EMPTY
+};
+
+/// The OpenSSL classes' object handlers (compare = not comparable).
+pub(crate) fn set_handlers(obj: &mut PhpObject) {
+    obj.native = Some(goro_core::object::NativeData {
+        data: Rc::new(()),
+        handlers: &OBJ_HANDLERS,
+    });
+}
+
 pub fn make_cert_object(vm: &mut Vm, c: Rc<Cert>) -> Value {
     let id = next_id();
     CERTS.with(|r| r.borrow_mut().insert(id, c));
     let oid = vm.next_object_id();
     let mut obj = PhpObject::new(b"OpenSSLCertificate".to_vec(), oid);
     obj.set_property(b"__cert_id".to_vec(), Value::Long(id as i64));
+    set_handlers(&mut obj);
     Value::Object(Rc::new(RefCell::new(obj)))
 }
 
@@ -52,6 +75,7 @@ pub fn make_csr_object(vm: &mut Vm, c: Csr) -> Value {
     let oid = vm.next_object_id();
     let mut obj = PhpObject::new(b"OpenSSLCertificateSigningRequest".to_vec(), oid);
     obj.set_property(b"__csr_id".to_vec(), Value::Long(id as i64));
+    set_handlers(&mut obj);
     Value::Object(Rc::new(RefCell::new(obj)))
 }
 

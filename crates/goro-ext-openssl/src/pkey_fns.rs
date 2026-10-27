@@ -36,6 +36,7 @@ pub fn make_object(vm: &mut Vm, key: PKey, is_private: bool) -> Value {
     let oid = vm.next_object_id();
     let mut obj = PhpObject::new(b"OpenSSLAsymmetricKey".to_vec(), oid);
     obj.set_property(b"__pkey_id".to_vec(), Value::Long(id as i64));
+    crate::x509::set_handlers(&mut obj);
     Value::Object(Rc::new(RefCell::new(obj)))
 }
 

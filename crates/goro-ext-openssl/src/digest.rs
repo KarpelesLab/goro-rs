@@ -126,6 +126,8 @@ pub const MD_METHODS_ALIASES: &[&str] = &[
 impl Md {
     /// Resolve a digest name (case-insensitive).
     pub fn by_name(name: &str) -> Option<Md> {
+        // OpenSSL sees the C string: a NUL byte ends the name
+        let name = name.split('\0').next().unwrap_or_default();
         let n = name.to_ascii_lowercase();
         Some(match n.as_str() {
             "md4" | "rsa-md4" | "md4withrsaencryption" | "1.2.840.113549.2.4" => Md::Md4,

@@ -368,7 +368,19 @@ pub(crate) enum ZCtx {
     },
 }
 
-static CTX_HANDLERS: NativeObjectHandlers = NativeObjectHandlers::EMPTY;
+/// zend_objects_not_comparable: distinct contexts are never equal.
+fn not_comparable(a: &Value, b: &Value) -> Option<i64> {
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) if Rc::ptr_eq(x, y) => Some(0),
+        (Value::Object(_), Value::Object(_)) => Some(1),
+        _ => None,
+    }
+}
+
+static CTX_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    compare: Some(not_comparable),
+    ..NativeObjectHandlers::EMPTY
+};
 
 fn ctx_of(v: &Value, class: &[u8]) -> Option<Rc<RefCell<ZCtx>>> {
     if let Value::Object(o) = v.deref() {
