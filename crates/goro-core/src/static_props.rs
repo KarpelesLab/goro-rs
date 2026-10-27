@@ -1998,16 +1998,15 @@ impl Vm {
 
 impl Vm {
     /// The CONST_LOOKUP at `ip` of `op_array` found global constant `name`
-    /// (`val`, not deprecated): by an unqualified name in the global
-    /// namespace, its site remembers the value (FETCH_CONSTANT's runtime
-    /// cache: a constant is never redefined).
+    /// (`val`, not deprecated): its site remembers the value (FETCH_CONSTANT's
+    /// runtime cache: a constant is never redefined; like php-src's, the
+    /// cache of an unqualified namespaced name that fell back to the global
+    /// constant does not see a namespaced constant defined later).
     #[inline(never)]
     pub(crate) fn note_const_site(&self, op_array: &OpArray, ip: usize, name: &[u8], val: &Value) {
         let op = &op_array.ops[ip];
-        if !matches!(op.op2, crate::opcode::OperandType::Unused)
-            || !matches!(op.op1, crate::opcode::OperandType::Const(_))
+        if !matches!(op.op1, crate::opcode::OperandType::Const(_))
             || !matches!(op.result, crate::opcode::OperandType::Tmp(_))
-            || name.contains(&b'\\')
             || self.internal_deprecated_constants.contains_key(name)
             || !matches!(
                 val,
