@@ -4292,9 +4292,7 @@ impl crate::vm::Vm {
                 return 0;
             }
         } else if let Some(name) = crate::vm::static_fcall_name(op, literals) {
-            let frame_this = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
-                && matches!(cvs.first().map(|v| v.deref()), Some(Value::Object(_)));
-            if !self.push_static_call(op_array, ip, name, frame_this) {
+            if !self.push_static_call(op_array, ip, name) {
                 return 0;
             }
         } else if let Some(name) = crate::vm::forward_fcall_name(op, literals) {

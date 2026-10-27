@@ -120,6 +120,88 @@ impl Vm {
         self.user_method_missing(&cl, method, false)
     }
 
+    /// INIT_STATIC_METHOD_CALL of `C::m()` (C a user class named as is)
+    /// finding the method: zend_std_get_static_method()'s visibility error
+    /// (unless __callStatic() / __call() may take over), an abstract method,
+    /// or a non-static one called from a frame without $this. None: the call
+    /// may go ahead (DO_FCALL then decides).
+    #[inline(never)]
+    pub(crate) fn init_static_call_error(&self, has_this: bool) -> Option<String> {
+        if self.current_exception.is_some() {
+            return None;
+        }
+        let call = self.pending_calls.last()?;
+        if call.target.closure || call.target.forward.is_some() || !call.named_args.is_empty() {
+            return None;
+        }
+        if !call.args.is_empty() {
+            return None;
+        }
+        let name = call.name.as_bytes();
+        if name.contains(&0) {
+            return None;
+        }
+        let bare = name.strip_prefix(b"\\").unwrap_or(name);
+        let sep = crate::string::find_double_colon(bare)?;
+        let (cls, method) = (&bare[..sep], &bare[sep + 2..]);
+        if cls.is_empty() || method.is_empty() || method.contains(&b':') {
+            return None;
+        }
+        let cl = cls.to_ascii_lowercase();
+        if matches!(cl.as_slice(), b"self" | b"static" | b"parent") {
+            return None;
+        }
+        let c = self
+            .classes
+            .get(cl.as_slice())
+            .filter(|c| c.filename.is_some())?;
+        let ml = method.to_ascii_lowercase();
+        let meth = c.get_method(&ml)?;
+        if meth.op_array.ops.is_empty() && !meth.is_abstract {
+            return None;
+        }
+        let decl = meth.declaring_class.to_ascii_lowercase();
+        if !self
+            .classes
+            .get(decl.as_slice())
+            .is_some_and(|d| d.filename.is_some())
+        {
+            return None;
+        }
+        if meth.visibility != crate::object::Visibility::Public {
+            if c.get_method(b"__callstatic").is_some() || c.get_method(b"__call").is_some() {
+                return None;
+            }
+            let scope = self.current_class_scope();
+            if let Some(e) = self.check_visibility(
+                meth.visibility,
+                &meth.declaring_class,
+                &c.name,
+                &String::from_utf8_lossy(&meth.name),
+                false,
+                scope.as_deref(),
+            ) {
+                return Some(e);
+            }
+        }
+        if meth.is_abstract {
+            let decl = self.class_name_for_display(&decl);
+            return Some(format!(
+                "Cannot call abstract method {}::{}()",
+                crate::string::msg_str(decl.as_deref().unwrap_or(&meth.declaring_class)),
+                crate::string::msg_str(&meth.name)
+            ));
+        }
+        if !meth.is_static && !has_this {
+            return Some(format!(
+                "Non-static method {}::{}() cannot be called statically",
+                crate::string::msg_str(&c.name),
+                crate::string::msg_str(&meth.name)
+            ));
+        }
+        None
+    }
+
     /// "Call to undefined method C::m()" when class `class_lower` and all
     /// of its ancestors are user classes (no internal method, handler or
     /// forwarding is involved) declaring neither `method` nor `__call()` /

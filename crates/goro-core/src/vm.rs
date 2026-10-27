@@ -354,8 +354,13 @@ macro_rules! native_exc_check {
 /// not to exist (see Vm::init_call_undefined): the call is dropped and the
 /// Error thrown, before any argument is evaluated.
 macro_rules! init_undefined_check {
-    ($self:ident, $handlers:ident, $pending:ident, $ip:ident, $line:expr) => {
-        if let Some(msg) = $self.init_call_undefined() {
+    ($self:ident, $handlers:ident, $pending:ident, $ip:ident, $line:expr, $op_array:ident, $cvs:ident) => {
+        if let Some(msg) = $self.init_call_undefined().or_else(|| {
+            // (the frame's $this: a non-static method may be called with it)
+            let has_this = $op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
+                && matches!($cvs.first().map(|v| v.deref()), Some(Value::Object(_)));
+            $self.init_static_call_error(has_this)
+        }) {
             if let Some(mut call) = $self.pending_calls.pop() {
                 $self.recycle_args(&mut call);
             }
@@ -24536,21 +24541,22 @@ impl Vm {
 
     /// INIT_FCALL at `ip` of `op_array` of a static call `Class::method`
     /// (see static_fcall_name) of a public method of a user class:
-    /// the general handler's pending call, with its target resolved.
-    /// `frame_this`: the running frame has a `$this` (a non-static method
-    /// may then get it: the general handler runs). Returns false, doing
-    /// nothing, otherwise.
+    /// the general handler's pending call, with its target resolved, for a
+    /// static method (a non-static one may get the frame's `$this`, or is
+    /// an error: the general handler runs). Returns false, doing nothing,
+    /// otherwise.
     #[inline(never)]
     pub(crate) fn push_static_call(
         &mut self,
         op_array: &OpArray,
         ip: usize,
         name: &PhpString,
-        frame_this: bool,
     ) -> bool {
         self.push_resolved_call(op_array, ip, name.clone(), false);
         match self.pending_calls.last().and_then(|c| c.target.method) {
-            Some((_, is_static)) if is_static || !frame_this => true,
+            // (a non-static method without a $this is INIT_STATIC_METHOD_CALL's
+            // error: the general handler's)
+            Some((_, true)) => true,
             _ => {
                 if let Some(mut call) = self.pending_calls.pop() {
                     self.recycle_args(&mut call);
@@ -31163,7 +31169,9 @@ impl Vm {
                                 exception_handlers,
                                 pending_calls_catch_depth,
                                 ip,
-                                op.line
+                                op.line,
+                                op_array,
+                                cvs
                             );
                         }
                         Ok(Flow::Next)
@@ -31193,7 +31201,9 @@ impl Vm {
                                     exception_handlers,
                                     pending_calls_catch_depth,
                                     ip,
-                                    op.line
+                                    op.line,
+                                    op_array,
+                                    cvs
                                 );
                             }
                         }
@@ -31878,7 +31888,9 @@ impl Vm {
                                 exception_handlers,
                                 pending_calls_catch_depth,
                                 ip,
-                                op.line
+                                op.line,
+                                op_array,
+                                cvs
                             );
                         }
                     }
@@ -32050,7 +32062,9 @@ impl Vm {
                         exception_handlers,
                         pending_calls_catch_depth,
                         ip,
-                        op.line
+                        op.line,
+                        op_array,
+                        cvs
                     );
                     Ok(Flow::Next)
                 })? {
