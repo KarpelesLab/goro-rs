@@ -9184,7 +9184,9 @@ impl Vm {
             // include_filename is still the file of the frame that
             // function's frame called, if any.
             return match idx.checked_sub(2).and_then(|i| frames.get(i)) {
-                Some(inner) if !inner.1.is_empty() && inner.1 != "[internal function]" && inner.2 != 0 => {
+                Some(inner)
+                    if !inner.1.is_empty() && inner.1 != "[internal function]" && inner.2 != 0 =>
+                {
                     std::borrow::Cow::Owned(vec![Value::String(PhpString::from_bytes(
                         inner.1.as_bytes(),
                     ))])

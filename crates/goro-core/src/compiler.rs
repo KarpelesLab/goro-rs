@@ -3565,7 +3565,10 @@ impl Compiler {
         let warnings_base = COMPILE_WARNINGS.with(|w| w.borrow().len());
         let pending_diag_base = PENDING_COMPILE_DIAGNOSTICS.with(|w| w.borrow().len());
         let saved_top = TOP_STMTS.with(|t| {
-            t.replace((program.statements.as_ptr() as usize, program.statements.len()))
+            t.replace((
+                program.statements.as_ptr() as usize,
+                program.statements.len(),
+            ))
         });
         let saved_pos = TOP_STMT_POS.with(|p| p.replace(0));
         let r = self.compile_file_inner(program, warnings_base, pending_diag_base);

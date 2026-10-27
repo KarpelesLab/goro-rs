@@ -4998,11 +4998,11 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                             canonical_name
                         );
                         // (object_init_ex() made the object first: freed after)
-                    let made = vm.alloc_object_id();
-                    let exc =
+                        let made = vm.alloc_object_id();
+                        let exc =
                             vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
                         crate::object::FREED_OBJECT_IDS.with(|f| f.borrow_mut().push(made));
-                    vm.current_exception = Some(exc);
+                        vm.current_exception = Some(exc);
                         return Some(Value::Null);
                     }
                 }
@@ -5133,11 +5133,11 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                             canonical_name
                         );
                         // (object_init_ex() made the object first: freed after)
-                    let made = vm.alloc_object_id();
-                    let exc =
+                        let made = vm.alloc_object_id();
+                        let exc =
                             vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
                         crate::object::FREED_OBJECT_IDS.with(|f| f.borrow_mut().push(made));
-                    vm.current_exception = Some(exc);
+                        vm.current_exception = Some(exc);
                         return Some(Value::Null);
                     }
                 }

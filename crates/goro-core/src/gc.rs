@@ -1827,8 +1827,7 @@ fn free_garbage(
                     // An empty array is almost always Zend's immutable
                     // zend_empty_array, which is not refcounted and so never
                     // counted.
-                    if *uncounted == COUNT_ALWAYS || (*uncounted == COUNT_NORMAL && !b.is_empty())
-                    {
+                    if *uncounted == COUNT_ALWAYS || (*uncounted == COUNT_NORMAL && !b.is_empty()) {
                         count += 1;
                     }
                     doomed.push(Doomed::Arr(Rc::downgrade(a)));
