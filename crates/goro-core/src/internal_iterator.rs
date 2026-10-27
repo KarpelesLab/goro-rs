@@ -51,6 +51,49 @@ impl Vm {
         Value::Object(obj)
     }
 
+    /// Whether `obj` is the iterator of foreach over a native aggregate
+    /// (ce->get_iterator): its steps are not method calls.
+    pub(crate) fn ext_iterator_is_silent(&self, obj: &Rc<RefCell<PhpObject>>) -> bool {
+        self.silent_iterators
+            .iter()
+            .any(|w| std::ptr::eq(w.as_ptr(), Rc::as_ptr(obj)))
+    }
+
+    /// Whether foreach's getIterator() of an object of the native class
+    /// `class_lower` may be its get_iterator handler: the method is not a
+    /// user one.
+    pub(crate) fn foreach_quiet_get_iterator(&self, class_lower: &[u8]) -> bool {
+        !self
+            .classes
+            .get(class_lower)
+            .is_some_and(|c| c.get_method(b"getiterator").is_some())
+    }
+
+    /// foreach's unobserved getIterator() of a native aggregate returned
+    /// `iter`: the get_iterator handler (`native`) made the iterator, whose
+    /// steps are not calls either; otherwise it was a method call after
+    /// all, shown to the observer now.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn foreach_native_get_iterator_done(
+        &mut self,
+        class_lower: &[u8],
+        native: bool,
+        iter: Option<&Value>,
+    ) {
+        if native {
+            if let Some(Value::Object(o)) = iter {
+                self.silent_iterators.retain(|w| w.strong_count() > 0);
+                self.silent_iterators.push(Rc::downgrade(o));
+            }
+            return;
+        }
+        if let Some(n) = self.observed_internal_method_any(class_lower, b"getiterator") {
+            self.observe_internal_begin(&n);
+            self.observe_internal_end(&n, iter);
+        }
+    }
+
     /// An InternalIterator nothing references any more: free its iterator.
     pub(crate) fn ext_iterator_released(&mut self, obj: &Rc<RefCell<PhpObject>>) -> bool {
         let id = obj.borrow().object_id;

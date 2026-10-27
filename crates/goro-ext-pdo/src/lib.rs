@@ -578,8 +578,24 @@ fn ini_readonly(_vm: &mut Vm, _key: &[u8], _value: &Value) -> bool {
 }
 
 /// PHP_MINIT(pdo) + PHP_MINIT(pdo_mysql)
+/// Vm::native_method_deprecation_hooks: PDO's driver-specific methods.
+fn method_deprecation(
+    _vm: &mut Vm,
+    class_lower: &[u8],
+    method_lower: &[u8],
+    this: Option<&Value>,
+) -> Option<(String, String)> {
+    if find_method(class_lower, method_lower).is_some() {
+        return None;
+    }
+    let this_o = this_obj(this);
+    pgsql::ext_method_deprecation(method_lower, this_o.as_ref())
+        .or_else(|| sqlite::ext_method_deprecation(method_lower, this_o.as_ref()))
+}
+
 pub fn register(vm: &mut Vm) {
     vm.register_extension(b"pdo");
+    vm.native_method_deprecation_hooks.push(method_deprecation);
     vm.register_function_with_params(b"pdo_drivers", w_pdo_drivers, &[]);
     vm.phpinfo_hooks.push(minfo);
     vm.shutdown_hooks.push(dbh::free_persistent);

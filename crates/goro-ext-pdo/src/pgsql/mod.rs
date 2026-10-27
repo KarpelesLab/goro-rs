@@ -874,6 +874,23 @@ fn is_pgsql_handle(this: Option<&Obj>) -> bool {
     dbh.borrow().driver.is_some_and(|d| d.name == "pgsql")
 }
 
+/// The deprecation of the PDO::pgsql* method `method_lower` of `this`
+/// (pdo_hash_methods() gives them a Deprecated attribute): its message and
+/// "PDO::method".
+pub fn ext_method_deprecation(method_lower: &[u8], this: Option<&Obj>) -> Option<(String, String)> {
+    let (old, new) = EXT_METHODS
+        .iter()
+        .find(|(o, _)| o.as_bytes().eq_ignore_ascii_case(method_lower))?;
+    if !is_pgsql_handle(this) {
+        return None;
+    }
+    let msg = format!(
+        "Method PDO::{}() is deprecated since 8.5, use Pdo\\Pgsql::{}() instead",
+        old, new
+    );
+    Some((msg, format!("PDO::{}", old)))
+}
+
 /// dbh_method_get + the call of a PDO::pgsql* method. None: no such method
 /// for this handle.
 pub fn call_ext_method(
@@ -888,12 +905,12 @@ pub fn call_ext_method(
     if !is_pgsql_handle(this) {
         return None;
     }
-    let msg = format!(
-        "Method PDO::{}() is deprecated since 8.5, use Pdo\\Pgsql::{}() instead",
-        old, new
-    );
-    if vm.emit_method_deprecation(&msg, old) {
-        return Some(Value::Null);
+    // (raised before the call when an observer watches it)
+    if !std::mem::take(&mut vm.native_deprecation_emitted) {
+        let (msg, _) = ext_method_deprecation(method_lower, this)?;
+        if vm.emit_method_deprecation(&msg, old) {
+            return Some(Value::Null);
+        }
     }
     let params = goro_core::stubs::find_method(b"PDO_PGSql_Ext", old.as_bytes())
         .map(|(_, m)| m.args.iter().map(|a| a.name).collect())

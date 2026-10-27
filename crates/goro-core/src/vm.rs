@@ -359,6 +359,10 @@ macro_rules! init_undefined_check {
 /// Built-in function signature
 pub type BuiltinFn = fn(&mut Vm, &[Value]) -> Result<Value, VmError>;
 
+/// See Vm::native_method_deprecation_hooks.
+pub type NativeMethodDeprecationHook =
+    fn(&mut Vm, &[u8], &[u8], Option<&Value>) -> Option<(String, String)>;
+
 /// Extension-provided method dispatcher for a built-in class (e.g. ext/date's
 /// DateTime). `has_method(class_lower, method_lower, is_static)` tells the VM
 /// whether the extension implements a method; `call(vm, class_lower,
@@ -2114,6 +2118,20 @@ pub struct Vm {
     /// iterator stands for the zend_object_iterator (one handle, no
     /// separate InternalIterator).
     pub foreach_native_iter: u8,
+    /// The next internal method call_object_method() runs is the VM's own
+    /// handler rather than a call (foreach's getIterator() of a native
+    /// aggregate): the observer does not see it.
+    pub(crate) unobserved_call: bool,
+    /// The iterators foreach got from native aggregates' get_iterator
+    /// handlers (see ext_iterator_is_silent()).
+    pub(crate) silent_iterators: Vec<std::rc::Weak<RefCell<PhpObject>>>,
+    /// Extensions' deprecated methods that only exist at run time (PDO's
+    /// driver-specific methods): Some((message, "Class::method")) for the
+    /// method (class and method lowercase) of `this`.
+    pub native_method_deprecation_hooks: Vec<NativeMethodDeprecationHook>,
+    /// The deprecation of the native method being called was raised
+    /// before the call (see observed_native_method_name()).
+    pub native_deprecation_emitted: bool,
     /// PHP_VAR_SERIALIZE_INIT (true) / _DESTROY (false) around the pieces an
     /// internal Serializable::serialize() serializes with one var_hash
     /// (set by ext/standard).
@@ -3547,6 +3565,10 @@ impl Vm {
             exec_frame_len: 0,
             unserialize_value_hook: None,
             foreach_native_iter: 0,
+            unobserved_call: false,
+            silent_iterators: Vec::new(),
+            native_method_deprecation_hooks: Vec::new(),
+            native_deprecation_emitted: false,
             serialize_scope_hook: None,
             unserialize_scope_hook: None,
             loaded_extensions: {
@@ -13039,6 +13061,45 @@ impl Vm {
 
     /// "Class::method" of internal method `method_lower` of internal class
     /// `class_lower`, as declared (the declaring class).
+    /// The observer's name for the internal method a native handler runs
+    /// (`orig_method`: as called). A deprecated one (a hook of
+    /// native_method_deprecation_hooks knows it) is reported first, as
+    /// ZEND_DO_FCALL does before the call starts: its Deprecated attribute
+    /// is constructed, then the deprecation raised (the handler then does
+    /// not raise it again: native_deprecation_emitted). None: the
+    /// deprecation threw, the call is not made.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn observed_native_method_name(
+        &mut self,
+        class_lower: &[u8],
+        method_lower: &[u8],
+        orig_method: &[u8],
+        this: Option<&Value>,
+    ) -> Option<String> {
+        for i in 0..self.native_method_deprecation_hooks.len() {
+            let hook = self.native_method_deprecation_hooks[i];
+            if let Some((msg, name)) = hook(self, class_lower, method_lower, this) {
+                self.observe_internal_begin("Deprecated::__construct");
+                self.observe_internal_end("Deprecated::__construct", Some(&Value::Null));
+                let method = name.rsplit("::").next().unwrap_or_default().to_string();
+                if self.emit_method_deprecation(&msg, &method) {
+                    return None;
+                }
+                self.native_deprecation_emitted = true;
+                return Some(name);
+            }
+        }
+        Some(match crate::stubs::find_method(class_lower, method_lower) {
+            Some((c, m)) => format!("{}::{}", c.name, m.name),
+            None => format!(
+                "{}::{}",
+                self.builtin_canonical_name(class_lower),
+                String::from_utf8_lossy(orig_method)
+            ),
+        })
+    }
+
     pub(crate) fn internal_method_display(
         &self,
         class_lower: &[u8],
@@ -13127,9 +13188,29 @@ impl Vm {
         None
     }
 
+    /// observed_internal_method_any() for call_object_method(), but None
+    /// for what is not a call: the VM's own get_iterator handler (see
+    /// unobserved_call) and the steps of the iterator it made.
+    #[cold]
+    #[inline(never)]
+    fn observed_internal_method_call(
+        &mut self,
+        class_lower: &[u8],
+        method_lower: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+    ) -> Option<String> {
+        if std::mem::take(&mut self.unobserved_call) {
+            return None;
+        }
+        if class_lower == b"internaliterator" && self.ext_iterator_is_silent(obj) {
+            return None;
+        }
+        self.observed_internal_method_any(class_lower, method_lower)
+    }
+
     /// "Class::method" of the internal method `method_lower` an object of
     /// class `class_lower` has (declared or inherited), for the observer.
-    fn observed_internal_method_any(
+    pub(crate) fn observed_internal_method_any(
         &self,
         class_lower: &[u8],
         method_lower: &[u8],
@@ -19990,7 +20071,7 @@ impl Vm {
 
             // Internal methods: the observer sees them run.
             let observed = if self.observer.is_some() {
-                self.observed_internal_method_any(&class_lower, &method_lower)
+                self.observed_internal_method_call(&class_lower, &method_lower, obj)
             } else {
                 None
             };
@@ -33799,14 +33880,24 @@ impl Vm {
                                 } else if !named_ok {
                                     Value::Null
                                 } else if self.observer.is_some() {
-                                    let name =
-                                        self.internal_method_display(spl_class, spl_method);
-                                    self.observe_internal_begin(&name);
-                                    let r = self
-                                        .handle_spl_docall(spl_class, spl_method, &spl_args)
-                                        .unwrap_or(Value::Null);
-                                    self.observe_internal_end(&name, Some(&r));
-                                    r
+                                    match self.observed_native_method_name(
+                                        spl_class,
+                                        spl_method,
+                                        orig_method,
+                                        spl_args.first(),
+                                    ) {
+                                        Some(name) => {
+                                            self.observe_internal_begin(&name);
+                                            let r = self
+                                                .handle_spl_docall(spl_class, spl_method, &spl_args)
+                                                .unwrap_or(Value::Null);
+                                            self.native_deprecation_emitted = false;
+                                            self.observe_internal_end(&name, Some(&r));
+                                            r
+                                        }
+                                        // (its deprecation threw)
+                                        None => Value::Null,
+                                    }
                                 } else {
                                     self.handle_spl_docall(spl_class, spl_method, &spl_args)
                                         .unwrap_or(Value::Null)
@@ -43421,8 +43512,20 @@ impl Vm {
                             // IteratorAggregate: call getIterator() and iterate the result
                             let had_exc = self.current_exception.is_some();
                             self.foreach_native_iter = u8::from(obj.borrow().native.is_some());
+                            let quiet = self.observer.is_some()
+                                && self.foreach_native_iter == 1
+                                && self.foreach_quiet_get_iterator(&class_lower);
+                            self.unobserved_call = quiet;
                             let mut iter_obj = self.spl_call_method(&arr_val, b"getIterator", &[]);
+                            self.unobserved_call = false;
                             let native_iter = std::mem::take(&mut self.foreach_native_iter) == 2;
+                            if quiet {
+                                self.foreach_native_get_iterator_done(
+                                    &class_lower,
+                                    native_iter,
+                                    iter_obj.as_ref(),
+                                );
+                            }
                             // zend_user_it_get_new_iterator(): what getIterator()
                             // returns must be traversable (an aggregate is asked in
                             // turn).
