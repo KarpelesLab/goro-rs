@@ -3787,8 +3787,16 @@ pub fn reflection_class_method(
                 .map(|c| c.name.clone())
                 .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
             let mut new_obj = PhpObject::new(canonical, obj_id);
-            // Set default property values
-            if let Some(ce) = rcls(vm, &class_lower) {
+            // Set default property values (the slots `new` gives: a
+            // redeclared private keeps its own)
+            if vm.classes.contains_key(&class_lower) {
+                let _ = vm.update_class_constants(&class_lower);
+                if vm.current_exception.is_some() {
+                    return Some(Value::Null);
+                }
+                vm.init_declared_props(&class_lower, &mut new_obj);
+                new_obj.mark_declared();
+            } else if let Some(ce) = rcls(vm, &class_lower) {
                 let props: Vec<_> = ce
                     .properties
                     .iter()

@@ -10082,6 +10082,13 @@ impl Vm {
     /// Check if a class is (or inherits from / implements) a given type name
     #[allow(clippy::if_same_then_else)] // branches mirror php-src
     fn class_is_a(&self, class_entry: &ClassEntry, target_lower: &[u8]) -> bool {
+        // (a class declaring __toString() implements Stringable)
+        if target_lower == b"stringable"
+            && !class_entry.is_interface
+            && class_entry.get_method(b"__tostring").is_some()
+        {
+            return true;
+        }
         // (a class_alias() names the aliased class)
         if let Some(t) = self.classes.get(target_lower) {
             if !t.name.eq_ignore_ascii_case(target_lower) {
