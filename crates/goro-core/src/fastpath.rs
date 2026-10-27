@@ -201,6 +201,101 @@ pub(crate) fn cv_num_writable(i: u32, cvs: &[Value], refs_ok: bool) -> bool {
     }
 }
 
+/// The int a string operand of arithmetic stands for, when it is the
+/// plain decimal form of one (an optional sign and at most 18 digits,
+/// nothing else: "42", "-007", "+5"): such a numeric string converts to
+/// that int without a warning or a float. Others take the general path.
+#[inline]
+fn plain_int_str(b: &[u8]) -> Option<i64> {
+    let (neg, digits) = match b.first()? {
+        b'-' => (true, &b[1..]),
+        b'+' => (false, &b[1..]),
+        _ => (false, b),
+    };
+    if digits.is_empty() || digits.len() > 18 {
+        return None;
+    }
+    let mut n: i64 = 0;
+    for &d in digits {
+        if !d.is_ascii_digit() {
+            return None;
+        }
+        n = n * 10 + i64::from(d - b'0');
+    }
+    Some(if neg { -n } else { n })
+}
+
+/// num_operand(), or the int of a variable's or literal's plain int
+/// string (see plain_int_str).
+#[inline]
+fn num_or_int_str(
+    operand: &OperandType,
+    cvs: &[Value],
+    tmps: &[Value],
+    literals: &[Value],
+) -> Option<Num> {
+    let of = |v: &Value| match v {
+        Value::Long(n) => Some(Num::L(*n)),
+        Value::Double(d) => Some(Num::D(*d)),
+        Value::String(s) => plain_int_str(s.as_bytes()).map(Num::L),
+        _ => None,
+    };
+    match operand {
+        OperandType::Cv(i) => match cvs.get(*i as usize)? {
+            Value::Reference(r) => of(&*r.try_borrow().ok()?),
+            v => of(v),
+        },
+        // (a temporary string is released by the opcode: the general path)
+        OperandType::Tmp(i) => Num::of(tmps.get(*i as usize)?),
+        OperandType::Const(i) => of(literals.get(*i as usize)?),
+        _ => None,
+    }
+}
+
+/// ADD / SUB / MUL / DIV / MOD, ASSIGN_ADD / _SUB / _MUL of numbers and
+/// plain int strings (see plain_int_str), what fast_op() leaves of them:
+/// the general handlers' result, which no warning or deprecation comes
+/// with. Fast::No otherwise.
+#[inline(never)]
+pub(crate) fn fast_num_str_arith(
+    op: &Op,
+    cvs: &mut [Value],
+    tmps: &mut [Value],
+    literals: &[Value],
+    refs_ok: bool,
+) -> Fast {
+    let (Some(a), Some(b)) = (
+        num_or_int_str(&op.op1, cvs, tmps, literals),
+        num_or_int_str(&op.op2, cvs, tmps, literals),
+    ) else {
+        return Fast::No;
+    };
+    let v = match op.opcode {
+        OpCode::Add | OpCode::AssignAdd => arith(b'+', a, b),
+        OpCode::Sub | OpCode::AssignSub => arith(b'-', a, b),
+        OpCode::Mul | OpCode::AssignMul => arith(b'*', a, b),
+        OpCode::Div | OpCode::Mod => match div_mod(op.opcode == OpCode::Mod, a, b) {
+            Some(v) => v,
+            None => return Fast::No,
+        },
+        _ => return Fast::No,
+    };
+    match op.opcode {
+        OpCode::AssignAdd | OpCode::AssignSub | OpCode::AssignMul => {
+            let OperandType::Cv(ci) = op.op1 else {
+                return Fast::No;
+            };
+            if cv_num_writable(ci, cvs, refs_ok) && store_num_cv(ci, v, cvs, refs_ok) {
+                Fast::Done
+            } else {
+                Fast::No
+            }
+        }
+        _ if store_tmp(&op.result, v, tmps) => Fast::Done,
+        _ => Fast::No,
+    }
+}
+
 /// The general Div / Mod handlers' first try: numbers into a temporary
 /// (div_mod()). False when the general path is needed.
 #[inline(never)]
@@ -2754,6 +2849,8 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
         OpCode::Add
             | OpCode::Sub
             | OpCode::Mul
+            | OpCode::Div
+            | OpCode::Mod
             | OpCode::Less
             | OpCode::LessEqual
             | OpCode::Greater
@@ -3320,9 +3417,20 @@ impl crate::vm::Vm {
                     }
                 }
                 // (one arm per opcode: each inlined fast_op() reduces to its own case)
-                OpCode::Add => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
-                OpCode::Sub => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
-                OpCode::Mul => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::Add => match fast_op(op, cvs, tmps, literals, refs_ok, no_release) {
+                    Fast::No => fast_num_str_arith(op, cvs, tmps, literals, refs_ok),
+                    f => f,
+                },
+                OpCode::Sub => match fast_op(op, cvs, tmps, literals, refs_ok, no_release) {
+                    Fast::No => fast_num_str_arith(op, cvs, tmps, literals, refs_ok),
+                    f => f,
+                },
+                OpCode::Mul => match fast_op(op, cvs, tmps, literals, refs_ok, no_release) {
+                    Fast::No => fast_num_str_arith(op, cvs, tmps, literals, refs_ok),
+                    f => f,
+                },
+                // (out of line: see div_mod_quick)
+                OpCode::Div | OpCode::Mod => fast_num_str_arith(op, cvs, tmps, literals, refs_ok),
                 OpCode::Less => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::LessEqual => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::Greater => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
@@ -3356,9 +3464,18 @@ impl crate::vm::Vm {
                     }
                 }
                 OpCode::Spaceship => fast_spaceship(op, cvs, tmps, literals),
-                OpCode::AssignAdd => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
-                OpCode::AssignSub => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
-                OpCode::AssignMul => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::AssignAdd => match fast_op(op, cvs, tmps, literals, refs_ok, no_release) {
+                    Fast::No => fast_num_str_arith(op, cvs, tmps, literals, refs_ok),
+                    f => f,
+                },
+                OpCode::AssignSub => match fast_op(op, cvs, tmps, literals, refs_ok, no_release) {
+                    Fast::No => fast_num_str_arith(op, cvs, tmps, literals, refs_ok),
+                    f => f,
+                },
+                OpCode::AssignMul => match fast_op(op, cvs, tmps, literals, refs_ok, no_release) {
+                    Fast::No => fast_num_str_arith(op, cvs, tmps, literals, refs_ok),
+                    f => f,
+                },
                 OpCode::PreIncrement => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::PreDecrement => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::PostIncrement => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
