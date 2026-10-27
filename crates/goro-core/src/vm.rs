@@ -4457,6 +4457,36 @@ impl Vm {
         None
     }
 
+    /// do_inherit_property() for the properties of internal parent class
+    /// `parent` (a stub entry, in its properties_info order) that `class`
+    /// redeclares: the first error.
+    #[inline(never)]
+    fn internal_parent_property_error(
+        &self,
+        class: &ClassEntry,
+        parent: &'static ClassEntry,
+    ) -> Option<String> {
+        for pp in &parent.properties {
+            if pp.visibility == Visibility::Private {
+                continue;
+            }
+            let Some(cp) = class.properties.iter().find(|p| {
+                p.name == pp.name && p.declaring_class.eq_ignore_ascii_case(&class.name)
+            }) else {
+                continue;
+            };
+            // (named as declared: the stub entry's are lowercase)
+            let mut pp = pp.clone();
+            if let Some(c) = crate::stubs::find_class(&pp.declaring_class) {
+                pp.declaring_class = c.name.as_bytes().to_vec();
+            }
+            if let Some(e) = self.trait_property_inheritance_error(class, cp, &pp) {
+                return Some(e);
+            }
+        }
+        None
+    }
+
     /// zend_do_link_class() binds a class's (concrete) trait methods before
     /// it inherits its parent's: the method table lists the class's own
     /// methods, then the trait ones (in binding order, each alias before its
@@ -57326,6 +57356,17 @@ impl Vm {
                             } else if let Some(stub_parent) =
                                 crate::stubs::class_entry(self, &parent_lower)
                             {
+                                // do_inherit_property() of the internal parent's
+                                // properties the class redeclares (before its
+                                // methods are inherited).
+                                if let Some(msg) =
+                                    self.internal_parent_property_error(&class, stub_parent)
+                                {
+                                    return Err(VmError {
+                                        message: msg,
+                                        line: op.line,
+                                    });
+                                }
                                 // Internal parent: check overriding methods against
                                 // its stub signatures.
                                 if let Err((msg, line, unresolved)) =
