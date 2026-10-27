@@ -20795,11 +20795,17 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // class hierarchy (so that inherited private props don't count).
             drop(obj_borrow);
             // has_property(ZEND_PROPERTY_EXISTS) from the calling scope.
-            Ok(if vm.prop_exists_from_scope(obj, prop_bytes) {
-                Value::True
-            } else {
-                Value::False
-            })
+            if vm.prop_exists_from_scope(obj, prop_bytes) {
+                return Ok(Value::True);
+            }
+            // An extension's has_property handler (SimpleXMLElement's
+            // children / attributes), with ZEND_PROPERTY_EXISTS.
+            if let Some(f) = goro_core::vm::native_handlers(obj).and_then(|h| h.has_property) {
+                if f(vm, obj, prop_bytes, 2) == Some(true) {
+                    return Ok(Value::True);
+                }
+            }
+            Ok(Value::False)
         }
         Value::String(s) => {
             let class_lower: Vec<u8> = s
