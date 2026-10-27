@@ -1054,7 +1054,7 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Check if constant is already defined
     if vm.constants.const_contains(&normalized) {
         // (zend_register_constant(): the name with its namespace lowercased)
-        let name_str = goro_core::string::msg_str(&normalized).to_string();
+        let name_str = goro_core::string::msg_cstr(&normalized).to_string();
         vm.emit_warning(&format!(
             "Constant {} already defined, this will be an error in PHP 9",
             name_str
@@ -11090,7 +11090,10 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm.try_autoload_class(original.as_bytes());
     }
     if !vm.classes.contains_key(&original_lower) && !vm.is_known_builtin_class(&original_lower) {
-        vm.emit_warning(&format!("Class \"{}\" not found", original.to_msg_string()));
+        vm.emit_warning(&format!(
+            "Class \"{}\" not found",
+            goro_core::string::msg_cstr(original.as_bytes())
+        ));
         return Ok(Value::False);
     }
     if vm.classes.contains_key(&alias_lower) {

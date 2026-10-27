@@ -8896,7 +8896,7 @@ impl Vm {
     /// even when it is self / parent / static.
     #[inline(never)]
     pub(crate) fn class_by_name_not_found(&mut self, cls: &[u8], line: u32) -> (Value, String) {
-        let msg = format!("Class \"{}\" not found", crate::string::msg_str(cls));
+        let msg = format!("Class \"{}\" not found", crate::string::msg_cstr(cls));
         let exc = self.create_exception(b"Error", "", line);
         if let Value::Object(o) = &exc {
             o.borrow_mut().set_property(
@@ -8950,6 +8950,9 @@ impl Vm {
                     break;
                 }
             }
+            if message.contains('\0') {
+                Self::class_not_found_cstr(&mut message);
+            }
         }
         err_obj.set_property(
             b"message".to_vec(),
@@ -8968,6 +8971,21 @@ impl Vm {
         err_obj.throwable_set(b"trace", trace);
         err_obj.throwable_set(b"previous", Value::Null);
         Value::Object(Rc::new(RefCell::new(err_obj)))
+    }
+
+    /// `Class "%s" not found` (zend_fetch_class() & co.): the name is a C
+    /// string, it stops at a NUL byte.
+    #[cold]
+    #[inline(never)]
+    fn class_not_found_cstr(message: &mut String) {
+        if let Some(name) = message
+            .strip_prefix("Class \"")
+            .and_then(|r| r.strip_suffix("\" not found"))
+        {
+            if let Some(p) = name.find('\0') {
+                *message = format!("Class \"{}\" not found", &name[..p]);
+            }
+        }
     }
 
     /// Exception/Error/ErrorException::__construct() (`args[0]` is `$this`)
@@ -13403,7 +13421,7 @@ impl Vm {
                     if !self.classes.contains_key(&l) && !self.is_known_builtin_class(&l) {
                         self.emit_warning(&format!(
                             "Class \"{}\" not found",
-                            crate::string::msg_str(&name)
+                            crate::string::msg_cstr(&name)
                         ));
                         return Value::Null;
                     }
@@ -31132,7 +31150,7 @@ impl Vm {
                                                 b"Error",
                                                 format!(
                                                     "Class \"{}\" not found",
-                                                    crate::string::msg_str(cn.as_bytes())
+                                                    crate::string::msg_cstr(cn.as_bytes())
                                                 ),
                                             ))
                                         } else if let Some(c) = self.classes.get(&cl) {
@@ -31636,7 +31654,7 @@ impl Vm {
                             {
                                 let err_msg = format!(
                                     "Class \"{}\" not found",
-                                    crate::string::msg_str(
+                                    crate::string::msg_cstr(
                                         class_name.strip_prefix(b"\\").unwrap_or(&class_name)
                                     )
                                 );

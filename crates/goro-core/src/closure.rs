@@ -1536,7 +1536,7 @@ impl Vm {
                 }
                 return Err((
                     b"Error",
-                    format!("Class \"{}\" not found", crate::string::msg_str(&cls)),
+                    format!("Class \"{}\" not found", crate::string::msg_cstr(&cls)),
                 ));
             }
         };
@@ -2237,7 +2237,7 @@ impl Vm {
                     if !self.classes.contains_key(&l) && !self.is_known_builtin_class(&l) {
                         self.emit_warning(&format!(
                             "Class \"{}\" not found",
-                            crate::string::msg_str(&n)
+                            crate::string::msg_cstr(&n)
                         ));
                         return Some(Value::Null);
                     }
@@ -2788,7 +2788,7 @@ fn by_name_class_check(cls: &[u8]) -> Result<(), (&'static [u8], String)> {
     if matches!(lower(cls).as_slice(), b"self" | b"parent" | b"static") {
         return Err((
             b"Error",
-            format!("Class \"{}\" not found", crate::string::msg_str(cls)),
+            format!("Class \"{}\" not found", crate::string::msg_cstr(cls)),
         ));
     }
     Ok(())

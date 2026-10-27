@@ -114,7 +114,7 @@ impl Vm {
             }
             return Some(format!(
                 "Class \"{}\" not found",
-                crate::string::msg_str(cls)
+                crate::string::msg_cstr(cls)
             ));
         }
         self.user_method_missing(&cl, method)

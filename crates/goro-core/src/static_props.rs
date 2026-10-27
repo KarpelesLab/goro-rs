@@ -165,7 +165,7 @@ impl Vm {
         }
         Err(SpErr::Throw(
             b"Error",
-            format!("Class \"{}\" not found", crate::string::msg_str(&resolved)),
+            format!("Class \"{}\" not found", crate::string::msg_cstr(&resolved)),
         ))
     }
 

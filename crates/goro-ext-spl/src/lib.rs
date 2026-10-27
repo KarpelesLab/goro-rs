@@ -762,7 +762,7 @@ fn class_arg(vm: &mut Vm, fname: &str, args: &[Value]) -> Result<Option<(Vec<u8>
                 vm.emit_warning(&format!(
                     "{}(): Class {} does not exist{}",
                     fname,
-                    goro_core::string::msg_str(&class_name),
+                    goro_core::string::msg_cstr(&class_name),
                     suffix
                 ));
                 return Ok(None);
