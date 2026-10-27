@@ -4830,19 +4830,17 @@ fn array_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
 
-    if let Value::Array(arr) = input {
-        let arr = arr.borrow();
-        let current_len = arr.len() as i64;
+    if let Value::Array(arr_rc) = input {
+        let current_len = arr_rc.borrow().len() as i64;
         let abs_size = pad_size.unsigned_abs() as usize;
 
         if abs_size <= current_len as usize {
-            // No padding needed, return a copy
-            let mut result = PhpArray::new();
-            for (k, v) in arr.iter() {
-                result.set(k.clone(), v.clone());
-            }
-            return Ok(Value::Array(Rc::new(RefCell::new(result))));
+            // No padding needed: the input array itself (ZVAL_COPY()),
+            // which a write separates from the input (zend_array_dup():
+            // references only the array holds become their values).
+            return Ok(Value::Array(goro_core::array::cow_copy_new(arr_rc)));
         }
+        let arr = arr_rc.borrow();
 
         let pad_count = abs_size - current_len as usize;
         // array_init_size() + zend_hash_real_init_packed()/_mixed()
@@ -18602,106 +18600,95 @@ fn array_replace_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
     if args.is_empty() {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }
-
-    let mut result = if let Value::Array(arr) = &args[0] {
-        arr.borrow().clone()
-    } else {
-        PhpArray::new()
+    // zend_array_dup() of the first array: the copy holds the references
+    // it shares once more (those only it held become their values).
+    let mut dest = match &args[0] {
+        Value::Array(arr) => {
+            let mut d = arr.borrow().clone();
+            d.make_unique();
+            d
+        }
+        _ => PhpArray::new(),
     };
-
+    let mut protect = Vec::new();
     for arg in &args[1..] {
-        let arg_deref = arg.deref();
-        if let Value::Array(arr) = &arg_deref {
-            let arr_ptr = Rc::as_ptr(arr) as usize;
-            let entries: Vec<_> = arr
-                .borrow()
-                .iter()
-                .map(|(k, v)| (k.clone(), unwrap_rc1_ref(v)))
-                .collect();
-            for (key, value) in entries {
-                let value_deref = value.deref();
-                if let Value::Array(inner_new) = &value_deref {
-                    let inner_new_ptr = Rc::as_ptr(inner_new) as usize;
-                    // Detect direct self-reference before recursing.
-                    if inner_new_ptr == arr_ptr {
-                        let e = "Recursion detected".to_string();
-                        let exc = vm.create_exception(b"Error", &e, vm.current_line);
-                        vm.current_exception = Some(exc);
-                        return Err(VmError {
-                            message: format!("Uncaught Error: {}", e),
-                            line: vm.current_line,
-                        });
-                    }
-                    let existing_inner = if let Some(existing) = result.get(&key) {
-                        let existing = existing.deref();
-                        if let Value::Array(inner_old) = existing {
-                            Some(inner_old.clone())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    if let Some(inner_old) = existing_inner {
-                        let mut visited = vec![arr_ptr, inner_new_ptr];
-                        match array_replace_recursive_inner(
-                            &inner_old.borrow(),
-                            inner_new,
-                            &mut visited,
-                        ) {
-                            Ok(merged_val) => {
-                                result.set(key.clone(), merged_val);
-                                continue;
-                            }
-                            Err(e) => {
-                                let exc = vm.create_exception(b"Error", &e, vm.current_line);
-                                vm.current_exception = Some(exc);
-                                return Err(VmError {
-                                    message: format!("Uncaught Error: {}", e),
-                                    line: vm.current_line,
-                                });
-                            }
-                        }
-                    }
-                }
-                result.set(key.clone(), value.clone());
+        if let Value::Array(arr) = &arg.deref() {
+            if !php_array_replace_recursive(&mut dest, arr, &mut protect) {
+                let e = "Recursion detected";
+                let exc = vm.create_exception(b"Error", e, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError {
+                    message: format!("Uncaught Error: {}", e),
+                    line: vm.current_line,
+                });
             }
         }
     }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
+    Ok(Value::Array(Rc::new(RefCell::new(dest))))
 }
 
-fn array_replace_recursive_inner(
-    base: &PhpArray,
-    replacement: &Rc<RefCell<PhpArray>>,
-    visited: &mut Vec<usize>,
-) -> Result<Value, String> {
-    let mut result = base.clone();
-    let replacement_borrow = replacement.borrow();
-    for (key, value) in replacement_borrow.iter() {
-        // Unwrap references so that recursive structures created via
-        // `$x[] = &$x;` are detected via their inner Rc pointer.
-        let value_owned = value.deref();
-        if let Value::Array(inner_new) = &value_owned {
-            let ptr = Rc::as_ptr(inner_new) as usize;
-            if visited.contains(&ptr) {
-                return Err("Recursion detected".to_string());
-            }
-            if let Some(existing) = result.get(key) {
-                let existing = existing.deref();
-                if let Value::Array(inner_old) = existing {
-                    visited.push(ptr);
-                    let merged =
-                        array_replace_recursive_inner(&inner_old.borrow(), inner_new, visited)?;
-                    visited.pop();
-                    result.set(key.clone(), merged);
-                    continue;
-                }
-            }
+/// php_array_replace_recursive(): `src` replaces into `dest` (an array of
+/// this call's own), arrays under the same key merged recursively. False:
+/// "Recursion detected" (an array met again while it is being merged, or
+/// the same reference in both whose refcount is odd -- php-src's check).
+/// `protect` holds the arrays being merged (Z_PROTECT_RECURSION).
+fn php_array_replace_recursive(
+    dest: &mut PhpArray,
+    src: &Rc<RefCell<PhpArray>>,
+    protect: &mut Vec<usize>,
+) -> bool {
+    let src_b = src.borrow();
+    for (key, src_entry) in src_b.iter() {
+        let src_zval = src_entry.deref();
+        let dest_is_array = match dest.get(key) {
+            Some(Value::Array(_)) => true,
+            Some(Value::Reference(r)) => matches!(&*r.borrow(), Value::Array(_)),
+            _ => false,
+        };
+        let Value::Array(src_arr) = &src_zval else {
+            dest.set(key.clone(), unwrap_rc1_ref(src_entry));
+            continue;
+        };
+        if !dest_is_array {
+            dest.set(key.clone(), unwrap_rc1_ref(src_entry));
+            continue;
         }
-        result.set(key.clone(), unwrap_rc1_ref(value));
+        let Some(dest_entry) = dest.get(key).cloned() else {
+            continue;
+        };
+        let Value::Array(dest_arr) = dest_entry.deref() else {
+            continue;
+        };
+        let same_ref = matches!((src_entry, &dest_entry),
+            (Value::Reference(a), Value::Reference(b)) if Rc::ptr_eq(a, b));
+        // (the refcount of the reference: less this function's copy of it)
+        let odd_refcount = match &dest_entry {
+            Value::Reference(r) => (Rc::strong_count(r) - 1) % 2 == 1,
+            _ => false,
+        };
+        let recursive = |a: &Rc<RefCell<PhpArray>>| protect.contains(&(Rc::as_ptr(a) as usize));
+        if recursive(&dest_arr) || recursive(src_arr) || (same_ref && odd_refcount) {
+            return false;
+        }
+        // SEPARATE_ZVAL(dest_entry): a reference in the destination is
+        // replaced by a copy of its array, not written through.
+        drop(dest_entry);
+        let mut sep = dest_arr.borrow().clone();
+        sep.make_unique();
+        drop(dest_arr);
+        let sep = Rc::new(RefCell::new(sep));
+        let (dp, sp) = (Rc::as_ptr(&sep) as usize, Rc::as_ptr(src_arr) as usize);
+        protect.push(dp);
+        protect.push(sp);
+        let ok = php_array_replace_recursive(&mut sep.borrow_mut(), src_arr, protect);
+        protect.pop();
+        protect.pop();
+        dest.set(key.clone(), Value::Array(sep));
+        if !ok {
+            return false;
+        }
     }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
+    true
 }
 
 /// A reference held only by its container (refcount 1) is copied as a

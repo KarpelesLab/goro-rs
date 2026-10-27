@@ -827,6 +827,11 @@ impl PhpArray {
         self.zcap > 0
     }
 
+    /// Whether the allocated table is a packed one (HT_IS_PACKED()).
+    pub fn table_packed(&self) -> bool {
+        self.zpacked
+    }
+
     #[inline]
     pub fn len(&self) -> usize {
         self.ents().len() - self.head as usize

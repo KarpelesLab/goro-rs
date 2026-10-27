@@ -251,7 +251,12 @@ fn zval_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u
             if a.is_empty() && !a.has_table() {
                 vm.write_output(format!("{}array(0) interned {{\n", prefix).as_bytes());
             } else {
-                let packed = if a.looks_packed() { "packed " } else { "" };
+                let packed = if a.is_empty() {
+                    a.table_packed()
+                } else {
+                    a.looks_packed()
+                };
+                let packed = if packed { "packed " } else { "" };
                 vm.write_output(
                     format!(
                         "{}array({}) {}refcount({}){{\n",
