@@ -49,11 +49,15 @@ pub(crate) fn is_internal_slot(name: &[u8]) -> bool {
 /// properties for its debug, array-cast and serialize views
 /// (get_properties_for): not part of its real property table, so neither
 /// foreach nor get_object_vars() see them.
+/// A slot named like a view field that the script also wrote holds the view's
+/// value; the script's own one is kept under `__timestamp_u_<name>` (see
+/// [`date_view_user_value`]).
 pub fn is_date_view_prop(ob: &PhpObject, name: &[u8]) -> bool {
     match name {
-        b"date" => ob.has_property(b"__timestamp_state"),
+        b"date" => ob.has_property(b"__timestamp_state") && !has_date_user_value(ob, name),
         b"timezone_type" | b"timezone" => {
-            ob.has_property(b"__timestamp_state") || ob.has_property(b"__timestamp_tzobj")
+            (ob.has_property(b"__timestamp_state") || ob.has_property(b"__timestamp_tzobj"))
+                && !has_date_user_value(ob, name)
         }
         // (a DatePeriod's: placeholders for its property tables' order)
         b"start"
@@ -65,6 +69,35 @@ pub fn is_date_view_prop(ob: &PhpObject, name: &[u8]) -> bool {
         | b"include_end_date" => ob.has_property(b"__timestamp_period"),
         _ => false,
     }
+}
+
+/// The hidden property keeping a DateTime's / DateTimeZone's dynamic
+/// property the script wrote under the name of one of its view fields.
+pub const DATE_USER_VIEW_PREFIX: &[u8] = b"__timestamp_u_";
+
+#[inline(never)]
+fn has_date_user_value(ob: &PhpObject, name: &[u8]) -> bool {
+    let mut k = DATE_USER_VIEW_PREFIX.to_vec();
+    k.extend_from_slice(name);
+    ob.has_property(&k)
+}
+
+/// The script's own dynamic property of a date object's slot `name` that is
+/// named like a view field (the slot holds the view's value): what a walk
+/// of the real property table (foreach, get_object_vars()...) sees there.
+#[inline]
+pub fn date_view_user_value(ob: &PhpObject, name: &[u8]) -> Option<Value> {
+    if !matches!(name, b"date" | b"timezone_type" | b"timezone") {
+        return None;
+    }
+    date_view_user_value_slow(ob, name)
+}
+
+#[inline(never)]
+fn date_view_user_value_slow(ob: &PhpObject, name: &[u8]) -> Option<Value> {
+    let mut k = DATE_USER_VIEW_PREFIX.to_vec();
+    k.extend_from_slice(name);
+    ob.has_property(&k).then(|| ob.get_property(&k))
 }
 
 impl Vm {
@@ -239,6 +272,7 @@ impl Vm {
             {
                 continue;
             }
+            let value = date_view_user_value(&obj.borrow(), &name).unwrap_or(value);
             // A dynamic property an inherited private one moved away from
             // (Vm::prop_access_key): zend_check_property_access() decides.
             let moved_from = self.class_layout_of(&class_name).slots.iter().any(|sl| {
@@ -500,6 +534,7 @@ impl Vm {
             {
                 continue;
             }
+            let value = date_view_user_value(&obj.borrow(), &name).unwrap_or(value);
             let Some(key) = self.foreach_prop_key(&class_lower, scope_lower.as_deref(), &name)
             else {
                 continue;

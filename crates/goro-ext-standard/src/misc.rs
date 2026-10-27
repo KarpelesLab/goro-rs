@@ -10880,6 +10880,13 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 continue;
             }
             let mut value = e.value;
+            if is_dynamic {
+                if let Some(v) =
+                    goro_core::foreach_obj::date_view_user_value(&obj_rc.borrow(), &e.key)
+                {
+                    value = v;
+                }
+            }
             if let Some(slot) = &e.slot {
                 if slot.has_get_hook {
                     // Hooked properties are read through their get hook.

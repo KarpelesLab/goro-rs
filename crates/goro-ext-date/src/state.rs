@@ -318,9 +318,46 @@ pub fn date_props(t: &Time) -> Vec<(&'static [u8], Value)> {
     out
 }
 
-fn reappend(o: &mut PhpObject, name: &[u8], v: Value) {
-    o.remove_property(name);
-    o.set_property(name.to_vec(), v);
+const VIEW_DATE: [&[u8]; 3] = [b"date", b"timezone_type", b"timezone"];
+const VIEW_TZ: [&[u8]; 2] = [b"timezone_type", b"timezone"];
+
+/// Sets the view fields `names` to `props` (a field missing from them goes,
+/// unless the script has its own property of that name, which then shows).
+fn set_view(ob: &mut PhpObject, names: &[&[u8]], props: Vec<(&'static [u8], Value)>) {
+    for n in names {
+        if props.iter().any(|(k, _)| k == n) {
+            continue;
+        }
+        let k = user_view_key(n);
+        if ob.has_property(&k) {
+            let v = ob.get_property(&k);
+            ob.set_property(n.to_vec(), v);
+        } else {
+            ob.remove_property(n);
+        }
+    }
+    for (k, v) in props {
+        ob.set_property(k.to_vec(), v);
+    }
+    order_view(ob, names);
+}
+
+/// The order of date_object_get_properties_for(): the real property table
+/// (the script's own properties, those named like a view field overlaid in
+/// place), then the view fields it lacks, in their order.
+fn order_view(ob: &mut PhpObject, names: &[&[u8]]) {
+    let mut tail = Vec::new();
+    for n in names {
+        if ob.has_property(&user_view_key(n)) {
+            continue;
+        }
+        if let Some(pos) = ob.properties.iter().position(|(k, _)| k.as_slice() == *n) {
+            tail.push(ob.properties.remove(pos));
+        }
+    }
+    for e in tail {
+        ob.properties.push(e);
+    }
 }
 
 pub fn date_set(o: &Rc<RefCell<PhpObject>>, t: &Time) {
@@ -332,11 +369,8 @@ pub fn date_set(o: &Rc<RefCell<PhpObject>>, t: &Time) {
         P_STATE.to_vec(),
         Value::String(PhpString::from_vec(encode_time(t))),
     );
-    ob.remove_property(b"timezone_type");
-    ob.remove_property(b"timezone");
-    for (k, v) in props {
-        reappend(&mut ob, k, v);
-    }
+    set_view(&mut ob, &VIEW_DATE, props);
+    attach_view_handlers(&mut ob);
 }
 
 // ---------------------------------------------------------------------------
@@ -428,9 +462,8 @@ pub fn tz_set(o: &Rc<RefCell<PhpObject>>, z: &TzObj) {
     e.s(z.tz.as_ref().map(|t| t.name.as_str()));
     let mut ob = o.borrow_mut();
     ob.set_property(P_TZ.to_vec(), Value::String(PhpString::from_vec(e.0)));
-    for (k, v) in tz_props(z) {
-        reappend(&mut ob, k, v);
-    }
+    set_view(&mut ob, &VIEW_TZ, tz_props(z));
+    attach_view_handlers(&mut ob);
 }
 
 // ---------------------------------------------------------------------------
@@ -989,7 +1022,7 @@ pub fn compare_check(vm: &mut Vm, a: &Value, b: &Value) {
 /// the name of one of DateTime's / DateTimeZone's view properties (php keeps
 /// it in the real property table, which get_properties_for overlays).
 fn user_view_key(name: &[u8]) -> Vec<u8> {
-    let mut k = b"__timestamp_u_".to_vec();
+    let mut k = goro_core::foreach_obj::DATE_USER_VIEW_PREFIX.to_vec();
     k.extend_from_slice(name);
     k
 }
@@ -1024,13 +1057,61 @@ fn keep_user_view_writes(o: &Rc<RefCell<PhpObject>>) {
             Some((_, v)) => {
                 ob.set_property(user_view_key(n), cur);
                 ob.set_property(n.to_vec(), v.clone());
+                attach_view_handlers(&mut ob);
             }
             None => {
                 ob.set_property(user_view_key(n), cur);
-                ob.remove_property(n);
+                attach_view_handlers(&mut ob);
             }
         }
     }
+}
+
+/// A date object the script gave a property named like a view field: its
+/// unset keeps the field (zend_std_unset_property() of the real table).
+fn attach_view_handlers(ob: &mut PhpObject) {
+    if ob.native.is_none() {
+        ob.native = Some(goro_core::object::NativeData {
+            data: Rc::new(()),
+            handlers: &VIEW_HANDLERS,
+        });
+    }
+}
+
+static VIEW_HANDLERS: goro_core::vm::NativeObjectHandlers = goro_core::vm::NativeObjectHandlers {
+    unset_property: Some(view_unset),
+    clone_obj: Some(native_clone_obj),
+    ..goro_core::vm::NativeObjectHandlers::EMPTY
+};
+
+fn view_unset(_vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8]) -> bool {
+    let mut ob = o.borrow_mut();
+    let names: &[&[u8]] = if ob.has_property(P_STATE) {
+        &VIEW_DATE
+    } else if ob.has_property(P_TZ) {
+        &VIEW_TZ
+    } else {
+        return false;
+    };
+    if !names.contains(&name) {
+        return false;
+    }
+    let k = user_view_key(name);
+    if ob.has_property(&k) {
+        ob.remove_property(&k);
+        // (a field the view lacks showed the script's value)
+        let view_has = match names.len() {
+            3 => bytes_prop(&ob, P_STATE)
+                .and_then(|b| decode_time(&b))
+                .is_some_and(|t| t.is_localtime != 0 || name == b"date"),
+            _ => true,
+        };
+        if !view_has {
+            ob.remove_property(name);
+        }
+        order_view(&mut ob, names);
+    }
+    true
 }
 
 /// Keep the engine-provided properties after user-added ones, mirroring the
@@ -1049,11 +1130,15 @@ pub fn prop_added(o: &Rc<RefCell<PhpObject>>) {
     }
     keep_user_view_writes(o);
     let mut ob = o.borrow_mut();
-    let names: &[&[u8]] = if ob.has_property(P_STATE) {
-        &[b"date", b"timezone_type", b"timezone"]
-    } else if ob.has_property(P_TZ) {
-        &[b"timezone_type", b"timezone"]
-    } else if ob.has_property(P_IVAL) {
+    if ob.has_property(P_STATE) {
+        order_view(&mut ob, &VIEW_DATE);
+        return;
+    }
+    if ob.has_property(P_TZ) {
+        order_view(&mut ob, &VIEW_TZ);
+        return;
+    }
+    let names: &[&[u8]] = if ob.has_property(P_IVAL) {
         &[
             b"y",
             b"m",

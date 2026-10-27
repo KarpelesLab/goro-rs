@@ -64185,7 +64185,9 @@ impl Vm {
                                         .set_property(modified_key.into_bytes(), Value::True);
                                 }
                                 // Emit deprecation warning for dynamic property creation
-                                if !obj.borrow().has_property(&pkey)
+                                // (a date object's view field is no property)
+                                if (!obj.borrow().has_property(&pkey)
+                                    || crate::foreach_obj::is_date_view_prop(&obj.borrow(), &pkey))
                                     && !prop_name.as_bytes().starts_with(b"__")
                                 {
                                     // Check if property is declared in class definition

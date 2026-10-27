@@ -32,16 +32,22 @@ $p->timezone = 'abc';
 var_dump($p->timezone);
 
 ?>
---EXPECT--
+--EXPECTF--
 bool(false)
+
+Deprecated: Creation of dynamic property DateTime::$timezone is deprecated in %s on line 4
 string(3) "abc"
 bool(true)
 string(3) "abc"
 string(25) "2024-01-02T10:00:00+01:00"
+
+Deprecated: Creation of dynamic property DateTime::$date is deprecated in %s on line 8
 string(2) "zz"
 string(25) "2024-01-02T10:00:00+01:00"
 string(2) "zz"
 bool(false)
+
+Deprecated: Creation of dynamic property DateTimeZone::$timezone is deprecated in %s on line 12
 string(1) "q"
 string(3) "UTC"
 isset(timezone)
@@ -64,4 +70,6 @@ object(D)#4 (3) {
   string(3) "UTC"
 }
 bool(false)
+
+Deprecated: Creation of dynamic property DateTime::$timezone is deprecated in %s on line 28
 string(3) "abc"

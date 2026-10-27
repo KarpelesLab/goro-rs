@@ -1446,6 +1446,22 @@ impl Vm {
             nop.scope_class = Some(decl);
             nop.closure_called_class = Some(called_canon);
             nop.fcc_target_name = Some(n.to_vec());
+            // (errors name the method)
+            if nop.display_name.is_empty() {
+                nop.display_name = n.to_vec();
+            }
+            // (a closure's arguments bind to its closure_params: the
+            // static method's parameters)
+            if nop.closure_params.is_empty() {
+                nop.closure_params = (0..nop.param_count as usize)
+                    .map(|i| {
+                        (
+                            nop.cv_names.get(i).cloned().unwrap_or_default(),
+                            nop.by_ref_params.get(i).copied().unwrap_or(false),
+                        )
+                    })
+                    .collect();
+            }
             self.user_functions.insert(name.clone(), Rc::new(nop));
         }
         self.make_closure_object(str_val(&name))
