@@ -25595,27 +25595,43 @@ impl Vm {
                     fast_tried = true;
                 } else {
                     let no_release = !self.has_release_work();
-                    let next = self.run_fast_ops(
-                        op_array,
-                        ip,
-                        cvs.as_mut_slice(),
-                        tmps.as_mut_slice(),
-                        internal_code,
-                        !typed_ref::any(),
-                        no_release,
-                        &mut crate::fastpath::FeView {
-                            positions: foreach_positions,
-                            snap: foreach_snap,
-                            obj: foreach_obj,
-                            iter_handles: foreach_iter_handles,
-                            cur_key: foreach_cur_key,
-                            weakmap: weakmap_iter_keys,
-                            ref_cells: foreach_ref_cells,
-                            handler_depth: exception_handlers.len() as u32,
-                        },
-                        foreach_iter_handles.is_empty() && foreach_ref_arrays.is_empty(),
-                        (bound || globals_cv.is_some()).then_some(globals_cv),
-                    );
+                    let mut fe = crate::fastpath::FeView {
+                        positions: foreach_positions,
+                        snap: foreach_snap,
+                        obj: foreach_obj,
+                        iter_handles: foreach_iter_handles,
+                        cur_key: foreach_cur_key,
+                        weakmap: weakmap_iter_keys,
+                        ref_cells: foreach_ref_cells,
+                        handler_depth: exception_handlers.len() as u32,
+                    };
+                    let fe_quiet = fe.iter_handles.is_empty() && foreach_ref_arrays.is_empty();
+                    let bound_cv = (bound || globals_cv.is_some()).then_some(globals_cv);
+                    let next = if typed_ref::any() {
+                        self.run_fast_ops::<false>(
+                            op_array,
+                            ip,
+                            cvs.as_mut_slice(),
+                            tmps.as_mut_slice(),
+                            internal_code,
+                            no_release,
+                            &mut fe,
+                            fe_quiet,
+                            bound_cv,
+                        )
+                    } else {
+                        self.run_fast_ops::<true>(
+                            op_array,
+                            ip,
+                            cvs.as_mut_slice(),
+                            tmps.as_mut_slice(),
+                            internal_code,
+                            no_release,
+                            &mut fe,
+                            fe_quiet,
+                            bound_cv,
+                        )
+                    };
                     if self.fast_call_failed.is_some() {
                         fast_failure = self.fast_call_failed.take();
                     }

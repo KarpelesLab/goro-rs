@@ -750,28 +750,26 @@ impl Vm {
                 ..
             } = &mut *fe;
             let no_release = !self.has_release_work();
-            let stop = self.run_fast_ops(
-                &f,
-                0,
-                &mut slots,
-                &mut ctmps,
-                false,
-                !crate::vm::typed_ref::any(),
-                no_release,
-                &mut FeView {
-                    positions,
-                    snap,
-                    obj,
-                    iter_handles,
-                    cur_key,
-                    weakmap: weakmap_iter_keys,
-                    ref_cells,
-                    // (a lean callee has entered no try block)
-                    handler_depth: 0,
-                },
-                true,
-                None,
-            );
+            let mut fev = FeView {
+                positions,
+                snap,
+                obj,
+                iter_handles,
+                cur_key,
+                weakmap: weakmap_iter_keys,
+                ref_cells,
+                // (a lean callee has entered no try block)
+                handler_depth: 0,
+            };
+            let stop = if crate::vm::typed_ref::any() {
+                self.run_fast_ops::<false>(
+                    &f, 0, &mut slots, &mut ctmps, false, no_release, &mut fev, true, None,
+                )
+            } else {
+                self.run_fast_ops::<true>(
+                    &f, 0, &mut slots, &mut ctmps, false, no_release, &mut fev, true, None,
+                )
+            };
             // (the frames a call it made gave it: see enter_lean_frames)
             if self.lean_frames.last().is_some_and(|lf| lf.at.is_some()) {
                 self.leave_lean_frame();
@@ -1659,28 +1657,26 @@ impl Vm {
             ..
         } = &mut *fe;
         let no_release = !self.has_release_work();
-        let stop = self.run_fast_ops(
-            f,
-            0,
-            &mut slots,
-            &mut ctmps,
-            false,
-            !crate::vm::typed_ref::any(),
-            no_release,
-            &mut FeView {
-                positions,
-                snap,
-                obj,
-                iter_handles,
-                cur_key,
-                weakmap: weakmap_iter_keys,
-                ref_cells,
-                // (a lean callee has entered no try block)
-                handler_depth: 0,
-            },
-            true,
-            None,
-        );
+        let mut fev = FeView {
+            positions,
+            snap,
+            obj,
+            iter_handles,
+            cur_key,
+            weakmap: weakmap_iter_keys,
+            ref_cells,
+            // (a lean callee has entered no try block)
+            handler_depth: 0,
+        };
+        let stop = if crate::vm::typed_ref::any() {
+            self.run_fast_ops::<false>(
+                f, 0, &mut slots, &mut ctmps, false, no_release, &mut fev, true, None,
+            )
+        } else {
+            self.run_fast_ops::<true>(
+                f, 0, &mut slots, &mut ctmps, false, no_release, &mut fev, true, None,
+            )
+        };
         if self.lean_frames.last().is_some_and(|lf| lf.at.is_some()) {
             self.leave_lean_frame();
         }

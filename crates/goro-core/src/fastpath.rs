@@ -2955,19 +2955,21 @@ impl crate::vm::Vm {
     /// index of $GLOBALS, if it does).
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn run_fast_ops(
+    pub(crate) fn run_fast_ops<const REFS_OK: bool>(
         &mut self,
         op_array: &crate::opcode::OpArray,
         mut ip: usize,
         cvs: &mut [Value],
         tmps: &mut [Value],
         internal_code: bool,
-        refs_ok: bool,
         no_release: bool,
         fe: &mut FeView,
         fe_quiet: bool,
         bound: Option<Option<u32>>,
     ) -> usize {
+        // (a constant of each instance: the one for no typed references has
+        // no checks of its own for them)
+        let refs_ok = REFS_OK;
         // (the slices: the vectors are not looked at again for each opcode)
         let ops: &[Op] = &op_array.ops;
         let literals: &[Value] = &op_array.literals;
@@ -4110,7 +4112,9 @@ impl crate::vm::Vm {
     /// whose release destroys nothing (held elsewhere too, or a small
     /// array of plain values), when no destructor can be due. `fe_quiet`:
     /// no foreach iterator handle or by-reference loop pins a temporary.
+    // (inlined into each instance of run_fast_ops, its one caller)
     #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
     fn fast_assign(
         &self,
         op: &Op,
