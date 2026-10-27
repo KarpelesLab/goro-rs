@@ -11042,6 +11042,25 @@ impl Vm {
     /// For a property write at `ip - 1` whose value comes from an increment /
     /// decrement just before it that overflowed int (zend_incdec_typed_prop):
     /// Some(true) = increment, Some(false) = decrement.
+    /// Whether the PropertySet at `ip - 1` stores the result of a compound
+    /// assignment (`$o->p op= v`, `C::$p op= v`: the RW fetch, then the binary op whose
+    /// result is the stored `value_operand`).
+    #[inline(never)]
+    fn is_compound_prop_store(op_array: &OpArray, ip: usize, value_operand: &OperandType) -> bool {
+        if ip < 3 || !matches!(value_operand, OperandType::Tmp(_)) {
+            return false;
+        }
+        let (Some(prev), Some(fetch)) = (op_array.ops.get(ip - 2), op_array.ops.get(ip - 3)) else {
+            return false;
+        };
+        prev.result == *value_operand
+            && matches!(
+                fetch.opcode,
+                OpCode::PropertyGetRW | OpCode::StaticPropFetchRW
+            )
+            && fetch.result == prev.op1
+    }
+
     fn incdec_overflow_kind(
         op_array: &OpArray,
         ip: usize,
@@ -48812,6 +48831,8 @@ impl Vm {
                         } else {
                             Self::incdec_overflow_kind(op_array, ip, &op.op2, &value)
                         };
+                        let compound = !by_ref
+                            && Self::is_compound_prop_store(op_array, ip, &op.op2);
                         match self.static_prop_assign(
                             &class_v,
                             prop_name.as_bytes(),
@@ -48819,6 +48840,7 @@ impl Vm {
                             by_ref,
                             op_array,
                             overflow,
+                            compound,
                             op.line,
                         ) {
                             Ok(stored) => {
@@ -63643,6 +63665,15 @@ impl Vm {
                                     }
                                     let skip_coercion = incdec_overflow;
                                     let incdec_overflow = incdec_overflow && !continue_to_ref_check;
+                                    // ASSIGN_OBJ_OP on a typed reference: the
+                                    // reference's sources judge the result
+                                    // (zend_binary_assign_op_typed_ref).
+                                    let compound_typed_ref = typed_ref::any()
+                                        && Self::is_compound_prop_store(op_array, ip, &op.op2)
+                                        && matches!(
+                                            obj.borrow().properties.iter().find(|(k, _)| **k == *pkey),
+                                            Some((_, Value::Reference(r))) if typed_ref::is_typed(r)
+                                        );
                                     // Try coercion in weak mode
                                     if !op_array.strict_types && !skip_coercion {
                                         // Emit implicit float-to-int deprecation BEFORE coercion truncates
@@ -63728,11 +63759,12 @@ impl Vm {
                                     }
                                     if !continue_to_ref_check
                                         && (incdec_overflow
-                                            || !self.value_matches_type_mode(
-                                                &value,
-                                                pt,
-                                                op_array.strict_types,
-                                            ))
+                                            || (!compound_typed_ref
+                                                && !self.value_matches_type_mode(
+                                                    &value,
+                                                    pt,
+                                                    op_array.strict_types,
+                                                )))
                                     {
                                         let declaring_lower = declaring_class.to_ascii_lowercase();
                                         let class_display = self

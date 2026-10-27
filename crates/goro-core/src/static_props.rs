@@ -804,6 +804,7 @@ impl Vm {
         by_ref: bool,
         op_array: &OpArray,
         overflow: Option<bool>,
+        compound: bool,
         line: u32,
     ) -> Result<Value, SpErr> {
         let key = self.static_prop_class_idx(class_v, name)?;
@@ -860,6 +861,35 @@ impl Vm {
             Value::Undef => Value::Null,
             v => v,
         };
+        // ++/-- and compound assignments on a typed reference: its sources
+        // judge the result (zend_incdec_typed_ref /
+        // zend_binary_assign_op_typed_ref).
+        let typed_cell_ref = if super::typed_ref::any() && (compound || overflow.is_some()) {
+            match self.sp_cell(&slot, name) {
+                Some(Value::Reference(r)) if super::typed_ref::is_typed(r) => Some(r.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(r) = typed_cell_ref {
+            if overflow.is_none() {
+                // (the coercion the property's own type makes; a rejected
+                // value is the reference's error)
+                let mut coerced = value.clone();
+                if self
+                    .sp_verify_type(&slot, name, &mut coerced, strict, None, line)
+                    .is_ok()
+                {
+                    value = coerced;
+                }
+            }
+            if let Err(msg) = self.typed_ref_write_check(&r, &mut value, strict, overflow) {
+                return Err(SpErr::Throw(b"TypeError", msg));
+            }
+            *r.borrow_mut() = value.clone();
+            return Ok(value);
+        }
         self.sp_verify_type(&slot, name, &mut value, strict, overflow, line)?;
         // Other typed properties sharing the slot's reference.
         if super::typed_ref::any() {
