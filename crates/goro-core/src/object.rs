@@ -281,8 +281,15 @@ impl ClassEntry {
         if !name.iter().any(u8::is_ascii_uppercase) {
             return self.methods.get(name);
         }
-        let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-        self.methods.get(&lower)
+        self.get_method_folded(name)
+    }
+
+    /// get_method() of a name with uppercase letters (lowercased on the
+    /// stack when short).
+    #[inline(never)]
+    fn get_method_folded(&self, name: &[u8]) -> Option<&MethodDef> {
+        let lower = crate::class_table::LowerName::new(name);
+        self.methods.get(lower.get())
     }
 }
 

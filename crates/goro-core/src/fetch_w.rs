@@ -868,7 +868,7 @@ impl Vm {
     ) -> Option<String> {
         let class_name = obj.borrow().class_name.clone();
         let cl = class_name.to_ascii_lowercase();
-        let scope = self.current_class_scope().map(|s| s.to_ascii_lowercase());
+        let scope = self.current_class_scope_lower();
         let (vis, decl, ro, _, set_vis) =
             self.find_property_def_for_scope(&cl, prop, scope.as_deref())?;
         if set_vis.is_some() {

@@ -270,9 +270,14 @@ impl Vm {
             return None;
         }
         let class = self.classes.get(class_lower);
-        let display = match class {
+        let stub_name = match class {
+            Some(_) => "",
+            None => crate::stubs::find_class(class_lower)?.name,
+        };
+        // (made when the method is missing)
+        let display = || match class {
             Some(c) => crate::value::display_class_name(&c.name),
-            None => crate::stubs::find_class(class_lower)?.name.to_string(),
+            None => stub_name.to_string(),
         };
         let has = |methods: &crate::fxhash::FxIndexMap<Vec<u8>, crate::object::MethodDef>| {
             methods.contains_key(&ml)
@@ -282,7 +287,7 @@ impl Vm {
         let missing = || {
             Some(format!(
                 "Call to undefined method {}::{}()",
-                display,
+                display(),
                 crate::string::msg_str(method)
             ))
         };

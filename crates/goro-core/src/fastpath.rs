@@ -6327,6 +6327,75 @@ impl crate::vm::Vm {
         v: &Value,
         init: bool,
     ) -> bool {
+        // (of an object: what was said of an object of its class)
+        if let Value::Object(o) = v {
+            if let Ok(ob) = o.try_borrow() {
+                return self.typed_prop_store_ok_obj(
+                    class_name,
+                    name,
+                    scope,
+                    v,
+                    &ob.class_name,
+                    init,
+                );
+            }
+        }
+        self.typed_prop_store_ok_walk(class_name, name, scope, v, init)
+    }
+
+    /// typed_prop_store_ok() of an object of class `vclass`: a function of
+    /// the classes in the table (and of what plain_public_prop() says),
+    /// remembered while they do not change when both classes are there.
+    fn typed_prop_store_ok_obj(
+        &self,
+        class_name: &[u8],
+        name: &[u8],
+        scope: Option<&[u8]>,
+        v: &Value,
+        vclass: &[u8],
+        init: bool,
+    ) -> bool {
+        let mut kbuf = [0u8; 256];
+        let Some(key) = plain_prop_key(&mut kbuf, class_name, name, init, scope) else {
+            return self.typed_prop_store_ok_walk(class_name, name, scope, v, init);
+        };
+        let stamp = self.classes.link_generation();
+        let ctx = (
+            crate::opcode::site_epoch(),
+            self.native_class_handlers.len(),
+        );
+        {
+            let mut m = self.typed_store_memo.borrow_mut();
+            if m.0 != ctx {
+                *m = (ctx, Default::default());
+            } else if let Some(r) = m.1.get(stamp, key, vclass) {
+                return r;
+            }
+        }
+        let r = self.typed_prop_store_ok_walk(class_name, name, scope, v, init);
+        let mut b1 = [0u8; 128];
+        let mut b2 = [0u8; 128];
+        let in_table = |n: &[u8], b: &mut [u8; 128]| {
+            lower_into(n, b).is_some_and(|l| self.classes.contains_key(l))
+        };
+        if in_table(class_name, &mut b1) && in_table(vclass, &mut b2) {
+            if let Ok(mut m) = self.typed_store_memo.try_borrow_mut() {
+                if m.0 == ctx {
+                    m.1.set(stamp, key, vclass, r);
+                }
+            }
+        }
+        r
+    }
+
+    fn typed_prop_store_ok_walk(
+        &self,
+        class_name: &[u8],
+        name: &[u8],
+        scope: Option<&[u8]>,
+        v: &Value,
+        init: bool,
+    ) -> bool {
         if self.plain_public_prop(class_name, name, false, scope) != PLAIN {
             return false;
         }

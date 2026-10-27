@@ -46,7 +46,33 @@ impl Vm {
     /// The name `vm_static_builtin()` runs for a call to `name_lower`
     /// ("class::method"): the method a user class inherits is its internal
     /// ancestor's. None when it is not such a method.
+    /// (Remembered while the classes in the table do not change, when the
+    /// class named is there: the answer is a function of them.)
     pub(crate) fn vm_static_builtin_target(&self, name_lower: &[u8]) -> Option<Vec<u8>> {
+        let stamp = self.classes.link_generation();
+        {
+            let m = self.static_builtin_memo.borrow();
+            if m.0 == stamp {
+                if let Some(r) = m.1.get(name_lower) {
+                    return r.as_ref().map(|t| t.to_vec());
+                }
+            }
+        }
+        let r = self.vm_static_builtin_target_walk(name_lower);
+        let class = crate::string::find_double_colon(name_lower).map(|i| &name_lower[..i]);
+        if class.is_some_and(|c| self.classes.contains_key(c)) {
+            if let Ok(mut m) = self.static_builtin_memo.try_borrow_mut() {
+                if m.0 != stamp {
+                    *m = (stamp, Default::default());
+                }
+                m.1.insert(name_lower.into(), r.as_deref().map(Into::into));
+            }
+        }
+        r
+    }
+
+    #[inline(never)]
+    fn vm_static_builtin_target_walk(&self, name_lower: &[u8]) -> Option<Vec<u8>> {
         let sep = name_lower.windows(2).position(|w| w == b"::")?;
         let (class, method) = (&name_lower[..sep], &name_lower[sep + 2..]);
         match method {

@@ -100,7 +100,7 @@ fn object_class(v: &Value) -> Option<Vec<u8>> {
 impl Vm {
     /// Class scope of the calling user code (lowercase), for callables.
     fn callable_scope(&self) -> Option<Vec<u8>> {
-        self.current_class_scope().map(|s| lower(&s))
+        self.current_class_scope_lower()
     }
 
     /// `$this` of the running user frame (zend_get_this_object).

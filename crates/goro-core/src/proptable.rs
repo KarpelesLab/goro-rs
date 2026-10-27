@@ -581,7 +581,7 @@ impl Vm {
     /// list: one declared by an internal ancestor, or a dynamic one.
     #[inline(never)]
     fn internal_prop_visible(&self, cl: &[u8], name: &[u8]) -> bool {
-        let scope = self.current_class_scope().map(|s| lower(&s));
+        let scope = self.current_class_scope_lower();
         let Some((vis, decl, ..)) = self.find_property_def_for_scope(cl, name, scope.as_deref())
         else {
             return true;
@@ -783,7 +783,7 @@ impl Vm {
             return None;
         }
         let cl = lower(&obj.borrow().class_name);
-        let scope = self.current_class_scope().map(|s| lower(&s));
+        let scope = self.current_class_scope_lower();
         match self.scoped_prop_info_in(&layout.slots, &cl, name, scope.as_deref()) {
             Ok(Some(slot)) => {
                 if let Some(mk) = &slot.moved_key {

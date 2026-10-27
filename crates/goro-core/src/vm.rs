@@ -2318,6 +2318,22 @@ pub struct Vm {
     /// class name and the class named, for one class table link generation:
     /// a site meeting more classes than it remembers looks there.
     pub(crate) instanceof_site_memo: RefCell<crate::class_table::ImplementsMemo>,
+    /// What value_matches_type_mode() said of an object of a class in the
+    /// table (lowercased name) and a class type (lowercased), for one
+    /// class table link generation.
+    pub(crate) type_isa_memo: RefCell<crate::class_table::ImplementsMemo>,
+    /// Vm::protected_access_ok()'s answers, for a class table link
+    /// generation.
+    pub(crate) protected_access_memo: RefCell<crate::class_table::ImplementsMemo>,
+    /// vm_static_builtin_target()'s answers, for a class table link
+    /// generation.
+    #[allow(clippy::type_complexity)]
+    pub(crate) static_builtin_memo: RefCell<(u64, crate::class_table::FrontMap<Option<Box<[u8]>>>)>,
+    /// typed_prop_store_ok()'s answers for objects, for ((site epoch,
+    /// handler count), class table link generation): (plain_prop_key() of
+    /// the write, the object's class name) -> answer.
+    #[allow(clippy::type_complexity)]
+    pub(crate) typed_store_memo: RefCell<((u32, usize), crate::class_table::ImplementsMemo)>,
     /// See Vm::find_native_class_handler(): ((class table link generation,
     /// handler count), class -> answer).
     #[allow(clippy::type_complexity)]
@@ -3844,6 +3860,10 @@ impl Vm {
             class_chain_memo: Default::default(),
             implements_memo: Default::default(),
             isa_memo: Default::default(),
+            type_isa_memo: Default::default(),
+            protected_access_memo: Default::default(),
+            static_builtin_memo: Default::default(),
+            typed_store_memo: Default::default(),
             instanceof_site_memo: Default::default(),
             native_handler_memo: Default::default(),
             instanceof_memo: Default::default(),
@@ -4206,6 +4226,24 @@ impl Vm {
     #[inline]
     pub(crate) fn scope_top(&self) -> Option<&Vec<u8>> {
         self.class_scope_stack.last().filter(|s| !s.is_empty())
+    }
+
+    /// current_class_scope(), lowercased.
+    pub fn current_class_scope_lower(&self) -> Option<Vec<u8>> {
+        // (an empty entry: a function running outside any class)
+        if self.class_scope_stack.last().is_some_and(|s| s.is_empty()) {
+            return None;
+        }
+        let lower_of = |lower: &[u8]| match self.classes.get(lower) {
+            Some(c) if !c.name.eq_ignore_ascii_case(lower) => c.name.to_ascii_lowercase(),
+            _ => lower.to_ascii_lowercase(),
+        };
+        if let Some(lower) = self.scope_top() {
+            return Some(lower_of(lower));
+        }
+        self.called_class_stack
+            .last()
+            .map(|n| lower_of(&n.to_ascii_lowercase()))
     }
 
     pub fn current_class_scope(&self) -> Option<Vec<u8>> {
@@ -4772,48 +4810,30 @@ impl Vm {
             Visibility::Protected => {
                 // zend_bad_method_call() names the method's declaring class;
                 // property errors name the accessed class.
-                let decl_display;
-                let target_class_display = if is_property {
-                    target_class_display
-                } else {
-                    decl_display =
-                        self.class_name_for_display(&declaring_class.to_ascii_lowercase());
-                    decl_display.as_deref().unwrap_or(declaring_class)
+                let target_display = || -> std::borrow::Cow<'_, [u8]> {
+                    if is_property {
+                        std::borrow::Cow::Borrowed(target_class_display)
+                    } else {
+                        match self.class_name_for_display(&declaring_class.to_ascii_lowercase()) {
+                            Some(n) => std::borrow::Cow::Owned(n),
+                            None => std::borrow::Cow::Borrowed(declaring_class),
+                        }
+                    }
                 };
                 if let Some(caller) = caller_scope {
                     let caller_lower: Vec<u8> =
                         caller.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    let declaring_lower: Vec<u8> = declaring_class
-                        .iter()
-                        .map(|b| b.to_ascii_lowercase())
-                        .collect();
-                    // For protected: find the root declaring class (highest ancestor that declares this member)
-                    let member_name_lower: Vec<u8> = member_name
-                        .as_bytes()
-                        .iter()
-                        .map(|b| b.to_ascii_lowercase())
-                        .collect();
-                    let root_declaring = if is_property {
-                        self.find_root_declaring_class_for_property(
-                            &declaring_lower,
-                            member_name.as_bytes(),
-                        )
-                    } else {
-                        self.find_root_declaring_class_for_method(
-                            &declaring_lower,
-                            &member_name_lower,
-                        )
-                    };
-                    // Same class, or caller extends root declaring, or root declaring extends caller
-                    if caller_lower == root_declaring
-                        || self.class_extends(&caller_lower, &root_declaring)
-                        || self.class_extends(&root_declaring, &caller_lower)
-                    {
+                    if self.protected_access_ok(
+                        &caller_lower,
+                        declaring_class,
+                        member_name.as_bytes(),
+                        is_property,
+                    ) {
                         None
                     } else {
                         Some(Self::format_access_error(
                             "protected",
-                            target_class_display,
+                            &target_display(),
                             member_name,
                             is_property,
                             Some(caller),
@@ -4822,7 +4842,7 @@ impl Vm {
                 } else {
                     Some(Self::format_access_error(
                         "protected",
-                        target_class_display,
+                        &target_display(),
                         member_name,
                         is_property,
                         None,
@@ -4869,6 +4889,56 @@ impl Vm {
                 }
             }
         }
+    }
+
+    /// Whether a protected member `member` (a property's name, a method's
+    /// in any case) declared by `declaring_class` is accessible from the
+    /// class scope `caller_lower` (lowercased): the scope is the member's
+    /// root declaring class (the highest ancestor declaring it), extends
+    /// it, or is extended by it. (A function of the classes in the table:
+    /// remembered while they do not change, for classes there.)
+    fn protected_access_ok(
+        &self,
+        caller_lower: &[u8],
+        declaring_class: &[u8],
+        member: &[u8],
+        is_property: bool,
+    ) -> bool {
+        let mut key = Vec::with_capacity(declaring_class.len() + member.len() + 2);
+        key.push(u8::from(is_property));
+        key.extend(declaring_class.iter().map(|b| b.to_ascii_lowercase()));
+        key.push(0);
+        if is_property {
+            key.extend_from_slice(member);
+        } else {
+            key.extend(member.iter().map(|b| b.to_ascii_lowercase()));
+        }
+        let stamp = self.classes.link_generation();
+        if let Some(r) = self
+            .protected_access_memo
+            .borrow_mut()
+            .get(stamp, caller_lower, &key)
+        {
+            return r;
+        }
+        let declaring_lower = &key[1..declaring_class.len() + 1];
+        let member_key = &key[declaring_class.len() + 2..];
+        let root_declaring = if is_property {
+            self.find_root_declaring_class_for_property(declaring_lower, member_key)
+        } else {
+            self.find_root_declaring_class_for_method(declaring_lower, member_key)
+        };
+        // Same class, or caller extends root declaring, or root declaring extends caller
+        let r = caller_lower == root_declaring.as_slice()
+            || self.class_extends(caller_lower, &root_declaring)
+            || self.class_extends(&root_declaring, caller_lower);
+        // (what is said of a class not in the table may change)
+        if self.classes.contains_key(caller_lower) && self.classes.contains_key(declaring_lower) {
+            self.protected_access_memo
+                .borrow_mut()
+                .set(stamp, caller_lower, &key, r);
+        }
+        r
     }
 
     /// A class's name as declared (user or internal class), by lowercase name.
@@ -5030,7 +5100,7 @@ impl Vm {
         Option<Visibility>,
     )> {
         // Resolved from the calling scope: its own private shadows others.
-        let scope = self.current_class_scope().map(|s| s.to_ascii_lowercase());
+        let scope = self.current_class_scope_lower();
         self.find_property_def_for_scope(class_name_lower, prop_name, scope.as_deref())
     }
 
@@ -5195,7 +5265,7 @@ impl Vm {
         class_lower: &[u8],
         prop: &[u8],
     ) -> Option<Vec<u8>> {
-        let scope = self.current_class_scope().map(|s| s.to_ascii_lowercase());
+        let scope = self.current_class_scope_lower();
         match self.find_property_def_walk(class_lower, prop, scope.as_deref()) {
             Some((_, decl, _, Some(_), _)) => Some(decl),
             _ => None,
@@ -8593,7 +8663,7 @@ impl Vm {
         if matches!(vis, V::Public) {
             return None;
         }
-        let scope = self.current_class_scope().map(|s| s.to_ascii_lowercase());
+        let scope = self.current_class_scope_lower();
         let allowed = match (&vis, &scope) {
             (V::Private, Some(sc)) => sc.as_slice() == class_lower,
             (V::Protected, Some(sc)) => {
@@ -9572,7 +9642,7 @@ impl Vm {
             return None;
         }
         let class_lower = b.class_name.to_ascii_lowercase();
-        let scope = self.current_class_scope().map(|s| s.to_ascii_lowercase());
+        let scope = self.current_class_scope_lower();
         let (vis, decl, readonly, _, _) =
             self.find_property_def_for_scope(&class_lower, name, scope.as_deref())?;
         if !readonly || !b.has_property(name) || matches!(b.get_property(name), Value::Undef) {
@@ -9615,7 +9685,7 @@ impl Vm {
         class_name: &[u8],
         name: &[u8],
     ) -> Option<String> {
-        let scope = self.current_class_scope().map(|s| s.to_ascii_lowercase());
+        let scope = self.current_class_scope_lower();
         let (vis, decl, _, _, _) =
             self.find_property_def_for_scope(class_lower, name, scope.as_deref())?;
         if vis == Visibility::Public {
@@ -10340,10 +10410,20 @@ impl Vm {
                             }
                             // Check parent chain and interfaces
                             if let Some(class_entry) = self.classes.get(&obj_class_lower) {
+                                // (a function of the classes in the table:
+                                // remembered while they do not change)
+                                let stamp = self.classes.link_generation();
+                                if let Some(r) = self.type_isa_memo.borrow_mut().get(
+                                    stamp,
+                                    &obj_class_lower,
+                                    &class_name_lower,
+                                ) {
+                                    return r;
+                                }
                                 // (a class_alias() of the object's own class; a
                                 // class declaring __toString() implements
                                 // Stringable implicitly)
-                                return self.class_is_a(class_entry, &class_name_lower)
+                                let r = self.class_is_a(class_entry, &class_name_lower)
                                     || self.classes.get(&class_name_lower).is_some_and(|t| {
                                         t.name.eq_ignore_ascii_case(&obj_class_lower)
                                     })
@@ -10352,6 +10432,13 @@ impl Vm {
                                             &obj_class_lower,
                                             b"stringable",
                                         ));
+                                self.type_isa_memo.borrow_mut().set(
+                                    stamp,
+                                    &obj_class_lower,
+                                    &class_name_lower,
+                                    r,
+                                );
+                                return r;
                             }
                             // Check built-in class hierarchy
                             if is_builtin_subclass(&obj_class_lower, &class_name_lower) {
@@ -47655,7 +47742,7 @@ impl Vm {
                             .called_class_stack
                             .last()
                             .map(|c| c.to_ascii_lowercase())
-                            .or_else(|| self.current_class_scope().map(|c| c.to_ascii_lowercase()))
+                            .or_else(|| self.current_class_scope_lower())
                             .unwrap_or(class_lower),
                         b"parent" => self
                             .current_class_scope()
@@ -51808,11 +51895,7 @@ impl Vm {
                                 .iter()
                                 .map(|b| b.to_ascii_lowercase())
                                 .collect();
-                            let caller_scope_hk = self.current_class_scope().map(|s| {
-                                s.iter()
-                                    .map(|b| b.to_ascii_lowercase())
-                                    .collect::<Vec<u8>>()
-                            });
+                            let caller_scope_hk = self.current_class_scope_lower();
                             let is_hooked = self
                                 .find_property_def_for_scope(
                                     &class_lower_hk,
@@ -51957,11 +52040,7 @@ impl Vm {
                             .iter()
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
-                        let caller_scope_u = self.current_class_scope().map(|s| {
-                            s.iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect::<Vec<u8>>()
-                        });
+                        let caller_scope_u = self.current_class_scope_lower();
                         // zend_std_unset_property(): a property the scope may not
                         // access goes to __unset() (unless its guard is active),
                         // else "Cannot access ... property".
@@ -53950,7 +54029,7 @@ impl Vm {
                             .collect();
                         // The slot this scope's access refers to (privates by scope).
                         let pkey = self.prop_key_for(&obj_val, prop_name.as_bytes());
-                        let scope_l = self.current_class_scope().map(|s| s.to_ascii_lowercase());
+                        let scope_l = self.current_class_scope_lower();
                         // Asymmetric visibility / readonly: a reference would allow
                         // modification. Objects yield a copy, other values error.
                         let mut deny: Option<String> = None;
@@ -62318,11 +62397,7 @@ impl Vm {
                         // Undefined-property warning + NULL instead of an
                         // Error.
                         let mut hidden_private_prop = false;
-                        let caller_scope_for_get = self.current_class_scope().map(|s| {
-                            s.iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect::<Vec<u8>>()
-                        });
+                        let caller_scope_for_get = self.current_class_scope_lower();
                         if let Some((vis, declaring_class, _is_readonly, _prop_type, _set_vis)) =
                             self.find_property_def_for_scope(
                                 &class_lower,
@@ -63711,11 +63786,7 @@ impl Vm {
                         // we still need to defer to __set if it exists, so we only enforce
                         // the asymmetric (set_visibility is Some) case here.
                         if has_set_hook && !in_set_hook {
-                            let caller_scope_for_set = self.current_class_scope().map(|s| {
-                                s.iter()
-                                    .map(|b| b.to_ascii_lowercase())
-                                    .collect::<Vec<u8>>()
-                            });
+                            let caller_scope_for_set = self.current_class_scope_lower();
                             if let Some((
                                 vis,
                                 declaring_class,
@@ -63958,11 +64029,7 @@ impl Vm {
                         // The typed property coerced the value (the assignment
                         // expression then yields the coerced value).
                         let mut coerced_for_result = false;
-                        let caller_scope_for_prop = self.current_class_scope().map(|s| {
-                            s.iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect::<Vec<u8>>()
-                        });
+                        let caller_scope_for_prop = self.current_class_scope_lower();
                         // If the runtime class allows dynamic properties and the only
                         // matching property is an inherited *private* one not visible
                         // from the current scope, treat it as a dynamic property
@@ -69522,11 +69589,7 @@ impl Vm {
         if !self.has_unguarded_get_hook(&class_lower, pn) {
             return None;
         }
-        let caller_scope_l = self.current_class_scope().map(|s| {
-            s.iter()
-                .map(|b| b.to_ascii_lowercase())
-                .collect::<Vec<u8>>()
-        });
+        let caller_scope_l = self.current_class_scope_lower();
         // A private property resolves to its declaring class' hook.
         let mut hook_class = class_lower.clone();
         if let Some((vis, declaring_class, _, _, _)) =
