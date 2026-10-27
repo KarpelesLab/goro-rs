@@ -323,7 +323,8 @@ impl NativeStream for PharDir {
     fn readdir(&mut self, _vm: &mut Vm) -> Option<Vec<u8>> {
         let e = self.entries.get(self.pos)?.clone();
         self.pos += 1;
-        if e.len() >= 256 {
+        // (php_stream_dirent's d_name is MAXPATHLEN bytes)
+        if e.len() >= 4096 {
             return None;
         }
         Some(e)

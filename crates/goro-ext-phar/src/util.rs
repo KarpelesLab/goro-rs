@@ -490,7 +490,7 @@ pub fn get_or_create_entry_data(
     if chk.result.is_err() {
         return fail(format!(
             "phar error: invalid path \"{}\" contains {}",
-            l(path),
+            goro_core::string::msg_str(path),
             chk.error
         ));
     }
@@ -864,7 +864,7 @@ pub fn get_entry_info_dir(
     if chk.result.is_err() {
         return fail(format!(
             "phar error: invalid path \"{}\" contains {}",
-            l(path),
+            goro_core::string::msg_str(path),
             chk.error
         ));
     }

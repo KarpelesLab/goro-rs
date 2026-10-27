@@ -2851,6 +2851,20 @@ fn extract_file(vm: &mut Vm, overwrite: bool, entry: &EntryRef, dest: &[u8]) -> 
     if is_mounted || fname.starts_with(b".phar") {
         return Ok(());
     }
+    // virtual_file_ex() relative to "/" fails (EINVAL) for a path that
+    // does not fit MAXPATHLEN: the message names the destination itself
+    let too_long = if fname.first() == Some(&b'/') {
+        fname.len() >= 4096 - 1
+    } else {
+        1 + fname.len() + 1 >= 4096 - 1
+    };
+    if too_long && fname.len() > 50 {
+        return Err(format!(
+            "Cannot extract \"{}...\" to \"{}...\", extracted filename is too long for filesystem",
+            l(&fname[..50]),
+            l(dest)
+        ));
+    }
     // virtual_file_ex() relative to "/"
     let mut parts: Vec<&[u8]> = Vec::new();
     for seg in fname.split(|&c| c == b'/') {
