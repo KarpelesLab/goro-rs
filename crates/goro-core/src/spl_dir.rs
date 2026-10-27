@@ -695,9 +695,11 @@ impl Vm {
                     ));
                     self.current_exception.is_none()
                 }
-                Value::True | Value::False | Value::Long(_) | Value::Double(_) | Value::String(_) => {
-                    true
-                }
+                Value::True
+                | Value::False
+                | Value::Long(_)
+                | Value::Double(_)
+                | Value::String(_) => true,
                 other => {
                     let msg = format!(
                         "{}(): Argument #2 ($useIncludePath) must be of type bool, {} given",
