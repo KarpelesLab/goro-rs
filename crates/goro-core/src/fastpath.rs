@@ -4198,8 +4198,14 @@ impl crate::vm::Vm {
                 }
                 return Fast::No;
             }
-            // (a temporary's array is moved, also into a temporary)
-            Value::Array(a) if to_tmp.is_some() || Rc::strong_count(&a) == 1 => Value::Array(a),
+            // (a temporary's array is moved, also into a temporary; a
+            // variable's is copied, also into a temporary: `c ? $a : b`)
+            Value::Array(a)
+                if (to_tmp.is_some() && matches!(op.op2, OperandType::Tmp(_)))
+                    || Rc::strong_count(&a) == 1 =>
+            {
+                Value::Array(a)
+            }
             v @ Value::Array(_) => self.dup_array_value(v),
             Value::Object(o) => {
                 crate::gc::track_object(&o);

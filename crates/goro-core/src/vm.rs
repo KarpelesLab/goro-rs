@@ -26243,6 +26243,12 @@ impl Vm {
                             *slot = Value::Undef;
                         }
                     }
+                    // A variable's array copied into a temporary (the result
+                    // of `c ? $a : b`, `match` arms): the temporary is a copy,
+                    // which property / element stores take as their own.
+                    if let OperandType::Tmp(_) = op.op1 {
+                        val = self.dup_stored_array(&op.op2, val);
+                    }
                     let keep = matches!(op.result, OperandType::Tmp(_));
                     let stored_val = if keep {
                         val.clone()
