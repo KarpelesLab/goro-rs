@@ -12531,7 +12531,14 @@ impl Vm {
 
         // If this is a generator function, create a Generator instead of executing
         if op_array.is_generator {
-            let generator = self.new_generator(op_array.clone(), func_cvs);
+            let mut generator = self.new_generator(op_array.clone(), func_cvs);
+            // (its func_get_args(): the arguments passed, extra ones included)
+            generator.args = call
+                .args
+                .iter()
+                .skip(lead.min(call.args.len()))
+                .map(|v| v.deref())
+                .collect();
             let gen_rc = Rc::new(RefCell::new(generator));
             crate::gc::track_generator(&gen_rc);
             self.watch_generator_finally(&gen_rc);
@@ -60046,6 +60053,11 @@ impl Vm {
                             // (transitively: interfaces extending builtin ones)
                             let mut todo: Vec<Vec<u8>> =
                                 iface_names.iter().map(|n| n.to_ascii_lowercase()).collect();
+                            // (an interface's first parent, an internal one
+                            // included: `interface I extends IteratorAggregate`)
+                            if class.is_interface {
+                                todo.extend(class.parent.iter().map(|n| n.to_ascii_lowercase()));
+                            }
                             let mut seen: std::collections::HashSet<Vec<u8>> =
                                 std::collections::HashSet::new();
                             while let Some(il) = todo.pop() {
