@@ -23714,6 +23714,10 @@ impl Compiler {
         if let Some(e) = relative_in_intersection(hint, self.is_in_trait) {
             return Some(e);
         }
+        // (only a union or an intersection lists types that can be redundant)
+        if !matches!(hint, TypeHint::Union(_) | TypeHint::Intersection(_)) {
+            return None;
+        }
         let pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
         fn names(parts: &[ParamType]) -> Vec<Vec<u8>> {
             parts
@@ -27239,7 +27243,14 @@ impl Compiler {
             }
         }
         fn qstr(s: &[u8]) -> String {
-            let mut out = String::from("'");
+            let mut out = String::with_capacity(s.len() + 2);
+            out.push('\'');
+            if s.is_ascii() && !s.iter().any(|&c| c == b'\'' || c == b'\\') {
+                // (nothing to escape: ASCII is its own char-per-byte form)
+                out.push_str(std::str::from_utf8(s).unwrap_or_default());
+                out.push('\'');
+                return out;
+            }
             for &c in s {
                 if c == b'\'' || c == b'\\' {
                     out.push('\\');

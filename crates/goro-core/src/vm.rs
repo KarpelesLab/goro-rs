@@ -2432,9 +2432,11 @@ pub struct Vm {
     /// The op array of an assignment an internal function makes through
     /// the VM (clone()'s $withProperties), by address (0: none).
     pub(crate) internal_assign_ops: usize,
-    /// Builtins with verified stub arginfo (see arginfo.rs), rebuilt when
-    /// the number of registered functions changes.
-    pub(crate) zpp_map: crate::fxhash::FxHashMap<Vec<u8>, (&'static crate::arginfo::FuncInfo, u8)>,
+    /// Builtins with verified stub arginfo (see arginfo.rs), looked up on
+    /// first use (None: not verified); cleared when the number of
+    /// registered functions changes.
+    pub(crate) zpp_map:
+        crate::fxhash::FxHashMap<Vec<u8>, Option<(&'static crate::arginfo::FuncInfo, u8)>>,
     pub(crate) zpp_map_fn_count: usize,
     /// Builtins of extensions whose stub arginfo matches their zpp (the
     /// counterpart of arginfo_verified.rs for extensions not covered by it):

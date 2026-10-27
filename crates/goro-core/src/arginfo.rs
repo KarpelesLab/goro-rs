@@ -913,9 +913,13 @@ impl Vm {
     #[inline]
     pub(crate) fn zpp_info(&mut self, lname: &[u8]) -> Option<(&'static FuncInfo, u8)> {
         if self.zpp_map_fn_count != self.functions.len() {
-            self.zpp_rebuild_map();
+            self.zpp_map.clear();
+            self.zpp_map_fn_count = self.functions.len();
         }
-        self.zpp_map.get(lname).copied()
+        match self.zpp_map.get(lname) {
+            Some(r) => *r,
+            None => self.zpp_info_slow(lname),
+        }
     }
 
     /// Arginfo and verified flags of internal method `method_lower` called on
@@ -1305,22 +1309,27 @@ impl Vm {
             .is_err()
     }
 
-    fn zpp_rebuild_map(&mut self) {
-        self.zpp_map.clear();
-        for name in self.functions.keys() {
+    /// zpp_info() of a name not looked up yet: a registered builtin whose
+    /// arginfo is verified.
+    #[inline(never)]
+    fn zpp_info_slow(&mut self, name: &[u8]) -> Option<(&'static FuncInfo, u8)> {
+        let r = if self.functions.contains_key(name) {
             let flags =
                 verified_flags(name) | self.zpp_extension_verified.get(name).copied().unwrap_or(0);
             if flags != 0 {
                 // (a deprecated function checks its arguments itself, after
                 // its deprecation: zpp_self_check())
-                if let Some(info) =
-                    lookup(name).filter(|i| i.stub.flags & crate::stubs::F_DEPRECATED == 0)
-                {
-                    self.zpp_map.insert(name.clone(), (info, flags));
-                }
+                lookup(name)
+                    .filter(|i| i.stub.flags & crate::stubs::F_DEPRECATED == 0)
+                    .map(|info| (info, flags))
+            } else {
+                None
             }
-        }
-        self.zpp_map_fn_count = self.functions.len();
+        } else {
+            None
+        };
+        self.zpp_map.insert(name.to_vec(), r);
+        r
     }
 
     /// Evaluate a stub default value (zend_get_default_from_internal_arg_info).
