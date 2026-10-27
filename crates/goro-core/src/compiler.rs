@@ -1389,6 +1389,45 @@ impl Compiler {
         }
     }
 
+    /// can_match_use_jumptable() && at least 2 conditions: every condition
+    /// of the match arms is an int or string literal.
+    #[inline(never)]
+    fn match_uses_jumptable(arms: &[MatchArm]) -> bool {
+        fn lit(e: &Expr) -> bool {
+            match &e.kind {
+                ExprKind::Int(_) | ExprKind::String(_) => true,
+                ExprKind::UnaryOp {
+                    op: UnaryOp::Negate | UnaryOp::Plus,
+                    operand,
+                    ..
+                } => matches!(operand.kind, ExprKind::Int(_)),
+                _ => false,
+            }
+        }
+        let mut n = 0;
+        for arm in arms {
+            for c in arm.conditions.iter().flatten() {
+                if !lit(c) {
+                    return false;
+                }
+                n += 1;
+            }
+        }
+        n >= 2
+    }
+
+    /// The line of a conditional jump emitted once its condition is
+    /// compiled: CG(zend_lineno), the line of the condition's last compiled
+    /// expression (`fallback` when unknown).
+    #[inline(never)]
+    fn cur_lineno(&self, fallback: u32) -> u32 {
+        if self.zend_lineno > 0 {
+            self.zend_lineno
+        } else {
+            fallback
+        }
+    }
+
     /// The line of the opcodes compiled right after object expression
     /// `object` (CG(zend_lineno)): a closure leaves it at its closing line
     /// (zend_compile_func_decl() sets decl->end_lineno and does not restore
@@ -4954,7 +4993,7 @@ impl Compiler {
                         op1: operand,
                         op2: OperandType::Unused,
                         result: OperandType::Unused,
-                        line: stmt.span.line,
+                        line: self.cur_lineno(stmt.span.line),
                     });
                     // Temporaries of the echoed expression are freed by now.
                     self.end_stmt_tmps(tmp_start, stmt.span.line);
@@ -5082,6 +5121,12 @@ impl Compiler {
                     let idx = self.op_array.add_literal(Value::Null);
                     OperandType::Const(idx)
                 };
+                // (RETURN follows its value: CG(zend_lineno))
+                let ret_line = if value.is_some() {
+                    self.cur_lineno(stmt.span.line)
+                } else {
+                    stmt.span.line
+                };
                 self.emit_loop_frees(0, operand, stmt.span.line);
                 // ZEND_RETURN_BY_REF of a non-variable (zend_compile_return):
                 // "Only variable references should be returned by reference".
@@ -5120,7 +5165,7 @@ impl Compiler {
                             op1: OperandType::Const(msg_idx),
                             op2: OperandType::Unused,
                             result: OperandType::Unused,
-                            line: stmt.span.line,
+                            line: ret_line,
                         });
                     }
                 }
@@ -5131,7 +5176,7 @@ impl Compiler {
                         op1: operand,
                         op2: OperandType::Unused,
                         result: OperandType::Unused,
-                        line: stmt.span.line,
+                        line: ret_line,
                     });
                     self.op_array.emit(Op {
                         opcode: OpCode::Jmp,
@@ -5146,7 +5191,7 @@ impl Compiler {
                         op1: operand,
                         op2: OperandType::Unused,
                         result: OperandType::Unused,
-                        line: stmt.span.line,
+                        line: ret_line,
                     });
                 }
                 Ok(())
@@ -5168,7 +5213,7 @@ impl Compiler {
                     op1: cond,
                     op2: OperandType::JmpTarget(0), // patched later
                     result: OperandType::Unused,
-                    line: stmt.span.line,
+                    line: self.cur_lineno(stmt.span.line),
                 });
                 // The condition's temporaries die once it is tested (e.g. the
                 // object of `if (!$x = f())`), on both paths.
@@ -5211,7 +5256,7 @@ impl Compiler {
                         op1: cond,
                         op2: OperandType::JmpTarget(0),
                         result: OperandType::Unused,
-                        line: stmt.span.line,
+                        line: self.cur_lineno(elseif_cond.span.line),
                     });
                     self.free_cond_tmps(cond_tmps, stmt.span.line);
                     for s in elseif_body {
@@ -5273,7 +5318,7 @@ impl Compiler {
                     op1: cond,
                     op2: OperandType::JmpTarget(0),
                     result: OperandType::Unused,
-                    line: stmt.span.line,
+                    line: self.cur_lineno(stmt.span.line),
                 });
 
                 // Set continue target to loop_start (re-evaluate condition)
@@ -5332,7 +5377,7 @@ impl Compiler {
                     op1: cond,
                     op2: OperandType::JmpTarget(loop_start),
                     result: OperandType::Unused,
-                    line: stmt.span.line,
+                    line: self.cur_lineno(stmt.span.line),
                 });
                 let after_loop = self.op_array.current_offset();
 
@@ -5387,7 +5432,7 @@ impl Compiler {
                         op1: cond,
                         op2: OperandType::JmpTarget(0),
                         result: OperandType::Unused,
-                        line: stmt.span.line,
+                        line: self.cur_lineno(stmt.span.line),
                     }))
                 } else {
                     None
@@ -5529,7 +5574,11 @@ impl Compiler {
                     op1: arr,
                     op2: src_flag,
                     result: OperandType::Tmp(iter_tmp),
-                    line: stmt.span.line,
+                    line: if *by_ref {
+                        expr.span.line.max(stmt.span.line)
+                    } else {
+                        self.cur_lineno(stmt.span.line)
+                    },
                 });
 
                 let depth_nop = if self.op_array.is_generator {
@@ -12768,6 +12817,27 @@ impl Compiler {
         arr_op: OperandType,
         line: u32,
     ) -> CompileResult<()> {
+        // (zend_compile_assign(): the list's line, its first element's)
+        let start = elems
+            .first()
+            .map(|e| e.value.span.line)
+            .filter(|&l| l > 0)
+            .unwrap_or(line);
+        self.compile_list_destructure_at(elems, arr_op, line, start)
+            .map(|_| ())
+    }
+
+    /// compile_list_destructure() with CG(zend_lineno) `cur_line`: each
+    /// FETCH_LIST is on the line of what was compiled last (the element's
+    /// key, else the previous element's target). Returns the line the
+    /// list's compilation ends on.
+    fn compile_list_destructure_at(
+        &mut self,
+        elems: &[ArrayElement],
+        arr_op: OperandType,
+        line: u32,
+        mut cur_line: u32,
+    ) -> CompileResult<u32> {
         // Spread operator is not allowed in destructuring assignments
         for elem in elems.iter() {
             if elem.unpack {
@@ -12815,10 +12885,19 @@ impl Compiler {
 
         for (i, elem) in elems.iter().enumerate() {
             let idx_op = if let Some(key_expr) = &elem.key {
-                self.compile_expr(key_expr)?
+                let k = self.compile_expr(key_expr)?;
+                cur_line = self.cur_lineno(cur_line);
+                k
             } else {
                 let idx_const = self.op_array.add_literal(Value::Long(i as i64));
                 OperandType::Const(idx_const)
+            };
+            let fetch_line = if cur_line > 0 { cur_line } else { line };
+            // (the target's assignment then sets it)
+            let target_line = if elem.value.span.line > 0 {
+                elem.value.span.line
+            } else {
+                fetch_line
             };
 
             if let ExprKind::Variable(name) = &elem.value.kind {
@@ -12829,15 +12908,16 @@ impl Compiler {
                     op1: arr_op,
                     op2: idx_op,
                     result: OperandType::Tmp(tmp),
-                    line,
+                    line: fetch_line,
                 });
                 self.op_array.emit(Op {
                     opcode: OpCode::Assign,
                     op1: OperandType::Cv(cv),
                     op2: OperandType::Tmp(tmp),
                     result: OperandType::Unused,
-                    line,
+                    line: target_line,
                 });
+                cur_line = target_line;
             } else {
                 // Check for nested destructuring
                 let nested_elems = match &elem.value.kind {
@@ -12867,9 +12947,14 @@ impl Compiler {
                         op1: arr_op,
                         op2: idx_op,
                         result: OperandType::Tmp(sub_arr),
-                        line,
+                        line: fetch_line,
                     });
-                    self.compile_list_destructure(&nested, OperandType::Tmp(sub_arr), line)?;
+                    cur_line = self.compile_list_destructure_at(
+                        &nested,
+                        OperandType::Tmp(sub_arr),
+                        line,
+                        fetch_line,
+                    )?;
                 } else if !matches!(&elem.value.kind, ExprKind::Null) {
                     // zend_verify_list_assign_target() and
                     // zend_ensure_writable_variable().
@@ -12903,14 +12988,15 @@ impl Compiler {
                         op1: arr_op,
                         op2: idx_op,
                         result: OperandType::Tmp(tmp),
-                        line,
+                        line: fetch_line,
                     });
                     // Compile the assignment to the complex target
                     self.compile_assign_tmp_to_target(&elem.value, tmp, line)?;
+                    cur_line = target_line;
                 }
             }
         }
-        Ok(())
+        Ok(cur_line)
     }
 
     /// Assign the value in `tmp` to a non-variable target expression
@@ -13275,7 +13361,7 @@ impl Compiler {
                     op1: obj,
                     op2: name,
                     result: OperandType::Tmp(tmp),
-                    line: object.span.line,
+                    line: object.span.line.max(property.span.line),
                 });
                 Ok(OperandType::Tmp(tmp))
             }
@@ -13818,7 +13904,7 @@ impl Compiler {
                 op1: obj,
                 op2: name,
                 result: OperandType::Tmp(tmp),
-                line: array.span.line,
+                line: array.span.line.max(property.span.line),
             });
             return Ok(OperandType::Tmp(tmp));
         }
@@ -16218,6 +16304,7 @@ impl Compiler {
             | b"doubleval" | b"strval" | b"gettype" => argc == 1,
             b"count" | b"sizeof" => argc == 1,
             b"get_called_class" | b"func_num_args" | b"func_get_args" => argc == 0,
+            b"array_key_exists" => argc == 2,
             _ => false,
         }
     }
@@ -18151,7 +18238,7 @@ impl Compiler {
                     op1: val,
                     op2: OperandType::Unused,
                     result: OperandType::Tmp(tmp),
-                    line: expr.span.line,
+                    line: self.cur_lineno(expr.span.line),
                 });
                 Ok(OperandType::Tmp(tmp))
             }
@@ -18223,13 +18310,16 @@ impl Compiler {
             } => {
                 let cond = self.compile_expr(condition)?;
                 let result_tmp = self.op_array.alloc_temp();
+                // (each opline on CG(zend_lineno): the line of the operand
+                // compiled last)
+                let cond_line = self.cur_lineno(expr.span.line);
 
                 let jmp_false = self.op_array.emit(Op {
                     opcode: OpCode::JmpZ,
                     op1: cond,
                     op2: OperandType::JmpTarget(0),
                     result: OperandType::Unused,
-                    line: expr.span.line,
+                    line: cond_line,
                 });
 
                 let true_val = if let Some(true_expr) = if_true {
@@ -18242,7 +18332,7 @@ impl Compiler {
                     op1: OperandType::Tmp(result_tmp),
                     op2: true_val,
                     result: OperandType::Unused,
-                    line: expr.span.line,
+                    line: self.cur_lineno(expr.span.line),
                 });
                 let jmp_end = self.op_array.emit(Op {
                     opcode: OpCode::Jmp,
@@ -18261,7 +18351,7 @@ impl Compiler {
                     op1: OperandType::Tmp(result_tmp),
                     op2: false_val,
                     result: OperandType::Unused,
-                    line: expr.span.line,
+                    line: self.cur_lineno(expr.span.line),
                 });
 
                 let end = self.op_array.current_offset();
@@ -18421,7 +18511,7 @@ impl Compiler {
                         op1: OperandType::Tmp(result_tmp),
                         op2: right_val,
                         result: OperandType::Unused,
-                        line: expr.span.line,
+                        line: self.cur_lineno(expr.span.line),
                     });
 
                     let end = self.op_array.current_offset();
@@ -18530,7 +18620,7 @@ impl Compiler {
                     op1: OperandType::Tmp(result_tmp),
                     op2: right_val,
                     result: OperandType::Unused,
-                    line: expr.span.line,
+                    line: self.cur_lineno(expr.span.line),
                 });
 
                 let end = self.op_array.current_offset();
@@ -18902,12 +18992,17 @@ impl Compiler {
             ExprKind::Match { subject, arms } => {
                 let subj = self.compile_expr(subject)?;
                 let subj_tmp = self.op_array.alloc_temp();
+                // (zend_compile_match(): MATCH_ERROR follows the subject
+                // when a jump table is used, else every condition)
+                let subject_line = self.cur_lineno(expr.span.line);
+                let mut match_error_line = subject_line;
+                let jumptable = Self::match_uses_jumptable(arms);
                 self.op_array.emit(Op {
                     opcode: OpCode::Assign,
                     op1: OperandType::Tmp(subj_tmp),
                     op2: subj,
                     result: OperandType::Unused,
-                    line: expr.span.line,
+                    line: subject_line,
                 });
 
                 let result_tmp = self.op_array.alloc_temp();
@@ -18921,12 +19016,16 @@ impl Compiler {
                         for cond in conditions {
                             let cond_val = self.compile_expr(cond)?;
                             let cmp_tmp = self.op_array.alloc_temp();
+                            let cond_line = self.cur_lineno(expr.span.line);
+                            if !jumptable {
+                                match_error_line = cond_line;
+                            }
                             self.op_array.emit(Op {
                                 opcode: OpCode::Identical,
                                 op1: OperandType::Tmp(subj_tmp),
                                 op2: cond_val,
                                 result: OperandType::Tmp(cmp_tmp),
-                                line: expr.span.line,
+                                line: cond_line,
                             });
                             let jmp = self.op_array.emit(Op {
                                 opcode: OpCode::JmpNz,
@@ -19021,7 +19120,7 @@ impl Compiler {
                         op1: OperandType::Tmp(subj_tmp),
                         op2: OperandType::Unused,
                         result: OperandType::Unused,
-                        line: expr.span.line,
+                        line: match_error_line,
                     });
                 }
 
@@ -19407,7 +19506,7 @@ impl Compiler {
                     op1: OperandType::Const(name_idx),
                     op2: OperandType::Unused,
                     result: OperandType::Tmp(tmp),
-                    line: expr.span.line,
+                    line: class.span.line.max(expr.span.line),
                 });
 
                 // Always call constructor (it may have default params or side effects)
@@ -19420,7 +19519,7 @@ impl Compiler {
                         op1: OperandType::Tmp(tmp),
                         op2: OperandType::Const(constructor_name),
                         result: OperandType::Unused,
-                        line: expr.span.line,
+                        line: class.span.line.max(expr.span.line),
                     });
                     self.compile_send_args(args, expr.span.line)?;
                     let discard_tmp = self.op_array.alloc_temp();
@@ -21131,12 +21230,18 @@ impl Compiler {
 
                 // The result of a yield expression is the value sent via send()
                 let result_tmp = self.op_array.alloc_temp();
+                // (after its operands: CG(zend_lineno))
+                let yield_line = if value.is_some() || key.is_some() {
+                    self.cur_lineno(expr.span.line)
+                } else {
+                    expr.span.line
+                };
                 self.op_array.emit(Op {
                     opcode: OpCode::Yield,
                     op1: val_operand,
                     op2: key_operand,
                     result: OperandType::Tmp(result_tmp),
-                    line: expr.span.line,
+                    line: yield_line,
                 });
                 Ok(OperandType::Tmp(result_tmp))
             }
@@ -21173,7 +21278,7 @@ impl Compiler {
                     op1: val,
                     op2: OperandType::Unused,
                     result: OperandType::Tmp(tmp),
-                    line: expr.span.line,
+                    line: self.cur_lineno(expr.span.line),
                 });
                 Ok(OperandType::Tmp(tmp))
             }
@@ -21884,7 +21989,9 @@ impl Compiler {
                         }
                     };
 
-                let init_line = Self::line_after_object(object, expr.span.line);
+                // (on the line of the method name, compiled last: CG(zend_lineno))
+                let init_line =
+                    Self::line_after_object(object, expr.span.line).max(method.span.line);
                 self.op_array.emit(Op {
                     opcode: OpCode::InitMethodCall,
                     op1: obj,
