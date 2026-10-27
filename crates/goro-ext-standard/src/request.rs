@@ -1919,7 +1919,9 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
     }
     // argv / argc (php_build_argv(), when register_argc_argv is on)
     if !req.cgi {
-        if !ini_bool(ini("register_argc_argv"), true) {
+        // (php_hash_environment(): a SAPI passing arguments (the CLI's
+        // SG(request_info).argc) registers them whatever the setting)
+        if req.argv.is_empty() && !ini_bool(ini("register_argc_argv"), true) {
             // (no $argv / $argc)
         } else {
             let argv = new_arr();
