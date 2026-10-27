@@ -1161,6 +1161,30 @@ pub(super) fn get_headers(vm: &mut Vm, args: &[Value]) -> Value {
         .map(|v| v.to_php_string().to_string_lossy())
         .unwrap_or_default();
     let assoc = args.get(1).is_some_and(|v| v.is_truthy());
+    // Z_PARAM_RESOURCE_OR_NULL(zcontext)
+    if let Some(c) = args.get(2).map(|v| v.deref()) {
+        if !matches!(c, Value::Null | Value::Undef | Value::Resource(..)) {
+            let msg = format!(
+                "get_headers(): Argument #3 ($context) must be of type resource or null, {} given",
+                Vm::value_type_name(&c)
+            );
+            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Value::False;
+        }
+    }
+    if url.is_empty() {
+        let exc = vm.create_exception(b"ValueError", "Path must not be empty", vm.current_line);
+        vm.current_exception = Some(exc);
+        return Value::False;
+    }
+    let raw_url = args
+        .first()
+        .map(|v| v.to_php_string().as_bytes().to_vec())
+        .unwrap_or_default();
+    if !super::userstream::require_url_wrapper(vm, "get_headers", &raw_url) {
+        return Value::False;
+    }
     let Some((fid, headers)) = http_open_stream(vm, "get_headers", &url, args.get(2), "r", true)
     else {
         return Value::False;

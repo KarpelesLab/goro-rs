@@ -6029,6 +6029,7 @@ fn ini_set_as_inner(vm: &mut Vm, args: &[Value], fname: &'static str) -> Result<
     // zval_get_tmp_string(): a float is converted with the precision in
     // effect before the new value applies.
     // (null is the empty string: a Null value is ini_restore()'s NULL)
+    vm.warn_nan_coercion(&value, "string", vm.current_line);
     let value = match value {
         Value::Double(_) | Value::Null | Value::Undef => Value::String(value.to_php_string()),
         v => v,
@@ -6658,6 +6659,21 @@ pub fn assert_ini_deprecation(key: &[u8], value: &Value) -> Option<String> {
     }
 }
 
+#[inline(never)]
+fn assert_arity_error(vm: &mut Vm, n: usize) -> Result<Value, VmError> {
+    let msg = if n == 0 {
+        "assert() expects at least 1 argument, 0 given".to_string()
+    } else {
+        format!("assert() expects at most 2 arguments, {} given", n)
+    };
+    let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+    vm.current_exception = Some(exc);
+    Err(VmError {
+        message: msg,
+        line: vm.current_line,
+    })
+}
+
 fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let zend_assertions = vm
         .constants
@@ -6666,6 +6682,10 @@ fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .unwrap_or(1);
     if !assert_ini_bool(vm, b"assert.active", true) || zend_assertions <= 0 {
         return Ok(Value::True);
+    }
+    // ZEND_PARSE_PARAMETERS_START(1, 2)
+    if args.is_empty() || args.len() > 2 {
+        return assert_arity_error(vm, args.len());
     }
     let assertion = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
     let mut description = args.get(1).map(|v| v.deref());
@@ -6714,7 +6734,7 @@ fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             });
         }
     }
-    if assertion.is_truthy() {
+    if vm.is_true(&assertion) {
         return Ok(Value::True);
     }
     if let Some(Value::Object(obj)) = &description {

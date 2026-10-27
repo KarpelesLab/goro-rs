@@ -18275,6 +18275,15 @@ impl Compiler {
                     if is_assert && args.len() == 1 && args[0].name.is_some() {
                         return self.compile_named_assert(expr, name, &args[0]);
                     }
+                    // (zend_compile_assert() appends the positional
+                    // "assert(...)" description after the unpacked one)
+                    if is_assert && args.len() == 1 && args[0].unpack {
+                        return Err(CompileError {
+                            message: "Cannot use positional argument after argument unpacking"
+                                .to_string(),
+                            line: expr.span.line,
+                        });
+                    }
                     if is_assert && args.len() == 1 && args[0].name.is_none() && !args[0].unpack {
                         let expr_str = crate::ast_export::export_expr(&args[0].value);
                         let assert_str = format!("assert({})", expr_str);

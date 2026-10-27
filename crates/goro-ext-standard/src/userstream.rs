@@ -831,6 +831,30 @@ fn needs_locate(path: &[u8]) -> bool {
     }
 }
 
+/// php_stream_open_wrapper_ex() with STREAM_USE_URL: the wrapper located for
+/// `path` must be a URL one (else "This function may only be used against
+/// URLs"). Reports the lookup diagnostics; false when the open must fail.
+#[inline(never)]
+pub(crate) fn require_url_wrapper(vm: &mut Vm, func: &'static str, path: &[u8]) -> bool {
+    FN_STACK.with(|st| st.borrow_mut().push(func));
+    let is_url = match locate(vm, path, REPORT_ERRORS) {
+        Loc::User(u) => u.is_url,
+        Loc::Builtin { .. } => scheme_len(path).is_some_and(|n| {
+            let lower = path[..n].to_ascii_lowercase();
+            matches!(
+                lower.as_slice(),
+                b"http" | b"https" | b"ftp" | b"ftps" | b"data"
+            )
+        }),
+        Loc::None => false,
+    };
+    if !is_url {
+        warn(vm, "This function may only be used against URLs");
+    }
+    FN_STACK.with(|st| st.borrow_mut().pop());
+    is_url
+}
+
 /// The local path the plain-files wrapper stats for a `file://` URL
 /// (php_stream_locate_url_wrapper()'s path_for_open), when that file exists;
 /// otherwise None, so the stat functions report the URL as given.
