@@ -1011,9 +1011,19 @@ impl Vm {
                         by_name_class_check(c.as_bytes())?;
                         self.fcc_static(c.as_bytes(), m.as_bytes(), None, wrapper, scope)
                     }
-                    _ => Err((
+                    // zend_init_dynamic_call_array()'s checks, in order
+                    (t, m) => Err((
                         b"Error",
-                        "Array callback must have exactly two elements".to_string(),
+                        if arr.borrow().len() != 2 {
+                            "Array callback must have exactly two elements"
+                        } else if t.is_none() || m.is_none() {
+                            "Array callback has to contain indices 0 and 1"
+                        } else if !matches!(t, Some(Value::String(_) | Value::Object(_))) {
+                            "First array member is not a valid class name or object"
+                        } else {
+                            "Second array member is not a valid method"
+                        }
+                        .to_string(),
                     )),
                 }
             }
