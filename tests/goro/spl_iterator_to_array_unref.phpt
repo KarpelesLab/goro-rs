@@ -1,5 +1,5 @@
 --TEST--
-iterator_to_array() and SPL storage readers store element references by value
+iterator_to_array() over an ArrayIterator unwraps element references nothing else holds (ZVAL_UNREF), keeps shared ones
 --FILE--
 <?php
 function g(array $x) { foreach ($x as &$v) { $v = 'g'; } return $x; }
@@ -13,6 +13,7 @@ $ac = (new ArrayObject($c))->getArrayCopy();
 $s = &$c[1];
 $s = 'changed';
 var_dump($d, $d2, $d3, $cur2, $off, $fa->toArray(), $ac);
+function g2(array $x) { foreach ($x as &$v) { $v = 'g'; } return $x; } $c = g2([1, 2]); $d = iterator_to_array(new ArrayIterator($c)); $s = &$c[1]; var_dump($d);
 ?>
 --EXPECT--
 array(2) {
@@ -35,6 +36,12 @@ array(2) {
 }
 string(1) "g"
 string(1) "g"
+array(2) {
+  [0]=>
+  string(1) "g"
+  [1]=>
+  string(1) "g"
+}
 array(2) {
   [0]=>
   string(1) "g"

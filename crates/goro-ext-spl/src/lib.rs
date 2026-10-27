@@ -370,8 +370,12 @@ fn iterator_to_array_iterate(vm: &mut Vm, it: &Value, use_keys: bool) -> Result<
         if vm.current_exception.is_some() {
             break;
         }
-        // (ZVAL_DEREF: an element reference is stored by value)
-        let value = vm.it_current_data(it).deref();
+        // (spl_array_it_get_current_data(): a reference nothing else holds
+        // is unwrapped, ZVAL_UNREF; shared ones are kept)
+        let value = match vm.it_current_data(it) {
+            Value::Reference(r) if Rc::strong_count(&r) <= 2 => r.borrow().clone(),
+            v => v,
+        };
         if vm.current_exception.is_some() {
             break;
         }
