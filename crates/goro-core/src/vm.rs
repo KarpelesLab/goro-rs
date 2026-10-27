@@ -5795,6 +5795,21 @@ impl Vm {
         }
     }
 
+    /// The methods of a builtin interface, for #[\Override] checks.
+    #[inline(never)]
+    fn override_builtin_iface_methods(il: &[u8]) -> &'static [&'static [u8]] {
+        match il {
+            b"iterator" => &[b"current", b"key", b"next", b"rewind", b"valid"],
+            b"iteratoraggregate" => &[b"getiterator"],
+            b"arrayaccess" => &[b"offsetexists", b"offsetget", b"offsetset", b"offsetunset"],
+            b"countable" => &[b"count"],
+            b"serializable" => &[b"serialize", b"unserialize"],
+            b"stringable" => &[b"__tostring"],
+            b"jsonserializable" => &[b"jsonserialize"],
+            _ => &[],
+        }
+    }
+
     /// FE_RESET_RW on a variable holding an array: the variable becomes (or
     /// stays) a reference to the iterated array; its cell is returned.
     #[inline(never)]
@@ -59072,67 +59087,27 @@ impl Vm {
                             // Collect interface method names (all interfaces, including transitive)
                             let mut interface_method_names: std::collections::HashSet<Vec<u8>> =
                                 std::collections::HashSet::new();
-                            for iface_name in &iface_names {
-                                let il: Vec<u8> =
-                                    iface_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            // (transitively: interfaces extending builtin ones)
+                            let mut todo: Vec<Vec<u8>> =
+                                iface_names.iter().map(|n| n.to_ascii_lowercase()).collect();
+                            let mut seen: std::collections::HashSet<Vec<u8>> =
+                                std::collections::HashSet::new();
+                            while let Some(il) = todo.pop() {
+                                if !seen.insert(il.clone()) {
+                                    continue;
+                                }
                                 if let Some(iface) = self.classes.get(&il) {
                                     for (mn, _) in &iface.methods {
                                         interface_method_names.insert(mn.clone());
                                     }
-                                    // Also check parent interfaces
-                                    for pi in &iface.interfaces {
-                                        let pil: Vec<u8> =
-                                            pi.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        if let Some(pi_def) = self.classes.get(&pil) {
-                                            for (mn, _) in &pi_def.methods {
-                                                interface_method_names.insert(mn.clone());
-                                            }
-                                        }
+                                    todo.extend(iface.interfaces.iter().map(|n| n.to_ascii_lowercase()));
+                                    // (an interface's first parent)
+                                    if iface.is_interface {
+                                        todo.extend(iface.parent.iter().map(|n| n.to_ascii_lowercase()));
                                     }
-                                } else {
-                                    // Known built-in interfaces - add their known methods
-                                    match il.as_slice() {
-                                        b"iterator" => {
-                                            for m in &[
-                                                b"current" as &[u8],
-                                                b"key",
-                                                b"next",
-                                                b"rewind",
-                                                b"valid",
-                                            ] {
-                                                interface_method_names.insert(m.to_vec());
-                                            }
-                                        }
-                                        b"iteratoraggregate" => {
-                                            interface_method_names.insert(b"getiterator".to_vec());
-                                        }
-                                        b"arrayaccess" => {
-                                            for m in &[
-                                                b"offsetexists" as &[u8],
-                                                b"offsetget",
-                                                b"offsetset",
-                                                b"offsetunset",
-                                            ] {
-                                                interface_method_names.insert(m.to_vec());
-                                            }
-                                        }
-                                        b"countable" => {
-                                            interface_method_names.insert(b"count".to_vec());
-                                        }
-                                        b"serializable" => {
-                                            for m in &[b"serialize" as &[u8], b"unserialize"] {
-                                                interface_method_names.insert(m.to_vec());
-                                            }
-                                        }
-                                        b"stringable" => {
-                                            interface_method_names.insert(b"__tostring".to_vec());
-                                        }
-                                        b"jsonserializable" => {
-                                            interface_method_names
-                                                .insert(b"jsonserialize".to_vec());
-                                        }
-                                        _ => {}
-                                    }
+                                }
+                                for m in Self::override_builtin_iface_methods(&il) {
+                                    interface_method_names.insert(m.to_vec());
                                 }
                             }
 
