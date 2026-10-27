@@ -701,17 +701,26 @@ pub fn time_print(tag: u8, v: &[u8]) -> String {
     let months = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
+    // ossl_asn1_time_print_ex(): a GeneralizedTime's fractional seconds
+    // ('.' and its digits) follow the seconds
+    let frac = if tag == asn1::GENERALIZED_TIME && v.get(14) == Some(&b'.') {
+        let n = v[15..].iter().take_while(|b| b.is_ascii_digit()).count();
+        String::from_utf8_lossy(&v[14..15 + n]).to_string()
+    } else {
+        String::new()
+    };
     match crate::cert::asn1_time_to_unix(tag, v) {
         Some(t) => {
             let (y, m, d) = crate::cert::civil_from_days(t.div_euclid(86400));
             let s = t.rem_euclid(86400);
             format!(
-                "{} {:2} {:02}:{:02}:{:02} {} GMT",
+                "{} {:2} {:02}:{:02}:{:02}{} {} GMT",
                 months[(m - 1) as usize],
                 d,
                 s / 3600,
                 (s / 60) % 60,
                 s % 60,
+                frac,
                 y
             )
         }

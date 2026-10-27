@@ -1365,7 +1365,7 @@ pub fn setup_verify(
                                 nfiles += 1;
                             }
                             _ => {
-                                err::push(err::LIB_X509, 124, "no certificate or crl found");
+                                err::push(err::LIB_X509, 136, "no certificate or crl found");
                                 vm.emit_warning(&format!("{}(): Error loading file {}", f, path));
                             }
                         }
