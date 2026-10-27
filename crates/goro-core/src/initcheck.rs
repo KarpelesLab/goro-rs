@@ -581,7 +581,10 @@ impl Vm {
     /// INSTANCEOF of a constant class name at `ip` of `op_array` answered
     /// `result` for an object of `o`'s class: the site remembers it, when
     /// the class named exists (an object's ancestors and interfaces do not
-    /// change, nor does whether a declared class is one of them).
+    /// change, nor does whether a declared class is one of them); the
+    /// instanceof_site_memo, while the class table's link_generation lasts,
+    /// also when it does not (an AST visitor's chains of checks of node
+    /// classes never loaded).
     #[inline(never)]
     pub(crate) fn note_instanceof(
         &self,
@@ -603,15 +606,25 @@ impl Vm {
         if named.eq_ignore_ascii_case(b"self")
             || named.eq_ignore_ascii_case(b"parent")
             || named.eq_ignore_ascii_case(b"static")
-            || !(self.classes.contains_key(class_lower)
-                || self.class_aliases.contains_key(class_lower))
         {
             return;
         }
+        let declared =
+            self.classes.contains_key(class_lower) || self.class_aliases.contains_key(class_lower);
         let Ok(ob) = o.try_borrow() else {
             return;
         };
         if ob.native.is_some() {
+            return;
+        }
+        // (a class not declared: what an object of a declared class is
+        // changes with a class_alias() naming it, which makes a new
+        // link_generation; the site's own answers do not see that)
+        if !declared
+            && !self
+                .classes
+                .contains_key(crate::class_table::LowerName::new(&ob.class_name).get())
+        {
             return;
         }
         self.instanceof_site_memo.borrow_mut().set(
@@ -621,9 +634,11 @@ impl Vm {
             matches!(result, Value::True),
         );
         let mut sites = op_array.sites().borrow_mut();
+        // (the site of a class not declared only looks at the memo)
         if let Some(c) = sites
             .get_or_insert_with(Default::default)
             .prop_slot(&op_array.ops, ip)
+            .filter(|_| declared)
         {
             // (two classes: the slot's `scope` holds the second one, its
             // `slot` the answer for it; a third replaces the first)
@@ -691,7 +706,7 @@ impl Vm {
                 }
                 // (a class the site does not remember: what another answer
                 // of a site said of it, see note_instanceof)
-                Some(c) if c.set => {
+                Some(_) => {
                     let named = match op.op2 {
                         OperandType::Const(k) => match op_array.literals.get(k as usize) {
                             Some(Value::String(n)) => n,
