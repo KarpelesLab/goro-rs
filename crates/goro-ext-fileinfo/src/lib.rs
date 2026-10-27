@@ -516,8 +516,9 @@ fn finfo_file_impl(vm: &mut Vm, this: Option<&Obj>, args: &[Value]) -> Value {
     let path = a[0].str_or(b"").to_vec();
     let options = a[1].long_or(0) as i32;
     if path.is_empty() {
-        let n = if this.is_some() { 1 } else { 2 };
-        f.must_not_be_empty(vm, n);
+        // zend_argument_must_not_be_empty_error(2) for the method too,
+        // whose argument #2 is $flags
+        f.must_not_be_empty(vm, 2);
         return Value::Null;
     }
     let Ok(ctx) = context_arg(vm, &f, &a[2]) else {
