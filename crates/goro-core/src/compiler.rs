@@ -20278,6 +20278,13 @@ impl Compiler {
                                 line: expr.span.line,
                             });
                             OperandType::Tmp(val_tmp)
+                        } else if Self::is_static_prop_expr(base_expr) {
+                            // isset(C::$p[k]): the property fetched quietly
+                            // (ZEND_FETCH_STATIC_PROP_IS: an uninitialized
+                            // typed or undeclared one is not set)
+                            let (t, j) = self.compile_static_prop_quiet(base_expr)?;
+                            jmp_patches.push(j as usize);
+                            OperandType::Tmp(t)
                         } else {
                             self.compile_expr(base_expr)?
                         };
