@@ -20936,6 +20936,9 @@ impl Compiler {
                 let const_name_idx = self
                     .op_array
                     .add_literal(Value::String(PhpString::from_vec(constant.clone())));
+                if self.in_const_expr {
+                    self.op_array.const_expr_const_names.push(const_name_idx);
+                }
                 let tmp = self.op_array.alloc_temp();
                 // Reuse StaticPropGet for class constants (VM will check both)
                 self.op_array.emit(Op {

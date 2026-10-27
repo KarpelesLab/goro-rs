@@ -552,6 +552,11 @@ pub struct OpArray {
     pub doc_comment: Option<Vec<u8>>,
     /// Literal indices that contain __CLASS__ magic constant values (for trait patching)
     pub class_const_literals: Vec<u32>,
+    /// Literal indices of the constant names of class constant fetches
+    /// compiled in a constant expression (a parameter default): those go
+    /// through zend_get_class_constant_ex(), which does not create every
+    /// case of a backed enum (the FETCH_CLASS_CONSTANT opcode does).
+    pub const_expr_const_names: Vec<u32>,
     /// Whether this file/function was declared with declare(strict_types=1)
     pub strict_types: bool,
     /// Which parameters are passed by reference (indexed by parameter position, true = by-ref)
@@ -1233,6 +1238,7 @@ impl OpArray {
         self.child_functions.shrink_to_fit();
         self.param_types.shrink_to_fit();
         self.class_const_literals.shrink_to_fit();
+        self.const_expr_const_names.shrink_to_fit();
         self.by_ref_params.shrink_to_fit();
         self.param_has_default.shrink_to_fit();
         self.param_default_repr.shrink_to_fit();
@@ -1302,6 +1308,7 @@ impl OpArray {
             end_line: 0,
             doc_comment: None,
             class_const_literals: Vec::new(),
+            const_expr_const_names: Vec::new(),
             strict_types: false,
             by_ref_params: Vec::new(),
             param_has_default: Vec::new(),

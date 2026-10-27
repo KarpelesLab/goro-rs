@@ -42,7 +42,7 @@ use crate::value::Value;
 
 const MAGIC: &[u8; 8] = b"GOROFC\0\0";
 /// Bumped whenever the encoding below changes.
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const HEADER_LEN: usize = 8 + 4 + 8 + 8 + 8 + 8 + 8 + 8;
 
 /// A value that cannot be stored (the script is then not cached).
@@ -1076,6 +1076,7 @@ impl Enc for OpArray {
             end_line,
             doc_comment,
             class_const_literals,
+            const_expr_const_names,
             strict_types,
             by_ref_params,
             param_has_default,
@@ -1121,6 +1122,7 @@ impl Enc for OpArray {
         end_line.enc(w)?;
         doc_comment.enc(w)?;
         class_const_literals.enc(w)?;
+        const_expr_const_names.enc(w)?;
         strict_types.enc(w)?;
         by_ref_params.enc(w)?;
         param_has_default.enc(w)?;
@@ -1166,6 +1168,7 @@ impl Dec for OpArray {
         o.end_line = u32::dec(r)?;
         o.doc_comment = Option::dec(r)?;
         o.class_const_literals = Vec::dec(r)?;
+        o.const_expr_const_names = Vec::dec(r)?;
         o.strict_types = bool::dec(r)?;
         o.by_ref_params = Vec::dec(r)?;
         o.param_has_default = Vec::dec(r)?;

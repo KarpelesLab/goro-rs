@@ -46819,6 +46819,7 @@ impl Vm {
                                     && c.is_enum
                                     && c.constants.contains_key(prop_name.as_bytes())
                             })
+                            && !Self::const_expr_const_fetch(op_array, &op.op2)
                         {
                             self.init_backed_enum_cases(&class_lower);
                         }
@@ -69145,6 +69146,18 @@ fn array_as_props(obj: &Rc<RefCell<PhpObject>>) -> bool {
 }
 
 impl Vm {
+    /// Whether a class constant fetch (StaticPropGet of constant name
+    /// `name`) belongs to a constant expression: a constant thunk's
+    /// (property / constant / static property initializer) or a parameter
+    /// default's (zend_get_class_constant_ex(), not FETCH_CLASS_CONSTANT).
+    #[inline(never)]
+    fn const_expr_const_fetch(op_array: &OpArray, name: &OperandType) -> bool {
+        op_array
+            .name
+            .starts_with(crate::compiler::CONST_THUNK_PREFIX.as_bytes())
+            || matches!(name, OperandType::Const(i) if op_array.const_expr_const_names.contains(i))
+    }
+
     /// `$closure->call($newThis, ...$args)` of the bound closure `bound`:
     /// run from the internal `Closure->call()` frame (its callee is called
     /// from "[internal function]").
