@@ -18691,14 +18691,23 @@ fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     match std::fs::metadata(&*path_str) {
         Ok(meta) => {
-            if let Ok(modified) = meta.modified() {
-                let secs = modified
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                Ok(Value::Long(secs as i64))
-            } else {
-                Ok(Value::False)
+            // (st_mtime: signed, a time before the epoch is negative)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                Ok(Value::Long(meta.mtime()))
+            }
+            #[cfg(not(unix))]
+            {
+                if let Ok(modified) = meta.modified() {
+                    let secs = modified
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    Ok(Value::Long(secs as i64))
+                } else {
+                    Ok(Value::False)
+                }
             }
         }
         Err(_) => {
@@ -18722,14 +18731,23 @@ fn fileatime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     match std::fs::metadata(&*path_str) {
         Ok(meta) => {
-            if let Ok(accessed) = meta.accessed() {
-                let secs = accessed
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                Ok(Value::Long(secs as i64))
-            } else {
-                Ok(Value::False)
+            // (st_atime: signed, a time before the epoch is negative)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                Ok(Value::Long(meta.atime()))
+            }
+            #[cfg(not(unix))]
+            {
+                if let Ok(accessed) = meta.accessed() {
+                    let secs = accessed
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    Ok(Value::Long(secs as i64))
+                } else {
+                    Ok(Value::False)
+                }
             }
         }
         Err(_) => {
