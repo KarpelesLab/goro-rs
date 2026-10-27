@@ -5092,7 +5092,7 @@ fn h_stream_wrapper_register(vm: &mut Vm, args: &[Value]) -> Result<Option<Value
             let msg = format!(
                 "{}(): Argument #2 ($class) must be a valid class name, {} given",
                 cur_fn(),
-                lossy(&class)
+                goro_core::string::msg_cstr(&class)
             );
             return Err(throw(vm, b"TypeError", &msg));
         }

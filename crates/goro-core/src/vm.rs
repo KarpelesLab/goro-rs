@@ -8930,9 +8930,6 @@ impl Vm {
                 }
             }
         }
-        if message.contains('\0') {
-            Self::truncate_arg_error_at_nul(class_name, &mut message);
-        }
         err_obj.set_property(
             b"message".to_vec(),
             Value::String(PhpString::from_vec(
@@ -8950,34 +8947,6 @@ impl Vm {
         err_obj.throwable_set(b"trace", trace);
         err_obj.throwable_set(b"previous", Value::Null);
         Value::Object(Rc::new(RefCell::new(err_obj)))
-    }
-
-    /// zend_argument_error_variadic(): the formatted message goes into the
-    /// "func(): Argument #n ($name) %s" one as a C string, so it stops at
-    /// its first NUL byte.
-    #[cold]
-    #[inline(never)]
-    fn truncate_arg_error_at_nul(class_name: &[u8], message: &mut String) {
-        if !matches!(
-            class_name,
-            b"ValueError" | b"TypeError" | b"ArgumentCountError"
-        ) {
-            return;
-        }
-        let Some(p) = message.find("(): Argument #") else {
-            return;
-        };
-        let head = &message[..p];
-        if head.is_empty()
-            || !head
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b':' | b'\\'))
-        {
-            return;
-        }
-        if let Some(nul) = message.find('\0') {
-            message.truncate(nul);
-        }
     }
 
     /// Exception/Error/ErrorException::__construct() (`args[0]` is `$this`)
