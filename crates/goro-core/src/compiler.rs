@@ -24071,8 +24071,22 @@ impl Compiler {
         let mode = self.memoize_mode;
         // (mode 1: a key memoize_chain_keys() evaluated already)
         if mode != 0 {
-            if let Some(op) = self.memoized_exprs.get(&key) {
-                return Ok(*op);
+            if let Some(op) = self.memoized_exprs.get(&key).copied() {
+                // (ZEND_COPY_TMP: the opcode the operand goes to may consume
+                // its temporary, as a property fetch of an object does;
+                // the other pass reads it again)
+                if matches!(op, OperandType::Tmp(_)) && !Self::is_call_expr(expr) {
+                    let copy = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::QmAssign,
+                        op1: op,
+                        op2: OperandType::Unused,
+                        result: OperandType::Tmp(copy),
+                        line: expr.span.line,
+                    });
+                    return Ok(OperandType::Tmp(copy));
+                }
+                return Ok(op);
             }
         }
         self.memoize_mode = 0;
@@ -24080,7 +24094,22 @@ impl Compiler {
         self.memoize_mode = mode;
         let r = r?;
         if mode == 1 {
-            self.memoized_exprs.insert(key, r);
+            // (the operand's user may consume a temporary: the memo is a
+            // copy of its own)
+            let memo = if matches!(r, OperandType::Tmp(_)) && !Self::is_call_expr(expr) {
+                let copy = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::QmAssign,
+                    op1: r,
+                    op2: OperandType::Unused,
+                    result: OperandType::Tmp(copy),
+                    line: expr.span.line,
+                });
+                OperandType::Tmp(copy)
+            } else {
+                r
+            };
+            self.memoized_exprs.insert(key, memo);
         }
         Ok(r)
     }
