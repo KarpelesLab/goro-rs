@@ -29,6 +29,9 @@ struct Globals {
     output_compression_default: i64,
     handler_registered: bool,
     compression_coding: i64,
+    /// HTTP_ACCEPT_ENCODING of the request's server variables
+    /// (PG(http_globals)[TRACK_VARS_SERVER]: not the script's $_SERVER)
+    accept_encoding: Option<Vec<u8>>,
     ini_loaded: bool,
     /// ZLIBG(ob_gzhandler): context of the legacy ob_gzhandler() function
     legacy: Option<ObCtx>,
@@ -79,16 +82,12 @@ fn output_encoding(vm: &mut Vm) -> i64 {
     if cur != 0 {
         return cur;
     }
+    let _ = vm;
     let mut coding = 0;
-    if let Some(Value::Array(srv)) = vm.get_global(b"_SERVER").map(|v| v.deref()) {
-        let enc = srv
-            .borrow()
-            .get(&ArrayKey::String(PhpString::from_bytes(
-                b"HTTP_ACCEPT_ENCODING",
-            )))
-            .map(|v| v.deref().to_php_string());
-        if let Some(enc) = enc {
-            let e = enc.as_bytes();
+    let enc = ZLIBG.with(|g| g.borrow().accept_encoding.clone());
+    {
+        if let Some(e) = enc {
+            let e = e.as_slice();
             let has = |n: &[u8]| e.windows(n.len()).any(|w| w == n);
             if has(b"gzip") {
                 coding = PHP_ZLIB_ENCODING_GZIP;
@@ -328,9 +327,19 @@ fn callable_name(vm: &Vm, cb: &Value) -> Result<Vec<u8>, ()> {
 /// PHP_RINIT_FUNCTION(zlib)
 fn request_startup(vm: &mut Vm) {
     ensure_ini(vm);
+    let enc = match vm.get_global(b"_SERVER").map(|v| v.deref()) {
+        Some(Value::Array(srv)) => srv
+            .borrow()
+            .get(&ArrayKey::String(PhpString::from_bytes(
+                b"HTTP_ACCEPT_ENCODING",
+            )))
+            .map(|v| v.deref().to_php_string().as_bytes().to_vec()),
+        _ => None,
+    };
     let registered = ZLIBG.with(|g| {
         let mut g = g.borrow_mut();
         g.compression_coding = 0;
+        g.accept_encoding = enc;
         g.handler_registered
     });
     if !registered {

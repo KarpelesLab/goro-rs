@@ -5503,7 +5503,7 @@ fn include_data_url(vm: &mut Vm, path: &str, kind: u8) -> Result<Vec<u8>, VmErro
         ));
         "no suitable wrapper could be found".to_string()
     } else {
-        match crate::misc::parse_rfc2397(path.as_bytes()) {
+        match crate::misc::parse_rfc2397(&goro_core::fspath::msg_bytes(path)) {
             Ok((_, bytes)) => return Ok(bytes),
             Err(e) => e.to_string(),
         }
