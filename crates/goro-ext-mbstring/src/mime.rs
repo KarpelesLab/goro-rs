@@ -11,6 +11,16 @@ use crate::zpp::*;
 
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"mb_encode_mimeheader", mb_encode_mimeheader);
+    // $charset / $transfer_encoding are Z_PARAM_STR under a ?string arginfo:
+    // checked by mb_encode_mimeheader() itself (see mime_str_param)
+    {
+        use goro_core::opcode::ParamType;
+        let s = || Some(ParamType::Simple(b"string".to_vec()));
+        vm.register_builtin_param_types(
+            b"mb_encode_mimeheader",
+            vec![s(), None, None, s(), Some(ParamType::Simple(b"int".to_vec()))],
+        );
+    }
     vm.register_function(b"mb_decode_mimeheader", mb_decode_mimeheader);
 }
 
@@ -328,6 +338,51 @@ pub fn mime_header_encode(
     }
 }
 
+/// Z_PARAM_STR of mb_encode_mimeheader()'s ?string-declared parameters: in
+/// strict mode only a string (null included is a TypeError of type
+/// "string"); a NAN is coerced with its warning.
+#[inline(never)]
+fn mime_str_param(
+    vm: &mut Vm,
+    f: &str,
+    args: &[Value],
+    i: usize,
+    pname: &str,
+) -> Result<(), VmError> {
+    let Some(v) = args.get(i).map(|v| v.deref()) else {
+        return Ok(());
+    };
+    if matches!(v, Value::Undef) {
+        return Ok(());
+    }
+    if vm.caller_strict_types && !matches!(v, Value::String(_)) {
+        let msg = format!(
+            "{}(): Argument #{} (${}) must be of type string, {} given",
+            f,
+            i + 1,
+            pname,
+            Vm::value_type_name(&v)
+        );
+        let exc = vm.throw_type_error(msg.clone());
+        vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
+    }
+    if matches!(v, Value::Double(d) if d.is_nan()) {
+        let line = vm.current_line;
+        vm.warn_nan_coercion(&v, "string", line);
+        if vm.current_exception.is_some() {
+            return Err(VmError {
+                message: vm.uncaught_exception_message(),
+                line,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn mb_encode_mimeheader(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let f = "mb_encode_mimeheader";
     let s = str_arg(vm, f, args, 0, "string")?;
@@ -349,12 +404,14 @@ fn mb_encode_mimeheader(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         given
     };
     // (all the arguments are parsed before the charset is looked up)
+    mime_str_param(vm, f, args, 1, "charset")?;
     let charset_null = null_given(vm, 1, "charset");
     let charset_name = if present(args, 1) || charset_null {
         Some(str_arg(vm, f, args, 1, "charset")?)
     } else {
         None
     };
+    mime_str_param(vm, f, args, 2, "transfer_encoding")?;
     let transenc_null = null_given(vm, 2, "transfer_encoding");
     let transenc = if present(args, 2) || transenc_null {
         Some(str_arg(vm, f, args, 2, "transfer_encoding")?)
