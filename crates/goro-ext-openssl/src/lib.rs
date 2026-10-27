@@ -581,7 +581,8 @@ fn php_openssl_cipher(
     if is_ccm {
         let l = 15 - iv_vec.len();
         if l < 8 && (data.len() as u64) >> (8 * l) != 0 {
-            err::push(err::LIB_PROV, 0x6E, "invalid data length");
+            // the CCM provider's length check fails the update
+            err::push(err::LIB_PROV, 102, "cipher operation failed");
             vm.emit_warning(&format!("{}(): Setting of data length failed", fname));
             return None;
         }

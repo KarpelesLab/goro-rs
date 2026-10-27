@@ -2119,7 +2119,7 @@ impl PKey {
                     return None;
                 }
                 let Some(m) = Modulus::new(&a.p) else {
-                    err::push(err::LIB_BN, 102, "called a function you should not call");
+                    err::push(err::LIB_BN, 102, "called with even modulus");
                     return None;
                 };
                 Some(m.to_bytes(&m.pow_secret(&y.to_box(), &x.to_box())))

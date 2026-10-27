@@ -55,6 +55,30 @@ fn is_numeric_oid(s: &str) -> bool {
             .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// OBJ_txt2obj(s, 0) leaving OpenSSL's errors when it fails: an unknown
+/// name, or a2d_ASN1_OBJECT()'s complaint about a dotted number.
+#[inline(never)]
+pub fn txt2obj_err(s: &str) -> Option<Obj> {
+    let r = txt2obj(s);
+    if r.is_none() {
+        let first = s.bytes().next();
+        if !first.is_some_and(|b| b.is_ascii_digit()) {
+            crate::err::push(crate::err::LIB_OBJ, 103, "unknown object name");
+        } else if !s.contains('.') {
+            crate::err::push(crate::err::LIB_ASN1, 138, "missing second number");
+        } else if s.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+            && s.split('.')
+                .next()
+                .is_some_and(|f| f.parse::<u64>().map_or(true, |v| v > 2))
+        {
+            crate::err::push(crate::err::LIB_ASN1, 122, "first num too large");
+        } else {
+            crate::err::push(crate::err::LIB_ASN1, 130, "invalid digit");
+        }
+    }
+    r
+}
+
 /// OBJ_txt2obj(s, 0): short name, long name or dotted OID.
 pub fn txt2obj(s: &str) -> Option<Obj> {
     if let Some(o) = by_sn(s).or_else(|| by_ln(s)) {

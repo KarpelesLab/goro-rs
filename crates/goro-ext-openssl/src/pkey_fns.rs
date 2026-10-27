@@ -301,9 +301,9 @@ fn init_dh(a: &PhpArray) -> Option<(PKey, bool)> {
     let q = arr_bn(a, "q");
     let priv_key = arr_bn(a, "priv_key");
     let mut pub_key = arr_bn(a, "pub_key");
-    if pub_key.is_none() && (p.is_zero() || pkey::is_even(&p)) {
-        // BN_mod_exp_mont() needs an odd modulus
-        err::push(err::LIB_BN, 102, "called a function you should not call");
+    if pub_key.is_none() && priv_key.is_some() && (p.is_zero() || pkey::is_even(&p)) {
+        // php_openssl_dh_pub_from_priv(): BN_mod_exp_mont() needs an odd modulus
+        err::push(err::LIB_BN, 102, "called with even modulus");
         return None;
     }
     if let Some(x) = &priv_key {
@@ -325,8 +325,13 @@ fn init_dh(a: &PhpArray) -> Option<(PKey, bool)> {
             is_priv,
         ));
     }
+    // EVP_PKEY_keygen(): DH_MIN_MODULUS_BITS first, then the Montgomery form
     if p.bits() < 512 {
-        err::push(err::LIB_DH, 103, "modulus too small");
+        err::push(err::LIB_DH, 126, "modulus too small");
+        return None;
+    }
+    if pkey::is_even(&p) {
+        err::push(err::LIB_BN, 102, "called with even modulus");
         return None;
     }
     let (x, y) = pkey::generate_ffc(&p, q.as_ref(), &g);

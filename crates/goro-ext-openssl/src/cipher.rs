@@ -1639,7 +1639,8 @@ fn ccm(blk: &dyn Block, op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail
     let l = 15 - n;
     let m = op.tag_len;
     if l < 8 && (data.len() as u64) >> (8 * l) != 0 {
-        err::push(err::LIB_PROV, 0x6E, "invalid data length");
+        // the CCM provider's length check fails the update
+        err::push(err::LIB_PROV, 102, "cipher operation failed");
         return Err(Fail::DataLength);
     }
     let mut b0 = [0u8; 16];
