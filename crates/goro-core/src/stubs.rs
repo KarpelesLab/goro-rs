@@ -125,17 +125,57 @@ impl StubFunc {
     }
 }
 
-/// FNV-1a of the ASCII-lowercased `b` (the stub name tables' hash).
+/// Lowercase the ASCII letters of the 8 bytes in `x` (SWAR).
+#[inline(always)]
+const fn lower8(x: u64) -> u64 {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    // (per byte b < 0x80: bit 7 of (b + 0x3f) is b >= 'A', of (b + 0x25)
+    // is b > 'Z'; bytes >= 0x80 are left alone)
+    let ascii = !x & HIGH;
+    let ge_a = (x & !HIGH).wrapping_add(ONES * 0x3f) & ascii;
+    let gt_z = (x & !HIGH).wrapping_add(ONES * 0x25) & ascii;
+    x | ((ge_a & !gt_z) >> 2)
+}
+
+/// Hash of the ASCII-lowercased `b` (the stub name tables' hash), eight
+/// bytes at a time.
 #[inline]
 const fn lower_hash(b: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    const K: u64 = 0x517c_c1b7_2722_0a95;
+    let mut h: u64 = b.len() as u64;
     let mut i = 0;
     while i < b.len() {
-        h ^= b[i].to_ascii_lowercase() as u64;
-        h = h.wrapping_mul(0x0100_0000_01b3);
-        i += 1;
+        let mut w: u64 = 0;
+        let mut k = 0;
+        while k < 8 && i + k < b.len() {
+            w |= (b[i + k] as u64) << (8 * k);
+            k += 1;
+        }
+        h = (h.rotate_left(5) ^ lower8(w)).wrapping_mul(K);
+        i += 8;
     }
-    h
+    // (the tag takes the top bits, the slot the low ones)
+    h ^ (h >> 29)
+}
+
+/// lower_hash() at run time (word loads instead of the byte loop).
+#[inline]
+fn lower_hash_rt(b: &[u8]) -> u64 {
+    const K: u64 = 0x517c_c1b7_2722_0a95;
+    let mut h: u64 = b.len() as u64;
+    let mut chunks = b.chunks_exact(8);
+    for c in &mut chunks {
+        let w = u64::from_le_bytes(c.try_into().unwrap_or([0; 8]));
+        h = (h.rotate_left(5) ^ lower8(w)).wrapping_mul(K);
+    }
+    let rest = chunks.remainder();
+    if !rest.is_empty() {
+        let mut buf = [0u8; 8];
+        buf[..rest.len()].copy_from_slice(rest);
+        h = (h.rotate_left(5) ^ lower8(u64::from_le_bytes(buf))).wrapping_mul(K);
+    }
+    h ^ (h >> 29)
 }
 
 const fn eq_lower(a: &[u8], b: &[u8]) -> bool {
@@ -153,13 +193,20 @@ const fn eq_lower(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Lowercased name -> index of a stub table's entry: an open-addressing
-/// table built at compile time (no startup cost).
+/// table built at compile time (no startup cost). A slot holds the index
+/// (low 16 bits) and 16 bits of the name's hash, which most probes of
+/// other names stop at.
 pub(crate) struct NameIndex<const N: usize> {
-    slots: [u16; N],
+    slots: [u32; N],
     names: fn(usize) -> &'static str,
 }
 
-const EMPTY: u16 = u16::MAX;
+const EMPTY: u32 = u32::MAX;
+
+#[inline(always)]
+const fn hash_tag(h: u64) -> u32 {
+    ((h >> 48) as u32) << 16
+}
 
 /// Slots for `len` names: a power of two at least twice as large.
 const fn index_size(len: usize) -> usize {
@@ -174,41 +221,28 @@ impl<const N: usize> NameIndex<N> {
     /// Index of the entry named `lower` (an ASCII-lowercased name).
     #[inline]
     pub(crate) fn get(&self, lower: &[u8]) -> Option<usize> {
-        let mask = N - 1;
-        let mut j = lower_hash(lower) as usize & mask;
-        loop {
-            let i = self.slots[j];
-            if i == EMPTY {
-                return None;
-            }
-            let name = (self.names)(i as usize).as_bytes();
-            if name.len() == lower.len()
-                && name
-                    .iter()
-                    .zip(lower)
-                    .all(|(a, b)| a.to_ascii_lowercase() == *b)
-            {
-                return Some(i as usize);
-            }
-            j = (j + 1) & mask;
-        }
+        let i = self.get_any_case(lower)?;
+        // (an uppercase letter in `lower` names nothing)
+        (!lower.iter().any(|b| b.is_ascii_uppercase())).then_some(i)
     }
 
     /// Index of the entry named `name` in any (ASCII) case.
     #[inline]
     pub(crate) fn get_any_case(&self, name: &[u8]) -> Option<usize> {
         let mask = N - 1;
-        let mut j = lower_hash(name) as usize & mask;
+        let h = lower_hash_rt(name);
+        let tag = hash_tag(h);
+        let mut j = h as usize & mask;
         loop {
-            let i = self.slots[j];
-            if i == EMPTY {
+            let e = self.slots[j];
+            if e == EMPTY {
                 return None;
             }
-            if (self.names)(i as usize)
-                .as_bytes()
-                .eq_ignore_ascii_case(name)
-            {
-                return Some(i as usize);
+            if e & 0xffff_0000 == tag {
+                let i = (e & 0xffff) as usize;
+                if (self.names)(i).as_bytes().eq_ignore_ascii_case(name) {
+                    return Some(i);
+                }
             }
             j = (j + 1) & mask;
         }
@@ -220,16 +254,19 @@ impl<const N: usize> NameIndex<N> {
 macro_rules! name_slots {
     ($table:expr, $n:expr) => {{
         let t = $table;
-        assert!(t.len() < EMPTY as usize);
+        assert!(t.len() < 0xffff);
         let mut slots = [EMPTY; $n];
         let mut i = 0;
         while i < t.len() {
             let name = t[i].name.as_bytes();
-            let mut j = lower_hash(name) as usize & ($n - 1);
-            while slots[j] != EMPTY && !eq_lower(t[slots[j] as usize].name.as_bytes(), name) {
+            let h = lower_hash(name);
+            let mut j = h as usize & ($n - 1);
+            while slots[j] != EMPTY
+                && !eq_lower(t[(slots[j] & 0xffff) as usize].name.as_bytes(), name)
+            {
                 j = (j + 1) & ($n - 1);
             }
-            slots[j] = i as u16;
+            slots[j] = hash_tag(h) | i as u32;
             i += 1;
         }
         slots
@@ -1153,4 +1190,67 @@ pub fn class_is_not_serializable(vm: &crate::vm::Vm, class_lower: &[u8]) -> bool
         return false;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lower8_lowercases_ascii_letters_only() {
+        for b in 0..=255u8 {
+            let x = u64::from_le_bytes([b, b'A', b'z', b'@', b'[', 0x80 | b'A', b, b'Z']);
+            let want = x.to_le_bytes().map(|c| c.to_ascii_lowercase());
+            assert_eq!(lower8(x).to_le_bytes(), want, "byte {b:#x}");
+        }
+    }
+
+    #[test]
+    fn run_time_hash_is_the_build_time_one() {
+        let mut names: Vec<Vec<u8>> = crate::stub_sigs::FUNCTIONS
+            .iter()
+            .map(|f| f.name.as_bytes().to_vec())
+            .collect();
+        for n in 0..40u8 {
+            names.push((0..n).map(|i| i.wrapping_mul(37).wrapping_add(n)).collect());
+        }
+        for n in &names {
+            assert_eq!(lower_hash(n), lower_hash_rt(n), "{:?}", n);
+        }
+    }
+
+    #[test]
+    fn name_indexes_find_every_stub() {
+        for (i, f) in crate::stub_sigs::FUNCTIONS.iter().enumerate() {
+            let lower = f.name.to_ascii_lowercase();
+            assert_eq!(
+                function_index().get(lower.as_bytes()),
+                Some(i),
+                "{}",
+                f.name
+            );
+            let upper = f.name.to_ascii_uppercase();
+            assert_eq!(function_index().get_any_case(upper.as_bytes()), Some(i));
+            assert_eq!(function_index_of(upper.as_bytes()), Some(i));
+            if lower != upper {
+                assert_eq!(function_index().get(upper.as_bytes()), None);
+            }
+        }
+        for (i, c) in crate::stub_sigs::CLASSES.iter().enumerate() {
+            let lower = c.name.to_ascii_lowercase();
+            assert_eq!(class_index().get(lower.as_bytes()), Some(i), "{}", c.name);
+            assert_eq!(class_index_of(format!("\\{}", c.name).as_bytes()), Some(i));
+            assert!(find_class_lower(lower.as_bytes()).is_some_and(|f| std::ptr::eq(f, c)));
+        }
+        for n in [
+            &b""[..],
+            b"strlen_",
+            b"no_such_function_at_all",
+            b"\xc3\xa9",
+            b"str len",
+        ] {
+            assert_eq!(function_index_of(n), None);
+            assert_eq!(class_index_of(n), None);
+        }
+    }
 }
