@@ -182,6 +182,11 @@ thread_local! {
 
 /// The end line of the last of property `prop`'s hooks `class` declares
 /// (where zend_verify_hooked_property() runs), if known.
+/// A gc frame pushed by native code (Vm::gc_pin): where it was pushed and
+/// what it was made for.
+#[derive(Clone, Copy)]
+pub(crate) struct GcMark(pub(crate) usize, pub(crate) *const u8);
+
 #[inline(never)]
 fn has_concrete_hook(class: &ClassEntry, prop: &[u8]) -> bool {
     [&b"__property_get_"[..], b"__property_set_"]
@@ -11455,15 +11460,37 @@ impl Vm {
     /// (see gc::GcFrame::pin): a fiber suspended inside that call owns them.
     /// `vals` must stay in place until [`Self::gc_unpin`] with the mark.
     #[inline]
-    pub(crate) fn gc_pin<T: crate::gc::GcPin + 'static>(&mut self, vals: &T) -> usize {
+    pub(crate) fn gc_pin<T: crate::gc::GcPin + 'static>(&mut self, vals: &T) -> GcMark {
         let mark = self.gc_frames.len();
-        self.gc_frames.push(crate::gc::GcFrame::pin(vals));
-        mark
+        let f = crate::gc::GcFrame::pin(vals);
+        let id = f.identity();
+        self.gc_frames.push(f);
+        GcMark(mark, id)
     }
 
     #[inline]
-    pub(crate) fn gc_unpin(&mut self, mark: usize) {
-        self.gc_frames.truncate(mark);
+    pub(crate) fn gc_unpin(&mut self, mark: GcMark) {
+        self.gc_truncate_to(mark);
+    }
+
+    /// Drop the gc frame `mark` names and those above it. A fiber that
+    /// suspended (and was resumed at another depth) since it was pushed
+    /// moved it: it is found by what it was made for.
+    #[inline]
+    pub(crate) fn gc_truncate_to(&mut self, mark: GcMark) {
+        let GcMark(at, id) = mark;
+        if self.gc_frames.get(at).is_some_and(|f| f.identity() == id) {
+            self.gc_frames.truncate(at);
+        } else {
+            self.gc_truncate_moved(id);
+        }
+    }
+
+    #[inline(never)]
+    fn gc_truncate_moved(&mut self, id: *const u8) {
+        if let Some(i) = self.gc_frames.iter().rposition(|f| f.identity() == id) {
+            self.gc_frames.truncate(i);
+        }
     }
 
     pub(crate) fn closure_frame_enter(&mut self, op_array: &OpArray, cvs: &[Value]) -> u8 {

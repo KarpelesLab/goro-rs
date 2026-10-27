@@ -1093,11 +1093,13 @@ impl PhpGenerator {
     fn drive(&mut self, vm: &mut Vm, kick: Kick) -> Result<bool, VmError> {
         // While the delegate runs, a fiber suspended inside it owns what
         // this generator holds too.
-        let mark = vm.gc_frames.len();
-        vm.gc_frames.push(crate::gc::GcFrame::for_generator(self));
+        let f = crate::gc::GcFrame::for_generator(self);
+        let mark = crate::vm::GcMark(vm.gc_frames.len(), f.identity());
+        vm.gc_frames.push(f);
         let r = self.drive_inner(vm, kick);
-        // (with the pins drive_inner() left)
-        vm.gc_frames.truncate(mark);
+        // (with the pins drive_inner() left; a fiber suspended inside may
+        // have moved it)
+        vm.gc_truncate_to(mark);
         r
     }
 

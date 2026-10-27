@@ -1445,6 +1445,16 @@ impl GcFrame {
     pub(crate) fn pin<T: GcPin + 'static>(vals: &T) -> Self {
         GcFrame::Pin(vals as &dyn GcPin as *const dyn GcPin)
     }
+    /// The address the frame was made for (the pinned values, the
+    /// generator), to find it again: a fiber suspended above it moves it.
+    #[inline]
+    pub(crate) fn identity(&self) -> *const u8 {
+        match self {
+            GcFrame::Pin(p) => *p as *const u8,
+            GcFrame::Gen(g, _) => *g as *const u8,
+            GcFrame::Frame { cvs, .. } => *cvs as *const u8,
+        }
+    }
     /// A pin rather than a function's frame.
     #[inline]
     pub(crate) fn is_pin(&self) -> bool {
