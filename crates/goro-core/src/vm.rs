@@ -36001,7 +36001,14 @@ impl Vm {
                         }
                         // `sort(array: $a)`: the array sent by reference is
                         // handed over by handle, as a positional one is.
-                        if let Some(a0) = call.args.first().filter(|_| nonframeless) {
+                        // (also positional ones: a call by a name no call
+                        // target was cached for, e.g. a long namespaced
+                        // name falling back to the global builtin)
+                        if let Some(a0) = call.args.first().filter(|a| {
+                            nonframeless
+                                || (matches!(a, Value::Reference(_))
+                                    && !Self::callback_array_ref_builtin(&func_name_lower))
+                        }) {
                             if matches!(a0, Value::Reference(_)) {
                                 if let Some(arr) =
                                     Self::array_ref_builtin_arg(&func_name_lower, 0, a0)
