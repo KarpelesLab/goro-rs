@@ -8887,10 +8887,32 @@ fn read_path_with_wrappers_inner(path_str: &str) -> std::io::Result<Vec<u8>> {
     };
     let normalized = if !path_str.contains("://") {
         normalize_path_lexical(path_str)
+    } else if let Some(local) = file_url_local(path_str) {
+        local.to_string()
     } else {
         path_str.to_string()
     };
     std::fs::read(msg_path(&normalized))
+}
+
+/// The local path of a `file:///path` / `file://localhost/path` URL (the
+/// plain-files wrapper's path_for_open).
+#[inline(never)]
+fn file_url_local(p: &str) -> Option<&str> {
+    if p.len() < 7 || !p.as_bytes()[..7].eq_ignore_ascii_case(b"file://") {
+        return None;
+    }
+    let mut rest = &p[7..];
+    if rest.len() >= 10 && rest.as_bytes()[..10].eq_ignore_ascii_case(b"localhost/") {
+        rest = &rest[9..];
+    }
+    if !rest.starts_with('/') {
+        return None;
+    }
+    while rest.len() > 1 && rest.as_bytes()[1] == b'/' {
+        rest = &rest[1..];
+    }
+    Some(rest)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

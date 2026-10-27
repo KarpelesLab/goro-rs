@@ -104,6 +104,26 @@ fn is_wrapper_url(p: &[u8]) -> bool {
     n > 1 && p[n..].starts_with(b"://") && !p[..n].eq_ignore_ascii_case(b"file")
 }
 
+/// The local path of a `file://` URL (the plain-files wrapper's path_for_open);
+/// other paths unchanged.
+#[inline(never)]
+fn file_url_path(p: &[u8]) -> &[u8] {
+    if p.len() < 7 || !p[..7].eq_ignore_ascii_case(b"file://") {
+        return p;
+    }
+    let mut rest = &p[7..];
+    if rest.len() >= 10 && rest[..10].eq_ignore_ascii_case(b"localhost/") {
+        rest = &rest[9..];
+    }
+    if !rest.starts_with(b"/") {
+        return p;
+    }
+    while rest.len() > 1 && rest[1] == b'/' {
+        rest = &rest[1..];
+    }
+    rest
+}
+
 /// The fields of a stat buffer the FileInfoFunction methods use.
 struct FsStat {
     mode: i64,
@@ -742,10 +762,11 @@ impl Vm {
         let st = if is_wrapper_url(fname) {
             self.fs_wrapper_stat(fname, link_op)
         } else {
+            let local = crate::fspath::bytes_path(file_url_path(fname));
             let md = if link_op {
-                std::fs::symlink_metadata(p)
+                std::fs::symlink_metadata(local)
             } else {
-                std::fs::metadata(p)
+                std::fs::metadata(local)
             };
             md.ok().map(|m| FsStat {
                 mode: m.mode() as i64,

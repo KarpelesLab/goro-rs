@@ -831,6 +831,29 @@ fn needs_locate(path: &[u8]) -> bool {
     }
 }
 
+/// The local path the plain-files wrapper stats for a `file://` URL
+/// (php_stream_locate_url_wrapper()'s path_for_open), when that file exists;
+/// otherwise None, so the stat functions report the URL as given.
+#[inline(never)]
+fn file_url_local_path(path: &[u8]) -> Option<Vec<u8>> {
+    if path.len() < 7 || !path[..7].eq_ignore_ascii_case(b"file://") {
+        return None;
+    }
+    let mut rest = &path[7..];
+    if rest.len() >= 10 && rest[..10].eq_ignore_ascii_case(b"localhost/") {
+        rest = &rest[9..];
+    }
+    if !rest.starts_with(b"/") {
+        return None;
+    }
+    while rest.len() > 1 && rest[1] == b'/' {
+        rest = &rest[1..];
+    }
+    let local = rest.to_vec();
+    std::fs::symlink_metadata(lossy(&local)).ok()?;
+    Some(local)
+}
+
 /// php_stream_locate_url_wrapper()
 fn locate(vm: &mut Vm, path: &[u8], options: i64) -> Loc {
     let n_opt = scheme_len(path);
@@ -4675,6 +4698,9 @@ fn php_stat(
     if !needs_locate(&p) {
         // A plain stat replaces PHP's single-entry stat cache.
         clear_stat_cache();
+        if let Some(local) = file_url_local_path(&p) {
+            return Ok(Some(call_orig(vm, name, &with_path(args, 0, local))?));
+        }
         return Ok(None);
     }
     let uw = match user_path(vm, &p, 0) {
