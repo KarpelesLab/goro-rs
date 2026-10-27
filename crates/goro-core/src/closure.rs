@@ -2579,7 +2579,89 @@ fn retarget_static_keys(op: &mut OpArray, old_name: &[u8], new_name: &[u8]) {
     }
 }
 
+thread_local! {
+    /// The functions of freed Closure objects that had static variables of
+    /// their own (see closure_with_own_statics): the variables go with the
+    /// closure (zend_closure_free_storage destroys its op array's statics).
+    static DEAD_CLOSURE_STATICS: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Freed closures whose static variables are still to be released.
+#[inline]
+pub(crate) fn has_dead_closure_statics() -> bool {
+    DEAD_CLOSURE_STATICS
+        .try_with(|d| !d.borrow().is_empty())
+        .unwrap_or(false)
+}
+
+/// A Closure object is freed: remember its function when it has static
+/// variables of its own (a `name#id` function).
+#[inline]
+pub(crate) fn note_dropped_closure(inner: &Value) {
+    let name = match inner {
+        Value::String(s) => s.as_bytes(),
+        Value::Array(a) => {
+            let Ok(a) = a.try_borrow() else {
+                return;
+            };
+            match a.values().next() {
+                Some(Value::String(s)) if s.as_bytes().contains(&b'#') => {
+                    let n = s.as_bytes().to_vec();
+                    let _ = DEAD_CLOSURE_STATICS.try_with(|d| d.borrow_mut().push(n));
+                }
+                _ => {}
+            }
+            return;
+        }
+        _ => return,
+    };
+    if name.contains(&b'#') && is_closure_fn_name(name) {
+        let n = name.to_vec();
+        let _ = DEAD_CLOSURE_STATICS.try_with(|d| d.borrow_mut().push(n));
+    }
+}
+
 impl Vm {
+    /// Destroy the static variables of the freed closures whose function no
+    /// frame or generator runs any more (their op array is only the
+    /// function table's).
+    #[inline(never)]
+    pub(crate) fn release_dead_closure_statics(&mut self) {
+        let dead = DEAD_CLOSURE_STATICS.with(|d| std::mem::take(&mut *d.borrow_mut()));
+        if dead.is_empty() {
+            return;
+        }
+        let mut retry = Vec::new();
+        let mut released: Vec<Value> = Vec::new();
+        for name in dead {
+            let running = self
+                .user_functions
+                .get(&lower(&name))
+                .is_some_and(|op| Rc::strong_count(op) > 1);
+            if running {
+                retry.push(name);
+                continue;
+            }
+            let mut prefix = name;
+            prefix.extend_from_slice(b"::");
+            let keys: Vec<Vec<u8>> = self
+                .static_vars
+                .keys()
+                .filter(|k| k.starts_with(&prefix))
+                .cloned()
+                .collect();
+            for k in keys {
+                if let Some(v) = self.static_vars.remove(&k) {
+                    released.push(v);
+                }
+            }
+        }
+        if !retry.is_empty() {
+            DEAD_CLOSURE_STATICS.with(|d| d.borrow_mut().extend(retry));
+        }
+        drop(released);
+    }
+
     /// Closures with `static` variables get their own copy of the function
     /// per closure object (PHP keeps static variables per closure).
     /// `copy_from`: the closure whose current static values are duplicated

@@ -1770,6 +1770,12 @@ pub struct Vm {
     /// The next executed op_array is a global-scope frame (main script,
     /// include/eval at global scope) whose CVs live in the symbol table.
     pub(crate) bind_next_frame: bool,
+    /// zend_attach_symbol_table(): when code ran in the global scope (the
+    /// main script, a file included there), its compiled variables joined
+    /// the symbol table at once, in their order: (the table's size then,
+    /// the variable names). The shutdown destructors walk the table in
+    /// that order.
+    pub(crate) symbol_attach_events: Vec<(usize, Vec<Vec<u8>>)>,
     /// The next executed op_array runs in a function's scope (include /
     /// eval inside a function): its CVs are bound to this local table.
     pub(crate) bind_next_tab: Option<crate::symtab::SymTab>,
@@ -2645,6 +2651,7 @@ impl Vm {
             globals_gen: Rc::new(std::cell::Cell::new(0)),
             global_ref_names: Default::default(),
             bind_next_frame: false,
+            symbol_attach_events: Vec::new(),
             bind_next_tab: None,
             hrh_cells: Vec::new(),
             keep_ref_depth: None,
@@ -11860,6 +11867,9 @@ impl Vm {
     fn run_pending_destructors_now(&mut self) {
         if crate::gc::weak_dirty() {
             crate::gc::purge_weakmaps(self);
+        }
+        if crate::closure::has_dead_closure_statics() {
+            self.release_dead_closure_statics();
         }
         loop {
             if crate::value::has_freed_resources() {
@@ -22413,7 +22423,7 @@ impl Vm {
     fn shutdown_symbol_table_destructors(&mut self) -> bool {
         loop {
             let before = self.globals.borrow().len();
-            let keys: Vec<ArrayKey> = self.globals.borrow().keys().cloned().collect();
+            let keys = self.symbol_table_order();
             for k in keys.into_iter().rev() {
                 match self.shutdown_global_generator(&k) {
                     Some(true) => continue,
@@ -22473,6 +22483,57 @@ impl Vm {
                 return true;
             }
         }
+    }
+
+    /// The global symbol table's keys in php-src's order: a variable of code
+    /// run in the global scope is where that code attached its variables,
+    /// the others where they were added.
+    #[inline(never)]
+    fn symbol_table_order(&self) -> Vec<ArrayKey> {
+        let keys: Vec<ArrayKey> = self.globals.borrow().keys().cloned().collect();
+        if self.symbol_attach_events.is_empty() {
+            return keys;
+        }
+        let mut attached: std::collections::HashMap<&[u8], (usize, usize)> =
+            std::collections::HashMap::new();
+        for (ev, (at, names)) in self.symbol_attach_events.iter().enumerate() {
+            for (i, n) in names.iter().enumerate() {
+                attached
+                    .entry(n.as_slice())
+                    .or_insert((*at, ev * 65536 + i));
+            }
+        }
+        let mut ranked: Vec<((usize, u8, usize), ArrayKey)> = keys
+            .into_iter()
+            .enumerate()
+            .map(|(idx, k)| {
+                let r = match &k {
+                    ArrayKey::String(s) => attached.get(s.as_bytes()).copied(),
+                    ArrayKey::Int(_) => None,
+                };
+                let rank = match r {
+                    Some((at, pos)) => (at, 0, pos),
+                    None => (idx, 1, 0),
+                };
+                (rank, k)
+            })
+            .collect();
+        ranked.sort_by(|a, b| a.0.cmp(&b.0));
+        ranked.into_iter().map(|(_, k)| k).collect()
+    }
+
+    /// A frame bound to the global symbol table starts: its variables join
+    /// it (zend_attach_symbol_table).
+    #[inline(never)]
+    fn note_symbol_attach(&mut self, op_array: &OpArray) {
+        let at = self.globals.borrow().len();
+        let names: Vec<Vec<u8>> = op_array
+            .cv_names
+            .iter()
+            .filter(|n| n.as_slice() != b"this")
+            .cloned()
+            .collect();
+        self.symbol_attach_events.push((at, names));
     }
 
     /// shutdown_symbol_table_destructors() for a global holding a Generator
@@ -25252,6 +25313,9 @@ impl Vm {
         let cv_frame = self.register_cv_frame_for_call(op_array, hinted, &cvs);
         let prev_global = self.is_global_scope;
         self.is_global_scope = std::mem::take(&mut self.bind_next_frame);
+        if self.is_global_scope && !op_array.cv_names.is_empty() {
+            self.note_symbol_attach(op_array);
+        }
         // The caller fetches the result of this by-ref function for writing.
         let keep_ref =
             self.keep_ref_depth.take() == Some(self.call_depth) && op_array.returns_by_ref;

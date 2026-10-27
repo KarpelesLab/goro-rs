@@ -864,6 +864,7 @@ impl Drop for PhpObject {
         let defers_before = LAST_DEFER.try_with(|c| c.get().1).unwrap_or(0);
         if let Some(c) = &self.closure {
             crate::gc::on_child_released(c);
+            crate::closure::note_dropped_closure(c);
         }
         // Release what the object holds before its handle goes back to the
         // free list (zend_objects_store_del: free_obj, then the handle).
