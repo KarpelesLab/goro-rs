@@ -860,6 +860,22 @@ impl Vm {
         let Some((info, flags)) = self.zpp_method_info(class_lower, method_lower) else {
             return Ok(false);
         };
+        self.zpp_method_call_info(info, flags, args, skip, named, frame, strict, line)
+    }
+
+    /// zpp_method_call() of the method whose arginfo is `info` (`flags`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn zpp_method_call_info(
+        &mut self,
+        info: &'static FuncInfo,
+        flags: u8,
+        args: &mut Vec<Value>,
+        skip: usize,
+        named: &mut Vec<(Vec<u8>, Value)>,
+        frame: Option<bool>,
+        strict: bool,
+        line: u32,
+    ) -> Result<bool, ()> {
         let skip = skip.min(args.len());
         let mut err = None;
         if !named.is_empty() {
@@ -1091,27 +1107,33 @@ impl Vm {
         strict: bool,
         line: u32,
     ) -> bool {
-        let class = match args.first() {
-            Some(Value::Object(o)) => o.borrow().class_name.to_ascii_lowercase(),
+        let n = self.classes.len();
+        let cached = match args.first() {
+            Some(Value::Object(o)) => match self.zpp_ctor_cache.get(&o.borrow().class_name) {
+                Some((at, r)) if *at == n => Some(*r),
+                _ => None,
+            },
             _ => return false,
         };
-        let Some(internal) = self.zpp_internal_class(&class) else {
+        let found = match cached {
+            Some(r) => r,
+            None => {
+                let name = match args.first() {
+                    Some(Value::Object(o)) => o.borrow().class_name.clone(),
+                    _ => return false,
+                };
+                let r = self
+                    .zpp_internal_class(&name.to_ascii_lowercase())
+                    .and_then(|internal| self.zpp_method_info(&internal, b"__construct"));
+                self.zpp_ctor_cache.insert(name, (n, r));
+                r
+            }
+        };
+        let Some((info, flags)) = found else {
             return false;
         };
-        if self.zpp_method_info(&internal, b"__construct").is_none() {
-            return false;
-        }
-        self.zpp_method_call(
-            &internal,
-            b"__construct",
-            args,
-            1,
-            named,
-            Some(true),
-            strict,
-            line,
-        )
-        .is_err()
+        self.zpp_method_call_info(info, flags, args, 1, named, Some(true), strict, line)
+            .is_err()
     }
 
     /// Generic zpp for a call `name_lower` ("class::method") to a static

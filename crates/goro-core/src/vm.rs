@@ -2325,6 +2325,13 @@ pub struct Vm {
     /// Class -> its nearest internal class (with the class count it was computed at)
     pub(crate) zpp_internal_class_cache:
         crate::fxhash::FxHashMap<Vec<u8>, (usize, Option<Vec<u8>>)>,
+    /// Class name (as declared) -> the verified arginfo of the internal
+    /// constructor its objects get (see zpp_internal_ctor), with the class
+    /// count it was found at.
+    pub(crate) zpp_ctor_cache: crate::fxhash::FxHashMap<
+        Vec<u8>,
+        (usize, Option<(&'static crate::arginfo::FuncInfo, u8)>),
+    >,
     /// Pending-call names of internal methods run at INIT time (see arginfo.rs)
     pub(crate) zpp_return_names:
         crate::fxhash::FxHashMap<Vec<u8>, crate::fxhash::FxHashMap<Vec<u8>, PhpString>>,
@@ -3760,6 +3767,7 @@ impl Vm {
             observe_code: false,
             zpp_method_map: Default::default(),
             zpp_internal_class_cache: Default::default(),
+            zpp_ctor_cache: Default::default(),
             zpp_return_names: Default::default(),
             builtin_frames: Vec::new(),
             spl_active_fn: None,
@@ -9229,6 +9237,18 @@ impl Vm {
         self.constants
             .get(b"zend.exception_ignore_args".as_slice())
             .is_some_and(|v| {
+                // (the usual values, without the conversions)
+                match v {
+                    Value::Long(n) => return *n != 0,
+                    Value::True => return true,
+                    Value::False | Value::Null => return false,
+                    Value::String(s) => match s.as_bytes() {
+                        b"0" | b"" => return false,
+                        b"1" => return true,
+                        _ => {}
+                    },
+                    _ => {}
+                }
                 let s = v
                     .to_php_string()
                     .to_string_lossy()

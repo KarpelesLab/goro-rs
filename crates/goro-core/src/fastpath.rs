@@ -5419,11 +5419,15 @@ impl crate::vm::Vm {
             },
         };
         let cur = &ob.properties[idx].1;
+        // (the first write of a typed property: see typed_prop_store_ok)
+        let typed_init = write && matches!(cur, Value::Undef);
         // An uninitialized slot, or (for a write) one that is a reference
         // or holds something releasing could care about (an object, which
         // may be destroyed, also when the cycle collector's buffer holds
         // it): only an array of a few plain values is overwritten.
-        let ok = if write {
+        let ok = if typed_init {
+            true
+        } else if write {
             self.prop_overwrite_quiet(cur)
         } else if obj_fetch {
             matches!(cur, Value::Object(_))
@@ -5476,6 +5480,30 @@ impl crate::vm::Vm {
             }
         };
         drop(sites);
+        // A typed property, written with a value of its type.
+        if write && (plain == 0 || typed_init) {
+            let fits = new_val.as_ref().is_some_and(|v| {
+                self.typed_prop_store_ok(&ob.class_name, name, scope, v, typed_init)
+            });
+            if !fits {
+                return Fast::No;
+            }
+            drop(ob);
+            let Some(v) = new_val else {
+                return Fast::No;
+            };
+            let Ok(mut obm) = obj.try_borrow_mut() else {
+                return Fast::No;
+            };
+            if let Value::Object(o) = &v {
+                crate::gc::track_object(o);
+            }
+            let old = std::mem::replace(&mut obm.properties[idx].1, v);
+            drop(obm);
+            crate::gc::on_value_replaced(&old, &Value::Null);
+            drop(old);
+            return Fast::Done;
+        }
         if plain == 0 || (plain == PLAIN_UNMANGLED && mangled) {
             return Fast::No;
         }
@@ -5790,6 +5818,112 @@ impl crate::vm::Vm {
     /// destructor can be due, the cycle collector not due) what drops
     /// quietly (see drops_quietly_deep()). (An uninitialized slot, a
     /// reference...: the general handler.)
+    /// `$o->name = v` of a typed property `name` of an object of
+    /// `class_name` in `scope`, with `v` of its type as it is (no coercion,
+    /// so the mode does not matter): a plain property but for its type (see
+    /// plain_public_prop), neither readonly nor with an asymmetric set
+    /// visibility. `init`: its slot is uninitialized; __set() would then be
+    /// consulted for one that was unset(), so the class has none.
+    #[inline(never)]
+    fn typed_prop_store_ok(
+        &self,
+        class_name: &[u8],
+        name: &[u8],
+        scope: Option<&[u8]>,
+        v: &Value,
+        init: bool,
+    ) -> bool {
+        if self.plain_public_prop(class_name, name, false, scope) != PLAIN {
+            return false;
+        }
+        let mut buf = [0u8; 128];
+        let Some(lower) = lower_into(class_name, &mut buf) else {
+            return false;
+        };
+        let Some(ce) = self.classes.get(lower) else {
+            return false;
+        };
+        let Some(p) = ce.properties.iter().find(|p| p.name == name) else {
+            return false;
+        };
+        if p.is_readonly || p.set_visibility.is_some() || ce.is_readonly {
+            return false;
+        }
+        let Some(ty) = p.property_type.as_ref() else {
+            return false;
+        };
+        if init {
+            let mut cur = Some(ce);
+            for _ in 0..64 {
+                let Some(c) = cur else {
+                    break;
+                };
+                if c.methods.contains_key(b"__set".as_slice()) {
+                    return false;
+                }
+                cur = c
+                    .parent
+                    .as_deref()
+                    .and_then(|pn| self.classes.get(pn.to_ascii_lowercase().as_slice()));
+            }
+        }
+        self.value_fits_type_exactly(v, ty)
+    }
+
+    /// Whether `v` is of type `ty` as it is (false when unsure).
+    fn value_fits_type_exactly(&self, v: &Value, ty: &crate::opcode::ParamType) -> bool {
+        use crate::opcode::ParamType;
+        match ty {
+            ParamType::Nullable(inner) => {
+                matches!(v, Value::Null) || self.value_fits_type_exactly(v, inner)
+            }
+            ParamType::Union(members) => members.iter().any(|m| self.value_fits_type_exactly(v, m)),
+            ParamType::Intersection(_) => false,
+            ParamType::Simple(n) => {
+                let n = n.strip_prefix(b"\\").unwrap_or(n);
+                let mut buf = [0u8; 128];
+                let Some(l) = lower_into(n, &mut buf) else {
+                    return false;
+                };
+                match l {
+                    b"int" => matches!(v, Value::Long(_)),
+                    b"float" => matches!(v, Value::Double(_)),
+                    b"string" => matches!(v, Value::String(_)),
+                    b"bool" => matches!(v, Value::True | Value::False),
+                    b"true" => matches!(v, Value::True),
+                    b"false" => matches!(v, Value::False),
+                    b"array" => matches!(v, Value::Array(_)),
+                    b"null" => matches!(v, Value::Null),
+                    b"mixed" => !matches!(v, Value::Undef),
+                    b"object" => matches!(v, Value::Object(_)),
+                    b"self" | b"static" | b"parent" | b"callable" | b"iterable" | b"void"
+                    | b"never" | b"integer" | b"double" | b"boolean" => false,
+                    class => match v {
+                        Value::Object(o) => {
+                            let Ok(ob) = o.try_borrow() else {
+                                return false;
+                            };
+                            if ob.class_name.eq_ignore_ascii_case(class) {
+                                return true;
+                            }
+                            // (a user class deriving from it: its class entry
+                            // lists its ancestors)
+                            let mut cbuf = [0u8; 128];
+                            match lower_into(&ob.class_name, &mut cbuf) {
+                                Some(cl) => {
+                                    self.classes.contains_key(cl)
+                                        && self.class_extends_any(cl, &[class])
+                                }
+                                None => false,
+                            }
+                        }
+                        _ => false,
+                    },
+                }
+            }
+        }
+    }
+
     fn prop_overwrite_quiet(&self, cur: &Value) -> bool {
         match cur {
             Value::Array(a) if Rc::ptr_eq(a, &self.globals) => false,

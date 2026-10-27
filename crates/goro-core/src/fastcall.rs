@@ -303,7 +303,10 @@ impl Vm {
                 slot.1 = Value::Long(op.line as i64);
             }
             let trace = self.build_exception_trace();
-            self.filter_new_exception_trace(&t.lower, &trace);
+            let (n, filter) = t.filter_trace;
+            if filter || n != self.trace_without_args_classes.len() {
+                self.filter_new_exception_trace(&t.lower, &trace);
+            }
             if let Some(slot) = props.get_mut(ti) {
                 slot.1 = trace;
             }
@@ -427,6 +430,14 @@ impl Vm {
             slots: obj.properties.clone(),
             arrays,
             throwable,
+            filter_trace: (self.trace_without_args_classes.len(), {
+                let targets: Vec<&[u8]> = self
+                    .trace_without_args_classes
+                    .iter()
+                    .map(|c| c.as_slice())
+                    .collect();
+                !targets.is_empty() && self.class_extends_any(lower, &targets)
+            }),
             tag: crate::object::class_tag_of(&obj.class_name),
             create_hook: self.object_create_hook_of(lower),
             hooks_len: self.object_create_handlers.len(),
@@ -602,7 +613,7 @@ impl Vm {
             && !t.forward_this
             && t.method_info.is_none()
             && t.fn_gen == 0
-            && !t.via_invoke
+            && t.call_flags == 0
             && !t.dynamic
             && t.internal_ctor == 0;
         let only_this = matches!(call.args.as_slice(), [Value::Object(o)] if std::ptr::eq(Rc::as_ptr(o), p.obj));
