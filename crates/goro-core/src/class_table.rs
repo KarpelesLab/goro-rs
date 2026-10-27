@@ -130,39 +130,68 @@ impl Vm {
     /// Names of the declared classes of the given kinds, in class-table order
     /// (internal classes first): get_declared_classes() and friends.
     pub fn declared_class_names(&self, want: &[ClassKind]) -> Vec<Vec<u8>> {
-        let bound = ANON_BOUND.with(|b| b.borrow().clone());
         let mut out = Vec::new();
+        self.for_each_declared_class_name(want, |n| out.push(n.to_vec()));
+        out
+    }
+
+    /// declared_class_names() handing each name to `f` (which must leave
+    /// the class table alone).
+    pub fn for_each_declared_class_name(&self, want: &[ClassKind], mut f: impl FnMut(&[u8])) {
+        // (the stubs of an extension are next to each other: its enabled
+        // state is looked up once per run of them)
+        let mut last_ext: Option<(&str, bool)> = None;
+        let mut buf = [0u8; 64];
         for c in crate::stub_sigs::CLASSES {
-            if want.contains(&ClassKind::of_stub(c))
-                && self.stub_ext_enabled(c.ext)
-                && !stubs::is_pseudo_class(c.name)
-            {
-                let l = c.name.to_ascii_lowercase();
-                if !self.classes.contains_key(l.as_bytes()) {
-                    out.push(c.name.as_bytes().to_vec());
+            if !want.contains(&ClassKind::of_stub(c)) {
+                continue;
+            }
+            let enabled = match last_ext {
+                Some((e, on)) if std::ptr::eq(e, c.ext) || e == c.ext => on,
+                _ => {
+                    let on = self.stub_ext_enabled(c.ext);
+                    last_ext = Some((c.ext, on));
+                    on
+                }
+            };
+            if enabled && !stubs::is_pseudo_class(c.name) {
+                let n = c.name.as_bytes();
+                let declared = if n.len() <= buf.len() {
+                    let l = &mut buf[..n.len()];
+                    l.copy_from_slice(n);
+                    l.make_ascii_lowercase();
+                    self.classes.contains_key(&*l)
+                } else {
+                    self.classes.contains_key(n.to_ascii_lowercase().as_slice())
+                };
+                if !declared {
+                    f(n);
                 }
             }
         }
-        for (key, ce) in &self.classes {
-            if !want.contains(&ClassKind::of_entry(ce)) {
-                continue;
+        ANON_BOUND.with(|b| {
+            let bound = b.borrow();
+            for (key, ce) in &self.classes {
+                if !want.contains(&ClassKind::of_entry(ce)) {
+                    continue;
+                }
+                // (an alias with an empty name is not listed)
+                if key.is_empty() {
+                    continue;
+                }
+                if ce.name.contains(&0) {
+                    // An anonymous class is declared when its `new` first runs.
+                    if bound.contains(&ce.name) {
+                        f(&ce.name);
+                    }
+                } else if ce.name.len() != key.len() || !ce.name.eq_ignore_ascii_case(key) {
+                    // Aliases are listed under their (lowercased) alias name.
+                    f(key);
+                } else {
+                    f(&ce.name);
+                }
             }
-            // An anonymous class is declared when its `new` first runs.
-            if ce.name.contains(&0) && !bound.contains(&ce.name) {
-                continue;
-            }
-            // Aliases are listed under their (lowercased) alias name (an
-            // empty one is not listed).
-            if key.is_empty() {
-                continue;
-            }
-            if !ce.name.eq_ignore_ascii_case(key) && !ce.name.contains(&0) {
-                out.push(key.clone());
-            } else {
-                out.push(ce.name.clone());
-            }
-        }
-        out
+        });
     }
 }
 

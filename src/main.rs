@@ -974,6 +974,10 @@ fn run_request(
     flush_output(&mut vm);
     vm.module_shutdown();
     *exit_status = request_exit_status(&vm, failed);
+    // The process ends here: the class and function tables (memory only,
+    // see retire_tables()) are left to the exit instead of being freed one
+    // op array at a time; the rest of the engine is released as usual.
+    std::mem::forget(vm.retire_tables());
     true
 }
 

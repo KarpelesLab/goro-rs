@@ -1,6 +1,10 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 
+/// A name resolution table (use imports...): shared between the compilers
+/// of nested scopes, copied when one changes it.
+type NameMap = std::rc::Rc<crate::fxhash::FxHashMap<Vec<u8>, Vec<u8>>>;
+
 use goro_parser::ast::*;
 
 use crate::object::{ClassEntry, MethodDef, PropertyDef, Visibility as ObjVisibility};
@@ -766,11 +770,11 @@ pub struct Compiler {
     /// compiled: what `__PROPERTY__` means in its constant expressions.
     const_property_name: Vec<u8>,
     /// Use imports: maps lowercase short name (alias) -> fully qualified name (original case)
-    use_map: HashMap<Vec<u8>, Vec<u8>>,
+    use_map: NameMap,
     /// Use imports for functions: maps lowercase short name -> fully qualified name
-    use_function_map: HashMap<Vec<u8>, Vec<u8>>,
+    use_function_map: NameMap,
     /// Use imports for constants: maps short name -> fully qualified name (case-sensitive)
-    use_const_map: HashMap<Vec<u8>, Vec<u8>>,
+    use_const_map: NameMap,
     /// Label offsets for goto: maps label name -> instruction offset
     label_offsets: HashMap<Vec<u8>, u32>,
     /// Ids of the try-with-finally regions (try and catch bodies) enclosing
@@ -787,7 +791,7 @@ pub struct Compiler {
     /// Whether the current function has a "never" return type
     has_never_return: bool,
     /// Map from parser anonymous class names (__anonymous_class_N) to PHP NUL-byte names
-    anon_class_name_map: HashMap<Vec<u8>, Vec<u8>>,
+    anon_class_name_map: NameMap,
     /// Lowercased qualified names of classes that were early-bound (hoisted) in the
     /// hoisting pass. Used so the second pass knows which class decls to skip, and so
     /// the hoisting pass can decide whether a `extends Parent` class can itself be
@@ -1167,9 +1171,9 @@ impl Compiler {
             finally_targets: Vec::new(),
             current_namespace: Vec::new(),
             const_property_name: Vec::new(),
-            use_map: HashMap::new(),
-            use_function_map: HashMap::new(),
-            use_const_map: HashMap::new(),
+            use_map: NameMap::default(),
+            use_function_map: NameMap::default(),
+            use_const_map: NameMap::default(),
             label_offsets: HashMap::new(),
             try_finally_ids: Vec::new(),
             try_finally_counter: 0,
@@ -1177,7 +1181,7 @@ impl Compiler {
             jumps: Box::default(),
             source_file: Vec::new(),
             has_never_return: false,
-            anon_class_name_map: HashMap::new(),
+            anon_class_name_map: NameMap::default(),
             hoisted_class_names: std::collections::HashSet::new(),
             hoisted_class_stmts: std::collections::HashSet::new(),
             leading_declare_stmts: std::collections::HashSet::new(),
@@ -3610,7 +3614,8 @@ impl Compiler {
                     anon_name.extend_from_slice(line.to_string().as_bytes());
                     anon_name.push(b'$');
                     anon_name.extend_from_slice(format!("{:x}", counter).as_bytes());
-                    self.anon_class_name_map.insert(name.to_vec(), anon_name);
+                    std::rc::Rc::make_mut(&mut self.anon_class_name_map)
+                        .insert(name.to_vec(), anon_name);
                 }
                 StmtKind::NamespaceDecl { name, body } => {
                     // Track namespace state for correct class name resolution
@@ -3628,7 +3633,7 @@ impl Compiler {
                     } else {
                         self.current_namespace = Vec::new();
                     }
-                    self.use_map = HashMap::new();
+                    self.use_map = NameMap::default();
                     if let Some(body_stmts) = body {
                         self.anon_class_map_pass(
                             body_stmts,
@@ -3658,7 +3663,7 @@ impl Compiler {
                                 }
                                 qualified.extend_from_slice(part);
                             }
-                            self.use_map.insert(alias_lower, qualified);
+                            std::rc::Rc::make_mut(&mut self.use_map).insert(alias_lower, qualified);
                         }
                     }
                 }
@@ -4001,9 +4006,9 @@ impl Compiler {
         let hoist_end = self.op_array.ops.len();
         // Reset namespace state for second pass (will be re-applied by NamespaceDecl/UseDecl)
         self.current_namespace = Vec::new();
-        self.use_map = HashMap::new();
-        self.use_function_map = HashMap::new();
-        self.use_const_map = HashMap::new();
+        self.use_map = NameMap::default();
+        self.use_function_map = NameMap::default();
+        self.use_const_map = NameMap::default();
         // Second pass: compile everything else
         self.in_main_pass = true;
         let main_pass = (|| -> CompileResult<()> {
@@ -4048,9 +4053,9 @@ impl Compiler {
                         } else {
                             self.current_namespace = Vec::new();
                         }
-                        self.use_map = HashMap::new();
-                        self.use_function_map = HashMap::new();
-                        self.use_const_map = HashMap::new();
+                        self.use_map = NameMap::default();
+                        self.use_function_map = NameMap::default();
+                        self.use_const_map = NameMap::default();
                         self.reset_seen_symbols();
 
                         if let Some(body_stmts) = body {
@@ -4092,9 +4097,9 @@ impl Compiler {
                             }
                             // Reset after block
                             self.current_namespace = Vec::new();
-                            self.use_map = HashMap::new();
-                            self.use_function_map = HashMap::new();
-                            self.use_const_map = HashMap::new();
+                            self.use_map = NameMap::default();
+                            self.use_function_map = NameMap::default();
+                            self.use_const_map = NameMap::default();
                             self.reset_seen_symbols();
                         }
                     }
@@ -4195,18 +4200,18 @@ impl Compiler {
                     } else {
                         self.current_namespace = Vec::new();
                     }
-                    self.use_map = HashMap::new();
-                    self.use_function_map = HashMap::new();
-                    self.use_const_map = HashMap::new();
+                    self.use_map = NameMap::default();
+                    self.use_function_map = NameMap::default();
+                    self.use_const_map = NameMap::default();
 
                     if let Some(body_stmts) = body {
                         // Recurse into bracketed namespace body
                         self.compile_hoisting_pass_inner(body_stmts)?;
                         // Reset after block
                         self.current_namespace = Vec::new();
-                        self.use_map = HashMap::new();
-                        self.use_function_map = HashMap::new();
-                        self.use_const_map = HashMap::new();
+                        self.use_map = NameMap::default();
+                        self.use_function_map = NameMap::default();
+                        self.use_const_map = NameMap::default();
                         self.reset_seen_symbols();
                     }
                 }
@@ -4371,9 +4376,9 @@ impl Compiler {
             return None;
         }
         self.current_namespace = Vec::new();
-        self.use_map = HashMap::new();
-        self.use_function_map = HashMap::new();
-        self.use_const_map = HashMap::new();
+        self.use_map = NameMap::default();
+        self.use_function_map = NameMap::default();
+        self.use_const_map = NameMap::default();
         self.in_main_pass = true;
         let mut earlier = None;
         for stmt in stmts {
@@ -12171,9 +12176,9 @@ impl Compiler {
                     self.current_namespace = Vec::new();
                 }
                 // Clear use maps when entering a new namespace
-                self.use_map = HashMap::new();
-                self.use_function_map = HashMap::new();
-                self.use_const_map = HashMap::new();
+                self.use_map = NameMap::default();
+                self.use_function_map = NameMap::default();
+                self.use_const_map = NameMap::default();
 
                 // If this is a block namespace { ... }, compile the body
                 if let Some(body_stmts) = body {
@@ -12182,9 +12187,9 @@ impl Compiler {
                     }
                     // After block namespace, reset to global
                     self.current_namespace = Vec::new();
-                    self.use_map = HashMap::new();
-                    self.use_function_map = HashMap::new();
-                    self.use_const_map = HashMap::new();
+                    self.use_map = NameMap::default();
+                    self.use_function_map = NameMap::default();
+                    self.use_const_map = NameMap::default();
                 }
                 Ok(())
             }
@@ -12290,13 +12295,15 @@ impl Compiler {
                     }
                     match item.kind {
                         UseKind::Normal => {
-                            self.use_map.insert(alias_lower, fqn);
+                            std::rc::Rc::make_mut(&mut self.use_map).insert(alias_lower, fqn);
                         }
                         UseKind::Function => {
-                            self.use_function_map.insert(alias_lower, fqn);
+                            std::rc::Rc::make_mut(&mut self.use_function_map)
+                                .insert(alias_lower, fqn);
                         }
                         UseKind::Constant => {
-                            self.use_const_map.insert(alias.clone(), fqn);
+                            std::rc::Rc::make_mut(&mut self.use_const_map)
+                                .insert(alias.clone(), fqn);
                         }
                     }
                 }
@@ -25345,7 +25352,7 @@ fn substitute_self_parent_types(class: &mut crate::object::ClassEntry) {
 fn type_hint_to_param_type_with_ns(
     hint: &TypeHint,
     namespace: &[u8],
-    use_map: &HashMap<Vec<u8>, Vec<u8>>,
+    use_map: &crate::fxhash::FxHashMap<Vec<u8>, Vec<u8>>,
 ) -> ParamType {
     match hint {
         TypeHint::Simple(name) => {
@@ -25745,7 +25752,7 @@ fn validate_type_hint_full(
             // object + class type is redundant
             if has_object && has_class_type {
                 // Render like zend_type_to_string (class names in order, then builtins)
-                let pt = type_hint_to_param_type_with_ns(hint, b"", &HashMap::new());
+                let pt = type_hint_to_param_type_with_ns(hint, b"", &Default::default());
                 let mut tv = crate::vm::variance::TypeView::from_param_type(&pt);
                 for e in tv.elems.iter_mut() {
                     if let crate::vm::variance::TElem::Name(n) = e {

@@ -12,16 +12,14 @@ use crate::string::PhpString;
 /// For regular classes: returns the name as-is.
 pub fn display_class_name(name: &[u8]) -> String {
     // (the common case: an ASCII name without NUL nor "__", kept as it is)
-    let mut prev = 0u8;
-    let plain = name.iter().all(|&b| {
-        let ok = b != 0 && b < 0x80 && !(b == b'_' && prev == b'_');
-        prev = b;
-        ok
-    });
-    match std::str::from_utf8(name) {
-        Ok(s) if plain => s.to_owned(),
-        _ => display_class_name_slow(name),
+    if name.is_ascii()
+        && !name.contains(&0)
+        && (!name.contains(&b'_') || !name.windows(2).any(|w| w == b"__"))
+    {
+        // SAFETY: ASCII is valid UTF-8.
+        return unsafe { std::str::from_utf8_unchecked(name) }.to_owned();
     }
+    display_class_name_slow(name)
 }
 
 #[inline(never)]
