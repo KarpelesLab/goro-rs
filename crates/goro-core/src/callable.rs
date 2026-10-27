@@ -932,6 +932,27 @@ impl Vm {
         }
     }
 
+    /// Raise the deprecations queued by the `callable` parameter type
+    /// checks of a call of `callee`: at its RECV, in its file, on its
+    /// declaration's line.
+    #[inline(never)]
+    pub fn flush_callable_deprecations_recv(&mut self, callee: &crate::opcode::OpArray) {
+        if self.pending_callable_deprecations.borrow().is_empty() {
+            return;
+        }
+        if callee.decl_line == 0 {
+            return self.flush_callable_deprecations();
+        }
+        let q = std::mem::take(&mut *self.pending_callable_deprecations.borrow_mut());
+        let saved = self.enter_recv_file(callee);
+        for d in q {
+            self.emit_deprecated_at(&d, callee.decl_line);
+        }
+        if let Some(f) = saved {
+            self.current_file = f;
+        }
+    }
+
     /// The error of zend_is_callable_ex() for `callable` (None when it is
     /// callable), raising its deprecations.
     pub fn callable_error(&mut self, callable: &Value) -> Option<String> {

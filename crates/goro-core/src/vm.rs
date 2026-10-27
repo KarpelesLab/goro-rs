@@ -10425,7 +10425,7 @@ impl Vm {
         if scope_pushed {
             self.class_scope_stack.pop();
         }
-        self.flush_callable_deprecations();
+        self.flush_callable_deprecations_recv(op_array);
         err
     }
 
@@ -10466,7 +10466,7 @@ impl Vm {
         let line = self.current_line;
         let param_err =
             self.check_param_types_with_strict(&user_fn, args, &display, 0, line, false);
-        self.flush_callable_deprecations();
+        self.flush_callable_deprecations_recv(&user_fn);
         if let Some(msg) = param_err {
             let msg = match msg.find(", called in ") {
                 Some(p) => msg[..p].to_string(),
@@ -10647,7 +10647,7 @@ impl Vm {
     /// Make `user_fn`'s file the current one (when it differs) for the
     /// diagnostics of its RECV; returns the file to restore.
     #[inline(never)]
-    fn enter_recv_file(&mut self, user_fn: &OpArray) -> Option<crate::rcstr::RcStr> {
+    pub(crate) fn enter_recv_file(&mut self, user_fn: &OpArray) -> Option<crate::rcstr::RcStr> {
         if user_fn.filename.is_empty() || user_fn.filename == self.current_file.as_bytes() {
             return None;
         }
@@ -23219,7 +23219,7 @@ impl Vm {
         if temp_scope_pushed {
             self.class_scope_stack.pop();
         }
-        self.flush_callable_deprecations();
+        self.flush_callable_deprecations_recv(user_fn);
         if let Some(err_msg) = param_err {
             // Use the function definition line for the exception, not the call site
             let def_line = if user_fn.decl_line > 0 {
@@ -24793,7 +24793,10 @@ impl Vm {
                     func_name, expected_type, actual_type
                 )
             };
-            let ret_line = if self.last_return_line > 0 {
+            let ret_line = if implicit_return && op_array.end_line > 0 {
+                // (the implicit return is on the function's last line)
+                op_array.end_line
+            } else if self.last_return_line > 0 {
                 self.last_return_line
             } else if op_array.decl_line > 0 {
                 op_array.decl_line
@@ -36202,7 +36205,7 @@ impl Vm {
                                 if scope_pushed {
                                     self.class_scope_stack.pop();
                                 }
-                                self.flush_callable_deprecations();
+                                self.flush_callable_deprecations_recv(&user_fn);
                                 let (exc_class, err_msg, exc_line): (&[u8], String, u32) =
                                     match type_err {
                                         Some(m) => (
