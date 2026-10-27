@@ -331,7 +331,7 @@ fn op_arg_or_type_error(vm: &mut Vm, val: &Value) -> Result<Int, String> {
 fn zval_type_name(val: &Value) -> String {
     match val {
         Value::Reference(r) => zval_type_name(&r.borrow()),
-        Value::Object(o) => String::from_utf8_lossy(&o.borrow().class_name).into_owned(),
+        Value::Object(o) => goro_core::value::display_class_name(&o.borrow().class_name),
         Value::True | Value::False => "bool".to_string(),
         other => value_type_name_for_gmp(other).to_string(),
     }
@@ -558,7 +558,7 @@ fn value_type_display_for_gmp(val: &Value) -> String {
     match val {
         Value::Object(obj) => {
             let b = obj.borrow();
-            String::from_utf8_lossy(&b.class_name).into_owned()
+            goro_core::value::display_class_name(&b.class_name)
         }
         Value::Reference(r) => value_type_display_for_gmp(&r.borrow()),
         _ => value_type_name_for_gmp(val).to_string(),
@@ -662,7 +662,7 @@ fn value_to_bigint_checked(
                     func_name,
                     arg_num,
                     arg_name,
-                    String::from_utf8_lossy(&b.class_name)
+                    goro_core::value::display_class_name(&b.class_name)
                 )))
             }
         }
@@ -915,7 +915,7 @@ fn gmp_init_inner(
         Value::Object(obj) => {
             // gmp_init signature is string|int, NOT GMP.
             let b = obj.borrow();
-            let cls = String::from_utf8_lossy(&b.class_name).into_owned();
+            let cls = goro_core::value::display_class_name(&b.class_name);
             let msg = format!(
                 "{}(): Argument #1 ($num) must be of type string|int, {} given",
                 func_name, cls
@@ -1048,7 +1048,7 @@ pub fn gmp_construct_native(vm: &mut Vm, args: &[Value], line: u32) -> Result<()
         }
         Value::Null | Value::Undef => Int::ZERO,
         Value::Object(obj) => {
-            let cls = String::from_utf8_lossy(&obj.borrow().class_name).into_owned();
+            let cls = goro_core::value::display_class_name(&obj.borrow().class_name);
             let msg = format!(
                 "GMP::__construct(): Argument #1 ($num) must be of type string|int, {} given",
                 cls
@@ -1409,7 +1409,7 @@ fn get_int_arg(
             })
         }
         Value::Object(obj) => {
-            let cls = String::from_utf8_lossy(&obj.borrow().class_name).into_owned();
+            let cls = goro_core::value::display_class_name(&obj.borrow().class_name);
             let msg = format!(
                 "{}(): Argument #{} (${}) must be of type int, {} given",
                 func_name,
@@ -1748,7 +1748,7 @@ fn gmp_setbit_or_clrbit(
         Value::Object(obj) => {
             let class_ok = obj.borrow().class_name.eq_ignore_ascii_case(b"GMP");
             if !class_ok {
-                let cls = String::from_utf8_lossy(&obj.borrow().class_name).into_owned();
+                let cls = goro_core::value::display_class_name(&obj.borrow().class_name);
                 let msg = format!(
                     "{}(): Argument #1 ($num) must be of type GMP, {} given",
                     func_name, cls
@@ -1768,7 +1768,7 @@ fn gmp_setbit_or_clrbit(
                 Value::Object(obj) => {
                     let class_ok = obj.borrow().class_name.eq_ignore_ascii_case(b"GMP");
                     if !class_ok {
-                        let cls = String::from_utf8_lossy(&obj.borrow().class_name).into_owned();
+                        let cls = goro_core::value::display_class_name(&obj.borrow().class_name);
                         let msg = format!(
                             "{}(): Argument #1 ($num) must be of type GMP, {} given",
                             func_name, cls

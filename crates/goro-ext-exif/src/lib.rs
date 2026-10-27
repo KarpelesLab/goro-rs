@@ -139,7 +139,7 @@ fn type_name(v: &Value) -> String {
         Value::Double(_) => "float".into(),
         Value::String(_) => "string".into(),
         Value::Array(_) => "array".into(),
-        Value::Object(o) => String::from_utf8_lossy(&o.borrow().class_name).into_owned(),
+        Value::Object(o) => goro_core::value::display_class_name(&o.borrow().class_name),
         _ => "resource".into(),
     }
 }

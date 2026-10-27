@@ -45,7 +45,8 @@ fn php_type_name(val: &Value) -> String {
         Value::String(_) => "string".to_string(),
         Value::Array(_) => "array".to_string(),
         Value::Resource(_) => "resource".to_string(),
-        Value::Object(obj) => String::from_utf8_lossy(&obj.borrow().class_name).to_string(),
+        // (ZSTR_VAL of the class name: an anonymous one stops at its NUL)
+        Value::Object(obj) => goro_core::value::display_class_name(&obj.borrow().class_name),
         Value::Generator(_) => "Generator".to_string(),
         Value::Reference(r) => php_type_name(&r.borrow()),
     }

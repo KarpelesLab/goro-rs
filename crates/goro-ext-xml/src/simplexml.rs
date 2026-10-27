@@ -856,7 +856,7 @@ fn value_str(vm: &mut Vm, v: &Value, access: Access) -> Result<Option<String>, (
 
 fn zend_value_name(_vm: &Vm, v: &Value) -> String {
     match v {
-        Value::Object(o) => String::from_utf8_lossy(&o.borrow().class_name).into_owned(),
+        Value::Object(o) => goro_core::value::display_class_name(&o.borrow().class_name),
         Value::Array(_) => "array".into(),
         Value::Null | Value::Undef => "null".into(),
         Value::True => "true".into(),
