@@ -95,6 +95,30 @@ thread_local! {
     static CTYPE_SET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+unsafe extern "C" {
+    fn mbrlen(s: *const libc::c_char, n: libc::size_t, ps: *mut libc::mbstate_t) -> libc::size_t;
+}
+
+/// php_mblen() over `s` (mbrlen() in the current LC_CTYPE with a state
+/// the caller keeps, php_mb_reset() being a zeroed one): the length of the
+/// character at the start of `s`, or a negative value for an invalid or
+/// incomplete one.
+pub fn php_mblen(s: &[u8], state: &mut libc::mbstate_t) -> isize {
+    if s.is_empty() {
+        return 0;
+    }
+    // SAFETY: `s` is a valid buffer of s.len() bytes; `state` is a valid
+    // mbstate_t.
+    let r = unsafe { mbrlen(s.as_ptr() as *const libc::c_char, s.len(), state) };
+    if r == usize::MAX || r == usize::MAX - 1 {
+        // (an invalid sequence leaves the state undefined: start over)
+        // SAFETY: an all-zero mbstate_t is the initial state.
+        *state = unsafe { std::mem::zeroed() };
+        return -1;
+    }
+    r as isize
+}
+
 pub fn ctype_locale_active() -> bool {
     CTYPE_SET.with(|c| c.get())
 }

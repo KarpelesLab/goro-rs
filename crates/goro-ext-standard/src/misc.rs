@@ -7929,12 +7929,29 @@ fn escapeshellarg_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let mut result = Vec::new();
     result.push(b'\'');
-    for &byte in s.as_bytes() {
-        if byte == b'\'' {
+    // (php_escape_shell_arg(): characters invalid in the LC_CTYPE are
+    // dropped, multibyte ones copied whole)
+    let b = s.as_bytes();
+    // SAFETY: an all-zero mbstate_t is the initial state (php_mb_reset()).
+    let mut st: libc::mbstate_t = unsafe { std::mem::zeroed() };
+    let mut x = 0;
+    while x < b.len() {
+        let mb = crate::locale::php_mblen(&b[x..], &mut st);
+        if mb < 0 {
+            x += 1;
+            continue;
+        }
+        if mb > 1 {
+            result.extend_from_slice(&b[x..x + mb as usize]);
+            x += mb as usize;
+            continue;
+        }
+        if b[x] == b'\'' {
             result.extend_from_slice(b"'\\''");
         } else {
-            result.push(byte);
+            result.push(b[x]);
         }
+        x += 1;
     }
     result.push(b'\'');
     Ok(Value::String(PhpString::from_vec(result)))
@@ -7963,7 +7980,24 @@ fn escapeshellcmd_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut result = Vec::new();
     // Quotes are only escaped when unpaired (php_escape_shell_cmd).
     let mut pending: Option<usize> = None;
+    // SAFETY: an all-zero mbstate_t is the initial state (php_mb_reset()).
+    let mut st: libc::mbstate_t = unsafe { std::mem::zeroed() };
+    let mut skip_to = 0usize;
     for (x, &byte) in str.iter().enumerate() {
+        if x < skip_to {
+            continue;
+        }
+        // (php_escape_shell_cmd(): characters invalid in the LC_CTYPE are
+        // dropped, multibyte ones copied whole)
+        let mb = crate::locale::php_mblen(&str[x..], &mut st);
+        if mb < 0 {
+            continue;
+        }
+        if mb > 1 {
+            result.extend_from_slice(&str[x..x + mb as usize]);
+            skip_to = x + mb as usize;
+            continue;
+        }
         match byte {
             b'"' | b'\'' => {
                 if pending.is_none() {
