@@ -592,7 +592,14 @@ impl<'a> Lexer<'a> {
     fn scan_double_quoted_string(&mut self) -> TokenKind {
         // Opening quote already consumed
         let mut result = Vec::new();
+        // The line the literal part being built starts on (where a `${`
+        // deprecation is reported: CG(zend_lineno) after compiling the
+        // previous part).
+        let mut seg_line = self.line;
         loop {
+            if result.is_empty() {
+                seg_line = self.line;
+            }
             match self.peek() {
                 Some(c) if c == self.dq_term => {
                     self.advance();
@@ -831,7 +838,7 @@ impl<'a> Lexer<'a> {
                     result.clear();
                     let (toks, end, msg) =
                         lex_dollar_brace_interpolation(self.source, self.pos, self.line);
-                    crate::push_compile_deprecated_at(msg.to_string(), self.line, self.pos as u32);
+                    crate::push_compile_deprecated_at(msg.to_string(), seg_line, self.pos as u32);
                     self.pending.extend(toks);
                     while self.pos < end {
                         self.advance();
@@ -1899,11 +1906,21 @@ impl<'a> Lexer<'a> {
         let len = content.len();
         let mut i = 0;
         let mut result = Vec::new();
+        // The body ends on the line before the closing label's: each part
+        // is on its own line (zend_scan_escape_string() counts the newlines
+        // as it goes).
+        let nl = memchr::memchr_iter(b'\n', &content).count() as u32;
+        let mut lc = LineAt::new(self.line.saturating_sub(nl + 1).max(1));
+        // Where the literal part being built starts.
+        let mut seg_start = 0;
 
         // Helper closure-like inline processing
         loop {
             if i >= len {
                 break;
+            }
+            if result.is_empty() {
+                seg_start = i;
             }
             let ch = content[i];
             match ch {
@@ -1963,7 +1980,7 @@ impl<'a> Lexer<'a> {
                             if j >= len {
                                 bad = true;
                             }
-                            encode_unicode_escape(&hex_str, bad, self.line, &mut result);
+                            encode_unicode_escape(&hex_str, bad, lc.at(&content, i), &mut result);
                             i = if bad { j } else { j + 1 };
                         }
                         b'x' | b'X' => {
@@ -2006,7 +2023,7 @@ impl<'a> Lexer<'a> {
                                         "Octal escape sequence overflow \\{} is greater than \\377",
                                         s
                                     ),
-                                    self.line,
+                                    lc.at(&content, i),
                                 );
                             }
                             result.push((v & 0xFF) as u8);
@@ -2026,7 +2043,7 @@ impl<'a> Lexer<'a> {
                     // Variable interpolation
                     self.pending.push(Token::new(
                         TokenKind::InterpolatedStringPart(result.clone()),
-                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                        Span::new(self.pos as u32, self.pos as u32, lc.at(&content, i)),
                     ));
                     result.clear();
                     i += 1; // skip $
@@ -2043,7 +2060,7 @@ impl<'a> Lexer<'a> {
                     let var_name = content[var_start..i].to_vec();
                     self.pending.push(Token::new(
                         TokenKind::Variable(var_name),
-                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                        Span::new(self.pos as u32, self.pos as u32, lc.at(&content, i)),
                     ));
 
                     // Check for ->property access (only before a label)
@@ -2057,7 +2074,7 @@ impl<'a> Lexer<'a> {
                         i += 2; // skip ->
                         self.pending.push(Token::new(
                             TokenKind::Arrow,
-                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                            Span::new(self.pos as u32, self.pos as u32, lc.at(&content, i)),
                         ));
                         if i < len
                             && (content[i].is_ascii_alphabetic()
@@ -2075,7 +2092,7 @@ impl<'a> Lexer<'a> {
                             let prop_name = content[prop_start..i].to_vec();
                             self.pending.push(Token::new(
                                 TokenKind::Identifier(prop_name),
-                                Span::new(self.pos as u32, self.pos as u32, self.line),
+                                Span::new(self.pos as u32, self.pos as u32, lc.at(&content, i)),
                             ));
                         }
                     }
@@ -2089,7 +2106,7 @@ impl<'a> Lexer<'a> {
                         i += 3;
                         self.pending.push(Token::new(
                             TokenKind::NullsafeArrow,
-                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                            Span::new(self.pos as u32, self.pos as u32, lc.at(&content, i)),
                         ));
                         let prop_start = i;
                         while i < len
@@ -2101,7 +2118,7 @@ impl<'a> Lexer<'a> {
                         }
                         self.pending.push(Token::new(
                             TokenKind::Identifier(content[prop_start..i].to_vec()),
-                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                            Span::new(self.pos as u32, self.pos as u32, lc.at(&content, i)),
                         ));
                     }
                     // Check for [index] access
@@ -2109,7 +2126,7 @@ impl<'a> Lexer<'a> {
                         i += 1; // skip [
                         self.pending.push(Token::new(
                             TokenKind::OpenBracket,
-                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                            Span::new(self.pos as u32, self.pos as u32, lc.at(&content, i)),
                         ));
                         // Scan index: could be number, variable, or bare identifier
                         if i < len {
@@ -2126,7 +2143,11 @@ impl<'a> Lexer<'a> {
                                     i = end;
                                     self.pending.push(Token::new(
                                         num_kind,
-                                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                                        Span::new(
+                                            self.pos as u32,
+                                            self.pos as u32,
+                                            lc.at(&content, i),
+                                        ),
                                     ));
                                 }
                                 b'$' => {
@@ -2142,7 +2163,11 @@ impl<'a> Lexer<'a> {
                                     let idx_var = content[idx_start..i].to_vec();
                                     self.pending.push(Token::new(
                                         TokenKind::Variable(idx_var),
-                                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                                        Span::new(
+                                            self.pos as u32,
+                                            self.pos as u32,
+                                            lc.at(&content, i),
+                                        ),
                                     ));
                                 }
                                 c if c.is_ascii_alphabetic() || c == b'_' || c >= 0x80 => {
@@ -2157,7 +2182,11 @@ impl<'a> Lexer<'a> {
                                     let key = content[key_start..i].to_vec();
                                     self.pending.push(Token::new(
                                         TokenKind::Identifier(key),
-                                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                                        Span::new(
+                                            self.pos as u32,
+                                            self.pos as u32,
+                                            lc.at(&content, i),
+                                        ),
                                     ));
                                 }
                                 _ => {}
@@ -2167,7 +2196,7 @@ impl<'a> Lexer<'a> {
                             i += 1;
                             self.pending.push(Token::new(
                                 TokenKind::CloseBracket,
-                                Span::new(self.pos as u32, self.pos as u32, self.line),
+                                Span::new(self.pos as u32, self.pos as u32, lc.at(&content, i)),
                             ));
                         }
                     }
@@ -2176,11 +2205,16 @@ impl<'a> Lexer<'a> {
                     // ${var} / ${expr} interpolation (deprecated syntax)
                     self.pending.push(Token::new(
                         TokenKind::InterpolatedStringPart(result.clone()),
-                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                        Span::new(self.pos as u32, self.pos as u32, lc.at(&content, i)),
                     ));
                     result.clear();
-                    let (toks, end, msg) = lex_dollar_brace_interpolation(&content, i, self.line);
-                    crate::push_compile_deprecated_at(msg.to_string(), self.line, self.pos as u32);
+                    let (toks, end, msg) =
+                        lex_dollar_brace_interpolation(&content, i, lc.at(&content, i));
+                    crate::push_compile_deprecated_at(
+                        msg.to_string(),
+                        lc.at(&content, seg_start),
+                        self.pos as u32,
+                    );
                     self.pending.extend(toks);
                     i = end;
                 }
@@ -2195,10 +2229,10 @@ impl<'a> Lexer<'a> {
                     // {$expr} interpolation: the braced part is PHP code.
                     self.pending.push(Token::new(
                         TokenKind::InterpolatedStringPart(result.clone()),
-                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                        Span::new(self.pos as u32, self.pos as u32, lc.at(&content, i)),
                     ));
                     result.clear();
-                    let (toks, end) = lex_braced_interpolation(&content, i, self.line);
+                    let (toks, end) = lex_braced_interpolation(&content, i, lc.at(&content, i));
                     self.pending.extend(toks);
                     i = end;
                 }
@@ -2213,7 +2247,7 @@ impl<'a> Lexer<'a> {
         if !self.pending.is_empty() {
             self.pending.push(Token::new(
                 TokenKind::InterpolatedStringEnd(result),
-                Span::new(self.pos as u32, self.pos as u32, self.line),
+                Span::new(self.pos as u32, self.pos as u32, lc.at(&content, len)),
             ));
             let first = self.pending.remove(0);
             return first.kind;
@@ -2432,26 +2466,27 @@ fn lex_interp_code(
     code.extend_from_slice(suffix);
     // The sub-lexer must not lose (or own) the outer lexer's pending error.
     let outer_err = crate::take_lexer_error();
-    let toks = Lexer::new(&code).tokenize();
+    // (lexed from the string's line: its tokens' lines and the warnings
+    // it raises are the code's own)
+    let mut sub = Lexer::new(&code);
+    sub.line = line;
+    let toks = sub.tokenize();
     let inner_err = crate::take_lexer_error();
     if let Some((m, l)) = outer_err {
         crate::push_lexer_error(m, l);
     }
     if let Some((m, l)) = inner_err {
-        crate::push_lexer_error(m, l + line - 1);
+        crate::push_lexer_error(m, l);
     }
     let mut out = vec![Token::new(
         TokenKind::InterpExprStart,
         Span::new(start as u32, start as u32, line),
     )];
-    for mut t in toks {
+    for t in toks {
         match t.kind {
             TokenKind::Eof => break,
             TokenKind::OpenTag => continue,
-            _ => {
-                t.span.line += line - 1;
-                out.push(t);
-            }
+            _ => out.push(t),
         }
     }
     let end_line = line
@@ -2553,6 +2588,35 @@ fn line_comment_end(src: &[u8], mut p: usize) -> usize {
         p += 1;
     }
     p.max(src.len())
+}
+
+/// The line of positions in a heredoc's body (counted from its first
+/// line, positions mostly increasing).
+struct LineAt {
+    base: u32,
+    pos: usize,
+    line: u32,
+}
+
+impl LineAt {
+    fn new(base: u32) -> Self {
+        Self {
+            base,
+            pos: 0,
+            line: base,
+        }
+    }
+
+    fn at(&mut self, s: &[u8], i: usize) -> u32 {
+        let i = i.min(s.len());
+        if i < self.pos {
+            self.pos = 0;
+            self.line = self.base;
+        }
+        self.line += memchr::memchr_iter(b'\n', &s[self.pos..i]).count() as u32;
+        self.pos = i;
+        self.line
+    }
 }
 
 #[cfg(test)]

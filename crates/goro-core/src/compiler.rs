@@ -18561,6 +18561,9 @@ impl Compiler {
                 let mut result: Option<OperandType> = None;
                 // Whether the result is one expression yet (not a string)
                 let mut lone_expr = false;
+                // (each ROPE_ADD is on the line of the part it adds: the
+                // last expression's)
+                let mut line = expr.span.line;
                 for part in parts {
                     let part_op = match part {
                         // (an empty piece adds nothing to the rope)
@@ -18571,7 +18574,12 @@ impl Compiler {
                                 .add_literal(Value::String(PhpString::from_vec(s.clone())));
                             OperandType::Const(idx)
                         }
-                        StringPart::Expr(e) => self.compile_expr(e)?,
+                        StringPart::Expr(e) => {
+                            if e.span.line > 0 {
+                                line = e.span.line;
+                            }
+                            self.compile_expr(e)?
+                        }
                     };
                     lone_expr = result.is_none() && matches!(part, StringPart::Expr(_));
                     result = Some(if let Some(prev) = result {
@@ -18581,7 +18589,7 @@ impl Compiler {
                             op1: prev,
                             op2: part_op,
                             result: OperandType::Tmp(tmp),
-                            line: expr.span.line,
+                            line,
                         });
                         OperandType::Tmp(tmp)
                     } else {
@@ -18595,7 +18603,7 @@ impl Compiler {
                         op1: op,
                         op2: OperandType::Unused,
                         result: OperandType::Tmp(tmp),
-                        line: expr.span.line,
+                        line,
                     });
                     return Ok(OperandType::Tmp(tmp));
                 }
