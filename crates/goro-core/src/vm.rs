@@ -7250,7 +7250,7 @@ impl Vm {
                 let caller_file = self.current_file.clone();
                 let caller_line = self.current_line;
                 let args_val = self
-                    .execute_op_array_pub(&attr.args_op_array, vec![])
+                    .eval_attr_args_at_caller(&attr.args_op_array)
                     .unwrap_or(Value::Null);
                 if self.current_exception.is_some() {
                     return None;
@@ -7654,7 +7654,7 @@ impl Vm {
             let caller_file = self.current_file.clone();
             let caller_line = self.current_line;
             let args_val = self
-                .execute_op_array_pub(&attr.args_op_array, vec![])
+                .eval_attr_args_at_caller(&attr.args_op_array)
                 .unwrap_or(Value::Null);
             if self.current_exception.is_some() {
                 return None;
@@ -13824,6 +13824,24 @@ impl Vm {
     }
 
     /// Public wrapper for execute_op_array (used by reflection invoke)
+    /// Evaluate an attribute's arguments for a diagnostic of the code
+    /// running (the #[\Deprecated] / #[\NoDiscard] message): like
+    /// zend_ast_evaluate(), what they raise is reported at the executing
+    /// line and file.
+    #[inline(never)]
+    pub fn eval_attr_args_at_caller(&mut self, args: &OpArray) -> Result<Value, VmError> {
+        let line = self.current_line;
+        if line == 0 {
+            return self.execute_op_array(args, vec![]);
+        }
+        let mut oa = args.clone();
+        for op in &mut oa.ops {
+            op.line = line;
+        }
+        oa.filename = self.current_file.as_bytes().to_vec();
+        self.execute_op_array(&oa, vec![])
+    }
+
     pub fn execute_op_array_pub(
         &mut self,
         op_array: &OpArray,
