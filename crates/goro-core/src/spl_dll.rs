@@ -135,7 +135,13 @@ impl Vm {
     fn dll_rewind_cursor(obj: &Rc<RefCell<PhpObject>>, flags: i64) -> Cursor {
         let a = match list(obj) {
             Some(a) => a,
-            None => return Cursor { cur: None, pos: 0 },
+            // (an empty list not created yet: LIFO starts at count - 1)
+            None => {
+                return Cursor {
+                    cur: None,
+                    pos: if flags & IT_LIFO != 0 { -1 } else { 0 },
+                };
+            }
         };
         let n = a.borrow().len();
         if flags & IT_LIFO != 0 {

@@ -1115,33 +1115,22 @@ impl Vm {
         name: &str,
         v: &Value,
     ) -> Option<PhpString> {
-        let conv;
+        // zend_parse_arg_class(): try_convert_to_string() (an object that
+        // cannot be converted throws, an array warns), then the class lookup
         let s = match v.deref() {
             Value::String(s) => s,
-            // zend_parse_arg_class(): try_convert_to_string()
-            ref o @ Value::Object(ref ob)
-                if self
-                    .classes
-                    .get(&ob.borrow().class_name.to_ascii_lowercase())
-                    .is_some_and(|c| c.get_method(b"__tostring").is_some()) =>
-            {
-                conv = self.value_to_string(o);
+            o @ Value::Object(_) => match self.value_to_string_checked(&o) {
+                Ok(conv) if self.current_exception.is_none() => conv,
+                _ => return None,
+            },
+            Value::Array(_) => {
+                self.emit_warning("Array to string conversion");
                 if self.current_exception.is_some() {
                     return None;
                 }
-                conv
+                PhpString::from_bytes(b"Array")
             }
-            other => {
-                let msg = format!(
-                    "{}(): Argument #{} (${}) must be a class name derived from ArrayIterator, {} given",
-                    func,
-                    argn,
-                    name,
-                    other.to_php_string().to_msg_string()
-                );
-                self.spl_throw(b"TypeError", &msg);
-                return None;
-            }
+            other => other.to_php_string(),
         };
         let cl: Vec<u8> = s
             .as_bytes()

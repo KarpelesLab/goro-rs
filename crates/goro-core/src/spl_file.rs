@@ -539,7 +539,6 @@ impl Vm {
 
     /// spl_arg_long() of a parameter declared as `tname` (int or ?int, for
     /// the TypeError message; null is handled by the caller for ?int).
-    #[allow(clippy::if_same_then_else)] // branches mirror php-src
     pub(crate) fn spl_arg_long_as(
         &mut self,
         func: &str,
@@ -552,23 +551,26 @@ impl Vm {
             Value::Long(n) => Some(n),
             Value::True => Some(1),
             Value::False => Some(0),
-            Value::Double(d) => {
-                if d.is_finite() && d.fract() == 0.0 && d.abs() < 9.2e18 {
-                    Some(d as i64)
-                } else if d.is_finite() && d.abs() < 9.2e18 {
-                    let msg = format!(
-                        "Implicit conversion from float {} to int loses precision",
-                        crate::value::format_php_float_repr(d)
-                    );
-                    self.emit_deprecated(&msg);
-                    Some(d as i64)
-                } else {
-                    let msg = format!(
-                        "{}(): Argument #{} (${}) must be of type {}, float given",
-                        func, argn, name, tname
-                    );
-                    self.spl_throw(b"TypeError", &msg);
-                    None
+            // (zend_parse_arg_long_weak(): the deprecations of fractional
+            // floats and float-strings, TypeErrors for the out-of-range and
+            // non-numeric ones)
+            v @ (Value::Double(_) | Value::String(_)) => {
+                let line = self.current_line;
+                match self.zpp_coerce_scalar(crate::arginfo::T_INT, &v, false, line) {
+                    Ok(Some(n)) => Some(n.to_long()),
+                    Ok(None) => {
+                        let msg = format!(
+                            "{}(): Argument #{} (${}) must be of type {}, {} given",
+                            func,
+                            argn,
+                            name,
+                            tname,
+                            Self::value_type_name(&v)
+                        );
+                        self.spl_throw(b"TypeError", &msg);
+                        None
+                    }
+                    Err(()) => None,
                 }
             }
             Value::Null | Value::Undef => {
@@ -578,26 +580,6 @@ impl Vm {
                 );
                 self.emit_deprecated(&msg);
                 Some(0)
-            }
-            Value::String(s) => {
-                let t = s.to_string_lossy();
-                let tt = t.trim_start();
-                if let Ok(n) = tt.trim_end().parse::<i64>() {
-                    Some(n)
-                } else if let Ok(d) = tt.trim_end().parse::<f64>() {
-                    if d.fract() == 0.0 {
-                        Some(d as i64)
-                    } else {
-                        Some(d as i64)
-                    }
-                } else {
-                    let msg = format!(
-                        "{}(): Argument #{} (${}) must be of type {}, string given",
-                        func, argn, name, tname
-                    );
-                    self.spl_throw(b"TypeError", &msg);
-                    None
-                }
             }
             other => {
                 let msg = format!(
@@ -1424,6 +1406,9 @@ impl Vm {
                 Some(Value::Null)
             }
             b"__tostring" => {
+                if !self.sfo_expects_none("SplFileObject::__toString", args) {
+                    return Some(Value::Null);
+                }
                 let _ = stream_or_throw!();
                 if !Self::sfo_has_line(obj) {
                     if !self.sfo_read_line(obj, false) {

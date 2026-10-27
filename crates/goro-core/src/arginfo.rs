@@ -162,6 +162,26 @@ impl FuncInfo {
         }
     }
 
+    /// Its Z_PARAM_CLASS parameters (CLASS_PARAMS, by the final `name`)
+    /// are left to the function.
+    fn mark_class_params(&mut self) {
+        let Some((_, idxs)) = CLASS_PARAMS
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(self.name))
+        else {
+            return;
+        };
+        for &i in idxs.iter() {
+            if let Some(p) = self.params.get_mut(i as usize) {
+                // (as an untyped parameter: a plain zval to zpp)
+                p.mask = 0;
+                if let Some(f) = self.fast.get_mut(i as usize) {
+                    *f = 0;
+                }
+            }
+        }
+    }
+
     pub fn is_variadic(&self) -> bool {
         self.params.last().is_some_and(|p| p.variadic)
     }
@@ -225,6 +245,16 @@ impl FuncInfo {
         }
     }
 }
+
+/// The Z_PARAM_CLASS ("C") parameters of internal functions (indexes),
+/// declared `string`: zpp converts the argument to a string (an object
+/// that cannot be converted throws, an array warns) and looks the class up,
+/// so the function validates them.
+const CLASS_PARAMS: &[(&str, &[u8])] = &[
+    ("ArrayObject::__construct", &[2]),
+    ("ArrayObject::setIteratorClass", &[0]),
+    ("get_class_vars", &[0]),
+];
 
 /// The Z_PARAM_PATH ("p") parameters of internal functions (indexes), from
 /// php-src's ZEND_PARSE_PARAMETERS blocks.
@@ -426,7 +456,11 @@ pub fn lookup(lname: &[u8]) -> Option<&'static FuncInfo> {
     let map = MAP.get_or_init(|| {
         crate::stub_sigs::FUNCTIONS
             .iter()
-            .map(|f| (f.name, FuncInfo::from_stub(f)))
+            .map(|f| {
+                let mut info = FuncInfo::from_stub(f);
+                info.mark_class_params();
+                (f.name, info)
+            })
             .collect()
     });
     let s = std::str::from_utf8(lname).ok()?;
@@ -561,6 +595,7 @@ fn verified_method(key: &str) -> Option<(&'static FuncInfo, u8)> {
             let mut info = FuncInfo::from_stub(f);
             info.name = Box::leak(format!("{}::{}", c.name, f.name).into_boxed_str());
             info.module = c.ext;
+            info.mark_class_params();
             // Z_PARAM_OBJ_OF_CLASS(obj, intern->ce): the type its error
             // names is the reflected class, which the stub cannot tell (the
             // methods check it themselves).
@@ -856,6 +891,7 @@ impl Vm {
                     let mut info = FuncInfo::from_stub(m);
                     info.name = Box::leak(format!("{}::{}", c.name, m.name).into_boxed_str());
                     info.module = c.ext;
+                    info.mark_class_params();
                     Box::leak(Box::new(info))
                 })
         });
