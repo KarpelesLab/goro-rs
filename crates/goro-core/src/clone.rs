@@ -675,7 +675,7 @@ pub fn clone_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::vm::VmError
         return fail(vm, b"ArgumentCountError", msg);
     }
     let obj = args[0].deref();
-    if !matches!(obj, Value::Object(_)) && !obj.is_closure_obj() {
+    if !matches!(obj, Value::Object(_) | Value::Generator(_)) && !obj.is_closure_obj() {
         let msg = format!(
             "clone(): Argument #1 ($object) must be of type object, {} given",
             Vm::value_type_name(&obj)
