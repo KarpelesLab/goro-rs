@@ -9,8 +9,8 @@ var_dump(array_key_exists('_REQUEST', $GLOBALS));
 eval('$x = $_REQUEST;');
 var_dump(array_keys($GLOBALS));
 --EXPECT--
-int(9)
-array(9) {
+int(8)
+array(8) {
   [0]=>
   string(4) "argv"
   [1]=>
@@ -22,15 +22,13 @@ array(9) {
   [4]=>
   string(7) "_COOKIE"
   [5]=>
-  string(7) "_SERVER"
-  [6]=>
-  string(4) "_ENV"
-  [7]=>
-  string(8) "_REQUEST"
-  [8]=>
   string(6) "_FILES"
+  [6]=>
+  string(7) "_SERVER"
+  [7]=>
+  string(4) "_ENV"
 }
-bool(true)
+bool(false)
 array(10) {
   [0]=>
   string(4) "argv"
@@ -43,13 +41,13 @@ array(10) {
   [4]=>
   string(7) "_COOKIE"
   [5]=>
-  string(7) "_SERVER"
-  [6]=>
-  string(4) "_ENV"
-  [7]=>
-  string(8) "_REQUEST"
-  [8]=>
   string(6) "_FILES"
+  [6]=>
+  string(7) "_SERVER"
+  [7]=>
+  string(4) "_ENV"
+  [8]=>
+  string(8) "_REQUEST"
   [9]=>
   string(1) "x"
 }
