@@ -5795,6 +5795,22 @@ impl Vm {
         }
     }
 
+    /// FE_RESET_RW on a variable holding an array: the variable becomes (or
+    /// stays) a reference to the iterated array; its cell is returned.
+    #[inline(never)]
+    fn foreach_ref_cv_cell(slot: &mut Value, arr: &Rc<RefCell<PhpArray>>) -> Rc<RefCell<Value>> {
+        if let Value::Reference(r) = slot {
+            let same = matches!(&*r.borrow(), Value::Array(a) if Rc::ptr_eq(a, arr));
+            if !same {
+                *r.borrow_mut() = Value::Array(arr.clone());
+            }
+            return r.clone();
+        }
+        let r = Rc::new(RefCell::new(Value::Array(arr.clone())));
+        *slot = Value::Reference(r.clone());
+        r
+    }
+
     /// FE_FETCH_RW of a by-reference foreach over a reference (a property,
     /// an element, a static property): another array assigned to it
     /// meanwhile is iterated from its internal pointer; anything else but
@@ -45710,12 +45726,15 @@ impl Vm {
                     // refers to the WeakMap after the loop.
                     let src_is_object = matches!(&arr_val, Value::Object(_))
                         || matches!(&arr_val, Value::Reference(r) if matches!(&*r.borrow(), Value::Object(_)));
-                    match &op.op1 {
-                        OperandType::Cv(idx) if !src_is_object => {
-                            cvs[*idx as usize] = Value::Array(arr_rc.clone());
+                    // (FE_RESET_RW makes the variable a reference: the loop
+                    // follows what is assigned to it, not an unset() or a
+                    // rebinding of the variable)
+                    let cv_cell = match &op.op1 {
+                        OperandType::Cv(idx) if !src_is_object && matches!(arr_val.deref(), Value::Array(_)) => {
+                            Some(Self::foreach_ref_cv_cell(&mut cvs[*idx as usize], &arr_rc))
                         }
-                        _ => {}
-                    }
+                        _ => None,
+                    };
 
                     if foreach_obj.contains_key(&iter_idx) {
                         foreach_ref_arrays.remove(&iter_idx);
@@ -45723,6 +45742,9 @@ impl Vm {
                         foreach_ref_arrays.insert(iter_idx, arr_rc.clone());
                     }
                     match (&op.op1, &arr_val) {
+                        _ if cv_cell.is_some() && foreach_ref_arrays.contains_key(&iter_idx) => {
+                            foreach_ref_cells.insert(iter_idx, cv_cell.unwrap());
+                        }
                         (OperandType::Tmp(_), Value::Reference(r))
                             if foreach_ref_arrays.contains_key(&iter_idx)
                                 && matches!(&*r.borrow(), Value::Array(_)) =>
@@ -45737,7 +45759,11 @@ impl Vm {
                         OperandType::Cv(idx)
                             if !src_is_object || foreach_obj.contains_key(&iter_idx) =>
                         {
-                            foreach_ref_src.insert(iter_idx, *idx);
+                            if foreach_ref_cells.contains_key(&iter_idx) {
+                                foreach_ref_src.remove(&iter_idx);
+                            } else {
+                                foreach_ref_src.insert(iter_idx, *idx);
+                            }
                         }
                         _ => {
                             foreach_ref_src.remove(&iter_idx);
