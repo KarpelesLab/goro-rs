@@ -2682,7 +2682,8 @@ impl Compiler {
                     op1: val,
                     op2: OperandType::Unused,
                     result: OperandType::Unused,
-                    line,
+                    // (CG(zend_lineno): after the unpacked expression)
+                    line: self.cur_lineno(line),
                 });
             } else if let Some(name) = &arg.name {
                 has_named = true;
@@ -2779,7 +2780,7 @@ impl Compiler {
                     op1: val,
                     op2: OperandType::Const(name_idx),
                     result: OperandType::Unused,
-                    line,
+                    line: self.cur_lineno(line),
                 });
             } else {
                 // Cannot use positional argument after named argument or after unpacking
