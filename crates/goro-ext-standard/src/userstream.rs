@@ -521,7 +521,18 @@ fn invoke_method_inner(
         // (thrown by the callee's RECV, inside its frame)
         let frame = method_frame_name(vm, &declaring, &class_name, &mname, is_static);
         let framed = vm.push_callee_frame(frame, &args, !is_static);
+        // (at the callee's declaration: its RECV)
+        let saved_line = vm.current_line;
+        let saved_file = vm.current_file.clone();
+        if op.decl_line > 0 {
+            vm.current_line = op.decl_line;
+            if !op.filename.is_empty() {
+                vm.current_file = String::from_utf8_lossy(&op.filename).into_owned().into();
+            }
+        }
         let e = throw(vm, b"ArgumentCountError", &msg);
+        vm.current_line = saved_line;
+        vm.current_file = saved_file;
         if framed {
             vm.call_stack.pop();
         }
