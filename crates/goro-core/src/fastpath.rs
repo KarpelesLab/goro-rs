@@ -4959,7 +4959,7 @@ impl crate::vm::Vm {
     /// a class that is not readonly).  Magic methods do not matter: they are
     /// only consulted for inaccessible or missing properties, and the
     /// caller checks the object holds an initialized slot for `prop`.
-    fn plain_public_prop(
+    pub(crate) fn plain_public_prop(
         &self,
         class_name: &[u8],
         prop: &[u8],
@@ -5038,6 +5038,17 @@ impl crate::vm::Vm {
         }
     }
 
+    /// A protected property declared by `declaring` is accessible from
+    /// class scope `scope` (check_visibility()'s rule: the scope is the
+    /// property's root declaring class, or a subclass or ancestor of it).
+    #[inline(never)]
+    fn protected_scope_ok(&self, declaring: &[u8], prop: &[u8], scope: &[u8]) -> bool {
+        let sl = scope.to_ascii_lowercase();
+        let root =
+            self.find_root_declaring_class_for_property(&declaring.to_ascii_lowercase(), prop);
+        sl == root || self.class_extends(&sl, &root) || self.class_extends(&root, &sl)
+    }
+
     /// plain_public_prop() of a class in the class table.
     fn plain_declared_prop(
         &self,
@@ -5072,7 +5083,10 @@ impl crate::vm::Vm {
                         && in_scope(&p.declaring_class)
                 }
                 crate::object::Visibility::Protected => {
-                    in_scope(&p.declaring_class) || in_scope(class_name)
+                    in_scope(&p.declaring_class)
+                        || in_scope(class_name)
+                        || scope
+                            .is_some_and(|s| self.protected_scope_ok(&p.declaring_class, prop, s))
                 }
             };
             if p.is_static
@@ -5121,7 +5135,7 @@ impl crate::vm::Vm {
                 return false;
             }
             let Some(pce) = self.classes.get(pl) else {
-                return plain_internal_base(pl, prop);
+                return plain_internal_base(pl, prop, write);
             };
             if pce.filename.is_none() {
                 return false;
@@ -6265,20 +6279,25 @@ impl crate::vm::Vm {
 }
 
 /// Whether internal class `lower` (and its ancestors) keeps its objects'
-/// properties as plain slots, declaring no property `prop`: the Exception
-/// and Error hierarchy, whose objects have no handlers of their own.
-fn plain_internal_base(lower: &[u8], prop: &[u8]) -> bool {
+/// properties as plain slots, declaring no property `prop` (but for a read
+/// of PhpToken's): the Exception and Error hierarchy, PDO, PhpToken, whose
+/// objects have no handlers of their own.
+fn plain_internal_base(lower: &[u8], prop: &[u8], write: bool) -> bool {
     let mut cur = crate::stubs::find_class_lower(lower);
     for _ in 0..16 {
         let Some(c) = cur else {
             return false;
         };
-        if c.props.iter().any(|p| p.name.as_bytes() == prop) {
+        // (PhpToken's typed public properties are plain slots to read)
+        if c.props.iter().any(|p| p.name.as_bytes() == prop) && (write || c.name != "PhpToken") {
             return false;
         }
         match c.parent {
             None => {
-                return matches!(c.name, "Exception" | "Error" | "PDO" | "PDOStatement");
+                return matches!(
+                    c.name,
+                    "Exception" | "Error" | "PDO" | "PDOStatement" | "PhpToken"
+                );
             }
             Some(p) => cur = crate::stubs::find_class(p.as_bytes()),
         }

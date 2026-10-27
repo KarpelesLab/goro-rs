@@ -43,7 +43,7 @@ impl DtorList {
             self.round_len = len;
             self.round_scans = 0;
         }
-        if self.old_below > start && self.round_scans % OLD_SCAN_EVERY != 0 {
+        if self.old_below > start && !self.round_scans.is_multiple_of(OLD_SCAN_EVERY) {
             self.old_below
         } else {
             start

@@ -173,6 +173,10 @@ pub struct ClassMap {
     /// every mutable access: what is derived from the table holds while it
     /// does not change (see Vm::class_chain()).
     stamp: u64,
+    /// Like `stamp`, but kept by the insertion of a class under its own
+    /// name not in the table before: what is derived from the classes
+    /// already there (and their ancestors) holds while it does not change.
+    link_stamp: u64,
 }
 
 thread_local! {
@@ -193,6 +197,7 @@ impl Default for ClassMap {
         ClassMap {
             map: Default::default(),
             stamp: fresh_gen(),
+            link_stamp: fresh_gen(),
         }
     }
 }
@@ -202,6 +207,30 @@ impl ClassMap {
     #[inline]
     pub fn generation(&self) -> u64 {
         self.stamp
+    }
+
+    /// See `link_stamp`.
+    #[inline]
+    pub fn link_generation(&self) -> u64 {
+        self.link_stamp
+    }
+
+    /// A change that may alter what the classes in the table are.
+    #[inline]
+    fn changed(&mut self) {
+        self.stamp = fresh_gen();
+        self.link_stamp = self.stamp;
+    }
+
+    /// An insertion: a new class under its own name only adds to the table
+    /// (an alias, or a replaced entry, changes what names resolve to).
+    #[inline]
+    fn inserted(&mut self, key: &[u8], ce: &ClassEntry, old: bool) {
+        if old || !ce.name.eq_ignore_ascii_case(key) {
+            self.changed();
+        } else {
+            self.stamp = fresh_gen();
+        }
     }
 
     #[inline]
@@ -227,7 +256,7 @@ impl ClassMap {
         &mut self,
         key: &Q,
     ) -> Option<&mut ClassEntry> {
-        self.stamp = fresh_gen();
+        self.changed();
         self.map.get_mut(key).map(Rc::make_mut)
     }
 
@@ -265,19 +294,21 @@ impl ClassMap {
     /// The entry at `i`, to change (copied first when shared).
     #[inline]
     pub fn get_index_mut(&mut self, i: usize) -> Option<(&Vec<u8>, &mut ClassEntry)> {
-        self.stamp = fresh_gen();
+        self.changed();
         self.map.get_index_mut(i).map(|(k, c)| (k, Rc::make_mut(c)))
     }
 
     #[inline]
     pub fn insert(&mut self, key: Vec<u8>, ce: ClassEntry) -> Option<Rc<ClassEntry>> {
-        self.stamp = fresh_gen();
+        let old = self.map.contains_key(&key);
+        self.inserted(&key, &ce, old);
         self.map.insert(key, Rc::new(ce))
     }
 
     #[inline]
     pub fn insert_rc(&mut self, key: Vec<u8>, ce: Rc<ClassEntry>) -> Option<Rc<ClassEntry>> {
-        self.stamp = fresh_gen();
+        let old = self.map.contains_key(&key);
+        self.inserted(&key, &ce, old);
         self.map.insert(key, ce)
     }
 
@@ -309,7 +340,7 @@ impl ClassMap {
     /// Every entry, to change (each copied first when shared).
     #[inline]
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut ClassEntry> {
-        self.stamp = fresh_gen();
+        self.changed();
         self.map.values_mut().map(Rc::make_mut)
     }
 }
@@ -356,8 +387,9 @@ pub(crate) struct ClassChainMemo {
     map: crate::fxhash::FxHashMap<Vec<u8>, Rc<ClassChain>>,
 }
 
-/// Vm::class_implements_interface()'s answers, for one class table
-/// generation: class -> interface -> answer.
+/// Vm::class_implements_interface()'s answers, for one class table link
+/// generation (ClassMap::link_generation()), about classes in the table:
+/// class -> interface -> answer.
 #[derive(Default)]
 pub(crate) struct ImplementsMemo {
     stamp: u64,

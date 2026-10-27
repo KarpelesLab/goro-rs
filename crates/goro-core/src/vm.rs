@@ -772,8 +772,8 @@ impl Vm {
         if self.native_class_handlers.is_empty() {
             return None;
         }
-        let cl = obj.borrow().class_name.to_ascii_lowercase();
-        let (_, h) = self.find_native_class_handler(&cl)?;
+        let cl = crate::class_table::LowerName::new(&obj.borrow().class_name);
+        let (_, h) = self.find_native_class_handler(cl.get())?;
         let f = h.prop_read?;
         f(self, obj, name)
     }
@@ -981,8 +981,8 @@ impl Vm {
         if self.native_class_handlers.is_empty() {
             return true;
         }
-        let cl = obj.borrow().class_name.to_ascii_lowercase();
-        if let Some((_, h)) = self.find_native_class_handler(&cl) {
+        let cl = crate::class_table::LowerName::new(&obj.borrow().class_name);
+        if let Some((_, h)) = self.find_native_class_handler(cl.get()) {
             if let Some(f) = h.prop_write {
                 return f(self, obj, name, kind);
             }
@@ -2245,6 +2245,16 @@ pub struct Vm {
     pub(crate) class_chain_memo: RefCell<crate::class_table::ClassChainMemo>,
     /// See Vm::class_implements_interface().
     pub(crate) implements_memo: RefCell<crate::class_table::ImplementsMemo>,
+    /// See Vm::find_native_class_handler(): ((class table link generation,
+    /// handler count), class -> answer).
+    #[allow(clippy::type_complexity)]
+    native_handler_memo: RefCell<(
+        (u64, usize),
+        crate::fxhash::FxHashMap<Box<[u8]>, Option<(Box<[u8]>, NativeClassHandler)>>,
+    )>,
+    /// The answers of the INSTANCEOF handler for objects (see
+    /// Vm::object_class_instanceof()).
+    pub(crate) instanceof_memo: RefCell<crate::class_table::ImplementsMemo>,
     /// Constants of natively implemented internal classes registered by
     /// extensions, keyed by lowercase class name: (name, value, deprecation
     /// message) in declaration order.
@@ -3746,6 +3756,8 @@ impl Vm {
             native_class_handlers: Default::default(),
             class_chain_memo: Default::default(),
             implements_memo: Default::default(),
+            native_handler_memo: Default::default(),
+            instanceof_memo: Default::default(),
             ext_class_constants: Default::default(),
             ini_validators: std::collections::HashMap::new(),
             warning_capture: None,
@@ -4810,7 +4822,7 @@ impl Vm {
     }
 
     /// Find the root declaring class for a property (the highest ancestor that declares it).
-    fn find_root_declaring_class_for_property(
+    pub(crate) fn find_root_declaring_class_for_property(
         &self,
         class_name_lower: &[u8],
         prop_name: &[u8],
@@ -14430,11 +14442,103 @@ impl Vm {
         self.class_extends(class_a, class_b)
     }
 
+    /// `$obj instanceof C` for an object of class `obj_class_lower`
+    /// (lowercased) and C's lowercased name.
+    #[inline(never)]
+    fn object_class_instanceof(&self, obj_class_lower: &[u8], class_lower: &[u8]) -> bool {
+        let obj_class_lower = obj_class_lower.to_vec();
+        let class_lower = class_lower.to_vec();
+        let is_alias_match = if let Some(alias_target) = self.class_aliases.get(&class_lower) {
+            obj_class_lower == *alias_target
+        } else {
+            false
+        };
+
+        if obj_class_lower == class_lower || is_alias_match {
+            true
+        } else {
+            // Walk the class hierarchy (parents + interfaces)
+            let mut current = obj_class_lower.clone();
+            let mut found = false;
+            let mut visited = Vec::new();
+            loop {
+                if visited.contains(&current) {
+                    break;
+                }
+                visited.push(current.clone());
+                if let Some(class_def) = self.classes.get(&current) {
+                    // Check interfaces (also resolve aliases)
+                    for iface in &class_def.interfaces {
+                        let iface_lower: Vec<u8> =
+                            iface.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let iface_matches = iface_lower == class_lower || {
+                            if let Some(alias_target) = self.class_aliases.get(&class_lower) {
+                                iface_lower == *alias_target
+                            } else {
+                                false
+                            }
+                        };
+                        if iface_matches {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if found {
+                        break;
+                    }
+                    // Check parent (also resolve aliases)
+                    if let Some(ref parent) = class_def.parent {
+                        let parent_lower: Vec<u8> =
+                            parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let parent_matches = parent_lower == class_lower || {
+                            if let Some(alias_target) = self.class_aliases.get(&class_lower) {
+                                parent_lower == *alias_target
+                            } else {
+                                false
+                            }
+                        };
+                        if parent_matches {
+                            found = true;
+                            break;
+                        }
+                        current = parent_lower;
+                    } else {
+                        break;
+                    }
+                } else {
+                    // Class not in table - check built-in hierarchy
+                    found = is_builtin_subclass(&current, &class_lower);
+                    break;
+                }
+            }
+            // Check for enum interfaces (UnitEnum, BackedEnum)
+            if !found {
+                if let Some(class_def) = self.classes.get(&obj_class_lower) {
+                    if class_def.is_enum {
+                        #[allow(clippy::if_same_then_else)]
+                        // branches mirror php-src
+                        if class_lower == b"unitenum" {
+                            found = true;
+                        } else if class_lower == b"backedenum"
+                            && class_def.enum_backing_type.is_some()
+                        {
+                            found = true;
+                        }
+                    }
+                }
+            }
+            if !found {
+                found = self.class_implements_interface(&obj_class_lower, &class_lower);
+            }
+            found
+        }
+    }
+
     /// Check if a class (by lowercase name) implements a given interface (by lowercase name).
-    /// (Remembered while the class table does not change: the walk is a
-    /// function of it and of the stubs.)
+    /// (Remembered for a class in the table while the classes there do not
+    /// change: the walk is a function of them and of the stubs.)
     pub fn class_implements_interface(&self, class_name: &[u8], iface_name: &[u8]) -> bool {
-        let stamp = self.classes.generation();
+        let stamp = self.classes.link_generation();
         if let Some(r) = self
             .implements_memo
             .borrow_mut()
@@ -14443,9 +14547,12 @@ impl Vm {
             return r;
         }
         let r = self.class_implements_interface_walk(class_name, iface_name);
-        self.implements_memo
-            .borrow_mut()
-            .set(stamp, class_name, iface_name, r);
+        // (what is said of a class not in the table may change)
+        if self.classes.contains_key(class_name) {
+            self.implements_memo
+                .borrow_mut()
+                .set(stamp, class_name, iface_name, r);
+        }
         r
     }
 
@@ -14558,18 +14665,53 @@ impl Vm {
         if self.native_class_handlers.is_empty() {
             return None;
         }
-        let mut cur: std::borrow::Cow<[u8]> = std::borrow::Cow::Borrowed(class_lower);
-        for _ in 0..50 {
-            if let Some(h) = self.native_class_handlers.get(cur.as_ref()) {
-                return Some((cur.into_owned(), *h));
+        // (remembered while the classes in the table and the handlers do
+        // not change: the walk is a function of them)
+        let key = (
+            self.classes.link_generation(),
+            self.native_class_handlers.len(),
+        );
+        {
+            let mut m = self.native_handler_memo.borrow_mut();
+            if m.0 != key {
+                m.1.clear();
+                m.0 = key;
+            } else if let Some(r) = m.1.get(class_lower) {
+                return r.as_ref().map(|(n, h)| (n.to_vec(), *h));
             }
-            let p = self
-                .classes
-                .get(cur.as_ref())
-                .and_then(|c| c.parent.as_ref())?;
+        }
+        let (r, memo) = self.find_native_class_handler_walk(class_lower);
+        if memo {
+            self.native_handler_memo.borrow_mut().1.insert(
+                class_lower.into(),
+                r.as_ref().map(|(n, h)| (n.as_slice().into(), *h)),
+            );
+        }
+        r
+    }
+
+    /// The walk of find_native_class_handler(), and whether its answer may
+    /// be remembered (not when the class is not in the table: it may be
+    /// added under that name).
+    #[inline(never)]
+    fn find_native_class_handler_walk(
+        &self,
+        class_lower: &[u8],
+    ) -> (Option<(Vec<u8>, NativeClassHandler)>, bool) {
+        let mut cur: std::borrow::Cow<[u8]> = std::borrow::Cow::Borrowed(class_lower);
+        for i in 0..50 {
+            if let Some(h) = self.native_class_handlers.get(cur.as_ref()) {
+                return (Some((cur.into_owned(), *h)), true);
+            }
+            let Some(c) = self.classes.get(cur.as_ref()) else {
+                return (None, i > 0);
+            };
+            let Some(p) = c.parent.as_ref() else {
+                return (None, true);
+            };
             cur = std::borrow::Cow::Owned(p.to_ascii_lowercase());
         }
-        None
+        (None, true)
     }
 
     pub(crate) fn dispatch_spl_method(
@@ -46352,104 +46494,34 @@ impl Vm {
                             Value::False
                         }
                     } else if let Value::Object(obj) = &val {
-                        let obj_borrow = obj.borrow();
-                        let obj_class_lower: Vec<u8> = obj_borrow
-                            .class_name
-                            .iter()
-                            .map(|b| b.to_ascii_lowercase())
-                            .collect();
-
-                        // Check direct match or alias match
-                        let is_alias_match =
-                            if let Some(alias_target) = self.class_aliases.get(&class_lower) {
-                                obj_class_lower == *alias_target
-                            } else {
-                                false
-                            };
-
-                        if obj_class_lower == class_lower || is_alias_match {
-                            Value::True
-                        } else {
-                            // Walk the class hierarchy (parents + interfaces)
-                            let mut current = obj_class_lower.clone();
-                            let mut found = false;
-                            let mut visited = Vec::new();
-                            loop {
-                                if visited.contains(&current) {
-                                    break;
+                        // (a function of the class table: remembered while it
+                        // does not change)
+                        let obj_lower =
+                            crate::class_table::LowerName::new(&obj.borrow().class_name);
+                        let stamp = self.classes.link_generation();
+                        let memo = self.instanceof_memo.borrow_mut().get(
+                            stamp,
+                            obj_lower.get(),
+                            &class_lower,
+                        );
+                        let found = match memo {
+                            Some(r) => r,
+                            None => {
+                                let r = self.object_class_instanceof(obj_lower.get(), &class_lower);
+                                // (what is said of a class not in the table
+                                // may change)
+                                if self.classes.contains_key(obj_lower.get()) {
+                                    self.instanceof_memo.borrow_mut().set(
+                                        stamp,
+                                        obj_lower.get(),
+                                        &class_lower,
+                                        r,
+                                    );
                                 }
-                                visited.push(current.clone());
-                                if let Some(class_def) = self.classes.get(&current) {
-                                    // Check interfaces (also resolve aliases)
-                                    for iface in &class_def.interfaces {
-                                        let iface_lower: Vec<u8> =
-                                            iface.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        let iface_matches = iface_lower == class_lower || {
-                                            if let Some(alias_target) =
-                                                self.class_aliases.get(&class_lower)
-                                            {
-                                                iface_lower == *alias_target
-                                            } else {
-                                                false
-                                            }
-                                        };
-                                        if iface_matches {
-                                            found = true;
-                                            break;
-                                        }
-                                    }
-                                    if found {
-                                        break;
-                                    }
-                                    // Check parent (also resolve aliases)
-                                    if let Some(ref parent) = class_def.parent {
-                                        let parent_lower: Vec<u8> =
-                                            parent.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        let parent_matches = parent_lower == class_lower || {
-                                            if let Some(alias_target) =
-                                                self.class_aliases.get(&class_lower)
-                                            {
-                                                parent_lower == *alias_target
-                                            } else {
-                                                false
-                                            }
-                                        };
-                                        if parent_matches {
-                                            found = true;
-                                            break;
-                                        }
-                                        current = parent_lower;
-                                    } else {
-                                        break;
-                                    }
-                                } else {
-                                    // Class not in table - check built-in hierarchy
-                                    found = is_builtin_subclass(&current, &class_lower);
-                                    break;
-                                }
+                                r
                             }
-                            // Check for enum interfaces (UnitEnum, BackedEnum)
-                            if !found {
-                                if let Some(class_def) = self.classes.get(&obj_class_lower) {
-                                    if class_def.is_enum {
-                                        #[allow(clippy::if_same_then_else)]
-                                        // branches mirror php-src
-                                        if class_lower == b"unitenum" {
-                                            found = true;
-                                        } else if class_lower == b"backedenum"
-                                            && class_def.enum_backing_type.is_some()
-                                        {
-                                            found = true;
-                                        }
-                                    }
-                                }
-                            }
-                            if !found {
-                                found =
-                                    self.class_implements_interface(&obj_class_lower, &class_lower);
-                            }
-                            if found { Value::True } else { Value::False }
-                        }
+                        };
+                        if found { Value::True } else { Value::False }
                     } else {
                         Value::False
                     };
