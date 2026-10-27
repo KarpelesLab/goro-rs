@@ -351,6 +351,7 @@ impl Vm {
                 }
             }
         }
+        Self::separate_array_ref_arg(func_name_lower, &args);
         if call.named_args.capacity() == 0
             && call.target.user.is_none()
             && call.target.method_info.is_none()

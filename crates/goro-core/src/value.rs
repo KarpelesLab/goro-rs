@@ -1153,18 +1153,22 @@ impl Value {
         }
         match (self, other) {
             // Array + Array = array union
-            (Value::Array(a), Value::Array(b)) => {
-                let a = a.borrow();
-                let b = b.borrow();
+            (Value::Array(ra), Value::Array(rb)) => {
+                let a = ra.borrow();
+                let b = rb.borrow();
                 let mut result = crate::array::PhpArray::new();
-                // Copy all entries from a
+                // (the copy of a keeps its next free element)
+                result.set_next_free_key(a.next_free_key());
+                // Copy all entries from a (zend_array_dup()), then add the
+                // entries of b that a lacks (zend_hash_merge() with
+                // zval_add_ref()): a reference only its array holds is
+                // copied as its value.
                 for (key, val) in a.iter() {
-                    result.set(key.clone(), val.clone());
+                    result.set(key.clone(), union_elem(val, ra));
                 }
-                // Add entries from b that don't exist in a
                 for (key, val) in b.iter() {
                     if !result.contains_key(key) {
-                        result.set(key.clone(), val.clone());
+                        result.set(key.clone(), union_elem(val, rb));
                     }
                 }
                 Value::Array(std::rc::Rc::new(std::cell::RefCell::new(result)))
@@ -2964,4 +2968,21 @@ fn pow_long(base: i64, exp: i64) -> Value {
         }
     }
     Value::Long(l1)
+}
+
+/// An element of an array copied into another (zend_array_dup() /
+/// zval_add_ref()): a reference only `src` holds (refcount 1) is its value,
+/// unless it points back at `src` itself.
+#[inline]
+pub(crate) fn union_elem(
+    v: &Value,
+    src: &std::rc::Rc<std::cell::RefCell<crate::array::PhpArray>>,
+) -> Value {
+    match v {
+        Value::Reference(r) if std::rc::Rc::strong_count(r) == 1 => match &*r.borrow() {
+            Value::Array(inner) if std::rc::Rc::ptr_eq(inner, src) => v.clone(),
+            other => other.clone(),
+        },
+        _ => v.clone(),
+    }
 }

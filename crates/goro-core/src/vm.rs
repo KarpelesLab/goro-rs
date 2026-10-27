@@ -32978,6 +32978,7 @@ impl Vm {
                             *slot = Value::Null;
                         }
                     }
+                    crate::array::separate_sent_array(&val);
                     if let Some(call) = self.pending_calls.last_mut() {
                         call.args.push(val);
                     }
@@ -33357,6 +33358,7 @@ impl Vm {
                                                 );
                                             }
                                         }
+                                        let mut bound = builtin_ref_mode != 0;
                                         if let Some(pos) =
                                             callee_param_names.iter().position(|n| *n == name_bytes)
                                         {
@@ -33365,6 +33367,7 @@ impl Vm {
                                                 .and_then(|br| br.get(pos).copied())
                                                 .unwrap_or(false)
                                             {
+                                                bound = true;
                                                 if from_traversable {
                                                     by_value_refs.push(pos);
                                                 } else if let Some(src_arr) = source_arr_rc.as_ref() {
@@ -33388,6 +33391,19 @@ impl Vm {
                                                 }
                                             }
                                         }
+                                        // (ZVAL_COPY_DEREF(): a by-value
+                                        // parameter, or a variadic one's
+                                        // element, gets the value)
+                                        let v = match v {
+                                            Value::Reference(r)
+                                                if !bound
+                                                    && !callee_variadic_is_ref
+                                                    && callee_by_ref.is_some() =>
+                                            {
+                                                r.borrow().clone()
+                                            }
+                                            v => v,
+                                        };
                                         call.named_args.push((name_bytes, v));
                                     } else {
                                         if had_named {
@@ -33472,7 +33488,12 @@ impl Vm {
                                                 call.args.push(v);
                                             }
                                         } else {
-                                            call.args.push(v);
+                                            // (ZVAL_COPY_DEREF(): a by-value
+                                            // parameter gets the element's value)
+                                            call.args.push(match v {
+                                                Value::Reference(r) => r.borrow().clone(),
+                                                v => v,
+                                            });
                                         }
                                         unpack_idx += 1;
                                     }
@@ -34294,6 +34315,7 @@ impl Vm {
                                 }
                             }
                         }
+                        Self::separate_array_ref_arg(func_name_lower, &call.args);
                         self.caller_strict_types = op_array.strict_types;
                         self.reset_named_skipped();
                         let had_exception_before = self.current_exception.is_some();
@@ -36464,6 +36486,7 @@ impl Vm {
                                 }
                             }
                         }
+                        Self::separate_array_ref_arg(&func_name_lower, &call.args);
                         // Generic zpp (verified stub arginfo): argument count and
                         // scalar parameter checks/coercion.
                         let zpp_types =
@@ -43421,7 +43444,9 @@ impl Vm {
                                     ArrayKey::String(s) => s.as_bytes().to_vec(),
                                     ArrayKey::Int(n) => n.to_string().into_bytes(),
                                 };
-                                obj.set_property(prop_name, value.clone());
+                                // (zend_symtable_to_proptable(): a reference
+                                // only the array holds is its value)
+                                obj.set_property(prop_name, crate::value::union_elem(value, &arr));
                             }
                             Value::Object(Rc::new(RefCell::new(obj)))
                         }
@@ -44523,6 +44548,12 @@ impl Vm {
                     // (ZVAL_UNDEFINED_OP1 in FETCH_DIM_R/RW).
                     if matches!(arr_val, Value::Undef | Value::Null) {
                         self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
+                    }
+                    // (FETCH_DIM_RW separates the array it writes: of storage
+                    // shared with copies, a reference only the storage held
+                    // is a plain value of its own copy)
+                    if is_rw {
+                        crate::array::separate_sent_array(&arr_val);
                     }
                     // ASSIGN_DIM_OP on false: the variable becomes an array
                     // (deprecated) before the element is read.
@@ -47105,7 +47136,11 @@ impl Vm {
                         OperandType::Cv(idx)
                             if !src_is_object || foreach_obj.contains_key(&iter_idx) =>
                         {
-                            if foreach_ref_cells.contains_key(&iter_idx) {
+                            // (a variable that is no array/object warned
+                            // here already: the loop is empty)
+                            if foreach_ref_cells.contains_key(&iter_idx)
+                                || !matches!(arr_val.deref(), Value::Array(_) | Value::Object(_))
+                            {
                                 foreach_ref_src.remove(&iter_idx);
                             } else {
                                 foreach_ref_src.insert(iter_idx, *idx);

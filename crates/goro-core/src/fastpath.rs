@@ -602,6 +602,7 @@ fn send_ref_fast(
         },
         _ => return false,
     };
+    crate::array::separate_sent_array(&v);
     call.args.push(v);
     true
 }

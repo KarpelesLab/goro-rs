@@ -2896,9 +2896,12 @@ fn call_user_func_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn array_push(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
+        // (the values are copied first: one may be the array itself,
+        // `array_push($a, $a)`)
+        let vals: Vec<Value> = args[1..].iter().map(|v| v.deref_for_storage()).collect();
         let mut arr = arr.borrow_mut();
-        for val in &args[1..] {
-            if let Err(msg) = arr.try_push(val.deref_for_storage()) {
+        for val in vals {
+            if let Err(msg) = arr.try_push(val) {
                 drop(arr);
                 let exc = vm.create_exception(b"Error", msg, 0);
                 vm.current_exception = Some(exc);
@@ -3217,7 +3220,11 @@ fn php_array_merge_recursive(
                         } else {
                             None
                         };
-                        let mut darr = if matches!(dval, Value::Null | Value::Undef) {
+                        // (the null check sees the destination's zval itself:
+                        // a reference to null converts to an empty array)
+                        let mut darr = if matches!(dval, Value::Null | Value::Undef)
+                            && !matches!(de, Value::Reference(_))
+                        {
                             let mut a = PhpArray::new();
                             a.push(Value::Null);
                             a
@@ -4326,7 +4333,7 @@ fn php_array_walk_arr(
     // when it is reachable from `holder`: an extra holder would make a
     // write from the callback separate (copy) it.
     let mut weak = Rc::downgrade(&arr);
-    let mut strong = if holder.is_some() { None } else { Some(arr) };
+    let strong = if holder.is_some() { None } else { Some(arr) };
     let mut pos = 0usize;
     loop {
         let Some(arr) = strong.clone().or_else(|| weak.upgrade()) else {
@@ -4457,22 +4464,8 @@ fn php_array_walk_arr(
             pos = p + 1;
         }
     }
-    let Some(arr) = strong.take().or_else(|| weak.upgrade()) else {
-        return Ok(true);
-    };
-    // References only held by the array (rc=1) are indistinguishable from
-    // plain values; store them as such.
-    if let Ok(mut a) = arr.try_borrow_mut() {
-        for (_, v) in a.iter_mut() {
-            let unwrap = match v {
-                Value::Reference(r) if Rc::strong_count(r) == 1 => Some(r.borrow().clone()),
-                _ => None,
-            };
-            if let Some(inner) = unwrap {
-                *v = inner;
-            }
-        }
-    }
+    // (the elements stay references, ZVAL_MAKE_REF(): a copy made by a
+    // function that keeps them, array_pad() ..., shares them)
     Ok(true)
 }
 

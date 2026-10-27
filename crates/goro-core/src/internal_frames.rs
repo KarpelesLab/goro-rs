@@ -516,6 +516,23 @@ impl Vm {
         )
     }
 
+    /// The `array &$array` of a builtin taking one first (sort(), shuffle(),
+    /// array_shift() ...) is separated from the copies sharing its storage
+    /// (ZPP's SEPARATE_ARRAY()), before the builtin reads its entries.
+    #[inline]
+    pub(crate) fn separate_array_ref_arg(lname: &[u8], args: &[Value]) {
+        let shared = match args.first() {
+            Some(Value::Array(a)) => a.try_borrow().is_ok_and(|b| b.shared_copies() > 0),
+            Some(Value::Reference(r)) => r.try_borrow().is_ok_and(|v| {
+                matches!(&*v, Value::Array(a) if a.try_borrow().is_ok_and(|b| b.shared_copies() > 0))
+            }),
+            _ => false,
+        };
+        if shared && crate::compiler::Compiler::is_array_ref_builtin(Some(lname)) {
+            crate::array::separate_sent_array(&args[0]);
+        }
+    }
+
     /// A reference to an array given for the `array &$array` parameter of a
     /// builtin that sorts/modifies the array it is handed (goro passes those
     /// arrays by handle, see Compiler::is_array_ref_builtin): the referenced

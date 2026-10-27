@@ -104,6 +104,9 @@ pub(crate) struct Store {
     /// The memory_limit accounting of the table (zend_size() of the array
     /// that made it shared), released with the storage.
     charged: usize,
+    /// It holds references (a cycle through one may outlive a copy: see
+    /// PhpArray's Drop).
+    has_refs: bool,
 }
 
 impl Store {
@@ -225,6 +228,30 @@ pub fn cow_copy(a: &std::rc::Rc<std::cell::RefCell<PhpArray>>) -> PhpArray {
     match a.try_borrow_mut() {
         Ok(mut b) => b.cow_clone(),
         Err(_) => a.borrow().clone(),
+    }
+}
+
+/// The array a by-reference argument `v` sends, separated from the copies
+/// sharing its storage (the SEPARATE_ARRAY() of an `array &$array`
+/// parameter's ZPP): the callee reads and rebuilds its own entries, the
+/// references only the storage held being plain values of them.
+#[inline]
+pub fn separate_sent_array(v: &Value) {
+    let sep = |a: &std::rc::Rc<std::cell::RefCell<PhpArray>>| {
+        if let Ok(mut b) = a.try_borrow_mut() {
+            b.make_unique();
+        }
+    };
+    match v {
+        Value::Array(a) => sep(a),
+        Value::Reference(r) => {
+            if let Ok(inner) = r.try_borrow() {
+                if let Value::Array(a) = &*inner {
+                    sep(a);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -519,10 +546,15 @@ impl PhpArray {
         }
         // (the table's accounting goes with it)
         let charged = self.zend_size();
+        let has_refs = self
+            .live()
+            .iter()
+            .any(|(_, v)| matches!(v, Value::Reference(_)));
         self.shared = Some(std::rc::Rc::new(Store {
             entries: std::mem::take(&mut self.entries),
             index: std::mem::take(&mut self.index),
             charged,
+            has_refs,
         }));
         true
     }
@@ -1567,7 +1599,12 @@ impl Drop for PhpArray {
             crate::gc::root_freed(self.gc_buffered.slot());
         }
         // (shared storage is released by its last holder: see Store)
-        if self.shared.is_some() {
+        if let Some(st) = &self.shared {
+            // The copies left share one zend_array in PHP, which lost a
+            // holder: a cycle through a reference it holds is a root.
+            if st.has_refs && std::rc::Rc::strong_count(st) > 1 {
+                root_store_referents(st);
+            }
             return;
         }
         // Release the accounted table.
@@ -1582,6 +1619,20 @@ impl Drop for PhpArray {
         }
         if nested {
             release_nested_entries(std::mem::take(&mut self.entries));
+        }
+    }
+}
+
+/// Buffer the arrays and objects the references of shared storage `st`
+/// point at as possible roots (a sharer of it was released).
+#[cold]
+#[inline(never)]
+fn root_store_referents(st: &Store) {
+    for (_, v) in st.entries.iter() {
+        if let Value::Reference(r) = v {
+            if let Ok(inner) = r.try_borrow() {
+                crate::gc::root_store_referent(&inner);
+            }
         }
     }
 }

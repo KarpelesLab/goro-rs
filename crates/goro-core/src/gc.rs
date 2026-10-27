@@ -311,6 +311,17 @@ pub fn possible_root(v: &Value) {
     }
 }
 
+/// An array or object a reference held by shared array storage points at,
+/// buffered when a sharer of the storage is released (see PhpArray's Drop):
+/// a cycle through the storage may now be garbage.
+pub fn root_store_referent(v: &Value) {
+    match v {
+        Value::Array(a) => buffer_array(a),
+        Value::Object(o) => buffer_object(o),
+        _ => {}
+    }
+}
+
 /// A lazy object's initializer closure released when the object is
 /// initialized or realized: Zend holds it twice (the zval and the fcc), so
 /// dropping the zval roots it before the fcc frees it.
