@@ -177,6 +177,10 @@ pub(crate) struct InternalNewTemplate {
     /// Whether its trace loses its arguments (filter_new_exception_trace()),
     /// with how many classes trace_without_args_classes had.
     pub(crate) filter_trace: (usize, bool),
+    /// The class has no constructor (none in the stubs, no extension
+    /// construct handler): `new` without arguments skips the constructor
+    /// call (ZEND_NEW).
+    pub(crate) no_ctor: bool,
     /// The class_tag() of the class's objects.
     pub(crate) tag: u32,
     /// The extension create_object hook its objects get, and how many hooks

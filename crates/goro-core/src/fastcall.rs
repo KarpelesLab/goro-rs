@@ -133,23 +133,63 @@ impl Vm {
         &mut self,
         op_array: &OpArray,
         ip: usize,
+        cvs: &[Value],
         tmps: &[Value],
     ) -> NewFast {
         let op = &op_array.ops[ip];
         let literals = &op_array.literals;
-        if let Some(t) = self.new_site_template(op_array, ip) {
-            return NewFast::Obj(self.new_from_template(&t, op, tmps), t.no_ctor);
-        }
-        if let Some(obj) = self.new_internal_fast(op_array, ip, op, tmps) {
-            return NewFast::Obj(obj, false);
-        }
-        let OperandType::Const(ci) = op.op1 else {
-            return NewFast::No;
+        // `new $name`: a class name in a variable or temporary (a leading
+        // backslash is dropped)
+        let dyn_name = match op.op1 {
+            OperandType::Const(_) => None,
+            OperandType::Cv(i) => match cvs.get(i as usize) {
+                Some(Value::String(s)) => Some(s.clone()),
+                Some(Value::Reference(r)) => match r.try_borrow().as_deref() {
+                    Ok(Value::String(s)) => Some(s.clone()),
+                    _ => return NewFast::No,
+                },
+                _ => return NewFast::No,
+            },
+            OperandType::Tmp(i) => match tmps.get(i as usize) {
+                Some(Value::String(s)) => Some(s.clone()),
+                _ => return NewFast::No,
+            },
+            _ => return NewFast::No,
         };
-        let Some(Value::String(name)) = literals.get(ci as usize) else {
-            return NewFast::No;
+        if let Some(n) = &dyn_name {
+            let n = n.as_bytes();
+            let n = n.strip_prefix(b"\\").unwrap_or(n);
+            if n.contains(&0) {
+                return NewFast::No;
+            }
+            if let Some(t) = self.new_site_template(op_array, ip) {
+                if n.eq_ignore_ascii_case(&t.lower) {
+                    return NewFast::Obj(self.new_from_template(&t, op, tmps), t.no_ctor);
+                }
+            }
+        } else {
+            if let Some(t) = self.new_site_template(op_array, ip) {
+                return NewFast::Obj(self.new_from_template(&t, op, tmps), t.no_ctor);
+            }
+            if let Some((obj, no_ctor)) = self.new_internal_fast(op_array, ip, op, tmps) {
+                return NewFast::Obj(obj, no_ctor);
+            }
+        }
+        let name = match &dyn_name {
+            Some(n) => {
+                let n = n.as_bytes();
+                n.strip_prefix(b"\\").unwrap_or(n)
+            }
+            None => {
+                let OperandType::Const(ci) = op.op1 else {
+                    return NewFast::No;
+                };
+                let Some(Value::String(name)) = literals.get(ci as usize) else {
+                    return NewFast::No;
+                };
+                name.as_bytes()
+            }
         };
-        let name = name.as_bytes();
         if name.is_empty()
             || name[0] == b'\\'
             || name.eq_ignore_ascii_case(b"static")
@@ -272,7 +312,7 @@ impl Vm {
         ip: usize,
         op: &Op,
         tmps: &[Value],
-    ) -> Option<Value> {
+    ) -> Option<(Value, bool)> {
         let t = op_array
             .sites()
             .borrow()
@@ -316,7 +356,7 @@ impl Vm {
         if let Some(h) = t.create_hook {
             h(self, &rc);
         }
-        Some(Value::Object(rc))
+        Some((Value::Object(rc), t.no_ctor))
     }
 
     /// Whether the class an InternalNewTemplate was made for is still the
@@ -396,20 +436,6 @@ impl Vm {
                 ce
             }
         };
-        let mut arrays = Vec::new();
-        for (i, (_, v)) in obj.properties.iter().enumerate() {
-            match v {
-                Value::Undef
-                | Value::Null
-                | Value::True
-                | Value::False
-                | Value::Long(_)
-                | Value::Double(_)
-                | Value::String(_) => {}
-                Value::Array(a) if a.borrow().is_empty() => arrays.push(i),
-                _ => return,
-            }
-        }
         let throwable = if throwable {
             let at = |k: &[u8]| obj.properties.iter().position(|(n, _)| n.as_slice() == k);
             let trace = obj
@@ -422,12 +448,37 @@ impl Vm {
         } else {
             None
         };
+        let mut arrays = Vec::new();
+        for (i, (_, v)) in obj.properties.iter().enumerate() {
+            // (a throwable's trace is made for each object)
+            if throwable.is_some_and(|(_, _, t)| t == i) {
+                continue;
+            }
+            match v {
+                Value::Undef
+                | Value::Null
+                | Value::True
+                | Value::False
+                | Value::Long(_)
+                | Value::Double(_)
+                | Value::String(_) => {}
+                Value::Array(a) if a.borrow().is_empty() => arrays.push(i),
+                _ => return,
+            }
+        }
+        // (the arrays are each object's own: not held here)
+        let mut slots = obj.properties.clone();
+        for &i in arrays.iter().chain(throwable.as_ref().map(|(_, _, t)| t)) {
+            if let Some(slot) = slots.get_mut(i) {
+                slot.1 = Value::Null;
+            }
+        }
         let t = InternalNewTemplate {
             class_name: obj.class_name.clone(),
             lower: lower.to_vec(),
             entry,
             stamp: std::cell::Cell::new(self.classes.generation()),
-            slots: obj.properties.clone(),
+            slots,
             arrays,
             throwable,
             filter_trace: (self.trace_without_args_classes.len(), {
@@ -439,6 +490,7 @@ impl Vm {
                 !targets.is_empty() && self.class_extends_any(lower, &targets)
             }),
             tag: crate::object::class_tag_of(&obj.class_name),
+            no_ctor: self.internal_class_without_ctor(lower),
             create_hook: self.object_create_hook_of(lower),
             hooks_len: self.object_create_handlers.len(),
         };
@@ -736,6 +788,47 @@ impl Vm {
             return 2;
         }
         0
+    }
+
+    /// Whether the internal class `lower` has no constructor: neither its
+    /// stub, nor an extension's construct handler or native class handler
+    /// has one (the general DO_FCALL handler then does nothing for its
+    /// constructor call).
+    fn internal_class_without_ctor(&self, lower: &[u8]) -> bool {
+        if crate::stubs::find_method(lower, b"__construct").is_some()
+            || self
+                .classes
+                .get(lower)
+                .is_some_and(|c| c.methods.contains_key(b"__construct".as_slice()))
+        {
+            return false;
+        }
+        let mut chain = vec![lower.to_vec()];
+        if let Some((_, h)) = crate::stubs::class_hierarchy(lower) {
+            chain.extend(h.parents_lower.iter().cloned());
+        }
+        let mut cur = self.classes.get(lower).and_then(|c| c.parent.clone());
+        for _ in 0..64 {
+            let Some(p) = cur else {
+                break;
+            };
+            let pl = p.to_ascii_lowercase();
+            cur = self.classes.get(pl.as_slice()).and_then(|c| c.parent.clone());
+            chain.push(pl);
+        }
+        if chain
+            .iter()
+            .any(|c| self.object_construct_handlers.contains_key(c.as_slice()))
+        {
+            return false;
+        }
+        match self.find_native_class_handler(lower) {
+            Some((native, h)) => {
+                !(h.has_method)(&native, b"__construct", false)
+                    && !(h.has_method)(&native, b"__construct", true)
+            }
+            None => true,
+        }
     }
 
     /// `new stdClass`: an object without properties, of a class without a

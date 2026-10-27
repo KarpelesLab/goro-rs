@@ -59226,7 +59226,7 @@ impl Vm {
                         }
                     }
                     // A user class (see new_object_fast)
-                    match self.new_object_fast(op_array, ip - 1, &tmps) {
+                    match self.new_object_fast(op_array, ip - 1, &cvs, &tmps) {
                         fastcall::NewFast::No => {}
                         fastcall::NewFast::Obj(obj_value, no_ctor) => {
                             // ZEND_NEW of a class without a constructor, with
