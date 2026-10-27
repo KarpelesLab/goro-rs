@@ -841,6 +841,13 @@ pub fn prop_write(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8], kind: u8
     // read handler synthesizes, whose write zend_std_write_property() makes:
     // a user subclass's __set() gets it). DateInterval only writes y, m, d,
     // h, i, s, f and invert into the interval.
+    // (unset of a view property name: the script's own one goes)
+    if kind == 1 && matches!(name, b"date" | b"timezone_type" | b"timezone") {
+        let k = user_view_key(name);
+        if o.borrow().has_property(&k) {
+            o.borrow_mut().remove_property(&k);
+        }
+    }
     if kind == 2 {
         let cn = o.borrow().class_name.clone();
         return !(base_of(vm, &cn) == Some(Base::Interval)
@@ -879,13 +886,13 @@ pub fn prop_read(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Option
             if matches!(name, b"date" | b"timezone_type" | b"timezone")
                 && o.borrow().has_property(P_STATE)
             {
-                return Some(None);
+                return Some(user_view_read(o, name));
             }
             None
         }
         Base::TimeZone => {
             if matches!(name, b"timezone_type" | b"timezone") && o.borrow().has_property(P_TZ) {
-                return Some(None);
+                return Some(user_view_read(o, name));
             }
             None
         }
@@ -925,6 +932,14 @@ pub fn prop_read(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Option
             Some(Some(period_prop(vm, &p, name)))
         }
     }
+}
+
+/// A view property name read: the script's own dynamic property of that
+/// name, if it wrote one (else undefined).
+fn user_view_read(o: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Option<Value> {
+    let ob = o.borrow();
+    let k = user_view_key(name);
+    ob.has_property(&k).then(|| ob.get_property(&k))
 }
 
 /// Side effects of the date classes' compare handlers.
@@ -970,6 +985,54 @@ pub fn compare_check(vm: &mut Vm, a: &Value, b: &Value) {
     }
 }
 
+/// The hidden property holding a dynamic property the script wrote under
+/// the name of one of DateTime's / DateTimeZone's view properties (php keeps
+/// it in the real property table, which get_properties_for overlays).
+fn user_view_key(name: &[u8]) -> Vec<u8> {
+    let mut k = b"__timestamp_u_".to_vec();
+    k.extend_from_slice(name);
+    k
+}
+
+/// A write of a view property name: the value written is the script's own
+/// dynamic property (read back by prop_read), the view keeps its value.
+#[inline(never)]
+fn keep_user_view_writes(o: &Rc<RefCell<PhpObject>>) {
+    let (names, props): (&[&[u8]], Vec<(&'static [u8], Value)>) = {
+        if o.borrow().has_property(P_STATE) {
+            match date_get(o) {
+                Some(t) => (&[b"date", b"timezone_type", b"timezone"], date_props(&t)),
+                None => return,
+            }
+        } else if o.borrow().has_property(P_TZ) {
+            match tz_get(o) {
+                Some(z) => (&[b"timezone_type", b"timezone"], tz_props(&z)),
+                None => return,
+            }
+        } else {
+            return;
+        }
+    };
+    let mut ob = o.borrow_mut();
+    for &n in names {
+        if !ob.has_property(n) {
+            continue;
+        }
+        let cur = ob.get_property(n);
+        match props.iter().find(|(k, _)| *k == n) {
+            Some((_, v)) if cur.identical(v) => {}
+            Some((_, v)) => {
+                ob.set_property(user_view_key(n), cur);
+                ob.set_property(n.to_vec(), v.clone());
+            }
+            None => {
+                ob.set_property(user_view_key(n), cur);
+                ob.remove_property(n);
+            }
+        }
+    }
+}
+
 /// Keep the engine-provided properties after user-added ones, mirroring the
 /// order PHP's get_properties_for handlers produce.
 pub fn prop_added(o: &Rc<RefCell<PhpObject>>) {
@@ -984,6 +1047,7 @@ pub fn prop_added(o: &Rc<RefCell<PhpObject>>) {
             }
         }
     }
+    keep_user_view_writes(o);
     let mut ob = o.borrow_mut();
     let names: &[&[u8]] = if ob.has_property(P_STATE) {
         &[b"date", b"timezone_type", b"timezone"]
