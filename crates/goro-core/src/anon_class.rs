@@ -14,8 +14,9 @@ pub(crate) fn is_anon_name(name: &[u8]) -> bool {
 
 impl Vm {
     /// DECLARE_CLASS of an anonymous class whose parent, interfaces or
-    /// traits are not declared yet: kept pending (true), to be bound (and
-    /// its dependencies loaded) when the class is first used.
+    /// traits are not declared yet, or that has interfaces or traits: kept
+    /// pending (true), to be bound (and its dependencies loaded) when the
+    /// class is first used.
     pub(crate) fn defer_anon_class(&mut self, class: &ClassEntry) -> bool {
         if self.declaring_anon || !is_anon_name(&class.name) {
             return false;
@@ -32,7 +33,10 @@ impl Vm {
         let deps_known = class.parent.as_deref().is_none_or(|p| known(self, p))
             && class.interfaces.iter().all(|i| known(self, i))
             && class.traits.iter().all(|t| known(self, t));
-        if deps_known {
+        // (a class with interfaces or traits is only linked by
+        // DECLARE_ANON_CLASS: its link-time diagnostics, such as the
+        // Serializable deprecation, are raised when `new class` runs)
+        if deps_known && class.interfaces.is_empty() && class.traits.is_empty() {
             return false;
         }
         self.anon_pending.insert(lower, class.clone());
@@ -44,9 +48,33 @@ impl Vm {
     pub(crate) fn bind_pending_anon_class(&mut self, name: &[u8]) -> Option<bool> {
         let lower = name.to_ascii_lowercase();
         let class = self.anon_pending.remove(&lower)?;
-        let file = class.filename.clone().unwrap_or_default();
+        // (`new class` runs in the file declaring it)
+        let file = class
+            .filename
+            .clone()
+            .filter(|f| !f.is_empty())
+            .unwrap_or_else(|| self.current_file.to_string());
         let r = self.declare_class_entry(class, &file);
+        if let Err(e) = &r {
+            self.anon_bind_fatal(e, &file);
+        }
         Some(r.is_ok() && self.current_exception.is_none() && self.classes.contains_key(&lower))
+    }
+
+    /// A fatal error linking a pending anonymous class (DECLARE_ANON_CLASS):
+    /// reported against its file, and the script ends (zend_bailout()), as
+    /// the lookup that bound it cannot propagate it.
+    #[inline(never)]
+    fn anon_bind_fatal(&mut self, e: &VmError, file: &str) {
+        if self.current_exception.is_some() || self.exit_requested {
+            return;
+        }
+        if !self.fatal_emitted {
+            let saved = std::mem::replace(&mut self.current_file, file.into());
+            let _ = self.emit_fatal_at(&e.message, e.line);
+            self.current_file = saved;
+        }
+        self.fatal_bailout = true;
     }
 
     /// Runs DECLARE_CLASS for `class` (declared in `file`).

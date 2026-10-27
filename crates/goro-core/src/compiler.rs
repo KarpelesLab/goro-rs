@@ -3302,10 +3302,14 @@ impl Compiler {
     fn build_anon_class_name_map(&mut self, stmts: &[Statement]) {
         let mut bound = std::collections::HashSet::new();
         let mut early = Vec::new();
+        // (an unbracketed `namespace X;` stays in effect past its statement)
+        let saved = (self.current_namespace.clone(), self.use_map.clone());
         self.anon_class_map_pass(stmts, Some((&mut bound, &mut early)));
+        (self.current_namespace, self.use_map) = saved.clone();
         early.sort_unstable();
         RTD_EARLY.with(|e| *e.borrow_mut() = early);
         self.anon_class_map_pass(stmts, None);
+        (self.current_namespace, self.use_map) = saved;
     }
 
     fn anon_class_map_pass(
@@ -3408,10 +3412,10 @@ impl Compiler {
                             body_stmts,
                             early.as_mut().map(|(b, s)| (&mut **b, &mut **s)),
                         );
+                        // Restore
+                        self.current_namespace = saved_ns;
+                        self.use_map = saved_use_map;
                     }
-                    // Restore
-                    self.current_namespace = saved_ns;
-                    self.use_map = saved_use_map;
                 }
                 StmtKind::UseDecl(use_items) => {
                     // Track use imports for correct name resolution
