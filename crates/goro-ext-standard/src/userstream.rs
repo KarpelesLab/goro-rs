@@ -281,6 +281,9 @@ thread_local! {
     /// Stack of the builtin names currently executing through this module,
     /// used to prefix diagnostics like php_error_docref() does.
     static FN_STACK: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+    /// The line of the include/require opline opening a user stream: the
+    /// wrapper's methods it calls are called from there.
+    static INCLUDE_SITE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
     /// FG(wrapper_errors): errors logged by wrappers while REPORT_ERRORS is off.
     static WRAPPER_ERRORS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// FG(user_stream_current_filename) (infinite recursion guard).
@@ -443,6 +446,16 @@ fn invoke_method_inner(
     method_lower: &[u8],
     args: Vec<Value>,
 ) -> Result<Value, VmError> {
+    // (a method an include/require opline calls directly is called from
+    // the including code's line)
+    let direct_include = FN_STACK.with(|st| {
+        st.borrow()
+            .last()
+            .is_some_and(|n| matches!(*n, "include" | "include_once" | "require" | "require_once"))
+    });
+    if let Some(l) = INCLUDE_SITE.with(|c| c.get()).filter(|_| direct_include) {
+        vm.ucf_call_line = Some(l);
+    }
     let cl = class_lower_of(obj);
     let class = match vm.classes.get(&cl) {
         Some(c) => c,
@@ -5222,7 +5235,11 @@ pub(crate) fn include_hook(vm: &mut Vm, path: &str, kind: u8) -> Option<Result<V
         false,
     );
     vm.call_stack.push(frame.clone());
+    // (the methods are called by the include opline itself: from the
+    // including code's line, not from an internal function)
+    let outer = INCLUDE_SITE.with(|c| c.replace(Some(vm.current_line)));
     let r = include_open(vm, p);
+    INCLUDE_SITE.with(|c| c.set(outer));
     vm.call_stack.pop();
     let res = match r {
         Ok(Some(src)) => Some(Ok(src)),
