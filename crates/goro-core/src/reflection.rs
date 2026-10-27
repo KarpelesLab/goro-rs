@@ -1900,27 +1900,32 @@ fn magic_call_trampoline(vm: &Vm, closure: &Value) -> Option<(Vec<u8>, Vec<u8>)>
     let op = vm.closure_op_array(closure);
     // `$obj->method(...)`: the thunk calls a literal method on the captured
     // object.
-    let method_fcc = op.as_ref().and_then(|op| {
-        let call = op
-            .ops
-            .iter()
-            .find(|o| o.opcode == crate::opcode::OpCode::InitMethodCall)?;
-        let crate::opcode::OperandType::Const(i) = call.op2 else {
-            return None;
-        };
-        let m = op.literals.get(i as usize)?.to_php_string();
-        let obj = match closure.closure_inner()? {
-            Value::Array(a) => a.borrow().values().find_map(|v| match v.deref() {
-                Value::Object(o) => Some(o.borrow().class_name.clone()),
-                _ => None,
-            })?,
-            _ => return None,
-        };
-        let mut t = obj;
-        t.extend_from_slice(b"::");
-        t.extend_from_slice(m.as_bytes());
-        Some(t)
-    });
+    // (only a thunk: the method's own code may make a method call, e.g.
+    // `throw new LogicException()` calls its constructor)
+    let method_fcc = op
+        .as_ref()
+        .filter(|op| op.name.starts_with(b"__closure_fcc_"))
+        .and_then(|op| {
+            let call = op
+                .ops
+                .iter()
+                .find(|o| o.opcode == crate::opcode::OpCode::InitMethodCall)?;
+            let crate::opcode::OperandType::Const(i) = call.op2 else {
+                return None;
+            };
+            let m = op.literals.get(i as usize)?.to_php_string();
+            let obj = match closure.closure_inner()? {
+                Value::Array(a) => a.borrow().values().find_map(|v| match v.deref() {
+                    Value::Object(o) => Some(o.borrow().class_name.clone()),
+                    _ => None,
+                })?,
+                _ => return None,
+            };
+            let mut t = obj;
+            t.extend_from_slice(b"::");
+            t.extend_from_slice(m.as_bytes());
+            Some(t)
+        });
     let target_name = match op.and_then(|op| op.fcc_target_name.clone()).or(method_fcc) {
         Some(t) => t,
         None => match closure.closure_inner()? {
