@@ -2563,6 +2563,7 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         all.push(Value::Object(obj.clone()));
                         all.extend(call_args);
                         let had_exc = vm.current_exception.is_some();
+                        let fatal_before = vm.fatal_emitted;
                         let r = vm.spl_deferred_call_ex(
                             method_name.as_bytes(),
                             &all,
@@ -2571,6 +2572,14 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             false,
                             direct.is_none(),
                         );
+                        // (a fatal error in the method ends the script)
+                        if !fatal_before && vm.fatal_emitted {
+                            vm.fatal_bailout = true;
+                            return Err(VmError {
+                                message: "fatal error".into(),
+                                line,
+                            });
+                        }
                         if !had_exc && vm.current_exception.is_some() {
                             return Err(VmError {
                                 message: vm.uncaught_exception_message(),

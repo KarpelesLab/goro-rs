@@ -468,8 +468,14 @@ impl Vm {
     ) -> Option<PhpString> {
         match v.deref() {
             Value::String(s) => Some(s),
-            Value::Long(_) | Value::Double(_) | Value::True | Value::False => {
-                Some(v.to_php_string())
+            Value::Long(_) | Value::True | Value::False => Some(v.to_php_string()),
+            // (with zend_double_to_str()'s NAN warning)
+            Value::Double(_) => {
+                let s = self.value_to_string(v);
+                if self.current_exception.is_some() {
+                    return None;
+                }
+                Some(s)
             }
             Value::Null | Value::Undef => {
                 let msg = format!(

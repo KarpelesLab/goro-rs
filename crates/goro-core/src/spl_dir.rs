@@ -535,27 +535,33 @@ impl Vm {
         if nullable && matches!(v, Value::Null) {
             return Ok(None);
         }
+        // zend_parse_arg_class(): try_convert_to_string() first ("Array"
+        // with its warning; a non-stringable object's Error)
         let s = match &v {
             Value::String(s) => s.as_bytes().to_vec(),
-            Value::Array(_) | Value::Object(_) => {
-                let given = Self::value_type_name(&v);
-                let msg = match base {
-                    Some(b) => format!(
-                        "{}(): Argument #1 ($class) must be a class name derived from {}{}, {} given",
-                        func,
-                        self.builtin_canonical_name(b),
-                        if nullable { " or null" } else { "" },
-                        given
-                    ),
-                    None => format!(
-                        "{}(): Argument #1 ($class) must be a valid class name{}, {} given",
-                        func,
-                        if nullable { " or null" } else { "" },
-                        given
-                    ),
-                };
-                self.spl_throw(b"TypeError", &msg);
-                return Err(());
+            Value::Array(_) | Value::Object(_) | Value::Double(_) => {
+                // (value_to_string() warns about a NAN itself)
+                if let Value::Array(_) = v {
+                    let line = self.current_line;
+                    self.emit_warning_at("Array to string conversion", line);
+                } else if let Value::Object(o) = &v {
+                    if !self.zpp_object_has_tostring(&v) {
+                        let msg = format!(
+                            "Object of class {} could not be converted to string",
+                            crate::value::display_class_name(&o.borrow().class_name)
+                        );
+                        self.spl_throw(b"Error", &msg);
+                        return Err(());
+                    }
+                }
+                if self.current_exception.is_some() {
+                    return Err(());
+                }
+                let s = self.value_to_string(&v);
+                if self.current_exception.is_some() {
+                    return Err(());
+                }
+                s.as_bytes().to_vec()
             }
             other => other.to_php_string().as_bytes().to_vec(),
         };
@@ -575,7 +581,7 @@ impl Vm {
                     func,
                     self.builtin_canonical_name(b),
                     if nullable { " or null" } else { "" },
-                    crate::string::msg_str(&s)
+                    crate::string::msg_cstr(&s)
                 );
                 self.spl_throw(b"TypeError", &msg);
                 return Err(());
@@ -586,7 +592,7 @@ impl Vm {
                 "{}(): Argument #1 ($class) must be a valid class name{}, {} given",
                 func,
                 if nullable { " or null" } else { "" },
-                crate::string::msg_str(&s)
+                crate::string::msg_cstr(&s)
             );
             self.spl_throw(b"TypeError", &msg);
             return Err(());
@@ -679,6 +685,44 @@ impl Vm {
             },
             None => sv(b"r"),
         };
+        // (zpp "|Sbr!": $useIncludePath and $context are checked here)
+        if let Some(v) = a.get(1).map(|v| v.deref()) {
+            let ok = match v {
+                Value::Null | Value::Undef => {
+                    self.emit_deprecated(&format!(
+                        "{}(): Passing null to parameter #2 ($useIncludePath) of type bool is deprecated",
+                        func
+                    ));
+                    self.current_exception.is_none()
+                }
+                Value::True | Value::False | Value::Long(_) | Value::Double(_) | Value::String(_) => {
+                    true
+                }
+                other => {
+                    let msg = format!(
+                        "{}(): Argument #2 ($useIncludePath) must be of type bool, {} given",
+                        func,
+                        Self::value_type_name(&other)
+                    );
+                    self.spl_throw(b"TypeError", &msg);
+                    false
+                }
+            };
+            if !ok {
+                return Value::Null;
+            }
+        }
+        if let Some(v) = a.get(2).map(|v| v.deref()) {
+            if !matches!(v, Value::Null | Value::Undef | Value::Resource(_)) {
+                let msg = format!(
+                    "{}(): Argument #3 ($context) must be of type resource or null, {} given",
+                    func,
+                    Self::value_type_name(&v)
+                );
+                self.spl_throw(b"TypeError", &msg);
+                return Value::Null;
+            }
+        }
         let class = Self::fs_file_class(source);
         let new_obj = self.spl_instantiate(&class);
         let fname = match self.fs_get_file_name(source) {

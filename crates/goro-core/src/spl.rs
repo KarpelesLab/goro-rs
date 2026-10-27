@@ -129,8 +129,10 @@ impl Vm {
 
     /// A callback `[$splObject, 'method']` run as the method's deferred call
     /// (spl_should_defer()).
+    /// (Not the protected SplHeap::compare(): a callback reaching it is a
+    /// closure over it, callable from anywhere.)
     pub fn spl_callback_deferred(&self, class_lower: &[u8], method_lower: &[u8]) -> bool {
-        self.spl_should_defer(class_lower, method_lower)
+        method_lower != b"compare" && self.spl_should_defer(class_lower, method_lower)
     }
 
     /// `parent::m()` / `self::m()` / `SplX::m()` naming a stubbed method of

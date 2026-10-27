@@ -6271,6 +6271,7 @@ impl Vm {
                         let mut call_args = vec![vals[0].clone()];
                         call_args.extend_from_slice(args);
                         let had_exc = self.current_exception.is_some();
+                        let fatal_before = self.fatal_emitted;
                         let line = self.current_line;
                         let r = self.spl_deferred_call_ex(
                             method_name.as_bytes(),
@@ -6280,6 +6281,14 @@ impl Vm {
                             false,
                             true,
                         );
+                        // (a fatal error in the method ends the script)
+                        if !fatal_before && self.fatal_emitted {
+                            self.fatal_bailout = true;
+                            return Err(VmError {
+                                message: "fatal error".into(),
+                                line,
+                            });
+                        }
                         if !had_exc && self.current_exception.is_some() {
                             return Err(VmError {
                                 message: self.uncaught_exception_message(),
