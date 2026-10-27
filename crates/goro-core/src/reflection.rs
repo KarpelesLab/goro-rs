@@ -12506,6 +12506,26 @@ pub fn reflection_zend_extension_method(
     }
 }
 
+/// A module's version (its zend_module_entry `version`, also phpversion($ext)):
+/// PHP_VERSION for most bundled extensions.
+pub fn extension_version(ext_lower: &str) -> &'static [u8] {
+    match ext_lower {
+        // (DOM_API_VERSION)
+        "dom" => b"20031129",
+        // (PHP_ZIP_VERSION)
+        "zip" => b"1.22.7",
+        // (PHP_ZEND_TEST_VERSION)
+        "zend_test" => b"0.1.0",
+        // (PHP_MYSQLND_VERSION)
+        "mysqlnd" => b"mysqlnd 8.5.4",
+        // PECL extensions have their own version
+        "uuid" => b"1.3.0",
+        "mailparse" => b"3.2.1-dev",
+        "imagick" => b"3.8.1",
+        _ => b"8.5.4",
+    }
+}
+
 pub fn reflection_extension_method(
     vm: &mut Vm,
     method: &[u8],
@@ -12519,15 +12539,9 @@ pub fn reflection_extension_method(
 
     match method {
         b"getname" => Some(Value::String(PhpString::from_msg(&name))),
-        b"getversion" => Some(Value::String(PhpString::from_bytes(
-            match ext_lower.as_str() {
-                // PECL extensions have their own version
-                "uuid" => b"1.3.0".as_slice(),
-                "mailparse" => b"3.2.1-dev",
-                "imagick" => b"3.8.1",
-                _ => b"8.5.4",
-            },
-        ))),
+        b"getversion" => Some(Value::String(PhpString::from_bytes(extension_version(
+            &ext_lower,
+        )))),
         b"getfunctions" => {
             // Enumerate all registered internal and user functions that belong
             // to this extension (matched via get_function_extension()). Return

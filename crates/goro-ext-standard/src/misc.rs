@@ -19580,27 +19580,16 @@ fn error_clear_last_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
 }
 
-fn phpversion_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn phpversion_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(ext) = args.first() {
         if !matches!(ext, Value::Null | Value::Undef) {
             let ext_name = ext.to_php_string().to_string_lossy().to_ascii_lowercase();
-            match ext_name.as_str() {
-                "standard" | "core" | "date" | "pcre" | "json" | "ctype" | "hash" | "spl"
-                | "tidy" | "ldap" => {
-                    return Ok(Value::String(PhpString::from_bytes(b"8.5.4")));
-                }
-                // PECL extensions report their own version.
-                "uuid" if _vm.loaded_extensions.contains(b"uuid".as_slice()) => {
-                    return Ok(Value::String(PhpString::from_bytes(b"1.3.0")));
-                }
-                "mailparse" if _vm.loaded_extensions.contains(b"mailparse".as_slice()) => {
-                    return Ok(Value::String(PhpString::from_bytes(b"3.2.1-dev")));
-                }
-                "imagick" if _vm.loaded_extensions.contains(b"imagick".as_slice()) => {
-                    return Ok(Value::String(PhpString::from_bytes(b"3.8.1")));
-                }
-                _ => return Ok(Value::False),
+            if !extension_is_loaded(vm, &ext_name) {
+                return Ok(Value::False);
             }
+            return Ok(Value::String(PhpString::from_bytes(
+                goro_core::reflection::extension_version(&ext_name),
+            )));
         }
     }
     Ok(Value::String(PhpString::from_bytes(b"8.5.4")))
@@ -20250,8 +20239,17 @@ fn extension_loaded_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .to_php_string()
         .to_string_lossy()
         .to_ascii_lowercase();
-    let loaded = matches!(
-        ext.as_str(),
+    Ok(if extension_is_loaded(vm, &ext) {
+        Value::True
+    } else {
+        Value::False
+    })
+}
+
+/// extension_loaded() for a lowercased module name.
+fn extension_is_loaded(vm: &Vm, ext: &str) -> bool {
+    matches!(
+        ext,
         "standard"
             | "core"
             | "date"
@@ -20264,8 +20262,7 @@ fn extension_loaded_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             | "reflection"
             | "uri"
             | "lexbor"
-    ) || vm.loaded_extensions.contains(ext.as_bytes());
-    Ok(if loaded { Value::True } else { Value::False })
+    ) || vm.loaded_extensions.contains(ext.as_bytes())
 }
 
 /// Module names as PHP spells them, in a php-src-like startup order
