@@ -17220,12 +17220,13 @@ impl Compiler {
                                 });
                             }
                         };
+                        // (ASSIGN_OP follows the value: CG(zend_lineno))
                         self.op_array.emit(Op {
                             opcode,
                             op1: OperandType::Cv(cv),
                             op2: val,
                             result: OperandType::Unused,
-                            line: expr.span.line,
+                            line: self.cur_lineno(expr.span.line),
                         });
                         Ok(OperandType::Cv(cv))
                     }
@@ -17245,6 +17246,12 @@ impl Compiler {
                             // `null op val` is appended.
                             OperandType::Unused
                         };
+                        // (the delayed FETCH_DIM opline ASSIGN_DIM_OP is made
+                        // from: on its key's line)
+                        let line = match index {
+                            Some(_) => self.cur_lineno(expr.span.line),
+                            None => expr.span.line,
+                        };
 
                         let read_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
@@ -17252,7 +17259,7 @@ impl Compiler {
                             op1: arr,
                             op2: idx,
                             result: OperandType::Tmp(read_tmp),
-                            line: expr.span.line,
+                            line,
                         });
 
                         let result_tmp = self.op_array.alloc_temp();
@@ -17276,7 +17283,7 @@ impl Compiler {
                             op1: OperandType::Tmp(read_tmp),
                             op2: val,
                             result: OperandType::Tmp(result_tmp),
-                            line: expr.span.line,
+                            line,
                         });
 
                         if matches!(idx, OperandType::Unused) {
@@ -17285,7 +17292,7 @@ impl Compiler {
                                 op1: arr,
                                 op2: OperandType::Tmp(result_tmp),
                                 result: OperandType::Unused,
-                                line: expr.span.line,
+                                line,
                             });
                         } else {
                             self.op_array.emit(Op {
@@ -17293,7 +17300,7 @@ impl Compiler {
                                 op1: arr,
                                 op2: OperandType::Tmp(result_tmp),
                                 result: idx,
-                                line: expr.span.line,
+                                line,
                             });
                         }
                         Ok(OperandType::Tmp(result_tmp))
@@ -17315,13 +17322,15 @@ impl Compiler {
                             _ => self.compile_expr(property)?,
                         };
 
+                        // (on the property name's line: the delayed FETCH_OBJ)
+                        let line = property.span.line.max(expr.span.line);
                         let read_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
                             opcode: OpCode::PropertyGetRW,
                             op1: obj,
                             op2: name_operand,
                             result: OperandType::Tmp(read_tmp),
-                            line: expr.span.line,
+                            line,
                         });
 
                         let result_tmp = self.op_array.alloc_temp();
@@ -17345,7 +17354,7 @@ impl Compiler {
                             op1: OperandType::Tmp(read_tmp),
                             op2: val,
                             result: OperandType::Tmp(result_tmp),
-                            line: expr.span.line,
+                            line,
                         });
 
                         self.op_array.emit(Op {
@@ -17353,7 +17362,7 @@ impl Compiler {
                             op1: obj,
                             op2: OperandType::Tmp(result_tmp),
                             result: name_operand,
-                            line: expr.span.line,
+                            line,
                         });
                         Ok(OperandType::Tmp(result_tmp))
                     }
@@ -17470,7 +17479,7 @@ impl Compiler {
                             op1: l,
                             op2: OperandType::JmpTarget(0),
                             result: OperandType::Unused,
-                            line: expr.span.line,
+                            line: self.cur_lineno(expr.span.line),
                         });
                         // Left was truthy, evaluate right
                         let r = self.compile_expr(right)?;
@@ -17480,7 +17489,7 @@ impl Compiler {
                             op1: r,
                             op2: OperandType::Unused,
                             result: OperandType::Tmp(result_tmp),
-                            line: expr.span.line,
+                            line: self.cur_lineno(expr.span.line),
                         });
                         let jmp_end = self.op_array.emit(Op {
                             opcode: OpCode::Jmp,
@@ -17521,7 +17530,7 @@ impl Compiler {
                             op1: l,
                             op2: OperandType::JmpTarget(0),
                             result: OperandType::Unused,
-                            line: expr.span.line,
+                            line: self.cur_lineno(expr.span.line),
                         });
                         // Left was falsy, evaluate right
                         let r = self.compile_expr(right)?;
@@ -17530,7 +17539,7 @@ impl Compiler {
                             op1: r,
                             op2: OperandType::Unused,
                             result: OperandType::Tmp(result_tmp),
-                            line: expr.span.line,
+                            line: self.cur_lineno(expr.span.line),
                         });
                         let jmp_end = self.op_array.emit(Op {
                             opcode: OpCode::Jmp,
@@ -21052,7 +21061,7 @@ impl Compiler {
                     op1: body_val,
                     op2: OperandType::Unused,
                     result: OperandType::Unused,
-                    line: expr.span.line,
+                    line: closure_compiler.cur_lineno(expr.span.line),
                 });
 
                 self.op_array
