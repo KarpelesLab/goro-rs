@@ -15912,7 +15912,6 @@ pub fn create_reflection_attributes(
             Value::String(PhpString::from_vec(attr.name.clone())),
         );
         // Store the op_array for lazy argument evaluation
-        obj.set_property(b"__reflection_attr_args_evaluated".to_vec(), Value::False);
         obj.set_property(b"__reflection_attr_target".to_vec(), Value::Long(target));
         // Store args_op_array reference as a serialized form
         // We'll evaluate it lazily when getArguments() is called
@@ -16017,11 +16016,8 @@ fn attr_args_value(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>) -> Option<Value> {
     if vm.current_exception.is_some() {
         return None;
     }
-    let v = r.unwrap_or_else(|_| Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-    let mut ob = obj.borrow_mut();
-    ob.set_property(b"__reflection_attr_args".to_vec(), v.clone());
-    ob.set_property(b"__reflection_attr_args_evaluated".to_vec(), Value::True);
-    Some(v)
+    // (not kept: the arguments are the caller's)
+    Some(r.unwrap_or_else(|_| Value::Array(Rc::new(RefCell::new(PhpArray::new())))))
 }
 
 /// Handle method calls on ReflectionAttribute objects
