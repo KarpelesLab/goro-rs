@@ -797,12 +797,15 @@ fn run_request(
     } else {
         Vec::new()
     };
+    // (the file name in the message encoding: its raw bytes are kept)
     let main_name = if script_file.is_some() {
-        s(&translated)
+        goro_core::string::msg_str(&translated).into_owned()
     } else {
         "Standard input code".to_string()
     };
-    goro_ext_standard::misc::set_translated_path(script_file.map(|_| s(&translated)));
+    goro_ext_standard::misc::set_translated_path(
+        script_file.map(|_| goro_core::string::msg_str(&translated).into_owned()),
+    );
 
     match mode {
         Mode::Lint => {

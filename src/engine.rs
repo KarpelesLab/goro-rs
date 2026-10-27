@@ -357,7 +357,7 @@ pub fn compile(
         }
     };
     let mut compiler = Compiler::new();
-    compiler.source_file = filename.as_bytes().to_vec();
+    compiler.source_file = goro_core::fspath::msg_bytes(filename).into_owned();
     compiler.takes_rtd_keys = true;
     match compiler.compile(&program) {
         Ok((op_array, classes, compile_warnings)) => {

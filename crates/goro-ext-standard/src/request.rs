@@ -2111,17 +2111,17 @@ fn move_uploaded_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     if !is_uploaded(from.as_bytes()) {
         return Ok(Value::False);
     }
-    let f = from.to_string_lossy();
-    let t = to.to_string_lossy();
-    let ok = std::fs::rename(&f, &t).is_ok()
-        || (std::fs::copy(&f, &t).is_ok() && std::fs::remove_file(&f).is_ok());
+    let f = goro_core::fspath::bytes_path(from.as_bytes());
+    let t = goro_core::fspath::bytes_path(to.as_bytes());
+    let ok = std::fs::rename(f, t).is_ok()
+        || (std::fs::copy(f, t).is_ok() && std::fs::remove_file(f).is_ok());
     if ok {
         UPLOADED_FILES.with(|u| u.borrow_mut().retain(|x| x != from.as_bytes()));
         Ok(Value::True)
     } else {
         vm.emit_warning(&format!(
             "move_uploaded_file({}): Failed to open stream: Permission denied",
-            t
+            to.to_msg_string()
         ));
         Ok(Value::False)
     }
