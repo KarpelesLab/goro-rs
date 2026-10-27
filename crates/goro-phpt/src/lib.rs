@@ -1884,6 +1884,7 @@ fn execute_php_inner_impl(
                 }
             }
         }
+        attach_terminal(&req.uncaptured);
         goro_ext_standard::misc::refresh_std_streams();
         let ini_lookup = |k: &str| -> Option<String> {
             ini_settings
@@ -3107,6 +3108,43 @@ fn parse_memory_limit_value(val: &goro_core::value::Value) -> i64 {
     num_str.parse::<i64>().unwrap_or(128 * 1024 * 1024) * multiplier
 }
 
+/// The descriptors a --CAPTURE_STDIO-- test leaves uncaptured are those of
+/// the terminal run-tests.php was started in: they get the slave side of a
+/// pseudo-terminal (whatever is written to it is drained and dropped), so
+/// that such tests behave the same wherever the runner's own descriptors
+/// lead.
+fn attach_terminal(fds: &[i32]) {
+    if fds.is_empty() {
+        return;
+    }
+    unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        if master < 0 || libc::grantpt(master) != 0 || libc::unlockpt(master) != 0 {
+            return;
+        }
+        let mut name = [0 as libc::c_char; 128];
+        if libc::ptsname_r(master, name.as_mut_ptr(), name.len()) != 0 {
+            return;
+        }
+        let slave = libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+        if slave < 0 {
+            return;
+        }
+        for &fd in fds {
+            libc::dup2(slave, fd);
+        }
+        if !fds.contains(&slave) {
+            libc::close(slave);
+        }
+        // (the master side is read so that writes to the terminal cannot
+        // block)
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while libc::read(master, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) > 0 {}
+        });
+    }
+}
+
 /// Request environment for the main FILE run (CGI emulation / CLI argv),
 /// built from the test sections like run-tests.php does.
 #[derive(Default, Clone)]
@@ -3115,6 +3153,9 @@ struct PhptRequest {
     /// Environment variables to export in the child before running.
     env: Vec<(String, String)>,
     stdin: Option<Vec<u8>>,
+    /// --CAPTURE_STDIO--: the descriptors (0, 1, 2) run-tests.php captures;
+    /// the others are those of the terminal it runs in (a pty here).
+    uncaptured: Vec<i32>,
 }
 
 thread_local! {
@@ -3352,7 +3393,26 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
         .get("STDIN")
         .or_else(|| test.sections.get("STDIN"))
         .map(|s| test.bytes(s));
-    PhptRequest { info, env, stdin }
+    let uncaptured = match test.sections.get("CAPTURE_STDIO") {
+        Some(c) => {
+            let names: Vec<String> = c
+                .split_whitespace()
+                .map(|w| w.to_ascii_uppercase())
+                .collect();
+            [("STDIN", 0), ("STDOUT", 1), ("STDERR", 2)]
+                .iter()
+                .filter(|(n, _)| !names.iter().any(|w| w == n))
+                .map(|&(_, fd)| fd)
+                .collect()
+        }
+        None => Vec::new(),
+    };
+    PhptRequest {
+        info,
+        env,
+        stdin,
+        uncaptured,
+    }
 }
 
 /// The extensions a test's VM gets (before the optional ones).
