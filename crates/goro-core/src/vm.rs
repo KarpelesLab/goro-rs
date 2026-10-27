@@ -14856,6 +14856,13 @@ impl Vm {
 
     /// Write to the output buffer
     /// Check if class_name extends target_name through the parent chain
+    /// Whether object `o`'s class is `class_lower` or a subclass of it.
+    #[inline(never)]
+    pub(crate) fn object_is_a_lower(&self, o: &Rc<RefCell<PhpObject>>, class_lower: &[u8]) -> bool {
+        let ocl = o.borrow().class_name.to_ascii_lowercase();
+        ocl == class_lower || self.class_extends(&ocl, class_lower)
+    }
+
     pub fn class_extends(&self, class_name: &[u8], target_name: &[u8]) -> bool {
         if let Some(t) = self.alias_canonical_lower(target_name) {
             return self.class_extends_any(class_name, &[&t]);
@@ -36914,6 +36921,9 @@ impl Vm {
                                                         // Prefer __call when calling from an instance method
                                                         // on an ancestor (or via parent::/self::/static::); __callStatic
                                                         // only when we're not inside an instance method.
+                                                        // (zend_std_get_static_method(): __call()
+                                                        // only for a $this that is an instance of
+                                                        // the class)
                                                         let inside_instance = op_array
                                                             .cv_names
                                                             .first()
@@ -36921,7 +36931,8 @@ impl Vm {
                                                             == Some(b"this")
                                                             && matches!(
                                                                 cvs.first(),
-                                                                Some(Value::Object(_))
+                                                                Some(Value::Object(o))
+                                                                    if self.object_is_a_lower(o, &class_part_owned)
                                                             );
                                                         let prefer_call =
                                                             inside_instance && has_call;
@@ -36987,12 +36998,7 @@ impl Vm {
                                                                     );
                                                                 }
                                                             }
-                                                            if has_call
-                                                                && matches!(
-                                                                    cvs.first(),
-                                                                    Some(Value::Object(_))
-                                                                )
-                                                            {
+                                                            if has_call && inside_instance {
                                                                 if let Some(call_method) = self
                                                                     .classes
                                                                     .get(&class_part_owned)
