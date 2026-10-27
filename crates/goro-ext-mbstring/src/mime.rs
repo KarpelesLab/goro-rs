@@ -12,20 +12,12 @@ use crate::zpp::*;
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"mb_encode_mimeheader", mb_encode_mimeheader);
     // $charset / $transfer_encoding are Z_PARAM_STR under a ?string arginfo:
-    // checked by mb_encode_mimeheader() itself (see mime_str_param)
+    // checked by mb_encode_mimeheader() itself (see mime_str_param), and so
+    // are the parameters after them (zpp parses the arguments in order)
     {
         use goro_core::opcode::ParamType;
         let s = || Some(ParamType::Simple(b"string".to_vec()));
-        vm.register_builtin_param_types(
-            b"mb_encode_mimeheader",
-            vec![
-                s(),
-                None,
-                None,
-                s(),
-                Some(ParamType::Simple(b"int".to_vec())),
-            ],
-        );
+        vm.register_builtin_param_types(b"mb_encode_mimeheader", vec![s(), None, None, None, None]);
     }
     vm.register_function(b"mb_decode_mimeheader", mb_decode_mimeheader);
 }
@@ -424,13 +416,28 @@ fn mb_encode_mimeheader(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         None
     };
-    let linefeed = if present(args, 3) {
-        str_arg(vm, f, args, 3, "newline")?
+    // ($newline and $indent: parsed after the charsets, by the generic zpp;
+    // the arguments before them are the ones parsed above)
+    let tail = if args.len() > 3 {
+        let mut a = args.to_vec();
+        a[0] = Value::String(goro_core::string::PhpString::from_vec(s.clone()));
+        for (i, v) in [(1, &charset_name), (2, &transenc)] {
+            a[i] = match v {
+                Some(b) => Value::String(goro_core::string::PhpString::from_vec(b.clone())),
+                None => Value::Null,
+            };
+        }
+        vm.zpp_self_check_flags(b"mb_encode_mimeheader", &a, goro_core::arginfo::CHECK_TYPES)?
+    } else {
+        Vec::new()
+    };
+    let linefeed = if present(&tail, 3) {
+        str_arg(vm, f, &tail, 3, "newline")?
     } else {
         b"\r\n".to_vec()
     };
-    let indent = if present(args, 4) {
-        long_arg(vm, f, args, 4, "indent")?
+    let indent = if present(&tail, 4) {
+        long_arg(vm, f, &tail, 4, "indent")?
     } else {
         0
     };
