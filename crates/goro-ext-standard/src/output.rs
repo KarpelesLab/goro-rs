@@ -170,7 +170,41 @@ fn debug_info_protected(
     r
 }
 
+thread_local! {
+    /// The longest run of spaces spaces() handed out.
+    static SPACES: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
+}
+
+/// `n` spaces (the indentation of a dump), without an allocation per
+/// level: a deeply nested value's levels would otherwise hold a quadratic
+/// amount of indentation while they recurse. The runs are leaked, each
+/// twice as long as the previous one (bounded by twice the deepest
+/// indentation).
+fn spaces(n: usize) -> &'static str {
+    let cur = SPACES.with(|s| s.get());
+    if n <= cur.len() {
+        return &cur[..n];
+    }
+    spaces_grow(n)
+}
+
+#[cold]
+#[inline(never)]
+fn spaces_grow(n: usize) -> &'static str {
+    let len = n.max(SPACES.with(|s| s.get()).len() * 2).max(256);
+    let s: &'static str = Box::leak(" ".repeat(len).into_boxed_str());
+    SPACES.with(|c| c.set(s));
+    &s[..n]
+}
+
 fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u64>) {
+    // (deep nesting: a fresh stack segment when this one runs low)
+    if goro_core::stack::with_room(|| var_dump_level(vm, val, indent, seen)).is_err() {
+        vm.write_output(format!("{:1$}nesting level too deep", "", indent + 1).as_bytes());
+    }
+}
+
+fn var_dump_level(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u64>) {
     if !ZVAL_DUMP.with(|z| z.get()) {
         return var_dump_value_inner(vm, val, indent, seen);
     }
@@ -182,7 +216,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
 /// Dump `val` (whose refcount is `bias` too high) the way
 /// php_debug_zval_dump() does.
 fn zval_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u64>, bias: usize) {
-    let prefix = " ".repeat(indent);
+    let prefix = spaces(indent);
     match val {
         Value::String(s) if !goro_core::closure::is_closure_fn_name(s.as_bytes()) => {
             vm.write_output(format!("{}string({}) \"", prefix, s.len()).as_bytes());
@@ -412,14 +446,12 @@ fn class_extends(vm: &Vm, class_lower: &[u8], ancestor: &[u8]) -> bool {
 }
 
 #[allow(clippy::if_same_then_else)] // branches mirror php-src
-/// C stack used by one php_var_dump() + php_object_property_dump() level.
-const VAR_DUMP_FRAME_COST: usize = 256;
+/// C stack used by one php_var_dump() + php_object_property_dump() level
+/// (php-src gets ~57.7k levels deep in an 8 MiB stack).
+const VAR_DUMP_FRAME_COST: usize = 145;
 
 fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u64>) {
-    if indent > 8000 {
-        return;
-    }
-    let prefix = " ".repeat(indent);
+    let prefix = spaces(indent);
     match val {
         Value::Null | Value::Undef => {
             vm.write_output(format!("{}NULL\n", prefix).as_bytes());
@@ -931,7 +963,7 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                                 vm.write_output(format!("{}  [{}]=>\n", prefix, n).as_bytes());
                             }
                             goro_core::array::ArrayKey::String(s) => {
-                                write_mangled_dump_key(vm, &prefix, s.as_bytes());
+                                write_mangled_dump_key(vm, prefix, s.as_bytes());
                             }
                         }
                         var_dump_value(vm, value, indent + 2, seen);
@@ -1421,16 +1453,23 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                     continue;
                 }
                 // php_object_property_dump(): ZEND_CHECK_STACK_LIMIT
-                if !goro_core::stack::enter_native(VAR_DUMP_FRAME_COST) {
+                // (debug_zval_dump()'s zval_object_property_dump() has none)
+                let checked = !ZVAL_DUMP.with(|z| z.get());
+                if checked && !goro_core::stack::enter_native(VAR_DUMP_FRAME_COST) {
                     vm.write_output(format!("{}  nesting level too deep", prefix).as_bytes());
                     continue;
                 }
                 vm.write_output(&line);
+                // (not held while the value is dumped: a deeply nested
+                // object's levels would hold a quadratic amount of it)
+                drop(line);
                 // (debug_zval_dump(): `table` holds the value once more)
                 ZVAL_BIAS.with(|b| b.set(1));
                 var_dump_value(vm, &value, indent + 2, seen);
                 ZVAL_BIAS.with(|b| b.set(0));
-                goro_core::stack::leave_native(VAR_DUMP_FRAME_COST);
+                if checked {
+                    goro_core::stack::leave_native(VAR_DUMP_FRAME_COST);
+                }
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
             seen.remove(&oid);
@@ -1685,7 +1724,7 @@ struct ClosurePrintInfo {
 }
 
 fn render_closure_print_r(buf: &mut Vec<u8>, indent: usize, info: &ClosurePrintInfo) {
-    let prefix = " ".repeat(indent);
+    let prefix = spaces(indent);
     buf.extend_from_slice(b"Closure Object\n");
     buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
     buf.extend_from_slice(format!("{}    [name] => {}\n", prefix, info.name).as_bytes());
@@ -1806,7 +1845,7 @@ fn print_r_value_body(
                     render_closure_print_r(buf, indent, info);
                 } else {
                     buf.extend_from_slice(b"Closure Object\n");
-                    let prefix = " ".repeat(indent);
+                    let prefix = spaces(indent);
                     buf.extend_from_slice(format!("{}(\n{})\n", prefix, prefix).as_bytes());
                 }
             } else {
@@ -1836,7 +1875,7 @@ fn print_r_value_body(
                                 render_closure_print_r(buf, indent, info);
                                 return;
                             }
-                            let prefix = " ".repeat(indent);
+                            let prefix = spaces(indent);
                             buf.extend_from_slice(b"Closure Object\n");
                             buf.extend_from_slice(format!("{}(\n{})\n", prefix, prefix).as_bytes());
                             return;
@@ -1847,7 +1886,7 @@ fn print_r_value_body(
             let _arr_ptr = Rc::as_ptr(arr) as *const u8 as usize;
             buf.extend_from_slice(b"Array\n");
             let arr = arr.borrow();
-            let prefix = " ".repeat(indent);
+            let prefix = spaces(indent);
             buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
             for (key, value) in arr.iter() {
                 match key {
@@ -1870,7 +1909,7 @@ fn print_r_value_body(
             // Check if this is an enum case object
             if obj_borrow.has_property(b"__enum_case") {
                 let class_name = goro_core::value::display_class_name(&obj_borrow.class_name);
-                let prefix = " ".repeat(indent);
+                let prefix = spaces(indent);
                 // Determine backing type from stored property
                 let has_backing = obj_borrow.has_property(b"__enum_backing_type");
                 let header = if has_backing {
@@ -1898,7 +1937,7 @@ fn print_r_value_body(
             if obj_borrow.closure.is_some() {
                 let oid = obj_borrow.object_id;
                 drop(obj_borrow);
-                let prefix = " ".repeat(indent);
+                let prefix = spaces(indent);
                 buf.extend_from_slice(b"Closure Object\n");
                 buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
                 for (k, v) in closure_debug_props(oid) {
@@ -1917,7 +1956,7 @@ fn print_r_value_body(
                 .iter()
                 .map(|b| b.to_ascii_lowercase())
                 .collect();
-            let prefix = " ".repeat(indent);
+            let prefix = spaces(indent);
 
             // Check if this is an SPL class with __spl_array
             let is_spl_array_class = matches!(class_lower.as_slice(), b"splfixedarray");
@@ -2174,6 +2213,28 @@ fn var_export_escape(buf: &mut Vec<u8>, s: &[u8], nul_concat: bool) {
 
 /// Port of php_var_export_ex().
 fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
+    // (php-src recurses without a stack check: deep nesting is bounded by
+    // memory; a fresh stack segment is used when this one runs low)
+    if goro_core::stack::with_room(|| var_export_level(vm, val, buf, level)).is_err() {
+        var_export_stack_error(vm);
+    }
+}
+
+/// No stack is left at all (far deeper than php-src, which would crash).
+#[cold]
+#[inline(never)]
+fn var_export_stack_error(vm: &mut Vm) {
+    if vm.current_exception.is_none() {
+        let msg = format!(
+            "Maximum call stack size of {} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?",
+            goro_core::stack::emulated_size()
+        );
+        let exc = vm.create_exception(b"Error", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+    }
+}
+
+fn var_export_level(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
     match val {
         Value::Null | Value::Undef | Value::Resource(_) => buf.extend_from_slice(b"NULL"),
         // (an object without properties)
@@ -2479,7 +2540,7 @@ fn var_dump_mangled_table(
     indent: usize,
     seen: &mut HashSet<u64>,
 ) {
-    let prefix = " ".repeat(indent);
+    let prefix = spaces(indent);
     if !seen.insert(oid) {
         vm.write_output(format!("{}*RECURSION*\n", prefix).as_bytes());
         return;
@@ -2627,6 +2688,15 @@ fn print_r_memo_stale(memo: &mut std::collections::HashMap<usize, Option<Value>>
 /// keys). Objects print_r() renders itself are kept. Returns None when
 /// nothing changed.
 pub fn materialize_print_r(
+    vm: &mut Vm,
+    v: &Value,
+    memo: &mut std::collections::HashMap<usize, Option<Value>>,
+) -> Option<Value> {
+    // (deeply nested values: a fresh stack segment when this one runs low)
+    goro_core::stack::with_room(|| materialize_print_r_level(vm, v, memo)).unwrap_or(None)
+}
+
+fn materialize_print_r_level(
     vm: &mut Vm,
     v: &Value,
     memo: &mut std::collections::HashMap<usize, Option<Value>>,
