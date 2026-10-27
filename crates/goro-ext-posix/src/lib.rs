@@ -251,11 +251,18 @@ fn path_arg(vm: &mut Vm, func: &str, args: &[Value], i: usize) -> Option<Vec<u8>
 /// PHP_POSIX_CHECK_PID()
 fn check_pid(vm: &mut Vm, func: &str, v: i64, n: usize, lower: i64, upper: i64) -> bool {
     if !(lower..=upper).contains(&v) {
+        // (POSIX_PID_MIN is INT_MIN, an int printed with ZEND_LONG_FMT: the
+        // 64-bit read sees it zero-extended)
+        let shown_lower = if lower == i64::from(i32::MIN) {
+            i64::from(i32::MIN as u32)
+        } else {
+            lower
+        };
         let _ = value_error(
             vm,
             func,
             n,
-            &format!("must be between {} and {}", lower, upper),
+            &format!("must be between {} and {}", shown_lower, upper),
         );
         return false;
     }
