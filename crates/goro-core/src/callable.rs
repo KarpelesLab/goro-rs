@@ -151,9 +151,15 @@ impl Vm {
     /// Look up a method in the function table of class `cl` (lowercase).
     fn callable_find_method(&self, cl: &[u8], ml: &[u8]) -> Option<MethodInfo> {
         let mut cur = cl.to_vec();
+        // The first extension class of the chain (in the class table, without
+        // a file): its stub and native handler know its inherited methods.
+        let mut internal: Option<Vec<u8>> = None;
         for _ in 0..64 {
             match self.classes.get(&cur) {
                 Some(c) => {
+                    if internal.is_none() && c.filename.is_none() && !c.is_enum {
+                        internal = Some(cur.clone());
+                    }
                     if let Some(m) = c.methods.get(ml) {
                         return Some(MethodInfo {
                             name: m.name.clone(),
@@ -188,6 +194,13 @@ impl Vm {
                     }
                 }
                 None => break,
+            }
+        }
+        if let Some(i) = internal {
+            if crate::stubs::find_class(&i).is_some()
+                || self.find_native_class_handler(&i).is_some()
+            {
+                cur = i;
             }
         }
         // An internal class (or the internal ancestor of a user class)

@@ -148,10 +148,17 @@ fn dispatch(
         }
     };
     let r = if ns.all {
-        vm.call_callback(
-            &Value::String(PhpString::from_string(fname.to_string())),
-            &params,
-        )
+        let cb = Value::String(PhpString::from_string(fname.to_string()));
+        // zend_call_function() on an uncached callable: "Invalid callback"
+        if let Some(err) = vm.callable_error(&cb) {
+            throw_error(
+                vm,
+                b"Error",
+                &format!("Invalid callback {}, {}", fname, err),
+            );
+            return Err(XErr::Ext);
+        }
+        vm.call_callback(&cb, &params)
     } else {
         match ns.funcs.iter().find(|(n, _)| n == fname) {
             Some((_, cb)) => {
