@@ -16993,6 +16993,8 @@ impl Compiler {
                     ExprKind::ArrayAccess { array, index } => {
                         // $arr[$key] = $val  →  ArraySet
                         let arr_op = self.compile_dim_write_base(array)?;
+                        // (ASSIGN_DIM is the delayed FETCH_DIM_W opline: on the
+                        // line its key, else its container, was compiled at)
                         if let Some(idx_expr) = index {
                             let idx_op = self.compile_expr(idx_expr)?;
                             self.op_array.emit(Op {
@@ -17000,15 +17002,19 @@ impl Compiler {
                                 op1: arr_op,
                                 op2: val,
                                 result: idx_op,
-                                line: expr.span.line,
+                                line: self.cur_lineno(expr.span.line).max(expr.span.line),
                             });
                         } else {
+                            let base_line = match &array.kind {
+                                ExprKind::PropertyAccess { property, .. } => property.span.line,
+                                _ => array.span.line,
+                            };
                             self.op_array.emit(Op {
                                 opcode: OpCode::ArrayAppend,
                                 op1: arr_op,
                                 op2: val,
                                 result: OperandType::Unused,
-                                line: expr.span.line,
+                                line: base_line.max(expr.span.line),
                             });
                         }
                         // C::$p[k] = v: an array the write created from a
@@ -21970,6 +21976,7 @@ impl Compiler {
                 // (FETCH_OBJ_R is emitted once the property name is
                 // compiled: on its line)
                 let fetch_line = self.zend_lineno.max(property.span.line).max(expr.span.line);
+                self.zend_lineno = fetch_line;
                 self.op_array.emit(Op {
                     opcode: OpCode::PropertyGet,
                     op1: obj,
@@ -22074,10 +22081,11 @@ impl Compiler {
                 let bridge_name: Option<Vec<u8>> = method_name_for_ref
                     .as_ref()
                     .and_then(|m| Self::builtin_method_to_bridge_func(m));
-                // (no fbc: except $this's private / final methods, which
-                // goro does not resolve here)
-                self.send_unknown_fbc =
-                    !matches!(&object.kind, ExprKind::Variable(n) if n == b"this");
+                // (CG(zend_lineno): the method name was compiled last)
+                self.zend_lineno = init_line;
+                // (no fbc: $this's private / final methods declared before
+                // the call aside, which goro does not resolve here)
+                self.send_unknown_fbc = true;
                 self.compile_send_args_with_name(args, init_line, bridge_name.as_deref())?;
 
                 // The call is on the method name's line (GH-8810).
