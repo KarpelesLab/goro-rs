@@ -11910,8 +11910,10 @@ impl Vm {
                     Some(l) => (self.current_file.clone(), l),
                     None => (RcStr::new(), 0),
                 };
+                // (its frame shows the arguments passed)
+                let passed: Vec<Value> = call.args.iter().skip(lead).map(|v| v.deref()).collect();
                 self.call_stack
-                    .push((frame_display, file, fline, Vec::new(), is_instance));
+                    .push((frame_display, file, fline, passed, is_instance));
                 let exc_val = self.create_exception(b"ArgumentCountError", &err_msg, line);
                 if op_array.decl_line > 0 && !op_array.filename.is_empty() {
                     if let Value::Object(ref o) = exc_val {
