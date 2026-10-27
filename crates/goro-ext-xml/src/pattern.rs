@@ -742,11 +742,11 @@ impl SubStream {
             self.block_level = -1;
             let comp = &self.comp;
             if comp.flags & STREAM_FROM_ROOT != 0 {
-                if comp.steps.is_empty() {
-                    ret = true;
-                } else if comp.steps.len() == 1
-                    && comp.steps[0].node_type == STREAM_ANY_NODE
-                    && comp.steps[0].flags & STEP_DESC != 0
+                // "/." and "//." match the document node
+                if comp.steps.is_empty()
+                    || (comp.steps.len() == 1
+                        && comp.steps[0].node_type == STREAM_ANY_NODE
+                        && comp.steps[0].flags & STEP_DESC != 0)
                 {
                     ret = true;
                 } else if comp.steps[0].flags & STEP_ROOT != 0 {
@@ -858,9 +858,7 @@ impl SubStream {
         }
         // compare:
         if step.node_type != node_type {
-            if node_type == ATTRIBUTE_NODE {
-                return Ok(ret);
-            } else if step.node_type != STREAM_ANY_NODE {
+            if node_type == ATTRIBUTE_NODE || step.node_type != STREAM_ANY_NODE {
                 return Ok(ret);
             }
         }
