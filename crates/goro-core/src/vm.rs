@@ -10995,7 +10995,7 @@ impl Vm {
         }
     }
 
-    fn emit_implicit_float_to_int_if_needed(
+    pub(crate) fn emit_implicit_float_to_int_if_needed(
         &mut self,
         value: &Value,
         param_type: &ParamType,

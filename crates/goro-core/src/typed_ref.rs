@@ -801,6 +801,12 @@ impl Vm {
             }
         }
         let was_nan = !strict && matches!(value, Value::Double(d) if d.is_nan());
+        // (zend_verify_weak_scalar_type_hint() of the first source)
+        if !strict && matches!(value, Value::Double(_) | Value::String(_)) {
+            let ty = srcs[0].ty.clone();
+            let line = self.current_line;
+            self.emit_implicit_float_to_int_if_needed(value, &ty, line);
+        }
         self.typed_ref_verify_sources(&srcs, value, strict)?;
         if was_nan {
             let line = self.current_line;
