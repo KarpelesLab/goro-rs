@@ -1916,8 +1916,38 @@ fn class_entry(name: &str, parent: Option<&str>, interfaces: &[&str]) -> ClassEn
     ce
 }
 
+/// get_gc of DOM objects: the XPath callbacks (dom_xpath_get_gc) and a
+/// live list's cached item object.
+fn dom_get_gc(data: &Rc<dyn Any>, visit: &mut dyn FnMut(&Value)) {
+    if Rc::strong_count(data) != 1 {
+        return;
+    }
+    let Some(d) = data.downcast_ref::<DomData>() else {
+        return;
+    };
+    if let Ok(c) = d.item_obj.try_borrow() {
+        if let Some(v) = &*c {
+            visit(v);
+        }
+    }
+    let Ok(k) = d.kind.try_borrow() else {
+        return;
+    };
+    if let Kind::XPath(st) = &*k {
+        let Ok(st) = st.try_borrow() else {
+            return;
+        };
+        for ns in st.php_ns.iter().chain(st.custom.iter().map(|(_, n)| n)) {
+            for (_, cb) in &ns.funcs {
+                visit(cb);
+            }
+        }
+    }
+}
+
 pub fn register(vm: &mut Vm) {
     build_tables();
+    goro_core::gc::register_native_gc(&HANDLERS, dom_get_gc);
     vm.register_extension(b"dom");
 
     // interfaces
