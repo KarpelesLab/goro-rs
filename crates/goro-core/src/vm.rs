@@ -9162,6 +9162,20 @@ impl Vm {
         {
             return std::borrow::Cow::Borrowed(&[]);
         }
+        if is_include && f.3.is_empty() {
+            // The fake include frame of a function called by the include
+            // opline itself (a stream wrapper's method, the error handler):
+            // include_filename is still the file of the frame that
+            // function's frame called, if any.
+            return match idx.checked_sub(2).and_then(|i| frames.get(i)) {
+                Some(inner) if !inner.1.is_empty() && inner.1 != "[internal function]" && inner.2 != 0 => {
+                    std::borrow::Cow::Owned(vec![Value::String(PhpString::from_bytes(
+                        inner.1.as_bytes(),
+                    ))])
+                }
+                _ => std::borrow::Cow::Borrowed(&[]),
+            };
+        }
         // (a builtin's by-reference arguments stay references in its frame,
         // so the frame does not hold a copy of their values: the trace gets
         // the values, like debug_backtrace_get_args())
