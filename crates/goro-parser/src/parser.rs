@@ -7542,6 +7542,18 @@ impl Parser {
                     TokenKind::Declare => Some(b"declare".to_vec()),
                     _ => None,
                 };
+                // (a keyword keeps its spelling: `readOnly: true` names
+                // $readOnly)
+                let maybe_name = match maybe_name {
+                    Some(kw) if !matches!(self.peek(), TokenKind::Identifier(_)) => {
+                        let span = self.span();
+                        match self.source.get(span.start as usize..span.end as usize) {
+                            Some(text) if text.eq_ignore_ascii_case(&kw) => Some(text.to_vec()),
+                            _ => Some(kw),
+                        }
+                    }
+                    other => other,
+                };
                 if let Some(ident) = maybe_name {
                     self.advance(); // identifier/keyword
                     self.advance(); // colon
