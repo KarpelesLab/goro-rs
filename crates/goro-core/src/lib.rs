@@ -66,6 +66,7 @@ pub mod uncaught;
 pub mod uri;
 pub mod value;
 pub mod vm;
+pub mod weak;
 
 pub use compiler::Compiler;
 pub use value::Value;

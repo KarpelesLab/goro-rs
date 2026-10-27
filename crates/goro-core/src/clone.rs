@@ -459,11 +459,11 @@ impl Vm {
                     }
                 }
                 if is_weakmap {
-                    let entries_copy: Vec<(u64, std::rc::Weak<RefCell<PhpObject>>, Value)> =
+                    let entries_copy: Vec<(u64, crate::weak::WeakTarget, Value)> =
                         if let Some(entries) = self.weak_map_entries.get(&original_oid) {
                             entries
                                 .iter()
-                                .filter(|(_, w, _)| w.upgrade().is_some())
+                                .filter(|(_, w, _)| w.is_alive())
                                 .map(|(k, w, v)| (*k, w.clone(), v.clone()))
                                 .collect()
                         } else {

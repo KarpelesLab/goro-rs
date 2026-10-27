@@ -765,11 +765,7 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
             if class_lower == b"weakreference" {
                 let weak_id = obj_borrow.get_property(b"__weak_ref_id").to_long() as u64;
                 drop(obj_borrow);
-                let referent = if let Some(weak) = vm.weak_refs.get(&weak_id) {
-                    weak.upgrade().map(Value::Object)
-                } else {
-                    None
-                };
+                let referent = vm.weak_refs.get(&weak_id).and_then(|weak| weak.upgrade());
                 vm.write_output(
                     format!("{}object(WeakReference)#{} (1) {{\n", prefix, oid).as_bytes(),
                 );
@@ -793,18 +789,7 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
             if class_lower == b"weakmap" {
                 drop(obj_borrow);
                 // Get live entries from weak_map_entries
-                let entries: Vec<(Value, Value)> =
-                    if let Some(wm_entries) = vm.weak_map_entries.get(&oid) {
-                        wm_entries
-                            .iter()
-                            .filter_map(|(_, weak, val)| {
-                                weak.upgrade()
-                                    .map(|strong| (Value::Object(strong), val.clone()))
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
+                let entries: Vec<(Value, Value)> = vm.weakmap_live_entries(oid);
                 let count = entries.len();
                 vm.write_output(
                     format!("{}object(WeakMap)#{} ({}) {{\n", prefix, oid, count).as_bytes(),
@@ -2815,25 +2800,12 @@ fn internal_debug_rows(
     match cl {
         b"weakreference" => {
             let weak_id = o.borrow().get_property(b"__weak_ref_id").to_long() as u64;
-            let referent = vm
-                .weak_refs
-                .get(&weak_id)
-                .and_then(|w| w.upgrade())
-                .map(Value::Object)
-                .unwrap_or(Value::Null);
+            let referent = vm.weakref_target(weak_id);
             Some(vec![(b"object".to_vec(), referent)])
         }
         b"weakmap" => {
             let oid = o.borrow().object_id;
-            let entries: Vec<(Value, Value)> = vm
-                .weak_map_entries
-                .get(&oid)
-                .map(|es| {
-                    es.iter()
-                        .filter_map(|(_, w, v)| w.upgrade().map(|s| (Value::Object(s), v.clone())))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let entries: Vec<(Value, Value)> = vm.weakmap_live_entries(oid);
             Some(
                 entries
                     .into_iter()

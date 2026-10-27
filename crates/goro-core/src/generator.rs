@@ -158,6 +158,8 @@ pub struct PhpGenerator {
     pub(crate) closure: Option<Value>,
     /// The object handle (allocated by Vm::new_generator; 0 = none).
     pub object_id: u64,
+    /// A WeakMap key (see PhpObject::weak_key).
+    pub(crate) weak_key: std::cell::Cell<bool>,
 }
 
 impl Drop for PhpGenerator {
@@ -165,6 +167,12 @@ impl Drop for PhpGenerator {
     /// would otherwise overflow the native stack in nested drops.
     fn drop(&mut self) {
         crate::value::memory_free(self.mem_charged);
+        // A WeakMap key: its entries are released (gc::purge_weakmaps)
+        // before its handle is recycled.
+        let weak_key = self.weak_key.get();
+        if weak_key {
+            crate::gc::weak_target_freed(self.object_id, false);
+        }
         let mut next = self.yield_from_source.take();
         while let Some(Value::Generator(rc)) = next {
             next = match Rc::try_unwrap(rc) {
@@ -197,7 +205,9 @@ impl Drop for PhpGenerator {
             drop(std::mem::take(&mut self.fin));
             drop(self.closure.take());
             let id = self.object_id;
-            let _ = crate::object::FREED_OBJECT_IDS.try_with(|ids| ids.borrow_mut().push(id));
+            if !weak_key {
+                let _ = crate::object::FREED_OBJECT_IDS.try_with(|ids| ids.borrow_mut().push(id));
+            }
         }
     }
 }
@@ -293,6 +303,7 @@ impl PhpGenerator {
             fe: Default::default(),
             closure: None,
             object_id: 0,
+            weak_key: std::cell::Cell::new(false),
         }
     }
 

@@ -682,7 +682,7 @@ pub fn purge_weakmaps(vm: &mut crate::vm::Vm) {
         }
         vm.weak_map_entries.retain(|_, entries| {
             entries.retain_mut(|(_, w, v)| {
-                if w.strong_count() == 0 {
+                if !w.is_alive() {
                     dropped.push(std::mem::replace(v, Value::Null));
                     false
                 } else {
@@ -1065,6 +1065,10 @@ impl<'a> Graph<'a> {
                             kids.push(c);
                         }
                     });
+                    // WeakMap entries this generator is the key of.
+                    if !self.eph.is_empty() {
+                        self.key_ephemerons(i, Rc::as_ptr(g) as *const u8 as usize);
+                    }
                     true
                 }
                 // Running inside a suspended fiber: the fiber holds its
@@ -1081,6 +1085,27 @@ impl<'a> Graph<'a> {
             self.internal[c] += 1;
         }
         self.children[i] = kids;
+    }
+
+    /// Node `i` (at address `p`, not an object node) is the key of WeakMap
+    /// entries: their values are reached through it.
+    #[inline(never)]
+    fn key_ephemerons(&mut self, i: usize, p: usize) {
+        let Some(es) = self.eph_by_key.get(&p).cloned() else {
+            return;
+        };
+        for &e in &es {
+            self.eph[e].key_node = Some(i);
+            if !self.eph[e].cancelled {
+                self.eph[e].cancelled = true;
+                let v = self.eph[e].value.clone();
+                if let Some(c) = self.add_value(&v) {
+                    self.internal[c] += 1;
+                    self.eph[e].value_node = Some(c);
+                }
+            }
+        }
+        self.node_eph.entry(i).or_default().extend(es);
     }
 
     fn class_has_array_storage(&mut self, class: &[u8]) -> bool {
@@ -2163,7 +2188,7 @@ impl GcHost for crate::vm::Vm {
         }
         for entries in self.weak_map_entries.values_mut() {
             entries.retain_mut(|(_, w, v)| {
-                if ptrs.contains(&(w.as_ptr() as *const u8 as usize)) {
+                if ptrs.contains(&w.as_ptr()) {
                     dropped.push(std::mem::replace(v, Value::Null));
                     false
                 } else {
@@ -2222,7 +2247,7 @@ impl GcHost for crate::vm::Vm {
         let mut out = Vec::new();
         for (map_id, entries) in &self.weak_map_entries {
             for (_, w, v) in entries {
-                if w.strong_count() > 0
+                if w.is_alive()
                     && matches!(
                         v,
                         Value::Object(_)
@@ -2231,7 +2256,7 @@ impl GcHost for crate::vm::Vm {
                             | Value::Generator(_)
                     )
                 {
-                    out.push((*map_id, w.as_ptr() as *const u8 as usize, v.clone()));
+                    out.push((*map_id, w.as_ptr(), v.clone()));
                 }
             }
         }

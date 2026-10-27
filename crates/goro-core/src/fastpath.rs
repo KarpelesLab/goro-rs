@@ -2556,7 +2556,7 @@ pub(crate) struct FeView<'a> {
         &'a crate::fxhash::FxHashMap<u32, std::rc::Weak<RefCell<crate::object::PhpObject>>>,
     pub(crate) iter_handles: &'a crate::fxhash::FxHashMap<u32, Value>,
     pub(crate) cur_key: &'a crate::fxhash::FxHashMap<u32, crate::array::ArrayKey>,
-    pub(crate) weakmap: &'a crate::fxhash::FxHashMap<u32, Vec<Value>>,
+    pub(crate) weakmap: &'a crate::fxhash::FxHashMap<u32, Vec<crate::weak::WeakTarget>>,
     pub(crate) ref_cells: &'a crate::fxhash::FxHashMap<u32, Rc<RefCell<Value>>>,
     /// The depth of the frame's exception handler stack (SaveHandlerDepth).
     pub(crate) handler_depth: u32,

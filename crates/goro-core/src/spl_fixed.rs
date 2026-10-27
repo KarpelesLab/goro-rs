@@ -527,7 +527,7 @@ impl Vm {
         let entry = |vm: &Self| -> Option<(Value, Value)> {
             vm.weak_map_entries.get(&map_id).and_then(|es| {
                 es.iter()
-                    .filter_map(|(_, w, v)| w.upgrade().map(|k| (Value::Object(k), v.clone())))
+                    .filter_map(|(_, w, v)| w.upgrade().map(|k| (k, v.clone())))
                     .nth(pos)
             })
         };

@@ -1162,8 +1162,9 @@ pub(crate) struct ForeachState {
     pub(crate) obj_cur: crate::fxhash::FxHashMap<u32, Vec<u8>>,
     /// Generator key storage for foreach (saved before advancing to next yield)
     pub(crate) gen_keys: crate::fxhash::FxHashMap<u32, Value>,
-    /// WeakMap iteration: maps iterator index to key objects
-    pub(crate) weakmap_iter_keys: crate::fxhash::FxHashMap<u32, Vec<Value>>,
+    /// WeakMap iteration: maps iterator index to its keys (held weakly, as
+    /// the map holds them)
+    pub(crate) weakmap_iter_keys: crate::fxhash::FxHashMap<u32, Vec<crate::weak::WeakTarget>>,
     /// By-reference foreach iterators (the source array)
     pub(crate) ref_arrays: crate::fxhash::FxHashMap<u32, Rc<RefCell<PhpArray>>>,
     /// By-reference foreach over a variable: its CV (FE_FETCH_RW reads the
@@ -1249,11 +1250,6 @@ impl ForeachState {
         for v in self.gen_keys.values() {
             f(v);
         }
-        for ks in self.weakmap_iter_keys.values() {
-            for v in ks {
-                f(v);
-            }
-        }
         for a in self.ref_arrays.values() {
             f(&Value::Array(a.clone()));
         }
@@ -1269,9 +1265,7 @@ impl ForeachState {
             out.extend(s.into_iter().map(|(_, v)| v));
         }
         out.extend(std::mem::take(&mut self.gen_keys).into_values());
-        for (_, ks) in std::mem::take(&mut self.weakmap_iter_keys) {
-            out.extend(ks);
-        }
+        self.weakmap_iter_keys.clear();
         out.extend(
             std::mem::take(&mut self.ref_arrays)
                 .into_values()
@@ -2488,16 +2482,16 @@ pub struct Vm {
     pub stored_attr_op_arrays: Vec<OpArray>,
     /// Weak reference storage: maps a unique ID to a Weak<RefCell<PhpObject>>
     /// Used by WeakReference objects (store the weak_ref_id as an internal property)
-    pub weak_refs: HashMap<u64, Weak<RefCell<PhpObject>>>,
+    pub weak_refs: HashMap<u64, crate::weak::WeakTarget>,
     /// Next weak reference ID
     pub next_weak_ref_id: u64,
     /// WeakReference singleton cache: maps target object_id to (weak_ref_id, WeakReference Value)
     weak_ref_cache: HashMap<u64, (u64, Value)>,
     /// (user_functions.len(), classes.len(), any #[SensitiveParameter]) cache
     sensitive_cache: std::cell::Cell<(usize, usize, bool)>,
-    /// WeakMap entries: keyed by (weakmap_object_id, target_object_id) -> (Weak<RefCell<PhpObject>>, Value)
-    /// The Weak is used to detect when the key object has been freed
-    pub weak_map_entries: HashMap<u64, Vec<(u64, Weak<RefCell<PhpObject>>, Value)>>,
+    /// WeakMap entries: weakmap object id -> [(key object id, key, value)]
+    /// The weak key is used to detect when the key object has been freed
+    pub weak_map_entries: HashMap<u64, Vec<(u64, crate::weak::WeakTarget, Value)>>,
     /// A declaration bound at compile time (early binding) is running: a
     /// fatal error it raises happens before an eval() frame exists.
     pub compile_time_binding: bool,
@@ -4520,7 +4514,10 @@ impl Vm {
                 if a.len() != 2 {
                     return None;
                 }
-                match (a.get_int(0).map(|v| v.deref()), a.get_int(1).map(|v| v.deref())) {
+                match (
+                    a.get_int(0).map(|v| v.deref()),
+                    a.get_int(1).map(|v| v.deref()),
+                ) {
                     (Some(Value::Object(o)), Some(Value::String(m)))
                         if m.as_bytes().windows(2).any(|w| w == b"::") =>
                     {
@@ -5818,7 +5815,11 @@ impl Vm {
             .unwrap_or_else(|| crate::value::display_class_name(&magic.declaring_class));
         if let Some(custom) = self.get_deprecated_message(&attrs) {
             let msg = self.format_deprecated_message(
-                &format!("Method {}::{}()", decl, String::from_utf8_lossy(method_name)),
+                &format!(
+                    "Method {}::{}()",
+                    decl,
+                    String::from_utf8_lossy(method_name)
+                ),
                 &custom,
             );
             let line = self.current_line;
@@ -20398,21 +20399,11 @@ impl Vm {
                 match method_lower.as_slice() {
                     b"offsetget" => {
                         let key_obj = args.first().cloned().unwrap_or(Value::Null);
-                        if let Value::Object(key_rc) = &key_obj {
-                            let key_oid = key_rc.borrow().object_id;
-                            if let Some(entries) = self.weak_map_entries.get(&wm_id) {
-                                if let Some((_, _, v)) = entries.iter().find(|(oid, weak, _)| {
-                                    *oid == key_oid && weak.upgrade().is_some()
-                                }) {
-                                    return Some(v.deref());
-                                }
+                        if let Some((key_oid, _)) = self.weak_target_of(&key_obj) {
+                            if let Some(v) = self.weakmap_get(wm_id, key_oid) {
+                                return Some(v);
                             }
-                            let class_display =
-                                crate::value::display_class_name(&key_rc.borrow().class_name);
-                            let msg = format!(
-                                "Object {}#{} not contained in WeakMap",
-                                class_display, key_oid
-                            );
+                            let msg = self.weakmap_missing_msg(&key_obj, key_oid);
                             let exc = self.create_exception(b"Error", &msg, 0);
                             self.current_exception = Some(exc);
                             return None;
@@ -20429,18 +20420,8 @@ impl Vm {
                     b"offsetset" => {
                         let key_obj = args.first().cloned().unwrap_or(Value::Null);
                         let val = args.get(1).cloned().unwrap_or(Value::Null);
-                        if let Value::Object(key_rc) = &key_obj {
-                            let key_oid = key_rc.borrow().object_id;
-                            let weak = Rc::downgrade(key_rc);
-                            key_rc.borrow().weak_key.set(true);
-                            let entries = self.weak_map_entries.entry(wm_id).or_default();
-                            if let Some(entry) =
-                                entries.iter_mut().find(|(oid, _, _)| *oid == key_oid)
-                            {
-                                entry.2 = val;
-                            } else {
-                                entries.push((key_oid, weak, val));
-                            }
+                        if let Some((key_oid, weak)) = self.weak_target_of(&key_obj) {
+                            self.weakmap_set(wm_id, key_oid, weak, val);
                             return Some(Value::Null);
                         } else if matches!(&key_obj, Value::Null) {
                             // offsetSet(null, $val) -> Cannot append to WeakMap
@@ -20460,18 +20441,9 @@ impl Vm {
                     }
                     b"offsetexists" => {
                         let key_obj = args.first().cloned().unwrap_or(Value::Null);
-                        if let Value::Object(key_rc) = &key_obj {
-                            let key_oid = key_rc.borrow().object_id;
-                            let exists = if let Some(entries) = self.weak_map_entries.get(&wm_id) {
-                                // WeakMap's offsetExists returns false for NULL values (like isset() behavior)
-                                entries.iter().any(|(oid, weak, val)| {
-                                    *oid == key_oid
-                                        && weak.upgrade().is_some()
-                                        && !matches!(val, Value::Null)
-                                })
-                            } else {
-                                false
-                            };
+                        if let Some((key_oid, _)) = self.weak_target_of(&key_obj) {
+                            // WeakMap's offsetExists returns false for NULL values (like isset() behavior)
+                            let exists = self.weakmap_exists(wm_id, key_oid);
                             return Some(if exists { Value::True } else { Value::False });
                         } else {
                             let exc = self.create_exception(
@@ -20485,11 +20457,8 @@ impl Vm {
                     }
                     b"offsetunset" => {
                         let key_obj = args.first().cloned().unwrap_or(Value::Null);
-                        if let Value::Object(key_rc) = &key_obj {
-                            let key_oid = key_rc.borrow().object_id;
-                            if let Some(entries) = self.weak_map_entries.get_mut(&wm_id) {
-                                entries.retain(|(oid, _, _)| *oid != key_oid);
-                            }
+                        if let Some((key_oid, _)) = self.weak_target_of(&key_obj) {
+                            self.weakmap_unset(wm_id, key_oid);
                             return Some(Value::Null);
                         } else {
                             let exc = self.create_exception(
@@ -20502,15 +20471,7 @@ impl Vm {
                         }
                     }
                     b"count" => {
-                        let count = if let Some(entries) = self.weak_map_entries.get(&wm_id) {
-                            entries
-                                .iter()
-                                .filter(|(_, weak, _)| weak.upgrade().is_some())
-                                .count()
-                        } else {
-                            0
-                        };
-                        return Some(Value::Long(count as i64));
+                        return Some(Value::Long(self.weakmap_count(wm_id) as i64));
                     }
                     _ => {}
                 }
@@ -25583,6 +25544,13 @@ impl Vm {
                         }
                         foreach_iter_handles.remove(&t);
                         foreach_ref_cells.remove(&t);
+                        // (the keys of the WeakMap or Iterator it walked)
+                        if !weakmap_iter_keys.is_empty() {
+                            weakmap_iter_keys.remove(&t);
+                        }
+                        if !foreach_gen_keys.is_empty() {
+                            foreach_gen_keys.remove(&t);
+                        }
                         if self.has_release_work() {
                             let had_exc = self.current_exception.is_some();
                             self.run_pending_destructors();
@@ -33720,19 +33688,8 @@ impl Vm {
                             b"offsetget" => {
                                 let key_obj =
                                     extra_args.first().cloned().unwrap_or(Value::Null);
-                                if let Value::Object(key_rc) = &key_obj {
-                                    let key_oid = key_rc.borrow().object_id;
-                                    let result =
-                                        if let Some(entries) = self.weak_map_entries.get(&wm_id) {
-                                            entries
-                                                .iter()
-                                                .find(|(oid, weak, _)| {
-                                                    *oid == key_oid && weak.upgrade().is_some()
-                                                })
-                                                .map(|(_, _, v)| v.deref())
-                                        } else {
-                                            None
-                                        };
+                                if let Some((key_oid, _)) = self.weak_target_of(&key_obj) {
+                                    let result = self.weakmap_get(wm_id, key_oid);
                                     if let Some(val) = result {
                                         self.write_operand(
                                             &op.result,
@@ -33742,13 +33699,7 @@ impl Vm {
                                             &static_cv_keys,
                                         );
                                     } else {
-                                        let class_display = crate::value::display_class_name(
-                                            &key_rc.borrow().class_name,
-                                        );
-                                        let msg = format!(
-                                            "Object {}#{} not contained in WeakMap",
-                                            class_display, key_oid
-                                        );
+                                        let msg = self.weakmap_missing_msg(&key_obj, key_oid);
                                         let exc =
                                             self.create_exception(b"Error", &msg, op.line);
                                         self.current_exception = Some(exc);
@@ -33785,19 +33736,8 @@ impl Vm {
                                 let key_obj =
                                     extra_args.first().cloned().unwrap_or(Value::Null);
                                 let val = extra_args.get(1).cloned().unwrap_or(Value::Null);
-                                if let Value::Object(key_rc) = &key_obj {
-                                    let key_oid = key_rc.borrow().object_id;
-                                    let weak = Rc::downgrade(key_rc);
-                                    key_rc.borrow().weak_key.set(true);
-                                    let entries =
-                                        self.weak_map_entries.entry(wm_id).or_default();
-                                    if let Some(entry) =
-                                        entries.iter_mut().find(|(oid, _, _)| *oid == key_oid)
-                                    {
-                                        entry.2 = val;
-                                    } else {
-                                        entries.push((key_oid, weak, val));
-                                    }
+                                if let Some((key_oid, weak)) = self.weak_target_of(&key_obj) {
+                                    self.weakmap_set(wm_id, key_oid, weak, val);
                                     self.write_operand(
                                         &op.result,
                                         Value::Null,
@@ -33825,19 +33765,8 @@ impl Vm {
                             b"offsetexists" => {
                                 let key_obj =
                                     extra_args.first().cloned().unwrap_or(Value::Null);
-                                if let Value::Object(key_rc) = &key_obj {
-                                    let key_oid = key_rc.borrow().object_id;
-                                    let exists = if let Some(entries) =
-                                        self.weak_map_entries.get(&wm_id)
-                                    {
-                                        entries.iter().any(|(oid, weak, val)| {
-                                            *oid == key_oid
-                                                && weak.upgrade().is_some()
-                                                && !matches!(val, Value::Null)
-                                        })
-                                    } else {
-                                        false
-                                    };
+                                if let Some((key_oid, _)) = self.weak_target_of(&key_obj) {
+                                    let exists = self.weakmap_exists(wm_id, key_oid);
                                     self.write_operand(
                                         &op.result,
                                         if exists { Value::True } else { Value::False },
@@ -33865,12 +33794,8 @@ impl Vm {
                             b"offsetunset" => {
                                 let key_obj =
                                     extra_args.first().cloned().unwrap_or(Value::Null);
-                                if let Value::Object(key_rc) = &key_obj {
-                                    let key_oid = key_rc.borrow().object_id;
-                                    if let Some(entries) = self.weak_map_entries.get_mut(&wm_id)
-                                    {
-                                        entries.retain(|(oid, _, _)| *oid != key_oid);
-                                    }
+                                if let Some((key_oid, _)) = self.weak_target_of(&key_obj) {
+                                    self.weakmap_unset(wm_id, key_oid);
                                     self.write_operand(
                                         &op.result,
                                         Value::Null,
@@ -33896,15 +33821,7 @@ impl Vm {
                                 }
                             }
                             b"count" => {
-                                let count =
-                                    if let Some(entries) = self.weak_map_entries.get(&wm_id) {
-                                        entries
-                                            .iter()
-                                            .filter(|(_, weak, _)| weak.upgrade().is_some())
-                                            .count()
-                                    } else {
-                                        0
-                                    };
+                                let count = self.weakmap_count(wm_id);
                                 self.write_operand(
                                     &op.result,
                                     Value::Long(count as i64),
@@ -44211,12 +44128,13 @@ impl Vm {
                                 _ => 0,
                             };
                             let mut iter_arr = PhpArray::new();
-                            let mut key_objs: Vec<Value> = Vec::new();
+                            let mut key_objs: Vec<crate::weak::WeakTarget> = Vec::new();
                             if let Some(entries) = self.weak_map_entries.get(&wm_id) {
-                                for (i, (_, weak, val)) in entries.iter().enumerate() {
-                                    if let Some(strong) = weak.upgrade() {
-                                        iter_arr.set(ArrayKey::Int(i as i64), val.clone());
-                                        key_objs.push(Value::Object(strong));
+                                for (_, weak, val) in entries.iter() {
+                                    if weak.is_alive() {
+                                        let i = key_objs.len() as i64;
+                                        iter_arr.set(ArrayKey::Int(i), val.clone());
+                                        key_objs.push(weak.clone());
                                     }
                                 }
                             }
@@ -44860,7 +44778,8 @@ impl Vm {
                         let is_valid = valid.is_truthy();
 
                         if !is_valid {
-                            // Done - jump to end
+                            // Done - jump to end (the last key is released)
+                            foreach_gen_keys.remove(&iter_idx);
                             if let OperandType::JmpTarget(target) = op.op2 {
                                 ip = target as usize;
                             }
@@ -45121,11 +45040,10 @@ impl Vm {
                         // Check for WeakMap iteration keys
                         let key_val = if let Some(wm_keys) = weakmap_iter_keys.get(&iter_idx) {
                             // WeakMap: use the stored object key
-                            if actual_pos < wm_keys.len() {
-                                wm_keys[actual_pos].clone()
-                            } else {
-                                Value::Null
-                            }
+                            wm_keys
+                                .get(actual_pos)
+                                .and_then(|w| w.upgrade())
+                                .unwrap_or(Value::Null)
                         } else if let Some(k) = foreach_snap
                             .get(&iter_idx)
                             .and_then(|snap| snap.get(actual_pos))
@@ -45453,14 +45371,15 @@ impl Vm {
                                     } else if class_lower == b"weakmap" {
                                         let wm_id = obj.borrow().object_id;
                                         let mut arr = PhpArray::new();
-                                        let mut key_objs: Vec<Value> = Vec::new();
+                                        let mut key_objs: Vec<crate::weak::WeakTarget> =
+                                            Vec::new();
                                         // Convert each entry value to a Reference (if not already)
                                         // and rewrite the storage to share that Reference so
                                         // writes through the foreach &$v modify the entry.
                                         if let Some(entries) = self.weak_map_entries.get_mut(&wm_id)
                                         {
                                             for (_oid, weak, v) in entries.iter_mut() {
-                                                if weak.upgrade().is_none() {
+                                                if !weak.is_alive() {
                                                     continue;
                                                 }
                                                 // Promote the stored value to a Reference so
@@ -45475,11 +45394,9 @@ impl Vm {
                                                         ref_v
                                                     }
                                                 };
-                                                if let Some(strong) = weak.upgrade() {
-                                                    key_objs.push(Value::Object(strong));
-                                                    let i = arr.len() as i64;
-                                                    arr.set(ArrayKey::Int(i), ref_val);
-                                                }
+                                                key_objs.push(weak.clone());
+                                                let i = arr.len() as i64;
+                                                arr.set(ArrayKey::Int(i), ref_val);
                                             }
                                         }
                                         weakmap_iter_keys.insert(iter_idx, key_objs);
@@ -45950,6 +45867,10 @@ impl Vm {
                         // (for an object, its references to the property slots).
                         foreach_ref_iters.remove(&iter_idx);
                         foreach_ref_cells.remove(&iter_idx);
+                        // (a WeakMap's keys are no longer held)
+                        if !weakmap_iter_keys.is_empty() {
+                            weakmap_iter_keys.remove(&iter_idx);
+                        }
                         if foreach_ref_arrays.remove(&iter_idx).is_some() {
                             if let Some(slot) = tmps.get_mut(iter_idx as usize) {
                                 if matches!(slot, Value::Array(_)) {
@@ -51771,18 +51692,8 @@ impl Vm {
                         _ => None,
                     };
                     if let Some(wm_id) = weakmap {
-                        if let Value::Object(key_rc) = key_val.deref() {
-                            let key_oid = key_rc.borrow().object_id;
-                            key_rc.borrow().weak_key.set(true);
-                            let weak = Rc::downgrade(&key_rc);
-                            let entries = self.weak_map_entries.entry(wm_id).or_default();
-                            if let Some(entry) =
-                                entries.iter_mut().find(|(oid, _, _)| *oid == key_oid)
-                            {
-                                entry.2 = ref_val;
-                            } else {
-                                entries.push((key_oid, weak, ref_val));
-                            }
+                        if let Some((key_oid, weak)) = self.weak_target_of(&key_val) {
+                            self.weakmap_set(wm_id, key_oid, weak, ref_val);
                             return Ok(Flow::Next);
                         }
                     }
@@ -63734,15 +63645,7 @@ impl Vm {
                                     let weak_id =
                                         obj.borrow().get_property(b"__weak_ref_id").to_long()
                                             as u64;
-                                    let result = if let Some(weak) = self.weak_refs.get(&weak_id) {
-                                        if let Some(strong) = weak.upgrade() {
-                                            Value::Object(strong)
-                                        } else {
-                                            Value::Null
-                                        }
-                                    } else {
-                                        Value::Null
-                                    };
+                                    let result = self.weakref_target(weak_id);
                                     let name = self.zpp_builtin_return_name(
                                         &class_name_lower,
                                         &method_name_lower,
@@ -69264,7 +69167,10 @@ impl Vm {
         };
         let (positional, named) = {
             let a = a.borrow();
-            let named = a.keys().filter(|k| matches!(k, ArrayKey::String(_))).count();
+            let named = a
+                .keys()
+                .filter(|k| matches!(k, ArrayKey::String(_)))
+                .count();
             (a.len() - named, named)
         };
         let msg = if positional == 0 {

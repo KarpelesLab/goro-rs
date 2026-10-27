@@ -1260,16 +1260,13 @@ impl Vm {
         key: Value,
     ) -> Option<Value> {
         self.weakmap_fetch_dim_w(obj, Some(key.clone()), DimFetch::W)?;
-        let Value::Object(key_obj) = key.deref() else {
-            return None;
-        };
+        let (key_id, _) = self.weak_target_of(&key)?;
         let wm_id = obj.borrow().object_id;
-        let key_id = key_obj.borrow().object_id;
         let (_, _, v) = self
             .weak_map_entries
             .get_mut(&wm_id)?
             .iter_mut()
-            .find(|(oid, weak, _)| *oid == key_id && weak.upgrade().is_some())?;
+            .find(|(oid, weak, _)| *oid == key_id && weak.is_alive())?;
         if !matches!(v, Value::Reference(_)) {
             let cur = std::mem::replace(v, Value::Null);
             *v = Value::Reference(Rc::new(RefCell::new(cur)));
@@ -1288,23 +1285,18 @@ impl Vm {
             self.throw_error_msg(b"Error", "Cannot append to WeakMap");
             return None;
         };
-        let Value::Object(key_obj) = key.deref() else {
+        let Some((key_id, _)) = self.weak_target_of(&key) else {
             self.throw_error_msg(b"TypeError", "WeakMap key must be an object");
             return None;
         };
         let wm_id = obj.borrow().object_id;
-        let key_id = key_obj.borrow().object_id;
         let entry = self.weak_map_entries.get_mut(&wm_id).and_then(|entries| {
             entries
                 .iter_mut()
-                .find(|(oid, weak, _)| *oid == key_id && weak.upgrade().is_some())
+                .find(|(oid, weak, _)| *oid == key_id && weak.is_alive())
         });
         let Some((_, _, v)) = entry else {
-            let msg = format!(
-                "Object {}#{} not contained in WeakMap",
-                crate::value::display_class_name(&key_obj.borrow().class_name),
-                key_id
-            );
+            let msg = self.weakmap_missing_msg(&key, key_id);
             self.throw_error_msg(b"Error", &msg);
             return None;
         };

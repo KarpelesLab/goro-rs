@@ -313,7 +313,7 @@ impl Vm {
     /// WeakReference::create(object $object): one WeakReference per object.
     fn weakreference_create(&mut self, args: &[Value], line: u32) -> Value {
         let arg = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
-        let Value::Object(obj_rc) = &arg else {
+        let Some((target_oid, weak)) = self.weak_target_of(&arg) else {
             let type_name = match &arg {
                 Value::Null => "null",
                 Value::Long(_) => "int",
@@ -331,11 +331,9 @@ impl Vm {
             self.current_exception = Some(exc);
             return Value::Null;
         };
-        let target_oid = obj_rc.borrow().object_id;
         if let Some((_, wr_val)) = self.weak_ref_cache.get(&target_oid) {
             return wr_val.clone();
         }
-        let weak = Rc::downgrade(obj_rc);
         let weak_id = self.next_weak_ref_id;
         self.next_weak_ref_id += 1;
         self.weak_refs.insert(weak_id, weak);
