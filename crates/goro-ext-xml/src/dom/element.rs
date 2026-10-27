@@ -53,6 +53,28 @@ pub fn get_attribute_or_nsdecl(t: &mut Tree, elem: NodeId, name: &str) -> Option
     t.has_ns_prop(elem, name, None).map(AttrOrNs::Attr)
 }
 
+/// The DTD default of what get_attribute_or_nsdecl() looks up when the
+/// element has no such attribute (xmlHasNsProp() returns the declaration).
+pub fn dtd_default_qname(
+    t: &mut Tree,
+    elem: NodeId,
+    name: &str,
+) -> Option<(Option<NodeId>, String)> {
+    if let Some(i) = name.find(':').filter(|&i| i > 0 && i + 1 < name.len()) {
+        let prefix = &name[..i];
+        if prefix == "xmlns" {
+            return None;
+        }
+        if let Some(ns) = t.search_ns(elem, Some(prefix)) {
+            let href = t.nss[ns].href.clone();
+            return t.dtd_default_prop(elem, &name[i + 1..], Some(&href));
+        }
+    } else if name == "xmlns" {
+        return None;
+    }
+    t.dtd_default_prop(elem, name, None)
+}
+
 /// Remove all children of an attribute/element and set legacy content
 /// (xmlNodeSetContent: entity references are parsed).
 pub fn set_content_legacy(t: &mut Tree, n: NodeId, value: &str) {
@@ -314,7 +336,9 @@ fn m_get_attribute(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     Ok(tree::with(|t| match get_attribute_or_nsdecl(t, n, &name) {
         Some(AttrOrNs::Attr(at)) => s(&attr_value(t, at)),
         Some(AttrOrNs::Ns(ns)) => s(&t.nss[ns].href),
-        None => s(""),
+        None => s(&dtd_default_qname(t, n, &name)
+            .map(|d| d.1)
+            .unwrap_or_default()),
     }))
 }
 
@@ -407,7 +431,11 @@ fn m_get_attribute_node(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let name = a.str(vm, 0, "qualifiedName")?;
     let n = need_node(vm, o)?;
     match tree::with(|t| get_attribute_or_nsdecl(t, n, &name)) {
-        None => Ok(Value::False),
+        None => match tree::with(|t| dtd_default_qname(t, n, &name)) {
+            // (the declaration has no DOM class)
+            Some((Some(decl), _)) => Ok(node_obj(vm, decl)),
+            _ => Ok(Value::False),
+        },
         Some(AttrOrNs::Attr(at)) => Ok(node_obj(vm, at)),
         Some(AttrOrNs::Ns(ns)) => Ok(ns_obj(vm, n, ns)),
     }
@@ -515,6 +543,9 @@ fn get_attribute_ns(t: &Tree, elem: NodeId, uri: Option<&str>, name: &str) -> Op
     // (xmlGetNsProp(): "" is a namespace no attribute is in)
     if let Some(at) = t.has_ns_prop(elem, name, uri) {
         return Some(attr_value(t, at));
+    }
+    if let Some((_, v)) = t.dtd_default_prop(elem, name, uri) {
+        return Some(v);
     }
     if uri == Some(XMLNS_NS) {
         return get_nsdecl(t, elem, Some(name)).map(|ns| t.nss[ns].href.clone());
@@ -699,7 +730,12 @@ fn m_get_attribute_node_ns(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let name = a.str(vm, 1, "localName")?;
     let n = need_node(vm, o)?;
     // (xmlHasNsProp(): "" is a namespace no attribute is in)
-    let at = tree::with(|t| t.has_ns_prop(n, &name, uri.as_deref()));
+    let at = tree::with(|t| {
+        t.has_ns_prop(n, &name, uri.as_deref()).or_else(|| {
+            t.dtd_default_prop(n, &name, uri.as_deref())
+                .and_then(|d| d.0)
+        })
+    });
     match at {
         Some(at) => Ok(node_obj(vm, at)),
         None => {
@@ -718,9 +754,9 @@ fn m_has_attribute(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     a.count(vm, 1, 1)?;
     let name = a.str(vm, 0, "qualifiedName")?;
     let n = need_node(vm, o)?;
-    Ok(b(
-        tree::with(|t| get_attribute_or_nsdecl(t, n, &name)).is_some()
-    ))
+    Ok(b(tree::with(|t| {
+        get_attribute_or_nsdecl(t, n, &name).is_some() || dtd_default_qname(t, n, &name).is_some()
+    })))
 }
 
 fn set_attribute_id(t: &mut Tree, at: NodeId, is_id: bool) {

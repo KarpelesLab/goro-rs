@@ -1040,6 +1040,71 @@ impl Tree {
         None
     }
 
+    /// The DTD part of xmlGetPropNodeInternal(useDTD): the declaration of
+    /// attribute `name` (in namespace `href`) of element `node` with a
+    /// default value, from the internal subset then the external one (only
+    /// when the document has an internal subset). Its AttributeDecl node and
+    /// default value.
+    #[inline(never)]
+    pub fn dtd_default_prop(
+        &self,
+        node: NodeId,
+        name: &str,
+        href: Option<&str>,
+    ) -> Option<(Option<NodeId>, String)> {
+        if self.nodes[node].t != NType::Element {
+            return None;
+        }
+        let doc = self.nodes[node].doc?;
+        let info = self.doc_info(doc)?;
+        info.int_subset?;
+        let subsets: Vec<&DtdInfo> = [info.int_subset, info.ext_subset]
+            .into_iter()
+            .flatten()
+            .filter_map(|s| self.dtd_info(s))
+            .collect();
+        if subsets.iter().all(|d| d.attr_defaults.is_empty()) {
+            return None;
+        }
+        let elem_q = self.qname(node);
+        let find = |prefix: Option<&str>| -> Option<(Option<NodeId>, String)> {
+            for d in &subsets {
+                if let Some(i) = d.find_attr_decl(&elem_q, name, prefix) {
+                    let a = &d.attr_defaults[i];
+                    return a.default.as_ref().map(|v| (a.node, v.clone()));
+                }
+            }
+            None
+        };
+        match href {
+            None => find(None),
+            Some(XML_XML_NAMESPACE) => find(Some("xml")),
+            Some(h) => {
+                // (xmlGetNsList(): the in-scope prefixes bound to the namespace)
+                let mut seen: Vec<Option<&str>> = Vec::new();
+                let mut cur = Some(node);
+                while let Some(c) = cur {
+                    if self.nodes[c].t == NType::Element {
+                        for &ns in &self.nodes[c].ns_def {
+                            let p = self.nss[ns].prefix.as_deref();
+                            if seen.contains(&p) {
+                                continue;
+                            }
+                            seen.push(p);
+                            if self.nss[ns].href == h {
+                                if let Some(r) = find(p) {
+                                    return Some(r);
+                                }
+                            }
+                        }
+                    }
+                    cur = self.nodes[c].parent;
+                }
+                None
+            }
+        }
+    }
+
     /// xmlHasProp: by name regardless of namespace
     pub fn has_prop(&self, node: NodeId, name: &str) -> Option<NodeId> {
         if self.nodes[node].t != NType::Element {

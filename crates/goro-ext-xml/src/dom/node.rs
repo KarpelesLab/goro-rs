@@ -1559,7 +1559,7 @@ fn line_no(t: &Tree, n: NodeId, depth: u32) -> i64 {
             if nd.line < 65535 {
                 return nd.line as i64;
             }
-            if nd.t == NType::Text && big {
+            let r = if nd.t == NType::Text && big {
                 nd.line as i64
             } else if nd.t == NType::Element && nd.children.is_some() {
                 line_no(t, nd.children.unwrap(), depth + 1)
@@ -1568,8 +1568,10 @@ fn line_no(t: &Tree, n: NodeId, depth: u32) -> i64 {
             } else if let Some(x) = nd.prev {
                 line_no(t, x, depth + 1)
             } else {
-                65535
-            }
+                -1
+            };
+            // (nothing better found: the node's own, saturated, line)
+            if r == -1 || r == 65535 { 65535 } else { r }
         }
         NType::Attribute => nd.parent.map(|p| line_no(t, p, depth + 1)).unwrap_or(-1),
         _ => {
