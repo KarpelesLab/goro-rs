@@ -149,6 +149,17 @@ fn no_drop(v: &Value) -> bool {
     )
 }
 
+/// The parts of a call lean_direct() set up that hold something.
+#[cold]
+#[inline(never)]
+fn drop_call_parts(
+    args: Vec<Value>,
+    named_args: Vec<(Vec<u8>, Value)>,
+    target: super::CallTarget,
+) {
+    drop((args, named_args, target));
+}
+
 /// Release the values of `slots` in order, as a frame's end does.
 #[inline]
 fn release_slots(slots: &mut Vec<Value>) {
@@ -478,8 +489,9 @@ impl Vm {
             }
             None => return None,
         }
-        // (lean_candidate(), when it lets the call be tried)
-        let f = target.user.as_ref()?;
+        // (lean_candidate(), when it lets the call be tried; the function is
+        // taken out of the call, see lean_run)
+        let f = target.user.take()?;
         if f.lean_kind() == 0 {
             op_array.no_direct_lean(ip);
             return None;
@@ -487,6 +499,20 @@ impl Vm {
         if f.cv_name_info().lean_score.get() < 0 {
             return None;
         }
+        // (what lean_target_of() checks of such a call: of its name, the
+        // same at each run)
+        let nb = name.as_bytes();
+        if nb.is_empty()
+            || nb.len() > 128
+            || (nb[0] == b'_' && nb.get(1) == Some(&b'_') && crate::closure::is_engine_fn_name(nb))
+        {
+            op_array.no_direct_lean(ip);
+            return None;
+        }
+        if !lean_function(&f, None) {
+            return None;
+        }
+        let nsends = self.lean_sends_ready(&f, None, op_array, ip, cvs, tmps)?;
         // (INIT_FCALL's result operand flags a name without global fallback)
         target.no_ns_fallback = !matches!(op_array.ops[ip].result, OperandType::Unused);
         let mut call = PendingCall {
@@ -495,10 +521,29 @@ impl Vm {
             named_args: Vec::new(),
             target,
         };
-        let (f, sep, nsends) = self.lean_fused_ready(&call, op_array, ip, cvs, tmps)?;
         // (what popping the call would do)
         self.trim_closure_pending_calls();
-        Some(self.lean_fused_run(op_array, ip, &f, sep, nsends, &mut call, cvs, tmps))
+        let next = self.lean_fused_run(op_array, ip, &f, None, nsends, &mut call, cvs, tmps);
+        // (what is left of the call: its name, unless it was handed over)
+        let PendingCall {
+            name,
+            args,
+            named_args,
+            target,
+        } = call;
+        drop(name);
+        if args.capacity() != 0
+            || named_args.capacity() != 0
+            || target.user.is_some()
+            || target.method_info.is_some()
+            || target.forward.is_some()
+        {
+            drop_call_parts(args, named_args, target);
+        } else {
+            // (nothing to drop)
+            std::mem::forget((args, named_args, target));
+        }
+        Some(next)
     }
 
     /// lean_fused(): whether the call `call`, set up by the INIT_* at `ip`
@@ -513,9 +558,25 @@ impl Vm {
         cvs: &[Value],
         tmps: &[Value],
     ) -> Option<(Rc<OpArray>, Option<(usize, bool)>, usize)> {
+        let (f, sep) = self.lean_target_of(call, true)?;
+        let nsends = self.lean_sends_ready(f, sep, op_array, ip, cvs, tmps)?;
+        Some((Rc::clone(f), sep, nsends))
+    }
+
+    /// lean_fused_ready() of the call of `f` (`sep`: see lean_target):
+    /// the number of sends.
+    #[inline(always)]
+    fn lean_sends_ready(
+        &self,
+        f: &OpArray,
+        sep: Option<(usize, bool)>,
+        op_array: &OpArray,
+        ip: usize,
+        cvs: &[Value],
+        tmps: &[Value],
+    ) -> Option<usize> {
         let ops = &op_array.ops;
         let literals = &op_array.literals;
-        let (f, sep) = self.lean_target_of(call, true)?;
         // (a variadic function: the call is made by its DO_FCALL, the
         // arguments then sent, see lean_call)
         if f.variadic_param.is_some() {
@@ -590,7 +651,7 @@ impl Vm {
         if !self.lean_ready(fcall, tmps) {
             return None;
         }
-        Some((Rc::clone(f), sep, nsends))
+        Some(nsends)
     }
 
     /// lean_fused(): the lean call of `f` (`sep`: see lean_target), the
@@ -839,6 +900,10 @@ impl Vm {
             // (the arguments, moved: as many as were sent)
             if call.args.len() < nargs {
                 call.args.resize_with(nargs, || Value::Undef);
+            }
+            // (a call lean_direct() set up has its function taken out)
+            if call.target.user.is_none() {
+                call.target.user = Some(Rc::clone(f));
             }
             self.lean_resume.push(LeanResume {
                 caller: op_array,
