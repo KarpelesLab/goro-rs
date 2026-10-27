@@ -984,7 +984,10 @@ impl Vm {
     ) -> bool {
         match array.deref() {
             Value::Array(a) => {
-                let copy = a.borrow().clone();
+                // (spl_array_set_array(): a shared array is duplicated,
+                // zend_array_dup(): the storage's own, for the collector too)
+                let mut copy = a.borrow().clone();
+                copy.make_unique();
                 set_prop(obj, b"__spl_array", val_arr(copy));
             }
             Value::Object(o) => {
