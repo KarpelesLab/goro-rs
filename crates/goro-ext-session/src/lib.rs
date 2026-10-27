@@ -238,6 +238,11 @@ impl FnGuard {
     }
 }
 
+/// The arguments of the innermost active session function.
+fn outer_fn_args() -> Vec<Value> {
+    FN_ARGS.with(|s| s.borrow().last().cloned().unwrap_or_default())
+}
+
 impl Drop for FnGuard {
     fn drop(&mut self) {
         FN_STACK.with(|s| {
@@ -1082,21 +1087,27 @@ fn set_session_vars(vm: &mut Vm, v: Value) {
 // Serializers
 // ---------------------------------------------------------------------------
 
-fn encode_loop(vm: &mut Vm) -> Option<Vec<(Vec<u8>, Value)>> {
+/// PS_ENCODE_LOOP over a snapshot of $_SESSION: numeric keys are skipped
+/// with a warning as they are met; `f` gets each named variable and
+/// returns false to stop the loop.
+fn encode_loop(vm: &mut Vm, mut f: impl FnMut(&mut Vm, Vec<u8>, Value) -> bool) -> Option<()> {
     let arr = session_vars_arr()?;
     let entries: Vec<(ArrayKey, Value)> = arr
         .borrow()
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let mut out = Vec::new();
     for (k, v) in entries {
         match k {
             ArrayKey::Int(n) => err(vm, E_WARNING, &format!("Skipping numeric key {}", n)),
-            ArrayKey::String(s) => out.push((s.as_bytes().to_vec(), v)),
+            ArrayKey::String(s) => {
+                if !f(vm, s.as_bytes().to_vec(), v) {
+                    break;
+                }
+            }
         }
     }
-    Some(out)
+    Some(())
 }
 
 /// php_session_encode
@@ -1127,7 +1138,8 @@ fn session_encode_data(vm: &mut Vm) -> Option<Vec<u8>> {
                 buf.extend(php_serialize(vm, &Value::Array(arr))?);
             }
             Serializer::Php => {
-                for (key, v) in encode_loop(vm)? {
+                let mut ok = true;
+                encode_loop(vm, |vm, key, v| {
                     buf.extend_from_slice(&key);
                     if key.contains(&b'|') {
                         err(
@@ -1138,20 +1150,36 @@ fn session_encode_data(vm: &mut Vm) -> Option<Vec<u8>> {
                                 lossy(cstr(&key))
                             ),
                         );
-                        return None;
+                        ok = false;
+                        return false;
                     }
                     buf.push(b'|');
-                    buf.extend(php_serialize(vm, &v)?);
+                    match php_serialize(vm, &v) {
+                        Some(b) => buf.extend(b),
+                        None => ok = false,
+                    }
+                    ok
+                })?;
+                if !ok {
+                    return None;
                 }
             }
             Serializer::PhpBinary => {
-                for (key, v) in encode_loop(vm)? {
+                let mut ok = true;
+                encode_loop(vm, |vm, key, v| {
                     if key.len() > 127 {
-                        continue;
+                        return true;
                     }
                     buf.push(key.len() as u8);
                     buf.extend_from_slice(&key);
-                    buf.extend(php_serialize(vm, &v)?);
+                    match php_serialize(vm, &v) {
+                        Some(b) => buf.extend(b),
+                        None => ok = false,
+                    }
+                    ok
+                })?;
+                if !ok {
+                    return None;
                 }
             }
         }
@@ -1189,6 +1217,7 @@ fn serializer_decode(vm: &mut Vm, data: &[u8]) -> bool {
             let mut pos = 0;
             let mut vars: Vec<(Vec<u8>, usize)> = Vec::new();
             let mut ok = true;
+            let mut bad_binary_name = false;
             while pos < data.len() {
                 let name;
                 if ser == Serializer::Php {
@@ -1204,7 +1233,9 @@ fn serializer_decode(vm: &mut Vm, data: &[u8]) -> bool {
                 } else {
                     let namelen = (data[pos] & 0x7f) as usize;
                     if pos + namelen >= data.len() {
+                        // (returns before php_session_normalize_vars())
                         ok = false;
+                        bad_binary_name = true;
                         break;
                     }
                     name = data[pos + 1..pos + 1 + namelen].to_vec();
@@ -1231,6 +1262,10 @@ fn serializer_decode(vm: &mut Vm, data: &[u8]) -> bool {
                     }
                 }
             }
+            // (its PS_ENCODE_LOOP warns about each numeric key)
+            if !bad_binary_name {
+                encode_loop(vm, |_, _, _| true);
+            }
             ok
         }
     };
@@ -1250,7 +1285,7 @@ fn session_decode_data(vm: &mut Vm, data: &[u8]) -> R<bool> {
     if let Some((fname, file, line)) = outer {
         let is_method = fname.contains("::");
         vm.call_stack
-            .push((fname, file, line, Vec::new(), is_method));
+            .push((fname, file, line, outer_fn_args(), is_method));
     }
     let ok = serializer_decode(vm, data);
     if pushed_outer {
@@ -1385,7 +1420,7 @@ fn call_handler(vm: &mut Vm, func: &Option<Value>, args: &[Value]) -> R<Option<V
             None => (fname.clone(), false),
         };
         vm.call_stack
-            .push((name, file, line, Vec::new(), is_method));
+            .push((name, file, line, outer_fn_args(), is_method));
     }
     let (cname, is_method) = callable_frame_name(&func);
     vm.call_stack.push((
@@ -2618,7 +2653,7 @@ fn php_can_change_session_setting(vm: &mut Vm, setting: &str, check_cookies: boo
 
 fn f_session_set_cookie_params(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_set_cookie_params";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 1, 5) {
         return Ok(Value::Null);
     }
@@ -2808,7 +2843,7 @@ fn long_arg_strict_arr(vm: &mut Vm, fname: &str, v: &Value) -> Result<i64, ()> {
 
 fn f_session_get_cookie_params(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_get_cookie_params";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 0) {
         return Ok(Value::Null);
     }
@@ -2829,7 +2864,7 @@ fn f_session_get_cookie_params(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_name(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_name";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 1) {
         return Ok(Value::Null);
     }
@@ -2846,7 +2881,7 @@ fn f_session_name(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_module_name(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_module_name";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 1) {
         return Ok(Value::Null);
     }
@@ -3114,7 +3149,7 @@ fn f_session_set_save_handler(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_save_path(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_save_path";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 1) {
         return Ok(Value::Null);
     }
@@ -3131,7 +3166,7 @@ fn f_session_save_path(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_id(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_id";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 1) {
         return Ok(Value::Null);
     }
@@ -3151,7 +3186,7 @@ fn f_session_id(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_regenerate_id(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_regenerate_id";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 1) {
         return Ok(Value::Null);
     }
@@ -3319,7 +3354,7 @@ fn f_session_regenerate_id(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_create_id(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_create_id";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 1) {
         return Ok(Value::Null);
     }
@@ -3397,7 +3432,7 @@ fn f_session_create_id(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_cache_limiter(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_cache_limiter";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 1) {
         return Ok(Value::Null);
     }
@@ -3427,7 +3462,7 @@ fn f_session_cache_limiter(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_cache_expire(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_cache_expire";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 1) {
         return Ok(Value::Null);
     }
@@ -3457,7 +3492,7 @@ fn f_session_cache_expire(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_encode(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_encode";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 0) {
         return Ok(Value::Null);
     }
@@ -3469,7 +3504,7 @@ fn f_session_encode(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_decode(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_decode";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 1, 1) {
         return Ok(Value::Null);
     }
@@ -3487,7 +3522,7 @@ fn f_session_decode(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_start(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_start";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 1) {
         return Ok(Value::Null);
     }
@@ -3611,7 +3646,7 @@ fn f_session_start(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_destroy(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_destroy";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 0) {
         return Ok(Value::Null);
     }
@@ -3620,7 +3655,7 @@ fn f_session_destroy(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_unset(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_unset";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 0) {
         return Ok(Value::Null);
     }
@@ -3635,7 +3670,7 @@ fn f_session_unset(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_gc(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_gc";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 0) {
         return Ok(Value::Null);
     }
@@ -3656,7 +3691,7 @@ fn f_session_gc(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_write_close(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_write_close";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 0) {
         return Ok(Value::Null);
     }
@@ -3669,7 +3704,7 @@ fn f_session_write_close(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_commit(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_commit";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 0) {
         return Ok(Value::Null);
     }
@@ -3682,7 +3717,7 @@ fn f_session_commit(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_abort(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_abort";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 0) {
         return Ok(Value::Null);
     }
@@ -3695,7 +3730,7 @@ fn f_session_abort(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_reset(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_reset";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 0) {
         return Ok(Value::Null);
     }
@@ -3708,7 +3743,7 @@ fn f_session_reset(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_status(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_status";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 0) {
         return Ok(Value::Null);
     }
@@ -3717,7 +3752,7 @@ fn f_session_status(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn f_session_register_shutdown(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let fname = "session_register_shutdown";
-    let _g = FnGuard::new(vm, fname);
+    let _g = FnGuard::with_args(vm, fname, args);
     if !check_args(vm, fname, args, 0, 0) {
         return Ok(Value::Null);
     }
