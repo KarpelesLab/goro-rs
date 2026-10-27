@@ -7322,9 +7322,19 @@ impl Vm {
                 // to point at the line that triggered the deprecation, not the args ops.
                 let caller_file = self.current_file.clone();
                 let caller_line = self.current_line;
-                let args_val = self
-                    .eval_attr_args_at_caller(&attr.args_op_array)
-                    .unwrap_or(Value::Null);
+                // (zend_ast_evaluate() in a class scope runs in a
+                // "[constant expression]" frame on the expression's line)
+                let args_val = if attr.args_op_array.scope_class.is_some()
+                    && !attr.args_op_array.filename.is_empty()
+                {
+                    let r = self.execute_op_array(&attr.args_op_array, vec![]);
+                    self.current_file = caller_file.clone();
+                    self.current_line = caller_line;
+                    r
+                } else {
+                    self.eval_attr_args_at_caller(&attr.args_op_array)
+                }
+                .unwrap_or(Value::Null);
                 if self.current_exception.is_some() {
                     return None;
                 }
