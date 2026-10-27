@@ -4548,8 +4548,8 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 };
                 // (each is the reflected class's method: its called scope
                 // when invoked, see reflection_method_factory(ce, ...))
-                let lookup_canonical = rcls(vm, &class_lower)
-                    .map(|c| crate::string::msg_str(&c.name).to_string());
+                let lookup_canonical =
+                    rcls(vm, &class_lower).map(|c| crate::string::msg_str(&c.name).to_string());
                 for (declaring, method_name) in method_info {
                     let declaring_lower: Vec<u8> = crate::errdisplay::raw_error_bytes(&declaring)
                         .iter()

@@ -17688,10 +17688,7 @@ fn array_walk_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
         });
     }
     let arr_val = args.first().unwrap_or(&Value::Null);
-    let callback_v = args
-        .get(1)
-        .map(walk_callback)
-        .unwrap_or(Value::Null);
+    let callback_v = args.get(1).map(walk_callback).unwrap_or(Value::Null);
     let callback = &callback_v;
     let extra_data = args.get(2).cloned();
     if matches!(arr_val.deref(), Value::Object(_)) {
