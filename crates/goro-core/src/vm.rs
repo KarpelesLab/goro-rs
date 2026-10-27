@@ -8082,6 +8082,21 @@ impl Vm {
     /// Return a type name string for error messages.
     /// For objects, this returns the class name (e.g. "stdClass") instead of just "object".
     /// For generators, this returns "Generator".
+    /// Set the file of exception `exc` (one raised in another file's code,
+    /// e.g. by a callee's RECV) when `file` is known.
+    #[inline(never)]
+    pub(crate) fn set_exception_file(exc: &Value, file: &[u8]) {
+        if file.is_empty() {
+            return;
+        }
+        if let Value::Object(o) = exc {
+            o.borrow_mut().set_property(
+                b"file".to_vec(),
+                Value::String(PhpString::from_vec(file.to_vec())),
+            );
+        }
+    }
+
     pub fn value_type_name(val: &Value) -> String {
         match val {
             Value::Null | Value::Undef => "null".to_string(),
@@ -10622,10 +10637,9 @@ impl Vm {
                 ));
                 break;
             }
-            let line = if op_array.decl_line > 0 {
-                op_array.decl_line
-            } else {
-                self.current_line
+            let line = match op_array.recv_line(cv.saturating_sub(hidden)) {
+                0 => self.current_line,
+                l => l,
             };
             if matches!(v, Value::Double(_) | Value::String(_)) {
                 let saved = self.enter_recv_file(op_array);
@@ -10693,10 +10707,9 @@ impl Vm {
                 Some(p) => msg[..p].to_string(),
                 None => msg,
             };
-            let def_line = if user_fn.decl_line > 0 {
-                user_fn.decl_line
-            } else {
-                line
+            let def_line = match user_fn.recv_line_for_msg(&msg) {
+                0 => line,
+                l => l,
             };
             return Some((msg, def_line));
         }
@@ -12016,8 +12029,13 @@ impl Vm {
                         .map(|n| String::from_utf8_lossy(n).to_string())
                         .unwrap_or_default();
                     let msg = format!("{}(): Argument #{} (${}) not passed", fname, p + 1, pname);
-                    let line = self.current_line;
+                    // (raised by the callee's RECV)
+                    let line = match op_array.recv_line(p) {
+                        0 => self.current_line,
+                        l => l,
+                    };
                     let exc = self.create_exception(b"ArgumentCountError", &msg, line);
+                    Self::set_exception_file(&exc, &op_array.filename);
                     self.current_exception = Some(exc);
                     return Err(VmError {
                         message: format!("Uncaught ArgumentCountError: {}", msg),
@@ -12127,10 +12145,9 @@ impl Vm {
                     Some(l) => format!("{}, called in {} on line {}", msg, self.current_file, l),
                     None => msg,
                 };
-                let line = if op_array.decl_line > 0 {
-                    op_array.decl_line
-                } else {
-                    self.current_line
+                let line = match op_array.recv_line_for_msg(&msg) {
+                    0 => self.current_line,
+                    l => l,
                 };
                 // (raised by the callee's RECV, inside its frame, which shows
                 // the arguments as RECV left them)
@@ -12222,10 +12239,9 @@ impl Vm {
                     ),
                 };
                 // Raised by the callee's RECV.
-                let line = if op_array.decl_line > 0 {
-                    op_array.decl_line
-                } else {
-                    self.current_line
+                let line = match op_array.recv_line(provided as usize) {
+                    0 => self.current_line,
+                    l => l,
                 };
                 let is_instance =
                     this_cv == 1 && lead > 0 && matches!(call.args.first(), Some(Value::Object(_)));
@@ -23826,8 +23842,9 @@ impl Vm {
         self.flush_callable_deprecations_recv(user_fn);
         if let Some(err_msg) = param_err {
             // Use the function definition line for the exception, not the call site
-            let def_line = if user_fn.decl_line > 0 {
-                user_fn.decl_line
+            let recv = user_fn.recv_line_for_msg(&err_msg);
+            let def_line = if recv > 0 {
+                recv
             } else {
                 user_fn.ops.first().map(|o| o.line).unwrap_or(line)
             };
@@ -23867,11 +23884,10 @@ impl Vm {
                     continue;
                 }
                 if let Some(type_info) = &user_fn.param_types[i] {
-                    // Reported by the callee's RECV (its declaration line).
-                    let recv_line = if user_fn.decl_line > 0 {
-                        user_fn.decl_line
-                    } else {
-                        line
+                    // Reported by the callee's RECV.
+                    let recv_line = match user_fn.recv_line(i.saturating_sub(implicit_args)) {
+                        0 => line,
+                        l => l,
                     };
                     self.emit_implicit_float_to_int_if_needed(
                         arg,
@@ -23906,10 +23922,9 @@ impl Vm {
                 Some(Value::True | Value::False) => "bool",
                 _ => continue,
             };
-            let recv_line = if user_fn.decl_line > 0 {
-                user_fn.decl_line
-            } else {
-                line
+            let recv_line = match user_fn.recv_line(i.saturating_sub(implicit_args)) {
+                0 => line,
+                l => l,
             };
             self.emit_warning_at(
                 &format!("unexpected NAN value was coerced to {}", target),
@@ -36892,26 +36907,20 @@ impl Vm {
                                 self.flush_callable_deprecations_recv(&user_fn);
                                 let (exc_class, err_msg, exc_line): (&[u8], String, u32) =
                                     match type_err {
-                                        Some(m) => (
-                                            b"TypeError",
-                                            m,
-                                            if user_fn.decl_line > 0 {
-                                                user_fn.decl_line
-                                            } else {
-                                                op.line
-                                            },
-                                        ),
+                                        Some(m) => {
+                                            let l = user_fn.recv_line_for_msg(&m);
+                                            (b"TypeError", m, if l > 0 { l } else { op.line })
+                                        }
                                         // zend_missing_arg_error() is raised by the
                                         // callee's RECV.
-                                        None => (
-                                            b"ArgumentCountError",
-                                            err_msg,
-                                            if user_fn.decl_line > 0 {
-                                                user_fn.decl_line
-                                            } else {
-                                                op.line
-                                            },
-                                        ),
+                                        None => {
+                                            let l = user_fn.recv_line(provided as usize);
+                                            (
+                                                b"ArgumentCountError",
+                                                err_msg,
+                                                if l > 0 { l } else { op.line },
+                                            )
+                                        }
                                     };
                                 let exc_val = self.create_exception(exc_class, &err_msg, exc_line);
                                 if user_fn.decl_line > 0 && !user_fn.filename.is_empty() {
@@ -36952,7 +36961,7 @@ impl Vm {
                                     .variadic_param
                                     .map(|v| v as usize)
                                     .unwrap_or(usize::MAX);
-                                let mut missing_param_err: Option<String> = None;
+                                let mut missing_param_err: Option<(String, usize)> = None;
                                 // (after $this or a closure's captured values)
                                 let lead = implicit_args + captures as usize;
                                 for param_idx in lead..(lead + required as usize) {
@@ -36969,19 +36978,28 @@ impl Vm {
                                             .map(|n| String::from_utf8_lossy(n).into_owned())
                                             .unwrap_or_else(|| format!("param{}", param_idx));
                                         let arg_num = param_idx - lead + 1;
-                                        missing_param_err = Some(format!(
-                                            "{}(): Argument #{} (${}) not passed",
-                                            fn_display, arg_num, param_name
+                                        missing_param_err = Some((
+                                            format!(
+                                                "{}(): Argument #{} (${}) not passed",
+                                                fn_display, arg_num, param_name
+                                            ),
+                                            arg_num - 1,
                                         ));
                                         break;
                                     }
                                 }
-                                if let Some(err_msg) = missing_param_err {
+                                if let Some((err_msg, idx)) = missing_param_err {
+                                    // (raised by the callee's RECV)
+                                    let line = match user_fn.recv_line(idx) {
+                                        0 => op.line,
+                                        l => l,
+                                    };
                                     let exc_val = self.create_exception(
                                         b"ArgumentCountError",
                                         &err_msg,
-                                        op.line,
+                                        line,
                                     );
+                                    Self::set_exception_file(&exc_val, &user_fn.filename);
                                     self.current_exception = Some(exc_val);
                                     if let Some((catch_target, _, _, _, saved_pc)) =
                                         exception_handlers.pop()

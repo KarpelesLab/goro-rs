@@ -563,6 +563,9 @@ pub struct OpArray {
     pub by_ref_params: Vec<bool>,
     /// Which parameters have default values (indexed by parameter position)
     pub param_has_default: Vec<bool>,
+    /// The lines of the parameters' RECV opcodes (by parameter position),
+    /// when one is not `decl_line` (empty otherwise): see `recv_line()`.
+    pub param_lines: Vec<u32>,
     pub attributes: Vec<crate::object::RuntimeAttribute>,
     pub param_attributes: Vec<Vec<crate::object::RuntimeAttribute>>,
     /// Source filename (for closures, error reporting)
@@ -980,6 +983,37 @@ pub fn take_auto_global_refs() -> u8 {
 }
 
 impl OpArray {
+    /// The line of the RECV opcode of parameter `idx` (0-based, `$this`
+    /// not counted; past the last one: the variadic's): where the errors
+    /// about its argument are raised. 0 when unknown.
+    #[inline(never)]
+    pub fn recv_line(&self, idx: usize) -> u32 {
+        match self.param_lines.last() {
+            Some(&last) => self.param_lines.get(idx).copied().unwrap_or(last),
+            None => self.decl_line,
+        }
+    }
+
+    /// `recv_line()` of the parameter a "...: Argument #N ..." message is
+    /// about (`decl_line` without one).
+    #[inline(never)]
+    pub fn recv_line_for_msg(&self, msg: &str) -> u32 {
+        if self.param_lines.is_empty() {
+            return self.decl_line;
+        }
+        let n = msg.find("Argument #").and_then(|p| {
+            let digits: String = msg[p + 10..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            digits.parse::<usize>().ok()
+        });
+        match n {
+            Some(n) if n > 0 => self.recv_line(n - 1),
+            _ => self.decl_line,
+        }
+    }
+
     /// Whether calls of this code may run without a frame of their own (see
     /// vm::leancall): 1 for a function, 2 for an instance method (its first
     /// variable is `$this`), 0 when its frame has to check or set up
@@ -1257,6 +1291,7 @@ impl OpArray {
         self.const_expr_const_names.shrink_to_fit();
         self.by_ref_params.shrink_to_fit();
         self.param_has_default.shrink_to_fit();
+        self.param_lines.shrink_to_fit();
         self.param_default_repr.shrink_to_fit();
     }
 
@@ -1328,6 +1363,7 @@ impl OpArray {
             strict_types: false,
             by_ref_params: Vec::new(),
             param_has_default: Vec::new(),
+            param_lines: Vec::new(),
             attributes: Vec::new(),
             fcc_target_name: None,
             param_attributes: Vec::new(),

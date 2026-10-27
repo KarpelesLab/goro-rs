@@ -6268,6 +6268,8 @@ impl Compiler {
                 // Record which parameters have default values
                 func_compiler.op_array.param_has_default =
                     params.iter().map(|p| p.default.is_some()).collect();
+                func_compiler.op_array.param_lines =
+                    param_recv_lines(params, func_compiler.op_array.decl_line);
                 for param in params {
                     let cv = func_compiler.op_array.get_or_create_cv(&param.name);
                     if param.variadic {
@@ -10222,6 +10224,8 @@ impl Compiler {
                                     }
                                     (last_req + 1) as u32
                                 };
+                                method_compiler.op_array.param_lines =
+                                    param_recv_lines(params, method_compiler.op_array.decl_line);
                                 // Record by-ref params (offset by 1 for non-static methods due to $this)
                                 if *is_static {
                                     method_compiler.op_array.by_ref_params =
@@ -10474,7 +10478,7 @@ impl Compiler {
                                                 op1: OperandType::Cv(this_cv),
                                                 op2: OperandType::Cv(param_cv),
                                                 result: OperandType::Const(prop_name_idx),
-                                                line: 0,
+                                                line: param.recv_line,
                                             });
                                         }
                                     }
@@ -20450,6 +20454,8 @@ impl Compiler {
                     closure_compiler.op_array.by_ref_params = by_ref;
                     closure_compiler.op_array.param_has_default = has_default;
                 }
+                closure_compiler.op_array.param_lines =
+                    param_recv_lines(params, closure_compiler.op_array.decl_line);
 
                 // Validate parameter types
                 for param in params.iter() {
@@ -20819,6 +20825,8 @@ impl Compiler {
                     closure_compiler.op_array.by_ref_params = by_ref;
                     closure_compiler.op_array.param_has_default = has_default;
                 }
+                closure_compiler.op_array.param_lines =
+                    param_recv_lines(params, closure_compiler.op_array.decl_line);
                 // Set up parameter CVs
                 for param in params {
                     let cv = closure_compiler.op_array.get_or_create_cv(&param.name);
@@ -26169,6 +26177,22 @@ fn args_to_source_string(args: &[Argument]) -> String {
 fn next_loop_id() -> u32 {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// OpArray::param_lines for `params` of a function declared on line
+/// `decl_line`: empty when all their RECV opcodes are on it.
+#[inline(never)]
+fn param_recv_lines(params: &[Param], decl_line: u32) -> Vec<u32> {
+    if params
+        .iter()
+        .all(|p| p.recv_line == decl_line || p.recv_line == 0)
+    {
+        return Vec::new();
+    }
+    params
+        .iter()
+        .map(|p| if p.recv_line == 0 { decl_line } else { p.recv_line })
+        .collect()
 }
 
 /// A constructor parameter declaring a promoted property (any of the

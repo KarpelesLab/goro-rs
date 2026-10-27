@@ -2123,6 +2123,8 @@ impl Parser {
                 }
             }
 
+            // (the line of ZEND_AST_PARAM: its type's, else its name's)
+            let mut recv_line = self.current().span.line;
             let type_hint = if !matches!(
                 self.peek(),
                 TokenKind::Variable(_) | TokenKind::Ampersand | TokenKind::Ellipsis
@@ -2134,6 +2136,9 @@ impl Parser {
 
             let by_ref = self.eat(&TokenKind::Ampersand);
             let variadic = self.eat(&TokenKind::Ellipsis);
+            if type_hint.is_none() {
+                recv_line = self.current().span.line;
+            }
 
             let name = match self.peek().clone() {
                 TokenKind::Variable(name) => {
@@ -2172,6 +2177,7 @@ impl Parser {
 
             params.push(Param {
                 line: param_line,
+                recv_line,
                 name,
                 type_hint,
                 default,

@@ -360,6 +360,9 @@ pub struct Argument {
 pub struct Param {
     /// Line of the parameter's first token after its attributes.
     pub line: u32,
+    /// Line of its type, else of its name (php-src's ZEND_AST_PARAM lineno:
+    /// that of its RECV opcode).
+    pub recv_line: u32,
     pub name: Vec<u8>,
     pub type_hint: Option<TypeHint>,
     pub default: Option<Expr>,
