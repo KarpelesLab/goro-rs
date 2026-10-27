@@ -151,46 +151,36 @@ impl Vm {
         if cls.is_empty() || method.is_empty() || method.contains(&b':') {
             return None;
         }
-        let mut cl = cls.to_ascii_lowercase();
-        match cl.as_slice() {
-            b"self" => cl = self.scope_top()?.to_ascii_lowercase(),
-            b"static" => {
-                cl = self
-                    .called_class_stack
-                    .last()
-                    .filter(|s| !s.is_empty())?
-                    .to_ascii_lowercase()
-            }
-            b"parent" => {
-                let scope = self.scope_top()?;
-                cl = self
-                    .classes
-                    .get(scope.as_slice())?
-                    .parent
-                    .as_ref()?
-                    .to_ascii_lowercase();
-            }
-            _ => {}
-        }
-        // (a keyword names a user class: its frame's $this decides)
-        let has_this = has_this || with_this;
-        let ml = method.to_ascii_lowercase();
         // (constructors and magic methods have errors of their own)
-        if ml.starts_with(b"__") {
+        if method.starts_with(b"__") {
             return None;
         }
-        let Some(c) = self
-            .classes
-            .get(cl.as_slice())
-            .filter(|c| c.filename.is_some())
-        else {
+        // (the class and method names lowercased on the stack: this runs
+        // for every forwarding call)
+        let (mut cbuf, mut cheap) = ([0u8; 128], Vec::new());
+        let named: &[u8] = if cls.eq_ignore_ascii_case(b"self") {
+            self.scope_top()?
+        } else if cls.eq_ignore_ascii_case(b"static") {
+            self.called_class_stack.last().filter(|s| !s.is_empty())?
+        } else if cls.eq_ignore_ascii_case(b"parent") {
+            let scope = self.scope_top()?;
+            self.classes.get(scope.as_slice())?.parent.as_ref()?
+        } else {
+            cls
+        };
+        let cl = lower_on_stack(named, &mut cbuf, &mut cheap);
+        // (a keyword names a user class: its frame's $this decides)
+        let has_this = has_this || with_this;
+        let (mut mbuf, mut mheap) = ([0u8; 128], Vec::new());
+        let ml = lower_on_stack(method, &mut mbuf, &mut mheap);
+        let Some(c) = self.classes.get(cl).filter(|c| c.filename.is_some()) else {
             // An internal class's public non-static method, from no $this.
-            if has_this || self.classes.contains_key(cl.as_slice()) {
+            if has_this || self.classes.contains_key(cl) {
                 return None;
             }
-            crate::stubs::find_class_lower(&cl)?;
+            crate::stubs::find_class_lower(cl)?;
             // (the error names the method's declaring class)
-            let (owner, sm) = crate::stubs::find_method(&cl, &ml)?;
+            let (owner, sm) = crate::stubs::find_method(cl, ml)?;
             if sm.flags & (crate::stubs::F_STATIC | crate::stubs::F_ABSTRACT) != 0
                 || sm.flags & crate::stubs::F_PUBLIC == 0
             {
@@ -201,8 +191,16 @@ impl Vm {
                 owner.name, sm.name
             ));
         };
-        let meth = c.get_method(&ml)?;
+        let meth = c.get_method(ml)?;
         if meth.op_array.ops.is_empty() && !meth.is_abstract {
+            return None;
+        }
+        // (a public non-abstract method: fails only when non-static and
+        // called without $this, whoever declares it)
+        if meth.visibility == crate::object::Visibility::Public
+            && !meth.is_abstract
+            && (meth.is_static || has_this)
+        {
             return None;
         }
         let decl = meth.declaring_class.to_ascii_lowercase();
@@ -714,6 +712,23 @@ impl Vm {
             Fast::Done
         } else {
             Fast::No
+        }
+    }
+}
+
+/// `s` lowercased, in `buf` when it fits (else in `heap`).
+#[inline]
+fn lower_on_stack<'b>(s: &[u8], buf: &'b mut [u8; 128], heap: &'b mut Vec<u8>) -> &'b [u8] {
+    match buf.get_mut(..s.len()) {
+        Some(d) => {
+            for (d, c) in d.iter_mut().zip(s) {
+                *d = c.to_ascii_lowercase();
+            }
+            &buf[..s.len()]
+        }
+        None => {
+            *heap = s.to_ascii_lowercase();
+            heap
         }
     }
 }
