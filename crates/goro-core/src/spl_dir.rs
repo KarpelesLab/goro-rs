@@ -695,6 +695,11 @@ impl Vm {
                     ));
                     self.current_exception.is_none()
                 }
+                Value::Double(d) if d.is_nan() => {
+                    let line = self.current_line;
+                    self.warn_nan_coercion(&v, "bool", line);
+                    self.current_exception.is_none()
+                }
                 Value::True
                 | Value::False
                 | Value::Long(_)
@@ -742,6 +747,12 @@ impl Vm {
             let mut cargs = vec![svec(fname), mode];
             cargs.extend_from_slice(a.get(1..).unwrap_or(&[]));
             self.spl_file_object_construct_in(&new_obj, &cargs, func);
+            // (spl_filesystem_object_create_type(): the path is the
+            // source's, e.g. none for an SplTempFileObject)
+            if self.current_exception.is_none() {
+                let p = Self::fs_get_path(source).unwrap_or_default();
+                set_prop(&new_obj, b"__spl_path", svec(p));
+            }
         }
         if self.current_exception.is_some() {
             return Value::Null;

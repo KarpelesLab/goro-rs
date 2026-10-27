@@ -12324,7 +12324,19 @@ impl FileHandle {
             }
             r
         } else {
-            let n = self.file.read(buf)?;
+            let n = match self.file.read(buf) {
+                // (a memory stream positioned past its end reads nothing:
+                // its backing file refuses offsets near the limit; a temp
+                // stream gone to a file reports it)
+                Err(e)
+                    if e.raw_os_error() == Some(22)
+                        && (self.special == SpecialStream::Memory
+                            || self.special == SpecialStream::Temp && self.temp_max.is_some()) =>
+                {
+                    0
+                }
+                r => r?,
+            };
             if let Some(p) = self.pipe_pos.as_mut() {
                 *p += n as i64;
             }
@@ -14589,10 +14601,11 @@ fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let clean = canon_fopen_mode(&m);
         if matches!(clean.as_str(), "w" | "a" | "x" | "c") {
             let line = vm.current_line;
-            vm.emit_notice_at(
-                "fgets(): Read of 8192 bytes failed with errno=9 Bad file descriptor",
-                line,
+            let msg = format!(
+                "{}(): Read of 8192 bytes failed with errno=9 Bad file descriptor",
+                called_as(vm, "fgets")
             );
+            vm.emit_notice_at(&msg, line);
             return Ok(Value::False);
         }
     }
@@ -14723,7 +14736,8 @@ fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     });
     if read_errno != 0 {
-        read_failed_notice(vm, "fgets", read_errno);
+        let fname = called_as(vm, "fgets");
+        read_failed_notice(vm, &fname, read_errno);
     }
     r
 }
@@ -14984,8 +14998,14 @@ fn fseek_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                     SeekFrom::Start(to as u64)
                 }
-                1 => SeekFrom::Current(offset - buffered), // SEEK_CUR
-                2 => SeekFrom::End(offset),                // SEEK_END
+                // SEEK_CUR (_php_stream_seek(): to ZEND_LONG_MAX at most)
+                1 => match fh.file.stream_position() {
+                    Ok(at) if offset > 0 && offset > i64::MAX - (at as i64 - buffered) => {
+                        SeekFrom::Start(i64::MAX as u64)
+                    }
+                    _ => SeekFrom::Current(offset - buffered),
+                },
+                2 => SeekFrom::End(offset), // SEEK_END
                 _ => SeekFrom::Start(offset as u64),
             };
             if is_unseekable_special {
@@ -20467,10 +20487,11 @@ fn fgetc_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let clean = canon_fopen_mode(&m);
         if matches!(clean.as_str(), "w" | "a" | "x" | "c") {
             let line = vm.current_line;
-            vm.emit_notice_at(
-                "fgetc(): Read of 8192 bytes failed with errno=9 Bad file descriptor",
-                line,
+            let msg = format!(
+                "{}(): Read of 8192 bytes failed with errno=9 Bad file descriptor",
+                called_as(vm, "fgetc")
             );
+            vm.emit_notice_at(&msg, line);
             return Ok(Value::False);
         }
     }
@@ -20498,7 +20519,8 @@ fn fgetc_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     });
     if failed_errno != 0 {
-        read_failed_notice(vm, "fgetc", failed_errno);
+        let fname = called_as(vm, "fgetc");
+        read_failed_notice(vm, &fname, failed_errno);
     }
     r
 }

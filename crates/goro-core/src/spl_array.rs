@@ -26,6 +26,9 @@ pub(crate) const CHILD_ARRAYS_ONLY: i64 = 4;
 pub(crate) const IS_SELF: i64 = 0x0100_0000;
 pub(crate) const USE_OTHER: i64 = 0x0200_0000;
 const INT_MASK: i64 = 0xFFFF_0000;
+/// `~SPL_ARRAY_INT_MASK`: the complement of an unsigned int constant,
+/// which only keeps the low 16 bits of a zend_long.
+const NOT_INT_MASK: i64 = 0xFFFF;
 const CLONE_MASK: i64 = 0x0100_FFFF;
 
 fn prop(obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Value {
@@ -1000,7 +1003,7 @@ impl Vm {
                     .is_some();
                 if other_is_ao {
                     if just_array {
-                        ar_flags = ao_flags(&o) & !INT_MASK;
+                        ar_flags = ao_flags(&o) & NOT_INT_MASK;
                     }
                     if Rc::ptr_eq(&o, obj) {
                         ar_flags |= IS_SELF;
@@ -1104,7 +1107,7 @@ impl Vm {
                 }
             }
         }
-        self.ao_set_array(obj, &array, flags & !INT_MASK, args.len() == 1, &func)
+        self.ao_set_array(obj, &array, flags & NOT_INT_MASK, args.len() == 1, &func)
     }
 
     /// Z_PARAM_CLASS with ArrayIterator as base.
@@ -1467,7 +1470,7 @@ impl Vm {
                 let t = self.ao_table(obj);
                 Value::Long(self.table_count(&t) as i64)
             }
-            b"getflags" => Value::Long(ao_flags(obj) & !INT_MASK),
+            b"getflags" => Value::Long(ao_flags(obj) & NOT_INT_MASK),
             b"setflags" => {
                 let f = match a.first() {
                     Some(v) => {
@@ -1478,7 +1481,7 @@ impl Vm {
                     }
                     None => 0,
                 };
-                let nf = (ao_flags(obj) & INT_MASK) | (f & !INT_MASK);
+                let nf = (ao_flags(obj) & INT_MASK) | (f & NOT_INT_MASK);
                 set_prop(obj, b"__spl_flags", Value::Long(nf));
                 Value::Null
             }
@@ -1868,7 +1871,7 @@ impl Vm {
                 let class = obj.borrow().class_name.clone();
                 let cl = obj_class_lower(obj);
                 let child = self.spl_instantiate(&class);
-                let cargs = vec![entry, Value::Long(f & !INT_MASK)];
+                let cargs = vec![entry, Value::Long(f & NOT_INT_MASK)];
                 if self.spl_has_user_ctor(&cl) {
                     self.call_object_method(&Value::Object(child.clone()), b"__construct", &cargs);
                 } else {
