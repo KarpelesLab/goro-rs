@@ -116,6 +116,11 @@ pub struct PhpFiber {
     pub(crate) saved_cv_frames: Vec<crate::internal_frames::CvFrame>,
     /// Vm::exec_frame_len of the suspended fiber, relative to its base
     pub(crate) saved_exec_frame_len: Option<usize>,
+    /// Vm::call_depth when control entered the fiber, and the calls of
+    /// the suspended fiber still running (counted in call_depth only
+    /// while it runs: a lean call's hand-over depth depends on it).
+    pub(crate) call_depth_base: u32,
+    pub(crate) saved_call_depth: u32,
     /// Locals of the suspended fiber's running functions, for the cycle
     /// collector (see gc::GcFrame).
     pub(crate) saved_gc_frames: Vec<crate::gc::GcFrame>,
@@ -215,6 +220,8 @@ impl PhpFiber {
             saved_builtin_frames: Vec::new(),
             saved_cv_frames: Vec::new(),
             saved_exec_frame_len: None,
+            call_depth_base: 0,
+            saved_call_depth: 0,
             saved_gc_frames: Vec::new(),
             saved_pending_calls: Vec::new(),
             saved_closure_pending: Vec::new(),

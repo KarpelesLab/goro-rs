@@ -68392,6 +68392,7 @@ impl Vm {
         self.fiber_bases.push((fiber_id, fiber_stack_base));
         let outer_exec = self.exec_frame_len;
         self.fiber_swap_pending_calls(&mut fiber);
+        fiber.call_depth_base = self.call_depth;
         self.fiber_custom_marks
             .push((self.custom_parked.len(), self.custom_active.clone()));
         let result = fiber.resume(crate::fiber::FiberResume::Value(Value::Null));
@@ -69566,14 +69567,20 @@ impl Vm {
         // its backtraces end with its own frames.
         self.sync_builtin_frames();
         let below = std::mem::take(&mut self.call_stack);
+        // (the CV / builtin frames of the frames set aside go with them: the
+        // fiber's are installed at depth 0 and dropped from its base when it
+        // ends, which would take the resumer's along)
+        let aside = self.frames_set_aside();
         let r = self.fiber_drive_coroutine(
             obj_rc.clone(),
             fiber,
             crate::fiber::FiberResume::Throw(ge),
             line,
         );
+        let depth = below.len();
         let mut above = std::mem::replace(&mut self.call_stack, below);
         self.call_stack.append(&mut above);
+        self.frames_put_back(aside, depth);
         if r.is_err() {
             if let Some(exc) = self.current_exception.clone() {
                 if let Some(prev) = saved_exc {
@@ -69600,6 +69607,8 @@ impl Vm {
     /// Re-install the frames a suspended fiber had pushed on the shared VM
     /// stacks.
     fn fiber_enter_stacks(&mut self, fiber: &mut crate::fiber::PhpFiber) {
+        fiber.call_depth_base = self.call_depth;
+        self.call_depth += std::mem::take(&mut fiber.saved_call_depth);
         self.fiber_restore_builtin_frames(&mut fiber.saved_builtin_frames);
         self.fiber_restore_cv_frames(&mut fiber.saved_cv_frames);
         self.gc_frames.append(&mut fiber.saved_gc_frames);
@@ -69652,6 +69661,8 @@ impl Vm {
         // Argument lists the fiber was building stay with the fiber.
         self.fiber_swap_pending_calls(fiber);
         if suspended {
+            fiber.saved_call_depth = self.call_depth.saturating_sub(fiber.call_depth_base);
+            self.call_depth = fiber.call_depth_base;
             fiber.saved_gc_frames = self.gc_frames.split_off(g.min(self.gc_frames.len()));
             fiber.saved_builtin_frames = self.fiber_take_builtin_frames(e, a);
             fiber.saved_cv_frames = self.fiber_take_cv_frames(a);

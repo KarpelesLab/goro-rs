@@ -1333,6 +1333,37 @@ impl Vm {
         self.cv_frames.append(frames);
     }
 
+    /// The CV and builtin frames, set aside with the call_stack frames they
+    /// belong to (a fiber destroyed with the call_stack emptied).
+    #[inline(never)]
+    pub(crate) fn frames_set_aside(&mut self) -> (Vec<CvFrame>, Vec<BuiltinFrame>) {
+        (
+            std::mem::take(&mut self.cv_frames),
+            std::mem::take(&mut self.builtin_frames),
+        )
+    }
+
+    /// Put back frames_set_aside()'s frames under those pushed meanwhile,
+    /// which then sit `depth` call_stack frames higher.
+    #[inline(never)]
+    pub(crate) fn frames_put_back(
+        &mut self,
+        aside: (Vec<CvFrame>, Vec<BuiltinFrame>),
+        depth: usize,
+    ) {
+        let (cv, bf) = aside;
+        let mut above_cv = std::mem::replace(&mut self.cv_frames, cv);
+        for f in &mut above_cv {
+            f.depth += depth;
+        }
+        self.cv_frames.append(&mut above_cv);
+        let mut above_bf = std::mem::replace(&mut self.builtin_frames, bf);
+        for f in &mut above_bf {
+            f.depth += depth;
+        }
+        self.builtin_frames.append(&mut above_bf);
+    }
+
     /// A fiber ended: drop the CV frames of its frames (from index `base` up).
     pub(crate) fn fiber_drop_cv_frames(&mut self, base: usize) {
         while self.cv_frames.last().is_some_and(|f| f.depth >= base) {
