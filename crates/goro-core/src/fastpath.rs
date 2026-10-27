@@ -2585,7 +2585,8 @@ fn consumed_tmps_of(
         let shared = match tmps.get(*i as usize) {
             Some(Value::Object(x)) if !no_release => {
                 Rc::strong_count(x) > 2
-                    || Rc::strong_count(x) == 2 && x.try_borrow().is_ok_and(|o| !o.dtor_listed.get())
+                    || Rc::strong_count(x) == 2
+                        && x.try_borrow().is_ok_and(|o| !o.dtor_listed.get())
             }
             Some(Value::Object(x)) => Rc::strong_count(x) > 1,
             Some(Value::Array(x)) => Rc::strong_count(x) > 1,
@@ -3231,7 +3232,14 @@ impl crate::vm::Vm {
                     // (while objects with a destructor exist, the release of
                     // its arguments is a release point it steps over)
                     let special = if maybe_special_call(op_array, ip) && quiet_ok!() {
-                        self.fast_special_call(op_array, ip, cvs, tmps, bound.is_some(), !no_release)
+                        self.fast_special_call(
+                            op_array,
+                            ip,
+                            cvs,
+                            tmps,
+                            bound.is_some(),
+                            !no_release,
+                        )
                     } else {
                         None
                     };
@@ -3371,8 +3379,7 @@ impl crate::vm::Vm {
                     let rel = if matches!(op.op1, OperandType::Tmp(_))
                         || matches!(op.op2, OperandType::Tmp(_))
                     {
-                        let rel = consumed!('run, op, ip);
-                        rel
+                        consumed!('run, op, ip)
                     } else {
                         0
                     };
@@ -4053,9 +4060,9 @@ impl crate::vm::Vm {
                     Value::Undef | Value::Reference(_) => return None,
                     v if is_plain_scalar(v) => unsafe { std::ptr::read(v) },
                     v @ Value::Array(a) if Rc::strong_count(a) > 1 => unsafe { std::ptr::read(v) },
-                    v @ Value::Object(o) if Rc::strong_count(o) > 1 && tmp_release_quiet(o, listed) => unsafe {
-                        std::ptr::read(v)
-                    },
+                    v @ Value::Object(o)
+                        if Rc::strong_count(o) > 1 && tmp_release_quiet(o, listed) =>
+                    unsafe { std::ptr::read(v) },
                     _ => return None,
                 },
                 _ => return None,
