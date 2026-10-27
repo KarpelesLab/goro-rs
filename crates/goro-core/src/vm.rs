@@ -23836,10 +23836,16 @@ impl Vm {
         let lower = &buf[..total];
         let method_lower = &lower[sep + 2..];
         let ce = self.classes.get(&lower[..sep])?;
-        if ce.filename.is_none() || ce.is_enum {
+        if ce.filename.is_none() {
             return None;
         }
         let m = ce.get_method(method_lower)?;
+        // (an enum's instance methods take the general path; its static
+        // ones are plain methods: their parameters' by-reference sends
+        // depend on knowing them)
+        if ce.is_enum && !m.is_static {
+            return None;
+        }
         if m.is_abstract || m.is_static == has_this {
             return None;
         }
