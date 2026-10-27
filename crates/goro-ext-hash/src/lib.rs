@@ -1184,6 +1184,21 @@ fn hash_update_stream_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
         );
         return throw(vm, b"TypeError", &msg);
     }
+    // PHP_Z_PARAM_STREAM(): fetched in parameter order, a closed stream
+    // is rejected before $length is parsed
+    let rid = stream.to_long();
+    if !goro_core::value::is_open_resource(rid)
+        || !matches!(
+            goro_core::value::resource_type_of(rid).as_deref(),
+            Some(b"stream" | b"persistent stream")
+        )
+    {
+        return throw(
+            vm,
+            b"TypeError",
+            "hash_update_stream(): Argument #2 ($stream) must be an open stream resource",
+        );
+    }
     let mut length = if args.len() > 2 {
         zpp_long(vm, args, 2, "hash_update_stream", "length")?
     } else {
