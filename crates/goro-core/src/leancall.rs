@@ -335,7 +335,7 @@ impl Vm {
 
     /// take_values(), inline.
     #[inline(always)]
-    fn take_slots(&mut self, n: usize) -> Vec<Value> {
+    pub(crate) fn take_slots(&mut self, n: usize) -> Vec<Value> {
         let mut v = self.value_pool.pop().unwrap_or_default();
         fill_undef(&mut v, n);
         v

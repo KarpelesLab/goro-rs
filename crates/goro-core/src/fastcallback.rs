@@ -73,7 +73,7 @@ impl Vm {
                         f
                     }
                 };
-                let lead = self.take_values(0);
+                let lead = self.take_empty_values();
                 self.fast_callback_call(&f, lead, args)
             }
             Value::Object(o) => {
@@ -86,7 +86,7 @@ impl Vm {
                         let Some(Value::String(n)) = it.next() else {
                             return None;
                         };
-                        let mut caps = self.take_values(0);
+                        let mut caps = self.take_empty_values();
                         caps.extend(it.cloned());
                         (n.clone(), Some(caps))
                     }
@@ -111,7 +111,7 @@ impl Vm {
                 };
                 // (the captured values move to the call, see
                 // call_callback_array)
-                let caps = captures.unwrap_or_else(|| self.take_values(0));
+                let caps = captures.unwrap_or_else(|| self.take_empty_values());
                 match &f {
                     Some(f) => self.fast_callback_call(f, caps, args),
                     None => {
@@ -242,7 +242,7 @@ impl Vm {
         // object's class as the called class.
         self.class_scope_stack.push(scope);
         self.called_class_stack.push(called);
-        let mut lead = self.take_values(0);
+        let mut lead = self.take_empty_values();
         lead.push(Value::Object(Rc::clone(obj)));
         let r = self.fast_callback_call(&f, lead, args);
         for v in [self.called_class_stack.pop(), self.class_scope_stack.pop()]
@@ -312,7 +312,7 @@ impl Vm {
         // named as the called class.
         self.class_scope_stack.push(scope);
         self.called_class_stack.push(called);
-        let lead = self.take_values(0);
+        let lead = self.take_empty_values();
         let r = self.fast_callback_call(&f, lead, args);
         for v in [self.called_class_stack.pop(), self.class_scope_stack.pop()]
             .into_iter()
@@ -360,7 +360,7 @@ impl Vm {
         self.push_callback_display(op_array, &mut frame_display);
         // The variables: the parameters, extra arguments only reach
         // func_get_args().
-        let mut func_cvs = self.take_values(op_array.cv_names.len());
+        let mut func_cvs = self.take_slots(op_array.cv_names.len());
         let nparams = (op_array.param_count as usize).min(func_cvs.len());
         for (slot, a) in func_cvs.iter_mut().zip(&call_args[..n.min(nparams)]) {
             *slot = a.clone();
@@ -374,7 +374,7 @@ impl Vm {
                 }
             }
         }
-        let mut frame_args = self.take_values(0);
+        let mut frame_args = self.take_empty_values();
         frame_args.extend(call_args.iter().skip(lead).map(|v| match v {
             Value::Reference(r) => r.borrow().clone(),
             v => v.clone(),
@@ -430,7 +430,24 @@ impl Vm {
         }
         let mut call = call;
         self.recycle_args(&mut call);
+        // (what is left of the call: its name, the empty string)
+        let PendingCall {
+            name,
+            args,
+            named_args,
+            target,
+        } = call;
+        drop(name);
+        debug_assert!(args.capacity() == 0 && named_args.capacity() == 0);
+        // (as made above: nothing to drop)
+        std::mem::forget((args, named_args, target));
         Some(result)
+    }
+
+    /// An empty buffer for values (take_values(0), inline).
+    #[inline(always)]
+    fn take_empty_values(&mut self) -> Vec<Value> {
+        self.value_pool.pop().unwrap_or_default()
     }
 
     /// fast_callback_call(): whether the arguments `args` of a call of
