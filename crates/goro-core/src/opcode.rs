@@ -942,14 +942,14 @@ pub(crate) struct SiteCaches {
     /// What a class constant fetch (`A::C`, `self::C`, `A::class`) found,
     /// for the class scope it ran in (see Vm::fast_class_const).
     /// (and, of `static::C`, the called class)
-    pub(crate) const_sites: IpMap<(Option<Vec<u8>>, Option<Vec<u8>>, Value)>,
+    pub(crate) const_sites: IpMap<(Option<Vec<u8>>, Option<Vec<u8>>, crate::array::HiddenValue)>,
     /// Where the static property reads (`A::$p`) found the property: the
     /// class holding its slot and the slot's index in its
     /// static_properties (see Vm::fast_static_prop_fetch).
     pub(crate) sprop_sites: IpMap<(usize, usize, Option<Vec<u8>>)>,
     /// The value a global constant fetch (not deprecated) found: constants
     /// do not change once defined (see Vm::fast_const_lookup).
-    pub(crate) gconst_sites: IpMap<Value>,
+    pub(crate) gconst_sites: IpMap<crate::array::HiddenValue>,
 }
 
 impl Default for SiteCaches {

@@ -1875,7 +1875,7 @@ impl Vm {
                         let default = match op.op2 {
                             OperandType::Const(d) => match op_array.literals.get(d as usize) {
                                 Some(Value::Array(a)) => {
-                                    Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
+                                    Value::Array(crate::array::cow_copy_new(a))
                                 }
                                 Some(v) => v.clone(),
                                 None => Value::Null,

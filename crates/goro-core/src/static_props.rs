@@ -2033,7 +2033,7 @@ impl Vm {
         if let Ok(mut s) = op_array.sites().try_borrow_mut() {
             s.get_or_insert_with(Default::default)
                 .gconst_sites
-                .insert(ip as u32, val.clone());
+                .insert(ip as u32, crate::array::HiddenValue::new(val.clone()));
         }
     }
 
@@ -2042,7 +2042,11 @@ impl Vm {
     #[inline(never)]
     pub(crate) fn fast_const_lookup(&self, op_array: &OpArray, ip: usize) -> Option<Value> {
         let sites = op_array.sites().borrow();
-        sites.as_ref()?.gconst_sites.get(&(ip as u32)).cloned()
+        sites
+            .as_ref()?
+            .gconst_sites
+            .get(&(ip as u32))
+            .map(|v| v.get().clone())
     }
 }
 

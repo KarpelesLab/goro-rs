@@ -241,9 +241,14 @@ fn zval_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u
                 return;
             }
             // (the copies sharing its storage are holders of PHP's array)
-            let rc = (Rc::strong_count(arr) + arr.borrow().shared_copies()).saturating_sub(bias);
+            let rc = {
+                let b = arr.borrow();
+                (Rc::strong_count(arr) + b.shared_copies())
+                    .saturating_sub(bias + b.hidden_holders())
+                    .max(1)
+            };
             let a = arr.borrow();
-            if a.is_empty() {
+            if a.is_empty() && !a.has_table() {
                 vm.write_output(format!("{}array(0) interned {{\n", prefix).as_bytes());
             } else {
                 let packed = if a.looks_packed() { "packed " } else { "" };

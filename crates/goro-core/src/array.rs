@@ -90,6 +90,62 @@ pub struct PhpArray {
     /// the first write to any of them. None: `entries` / `index` are this
     /// array's own.
     shared: Option<std::rc::Rc<Store>>,
+    /// Holders of this array PHP has no counterpart for (see
+    /// HiddenValue and mark_template_held()): debug_zval_dump() leaves
+    /// them out. The low bits count them (runtime cache slots, the
+    /// compiled declaration's), TEMPLATE_HELD marks that the compiled
+    /// declaration's are counted.
+    hidden: std::cell::Cell<u16>,
+}
+
+/// PhpArray::hidden: the array is held by the compiled declaration (class
+/// constant, static or instance property default) it was copied from.
+const TEMPLATE_HELD: u16 = 0x8000;
+
+/// A value a runtime cache of the engine keeps (FETCH_CONSTANT's or
+/// FETCH_CLASS_CONSTANT's run-time cache slot: PHP's points at the
+/// constant without holding the value): an array in it is a hidden holder
+/// of the array (see PhpArray::hidden_holders()).
+#[derive(Debug)]
+pub struct HiddenValue {
+    value: Value,
+    counted: bool,
+}
+
+impl HiddenValue {
+    pub fn new(value: Value) -> Self {
+        let counted = match &value {
+            Value::Array(a) => a.try_borrow().is_ok_and(|b| {
+                b.hidden.set(b.hidden.get().wrapping_add(1));
+                true
+            }),
+            _ => false,
+        };
+        HiddenValue { value, counted }
+    }
+
+    #[inline]
+    pub fn get(&self) -> &Value {
+        &self.value
+    }
+}
+
+impl Clone for HiddenValue {
+    fn clone(&self) -> Self {
+        HiddenValue::new(self.value.clone())
+    }
+}
+
+impl Drop for HiddenValue {
+    fn drop(&mut self) {
+        if self.counted {
+            if let Value::Array(a) = &self.value {
+                if let Ok(b) = a.try_borrow() {
+                    b.hidden.set(b.hidden.get().wrapping_sub(1));
+                }
+            }
+        }
+    }
 }
 
 /// The storage of an array shared by copies of it, copy-on-write (PHP's
@@ -402,6 +458,7 @@ impl Clone for PhpArray {
             untracked: false,
             ident: std::cell::Cell::new(if is_closure { 0 } else { self.identity() }),
             iters: None,
+            hidden: std::cell::Cell::new(0),
             shared: None,
         };
         if self.head == 0 {
@@ -429,6 +486,7 @@ impl PhpArray {
             untracked: false,
             ident: std::cell::Cell::new(0),
             iters: None,
+            hidden: std::cell::Cell::new(0),
             shared: None,
         }
     }
@@ -448,6 +506,7 @@ impl PhpArray {
             untracked: false,
             ident: std::cell::Cell::new(0),
             iters: None,
+            hidden: std::cell::Cell::new(0),
             shared: None,
         }
     }
@@ -493,6 +552,21 @@ impl PhpArray {
         self.shared
             .as_ref()
             .map_or(0, |s| std::rc::Rc::strong_count(s) - 1)
+    }
+
+    /// The holders of this array PHP does not have (see `hidden`).
+    pub fn hidden_holders(&self) -> usize {
+        (self.hidden.get() & !TEMPLATE_HELD) as usize
+    }
+
+    /// This array is also held `n` times by the compiled declaration it
+    /// was copied from (the class entry's constants, property defaults and
+    /// static properties share them): counted once.
+    pub fn mark_template_held(&self, n: u16) {
+        let h = self.hidden.get();
+        if h & TEMPLATE_HELD == 0 {
+            self.hidden.set((h | TEMPLATE_HELD).wrapping_add(n));
+        }
     }
 
     fn ents(&self) -> &Vec<(ArrayKey, Value)> {
@@ -580,6 +654,7 @@ impl PhpArray {
             untracked: false,
             ident: std::cell::Cell::new(self.identity()),
             iters: None,
+            hidden: std::cell::Cell::new(0),
             shared: None,
         }))
     }
@@ -625,6 +700,7 @@ impl PhpArray {
             untracked: false,
             ident: std::cell::Cell::new(self.identity()),
             iters: None,
+            hidden: std::cell::Cell::new(0),
             shared: self.shared.clone(),
         }
     }
@@ -743,6 +819,12 @@ impl PhpArray {
     #[inline]
     fn iters_inserted_at(&mut self, pos: usize) {
         self.iters_adjust(|p| if p >= pos { p + 1 } else { p });
+    }
+
+    /// Whether a data block was allocated for the table (an emptied array
+    /// is a real zend_array, not the shared empty one).
+    pub fn has_table(&self) -> bool {
+        self.zcap > 0
     }
 
     #[inline]

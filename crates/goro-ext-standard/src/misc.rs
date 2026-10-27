@@ -261,7 +261,7 @@ final class StreamBucket {
     vm.register_function(b"define", define);
     // ZEND_DECLARE_CONST: what a `const X = ...;` statement runs (not a
     // call to define(): observers and disable_functions do not see it).
-    vm.register_function(b"__declare_const", define);
+    vm.register_function(b"__declare_const", declare_const);
     vm.register_function(b"constant", constant);
 
     // Output buffering
@@ -994,6 +994,17 @@ fn trigger_error_as(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, V
 // === Constants ===
 
 fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    define_impl(vm, args, false)
+}
+
+/// ZEND_DECLARE_CONST (`const C = ...;`): the constant holds the value
+/// itself (ZVAL_COPY(), a literal array is shared with the literal), where
+/// define() copies an array (copy_constant_array()).
+fn declare_const(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    define_impl(vm, args, true)
+}
+
+fn define_impl(vm: &mut Vm, args: &[Value], share: bool) -> Result<Value, VmError> {
     let name_val = args.first().unwrap_or(&Value::Null);
     // Check type of first argument
     match name_val {
@@ -1066,6 +1077,7 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // copy_constant_array(): references are dropped; a recursive array
     // is rejected (validate_constant_array_argument()).
     let value = match value.deref() {
+        Value::Array(a) if share => Value::Array(a),
         Value::Array(a) => {
             let mut stack = Vec::new();
             match const_array_copy(&a, &mut stack) {

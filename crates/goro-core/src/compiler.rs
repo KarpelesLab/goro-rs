@@ -19082,7 +19082,13 @@ impl Compiler {
                             }),
                     });
                 }
+                // zend_try_ct_eval_array(): an IS_CONST operand.
+                if let Some(arr) = Self::fold_const_array(expr, 0) {
+                    self.zend_lineno = Self::array_ast_lineno(expr);
+                    return Ok(OperandType::Const(self.op_array.add_literal(arr)));
+                }
                 let arr_tmp = self.op_array.alloc_temp();
+                let arr_new_at = self.op_array.ops.len();
                 self.op_array.emit(Op {
                     opcode: OpCode::ArrayNew,
                     op1: OperandType::Unused,
@@ -19302,6 +19308,13 @@ impl Compiler {
                             line: el_line,
                         });
                     }
+                }
+                // zend_try_ct_eval_array() of elements that compiled to
+                // constants (persistent constants, __LINE__, folded
+                // operators ...): an IS_CONST operand after all.
+                if let Some(lit) = self.fold_compiled_const_array(arr_new_at, arr_tmp, lits_start) {
+                    self.zend_lineno = Self::array_ast_lineno(expr);
+                    return Ok(OperandType::Const(lit));
                 }
                 // A compile-time constant array (zend_try_ct_eval_array) keeps
                 // the strings of the AST, which are not interned (one-byte
@@ -24391,26 +24404,35 @@ impl Compiler {
     }
 
     /// An array literal of constant elements (ints, floats, strings, bools,
-    /// null and such arrays, under int or string keys), built at compile
-    /// time the way INIT_ARRAY / ADD_ARRAY_ELEMENT build it at run time
-    /// (string keys that are canonical integers become integer keys, an
-    /// append takes the next integer key). None when it is not one, or when
-    /// building it could raise anything (a float / bool / null key, an
-    /// append past the last integer key). Assigned to a variable, the
-    /// literal is copied (the copy shares its storage until written).
+    /// null and such arrays, unpacked constant arrays), built at compile
+    /// time like zend_try_ct_eval_array(): string keys that are canonical
+    /// integers become integer keys, bools and integral floats are integer
+    /// keys, an append takes the next integer key. None when it is not one,
+    /// or when building it could raise anything at run time (a null key, a
+    /// fractional float key, an append past the last integer key). The
+    /// literal is the array every evaluation shares (PHP's IS_CONST
+    /// operand): holders copy it on write, and the literal table keeps
+    /// holding it (never garbage for the cycle collector).
     #[inline(never)]
     fn fold_const_array(expr: &Expr, depth: usize) -> Option<Value> {
         let ExprKind::Array(elements) = &expr.kind else {
             return None;
         };
-        if depth > 16 || elements.len() > 4096 {
+        if depth > 256 {
             return None;
         }
         fn scalar(e: &Expr) -> Option<Value> {
             Some(match &e.kind {
                 ExprKind::Int(n) => Value::Long(*n),
                 ExprKind::Float(f) => Value::Double(*f),
-                ExprKind::String(s) => Value::String(PhpString::from_vec(s.clone())),
+                ExprKind::String(s) => {
+                    // (one-byte and empty strings are interned: ZSTR_CHAR())
+                    let p = PhpString::from_vec(s.clone());
+                    if s.len() <= 1 {
+                        p.mark_interned();
+                    }
+                    Value::String(p)
+                }
                 ExprKind::True => Value::True,
                 ExprKind::False => Value::False,
                 ExprKind::Null => Value::Null,
@@ -24426,19 +24448,62 @@ impl Compiler {
                 _ => return None,
             })
         }
-        let mut arr = crate::array::PhpArray::new();
+        fn is_scalar(e: &Expr) -> bool {
+            match &e.kind {
+                ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::String(_)
+                | ExprKind::True
+                | ExprKind::False
+                | ExprKind::Null => true,
+                ExprKind::UnaryOp {
+                    op: UnaryOp::Negate,
+                    operand,
+                    ..
+                } => match &operand.kind {
+                    ExprKind::Int(n) => n.checked_neg().is_some(),
+                    ExprKind::Float(_) => true,
+                    _ => false,
+                },
+                _ => false,
+            }
+        }
+        // (every element is checked before anything is built: a
+        // non-constant one anywhere leaves the whole array to run time)
         for elem in elements {
             // (an empty element, `[1, , 2]`, is a compile error: compile_expr's)
             let empty = elem.key.is_none()
                 && matches!(elem.value.kind, ExprKind::Null)
                 && elem.value.span.start == elem.value.span.end;
-            if elem.unpack || elem.by_ref || empty {
+            if elem.by_ref || empty {
                 return None;
             }
+            let value_ok = match &elem.value.kind {
+                ExprKind::Array(_) => true,
+                _ => !elem.unpack && is_scalar(&elem.value),
+            };
+            if !value_ok || elem.key.as_ref().is_some_and(|k| !is_scalar(k)) {
+                return None;
+            }
+        }
+        let mut arr = crate::array::PhpArray::with_capacity(elements.len());
+        for elem in elements {
             let val = match &elem.value.kind {
                 ExprKind::Array(_) => Self::fold_const_array(&elem.value, depth + 1)?,
                 _ => scalar(&elem.value)?,
             };
+            if elem.unpack {
+                let Value::Array(inner) = &val else {
+                    return None;
+                };
+                for (k, v) in inner.borrow().iter() {
+                    match k {
+                        crate::array::ArrayKey::String(_) => arr.set(k.clone(), v.clone()),
+                        crate::array::ArrayKey::Int(_) => arr.try_push(v.clone()).ok()?,
+                    }
+                }
+                continue;
+            }
             match &elem.key {
                 None => arr.try_push(val).ok()?,
                 Some(k) => {
@@ -24450,6 +24515,17 @@ impl Compiler {
                                 None => crate::array::ArrayKey::String(s),
                             }
                         }
+                        Value::True => crate::array::ArrayKey::Int(1),
+                        Value::False => crate::array::ArrayKey::Int(0),
+                        // (zend_is_long_compatible(): an integral float in range)
+                        Value::Double(f)
+                            if f.is_finite()
+                                && f.fract() == 0.0
+                                && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18)
+                                    .contains(&f) =>
+                        {
+                            crate::array::ArrayKey::Int(f as i64)
+                        }
                         _ => return None,
                     };
                     arr.set(key, val);
@@ -24457,6 +24533,105 @@ impl Compiler {
             }
         }
         Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr))))
+    }
+
+    /// The line of an array literal's AST node (zend_ast_create_list():
+    /// its first element's, whose ZEND_AST_ARRAY_ELEM has its value's), what
+    /// CG(zend_lineno) is left at once a constant array is compiled.
+    #[inline(never)]
+    fn array_ast_lineno(expr: &Expr) -> u32 {
+        let mut e = expr;
+        loop {
+            match &e.kind {
+                ExprKind::Array(elems) if !elems.is_empty() && elems[0].value.span.line > 0 => {
+                    e = &elems[0].value;
+                }
+                _ if e.span.line > 0 => return e.span.line,
+                _ => return expr.span.line,
+            }
+        }
+    }
+
+    /// zend_try_ct_eval_array() of an array literal whose elements all
+    /// compiled to constant operands (ArrayNew at `at` into `arr_tmp`, then
+    /// only ArrayAppend / ArraySet of literals added from `lits_start` on):
+    /// the code is dropped and the array built now becomes a literal. None
+    /// (nothing changed) when building it could raise anything at run time.
+    #[inline(never)]
+    fn fold_compiled_const_array(
+        &mut self,
+        at: usize,
+        arr_tmp: u32,
+        lits_start: usize,
+    ) -> Option<u32> {
+        let ops = &self.op_array.ops[at + 1..];
+        let lits = &self.op_array.literals;
+        let lit = |o: &OperandType| match o {
+            OperandType::Const(i) => lits.get(*i as usize),
+            _ => None,
+        };
+        let plain = |v: &Value| {
+            matches!(
+                v,
+                Value::Long(_)
+                    | Value::Double(_)
+                    | Value::String(_)
+                    | Value::True
+                    | Value::False
+                    | Value::Null
+                    | Value::Array(_)
+            )
+        };
+        let mut arr = crate::array::PhpArray::with_capacity(ops.len());
+        for op in ops {
+            if op.op1 != OperandType::Tmp(arr_tmp) {
+                return None;
+            }
+            let val = lit(&op.op2).filter(|v| plain(v))?.clone();
+            match op.opcode {
+                OpCode::ArrayAppend => arr.try_push(val).ok()?,
+                OpCode::ArraySet => {
+                    let key = match lit(&op.result)? {
+                        Value::Long(n) => crate::array::ArrayKey::Int(*n),
+                        Value::String(s) => {
+                            match crate::fastpath::canonical_int_key(s.as_bytes()) {
+                                Some(n) => crate::array::ArrayKey::Int(n),
+                                None => crate::array::ArrayKey::String(s.clone()),
+                            }
+                        }
+                        Value::True => crate::array::ArrayKey::Int(1),
+                        Value::False => crate::array::ArrayKey::Int(0),
+                        Value::Double(f)
+                            if f.is_finite()
+                                && f.fract() == 0.0
+                                && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18)
+                                    .contains(f) =>
+                        {
+                            crate::array::ArrayKey::Int(*f as i64)
+                        }
+                        _ => return None,
+                    };
+                    arr.set(key, val);
+                }
+                _ => return None,
+            }
+        }
+        // (the strings of the AST are not interned: one-byte and empty
+        // strings aside)
+        for (_, v) in arr.iter() {
+            if let Value::String(s) = v {
+                s.unmark_interned();
+            }
+        }
+        self.op_array.ops.truncate(at);
+        self.op_array.literals.truncate(lits_start);
+        if self.op_array.temp_next == arr_tmp + 1 {
+            self.op_array.temp_next = arr_tmp;
+        }
+        Some(
+            self.op_array
+                .add_literal(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr)))),
+        )
     }
 
     /// zend_try_ct_eval_array() of an array literal or of one nested in

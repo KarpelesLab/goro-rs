@@ -23430,7 +23430,10 @@ impl Vm {
             .borrow_mut()
             .get_or_insert_with(Default::default)
             .const_sites
-            .insert(ip as u32, (scope, called, val.clone()));
+            .insert(
+                ip as u32,
+                (scope, called, crate::array::HiddenValue::new(val.clone())),
+            );
     }
 
     /// A class constant fetch its site already resolved (see
@@ -23443,7 +23446,7 @@ impl Vm {
             && called
                 .as_ref()
                 .is_none_or(|c| self.called_class_stack.last() == Some(c)))
-        .then(|| v.clone())
+        .then(|| v.get().clone())
     }
 
     /// A freshly compiled included file, as it runs (and as the script
@@ -24782,13 +24785,33 @@ impl Vm {
     /// Give `class` its own copy of the array defaults it shares with the
     /// compiled declaration (objects then share them copy-on-write).
     #[inline(never)]
-    fn own_array_defaults(class: &mut ClassEntry) {
-        for p in class.properties.iter_mut() {
-            if let Value::Array(a) = &p.default {
-                if Rc::strong_count(a) > 1 {
-                    let copy = a.borrow().clone();
-                    p.default = Value::Array(Rc::new(RefCell::new(copy)));
+    fn own_array_defaults(class: &ClassEntry) {
+        // (each array of the declaration, with the number of places of it
+        // holding it: the declaration this entry was cloned from holds it
+        // as many times)
+        let mut seen: Vec<(*const RefCell<crate::array::PhpArray>, u16)> = Vec::new();
+        let mut note = |v: &Value| {
+            if let Value::Array(a) = v {
+                let p = Rc::as_ptr(a);
+                match seen.iter_mut().find(|(q, _)| *q == p) {
+                    Some((_, n)) => *n += 1,
+                    None => seen.push((p, 1)),
                 }
+            }
+        };
+        for p in class.properties.iter() {
+            note(&p.default);
+        }
+        for v in class.constants.values() {
+            note(v);
+        }
+        for v in class.static_properties.values() {
+            note(v);
+        }
+        for (p, n) in seen {
+            // SAFETY: `p` points into an array `class` holds.
+            if let Ok(b) = unsafe { &*p }.try_borrow() {
+                b.mark_template_held(n);
             }
         }
     }
@@ -47690,7 +47713,9 @@ impl Vm {
                         let default = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                         let default = match default {
                             Value::Array(a) => {
-                                Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
+                                // (the static_variables_ptr copy: the literal
+                                // shared until written)
+                                Value::Array(crate::array::cow_copy_new(&a))
                             }
                             v => v,
                         };
@@ -56051,7 +56076,7 @@ impl Vm {
                     if let Some(mut class) = src.cloned() {
                         // The class entry owns its array defaults (the
                         // compiled declaration's copy is not a holder).
-                        Self::own_array_defaults(&mut class);
+                        Self::own_array_defaults(&class);
                         // Check for using "_" as a class/interface/trait/enum name (deprecated since 8.4)
                         {
                             let short_name =
