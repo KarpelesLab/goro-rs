@@ -286,8 +286,8 @@ impl Vm {
     /// The static slot's current cell.
     fn sp_cell(&mut self, slot: &StaticPropSlot, name: &[u8]) -> Option<&mut Value> {
         self.classes
-            .get_index_mut(slot.owner)
-            .and_then(|(_, c)| c.static_properties.get_mut(name))
+            .static_props_mut(slot.owner)
+            .and_then(|sp| sp.get_mut(name))
     }
 
     /// The property's declared type.

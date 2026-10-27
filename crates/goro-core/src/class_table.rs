@@ -9,6 +9,7 @@
 
 use crate::object::ClassEntry;
 use crate::stubs::{self, K_ENUM, K_INTERFACE, K_TRAIT, StubClass};
+use crate::value::Value;
 use crate::vm::Vm;
 use std::hash::Hash;
 use std::rc::Rc;
@@ -300,6 +301,19 @@ impl ClassMap {
     pub fn get_index_mut(&mut self, i: usize) -> Option<(&Vec<u8>, &mut ClassEntry)> {
         self.changed();
         self.map.get_index_mut(i).map(|(k, c)| (k, Rc::make_mut(c)))
+    }
+
+    /// The static property values of the entry at `i`, to change (the
+    /// entry copied first when shared). What is derived from the table
+    /// (see `stamp`) does not depend on them: the stamps are kept.
+    #[inline]
+    pub fn static_props_mut(
+        &mut self,
+        i: usize,
+    ) -> Option<&mut indexmap::IndexMap<Vec<u8>, Value>> {
+        self.map
+            .get_index_mut(i)
+            .map(|(_, c)| &mut Rc::make_mut(c).static_properties)
     }
 
     #[inline]
