@@ -11451,6 +11451,36 @@ impl Vm {
             || crate::value::has_freed_resources()
     }
 
+    /// While objects awaiting their destructor exist (has_release_work()),
+    /// how many release points in a row a run of fast opcodes releasing
+    /// nothing but plain values may step over (see run_fast_ops): each
+    /// would find nothing to do. Nothing is waiting (no generator with a
+    /// finally block, no released resource, nothing in the collector's
+    /// queues: gc::release_quiet()), and the scan of the destructible
+    /// list's tail the next release points make sees no object only the
+    /// list holds; up to the next scan that looks at the long-lived
+    /// entries too (see DtorList::young_scan), which a release point
+    /// makes. 0: none.
+    #[inline(never)]
+    pub(crate) fn quiet_release_budget(&self) -> u32 {
+        if !self.finally_generators.is_empty()
+            || crate::value::has_freed_resources()
+            || !crate::gc::release_quiet()
+            || self.unset_slot_pending.is_some()
+        {
+            return 0;
+        }
+        let (start, n) = self.destructible_objects.young_scan(64);
+        if n == 0
+            || self.destructible_objects[start..]
+                .iter()
+                .any(|v| !matches!(v, Value::Object(o) if Rc::strong_count(o) > 1))
+        {
+            return 0;
+        }
+        n
+    }
+
     /// zend_list_free(): run the destructors of the resources whose last
     /// reference went away. An exception in flight is set aside while a
     /// destructor runs and becomes the previous of one it throws.

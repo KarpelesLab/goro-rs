@@ -783,6 +783,26 @@ pub(crate) fn drops_quietly_deep(
     budget: &mut u32,
     globals: &Rc<RefCell<crate::array::PhpArray>>,
 ) -> bool {
+    drops_quietly::<false>(v, budget, globals)
+}
+
+/// drops_quietly_deep() while objects awaiting their destructor exist:
+/// no such object is reached either (one held by its list and by what is
+/// released would be garbage then: see Vm::quiet_release_budget).
+#[inline]
+pub(crate) fn drops_quietly_listed(
+    v: &Value,
+    budget: &mut u32,
+    globals: &Rc<RefCell<crate::array::PhpArray>>,
+) -> bool {
+    drops_quietly::<true>(v, budget, globals)
+}
+
+fn drops_quietly<const LISTED: bool>(
+    v: &Value,
+    budget: &mut u32,
+    globals: &Rc<RefCell<crate::array::PhpArray>>,
+) -> bool {
     match v {
         Value::Array(a) => {
             if Rc::ptr_eq(a, globals) {
@@ -813,10 +833,13 @@ pub(crate) fn drops_quietly_deep(
                         | Value::Long(_)
                         | Value::Double(_)
                         | Value::String(_)
-                ) || drops_quietly_deep(v, budget, globals)
+                ) || drops_quietly::<LISTED>(v, budget, globals)
             })
         }
         Value::Object(o) => {
+            if LISTED && o.try_borrow().map_or(true, |b| b.dtor_listed.get()) {
+                return false;
+            }
             if Rc::strong_count(o) > 1 || object_release_quiet(o) {
                 return true;
             }
@@ -849,13 +872,13 @@ pub(crate) fn drops_quietly_deep(
                         | Value::Long(_)
                         | Value::Double(_)
                         | Value::String(_)
-                ) || drops_quietly_deep(v, budget, globals)
+                ) || drops_quietly::<LISTED>(v, budget, globals)
             })
         }
         Value::Reference(r) => {
             Rc::strong_count(r) > 1
                 || r.try_borrow()
-                    .is_ok_and(|b| drops_quietly_deep(&b, budget, globals))
+                    .is_ok_and(|b| drops_quietly::<LISTED>(&b, budget, globals))
         }
         Value::Generator(g) => Rc::strong_count(g) > 1,
         Value::Resource(_) => false,
@@ -968,6 +991,7 @@ pub(crate) fn fast_op(
                 num_operand(&op.op1, cvs, tmps, literals),
                 num_operand(&op.op2, cvs, tmps, literals),
             ) {
+                (Some(Num::L(x)), Some(Num::L(y))) => x == y,
                 (Some(a), Some(b)) => a.value().equals(&b.value()),
                 // Scalars (strings compared as numbers when both are
                 // numeric): no conversion with a side effect.
@@ -2795,11 +2819,13 @@ pub(crate) struct PlainPropMemo {
 }
 
 /// Whether a variable operand of `op` is bound to a reference.
-#[inline]
+#[inline(always)]
 fn cv_operand_is_ref(op: &Op, cvs: &[Value]) -> bool {
-    [op.op1, op.op2, op.result].iter().any(|o| {
+    #[inline(always)]
+    fn is_ref(o: &OperandType, cvs: &[Value]) -> bool {
         matches!(o, OperandType::Cv(i) if matches!(cvs.get(*i as usize), Some(Value::Reference(_))))
-    })
+    }
+    is_ref(&op.op1, cvs) || is_ref(&op.op2, cvs) || is_ref(&op.result, cvs)
 }
 
 /// Whether the write fetch `op` is the container of the next opcode's
@@ -2986,6 +3012,30 @@ impl crate::vm::Vm {
         // the dispatch loop's current line once control goes back to it,
         // nothing here reads it)
         let mut last = usize::MAX;
+        // While destructible objects exist (`no_release` false): how many
+        // more release points opcodes that release nothing but plain values
+        // may step over (see Vm::quiet_release_budget; -1: not looked at).
+        let mut quiet_left: i64 = -1;
+        // (whether such an opcode may run here; then, once it ran, that it
+        // stepped over its release point)
+        macro_rules! quiet_ok {
+            () => {
+                no_release || {
+                    if quiet_left < 0 {
+                        quiet_left = i64::from(self.quiet_release_budget());
+                    }
+                    quiet_left > 0
+                }
+            };
+        }
+        macro_rules! quiet_took {
+            () => {
+                if !no_release {
+                    quiet_left -= 1;
+                    self.destructible_objects.skip_scan();
+                }
+            };
+        }
         let next = 'run: loop {
             let Some(op) = ops.get(ip) else {
                 break 'run ip;
@@ -3372,13 +3422,14 @@ impl crate::vm::Vm {
                 // A statement's temporaries that hold plain values, with no
                 // foreach state and nothing to destroy: the general handler
                 // just empties them.
-                OpCode::FreeTmps if no_release => {
+                OpCode::FreeTmps if quiet_ok!() => {
                     // (nothing to release in them: see OpArray::free_mask())
                     if free_mask
                         .get()
                         .get(ip)
                         .is_some_and(|m| m & crate::opcode::FREE_PLAIN != 0)
                     {
+                        quiet_took!();
                         Fast::Done
                     } else {
                         let (OperandType::Tmp(a), OperandType::Tmp(b)) = (op.op1, op.op2) else {
@@ -3411,10 +3462,16 @@ impl crate::vm::Vm {
                             }
                         }
                         match rest {
-                            Some(k) if !fast_free_containers(&mut range[k..], &self.globals) => {
+                            Some(k)
+                                if !no_release
+                                    || !fast_free_containers(&mut range[k..], &self.globals) =>
+                            {
                                 break 'run ip;
                             }
-                            _ => Fast::Done,
+                            _ => {
+                                quiet_took!();
+                                Fast::Done
+                            }
                         }
                     }
                 }
@@ -3432,7 +3489,22 @@ impl crate::vm::Vm {
                     f => f,
                 },
                 // (out of line: see div_mod_quick)
-                OpCode::Div | OpCode::Mod => fast_num_str_arith(op, cvs, tmps, literals, refs_ok),
+                OpCode::Div => fast_num_str_arith(op, cvs, tmps, literals, refs_ok),
+                // (of two ints, at once)
+                OpCode::Mod => match (
+                    num_operand(&op.op1, cvs, tmps, literals),
+                    num_operand(&op.op2, cvs, tmps, literals),
+                ) {
+                    (Some(Num::L(x)), Some(Num::L(y))) if y != 0 => {
+                        // (LONG_MIN % -1 is 0)
+                        if store_tmp(&op.result, Value::Long(x.wrapping_rem(y)), tmps) {
+                            Fast::Done
+                        } else {
+                            Fast::No
+                        }
+                    }
+                    _ => fast_num_str_arith(op, cvs, tmps, literals, refs_ok),
+                },
                 OpCode::Less => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::LessEqual => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::Greater => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
@@ -3490,7 +3562,12 @@ impl crate::vm::Vm {
                     let f = fast_op(op, cvs, tmps, literals, refs_ok, no_release);
                     past_tested_free(f, ip, ops, free_mask.get(), tmps, no_release, fe)
                 }
-                OpCode::Assign => match fast_op(op, cvs, tmps, literals, refs_ok, no_release) {
+                // (a plain value over a plain value: nothing released)
+                OpCode::Assign => match fast_op(op, cvs, tmps, literals, refs_ok, quiet_ok!()) {
+                    Fast::Done if !no_release => {
+                        quiet_took!();
+                        Fast::Done
+                    }
                     Fast::No => {
                         // (a temporary no running loop holds; or the iterator
                         // of a loop left by a `break`, released: FE_FREE)
@@ -3504,9 +3581,23 @@ impl crate::vm::Vm {
                             }
                             _ => false,
                         };
-                        self.fast_assign(
-                            op, cvs, tmps, literals, refs_ok, no_release, fe_quiet, tmp_free,
-                        )
+                        match self.fast_assign(
+                            op,
+                            cvs,
+                            tmps,
+                            literals,
+                            refs_ok,
+                            no_release,
+                            quiet_ok!(),
+                            fe_quiet,
+                            tmp_free,
+                        ) {
+                            Fast::Done => {
+                                quiet_took!();
+                                Fast::Done
+                            }
+                            f => f,
+                        }
                     }
                     f => f,
                 },
@@ -4123,17 +4214,22 @@ impl crate::vm::Vm {
         literals: &[Value],
         refs_ok: bool,
         no_release: bool,
+        quiet: bool,
         fe_quiet: bool,
         tmp_free: bool,
     ) -> Fast {
         // (the general handler is a release point: it is only bypassed when
-        // no destructor can be due)
-        if !no_release || !tmp_writable(&op.result, tmps) {
+        // no destructor can be due, or when none is and what it releases
+        // makes none due: `quiet`, see Vm::quiet_release_budget)
+        if !quiet || !tmp_writable(&op.result, tmps) {
             return Fast::No;
         }
         // (an overwritten array or object loses this holder)
         let releasable = |v: &Value| match v {
-            Value::Array(_) | Value::Object(_) => drops_quietly_deep(v, &mut 256, &self.globals),
+            Value::Array(_) | Value::Object(_) if no_release => {
+                drops_quietly_deep(v, &mut 256, &self.globals)
+            }
+            Value::Array(_) | Value::Object(_) => drops_quietly_listed(v, &mut 256, &self.globals),
             v => is_plain_scalar(v),
         };
         let to_tmp = match op.op1 {

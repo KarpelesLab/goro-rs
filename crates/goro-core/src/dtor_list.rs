@@ -49,6 +49,27 @@ impl DtorList {
             start
         }
     }
+
+    /// The first index the scans of the next release points look at (as
+    /// tail_scan_start() finds it), and how many of them in a row look at
+    /// the young entries only: the next scan that looks at the old ones
+    /// too (or starts a new round) comes after them.
+    #[inline]
+    pub(crate) fn young_scan(&self, window: usize) -> (usize, u32) {
+        let len = self.list.len();
+        let start = len - len.min(window);
+        // (scan k of the next ones counts round_scans + k: a multiple of
+        // OLD_SCAN_EVERY, which SCANS_TO_OLD is, looks at the old entries)
+        let n = OLD_SCAN_EVERY - 1 - self.round_scans % OLD_SCAN_EVERY;
+        (self.old_below.max(start), n)
+    }
+
+    /// A release point's scan that young_scan() found would see nothing
+    /// was stepped over: the scans after it are those that would have come.
+    #[inline]
+    pub(crate) fn skip_scan(&mut self) {
+        self.round_scans += 1;
+    }
 }
 
 impl std::ops::Deref for DtorList {
