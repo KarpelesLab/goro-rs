@@ -26,7 +26,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | Area | Pass | Run | Rate |
 |---|---|---|---|
 | Zend/tests | 5254 | 5255 | 99.98% |
-| tests/ (lang, classes, basic, …) | 826 | 832 | 99.3% |
+| tests/ (lang, classes, basic, …) | 831 | 831 | 100% |
 | ext/standard | 3373 | 3376 | 99.9% |
 | ext/spl | 779 | 779 | 100% |
 | ext/date | 677 | 677 | 100% |
@@ -37,9 +37,9 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/gd (bundled libgd port; PNG/GIF/JPEG/WebP/AVIF/BMP/TGA/XBM/XPM/WBMP/GD2, FreeType) | 308 | 308 | 100% |
 | ext/xsl (libxslt + libexslt port) | 76 | 76 | 100% |
 | ext/mbstring | 415 | 415 | 100% |
-| ext/intl (on the `intl` crate) | 426 | 428 | 99.5% |
+| ext/intl (on the `intl` crate) | 427 | 427 | 100% |
 | ext/iconv (glibc iconv emulation) | 68 | 68 | 100% |
-| ext/openssl (incl. TLS streams, on purecrypto) | 208 | 213 | 97.7% |
+| ext/openssl (incl. TLS streams, on purecrypto) | 211 | 214 | 98.6% |
 | ext/sodium (on purecrypto) | 30 | 30 | 100% |
 | ext/mysqli (embedded MySQL fixture) | 420 | 420 | 100% |
 | ext/pdo (generic tests, run against MySQL, PostgreSQL and SQLite) | 369 | 372 | 99.2% |
@@ -191,6 +191,24 @@ SQLite (the official SQLite Database Integration plugin over goro's PDO
 SQLite) and has an end-to-end smoke test: installer, login, dashboard,
 pretty permalinks, publishing through the REST API, comments, uploads with
 thumbnails and HTTPS.
+
+### Real-world software
+
+Checked against PHP 8.5.4 (same output / same test results):
+
+- **Composer** 2.10: `install`, `require`, `update`, `create-project`,
+  `dump-autoload -o` (byte-identical to PHP's), `audit`, `outdated`.
+- **Laravel 13** skeleton: `artisan` migrate (SQLite), `route:list`, `make:*`,
+  `artisan test`, tinker, and pages served by `goro -S`.
+- **Symfony 8.1** skeleton: `cache:clear`, `about`, the compiled container and
+  the welcome page.
+- Library test suites with no goro-only failures: nikic/php-parser, twig,
+  league/commonmark, ramsey/uuid, guzzle/psr7 (and real HTTPS through Guzzle
+  and Symfony HttpClient), doctrine/lexer and inflector, brick/math,
+  symfony/yaml, finder, process; monolog, Carbon and symfony/console differ only
+  on environment-dependent tests.
+- **phpstan** analyses brick/math at level 10 with PHP's exact result (still
+  ~19× slower than PHP; performance work is ongoing).
 
 ## Architecture
 
