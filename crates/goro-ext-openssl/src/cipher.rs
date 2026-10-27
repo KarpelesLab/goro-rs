@@ -44,8 +44,19 @@ pub enum Mode {
     Xts,
     Wrap,
     WrapPad,
+    /// Key wrap with the inverse cipher (AES-*-WRAP(-PAD)-INV).
+    WrapInv,
+    WrapPadInv,
     /// CBC with ciphertext stealing, OpenSSL's default "CS1" variant.
     CbcCts,
+    /// AES-*-CBC-HMAC-SHA*: outside TLS, unpadded CBC on whole blocks.
+    CbcHmac,
+    /// RFC 8452 AES-GCM-SIV (no tag reachable from PHP).
+    GcmSiv,
+    /// RFC 5297 AES-SIV (no tag reachable from PHP).
+    Siv,
+    /// RFC 3217 Triple-DES key wrap (random IV).
+    Des3Wrap,
 }
 
 #[derive(Clone, Debug)]
@@ -171,17 +182,6 @@ fn build_table() -> Vec<CipherSpec> {
             Some(oids[1]),
         ));
         t.push(spec(
-            &n("cbc-cts"),
-            &[],
-            Algo::Aes,
-            Mode::CbcCts,
-            k,
-            16,
-            1,
-            false,
-            None,
-        ));
-        t.push(spec(
             &n("ofb"),
             &[],
             Algo::Aes,
@@ -297,6 +297,76 @@ fn build_table() -> Vec<CipherSpec> {
             false,
             Some(oids[7]),
         ));
+        t.push(spec(
+            &n("wrap-inv"),
+            &[&format!("aes{}-wrap-inv", bits)],
+            Algo::Aes,
+            Mode::WrapInv,
+            k,
+            8,
+            8,
+            false,
+            None,
+        ));
+        t.push(spec(
+            &n("wrap-pad-inv"),
+            &[&format!("aes{}-wrap-pad-inv", bits)],
+            Algo::Aes,
+            Mode::WrapPadInv,
+            k,
+            4,
+            8,
+            false,
+            None,
+        ));
+        t.push(spec(
+            &n("cbc-cts"),
+            &[],
+            Algo::Aes,
+            Mode::CbcCts,
+            k,
+            16,
+            16,
+            false,
+            None,
+        ));
+        t.push(spec(
+            &n("gcm-siv"),
+            &[],
+            Algo::Aes,
+            Mode::GcmSiv,
+            k,
+            12,
+            1,
+            false,
+            None,
+        ));
+        t.push(spec(
+            &n("siv"),
+            &[],
+            Algo::Aes,
+            Mode::Siv,
+            2 * k,
+            0,
+            1,
+            false,
+            None,
+        ));
+        if bits != 192 {
+            for h in ["sha1", "sha256"] {
+                t.push(spec(
+                    &n(&format!("cbc-hmac-{}", h)),
+                    &[],
+                    Algo::Aes,
+                    Mode::CbcHmac,
+                    k,
+                    16,
+                    16,
+                    false,
+                    None,
+                ));
+            }
+        }
     }
     t.push(spec(
         "aes-128-xts",
@@ -447,17 +517,6 @@ fn build_table() -> Vec<CipherSpec> {
             k,
             16,
             16,
-            false,
-            None,
-        ));
-        t.push(spec(
-            &n("cbc-cts"),
-            &[],
-            Algo::Camellia,
-            Mode::CbcCts,
-            k,
-            16,
-            1,
             false,
             None,
         ));
@@ -877,8 +936,101 @@ fn build_table() -> Vec<CipherSpec> {
         false,
         None,
     ));
+    for bits in [128usize, 192, 256] {
+        t.push(spec(
+            &format!("camellia-{}-cbc-cts", bits),
+            &[],
+            Algo::Camellia,
+            Mode::CbcCts,
+            bits / 8,
+            16,
+            16,
+            false,
+            None,
+        ));
+    }
+    for (m, mode, k, iv, oid) in [
+        ("gcm", Mode::Gcm, 16, 12, "1.2.156.10197.1.104.8"),
+        ("ccm", Mode::Ccm, 16, 12, "1.2.156.10197.1.104.9"),
+        ("xts", Mode::Xts, 32, 16, "1.2.156.10197.1.104.10"),
+    ] {
+        t.push(spec(
+            &format!("sm4-{}", m),
+            &[],
+            Algo::Sm4,
+            mode,
+            k,
+            iv,
+            1,
+            false,
+            Some(oid),
+        ));
+    }
+    t.push(spec(
+        "des3-wrap",
+        &["id-smime-alg-cms3deswrap"],
+        Algo::DesEde3,
+        Mode::Des3Wrap,
+        24,
+        0,
+        8,
+        false,
+        Some("1.2.840.113549.1.9.16.3.6"),
+    ));
+    // Object identifiers the default provider registers as cipher names.
+    for (name, oid) in PROVIDER_OIDS {
+        if let Some(c) = t.iter_mut().find(|c| c.name == *name && c.oid.is_none()) {
+            c.oid = Some(oid);
+        }
+    }
     t
 }
+
+/// OIDs of ARIA, Camellia, SM4 and DES-EDE ciphers (OpenSSL provider names).
+const PROVIDER_OIDS: &[(&str, &str)] = &[
+    ("aria-128-ecb", "1.2.410.200046.1.1.1"),
+    ("aria-128-cbc", "1.2.410.200046.1.1.2"),
+    ("aria-128-cfb", "1.2.410.200046.1.1.3"),
+    ("aria-128-ofb", "1.2.410.200046.1.1.4"),
+    ("aria-128-ctr", "1.2.410.200046.1.1.5"),
+    ("aria-192-ecb", "1.2.410.200046.1.1.6"),
+    ("aria-192-cbc", "1.2.410.200046.1.1.7"),
+    ("aria-192-cfb", "1.2.410.200046.1.1.8"),
+    ("aria-192-ofb", "1.2.410.200046.1.1.9"),
+    ("aria-192-ctr", "1.2.410.200046.1.1.10"),
+    ("aria-256-ecb", "1.2.410.200046.1.1.11"),
+    ("aria-256-cbc", "1.2.410.200046.1.1.12"),
+    ("aria-256-cfb", "1.2.410.200046.1.1.13"),
+    ("aria-256-ofb", "1.2.410.200046.1.1.14"),
+    ("aria-256-ctr", "1.2.410.200046.1.1.15"),
+    ("aria-128-gcm", "1.2.410.200046.1.1.34"),
+    ("aria-192-gcm", "1.2.410.200046.1.1.35"),
+    ("aria-256-gcm", "1.2.410.200046.1.1.36"),
+    ("aria-128-ccm", "1.2.410.200046.1.1.37"),
+    ("aria-192-ccm", "1.2.410.200046.1.1.38"),
+    ("aria-256-ccm", "1.2.410.200046.1.1.39"),
+    ("camellia-128-cbc", "1.2.392.200011.61.1.1.1.2"),
+    ("camellia-192-cbc", "1.2.392.200011.61.1.1.1.3"),
+    ("camellia-256-cbc", "1.2.392.200011.61.1.1.1.4"),
+    ("camellia-128-ecb", "0.3.4401.5.3.1.9.1"),
+    ("camellia-128-ofb", "0.3.4401.5.3.1.9.3"),
+    ("camellia-128-cfb", "0.3.4401.5.3.1.9.4"),
+    ("camellia-128-ctr", "0.3.4401.5.3.1.9.9"),
+    ("camellia-192-ecb", "0.3.4401.5.3.1.9.21"),
+    ("camellia-192-ofb", "0.3.4401.5.3.1.9.23"),
+    ("camellia-192-cfb", "0.3.4401.5.3.1.9.24"),
+    ("camellia-192-ctr", "0.3.4401.5.3.1.9.29"),
+    ("camellia-256-ecb", "0.3.4401.5.3.1.9.41"),
+    ("camellia-256-ofb", "0.3.4401.5.3.1.9.43"),
+    ("camellia-256-cfb", "0.3.4401.5.3.1.9.44"),
+    ("camellia-256-ctr", "0.3.4401.5.3.1.9.49"),
+    ("sm4-ecb", "1.2.156.10197.1.104.1"),
+    ("sm4-cbc", "1.2.156.10197.1.104.2"),
+    ("sm4-ofb", "1.2.156.10197.1.104.3"),
+    ("sm4-cfb", "1.2.156.10197.1.104.4"),
+    ("sm4-ctr", "1.2.156.10197.1.104.7"),
+    ("des-ede-ecb", "1.3.14.3.2.17"),
+];
 
 fn table() -> &'static [CipherSpec] {
     static T: OnceLock<Vec<CipherSpec>> = OnceLock::new();
@@ -890,7 +1042,7 @@ pub fn by_name(name: &str) -> Option<&'static CipherSpec> {
     let n = name.to_ascii_lowercase();
     table()
         .iter()
-        .find(|s| s.name == n || s.aliases.contains(&n))
+        .find(|s| s.name == n || s.aliases.contains(&n) || s.oid == Some(n.as_str()))
 }
 
 /// php_openssl_get_evp_cipher_by_name(): a failed EVP_CIPHER_fetch() leaves
@@ -1144,8 +1296,12 @@ pub fn run(op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail> {
         Algo::ChaCha20Poly1305 => return chacha20_poly1305(op, data),
         _ => {}
     }
-    if spec.mode == Mode::Xts {
-        return xts(op, data);
+    match spec.mode {
+        Mode::Xts => return xts(op, data),
+        // keyed per operation (derived / split keys)
+        Mode::GcmSiv => return gcm_siv(op, data),
+        Mode::Siv => return siv(op, data),
+        _ => {}
     }
     let blk = match make_block(spec.algo, op.key) {
         Some(b) => b,
@@ -1291,89 +1447,22 @@ pub fn run(op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail> {
         Mode::Ccm => ccm(blk.as_ref(), op, data),
         Mode::Ocb => ocb(blk.as_ref(), op, data),
         Mode::Wrap | Mode::WrapPad => wrap(blk.as_ref(), op, data),
+        Mode::WrapInv | Mode::WrapPadInv => wrap(&Inverse(blk.as_ref()), op, data),
         Mode::CbcCts => cbc_cts(blk.as_ref(), op, data),
-        Mode::Stream | Mode::Xts => Err(Fail::Silent),
+        Mode::CbcHmac => {
+            // no MAC key / TLS AAD set: whole blocks only, no padding
+            if !data.len().is_multiple_of(bs) {
+                err::push(err::LIB_PROV, 102, "cipher operation failed");
+                return Err(Fail::Silent);
+            }
+            Ok((cbc_raw(blk.as_ref(), op.iv, data, op.enc), Vec::new()))
+        }
+        Mode::Des3Wrap => des3_wrap(blk.as_ref(), op, data),
+        Mode::Stream | Mode::Xts | Mode::GcmSiv | Mode::Siv => Err(Fail::Silent),
     }
 }
 
 /// CTR keystream XOR; `inc32` restricts the increment to the low 32 bits (GCM).
-/// CBC with ciphertext stealing, CS1 (OpenSSL's cipher_cts.c): the data
-/// (at least one block) is CBC-processed, a partial last block steals the
-/// tail of the previous ciphertext block, which is output truncated before
-/// the last one. No padding.
-#[inline(never)]
-fn cbc_cts(blk: &dyn Block, op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail> {
-    let bs = blk.bs();
-    if data.len() < bs {
-        return Err(Fail::Silent);
-    }
-    let mut iv = op.iv[..bs.min(op.iv.len())].to_vec();
-    iv.resize(bs, 0);
-    let tail = data.len() % bs;
-    // (the blocks processed as plain CBC)
-    let full = if tail == 0 {
-        data.len()
-    } else {
-        data.len() - tail - bs
-    };
-    let mut out = data.to_vec();
-    let mut chain = iv;
-    for c in out[..full].chunks_mut(bs) {
-        if op.enc {
-            for i in 0..bs {
-                c[i] ^= chain[i];
-            }
-            blk.enc(c);
-            chain.copy_from_slice(c);
-        } else {
-            let saved = c.to_vec();
-            blk.dec(c);
-            for i in 0..bs {
-                c[i] ^= chain[i];
-            }
-            chain = saved;
-        }
-    }
-    if tail == 0 {
-        return Ok((out, Vec::new()));
-    }
-    let d = tail;
-    if op.enc {
-        // C(n-1) = E(P(n-1) ^ chain); Cn = E(C(n-1) ^ (Pn || 0))
-        let mut cn1 = data[full..full + bs].to_vec();
-        for i in 0..bs {
-            cn1[i] ^= chain[i];
-        }
-        blk.enc(&mut cn1);
-        let mut cn = vec![0u8; bs];
-        cn[..d].copy_from_slice(&data[full + bs..]);
-        for i in 0..bs {
-            cn[i] ^= cn1[i];
-        }
-        blk.enc(&mut cn);
-        out.truncate(full);
-        out.extend_from_slice(&cn1[..d]);
-        out.extend_from_slice(&cn);
-    } else {
-        // the input is C(n-1)[..d] || Cn
-        let cpart = &data[full..full + d];
-        let mut x = data[full + d..].to_vec();
-        blk.dec(&mut x);
-        let mut cn1 = cpart.to_vec();
-        cn1.extend_from_slice(&x[d..]);
-        let pn: Vec<u8> = (0..d).map(|i| x[i] ^ cpart[i]).collect();
-        let mut pn1 = cn1;
-        blk.dec(&mut pn1);
-        for i in 0..bs {
-            pn1[i] ^= chain[i];
-        }
-        out.truncate(full);
-        out.extend_from_slice(&pn1);
-        out.extend_from_slice(&pn);
-    }
-    Ok((out, Vec::new()))
-}
-
 fn ctr_xor(blk: &dyn Block, ctr: &mut [u8], data: &[u8], inc32: bool) -> Vec<u8> {
     let bs = blk.bs();
     let mut out = Vec::with_capacity(data.len());
@@ -1751,7 +1840,8 @@ fn ocb(blk: &dyn Block, op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail
 fn xts(op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail> {
     let half = op.key.len() / 2;
     let (k1, k2) = op.key.split_at(half);
-    if op.enc && k1 == k2 {
+    // only the AES-XTS provider refuses identical key halves
+    if op.enc && k1 == k2 && op.spec.algo == Algo::Aes {
         err::push(err::LIB_PROV, 149, "xts duplicated keys");
         return Err(Fail::Silent);
     }
@@ -1766,7 +1856,20 @@ fn xts(op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail> {
     let mut t = [0u8; 16];
     t.copy_from_slice(&op.iv[..16]);
     c2.enc(&mut t);
+    // SM4-XTS defaults to the GB/T 17964-2021 tweak update (a GHASH-style
+    // multiplication by x); AES-XTS uses IEEE 1619's little-endian one.
+    let gb = op.spec.algo == Algo::Sm4;
     let mul_alpha = |t: &mut [u8; 16]| {
+        if gb {
+            let v = u128::from_be_bytes(*t);
+            let v = if v & 1 == 1 {
+                (v >> 1) ^ (0xE1u128 << 120)
+            } else {
+                v >> 1
+            };
+            *t = v.to_be_bytes();
+            return;
+        }
         let mut carry = 0u8;
         for b in t.iter_mut() {
             let nc = *b >> 7;
@@ -1826,6 +1929,280 @@ fn xts(op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail> {
     Ok((out, Vec::new()))
 }
 
+// --- CBC variants ---------------------------------------------------------
+
+/// Plain CBC over whole blocks (`data.len()` a multiple of the block size).
+fn cbc_raw(blk: &dyn Block, iv: &[u8], data: &[u8], enc: bool) -> Vec<u8> {
+    let bs = blk.bs();
+    let mut chain = iv[..bs.min(iv.len())].to_vec();
+    chain.resize(bs, 0);
+    let mut buf = data.to_vec();
+    for c in buf.chunks_mut(bs) {
+        if enc {
+            for i in 0..bs {
+                c[i] ^= chain[i];
+            }
+            blk.enc(c);
+            chain.copy_from_slice(c);
+        } else {
+            let saved = c.to_vec();
+            blk.dec(c);
+            for i in 0..bs {
+                c[i] ^= chain[i];
+            }
+            chain = saved;
+        }
+    }
+    buf
+}
+
+/// CBC-CS1 ciphertext stealing (NIST SP 800-38A addendum): the truncated
+/// penultimate block stays in place; whole-block input is plain CBC.
+#[inline(never)]
+fn cbc_cts(blk: &dyn Block, op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail> {
+    let bs = blk.bs();
+    if data.len() < bs {
+        return Err(Fail::Silent);
+    }
+    let r = data.len() % bs;
+    if r == 0 {
+        return Ok((cbc_raw(blk, op.iv, data, op.enc), Vec::new()));
+    }
+    let full = data.len() - r;
+    if op.enc {
+        let mut out = cbc_raw(blk, op.iv, &data[..full], true);
+        let mut last = vec![0u8; bs];
+        last[..r].copy_from_slice(&data[full..]);
+        let c = cbc_raw(blk, &out[full - bs..], &last, true);
+        out.truncate(full - bs + r);
+        out.extend_from_slice(&c);
+        Ok((out, Vec::new()))
+    } else {
+        // C_1..C_{m-1} | C_m[..r] | C_n
+        let head = full - bs;
+        let mut out = cbc_raw(blk, op.iv, &data[..head], false);
+        let prev = if head >= bs {
+            data[head - bs..head].to_vec()
+        } else {
+            let mut v = op.iv[..bs.min(op.iv.len())].to_vec();
+            v.resize(bs, 0);
+            v
+        };
+        let mut dn = data[head + r..].to_vec();
+        blk.dec(&mut dn);
+        let mut cm = data[head..head + r].to_vec();
+        cm.extend_from_slice(&dn[r..]);
+        let pn: Vec<u8> = (0..r).map(|i| dn[i] ^ cm[i]).collect();
+        let mut pm = cm.clone();
+        blk.dec(&mut pm);
+        for i in 0..bs {
+            pm[i] ^= prev[i];
+        }
+        out.extend_from_slice(&pm);
+        out.extend_from_slice(&pn);
+        Ok((out, Vec::new()))
+    }
+}
+
+/// A block cipher used in its inverse direction (the *-INV key wraps).
+struct Inverse<'a>(&'a dyn Block);
+
+impl Block for Inverse<'_> {
+    fn bs(&self) -> usize {
+        self.0.bs()
+    }
+    fn enc(&self, b: &mut [u8]) {
+        self.0.dec(b)
+    }
+    fn dec(&self, b: &mut [u8]) {
+        self.0.enc(b)
+    }
+}
+
+// --- SIV modes --------------------------------------------------------------
+//
+// PHP treats neither as AEAD: encryption returns the ciphertext without the
+// tag, and decryption (no tag can be set) always fails.
+
+/// RFC 8452 AES-GCM-SIV encryption, no AAD.
+#[inline(never)]
+fn gcm_siv(op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail> {
+    if !op.enc {
+        return Err(Fail::Silent);
+    }
+    let Some(kgk) = make_block(Algo::Aes, op.key) else {
+        err::evp_invalid_key_length();
+        return Err(Fail::Silent);
+    };
+    let derive = |n: u32| {
+        let mut b = [0u8; 16];
+        b[..4].copy_from_slice(&n.to_le_bytes());
+        b[4..].copy_from_slice(&op.iv[..12]);
+        kgk.enc(&mut b);
+        b
+    };
+    let mut auth_key = [0u8; 16];
+    auth_key[..8].copy_from_slice(&derive(0)[..8]);
+    auth_key[8..].copy_from_slice(&derive(1)[..8]);
+    let mut enc_key = Vec::with_capacity(op.key.len());
+    for i in 0..(op.key.len() / 8) as u32 {
+        enc_key.extend_from_slice(&derive(2 + i)[..8]);
+    }
+    let Some(ek) = make_block(Algo::Aes, &enc_key) else {
+        return Err(Fail::Silent);
+    };
+    // POLYVAL(H, X) = rev(GHASH(mulX(rev(H)), rev(X_1), ...))
+    let rev = |b: &[u8]| {
+        let mut a = [0u8; 16];
+        a[..b.len()].copy_from_slice(b);
+        a.reverse();
+        u128::from_be_bytes(a)
+    };
+    let hr = rev(&auth_key);
+    let h = if hr & 1 == 1 {
+        (hr >> 1) ^ (0xE1u128 << 120)
+    } else {
+        hr >> 1
+    };
+    let mut y = 0u128;
+    for chunk in data.chunks(16) {
+        y = gf_mul(y ^ rev(chunk), h);
+    }
+    let mut lens = [0u8; 16];
+    lens[8..].copy_from_slice(&(data.len() as u64 * 8).to_le_bytes());
+    y = gf_mul(y ^ rev(&lens), h);
+    let mut tag = y.to_be_bytes();
+    tag.reverse();
+    for i in 0..12 {
+        tag[i] ^= op.iv[i];
+    }
+    tag[15] &= 0x7f;
+    ek.enc(&mut tag);
+    let mut ctr = tag;
+    ctr[15] |= 0x80;
+    let mut out = Vec::with_capacity(data.len());
+    for chunk in data.chunks(16) {
+        let mut ks = ctr;
+        ek.enc(&mut ks);
+        out.extend(chunk.iter().zip(ks.iter()).map(|(a, b)| a ^ b));
+        let c = u32::from_le_bytes(ctr[..4].try_into().unwrap()).wrapping_add(1);
+        ctr[..4].copy_from_slice(&c.to_le_bytes());
+    }
+    Ok((out, Vec::new()))
+}
+
+/// AES-CMAC (RFC 4493).
+fn cmac(blk: &dyn Block, msg: &[u8]) -> [u8; 16] {
+    let mut l = [0u8; 16];
+    blk.enc(&mut l);
+    let k1 = dbl(&l);
+    let k2 = dbl(&k1);
+    let n = msg.len().div_ceil(16).max(1);
+    let complete = !msg.is_empty() && msg.len().is_multiple_of(16);
+    let mut x = [0u8; 16];
+    for i in 0..n {
+        let mut b = [0u8; 16];
+        let chunk = &msg[(i * 16).min(msg.len())..((i + 1) * 16).min(msg.len())];
+        b[..chunk.len()].copy_from_slice(chunk);
+        if i == n - 1 {
+            if complete {
+                xor16(&mut b, &k1);
+            } else {
+                b[chunk.len()] = 0x80;
+                xor16(&mut b, &k2);
+            }
+        }
+        xor16(&mut x, &b);
+        blk.enc(&mut x);
+    }
+    x
+}
+
+/// RFC 5297 AES-SIV encryption with no associated data.
+#[inline(never)]
+fn siv(op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail> {
+    if !op.enc {
+        return Err(Fail::Silent);
+    }
+    let half = op.key.len() / 2;
+    let (Some(mac), Some(ctr_blk)) = (
+        make_block(Algo::Aes, &op.key[..half]),
+        make_block(Algo::Aes, &op.key[half..]),
+    ) else {
+        err::evp_invalid_key_length();
+        return Err(Fail::Silent);
+    };
+    // S2V: D = CMAC(<zero>), then the plaintext as the last component.
+    let d = cmac(mac.as_ref(), &[0u8; 16]);
+    let v = if data.len() >= 16 {
+        let mut m = data.to_vec();
+        let n = m.len();
+        for i in 0..16 {
+            m[n - 16 + i] ^= d[i];
+        }
+        cmac(mac.as_ref(), &m)
+    } else {
+        let mut t = [0u8; 16];
+        t[..data.len()].copy_from_slice(data);
+        t[data.len()] = 0x80;
+        xor16(&mut t, &dbl(&d));
+        cmac(mac.as_ref(), &t)
+    };
+    let mut q = v;
+    q[8] &= 0x7f;
+    q[12] &= 0x7f;
+    Ok((ctr_xor(ctr_blk.as_ref(), &mut q, data, false), Vec::new()))
+}
+
+// --- RFC 3217 Triple-DES key wrap -----------------------------------------
+
+const DES3_WRAP_IV: [u8; 8] = [0x4a, 0xdd, 0xa2, 0x2c, 0x79, 0xe8, 0x21, 0x05];
+
+#[inline(never)]
+fn des3_wrap(blk: &dyn Block, op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail> {
+    use purecrypto::rng::RngCore;
+    if data.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let failed = || {
+        err::push(err::LIB_PROV, 102, "cipher operation failed");
+        Err(Fail::Silent)
+    };
+    if !data.len().is_multiple_of(8) {
+        return failed();
+    }
+    if op.enc {
+        let mut iv = [0u8; 8];
+        purecrypto::rng::OsRng.fill_bytes(&mut iv);
+        let mut inner = data.to_vec();
+        inner.extend_from_slice(&crate::digest::Md::Sha1.digest(data)[..8]);
+        let mut out = iv.to_vec();
+        out.extend(cbc_raw(blk, &iv, &inner, true));
+        out.reverse();
+        Ok((cbc_raw(blk, &DES3_WRAP_IV, &out, true), Vec::new()))
+    } else {
+        if data.len() < 24 {
+            return failed();
+        }
+        let n = data.len();
+        let all = cbc_raw(blk, &DES3_WRAP_IV, data, false);
+        let mut icv = all[..8].to_vec();
+        let mut mid = all[8..n - 8].to_vec();
+        let mut iv = all[n - 8..].to_vec();
+        icv.reverse();
+        mid.reverse();
+        iv.reverse();
+        let mut joined = mid;
+        joined.extend_from_slice(&icv);
+        let plain = cbc_raw(blk, &iv, &joined, false);
+        let (key, check) = plain.split_at(n - 16);
+        if crate::digest::Md::Sha1.digest(key)[..8] != *check {
+            return failed();
+        }
+        Ok((key.to_vec(), Vec::new()))
+    }
+}
+
 // --- Key wrap (RFC 3394 / RFC 5649) ---------------------------------------
 
 fn wrap_core(blk: &dyn Block, a: [u8; 8], r: &mut [[u8; 8]]) -> [u8; 8] {
@@ -1879,7 +2256,7 @@ fn wrap(blk: &dyn Block, op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fai
     if data.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
-    let pad = op.spec.mode == Mode::WrapPad;
+    let pad = matches!(op.spec.mode, Mode::WrapPad | Mode::WrapPadInv);
     if op.enc {
         let (aiv, mut plain) = if pad {
             let mut aiv = [0u8; 8];
