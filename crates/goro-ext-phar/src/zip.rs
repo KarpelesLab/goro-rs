@@ -931,10 +931,12 @@ pub fn zip_flush(
     }
     let newbuf = Rc::new(RefCell::new(pass.filefp));
     if !phar.borrow().donotflush && std::fs::write(l(&fname), &*newbuf.borrow()).is_err() {
+        phar.borrow_mut().fp_cache = None;
         phar.borrow_mut().fp = Some(newbuf);
         crate::open_failed_warning(vm, &fname);
         return Some(format!("unable to open new phar \"{}\" for writing", f));
     }
+    phar.borrow_mut().fp_cache = None;
     phar.borrow_mut().fp = Some(newbuf);
     None
 }

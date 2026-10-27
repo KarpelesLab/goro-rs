@@ -866,11 +866,13 @@ pub fn tar_flush(
             Some(newbuf.borrow().clone())
         };
         if std::fs::write(l(&fname), out.unwrap_or_default()).is_err() {
+            phar.borrow_mut().fp_cache = None;
             phar.borrow_mut().fp = Some(newbuf);
             crate::open_failed_warning(vm, &fname);
             return Some(format!("unable to open new phar \"{}\" for writing", f));
         }
     }
+    phar.borrow_mut().fp_cache = None;
     phar.borrow_mut().fp = Some(newbuf);
     None
 }

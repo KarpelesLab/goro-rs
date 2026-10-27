@@ -225,6 +225,11 @@ pub struct Archive {
     /// The file `fp` was read from, (device, inode): php's phar->fp is an
     /// open stream, which sees the file rewritten in place.
     pub fp_ino: Option<(u64, u64)>,
+    /// The contents open_archive_fp() last read, with the file's stat
+    /// stamp then: reopening an unchanged archive (each include from it,
+    /// once the previous entry's stream closed the fp) reuses them instead
+    /// of reading the whole file again.
+    pub fp_cache: Option<(FileStamp, Buf)>,
     pub ufp: Option<Buf>,
     pub refcount: i32,
     pub sig_flags: u32,
@@ -257,6 +262,7 @@ impl Default for Archive {
             max_timestamp: 0,
             fp: None,
             fp_ino: None,
+            fp_cache: None,
             ufp: None,
             refcount: 0,
             sig_flags: 0,
@@ -466,6 +472,32 @@ fn fp_current(p: &Archive, fp: Buf) -> Buf {
         }
     }
     fp
+}
+
+/// What identifies a file's contents without reading it: (device, inode,
+/// size, mtime ns, ctime ns).
+pub type FileStamp = (u64, u64, u64, i128, i128);
+
+pub fn file_stamp(fname: &[u8]) -> Option<FileStamp> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(l(fname)).ok()?;
+        m.is_file().then(|| {
+            (
+                m.dev(),
+                m.ino(),
+                m.size(),
+                m.mtime() as i128 * 1_000_000_000 + m.mtime_nsec() as i128,
+                m.ctime() as i128 * 1_000_000_000 + m.ctime_nsec() as i128,
+            )
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fname;
+        None
+    }
 }
 
 /// php_stream_open_wrapper(fname, "rb", IGNORE_URL|STREAM_MUST_SEEK)
@@ -2250,6 +2282,7 @@ pub fn flush_ex(
         };
         let out = out.unwrap_or_default();
         if std::fs::write(l(&fname), &out).is_err() {
+            phar.borrow_mut().fp_cache = None;
             phar.borrow_mut().fp = Some(newbuf);
             phar.borrow_mut().fp_ino = None;
             let msg = format!("unable to open new phar \"{}\" for writing", f);
@@ -2267,6 +2300,7 @@ pub fn flush_ex(
         }
     }
     let mut p = phar.borrow_mut();
+    p.fp_cache = None;
     p.fp = Some(newbuf);
     // fp is the file's contents again, unless the archive is buffering
     // (the new contents are not written yet)

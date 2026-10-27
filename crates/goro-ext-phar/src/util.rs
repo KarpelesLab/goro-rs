@@ -195,9 +195,22 @@ pub fn open_archive_fp(_vm: &mut Vm, phar: &ArcRef) -> Res<()> {
         return Ok(());
     }
     let fname = phar.borrow().fname.clone();
+    let stamp = file_stamp(&fname);
+    if let Some(st) = stamp {
+        let mut p = phar.borrow_mut();
+        if let Some((cst, buf)) = &p.fp_cache {
+            if *cst == st && buf.borrow().len() as u64 == st.2 {
+                p.fp = Some(buf.clone());
+                return Ok(());
+            }
+        }
+    }
     match read_file(&fname) {
         Some(d) => {
-            phar.borrow_mut().fp = Some(Rc::new(RefCell::new(d)));
+            let buf = Rc::new(RefCell::new(d));
+            let mut p = phar.borrow_mut();
+            p.fp_cache = stamp.map(|st| (st, buf.clone()));
+            p.fp = Some(buf);
             Ok(())
         }
         None => Err(None),
