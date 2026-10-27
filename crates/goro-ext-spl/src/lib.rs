@@ -747,10 +747,9 @@ fn class_arg(vm: &mut Vm, fname: &str, args: &[Value]) -> Result<Option<(Vec<u8>
             vm.classes.contains_key(&class_lower) || vm.is_known_builtin_class(&class_lower);
         if !exists {
             if autoload {
+                // (an exception the autoloader throws stays pending: the
+                // class is still reported missing, spl_find_ce_by_name())
                 vm.try_autoload_class(&class_name);
-                if vm.current_exception.is_some() {
-                    return Ok(None);
-                }
             }
             let still =
                 vm.classes.contains_key(&class_lower) || vm.is_known_builtin_class(&class_lower);
