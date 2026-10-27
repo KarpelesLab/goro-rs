@@ -49622,6 +49622,18 @@ impl Vm {
                         OpCode::StaticPropGetRef => SpFetch::Ref,
                         _ => SpFetch::R,
                     };
+                    // Sent to a builtin's `array &$array` parameter (by
+                    // handle): a null property is not made an array, the
+                    // parameter refuses it (ZEND_FETCH_STATIC_PROP_W for
+                    // SEND_REF).
+                    let mode = if mode == SpFetch::W
+                        && matches!(op_array.ops.get(ip), Some(o)
+                            if o.opcode == OpCode::SendVal && o.op1 == op.result)
+                    {
+                        SpFetch::WSend
+                    } else {
+                        mode
+                    };
                     match self.static_prop_fetch(
                         &class_v,
                         prop_name.as_bytes(),
@@ -54102,8 +54114,18 @@ impl Vm {
                             let i = ci as usize;
                             let name = op_array.cv_names.get(i).map(|n| n.as_slice());
                             self.dim_w_cv_ref = Self::cv_is_php_ref(cvs.get(i), i, fsym);
-                            let mut slot =
-                                cvs.get_mut(i).map(std::mem::take).unwrap_or(Value::Undef);
+                            // (a scalar stays in the variable: the error it
+                            // raises sees it, e.g. in a trace's arguments)
+                            let mut slot = match cvs.get_mut(i) {
+                                Some(
+                                    v @ (Value::String(_)
+                                    | Value::Long(_)
+                                    | Value::Double(_)
+                                    | Value::True),
+                                ) => v.clone(),
+                                Some(v) => std::mem::take(v),
+                                None => Value::Undef,
+                            };
                             let r = self.fetch_dim_for_write(&mut slot, key, mode, name, op.line);
                             self.dim_w_cv_ref = false;
                             if let Some(s) = cvs.get_mut(i) {
