@@ -482,122 +482,6 @@ fn cstr_trunc(b: &[u8]) -> CString {
     CString::new(&b[..end]).unwrap_or_default()
 }
 
-unsafe extern "C" {
-    static mut environ: *const *const libc::c_char;
-}
-
-/// What the child of proc_open() is set up with before its exec.
-struct ChildSpec<'a> {
-    errpipe: [i32; 2],
-    /// (index, child end, parent end, has a parent end)
-    child_fds: &'a [(i32, i32, i32, bool)],
-    child_state: goro_core::child_proc::ChildState,
-    cwd: *const libc::c_char,
-    env: *const *const libc::c_char,
-    prog: *const libc::c_char,
-    argv: *const *const libc::c_char,
-    /// execvp() (an argv array) rather than execv() of /bin/sh.
-    search_path: bool,
-    /// The signal mask the child gets (the parent's).
-    mask: libc::sigset_t,
-}
-
-/// Start the child of proc_open() as posix_spawn() does: a clone sharing
-/// the parent's memory (CLONE_VM | CLONE_VFORK: the parent waits until it
-/// called exec or exited), so that the address space is not copied.
-/// Returns its pid, or -1 (errno set).
-///
-/// # Safety
-/// The pointers in `spec` must stay valid until the call returns.
-#[inline(never)]
-unsafe fn spawn_child(mut spec: ChildSpec<'_>) -> libc::pid_t {
-    const STACK: usize = 128 * 1024;
-    unsafe {
-        // No signal handler of the parent may run on the child's side of
-        // the shared memory: everything is blocked until the child reset
-        // the caught signals to their default action.
-        let mut all: libc::sigset_t = std::mem::zeroed();
-        libc::sigfillset(&mut all);
-        libc::pthread_sigmask(libc::SIG_SETMASK, &all, &mut spec.mask);
-        let saved_environ = environ;
-        let mut stack = vec![0u8; STACK];
-        let top = (stack.as_mut_ptr().add(STACK) as usize & !15) as *mut libc::c_void;
-        let pid = libc::clone(
-            child_main,
-            top,
-            libc::CLONE_VM | libc::CLONE_VFORK | libc::SIGCHLD,
-            &mut spec as *mut ChildSpec<'_> as *mut libc::c_void,
-        );
-        let e = errno();
-        // (the child switched it for its exec)
-        environ = saved_environ;
-        libc::pthread_sigmask(libc::SIG_SETMASK, &spec.mask, std::ptr::null_mut());
-        drop(stack);
-        if pid < 0 {
-            *libc::__errno_location() = e;
-        }
-        pid
-    }
-}
-
-/// The child of spawn_child(): async-signal-safe calls only (it runs on
-/// the parent's memory).
-extern "C" fn child_main(arg: *mut libc::c_void) -> libc::c_int {
-    unsafe {
-        let spec = &*(arg as *const ChildSpec<'_>);
-        let fail = |e: i32| -> ! {
-            if spec.errpipe[1] >= 0 {
-                let b = e.to_ne_bytes();
-                libc::write(spec.errpipe[1], b.as_ptr() as *const libc::c_void, 4);
-            }
-            libc::_exit(127);
-        };
-        // (exec would reset them anyway; the ignored ones stay ignored)
-        for sig in 1..=libc::SIGRTMAX() {
-            let mut sa: libc::sigaction = std::mem::zeroed();
-            if libc::sigaction(sig, std::ptr::null(), &mut sa) == 0
-                && sa.sa_sigaction != libc::SIG_IGN
-                && sa.sa_sigaction != libc::SIG_DFL
-            {
-                let mut dfl: libc::sigaction = std::mem::zeroed();
-                dfl.sa_sigaction = libc::SIG_DFL;
-                libc::sigaction(sig, &dfl, std::ptr::null_mut());
-            }
-        }
-        if spec.errpipe[0] >= 0 {
-            libc::close(spec.errpipe[0]);
-        }
-        for &(index, childend, parentend, has_parent) in spec.child_fds {
-            if has_parent {
-                libc::close(parentend);
-            }
-            if childend != index {
-                if libc::dup2(childend, index) < 0 {
-                    fail(errno());
-                }
-                libc::close(childend);
-            }
-        }
-        // The signal mask is inherited as in php-src (Symfony Process
-        // blocks the signals a child should ignore around proc_open());
-        // SIGPIPE and goro's RLIMIT_AS go back to what goro started with.
-        spec.child_state.apply_in_child_keep_mask();
-        if !spec.cwd.is_null() && libc::chdir(spec.cwd) != 0 {
-            fail(errno());
-        }
-        if !spec.env.is_null() {
-            environ = spec.env;
-        }
-        libc::sigprocmask(libc::SIG_SETMASK, &spec.mask, std::ptr::null_mut());
-        if spec.search_path {
-            libc::execvp(spec.prog, spec.argv);
-        } else {
-            libc::execv(spec.prog, spec.argv);
-        }
-        fail(errno());
-    }
-}
-
 /// PHP_FUNCTION(proc_open)
 pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.len() < 3 || args.len() > 6 {
@@ -816,7 +700,7 @@ pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     super::flush_cli_output(vm);
     let child_state = goro_core::child_proc::ChildState::capture();
-    let spec = ChildSpec {
+    let spec = goro_core::child_proc::ChildSpec {
         errpipe,
         child_fds: &child_fds,
         child_state,
@@ -825,9 +709,11 @@ pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         prog,
         argv: av_ptrs.as_ptr(),
         search_path: argv.is_some(),
+        keep_mask: true,
+        same_fd_inherited: false,
         mask: unsafe { std::mem::zeroed() },
     };
-    let pid = unsafe { spawn_child(spec) };
+    let pid = unsafe { goro_core::child_proc::spawn_child(spec) };
     if errpipe[1] >= 0 {
         unsafe { libc::close(errpipe[1]) };
     }

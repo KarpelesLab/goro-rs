@@ -21330,19 +21330,15 @@ fn php_exec(
     array: Option<&Rc<RefCell<PhpArray>>>,
 ) -> (Value, i64) {
     use std::io::{BufRead, Read};
-    #[cfg(unix)]
-    let cmd_os = {
-        use std::os::unix::ffi::OsStrExt;
-        std::ffi::OsStr::from_bytes(cmd).to_os_string()
-    };
-    #[cfg(not(unix))]
-    let cmd_os = std::ffi::OsString::from(String::from_utf8_lossy(cmd).into_owned());
     // Output written so far reaches the terminal before the child's.
     vm.flush_cli_output();
+    #[cfg(unix)]
+    let child = goro_core::child_proc::spawn_command(b"/bin/sh", &[b"-c", cmd], false, true);
+    #[cfg(not(unix))]
     let child = goro_core::child_proc::prepare_command(
         std::process::Command::new("/bin/sh")
             .arg("-c")
-            .arg(cmd_os)
+            .arg(String::from_utf8_lossy(cmd).into_owned())
             .stdout(std::process::Stdio::piped()),
     )
     .spawn();
@@ -21442,7 +21438,6 @@ fn system_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn shell_exec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     use std::io::Read;
-    use std::os::unix::ffi::OsStrExt;
     let cmd = args
         .first()
         .map(|v| v.deref())
@@ -21461,13 +21456,8 @@ fn shell_exec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         ));
     }
     vm.flush_cli_output();
-    let child = goro_core::child_proc::prepare_command(
-        std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(std::ffi::OsStr::from_bytes(cmd.as_bytes()))
-            .stdout(std::process::Stdio::piped()),
-    )
-    .spawn();
+    let child =
+        goro_core::child_proc::spawn_command(b"/bin/sh", &[b"-c", cmd.as_bytes()], false, true);
     let mut child = match child {
         Ok(c) => c,
         Err(_) => {
@@ -23393,27 +23383,16 @@ fn popen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    use std::process::{Command, Stdio};
     // A child writing to our stdout: when the script's output is not
     // written straight to it, collect the child's and emit it at pclose().
     let capture_stdout = !mode_str.contains('r') && !vm.cli_direct_output;
-    let child = if mode_str.contains('r') {
-        goro_core::child_proc::prepare_command(
-            Command::new("sh")
-                .arg("-c")
-                .arg(&*cmd_str)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit()),
-        )
-        .spawn()
-    } else {
-        let mut c = Command::new("sh");
-        c.arg("-c").arg(&*cmd_str).stdin(Stdio::piped());
-        if capture_stdout {
-            c.stdout(Stdio::piped());
-        }
-        goro_core::child_proc::prepare_command(&mut c).spawn()
-    };
+    let reads = mode_str.contains('r');
+    let child = goro_core::child_proc::spawn_command(
+        b"sh",
+        &[b"-c", cmd_str.as_bytes()],
+        !reads,
+        reads || capture_stdout,
+    );
     match child {
         Ok(mut child) => {
             let drain = if capture_stdout {
@@ -23484,7 +23463,7 @@ type PopenDrain = (
 
 thread_local! {
     /// popen() children, by stream id.
-    static POPEN_CHILDREN: RefCell<StdHashMap<i64, (std::process::Child, Option<PopenDrain>)>> =
+    static POPEN_CHILDREN: RefCell<StdHashMap<i64, (goro_core::child_proc::CmdChild, Option<PopenDrain>)>> =
         RefCell::new(StdHashMap::new());
 }
 
