@@ -64879,7 +64879,19 @@ impl Vm {
                                     named_args: Vec::new(),
                                     target: CallTarget::NONE,
                                 });
-                            } else if let Some(call_method) = class.get_method(b"__call") {
+                            } else if let Some(call_method) =
+                                class.get_method(b"__call").filter(|_| {
+                                    // (an enum's static cases() / from() /
+                                    // tryFrom() exist: not __call()'s)
+                                    !(class.is_enum
+                                        && (method_name_lower == b"cases"
+                                            || (class.enum_backing_type.is_some()
+                                                && matches!(
+                                                    method_name_lower.as_slice(),
+                                                    b"from" | b"tryfrom"
+                                                ))))
+                                })
+                            {
                                 // __call magic method fallback
                                 let mut func_name = class_name_orig.clone();
                                 func_name.extend_from_slice(b"::__call");
