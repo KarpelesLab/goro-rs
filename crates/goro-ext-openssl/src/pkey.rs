@@ -1100,6 +1100,10 @@ pub fn generate_rsa(bits: usize) -> Option<Rsa> {
     use purecrypto::bignum::inv_mod_ct_boxed;
     use purecrypto::rsa::BoxedRsaPrivateKey;
     let e = BoxedUint::from_u64(65537);
+    // rsa_keygen(): two primes, >= 2048 bits and e > 2^16 take the SP 800-56B
+    // generator, whose primes are both nbits/2 bits long (an odd size makes
+    // a modulus one bit shorter).
+    let bits = if bits >= 2048 { bits & !1 } else { bits };
     if bits.is_multiple_of(2) && bits >= 512 {
         let k = BoxedRsaPrivateKey::generate(bits, e.clone(), &mut purecrypto::rng::OsRng, 0);
         let n = Bn::from_box(k.modulus());
@@ -1328,6 +1332,18 @@ fn rsa_err(reason: u32, s: &str) {
 }
 
 impl Rsa {
+    /// rsa_ossl_public_encrypt() / _decrypt(): the public operations refuse
+    /// a modulus over OPENSSL_RSA_MAX_MODULUS_BITS (a key that big can be
+    /// generated and used privately).
+    #[inline(never)]
+    fn public_modulus_too_large(&self) -> bool {
+        if self.n.bits() > 16384 {
+            rsa_err(105, "modulus too large");
+            return true;
+        }
+        false
+    }
+
     pub fn k(&self) -> usize {
         bytes_len(&self.n)
     }
@@ -1429,6 +1445,9 @@ impl Rsa {
 
     /// RSA public encrypt (EVP_PKEY_encrypt).
     pub fn encrypt(&self, data: &[u8], padding: i64, oaep_md: Md) -> Option<Vec<u8>> {
+        if self.public_modulus_too_large() {
+            return None;
+        }
         let k = self.k();
         let em = match padding {
             RSA_PKCS1_PADDING => {
@@ -1652,6 +1671,9 @@ impl Rsa {
     /// RSA public decrypt (EVP_PKEY_verify_recover).
     pub fn verify_recover(&self, data: &[u8], padding: i64) -> Option<Vec<u8>> {
         let k = self.k();
+        if self.public_modulus_too_large() {
+            return None;
+        }
         if !matches!(padding, RSA_PKCS1_PADDING | RSA_NO_PADDING) {
             err::push(err::LIB_PROV, 165, "illegal or unsupported padding mode");
             return None;
@@ -1724,6 +1746,9 @@ impl Rsa {
     /// rsa_ossl_public_decrypt() without the padding removal: s^e mod n as
     /// `k` bytes (shorter inputs are accepted, as for RSA_NO_PADDING).
     fn public_decrypt_raw(&self, sig: &[u8]) -> Option<Vec<u8>> {
+        if self.public_modulus_too_large() {
+            return None;
+        }
         let k = self.k();
         if sig.len() > k {
             rsa_err(108, "data greater than mod len");

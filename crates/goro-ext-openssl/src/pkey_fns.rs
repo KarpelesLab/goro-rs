@@ -533,10 +533,8 @@ pub fn generate_private_key(vm: &mut Vm, fname: &str, r: &Req) -> Option<PKey> {
                 err::push(err::LIB_PROV, 171, "key size too small");
                 return None;
             }
-            if bits > 16384 {
-                err::push(err::LIB_PROV, 171, "key size too large");
-                return None;
-            }
+            // (no upper bound: OPENSSL_RSA_MAX_MODULUS_BITS limits what the
+            // key can be used for, not its generation)
             pkey::generate_rsa(bits).map(PKey::Rsa)
         }
         req::OPENSSL_KEYTYPE_DSA => {
@@ -798,6 +796,11 @@ fn need_key_object(
 fn set_bn(arr: &mut PhpArray, name: &str, v: &Option<Bn>) {
     if let Some(v) = v {
         let b = if v.is_zero() { Vec::new() } else { v.to_vec() };
+        // EVP_PKEY_get_bn_param() first tries a 2048-byte buffer (leaving
+        // the error), then retries with one of the right size.
+        if b.len() > 2048 {
+            err::push(err::LIB_CRYPTO, 116, "too small buffer");
+        }
         arr.set(
             ArrayKey::String(PhpString::from_bytes(name.as_bytes())),
             zpp::bytes(b),
