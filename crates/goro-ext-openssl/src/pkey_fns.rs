@@ -252,6 +252,7 @@ fn init_rsa(a: &PhpArray) -> Option<PKey> {
         dmq1: arr_bn(a, "dmq1"),
         iqmp: arr_bn(a, "iqmp"),
         pss: None,
+        other_primes: None,
     }))
 }
 
@@ -270,6 +271,7 @@ fn init_dsa(a: &PhpArray) -> Option<(PKey, bool)> {
                 g,
                 pub_key: Some(y),
                 priv_key,
+                x942: false,
             }),
             is_priv,
         ));
@@ -286,6 +288,7 @@ fn init_dsa(a: &PhpArray) -> Option<(PKey, bool)> {
             g,
             pub_key: Some(y),
             priv_key: Some(x),
+            x942: false,
         }),
         true,
     ))
@@ -316,6 +319,7 @@ fn init_dh(a: &PhpArray) -> Option<(PKey, bool)> {
                 g,
                 pub_key,
                 priv_key,
+                x942: false,
             }),
             is_priv,
         ));
@@ -332,6 +336,7 @@ fn init_dh(a: &PhpArray) -> Option<(PKey, bool)> {
             g,
             pub_key: Some(y),
             priv_key: Some(x),
+            x942: false,
         }),
         true,
     ))
@@ -440,6 +445,7 @@ fn init_ec(vm: &mut Vm, a: &PhpArray) -> Option<(PKey, bool)> {
                 pub_key: q,
                 priv_key: d,
                 sm2,
+                compressed: false,
             }),
             is_priv,
         ));
@@ -528,6 +534,7 @@ pub fn generate_private_key(vm: &mut Vm, fname: &str, r: &Req) -> Option<PKey> {
                 g,
                 pub_key: Some(y),
                 priv_key: Some(x),
+                x942: false,
             }))
         }
         req::OPENSSL_KEYTYPE_DH => {
@@ -542,6 +549,7 @@ pub fn generate_private_key(vm: &mut Vm, fname: &str, r: &Req) -> Option<PKey> {
                 g,
                 pub_key: Some(y),
                 priv_key: Some(x),
+                x942: false,
             }))
         }
         req::OPENSSL_KEYTYPE_EC => {
@@ -794,6 +802,8 @@ pub fn openssl_pkey_get_details(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
     let sub_name = match &*key {
         // php_openssl_pkey_get_details() has no case for EVP_PKEY_RSA_PSS
         PKey::Rsa(r) if r.pss.is_some() => "",
+        // nor for EVP_PKEY_DHX
+        PKey::Dh(f) if f.x942 => "",
         PKey::Rsa(r) => {
             set_bn(&mut sub, "n", &Some(r.n.clone()));
             set_bn(&mut sub, "e", &Some(r.e.clone()));
@@ -1453,6 +1463,7 @@ pub fn openssl_dh_compute_key(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
         g: d.g.clone(),
         pub_key: Some(Bn::from_be(pubs.as_bytes())),
         priv_key: None,
+        x942: d.x942,
     });
     match key.derive(&peer) {
         Some(s) => Ok(zpp::bytes(s)),

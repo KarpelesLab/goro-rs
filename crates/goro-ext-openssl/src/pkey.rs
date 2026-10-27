@@ -33,6 +33,9 @@ pub struct Rsa {
     /// RSASSA-PSS key (EVP_PKEY_RSA_PSS): the AlgorithmIdentifier
     /// parameters as encoded (empty when unrestricted).
     pub pss: Option<Vec<u8>>,
+    /// Multi-prime keys (RSAPrivateKey version 1): the otherPrimeInfos
+    /// SEQUENCE as encoded, re-emitted on export.
+    pub other_primes: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -42,6 +45,8 @@ pub struct Ffc {
     pub g: Bn,
     pub pub_key: Option<Bn>,
     pub priv_key: Option<Bn>,
+    /// X9.42 DH (EVP_PKEY_DHX, dhpublicnumber): parameters p, g, q.
+    pub x942: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -51,6 +56,9 @@ pub struct EcKey {
     pub priv_key: Option<Bn>,
     /// SM2 keys share the EC representation.
     pub sm2: bool,
+    /// The public point was decoded from its compressed form, which
+    /// OpenSSL keeps as the key's point_conversion_form for encoding.
+    pub compressed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -100,6 +108,8 @@ impl PKey {
             PKey::Rsa(r) if r.pss.is_some() => -1,
             PKey::Rsa(_) => KEYTYPE_RSA,
             PKey::Dsa(_) => KEYTYPE_DSA,
+            // EVP_PKEY_DHX has no OPENSSL_KEYTYPE_* constant
+            PKey::Dh(f) if f.x942 => -1,
             PKey::Dh(_) => KEYTYPE_DH,
             PKey::Ec(_) => KEYTYPE_EC,
             PKey::Ecx(x) => match x.kind {
@@ -177,6 +187,15 @@ impl PKey {
             }) => asn1::algid(OID_RSA_PSS, (!params.is_empty()).then(|| params.clone())),
             PKey::Rsa(_) => asn1::algid(OID_RSA, Some(asn1::null())),
             PKey::Dsa(f) => asn1::algid(OID_DSA, Some(Self::ffc_params_der(f, true))),
+            // DomainParameters: p, g, q
+            PKey::Dh(f) if f.x942 => asn1::algid(
+                OID_DHX,
+                Some(asn1::seq(&[
+                    asn1::uint(&f.p),
+                    asn1::uint(&f.g),
+                    asn1::uint(&f.q.clone().unwrap_or_default()),
+                ])),
+            ),
             PKey::Dh(f) => asn1::algid(OID_DH, Some(Self::ffc_params_der(f, false))),
             PKey::Ec(e) => asn1::algid(OID_EC, Some(Self::ec_params_der(&e.group))),
             PKey::Ecx(x) => asn1::algid(x.kind.oid(), None),
@@ -193,7 +212,7 @@ impl PKey {
             PKey::Dsa(f) | PKey::Dh(f) => asn1::uint(&f.pub_key.clone().unwrap_or_default()),
             PKey::Ec(e) => e
                 .group
-                .encode(e.pub_key.as_ref().unwrap_or(&Point::Inf), false),
+                .encode(e.pub_key.as_ref().unwrap_or(&Point::Inf), e.compressed),
             PKey::Ecx(x) => x.pub_key.clone(),
         }
     }
@@ -211,8 +230,8 @@ impl PKey {
     pub fn rsa_private_der(r: &Rsa) -> Vec<u8> {
         let z = Bn::default();
         let g = |v: &Option<Bn>| asn1::uint(v.as_ref().unwrap_or(&z));
-        asn1::seq(&[
-            asn1::int_i64(0),
+        let mut items = vec![
+            asn1::int_i64(if r.other_primes.is_some() { 1 } else { 0 }),
             asn1::uint(&r.n),
             asn1::uint(&r.e),
             g(&r.d),
@@ -221,7 +240,11 @@ impl PKey {
             g(&r.dmp1),
             g(&r.dmq1),
             g(&r.iqmp),
-        ])
+        ];
+        if let Some(o) = &r.other_primes {
+            items.push(o.clone());
+        }
+        asn1::seq(&items)
     }
 
     fn ec_private_der(e: &EcKey, with_params: bool) -> Vec<u8> {
@@ -232,7 +255,10 @@ impl PKey {
             items.push(asn1::explicit(0, &Self::ec_params_der(&e.group)));
         }
         if let Some(p) = &e.pub_key {
-            items.push(asn1::explicit(1, &asn1::bitstr(&e.group.encode(p, false))));
+            items.push(asn1::explicit(
+                1,
+                &asn1::bitstr(&e.group.encode(p, e.compressed)),
+            ));
         }
         asn1::seq(&items)
     }
@@ -381,6 +407,7 @@ fn parse_rsa_public(der: &[u8]) -> Option<Rsa> {
         dmq1: None,
         iqmp: None,
         pss: None,
+        other_primes: None,
     })
 }
 
@@ -400,6 +427,7 @@ fn parse_rsa_private(der: &[u8]) -> Option<Rsa> {
         dmq1: Some(c[7].uint()),
         iqmp: Some(c[8].uint()),
         pss: None,
+        other_primes: c.get(9).map(|t| t.raw.to_vec()),
     })
 }
 
@@ -426,6 +454,7 @@ fn parse_ec_private(der: &[u8], params: Option<Group>) -> Option<EcKey> {
         }
     }
     let group = group?;
+    let compressed = matches!(pubk.as_deref(), Some([2 | 3, ..]));
     let pub_point = match pubk {
         Some(b) => group.decode(&b)?,
         None => group.pub_from_priv(&d),
@@ -435,6 +464,7 @@ fn parse_ec_private(der: &[u8], params: Option<Group>) -> Option<EcKey> {
         pub_key: Some(pub_point),
         priv_key: Some(d),
         sm2: false,
+        compressed,
     })
 }
 
@@ -464,6 +494,7 @@ pub fn parse_spki(der: &[u8]) -> Option<PKey> {
                 g,
                 pub_key: Some(y),
                 priv_key: None,
+                x942: false,
             }))
         }
         OID_DH | OID_DHX => {
@@ -484,6 +515,7 @@ pub fn parse_spki(der: &[u8]) -> Option<PKey> {
                 g,
                 pub_key: Some(y),
                 priv_key: None,
+                x942: oid == OID_DHX,
             }))
         }
         OID_EC => {
@@ -495,6 +527,7 @@ pub fn parse_spki(der: &[u8]) -> Option<PKey> {
                 pub_key: Some(pt),
                 priv_key: None,
                 sm2,
+                compressed: matches!(bits, [2 | 3, ..]),
             }))
         }
         o => {
@@ -538,6 +571,7 @@ pub fn parse_pkcs8(der: &[u8]) -> Option<PKey> {
                 g,
                 pub_key: y,
                 priv_key: Some(x),
+                x942: false,
             }))
         }
         OID_DH | OID_DHX => {
@@ -559,6 +593,7 @@ pub fn parse_pkcs8(der: &[u8]) -> Option<PKey> {
                 g,
                 pub_key: y,
                 priv_key: Some(x),
+                x942: oid == OID_DHX,
             }))
         }
         OID_EC => {
@@ -964,6 +999,7 @@ pub fn read_private_pem(data: &[u8], pass: &[u8]) -> Result<PKey, ReadErr> {
                         g: c[3].uint(),
                         pub_key: Some(c[4].uint()),
                         priv_key: Some(c[5].uint()),
+                        x942: false,
                     }))
                 });
             match parsed {
@@ -1032,6 +1068,7 @@ fn rsa_with_crt(n: Bn, e: Bn, d: Bn, p: Bn, q: Bn) -> Rsa {
         dmq1: Some(dmq1),
         iqmp: Some(iqmp),
         pss: None,
+        other_primes: None,
     }
 }
 
@@ -1112,6 +1149,7 @@ pub fn generate_ec(group: Group) -> EcKey {
         pub_key: Some(q),
         priv_key: Some(d),
         sm2,
+        compressed: false,
     }
 }
 
@@ -2235,6 +2273,7 @@ mod tests {
             g,
             pub_key: Some(y.clone()),
             priv_key: Some(x.clone()),
+            x942: false,
         };
         let h = [9u8; 32];
         let (r, s) = dsa_sign(&f, &q, &x, &h).unwrap();

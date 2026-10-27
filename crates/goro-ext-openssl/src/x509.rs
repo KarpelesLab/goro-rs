@@ -521,7 +521,7 @@ fn print_pubkey(k: Option<PKey>, spki: &[u8], indent: usize) -> String {
                 pad2
             ));
             if let Some(p) = &e.pub_key {
-                s.push_str(&hex_block(&e.group.encode(p, false), indent + 8));
+                s.push_str(&hex_block(&e.group.encode(p, e.compressed), indent + 8));
             }
             if let Some(n) = e.group.name {
                 s.push_str(&format!("{}ASN1 OID: {}\n", pad2, n));
