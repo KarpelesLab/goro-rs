@@ -65,3 +65,7 @@ run_tests_v2.sh
 
 # test-leftover patterns above must never hide Rust sources
 !*.rs
+
+# regression tests are never artifacts
+!tests/goro/*.phpt
+!tests/goro/**/*.phpt
