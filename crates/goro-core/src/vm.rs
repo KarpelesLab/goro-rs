@@ -41113,8 +41113,13 @@ impl Vm {
                                     }
                                 }
                             }
-                            // Handle Reflection static methods
-                            if !handled {
+                            // Handle Reflection static methods (not parent::m() /
+                            // self::m() with a $this: those are method calls, below)
+                            let forwarded_this = is_forwarding_call
+                                && op_array.cv_names.first().map(|n| n.as_slice())
+                                    == Some(b"this".as_slice())
+                                && matches!(cvs.first(), Some(Value::Object(_)));
+                            if !handled && !forwarded_this {
                                 let func_display = call.name.to_msg_string();
                                 if let Some(sep_pos) = func_display.find("::") {
                                     let class_part = &func_display[..sep_pos];

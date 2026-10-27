@@ -6759,6 +6759,17 @@ impl Parser {
                             span,
                         });
                     }
+                    // `new (NAME)`: the class named by constant NAME's value
+                    TokenKind::OpenParen => {
+                        let e = self.parse_primary()?;
+                        match e.kind {
+                            ExprKind::Identifier(name) => Expr {
+                                kind: ExprKind::ConstantAccess(vec![name]),
+                                span: e.span,
+                            },
+                            _ => e,
+                        }
+                    }
                     _ => self.parse_primary()?,
                 };
                 // class_name '::' simple_variable is a new_variable too.
