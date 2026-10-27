@@ -433,7 +433,7 @@ pub(crate) fn rmethods<'a>(vm: &'a Vm, lower: &[u8]) -> Vec<&'a crate::object::M
         }
         seen.push(i.clone());
         if let Some(ice) = rcls(vm, &i) {
-            if !vm.classes.contains_key(&i) {
+            if !vm.classes.contains_key(&i) || vm.classes.get(&i).is_some_and(bare_entry) {
                 for m in ice.methods.values() {
                     if !out.iter().any(|x| x.name.eq_ignore_ascii_case(&m.name)) {
                         out.push(m);
@@ -1249,10 +1249,9 @@ fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bo
 
     // ReflectionObject::__construct(object $object)
     let rc_lower = reflector_class_name.to_ascii_lowercase();
-    if (rc_lower == "reflectionobject"
-        || vm.class_extends(rc_lower.as_bytes(), b"reflectionobject"))
-        && !matches!(arg.deref(), Value::Object(_) | Value::Generator(_))
-    {
+    let is_reflection_object = rc_lower == "reflectionobject"
+        || vm.class_extends(rc_lower.as_bytes(), b"reflectionobject");
+    if is_reflection_object && !matches!(arg.deref(), Value::Object(_) | Value::Generator(_)) {
         let err_msg = format!(
             "ReflectionObject::__construct(): Argument #1 ($object) must be of type object, {} given",
             Vm::value_type_name(&arg.deref())
@@ -1370,7 +1369,8 @@ fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bo
         b"__reflection_target".to_vec(),
         Value::String(PhpString::from_string(canonical)),
     );
-    // If constructed from an object, store the object reference
+    // If constructed from an object, a ReflectionObject keeps the object
+    // (intern->obj); a ReflectionClass keeps only its class.
     if let Value::Object(_) = &arg {
         if arg.is_closure_obj() {
             let (fname, _) = crate::closure::closure_parts(&closure_legacy_arg(&arg));
@@ -1379,9 +1379,13 @@ fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bo
                 Value::String(PhpString::from_vec(fname)),
             );
         }
-        obj.set_property(b"__reflection_object".to_vec(), arg);
+        if is_reflection_object {
+            obj.set_property(b"__reflection_object".to_vec(), arg);
+        }
     } else if let Value::Generator(_) = &arg {
-        obj.set_property(b"__reflection_object".to_vec(), arg);
+        if is_reflection_object {
+            obj.set_property(b"__reflection_object".to_vec(), arg);
+        }
     } else if let Value::String(s) = &arg {
         // Closure represented as a string: remember the underlying function.
         let name = s.to_string_lossy();
