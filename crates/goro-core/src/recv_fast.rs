@@ -26,8 +26,10 @@ pub(crate) fn args_match_exactly(vm: &Vm, f: &OpArray, args: &[Value]) -> bool {
 #[inline]
 pub(crate) fn positional_args_match_exactly(vm: &Vm, f: &OpArray, args: &[Value]) -> bool {
     let variadic = f.variadic_param.map_or(usize::MAX, |v| v as usize);
+    let masks = f.type_kind_masks();
     for (i, a) in args.iter().enumerate() {
-        let Some(t) = f.param_types.get(i.min(variadic)) else {
+        let i = i.min(variadic);
+        let Some(t) = f.param_types.get(i) else {
             break;
         };
         let Some(t) = t else {
@@ -37,7 +39,11 @@ pub(crate) fn positional_args_match_exactly(vm: &Vm, f: &OpArray, args: &[Value]
         if matches!(a, Value::Undef) {
             continue;
         }
-        if !value_is_exactly(vm, a, &t.param_type) {
+        let ok = match masks.get(i) {
+            Some(&m) if m != 0 => m & kind_bit(a) != 0,
+            _ => value_is_exactly(vm, a, &t.param_type),
+        };
+        if !ok {
             return false;
         }
     }
@@ -49,8 +55,77 @@ pub(crate) fn positional_args_match_exactly(vm: &Vm, f: &OpArray, args: &[Value]
 #[inline]
 pub(crate) fn arg_matches_exactly(vm: &Vm, f: &OpArray, i: usize, v: &Value) -> bool {
     match f.param_types.get(i) {
-        Some(Some(t)) => matches!(v, Value::Undef) || value_is_exactly(vm, v, &t.param_type),
+        Some(Some(t)) => {
+            matches!(v, Value::Undef)
+                || match f.type_kind_masks().get(i) {
+                    Some(&m) if m != 0 => m & kind_bit(v) != 0,
+                    _ => value_is_exactly(vm, v, &t.param_type),
+                }
+        }
         _ => true,
+    }
+}
+
+/// The kind of `v` among those type_kind_masks() names: null 1, true 2,
+/// false 4, int 8, float 16, string 32, array 64 (else 0: no such mask
+/// takes it).
+#[inline(always)]
+fn kind_bit(v: &Value) -> u16 {
+    match v {
+        Value::Null => 1,
+        Value::True => 2,
+        Value::False => 4,
+        Value::Long(_) => 8,
+        Value::Double(_) => 16,
+        Value::String(_) => 32,
+        Value::Array(_) => 64,
+        _ => 0,
+    }
+}
+
+/// OpArray::type_kind_masks() of `f`.
+pub(crate) fn type_kind_masks_of(f: &OpArray) -> Box<[u16]> {
+    f.param_types
+        .iter()
+        .map(|t| t.as_ref().map_or(0, |t| type_kind_mask(&t.param_type)))
+        .chain(std::iter::once(f.return_type.as_ref().map_or(0, type_kind_mask)))
+        .collect()
+}
+
+/// The value kinds (see kind_bit) `t` takes as they are, as
+/// value_is_exactly() judges them; 0 when it names a class or anything
+/// else.
+fn type_kind_mask(t: &ParamType) -> u16 {
+    match t {
+        ParamType::Nullable(inner) => match type_kind_mask(inner) {
+            0 => 0,
+            m => m | 1,
+        },
+        ParamType::Union(members) => {
+            let mut m = 0;
+            for t in members {
+                match type_kind_mask(t) {
+                    0 => return 0,
+                    k => m |= k,
+                }
+            }
+            m
+        }
+        ParamType::Simple(n) => {
+            let n = n.strip_prefix(b"\\").unwrap_or(n);
+            match n.len() {
+                3 if n.eq_ignore_ascii_case(b"int") => 8,
+                5 if n.eq_ignore_ascii_case(b"float") => 16,
+                6 if n.eq_ignore_ascii_case(b"string") => 32,
+                4 if n.eq_ignore_ascii_case(b"bool") => 6,
+                5 if n.eq_ignore_ascii_case(b"array") => 64,
+                4 if n.eq_ignore_ascii_case(b"null") => 1,
+                4 if n.eq_ignore_ascii_case(b"true") => 2,
+                5 if n.eq_ignore_ascii_case(b"false") => 4,
+                _ => 0,
+            }
+        }
+        ParamType::Intersection(_) => 0,
     }
 }
 
@@ -68,7 +143,10 @@ pub(crate) fn return_matches_exactly(vm: &Vm, f: &OpArray, v: &Value, implicit: 
         }
         // ("none returned" for any other type)
         _ if implicit => false,
-        t => value_is_exactly(vm, v, t),
+        t => match f.type_kind_masks().last() {
+            Some(&m) if m != 0 => m & kind_bit(v) != 0,
+            _ => value_is_exactly(vm, v, t),
+        },
     }
 }
 

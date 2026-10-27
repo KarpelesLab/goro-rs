@@ -630,6 +630,8 @@ pub struct OpArray {
     /// The name of the frame of a call of this function a builtin makes
     /// (see Vm::push_callback_display), once made.
     callback_display: FreshOnClone<Box<str>>,
+    /// See OpArray::type_kind_masks().
+    type_masks: FreshOnClone<Box<[u16]>>,
 }
 
 /// The cell of a static variable a declaration of it (StaticVarInit, at
@@ -1023,6 +1025,16 @@ impl OpArray {
         }
     }
 
+    /// The value kinds each parameter's declared type takes as they are
+    /// (see recv_fast::kind_bit), then the return type's: 0 for none, or
+    /// for a type naming a class or anything else (the full check then).
+    #[inline]
+    pub(crate) fn type_kind_masks(&self) -> &[u16] {
+        self.type_masks
+            .0
+            .get_or_init(|| crate::recv_fast::type_kind_masks_of(self))
+    }
+
     /// See `callback_display`.
     #[inline]
     pub(crate) fn callback_display(&self) -> &std::cell::OnceCell<Box<str>> {
@@ -1408,6 +1420,7 @@ impl OpArray {
             fused_sends: Default::default(),
             static_sites: Default::default(),
             callback_display: Default::default(),
+            type_masks: Default::default(),
         }
     }
 
