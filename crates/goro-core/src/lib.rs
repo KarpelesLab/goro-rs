@@ -15,6 +15,7 @@ pub mod const_table;
 pub mod crypto;
 pub mod csv;
 pub mod custom_fiber;
+pub(crate) mod dtor_list;
 pub mod errdisplay;
 pub mod ext_order;
 pub mod ext_stream;

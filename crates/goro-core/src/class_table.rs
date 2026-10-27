@@ -356,6 +356,43 @@ pub(crate) struct ClassChainMemo {
     map: crate::fxhash::FxHashMap<Vec<u8>, Rc<ClassChain>>,
 }
 
+/// Vm::class_implements_interface()'s answers, for one class table
+/// generation: class -> interface -> answer.
+#[derive(Default)]
+pub(crate) struct ImplementsMemo {
+    stamp: u64,
+    map: crate::fxhash::FxHashMap<Vec<u8>, crate::fxhash::FxHashMap<Vec<u8>, bool>>,
+}
+
+impl ImplementsMemo {
+    #[inline]
+    pub(crate) fn get(&mut self, stamp: u64, class: &[u8], iface: &[u8]) -> Option<bool> {
+        if self.stamp != stamp {
+            self.map.clear();
+            self.stamp = stamp;
+            return None;
+        }
+        self.map.get(class)?.get(iface).copied()
+    }
+
+    pub(crate) fn set(&mut self, stamp: u64, class: &[u8], iface: &[u8], r: bool) {
+        if self.stamp != stamp {
+            self.map.clear();
+            self.stamp = stamp;
+        }
+        match self.map.get_mut(class) {
+            Some(m) => {
+                m.insert(iface.to_vec(), r);
+            }
+            None => {
+                let mut m = crate::fxhash::FxHashMap::default();
+                m.insert(iface.to_vec(), r);
+                self.map.insert(class.to_vec(), m);
+            }
+        }
+    }
+}
+
 impl Vm {
     /// The ancestry of `name` (see ClassChain), remembered while the class
     /// table does not change.

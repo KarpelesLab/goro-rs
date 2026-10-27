@@ -1572,6 +1572,8 @@ struct DtorCtx {
     queue: std::collections::VecDeque<Weak<RefCell<PhpObject>>>,
     /// The VM's own strong refs per object (destructible list).
     base_extra: PtrMap<usize>,
+    /// The largest of `base_extra` (an object holding more is no orphan).
+    max_extra: usize,
     called: PtrSet,
     zombies: Vec<Rc<RefCell<PhpObject>>>,
     /// Which destructor phase this is.
@@ -1664,6 +1666,12 @@ fn dtor_drain_orphans<H: GcHost + ?Sized>(host: &mut H) {
             let c = c.borrow();
             let c = c.as_ref()?;
             c.queue.iter().enumerate().find_map(|(i, w)| {
+                // (most are held by more than the VM's lists can: no
+                // upgrade or lookup for them)
+                let n = w.strong_count();
+                if n == 0 || n > c.max_extra {
+                    return None;
+                }
                 let o = w.upgrade()?;
                 let p = Rc::as_ptr(&o) as *const u8 as usize;
                 let held = c.base_extra.get(&p).copied().unwrap_or(0);
@@ -1878,6 +1886,7 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
             DTOR_CTX.with(|c| {
                 *c.borrow_mut() = Some(DtorCtx {
                     queue: dtor_objs.iter().cloned().collect(),
+                    max_extra: base_extra.values().copied().max().unwrap_or(0),
                     base_extra: std::mem::take(&mut base_extra),
                     called: PtrSet::default(),
                     zombies: Vec::new(),
@@ -2004,7 +2013,7 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
 impl GcHost for crate::vm::Vm {
     fn gc_extra_refs(&self) -> PtrMap<usize> {
         let mut m = PtrMap::default();
-        for v in &self.destructible_objects {
+        for v in self.destructible_objects.iter() {
             if let Value::Object(o) = v {
                 *m.entry(Rc::as_ptr(o) as *const u8 as usize).or_insert(0) += 1;
             }

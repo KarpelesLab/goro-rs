@@ -1841,7 +1841,7 @@ pub struct Vm {
     /// to short-circuit recursive magic-method calls (PHP behavior).
     pub magic_prop_guards: std::collections::HashSet<(u64, Vec<u8>, u8)>,
     /// Objects with __destruct methods, tracked for shutdown-time destruction
-    pub(crate) destructible_objects: Vec<Value>,
+    pub(crate) destructible_objects: crate::dtor_list::DtorList,
     /// free_obj handlers that call back into PHP code, by the address of
     /// the native handlers table (see register_native_free_hook).
     native_free_hooks: Vec<(usize, NativeFreeHook)>,
@@ -2243,6 +2243,8 @@ pub struct Vm {
     pub native_class_handlers: crate::fxhash::FxHashMap<Vec<u8>, NativeClassHandler>,
     /// See Vm::class_chain().
     pub(crate) class_chain_memo: RefCell<crate::class_table::ClassChainMemo>,
+    /// See Vm::class_implements_interface().
+    pub(crate) implements_memo: RefCell<crate::class_table::ImplementsMemo>,
     /// Constants of natively implemented internal classes registered by
     /// extensions, keyed by lowercase class name: (name, value, deprecation
     /// message) in declaration order.
@@ -2617,7 +2619,7 @@ impl Vm {
             exception_string_param_max_len: 15,
             magic_depth: 0,
             magic_prop_guards: std::collections::HashSet::new(),
-            destructible_objects: Vec::new(),
+            destructible_objects: Default::default(),
             native_free_hooks: Vec::new(),
             finally_generators: Vec::new(),
             forced_close_generators: Vec::new(),
@@ -3743,6 +3745,7 @@ impl Vm {
             prop_ptr_handlers: Default::default(),
             native_class_handlers: Default::default(),
             class_chain_memo: Default::default(),
+            implements_memo: Default::default(),
             ext_class_constants: Default::default(),
             ini_validators: std::collections::HashMap::new(),
             warning_capture: None,
@@ -11413,7 +11416,11 @@ impl Vm {
                 batch.push(self.destructible_objects.remove(idx));
             }
             let len = self.destructible_objects.len();
-            let mut i = len - len.min(64);
+            let mut i = if len == 0 {
+                0
+            } else {
+                self.destructible_objects.tail_scan_start(64)
+            };
             while i < self.destructible_objects.len() {
                 // (Some(true): destruct it; Some(false): its construction
                 // failed, it is just freed)
@@ -14424,8 +14431,27 @@ impl Vm {
     }
 
     /// Check if a class (by lowercase name) implements a given interface (by lowercase name).
-    /// Walks up the parent chain and checks each class's interfaces list.
+    /// (Remembered while the class table does not change: the walk is a
+    /// function of it and of the stubs.)
     pub fn class_implements_interface(&self, class_name: &[u8], iface_name: &[u8]) -> bool {
+        let stamp = self.classes.generation();
+        if let Some(r) = self
+            .implements_memo
+            .borrow_mut()
+            .get(stamp, class_name, iface_name)
+        {
+            return r;
+        }
+        let r = self.class_implements_interface_walk(class_name, iface_name);
+        self.implements_memo
+            .borrow_mut()
+            .set(stamp, class_name, iface_name, r);
+        r
+    }
+
+    /// Walks up the parent chain and checks each class's interfaces list.
+    #[inline(never)]
+    fn class_implements_interface_walk(&self, class_name: &[u8], iface_name: &[u8]) -> bool {
         // Stringable: any class with __toString() automatically implements Stringable
         if iface_name == b"stringable" {
             let mut cur: Vec<u8> = class_name.to_vec();
@@ -22006,7 +22032,7 @@ impl Vm {
         self.fatal_bailout = true;
         // (an exception in flight is abandoned with everything else)
         self.current_exception = None;
-        for v in std::mem::take(&mut self.destructible_objects) {
+        for v in std::mem::take(&mut *self.destructible_objects) {
             if let Value::Object(o) = &v {
                 o.borrow().dtor_listed.set(false);
                 o.borrow_mut()
