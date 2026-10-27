@@ -294,11 +294,14 @@ fn print_policies(value: &[u8]) -> Option<String> {
                                         ));
                                     }
                                 } else {
+                                    // print_notice(): "%.*s" of the raw string
+                                    // bytes, so a BMPString stops at its
+                                    // first NUL byte
+                                    let raw = x.content;
+                                    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
                                     out.push_str(&format!(
                                         "    Explicit Text: {}\n",
-                                        String::from_utf8_lossy(
-                                            &name::to_utf8(x.tag, x.content).unwrap_or_default()
-                                        )
+                                        String::from_utf8_lossy(&raw[..end])
                                     ));
                                 }
                             }

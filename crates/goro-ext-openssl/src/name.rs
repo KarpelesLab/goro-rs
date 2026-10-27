@@ -127,6 +127,8 @@ impl Name {
                 }
                 if !(b' '..=b'~').contains(&n) {
                     out.push_str(&format!("\\x{:02X}", n));
+                } else if n == b'/' {
+                    out.push_str("\\/");
                 } else {
                     out.push(n as char);
                 }
