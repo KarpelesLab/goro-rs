@@ -937,8 +937,12 @@ impl PhpGenerator {
         // The running frame's values (a fiber suspended inside it owns them).
         vm.gc_frames.push(crate::gc::GcFrame::for_generator(self));
         let fname = self.running_function_name(vm);
-        vm.running_generators
-            .push((self as *const PhpGenerator as usize, fname, self.object_id));
+        vm.running_generators.push((
+            self as *const PhpGenerator as usize,
+            fname,
+            self.object_id,
+            vm.call_stack.len(),
+        ));
         self.push_running_values(vm);
         let cv_frame = vm.register_cv_frame(&self.op_array);
         if cv_frame {
@@ -2615,8 +2619,12 @@ impl PhpGenerator {
         // The running frame's values (a fiber suspended inside it owns them).
         vm.gc_frames.push(crate::gc::GcFrame::for_generator(self));
         let fname = self.running_function_name(vm);
-        vm.running_generators
-            .push((self as *const PhpGenerator as usize, fname, self.object_id));
+        vm.running_generators.push((
+            self as *const PhpGenerator as usize,
+            fname,
+            self.object_id,
+            vm.call_stack.len(),
+        ));
         self.push_running_values(vm);
         let cv_frame = vm.register_cv_frame(&self.op_array);
         if cv_frame {
@@ -2744,8 +2752,8 @@ impl Vm {
                 self.running_generators
                     .iter()
                     .rev()
-                    .find(|(a, _, _)| *a == addr)
-                    .map(|(_, n, _)| n.to_string())
+                    .find(|(a, _, _, _)| *a == addr)
+                    .map(|(_, n, _, _)| n.to_string())
                     .unwrap_or_default()
             }
         }
@@ -2759,8 +2767,9 @@ impl Vm {
             Some(n) => n.clone(),
             None => Rc::from(self.generator_function_name_of(g)),
         };
+        let depth = self.call_stack.len();
         self.running_generators
-            .push((g as *const PhpGenerator as usize, fname, g.object_id));
+            .push((g as *const PhpGenerator as usize, fname, g.object_id, depth));
     }
 
     /// The object handle of a generator (also while it runs).
@@ -2772,8 +2781,8 @@ impl Vm {
                 self.running_generators
                     .iter()
                     .rev()
-                    .find(|(a, _, _)| *a == addr)
-                    .map_or(0, |(_, _, id)| *id)
+                    .find(|(a, _, _, _)| *a == addr)
+                    .map_or(0, |(_, _, id, _)| *id)
             }
         }
     }

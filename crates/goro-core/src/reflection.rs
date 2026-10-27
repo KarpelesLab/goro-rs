@@ -11772,15 +11772,28 @@ fn reflection_running_generator(
     let start = vm
         .running_generators
         .iter()
-        .rposition(|(a, _, _)| *a == addr)
+        .rposition(|(a, _, _, _)| *a == addr)
         .unwrap_or(vm.running_generators.len().saturating_sub(1));
     let names: Vec<String> = vm.running_generators[start..]
         .iter()
-        .map(|(_, n, _)| n.to_string())
+        .map(|(_, n, _, _)| n.to_string())
         .collect();
+    // (the executing generator's position: where it called the frames
+    // running above it, if any)
+    let at = vm
+        .running_generators
+        .last()
+        .and_then(|(_, _, _, d)| vm.call_stack.get(*d))
+        .filter(|f| !f.1.is_empty() && f.2 > 0)
+        .map(|f| (f.1.to_string(), f.2));
     match method {
-        b"getexecutingfile" => Value::String(PhpString::from_string(vm.current_file.to_string())),
-        b"getexecutingline" => Value::Long(vm.current_line as i64),
+        b"getexecutingfile" => Value::String(PhpString::from_string(
+            at.map(|(f, _)| f)
+                .unwrap_or_else(|| vm.current_file.to_string()),
+        )),
+        b"getexecutingline" => {
+            Value::Long(at.map_or(vm.current_line, |(_, l)| l) as i64)
+        }
         b"getexecutinggenerator" => Value::Generator(g.clone()),
         b"getthis" => Value::Null,
         b"getfunction" => {
