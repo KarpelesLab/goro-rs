@@ -316,8 +316,21 @@ pub(crate) fn rcls<'a>(vm: &'a Vm, lower: &[u8]) -> Option<&'a crate::object::Cl
     if internal_class_known(vm, l) {
         crate::stubs::class_entry(vm, l)
     } else {
-        None
+        lossy_named_class(vm, l)
     }
+}
+
+/// A class whose name is not UTF-8 (Symfony's `\xA9` value wrapper), looked
+/// up by the lossy form a reflector keeps of it.
+#[inline(never)]
+fn lossy_named_class<'a>(vm: &'a Vm, lower: &[u8]) -> Option<&'a crate::object::ClassEntry> {
+    if !lower.windows(3).any(|w| w == "\u{FFFD}".as_bytes()) {
+        return None;
+    }
+    vm.classes
+        .iter()
+        .find(|(k, _)| String::from_utf8_lossy(k).as_bytes() == lower)
+        .map(|(_, c)| c)
 }
 
 /// Whether the class is an internal one (no user declaration).
@@ -1285,6 +1298,26 @@ fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bo
         Value::Object(obj) => {
             let ob = obj.borrow();
             String::from_utf8_lossy(&ob.class_name).to_string()
+        }
+        Value::String(s) if std::str::from_utf8(s.as_bytes()).is_err() => {
+            // (a class name that is not UTF-8: looked up by its bytes)
+            let raw = s.as_bytes();
+            let raw = raw.strip_prefix(b"\\").unwrap_or(raw);
+            let l = raw.to_ascii_lowercase();
+            if !vm.classes.contains_key(&l) {
+                vm.try_autoload_class(raw);
+                if vm.current_exception.is_some() {
+                    return false;
+                }
+            }
+            if let Some(ce) = vm.classes.get(&l) {
+                let name = Value::String(PhpString::from_vec(ce.name.clone()));
+                let mut obj = this.borrow_mut();
+                obj.set_property(b"name".to_vec(), name.clone());
+                obj.set_property(b"__reflection_target".to_vec(), name);
+                return true;
+            }
+            s.to_msg_string()
         }
         Value::String(s) => {
             let name = s.to_msg_string();
@@ -3176,7 +3209,9 @@ pub fn reflection_class_method(
         .get_property(b"__reflection_target")
         .to_php_string()
         .to_string_lossy();
-    let class_lower: Vec<u8> = target
+    let class_lower: Vec<u8> = ob
+        .get_property(b"__reflection_target")
+        .to_php_string()
         .as_bytes()
         .iter()
         .map(|b| b.to_ascii_lowercase())
@@ -4000,7 +4035,9 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
             .get_property(b"__reflection_target")
             .to_php_string()
             .to_string_lossy();
-        let class_lower: Vec<u8> = target
+        let class_lower: Vec<u8> = ob
+            .get_property(b"__reflection_target")
+            .to_php_string()
             .as_bytes()
             .iter()
             .map(|b| b.to_ascii_lowercase())
