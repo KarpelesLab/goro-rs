@@ -7605,7 +7605,11 @@ impl Vm {
                     line,
                 );
             }
-            (Value::Object(oa), Value::Object(ob)) if !self.native_class_handlers.is_empty() => {
+            // (zend_compare() finds an object equal to itself without calling
+            // its compare handler)
+            (Value::Object(oa), Value::Object(ob))
+                if !self.native_class_handlers.is_empty() && !Rc::ptr_eq(oa, ob) =>
+            {
                 // Extension compare handlers may warn or throw (e.g. DateTimeZone).
                 let cl = oa.borrow().class_name.to_ascii_lowercase();
                 let h = self.find_native_class_handler(&cl).or_else(|| {
