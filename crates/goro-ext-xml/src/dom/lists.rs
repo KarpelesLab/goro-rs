@@ -455,7 +455,8 @@ fn named_item(t: &mut Tree, m: &MK, name: &str, ns: Option<&str>) -> Option<Node
 fn offset_as_long(v: &Value) -> Result<i64, ()> {
     use goro_core::value::{NumStr, parse_numeric_str};
     match v {
-        Value::String(s) => match parse_numeric_str(s.as_bytes(), false) {
+        // (is_numeric_string(allow_errors): "1abc" / "0x1" are numeric prefixes)
+        Value::String(s) => match parse_numeric_str(s.as_bytes(), true) {
             Some((NumStr::Long(n), _)) => Ok(n),
             Some((NumStr::Double(d), _)) => Ok(if d.is_finite() {
                 d as i64
@@ -467,6 +468,22 @@ fn offset_as_long(v: &Value) -> Result<i64, ()> {
             None => Err(()),
         },
         other => Ok(other.to_long()),
+    }
+}
+
+/// zval_get_long() of an object offset: it warns and is 1.
+#[inline(never)]
+fn object_offset(vm: &mut Vm, v: &Value) -> Option<Value> {
+    match v {
+        Value::Object(oo) if goro_core::value::native_cast(oo, 1).is_none() => {
+            let cn = goro_core::value::display_class_name(&oo.borrow().class_name).to_string();
+            vm.emit_warning(&format!(
+                "Object of class {} could not be converted to int",
+                cn
+            ));
+            Some(Value::Long(1))
+        }
+        _ => None,
     }
 }
 
@@ -484,6 +501,7 @@ pub fn h_read_dimension(vm: &mut Vm, o: &Obj, offset: Option<&Value>, _mode: u8)
             return Some(Value::Null);
         }
     };
+    let off = object_offset(vm, &off).unwrap_or(off);
     match mr {
         MapRef::List(_) => match offset_as_long(&off) {
             Err(()) => Some(Value::Null),
@@ -510,9 +528,10 @@ pub fn h_read_dimension(vm: &mut Vm, o: &Obj, offset: Option<&Value>, _mode: u8)
     }
 }
 
-pub fn h_has_dimension(_vm: &mut Vm, o: &Obj, offset: &Value, _check_empty: u8) -> Option<bool> {
+pub fn h_has_dimension(vm: &mut Vm, o: &Obj, offset: &Value, _check_empty: u8) -> Option<bool> {
     let mr = map_ref(o)?;
     let off = offset.deref();
+    let off = object_offset(vm, &off).unwrap_or(off);
     match offset_as_long(&off) {
         Err(()) => match mr {
             MapRef::List(_) => Some(false),

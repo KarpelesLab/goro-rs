@@ -2447,7 +2447,7 @@ fn new_instance(vm: &mut Vm, class: &[u8], core: Box<Core>) -> Value {
         .unwrap_or_else(|| b"XMLReader".to_vec());
     let id = vm.alloc_object_id();
     let mut o = PhpObject::new(disp, id);
-    vm.apply_class_property_defaults(&mut o, &lower);
+    vm.init_native_object_props(&lower, &mut o);
     let o = Rc::new(RefCell::new(o));
     vm.lazy_list_destructible(&o);
     attach(&o);

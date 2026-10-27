@@ -370,7 +370,8 @@ fn iterator_to_array_iterate(vm: &mut Vm, it: &Value, use_keys: bool) -> Result<
         if vm.current_exception.is_some() {
             break;
         }
-        let value = vm.it_current_data(it);
+        // (ZVAL_DEREF: an element reference is stored by value)
+        let value = vm.it_current_data(it).deref();
         if vm.current_exception.is_some() {
             break;
         }

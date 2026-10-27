@@ -149,7 +149,7 @@ fn new_sxe_object(vm: &mut Vm, class_name: &[u8], sxe: Sxe) -> Obj {
         && lower != b"simplexmlelement"
         && lower != b"simplexmliterator"
     {
-        vm.apply_class_property_defaults(&mut o, &lower);
+        vm.init_native_object_props(&lower, &mut o);
     }
     sxe.fptr_count.set(find_fptr_count(vm, &lower));
     o.native = Some(NativeData {

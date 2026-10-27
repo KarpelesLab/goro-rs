@@ -24793,6 +24793,14 @@ impl Vm {
 
     /// A new object of class `name_lower` gets its declared instance
     /// properties, with their defaults (NEW: object_properties_init()).
+    /// The declared property slots an object of the user class
+    /// `name_lower` that an extension creates natively starts with, as for
+    /// `new` (uninitialized typed / readonly properties are not unset ones).
+    pub fn init_native_object_props(&mut self, name_lower: &[u8], obj: &mut PhpObject) {
+        self.init_declared_props(name_lower, obj);
+        obj.mark_declared();
+    }
+
     pub(crate) fn init_declared_props(&mut self, name_lower: &[u8], obj: &mut PhpObject) {
         let Some(props) = self.declared_prop_list(name_lower) else {
             return;

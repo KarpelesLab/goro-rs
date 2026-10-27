@@ -700,7 +700,7 @@ pub fn new_object(vm: &mut Vm, class: &[u8]) -> Obj {
     let mut o = PhpObject::new(disp, id);
     let user = vm.classes.contains_key(&lower);
     if user {
-        vm.apply_class_property_defaults(&mut o, &lower);
+        vm.init_native_object_props(&lower, &mut o);
     }
     let o = Rc::new(RefCell::new(o));
     if user {
@@ -1401,7 +1401,8 @@ fn h_get_properties(vm: &mut Vm, o: &Obj, purpose: u8) -> Option<PhpArray> {
         .borrow()
         .properties
         .iter()
-        .filter(|(k, _)| !k.starts_with(b"__"))
+        // (uninitialized typed properties are not shown)
+        .filter(|(k, v)| !k.starts_with(b"__") && !matches!(v, Value::Undef))
         .cloned()
         .collect();
     for (k, v) in std {
