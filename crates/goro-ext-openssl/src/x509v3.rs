@@ -535,6 +535,16 @@ pub fn ext_print(e: &Ext) -> Option<Vec<u8>> {
             }
             sections.join("\n")
         }
+        // ct_precert_scts / ct_cert_scts: i2r_SCT_LIST()
+        "1.3.6.1.4.1.11129.2.4.2" | "1.3.6.1.4.1.11129.2.4.5" => {
+            let t = asn1::parse_one(v)?;
+            if t.tag != asn1::OCTET_STRING {
+                return None;
+            }
+            sct_list_print(t.content)?
+        }
+        // ct_precert_poison: i2s_poison()
+        "1.3.6.1.4.1.11129.2.4.3" => "NULL".to_string(),
         "1.3.6.1.5.5.7.1.24" => {
             let t = asn1::parse_one(v)?;
             let f: Vec<String> = t
@@ -569,6 +579,116 @@ pub fn ext_print(e: &Ext) -> Option<Vec<u8>> {
         _ => return None,
     };
     Some(s.into_bytes())
+}
+
+/// BIO_hex_string(): colon-separated hex, `width` bytes per line, later
+/// lines indented by `indent`.
+fn bio_hex_string(indent: usize, width: usize, d: &[u8]) -> String {
+    let mut out = String::new();
+    let Some((last, head)) = d.split_last() else {
+        return out;
+    };
+    let mut j = 0;
+    for (i, b) in head.iter().enumerate() {
+        if i > 0 && j == 0 {
+            out.push_str(&" ".repeat(indent));
+        }
+        out.push_str(&format!("{:02X}:", b));
+        j = (j + 1) % width;
+        if j == 0 {
+            out.push('\n');
+        }
+    }
+    if !head.is_empty() && j == 0 {
+        out.push_str(&" ".repeat(indent));
+    }
+    out.push_str(&format!("{:02X}", last));
+    out
+}
+
+/// SCT_LIST_print(list, out, 0, "\n", NULL) over the TLS-encoded list
+/// (o2i_SCT_LIST); None when it does not decode.
+#[inline(never)]
+fn sct_list_print(d: &[u8]) -> Option<String> {
+    let u16at = |b: &[u8], i: usize| -> Option<usize> {
+        Some(u16::from_be_bytes([*b.get(i)?, *b.get(i + 1)?]) as usize)
+    };
+    let total = u16at(d, 0)?;
+    if total + 2 != d.len() {
+        return None;
+    }
+    let mut scts = Vec::new();
+    let mut i = 2;
+    while i < d.len() {
+        let l = u16at(d, i)?;
+        let sct = d.get(i + 2..i + 2 + l)?;
+        if sct.is_empty() {
+            return None;
+        }
+        scts.push(sct);
+        i += 2 + l;
+    }
+    if scts.is_empty() {
+        return None;
+    }
+    let months = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let mut out = Vec::new();
+    for sct in scts {
+        let mut s = String::from("Signed Certificate Timestamp:\n    Version   : ");
+        if sct[0] != 0 {
+            s.push_str("unknown\n");
+            s.push_str(&" ".repeat(16));
+            s.push_str(&bio_hex_string(16, 16, sct));
+            out.push(s);
+            continue;
+        }
+        // v1: log id, timestamp, extensions, signature
+        let log_id = sct.get(1..33)?;
+        let ts = u64::from_be_bytes(sct.get(33..41)?.try_into().ok()?);
+        let el = u16at(sct, 41)?;
+        let ext = sct.get(43..43 + el)?;
+        let p = 43 + el;
+        let (hash_alg, sig_alg) = (*sct.get(p)?, *sct.get(p + 1)?);
+        let sl = u16at(sct, p + 2)?;
+        let sig = sct.get(p + 4..p + 4 + sl)?;
+        if p + 4 + sl != sct.len() {
+            return None;
+        }
+        s.push_str("v1 (0x0)\n    Log ID    : ");
+        s.push_str(&bio_hex_string(16, 16, log_id));
+        let secs = (ts / 1000) as i64;
+        let (y, m, dd) = crate::cert::civil_from_days(secs.div_euclid(86400));
+        let r = secs.rem_euclid(86400);
+        s.push_str(&format!(
+            "\n    Timestamp : {} {:2} {:02}:{:02}:{:02}.{:03} {} GMT",
+            months[(m - 1) as usize],
+            dd,
+            r / 3600,
+            (r / 60) % 60,
+            r % 60,
+            ts % 1000,
+            y
+        ));
+        s.push_str("\n    Extensions: ");
+        if ext.is_empty() {
+            s.push_str("none");
+        } else {
+            s.push_str(&bio_hex_string(16, 16, ext));
+        }
+        s.push_str("\n    Signature : ");
+        // SCT_get_signature_nid(): only SHA-256 with ECDSA or RSA is named
+        match (hash_alg, sig_alg) {
+            (4, 3) => s.push_str("ecdsa-with-SHA256"),
+            (4, 1) => s.push_str("sha256WithRSAEncryption"),
+            _ => s.push_str(&format!("{:02X}{:02X}", hash_alg, sig_alg)),
+        }
+        s.push_str("\n                ");
+        s.push_str(&bio_hex_string(16, 16, sig));
+        out.push(s);
+    }
+    Some(out.join("\n"))
 }
 
 /// ASN1_TIME_print() style "Mon DD HH:MM:SS YYYY GMT".
