@@ -1307,6 +1307,10 @@ pub(crate) struct PendingCall {
 
 /// The function a pending call by name resolved to (see
 /// Vm::resolve_call_target).
+/// CallTarget::call_flags
+pub(crate) const CALL_VIA_INVOKE: u8 = 1;
+pub(crate) const CALL_MAGIC: u8 = 2;
+
 #[derive(Debug, Clone)]
 pub(crate) struct CallTarget {
     /// The user function of that name (as user_fn_lookup() finds it).
@@ -1351,17 +1355,17 @@ pub(crate) struct CallTarget {
     /// function declared since then (while the arguments were evaluated)
     /// makes the lookup run again.
     pub(crate) fn_gen: usize,
-    /// The call is made by Closure::__invoke() (`$closure->__invoke()`):
-    /// its argument errors have no "called in" (the caller is internal).
-    pub(crate) via_invoke: bool,
+    /// CALL_VIA_INVOKE: the call is made by Closure::__invoke()
+    /// (`$closure->__invoke()`): its argument errors have no "called in"
+    /// (the caller is internal). CALL_MAGIC: the `__call()` dispatch of a
+    /// call to an inaccessible or undefined method (`[$this, $name]` lead
+    /// the arguments; the others are packed into `$arguments`), not a call
+    /// of `__call()` itself. (one byte: a PendingCall stays within 128)
+    pub(crate) call_flags: u8,
     /// A dynamic call by a function name (`$f()`, INIT_DYNAMIC_CALL): the
     /// arguments of an internal function's by-reference parameters are
     /// only known to be sent by reference at run time.
     pub(crate) dynamic: bool,
-    /// The `__call()` dispatch of a call to an inaccessible or undefined
-    /// method (`[$this, $name]` lead the arguments; the others are packed
-    /// into `$arguments`), not a call of `__call()` itself.
-    pub(crate) magic_call: bool,
 }
 
 /// What the frame of a method call set up by INIT_METHOD_CALL's fast path
@@ -1488,9 +1492,8 @@ impl CallTarget {
         forward_this: false,
         method_info: None,
         fn_gen: 0,
-        via_invoke: false,
+        call_flags: 0,
         dynamic: false,
-        magic_call: false,
     };
 }
 
@@ -12528,7 +12531,7 @@ impl Vm {
                     args,
                     named_args: Vec::new(),
                     target: CallTarget {
-                        via_invoke: true,
+                        call_flags: CALL_VIA_INVOKE,
                         ..CallTarget::NONE
                     },
                 });
@@ -22969,7 +22972,7 @@ impl Vm {
         };
         // For method calls like ClassName::method, format as ClassName::method
         // For regular functions, just the function name
-        self.pending_call_via_invoke = call.target.via_invoke;
+        self.pending_call_via_invoke = call.target.call_flags & CALL_VIA_INVOKE != 0;
         if implicit_args == 1 {
             self.recv_this = call
                 .args
@@ -23171,9 +23174,8 @@ impl Vm {
                 forward_this: false,
                 method_info: None,
                 fn_gen: self.user_functions.len() + 1,
-                via_invoke: false,
+                call_flags: 0,
                 dynamic: false,
-                magic_call: false,
             };
         }
         let builtin = match found {
@@ -23209,9 +23211,8 @@ impl Vm {
             forward_this: false,
             method_info: None,
             fn_gen: self.user_functions.len() + 1,
-            via_invoke: false,
+            call_flags: 0,
             dynamic: false,
-            magic_call: false,
         }
     }
 
@@ -35051,7 +35052,7 @@ impl Vm {
                                     fn_display = self.method_declaring_display(fn_display);
                                 }
                                 if from_trampoline {
-                                } else if call.target.magic_call {
+                                } else if call.target.call_flags & CALL_MAGIC != 0 {
                                     if let Some(Value::String(s)) = call.args.get(1) {
                                         if let Some(sep) = fn_display.rfind("::") {
                                             fn_display = format!(
@@ -35142,7 +35143,7 @@ impl Vm {
                                     call.name.to_msg_string()
                                 };
                                 // __call/__callStatic name the method that was called.
-                                let magic_name = if call.target.magic_call {
+                                let magic_name = if call.target.call_flags & CALL_MAGIC != 0 {
                                     call.args.get(1)
                                 } else if func_name_lower.ends_with(b"::__callstatic") {
                                     call.args.first()
@@ -35568,7 +35569,7 @@ impl Vm {
                         // Resolve named arguments by reordering to match parameter positions
                         if !call.named_args.is_empty() {
                             // For __call/__callStatic, pack named args into the args for the $args array
-                            let is_magic_call = call.target.magic_call
+                            let is_magic_call = (call.target.call_flags & CALL_MAGIC != 0)
                                 || func_name_lower.ends_with(b"::__callstatic");
                             if is_magic_call {
                                 // Named args become part of the args array with string keys
@@ -35741,7 +35742,7 @@ impl Vm {
                             let required = user_fn.required_param_count;
                             // Don't check for __call/__callStatic (their arguments
                             // are packed below)
-                            let is_special = call.target.magic_call
+                            let is_special = (call.target.call_flags & CALL_MAGIC != 0)
                                 || func_name_lower.ends_with(b"::__callstatic");
                             if !is_special && provided < required {
                                 let display_name = if !user_fn.display_name.is_empty() {
@@ -35813,7 +35814,7 @@ impl Vm {
                                 let type_err = if user_fn.param_types.is_empty() {
                                     None
                                 } else {
-                                    self.pending_call_via_invoke = call.target.via_invoke;
+                                    self.pending_call_via_invoke = call.target.call_flags & CALL_VIA_INVOKE != 0;
                                     let r = self.check_param_types_with_strict(
                                         &user_fn,
                                         &call.args,
@@ -35946,7 +35947,7 @@ impl Vm {
                         // Special handling for __call/__callStatic:
                         // Pack extra args into an array for the $args parameter
                         // Must happen BEFORE type checking so the array arg passes the type check.
-                        if call.target.magic_call
+                        if (call.target.call_flags & CALL_MAGIC != 0)
                             || func_name_lower.ends_with(b"::__callstatic")
                         {
                             // Args: [this, method_name, arg1, arg2, ...]
@@ -63751,7 +63752,7 @@ impl Vm {
                                         args: vec![obj_val.clone(), method_name_val],
                                         named_args: Vec::new(),
                                         target: CallTarget {
-                                            magic_call: true,
+                                            call_flags: CALL_MAGIC,
                                             ..CallTarget::NONE
                                         },
                                     });
@@ -63810,7 +63811,7 @@ impl Vm {
                                     args: vec![obj_val.clone(), method_name_val],
                                     named_args: Vec::new(),
                                     target: CallTarget {
-                                        magic_call: true,
+                                        call_flags: CALL_MAGIC,
                                         ..CallTarget::NONE
                                     },
                                 });
