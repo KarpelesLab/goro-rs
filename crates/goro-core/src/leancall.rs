@@ -140,6 +140,15 @@ fn fill_undef_to(v: &mut Vec<Value>, n: usize) {
     unsafe { v.set_len(n) };
 }
 
+/// Whether `v` holds nothing to release (no drop glue to run).
+#[inline(always)]
+fn no_drop(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Undef | Value::Null | Value::False | Value::True | Value::Long(_) | Value::Double(_)
+    )
+}
+
 /// Release the values of `slots` in order, as a frame's end does.
 #[inline]
 fn release_slots(slots: &mut Vec<Value>) {
@@ -1146,40 +1155,41 @@ impl Vm {
         {
             return None;
         }
-        // (containers of such values too, within a budget: a tree of
-        // plain objects the callee built and drops, see drops_quietly_deep)
-        // (while objects with a destructor exist, no such object is
-        // released: see drops_quietly_listed)
-        let mut budget = 256u32;
-        let globals = &self.globals;
-        let mut plain = true;
-        let mut quiet = |v: &Value| match v {
-            Value::Undef
-            | Value::Null
-            | Value::False
-            | Value::True
-            | Value::Long(_)
-            | Value::Double(_) => true,
-            v => {
-                plain = false;
-                is_plain_scalar(v)
-                    || if listed {
-                        crate::fastpath::drops_quietly_listed(v, &mut budget, globals)
-                    } else {
-                        crate::fastpath::drops_quietly_deep(v, &mut budget, globals)
-                    }
-            }
-        };
         if unused && !is_plain_scalar(v) {
             return None;
         }
-        for c in cvs {
-            if !quiet(c) {
-                return None;
+        // (plain values only, the common case: nothing to release)
+        // (plain values only, the common case: nothing to release; else
+        // strings and values held elsewhere too, a method's `$this`, or
+        // see lean_frame_drops_quietly)
+        let plain = cvs.iter().all(no_drop)
+            && tmps
+                .iter()
+                .enumerate()
+                .all(|(i, t)| no_drop(t) || i == ret_tmp);
+        if !plain {
+            let mut slow = false;
+            let mut look = |v: &Value| {
+                if !no_drop(v) {
+                    match v {
+                        Value::String(_) => {}
+                        Value::Object(o)
+                            if Rc::strong_count(o) > 1
+                                && (!listed
+                                    || o.try_borrow().is_ok_and(|b| !b.dtor_listed.get())) => {}
+                        _ => slow = true,
+                    }
+                }
+            };
+            for c in cvs {
+                look(c);
             }
-        }
-        for (i, t) in tmps.iter().enumerate() {
-            if i != ret_tmp && !quiet(t) {
+            for (i, t) in tmps.iter().enumerate() {
+                if i != ret_tmp {
+                    look(t);
+                }
+            }
+            if slow && !self.lean_frame_drops_quietly(cvs, tmps, ret_tmp, listed) {
                 return None;
             }
         }
@@ -1194,6 +1204,38 @@ impl Vm {
         self.last_return_line = r.line;
         self.current_line = r.line;
         Some((v, plain))
+    }
+
+    /// lean_return(): whether the release of the variables `cvs` and the
+    /// temporaries `tmps` (but the returned one, `ret_tmp`) only frees
+    /// memory: containers of plain values too, within a budget (a tree of
+    /// plain objects the callee built and drops, see drops_quietly_deep;
+    /// while objects with a destructor exist, `listed`, no such object is
+    /// released: see drops_quietly_listed).
+    #[inline(never)]
+    fn lean_frame_drops_quietly(
+        &self,
+        cvs: &[Value],
+        tmps: &[Value],
+        ret_tmp: usize,
+        listed: bool,
+    ) -> bool {
+        let mut budget = 256u32;
+        let globals = &self.globals;
+        let mut quiet = |v: &Value| {
+            no_drop(v)
+                || is_plain_scalar(v)
+                || if listed {
+                    crate::fastpath::drops_quietly_listed(v, &mut budget, globals)
+                } else {
+                    crate::fastpath::drops_quietly_deep(v, &mut budget, globals)
+                }
+        };
+        cvs.iter().all(&mut quiet)
+            && tmps
+                .iter()
+                .enumerate()
+                .all(|(i, t)| i == ret_tmp || quiet(t))
     }
 
     /// The DO_FCALL at `ip` of `op_array`, the callee of the running lean
