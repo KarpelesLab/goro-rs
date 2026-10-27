@@ -210,6 +210,22 @@ pub fn has_room() -> bool {
     sp().saturating_sub(current_limit()) >= RED_ZONE
 }
 
+/// Room below which releasing a value no longer recurses into what it holds
+/// (see `release_stack_low`): what freeing one object or array needs, with
+/// a wide margin.
+const RELEASE_ZONE: usize = 256 * 1024;
+
+/// Whether the current stack segment is nearly used up, for releases (a
+/// long chain of objects let go at once recurses once per link; past this
+/// the rest of the chain is freed iteratively, see object.rs). One load and
+/// a compare: while the segment's limit is not known yet (no PHP code ran
+/// on this thread) it says no.
+#[inline(always)]
+pub fn release_stack_low() -> bool {
+    let limit = CTX.with(|c| c.get().limit);
+    sp() < limit.wrapping_add(RELEASE_ZONE)
+}
+
 /// Run `f`, on a fresh stack segment if the current one is nearly used up.
 #[inline]
 pub fn with_room<R>(f: impl FnOnce() -> R) -> Result<R, Exhausted> {

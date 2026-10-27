@@ -779,6 +779,49 @@ fn release_object_storage(props: &mut [(Vec<u8>, crate::value::Value)]) {
     drop(infs);
 }
 
+thread_local! {
+    /// The property tables of objects released with the stack nearly used
+    /// up (see release_props_deep()), and whether one of those releases is
+    /// draining them.
+    static DEEP_RELEASES: std::cell::RefCell<(Vec<Vec<(Vec<u8>, Value)>>, bool)> =
+        const { std::cell::RefCell::new((Vec::new(), false)) };
+}
+
+/// Release the property table of an object freed with the stack nearly
+/// used up (a long chain of objects let go at once recurses once per link):
+/// the first such release frees it and what the ones below it hand over,
+/// iteratively, instead of overflowing the native stack. Chains short
+/// enough to fit are freed recursively (innermost handles first).
+#[cold]
+#[inline(never)]
+fn release_props_deep(props: Vec<(Vec<u8>, Value)>) {
+    let Ok(draining) = DEEP_RELEASES.try_with(|d| {
+        let mut d = d.borrow_mut();
+        if d.1 {
+            d.0.push(props);
+            None
+        } else {
+            d.1 = true;
+            Some(props)
+        }
+    }) else {
+        // (thread-local storage gone while the thread exits)
+        return;
+    };
+    let Some(props) = draining else {
+        return;
+    };
+    drop(props);
+    while let Some(next) = DEEP_RELEASES
+        .try_with(|d| d.borrow_mut().0.pop())
+        .ok()
+        .flatten()
+    {
+        drop(next);
+    }
+    let _ = DEEP_RELEASES.try_with(|d| d.borrow_mut().1 = false);
+}
+
 impl Drop for PhpObject {
     fn drop(&mut self) {
         if self.gc_buffered.get() {
@@ -794,8 +837,12 @@ impl Drop for PhpObject {
             hook(self as *const PhpObject as usize);
         }
         let mut defer_on: Option<usize> = None;
+        // (only a held object, array or reference can release further
+        // objects, recursively)
+        let mut containers = false;
         for (_, v) in self.properties.iter() {
             crate::gc::on_child_released(v);
+            containers |= matches!(v, Value::Object(_) | Value::Array(_) | Value::Reference(_));
             if let Some(k) = pending_dtor_child(v) {
                 defer_on = Some(k);
             }
@@ -813,7 +860,11 @@ impl Drop for PhpObject {
         if internal {
             release_object_storage(&mut props);
         }
-        drop(props);
+        if containers && crate::stack::release_stack_low() {
+            release_props_deep(props);
+        } else {
+            drop(props);
+        }
         drop(self.closure.take());
         // Don't recycle the sentinel zero id.
         if self.object_id != 0 && !weak_target {
