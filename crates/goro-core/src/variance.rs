@@ -1265,7 +1265,7 @@ impl Vm {
                                     c, p
                                 );
                                 let line = child.op_array.decl_line;
-                                self.emit_deprecated_at(&dep, line);
+                                self.emit_link_deprecated_at(&dep, line);
                             }
                         }
                     }

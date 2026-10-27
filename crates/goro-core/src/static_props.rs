@@ -1539,7 +1539,11 @@ impl Vm {
         match &r {
             Ok(()) => {
                 for (ty, msg, line) in recorded {
+                    // (a user error handler is called from the declaring
+                    // opline, see emit_link_deprecated_at)
+                    self.error_frame_line = self.current_line;
                     self.raise_error(ty, &msg, line);
+                    self.error_frame_line = 0;
                 }
             }
             // Retried later: the errors will be raised again then.
@@ -1675,7 +1679,7 @@ impl Vm {
                                     "Return type of {} should either be compatible with {}, or the #[\\ReturnTypeWillChange] attribute should be used to temporarily suppress the notice",
                                     c, p
                                 );
-                                self.emit_deprecated_at(&dep, line);
+                                self.emit_link_deprecated_at(&dep, line);
                                 if self.current_exception.is_some() {
                                     return Err((dep, line, false));
                                 }

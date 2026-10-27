@@ -231,6 +231,15 @@ impl Vm {
 
     /// zend_error(): hand a non-fatal error raised at `line` of the current
     /// file to the user error handler, or to php_error_cb().
+    /// A deprecation raised while linking a class, about the member on
+    /// `line`: a user error handler is called from the executing opline.
+    #[inline(never)]
+    pub fn emit_link_deprecated_at(&mut self, msg: &str, line: u32) {
+        self.error_frame_line = self.current_line;
+        self.raise_error(E_DEPRECATED, msg, line);
+        self.error_frame_line = 0;
+    }
+
     pub fn raise_error(&mut self, ty: i64, msg: &str, line: u32) {
         if self.error_reporting == ER_SILENT {
             return;
@@ -294,10 +303,11 @@ impl Vm {
         // Called from user code, the handler's frame is located at the
         // error; called from a builtin, it is an "[internal function]" one.
         let saved_ucf = self.ucf_call_line.take();
+        let frame_line = std::mem::take(&mut self.error_frame_line);
         if self.in_builtin_frame() {
             self.materialize_builtin_frames(false);
         } else {
-            self.ucf_call_line = Some(line);
+            self.ucf_call_line = Some(if frame_line != 0 { frame_line } else { line });
             self.ucf_strict = false;
         }
         let fatal_before = self.fatal_emitted;

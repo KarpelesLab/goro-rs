@@ -2381,6 +2381,10 @@ pub struct Vm {
     pub mute_callable_deprecations: bool,
     /// Line of a direct call_user_func() call, for its callee's frame.
     pub ucf_call_line: Option<u32>,
+    /// The line of the user error handler's frame when it is not the
+    /// error's (an error raised while linking a class is about a member,
+    /// the handler is called from the declaring opline); 0: the error's.
+    pub error_frame_line: u32,
     /// The direct call_user_func() that set `ucf_call_line` was made from
     /// strict_types code: its callee's arguments are checked in strict mode
     /// (ZEND_INIT_USER_CALL makes the call the calling code's).
@@ -3800,6 +3804,7 @@ impl Vm {
             pending_callable_deprecations: RefCell::new(Vec::new()),
             mute_callable_deprecations: false,
             ucf_call_line: None,
+            error_frame_line: 0,
             ucf_strict: false,
             release_call_at: None,
             closure_invoke_call: false,
@@ -56363,6 +56368,18 @@ impl Vm {
                                                     .eq_ignore_ascii_case(&class.name)
                                             })
                                         };
+                                        // (reported at the child's hook, as a method's)
+                                        let hook_line = |kind: &[u8]| {
+                                            let m = [kind, child_prop.name.as_slice()]
+                                                .concat()
+                                                .to_ascii_lowercase();
+                                            class
+                                                .methods
+                                                .get(&m)
+                                                .map(|md| md.op_array.decl_line)
+                                                .filter(|&l| l > 0)
+                                                .unwrap_or(op.line)
+                                        };
                                         if parent_read_only && own_hook(b"__property_get_") {
                                             // Otherwise emit a hook-style declaration mismatch error.
                                             let child_display =
@@ -56392,7 +56409,7 @@ impl Vm {
                                                     prop_display,
                                                     parent_type
                                                 ),
-                                                line: op.line,
+                                                line: hook_line(b"__property_get_"),
                                             });
                                         }
                                         if parent_write_only && own_hook(b"__property_set_") {
@@ -56423,7 +56440,7 @@ impl Vm {
                                                     prop_display,
                                                     parent_type
                                                 ),
-                                                line: op.line,
+                                                line: hook_line(b"__property_set_"),
                                             });
                                         }
                                         let child_display =
