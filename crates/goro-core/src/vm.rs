@@ -21046,6 +21046,32 @@ impl Vm {
         }
     }
 
+    /// zend_std_write_property(): a typed property that was unset() (not
+    /// merely uninitialized) goes to __set() with the value as given, so its
+    /// type is not checked by the write itself.
+    #[inline(never)]
+    fn unset_prop_write_goes_to_set(
+        &self,
+        obj: &Rc<RefCell<PhpObject>>,
+        pkey: &[u8],
+        class_lower: &[u8],
+        prop_name: &[u8],
+    ) -> bool {
+        if obj.borrow().has_property(pkey) || self.magic_depth >= 5 {
+            return false;
+        }
+        let has_set = self
+            .classes
+            .get(class_lower)
+            .map(|c| c.methods.contains_key(b"__set".as_slice()))
+            .unwrap_or(false);
+        if !has_set {
+            return false;
+        }
+        let guard_key = (obj.borrow().object_id, prop_name.to_vec(), 2u8);
+        !self.magic_prop_guards.contains(&guard_key)
+    }
+
     /// The #[\Deprecated] of user method `method_lower` of `class_lower`,
     /// called implicitly; true when the error handler threw.
     #[inline(never)]
@@ -63780,7 +63806,16 @@ impl Vm {
                             }
                             // Enforce typed properties (only if no readonly error, since readonly takes precedence)
                             let mut continue_to_ref_check = false;
-                            if readonly_error.is_none() && visibility_error.is_none() {
+                            if readonly_error.is_none()
+                                && visibility_error.is_none()
+                                && !(prop_type.is_some()
+                                    && self.unset_prop_write_goes_to_set(
+                                        &obj,
+                                        &pkey,
+                                        &class_lower,
+                                        prop_name.as_bytes(),
+                                    ))
+                            {
                                 if let Some(ref pt) = prop_type {
                                     // ++/-- past the int range on a property that
                                     // does not accept float (zend_incdec_typed_prop):
