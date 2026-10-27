@@ -47549,14 +47549,8 @@ impl Vm {
                 },
 
                 OpCode::Throw => match outlined(|| -> Result<Flow, VmError> {
-                    let exc_val = self.read_operand_warn(
-                        &op.op1,
-                        &cvs,
-                        &tmps,
-                        &op_array.literals,
-                        op_array,
-                        op.line,
-                    );
+                    // (an undefined variable warns below, with the error)
+                    let exc_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
 
                     // (the `@` levels the exception leaves are restored where
                     // it is caught)
@@ -47644,10 +47638,19 @@ impl Vm {
                 OpCode::StaticPropGet => match outlined(|| -> Result<Flow, VmError> {
                     let op1_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // ZEND_FETCH_CLASS: `$v::C` with $v neither an object nor a string
-                    if let Some(exc) = matches!(op.op1, OperandType::Cv(_) | OperandType::Tmp(_))
-                        .then(|| self.invalid_class_name_operand(&op1_val, op.line))
-                        .flatten()
-                    {
+                    // (an undefined $v warns first; the warning may throw)
+                    let had_exc = self.current_exception.is_some();
+                    if matches!(op.op1, OperandType::Cv(_)) && matches!(op1_val, Value::Undef) {
+                        self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
+                    }
+                    let thrown = (!had_exc)
+                        .then(|| self.current_exception.take())
+                        .flatten();
+                    if let Some(exc) = thrown.or_else(|| {
+                        matches!(op.op1, OperandType::Cv(_) | OperandType::Tmp(_))
+                            .then(|| self.invalid_class_name_operand(&op1_val, op.line))
+                            .flatten()
+                    }) {
                         self.current_exception = Some(exc);
                         if let Some((catch_target, _, _, _, eh_pc_depth)) =
                             exception_handlers.last()
