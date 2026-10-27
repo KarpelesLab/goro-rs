@@ -13767,7 +13767,22 @@ impl Vm {
             let had_this_captured = !captured_values.is_empty();
             if had_this_captured {
                 // Check if the closure actually uses $this in opcodes
+                // (a nested closure's capture of it does not count: the
+                // ArrayAppend into the capture list a MakeClosure wraps)
+                let capture_lists: Vec<OperandType> = original_op
+                    .ops
+                    .iter()
+                    .filter(|i| i.opcode == OpCode::MakeClosure)
+                    .map(|i| i.op1)
+                    .collect();
                 let uses_this = original_op.ops.iter().any(|instr| {
+                    if instr.opcode == OpCode::ArrayAppend
+                        && matches!(instr.op1, OperandType::Tmp(_))
+                        && capture_lists.contains(&instr.op1)
+                        && matches!(instr.op2, OperandType::Cv(0))
+                    {
+                        return false;
+                    }
                     matches!(instr.op1, OperandType::Cv(0))
                         || matches!(instr.op2, OperandType::Cv(0))
                         || matches!(instr.result, OperandType::Cv(0))
