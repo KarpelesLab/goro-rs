@@ -219,11 +219,14 @@ fn resolve_charset(vm: &mut Vm, args: &[Value], fn_name: &str, arg_idx: usize) -
     let raw: Option<Vec<u8>> = match args.get(arg_idx).map(|v| v.deref()) {
         None | Some(Value::Null) => ini_default_charset(vm),
         Some(v) => {
+            // (a C string: it ends at a NUL byte)
             let s = v.to_php_string();
-            if s.as_bytes().is_empty() {
+            let b = s.as_bytes();
+            let b = &b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())];
+            if b.is_empty() {
                 ini_default_charset(vm)
             } else {
-                Some(s.as_bytes().to_vec())
+                Some(b.to_vec())
             }
         }
     };
