@@ -42737,6 +42737,19 @@ impl Vm {
                         Value::Array(a) => a.borrow().values().cloned().collect(),
                         _ => Vec::new(),
                     };
+                    // (arguments unpacked from `compact(...$names)`)
+                    if let Some(exc) = self.compact_unpacked_args_error(&args_val, op.line) {
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            return Ok(Flow::Continue);
+                        }
+                        return Err(VmError {
+                            message: self.uncaught_exception_message(),
+                            line: op.line,
+                        });
+                    }
                     let mut stack: Vec<usize> = Vec::new();
                     let tab = fsym.as_ref().map(|f| f.tab.clone());
                     // (compact()'s own frame, for errors raised in it)
@@ -69146,6 +69159,28 @@ fn array_as_props(obj: &Rc<RefCell<PhpObject>>) -> bool {
 }
 
 impl Vm {
+    /// The error of `compact(...$names)` arguments: no positional one, or a
+    /// named one (a string key of the unpacked array).
+    #[inline(never)]
+    fn compact_unpacked_args_error(&mut self, args: &Value, line: u32) -> Option<Value> {
+        let Value::Array(a) = args else {
+            return None;
+        };
+        let (positional, named) = {
+            let a = a.borrow();
+            let named = a.keys().filter(|k| matches!(k, ArrayKey::String(_))).count();
+            (a.len() - named, named)
+        };
+        let msg = if positional == 0 {
+            "compact() expects at least 1 argument, 0 given"
+        } else if named > 0 {
+            "compact() does not accept unknown named parameters"
+        } else {
+            return None;
+        };
+        Some(self.create_exception(b"ArgumentCountError", msg, line))
+    }
+
     /// Whether a class constant fetch (StaticPropGet of constant name
     /// `name`) belongs to a constant expression: a constant thunk's
     /// (property / constant / static property initializer) or a parameter

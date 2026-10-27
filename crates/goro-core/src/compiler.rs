@@ -17623,7 +17623,7 @@ impl Compiler {
                     }
                     if unqualified == b"compact"
                         && !args.is_empty()
-                        && (args.iter().all(|a| a.name.is_none() && !a.unpack)
+                        && (args.iter().all(|a| a.name.is_none())
                             || matches!(args.as_slice(), [a] if !a.unpack
                                 && a.name.as_deref() == Some(b"var_name".as_slice())))
                     {
@@ -17658,6 +17658,17 @@ impl Compiler {
                         });
                         for arg in args {
                             let v = self.compile_expr(&arg.value)?;
+                            // (`compact(...$names)`: the unpacked names)
+                            if arg.unpack {
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ArraySpread,
+                                    op1: OperandType::Tmp(args_tmp),
+                                    op2: v,
+                                    result: OperandType::Unused,
+                                    line: expr.span.line,
+                                });
+                                continue;
+                            }
                             self.op_array.emit(Op {
                                 opcode: OpCode::ArrayAppend,
                                 op1: OperandType::Tmp(args_tmp),
