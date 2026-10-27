@@ -737,6 +737,10 @@ pub struct Compiler {
     /// last. An operator's opline gets it once its operands are compiled, so
     /// a multi-line `$a +\n $b` reports the line of `$b`.
     zend_lineno: u32,
+    /// The call whose arguments compile_send_args_with_name() compiles
+    /// next has no compile-time known callee (zend_compile_args() without
+    /// fbc): a variable argument is sent on the argument list's line.
+    send_unknown_fbc: bool,
     /// Reserved variable names (not expressible in PHP source) standing for
     /// already-computed operands while synthesized code is compiled (target
     /// keys evaluated before an assigned value).
@@ -1149,6 +1153,7 @@ impl Compiler {
             memoized_exprs: HashMap::new(),
             memoize_root: 0,
             zend_lineno: 0,
+            send_unknown_fbc: false,
             tmp_aliases: Vec::new(),
             dynvar_count: 0,
             dynvar_pending: Vec::new(),
@@ -2640,6 +2645,12 @@ impl Compiler {
         let mut has_named = false;
         let mut has_unpack = false;
         let mut stub = None;
+        // (zend_compile_args() without fbc sets CG(zend_lineno) to the
+        // list's line before sending a CV)
+        let cv_list_line = std::mem::take(&mut self.send_unknown_fbc)
+            .then(|| args.first().map(|a| a.value.span.line))
+            .flatten()
+            .filter(|&l| l > 0);
         for (i, arg) in args.iter().enumerate() {
             // The operand of a pipe: a temporary (ZEND_SEND_VAL_EX).
             if matches!(&arg.value.kind, ExprKind::Variable(n) if n.starts_with(PIPE_ALIAS_PREFIX))
@@ -3362,7 +3373,10 @@ impl Compiler {
                     result: checked_kind.unwrap_or(OperandType::Unused),
                     // (SEND_* is emitted once the argument is compiled:
                     // CG(zend_lineno))
-                    line: self.zend_lineno.max(line),
+                    line: match cv_list_line {
+                        Some(l) if matches!(arg.value.kind, ExprKind::Variable(_)) && !is_byref => l,
+                        _ => self.zend_lineno.max(line),
+                    },
                 });
             }
         }
@@ -18222,6 +18236,32 @@ impl Compiler {
                 } else {
                     None
                 };
+                // zend_compile_call(): the callee is known at compile time
+                // when it is an internal function, or a function the file
+                // declared before (only tracked in the main script).
+                self.send_unknown_fbc = match (&name.kind, &resolved_name) {
+                    // (an unqualified name in a namespace: resolved at run time)
+                    (ExprKind::Identifier(n), _)
+                        if !self.current_namespace.is_empty()
+                            && !n.starts_with(b"\\")
+                            && !n.contains(&b'\\') =>
+                    {
+                        true
+                    }
+                    (ExprKind::Identifier(_), Some(r)) if fallback_name.is_none() => {
+                        let r = r.strip_prefix(b"\\").unwrap_or(r);
+                        let lower = r.to_ascii_lowercase();
+                        crate::arginfo::lookup(&lower).is_none()
+                            && self.op_array.name.is_empty()
+                            && !self
+                                .op_array
+                                .child_functions
+                                .iter()
+                                .any(|f| f.name.eq_ignore_ascii_case(r) && f.decl_line <= expr.span.line)
+                    }
+                    (ExprKind::Identifier(_), _) => fallback_name.is_some(),
+                    _ => true,
+                };
                 self.compile_send_args_with_name(args, expr.span.line, func_name_for_ref)?;
 
                 // Do the call (op1 signals if result is being discarded for #[\NoDiscard])
@@ -22029,6 +22069,9 @@ impl Compiler {
                 let bridge_name: Option<Vec<u8>> = method_name_for_ref
                     .as_ref()
                     .and_then(|m| Self::builtin_method_to_bridge_func(m));
+                // (no fbc: except $this's private / final methods, which
+                // goro does not resolve here)
+                self.send_unknown_fbc = !matches!(&object.kind, ExprKind::Variable(n) if n == b"this");
                 self.compile_send_args_with_name(args, init_line, bridge_name.as_deref())?;
 
                 // The call is on the method name's line (GH-8810).
