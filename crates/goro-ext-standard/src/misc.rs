@@ -5981,8 +5981,9 @@ fn ini_set_as(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError
     }
     // zval_get_tmp_string(): a float is converted with the precision in
     // effect before the new value applies.
+    // (null is the empty string: a Null value is ini_restore()'s NULL)
     let value = match value {
-        Value::Double(_) => Value::String(value.to_php_string()),
+        Value::Double(_) | Value::Null | Value::Undef => Value::String(value.to_php_string()),
         v => v,
     };
     let key = name.as_bytes().to_vec();
@@ -6356,6 +6357,44 @@ fn ini_restore(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let key = name.as_bytes().to_vec();
     if !is_ini_entry_name(&key) {
         return Ok(Value::Null);
+    }
+    // zend_restore_ini_entry_cb(): an entry without an on_modify handler
+    // keeps its value at runtime (its result stays FAILURE)
+    if matches!(
+        key.as_slice(),
+        b"highlight.comment"
+            | b"highlight.default"
+            | b"highlight.html"
+            | b"highlight.keyword"
+            | b"highlight.string"
+            | b"date.default_latitude"
+            | b"date.default_longitude"
+            | b"date.sunrise_zenith"
+            | b"date.sunset_zenith"
+            | b"SMTP"
+            | b"smtp_port"
+            | b"sendmail_from"
+            | b"gd.jpeg_ignore_warning"
+    ) {
+        return Ok(Value::Null);
+    }
+    // (mbstring's NULL-default entries are restored to NULL: their
+    // handlers' deprecations are for a value)
+    if matches!(
+        key.as_slice(),
+        b"mbstring.http_input" | b"mbstring.http_output" | b"mbstring.internal_encoding"
+    ) {
+        if let Some(Some(orig)) = vm.ini_originals.get(&key) {
+            if orig.to_php_string().is_empty() {
+                vm.ini_originals.remove(&key);
+                if let Some(hook) = vm.ini_set_hooks.get(&key).copied() {
+                    hook(vm, &key, &Value::Null);
+                }
+                vm.constants
+                    .insert(key, Value::String(PhpString::empty()));
+                return Ok(Value::Null);
+            }
+        }
     }
     match vm.ini_originals.remove(&key) {
         Some(Some(orig)) => {

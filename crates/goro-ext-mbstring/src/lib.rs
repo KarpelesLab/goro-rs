@@ -81,4 +81,24 @@ pub fn register(vm: &mut Vm) {
         }
     }
     goro_core::reflection::register_ini_access("mbstring.encoding_translation", 6);
+    vm.ini_validators
+        .insert(b"mbstring.regex_retry_limit".to_vec(), on_update_retry_limit);
+    vm.ini_validators
+        .insert(b"mbstring.regex_stack_limit".to_vec(), on_update_stack_limit);
+}
+
+/// OnUpdateLong: zend_ini_parse_quantity_warn() of the value (accepted).
+fn on_update_long_warn(vm: &mut Vm, name: &str, value: &[u8]) -> bool {
+    if let (_, Some(e)) = goro_core::ini_quantity::parse_quantity(value, true) {
+        vm.emit_warning(&format!("Invalid \"{}\" setting. {}", name, e));
+    }
+    true
+}
+
+fn on_update_retry_limit(vm: &mut Vm, value: &[u8], _startup: bool) -> bool {
+    on_update_long_warn(vm, "mbstring.regex_retry_limit", value)
+}
+
+fn on_update_stack_limit(vm: &mut Vm, value: &[u8], _startup: bool) -> bool {
+    on_update_long_warn(vm, "mbstring.regex_stack_limit", value)
 }

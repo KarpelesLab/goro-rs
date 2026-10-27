@@ -671,7 +671,9 @@ pub fn ini_set_hook(vm: &mut Vm, key: &[u8], value: &Value) -> bool {
     }
     let mut st = MBSTRG.with(|s| std::mem::replace(&mut *s.borrow_mut(), MbState::new()));
     MSG_CTX.with(|c| c.set(2));
-    let ok = apply_ini(vm, &mut st, key_s, Some(&raw), false);
+    // (Null: ini_restore() of an entry whose value is NULL)
+    let given = (!matches!(value, Value::Null)).then_some(&raw[..]);
+    let ok = apply_ini(vm, &mut st, key_s, given, false);
     MSG_CTX.with(|c| c.set(0));
     if ok {
         for e in st.ini_seen.iter_mut() {
