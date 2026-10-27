@@ -20069,9 +20069,12 @@ impl Vm {
     /// An InternalIterator over the live entries of WeakMap `wm`.
     #[inline(never)]
     pub(crate) fn weakmap_iterator(&mut self, wm: &Value) -> Value {
+        // (the zend_object_iterator, an object of its own, comes first)
+        let h = self.foreach_iterator_handle();
         let it = self.spl_instantiate(b"InternalIterator");
         {
             let mut b = it.borrow_mut();
+            b.set_property(b"__spl_iter_h".to_vec(), h);
             b.set_property(b"__spl_wm_target".to_vec(), wm.clone());
             b.set_property(b"__spl_pos".to_vec(), Value::Long(0));
         }
@@ -21844,7 +21847,7 @@ impl Vm {
         self.foreach_iterator_handle()
     }
 
-    fn foreach_iterator_handle(&mut self) -> Value {
+    pub(crate) fn foreach_iterator_handle(&mut self) -> Value {
         let id = self.alloc_object_id();
         Value::Object(Rc::new(RefCell::new(PhpObject::new(
             b"InternalIterator".to_vec(),
@@ -44590,6 +44593,10 @@ impl Vm {
                             // Store key objects for ForeachKey to use
                             // We'll use the weakmap_iter_keys map
                             weakmap_iter_keys.insert(iter_idx, key_objs);
+                            if let OperandType::Tmp(t) = op.result {
+                                let h = self.foreach_iterator_handle();
+                                foreach_iter_handles.insert(t, h);
+                            }
                             self.write_operand(
                                 &op.result,
                                 Value::Array(Rc::new(RefCell::new(iter_arr))),
@@ -45850,6 +45857,8 @@ impl Vm {
                                             }
                                         }
                                         weakmap_iter_keys.insert(iter_idx, key_objs);
+                                        let h = self.foreach_iterator_handle();
+                                        foreach_iter_handles.insert(iter_idx, h);
                                         Rc::new(RefCell::new(arr))
                                     } else {
                                         // Plain objects: the live property table is

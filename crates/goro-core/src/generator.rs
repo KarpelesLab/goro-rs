@@ -73,6 +73,9 @@ pub struct PhpGenerator {
     pub yield_from_source: Option<Value>,
     /// Yield from: position within array iteration
     pub yield_from_pos: usize,
+    /// The zend_object_iterator (an object handle of its own) of a
+    /// `yield from` over a Traversable object.
+    pub(crate) yield_from_iter_h: Option<Value>,
     /// Yield from (Generator only): set after we yielded a value from the inner
     /// generator's current state. On re-entry to YieldFrom we must first advance
     /// the inner before yielding again. Without this flag we either advance too
@@ -270,6 +273,7 @@ impl PhpGenerator {
             return_value: Value::Null,
             yield_from_source: None,
             yield_from_pos: 0,
+            yield_from_iter_h: None,
             yield_from_observed: false,
             fiber_suspend_result: None,
             is_running: false,
@@ -519,6 +523,25 @@ impl PhpGenerator {
         }
     }
 
+    /// Detach what a closed generator's frame owned (zend_generator_close):
+    /// its variables, temporaries, arguments, pending calls and closure.
+    #[inline(never)]
+    pub(crate) fn take_frame_values(&mut self) -> Vec<Value> {
+        let mut out: Vec<Value> = Vec::new();
+        out.extend(std::mem::take(&mut self.cvs));
+        out.extend(std::mem::take(&mut self.tmps));
+        out.extend(std::mem::take(&mut self.args));
+        out.extend(self.closure.take());
+        for c in std::mem::take(&mut self.saved_calls) {
+            out.extend(c.args);
+            out.extend(c.named_args.into_iter().map(|(_, v)| v));
+        }
+        if let Some(st) = self.symtab.take() {
+            drop(st);
+        }
+        out
+    }
+
     /// Detach everything the frame owns (the generator is garbage).
     pub(crate) fn take_gc_children(&mut self) -> Vec<Value> {
         let mut out: Vec<Value> = Vec::new();
@@ -530,6 +553,7 @@ impl PhpGenerator {
         out.push(std::mem::replace(&mut self.send_value, Value::Null));
         out.push(std::mem::replace(&mut self.return_value, Value::Null));
         out.extend(self.yield_from_source.take());
+        out.extend(self.yield_from_iter_h.take());
         out.extend(self.pending_return.take());
         out.extend(self.pending_exception.take());
         out.extend(self.closure.take());
@@ -598,6 +622,7 @@ impl PhpGenerator {
         if let Some(src) = self.yield_from_source.take() {
             let delegate = matches!(src, Value::Generator(_));
             drop(src);
+            drop(self.yield_from_iter_h.take());
             if delegate {
                 vm.close_released_generators();
             }
@@ -1631,6 +1656,7 @@ impl PhpGenerator {
                                 }
                                 // Array exhausted
                                 self.yield_from_source = None;
+                                self.yield_from_iter_h = None;
                                 self.yield_from_pos = 0;
                                 self.write_operand(&op.result, Value::Null);
                             }
@@ -1676,6 +1702,9 @@ impl PhpGenerator {
                                     return Ok(true);
                                 }
                                 self.yield_from_source = None;
+                                // (the iterator is freed after what it walked)
+                                drop(source);
+                                self.yield_from_iter_h = None;
                                 self.yield_from_pos = 0;
                                 if failed(vm) {
                                     if let Some(t) = self.dispatch_exception() {
@@ -1809,6 +1838,7 @@ impl PhpGenerator {
                                     // Iterated lazily, one element per resume.
                                     let had = vm.current_exception.is_some();
                                     vm.current_line = op.line;
+                                    self.yield_from_iter_h = Some(vm.foreach_iterator_handle());
                                     vm.spl_call_method_at(&iterable, b"rewind", &[], false);
                                     if !had && vm.current_exception.is_some() {
                                         if let Some(t) = self.dispatch_exception() {
@@ -1829,6 +1859,7 @@ impl PhpGenerator {
                                 } else if vm
                                     .class_implements_interface(&class_lower, b"traversable")
                                 {
+                                    self.yield_from_iter_h = Some(vm.foreach_iterator_handle());
                                     let arr = vm.iterator_to_array(&iterable);
                                     self.yield_from_source =
                                         Some(Value::Array(Rc::new(RefCell::new(arr))));

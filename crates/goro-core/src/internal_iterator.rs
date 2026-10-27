@@ -36,8 +36,9 @@ impl Vm {
     /// zend_create_internal_iterator_zval(): an InternalIterator over `it`.
     pub fn create_internal_iterator(&mut self, it: Box<dyn ObjectIterator>) -> Value {
         // The zend_object_iterator is an object of its own (handle).
-        let _ = self.alloc_object_id();
+        let h = self.foreach_iterator_handle();
         let obj = self.spl_instantiate(b"InternalIterator");
+        obj.borrow_mut().set_property(b"__spl_iter_h".to_vec(), h);
         let id = obj.borrow().object_id;
         self.ext_iterators.insert(
             id,

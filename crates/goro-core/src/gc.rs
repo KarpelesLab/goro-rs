@@ -1779,13 +1779,6 @@ pub trait GcHost {
     }
 }
 
-/// Run a collection. Returns the number of freed arrays/objects, counted
-/// like zend_gc_collect_cycles: references are not counted, and objects
-/// whose destructor runs are counted by the run that finally frees them.
-///
-/// `limit`: `None` for gc_collect_cycles() (also scans every tracked object
-/// and generator), `Some(_)` for an automatic run over the buffered roots.
-#[allow(clippy::needless_range_loop)] // index loop mirrors the reference algorithm
 /// A garbage node while the garbage is destroyed: objects and arrays are
 /// held weakly so that they are freed as soon as their last holder is.
 enum Doomed {
@@ -1891,6 +1884,13 @@ fn free_garbage(
     count
 }
 
+/// Run a collection. Returns the number of freed arrays/objects, counted
+/// like zend_gc_collect_cycles: references are not counted, and objects
+/// whose destructor runs are counted by the run that finally frees them.
+///
+/// `limit`: `None` for gc_collect_cycles() (also scans every tracked object
+/// and generator), `Some(_)` for an automatic run over the buffered roots.
+#[allow(clippy::needless_range_loop)] // index loop mirrors the reference algorithm
 pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
     if GC_ACTIVE.with(|c| c.get()) {
         return 0;
@@ -1985,9 +1985,27 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
             }
         }
         free_order.extend((0..len).filter(|&i| free[i] && !in_order[i]));
+        // Arrays sharing their storage are one zend_array in Zend: it is
+        // garbage (and counted once) only when all its holders are.
+        let mut store_seen = vec![false; len];
         let free_nodes: Vec<(Node, u8)> = free_order
             .iter()
-            .map(|&i| (an.graph.nodes[i].clone(), an.graph.uncounted[i]))
+            .map(|&i| {
+                let g = &an.graph;
+                let mut uncounted = g.uncounted[i];
+                if matches!(g.nodes[i], Node::Arr(_)) {
+                    if let Some(&s) = g.children[i]
+                        .iter()
+                        .find(|&&c| matches!(g.nodes[c], Node::Store(_)))
+                    {
+                        if !an.garbage[s] || store_seen[s] {
+                            uncounted = COUNT_NEVER;
+                        }
+                        store_seen[s] = true;
+                    }
+                }
+                (g.nodes[i].clone(), uncounted)
+            })
             .collect();
         drop(order);
         drop(an);
@@ -2210,10 +2228,22 @@ impl GcHost for crate::vm::Vm {
     fn gc_close_generator(&mut self, g: &Rc<RefCell<PhpGenerator>>) {
         let prev = self.current_exception.take();
         self.finally_generators.retain(|x| !Rc::ptr_eq(x, g));
+        let mut frame: Vec<Value> = Vec::new();
         if let Ok(mut b) = g.try_borrow_mut() {
             b.gc_dtor_called.set(true);
+            if b.state == crate::generator::GeneratorState::Created {
+                // (an unstarted generator is closed too)
+                b.state = crate::generator::GeneratorState::Completed;
+            }
             b.close(self);
+            // zend_generator_close() frees the frame (its variables, extra
+            // args, the closure); the last yielded value and key stay with
+            // the generator until it is freed.
+            if b.state == crate::generator::GeneratorState::Completed && b.fin.is_empty() {
+                frame = b.take_frame_values();
+            }
         }
+        drop(frame);
         if let Some(prev) = prev {
             match self.current_exception.clone() {
                 Some(exc) => crate::vm::Vm::exception_set_previous(&exc, prev),
