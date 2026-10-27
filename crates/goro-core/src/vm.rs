@@ -24159,6 +24159,11 @@ impl Vm {
         if !caller_strict {
             let had_exc = self.current_exception.is_some();
             for (i, arg) in call.args.iter().enumerate() {
+                // (the arguments a variadic collects: its type, RECV_VARIADIC)
+                let i = match user_fn.variadic_param {
+                    Some(v) if i > v as usize => v as usize,
+                    _ => i,
+                };
                 if i >= user_fn.param_types.len() {
                     break;
                 }
@@ -24203,6 +24208,10 @@ impl Vm {
                 Some(Value::String(_)) => "string",
                 Some(Value::True | Value::False) => "bool",
                 _ => continue,
+            };
+            let i = match user_fn.variadic_param {
+                Some(v) if i > v as usize => v as usize,
+                _ => i,
             };
             let recv_line = match user_fn.recv_line(i.saturating_sub(implicit_args)) {
                 0 => line,
