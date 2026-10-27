@@ -434,8 +434,21 @@ fn init_ec(vm: &mut Vm, a: &PhpArray) -> Option<(PKey, bool)> {
     // EVP_PKEY_check() || EVP_PKEY_public_check_quick()
     let valid = match (&d, &q) {
         (Some(dv), Some(_)) => !dv.is_zero() && dv.to_box().lt(&group.n.to_box()),
-        (None, Some(pt)) => *pt != Point::Inf,
-        _ => false,
+        (None, Some(pt)) => {
+            // the full check's private part has no key (ERR_R_PASSED_NULL_PARAMETER)
+            err::push(
+                err::LIB_EC,
+                err::RFLAG_COMMON | (1 << 18) | 258,
+                "passed a null parameter",
+            );
+            *pt != Point::Inf
+        }
+        _ => {
+            // both checks run on a context without a key
+            err::push(err::LIB_EVP, 154, "no key set");
+            err::push(err::LIB_EVP, 154, "no key set");
+            false
+        }
     };
     if valid {
         let is_priv = d.is_some();

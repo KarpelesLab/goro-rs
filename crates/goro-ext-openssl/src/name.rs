@@ -127,8 +127,10 @@ impl Name {
                 }
                 if !(b' '..=b'~').contains(&n) {
                     out.push_str(&format!("\\x{:02X}", n));
-                } else if n == b'/' {
-                    out.push_str("\\/");
+                } else if n == b'/' || n == b'+' {
+                    // the entry and multi-valued RDN separators are escaped
+                    out.push('\\');
+                    out.push(n as char);
                 } else {
                     out.push(n as char);
                 }
