@@ -484,6 +484,15 @@ impl PhpArray {
         }
     }
 
+    /// Whether this array and `other` are copies sharing one storage (one
+    /// zend_array in PHP).
+    pub fn shares_storage_with(&self, other: &PhpArray) -> bool {
+        match (&self.shared, &other.shared) {
+            (Some(a), Some(b)) => std::rc::Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
     /// The storage this array shares with copies of it, if any.
     pub(crate) fn shared_store(&self) -> Option<&std::rc::Rc<Store>> {
         self.shared.as_ref()

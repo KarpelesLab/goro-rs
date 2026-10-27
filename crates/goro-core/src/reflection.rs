@@ -7830,7 +7830,11 @@ fn reflection_reference_from_array_element(vm: &mut Vm, args: &[Value], line: u3
     // A reference with a refcount of 1 is not a reference anymore, except
     // for a directly self-referential array (bug #78263).
     let self_ref = match &*rc.borrow() {
-        Value::Array(inner) => Rc::ptr_eq(inner, &arr),
+        Value::Array(inner) => {
+            Rc::ptr_eq(inner, &arr)
+                || matches!((inner.try_borrow(), arr.try_borrow()),
+                    (Ok(i), Ok(a)) if i.shares_storage_with(&a))
+        }
         _ => false,
     };
     // (`rc` itself is one more holder than the array slot.)

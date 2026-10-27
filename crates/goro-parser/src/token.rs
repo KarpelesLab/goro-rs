@@ -581,16 +581,14 @@ pub fn token_id_to_name(id: i64) -> Option<&'static str> {
 }
 
 /// Token ids classified as "ignorable" by PhpToken::isIgnorable():
-/// whitespace, comments, open/close tag, inline HTML.
+/// whitespace, comments and the open tag (not `<?=`, `?>` nor inline
+/// HTML).
 pub fn token_id_is_ignorable(id: i64) -> bool {
     use crate::php_scanner as ps;
     [
-        ps::T_INLINE_HTML,
         ps::T_COMMENT,
         ps::T_DOC_COMMENT,
         ps::T_OPEN_TAG,
-        ps::T_OPEN_TAG_WITH_ECHO,
-        ps::T_CLOSE_TAG,
         ps::T_WHITESPACE,
     ]
     .contains(&(id as i32))
