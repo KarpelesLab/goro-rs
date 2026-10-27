@@ -512,7 +512,14 @@ impl Vm {
         if !lean_function(&f, None) {
             return None;
         }
-        let nsends = self.lean_sends_ready(&f, None, op_array, ip, cvs, tmps)?;
+        // (untyped by-value parameters: the sends checked as they are made,
+        // see lean_direct_sends; else as lean_fused() makes them)
+        let (nsends, slots) = if f.lean_kind() & (4 | 16) == 0 {
+            let (n, slots) = self.lean_direct_sends(&f, op_array, ip, cvs, tmps)?;
+            (n, Some(slots))
+        } else {
+            (self.lean_sends_ready(&f, None, op_array, ip, cvs, tmps)?, None)
+        };
         // (INIT_FCALL's result operand flags a name without global fallback)
         target.no_ns_fallback = !matches!(op_array.ops[ip].result, OperandType::Unused);
         let mut call = PendingCall {
@@ -523,7 +530,15 @@ impl Vm {
         };
         // (what popping the call would do)
         self.trim_closure_pending_calls();
-        let next = self.lean_fused_run(op_array, ip, &f, None, nsends, &mut call, cvs, tmps);
+        let next = match slots {
+            Some(slots) => {
+                let do_ip = ip + 1 + nsends;
+                let done =
+                    self.lean_run(op_array, do_ip, &f, None, slots, nsends, &mut call, cvs, tmps, true);
+                if done { do_ip + 1 } else { do_ip }
+            }
+            None => self.lean_fused_run(op_array, ip, &f, None, nsends, &mut call, cvs, tmps),
+        };
         // (what is left of the call: its name, unless it was handed over)
         let PendingCall {
             name,
@@ -544,6 +559,110 @@ impl Vm {
             std::mem::forget((args, named_args, target));
         }
         Some(next)
+    }
+
+    /// lean_direct(): the sends of the call of `f` (a plain function, its
+    /// parameters untyped and by value) after the INIT_FCALL at `ip` of
+    /// `op_array`, when lean_sends_ready() takes them, made at once (as
+    /// lean_fused_run() makes them): their number and the callee's
+    /// variables. None: nothing was done.
+    #[inline(always)]
+    fn lean_direct_sends(
+        &mut self,
+        f: &OpArray,
+        op_array: &OpArray,
+        ip: usize,
+        cvs: &[Value],
+        tmps: &mut [Value],
+    ) -> Option<(usize, Vec<Value>)> {
+        let ops = &op_array.ops;
+        let literals = &op_array.literals;
+        if f.variadic_param.is_some() {
+            return None;
+        }
+        let nsends = op_array.fused_sends(ip)?;
+        if nsends > f.param_count as usize || nsends < f.required_param_count as usize {
+            return None;
+        }
+        let do_ip = ip + 1 + nsends;
+        if !self.lean_ready(&ops[do_ip], tmps) {
+            return None;
+        }
+        let sends = &ops[ip + 1..do_ip];
+        let mut slots = self.take_slots(f.cv_names.len());
+        // (a temporary is moved once all of them are taken, an array
+        // copied once all are made)
+        let mut moves = false;
+        let mut arrays = false;
+        for (slot, s) in slots.iter_mut().zip(sends) {
+            let v = match s.op1 {
+                OperandType::Cv(c) => match cvs.get(c as usize) {
+                    Some(Value::Reference(r)) => match r.try_borrow() {
+                        Ok(b) => match &*b {
+                            Value::Undef => None,
+                            Value::Array(a) if Rc::ptr_eq(a, &self.globals) => None,
+                            v => Some(v.clone()),
+                        },
+                        Err(_) => None,
+                    },
+                    None | Some(Value::Undef) => None,
+                    // ($GLOBALS is sent as a copy: the general handler's)
+                    Some(Value::Array(a)) if Rc::ptr_eq(a, &self.globals) => None,
+                    Some(v) => Some(v.clone()),
+                },
+                OperandType::Tmp(t) => match tmps.get(t as usize) {
+                    Some(Value::Reference(_)) => None,
+                    Some(Value::Array(a)) if Rc::ptr_eq(a, &self.globals) => None,
+                    _ => {
+                        moves = true;
+                        Some(Value::Undef)
+                    }
+                },
+                OperandType::Const(c) => Some(literals[c as usize].clone()),
+                _ => None,
+            };
+            match v {
+                Some(v) => {
+                    arrays |= matches!(v, Value::Array(_));
+                    *slot = v;
+                }
+                None => {
+                    self.lean_direct_sends_failed(slots);
+                    return None;
+                }
+            }
+        }
+        if moves {
+            for (slot, s) in slots.iter_mut().zip(sends) {
+                if let OperandType::Tmp(t) = s.op1 {
+                    *slot = match std::mem::take(&mut tmps[t as usize]) {
+                        Value::Undef => Value::Null,
+                        v => v,
+                    };
+                    arrays |= matches!(slot, Value::Array(_));
+                }
+            }
+        }
+        // By-value array parameters get their own copy (see lean_run).
+        if arrays {
+            for slot in slots[..nsends].iter_mut() {
+                if let Value::Array(a) = slot {
+                    if Rc::strong_count(a) > 1 {
+                        *slot = Value::Array(crate::array::cow_copy_new(a));
+                    }
+                }
+            }
+        }
+        Some((nsends, slots))
+    }
+
+    /// lean_direct_sends() found a send it does not make: the values it
+    /// took go (copies of variables' and literals': nothing is released).
+    #[cold]
+    #[inline(never)]
+    fn lean_direct_sends_failed(&mut self, mut slots: Vec<Value>) {
+        release_slots(&mut slots);
+        self.recycle_values(slots);
     }
 
     /// lean_fused(): whether the call `call`, set up by the INIT_* at `ip`
