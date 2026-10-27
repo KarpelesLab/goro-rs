@@ -2335,7 +2335,7 @@ fn str_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let input = args.first().unwrap_or(&Value::Null).to_php_string();
     let length = args.get(1).map(|v| v.to_long()).unwrap_or(0).max(0) as usize;
     let pad_string = match args.get(2) {
-        Some(Value::Null) | None => PhpString::from_bytes(b" "),
+        Some(Value::Null) | None => PhpString::one_char(b' '),
         Some(v) => v.to_php_string(),
     };
     let pad_type = args.get(3).map(|v| v.to_long()).unwrap_or(1); // STR_PAD_RIGHT=1
@@ -2376,29 +2376,33 @@ fn str_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let pad_needed = length - bytes.len();
 
-    let mut padding = Vec::new();
-    while padding.len() < pad_needed {
-        padding.push(pad_bytes[padding.len() % pad_bytes.len()]);
-    }
+    // (`n` bytes of the pad string repeated, from its start)
+    let pad = |result: &mut Vec<u8>, n: usize| {
+        if let [c] = pad_bytes {
+            result.resize(result.len() + n, *c);
+        } else {
+            result.extend(pad_bytes.iter().cycle().take(n));
+        }
+    };
 
     let mut result = Vec::with_capacity(length);
     match pad_type {
         0 => {
             // STR_PAD_LEFT
-            result.extend_from_slice(&padding);
+            pad(&mut result, pad_needed);
             result.extend_from_slice(bytes);
         }
         2 => {
             // STR_PAD_BOTH
             let left = pad_needed / 2;
-            result.extend_from_slice(&padding[..left]);
+            pad(&mut result, left);
             result.extend_from_slice(bytes);
-            result.extend_from_slice(&padding[..pad_needed - left]);
+            pad(&mut result, pad_needed - left);
         }
         _ => {
             // STR_PAD_RIGHT (default, 1)
             result.extend_from_slice(bytes);
-            result.extend_from_slice(&padding);
+            pad(&mut result, pad_needed);
         }
     }
     Ok(Value::String(PhpString::from_vec(result)))

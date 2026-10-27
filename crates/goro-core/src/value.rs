@@ -1096,7 +1096,7 @@ impl Value {
             Value::Undef | Value::Null => PhpString::empty(),
             Value::False => PhpString::empty(),
             Value::True => PhpString::from_bytes(b"1"),
-            Value::Long(n) => PhpString::from_string(n.to_string()),
+            Value::Long(n) => PhpString::from_long(*n),
             Value::Resource(n) => PhpString::from_string(format!("Resource id #{}", n)),
             Value::Double(f) => PhpString::from_string(format_php_float(*f)),
             Value::String(s) => s.clone(),

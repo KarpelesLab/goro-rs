@@ -228,6 +228,29 @@ impl PhpString {
         Self::from_vec(crate::errdisplay::raw_error_bytes(s).into_owned())
     }
 
+    /// The decimal form of `n` (`n.to_string()`, without the formatting
+    /// machinery).
+    pub fn from_long(n: i64) -> Self {
+        let mut buf = [0u8; 20];
+        let mut i = buf.len();
+        let mut u = n.unsigned_abs();
+        loop {
+            i -= 1;
+            buf[i] = b'0' + (u % 10) as u8;
+            u /= 10;
+            if u == 0 {
+                break;
+            }
+        }
+        let digits = &buf[i..];
+        let mut v = Vec::with_capacity(digits.len() + usize::from(n < 0));
+        if n < 0 {
+            v.push(b'-');
+        }
+        v.extend_from_slice(digits);
+        Self::from_vec(v)
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         &self.inner.data
     }
