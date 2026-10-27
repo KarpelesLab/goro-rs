@@ -156,7 +156,7 @@ impl Vm {
         // An internal class: the methods its stub declares, but for those
         // whose get_method handler finds more (the dual iterators forward
         // to their inner iterator).
-        let stub_missing = |name: &[u8]| {
+        let stub_missing_uncached = |name: &[u8]| {
             let mut stub = crate::stubs::find_class(name);
             for _ in 0..16 {
                 let Some(s) = stub else {
@@ -192,6 +192,18 @@ impl Vm {
                 }
             }
             false
+        };
+        // (what the stubs answer does not change: remembered)
+        let stub_missing = |name: &[u8]| {
+            let mut key = name.to_ascii_lowercase();
+            key.extend_from_slice(b"::");
+            key.extend_from_slice(&ml);
+            if let Some(&r) = self.stub_method_missing_memo.borrow().get(&key) {
+                return r;
+            }
+            let r = stub_missing_uncached(name);
+            self.stub_method_missing_memo.borrow_mut().insert(key, r);
+            r
         };
         let Some(mut cur) = class else {
             return stub_missing(class_lower).then(missing).flatten();

@@ -757,6 +757,23 @@ impl Vm {
             }
             return 1;
         }
+        // A Reflection class's constructor (an internal class: the general
+        // handler's nearest builtin ancestor is the one it runs the
+        // constructor of)
+        if chain.len() == 1 + h.parents_lower.len() && !handler {
+            let k = match lower.as_slice() {
+                b"reflectionclass" | b"reflectionobject" | b"reflectionenum" => 3,
+                b"reflectionmethod" => 4,
+                b"reflectionfunction" => 5,
+                b"reflectionproperty" => 6,
+                b"reflectionparameter" => 7,
+                b"reflectionclassconstant" | b"reflectionenumunitcase" | b"reflectionenumbackedcase" => 8,
+                _ => 0,
+            };
+            if k != 0 {
+                return k;
+            }
+        }
         // (the general handler's nearest builtin ancestor of the class is
         // the class itself: it is none of the special ones, nor extends one)
         const SPECIAL: &[&[u8]] = &[

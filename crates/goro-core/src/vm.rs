@@ -1370,7 +1370,8 @@ pub(crate) struct CallTarget {
     /// subclass without a constructor of its own) that the general handler
     /// would make one of these ways (see Vm::fast_internal_ctor_target):
     /// 1 Exception's / Error's constructor, 2 an extension's construct
-    /// handler; 0: none of them.
+    /// handler, 3-8 a Reflection class's (see Vm::internal_ctor_kind); 0:
+    /// none of them.
     pub(crate) internal_ctor: u8,
 }
 
@@ -2328,6 +2329,9 @@ pub struct Vm {
     /// Class name (as declared) -> the verified arginfo of the internal
     /// constructor its objects get (see zpp_internal_ctor), with the class
     /// count it was found at.
+    /// "class::method" (lowercase) -> whether the stub of that internal
+    /// class (with its ancestors) lacks the method (see user_method_missing).
+    pub(crate) stub_method_missing_memo: RefCell<crate::fxhash::FxHashMap<Vec<u8>, bool>>,
     pub(crate) zpp_ctor_cache: crate::fxhash::FxHashMap<
         Vec<u8>,
         (usize, Option<(&'static crate::arginfo::FuncInfo, u8)>),
@@ -3768,6 +3772,7 @@ impl Vm {
             zpp_method_map: Default::default(),
             zpp_internal_class_cache: Default::default(),
             zpp_ctor_cache: Default::default(),
+            stub_method_missing_memo: Default::default(),
             zpp_return_names: Default::default(),
             builtin_frames: Vec::new(),
             spl_active_fn: None,
@@ -32377,6 +32382,33 @@ impl Vm {
                                 message: self.uncaught_exception_message(),
                                 line: op.line,
                             });
+                        }
+                        if kind >= 3 {
+                            // A Reflection class's constructor
+                            let f: fn(&mut Vm, &[Value], u32) -> bool = match kind {
+                                3 => crate::reflection::reflection_class_construct,
+                                4 => crate::reflection::reflection_method_construct,
+                                5 => crate::reflection::reflection_function_construct,
+                                6 => crate::reflection::reflection_property_construct,
+                                7 => crate::reflection::reflection_parameter_construct,
+                                _ => crate::reflection::reflection_class_constant_construct,
+                            };
+                            if !f(self, &call.args, op.line) {
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: "Uncaught ReflectionException".to_string(),
+                                    line: op.line,
+                                });
+                            }
+                            self.write_operand(&op.result, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.recycle_args(&mut call);
+                            return Ok(Flow::Next);
                         }
                         if kind == 2 {
                             // An extension's construct handler
