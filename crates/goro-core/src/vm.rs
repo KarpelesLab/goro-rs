@@ -11587,6 +11587,7 @@ impl Vm {
             || crate::value::has_freed_resources()
             || !crate::gc::release_quiet()
             || self.unset_slot_pending.is_some()
+            || crate::closure::has_dead_closure_statics()
         {
             return 0;
         }
