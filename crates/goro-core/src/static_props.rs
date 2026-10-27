@@ -1274,7 +1274,8 @@ impl Vm {
                 .properties
                 .iter()
                 .enumerate()
-                .filter(|(_, p)| !p.is_static || thunk_marker_name(&p.default).is_some())
+                // (the instance defaults: the static ones follow, see below)
+                .filter(|(_, p)| !p.is_static)
                 .filter_map(|(i, p)| {
                     lazy_marker(&p.default).map(|n| {
                         (
@@ -1370,17 +1371,24 @@ impl Vm {
             })
             .unwrap_or_default();
         for (pname, thunk) in statics {
-            let v = self.eval_lazy_marker(&thunk, Some(class_lower))?;
+            let mut v = self.eval_lazy_marker(&thunk, Some(class_lower))?;
+            // (the property's type: checked strictly)
+            let idx = self.classes.get(class_lower).and_then(|c| {
+                c.properties
+                    .iter()
+                    .position(|p| p.is_static && p.name == pname)
+            });
+            if let Some(i) = idx.filter(|_| thunk.starts_with(b"__deferred_thunk__::")) {
+                self.verify_default_type(class_lower, i, &mut v)?;
+            }
             let Some(c) = self.classes.get_mut(class_lower) else {
                 continue;
             };
-            // (a closure default: the declaration's entry gets the same one)
-            if thunk.starts_with(b"__deferred_closure__::") {
-                for p in c.properties.iter_mut() {
-                    if p.is_static && p.name == pname && lazy_marker(&p.default) == Some(&thunk[..])
-                    {
-                        p.default = v.clone();
-                    }
+            // (the declaration's entry gets the same value: static defaults
+            // are evaluated after the instance ones, once)
+            for p in c.properties.iter_mut() {
+                if p.is_static && p.name == pname && lazy_marker(&p.default) == Some(&thunk[..]) {
+                    p.default = v.clone();
                 }
             }
             if let Some(slot) = c.static_properties.get_mut(&pname) {
