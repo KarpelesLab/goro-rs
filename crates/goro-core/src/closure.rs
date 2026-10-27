@@ -880,6 +880,15 @@ impl Vm {
         {
             if let Some(p) = rest.windows(2).rposition(|w| w == b"::") {
                 let (cls, m) = (rest[..p].to_vec(), rest[p + 2..].to_vec());
+                // (self / parent unknown when compiled: a closure given its
+                // class scope by bind(), resolved in that scope now)
+                let cls = if !const_expr
+                    && (cls.eq_ignore_ascii_case(b"self") || cls.eq_ignore_ascii_case(b"parent"))
+                {
+                    self.fcc_runtime_relative_class(&cls, scope.as_deref())?
+                } else {
+                    cls
+                };
                 if const_expr {
                     // zend_ast_evaluate(): a __callStatic() trampoline cannot
                     // back a constant-expression callable.
@@ -899,6 +908,43 @@ impl Vm {
             }
         }
         Ok(self.make_closure_object(wrapper))
+    }
+
+    /// `self` / `parent` of `self::m(...)` / `parent::m(...)` compiled
+    /// outside a class, resolved in the running scope as the "self:" /
+    /// "parent:" forms the compiler makes inside one.
+    #[inline(never)]
+    fn fcc_runtime_relative_class(
+        &self,
+        cls: &[u8],
+        scope: Option<&[u8]>,
+    ) -> Result<Vec<u8>, (&'static [u8], String)> {
+        let Some(scope) = scope else {
+            return Err((
+                b"Error",
+                format!(
+                    "Cannot access \"{}\" when no class scope is active",
+                    String::from_utf8_lossy(&lower(cls))
+                ),
+            ));
+        };
+        let ce = self.classes.get(&lower(scope));
+        if cls.eq_ignore_ascii_case(b"self") {
+            let mut v = b"self:".to_vec();
+            v.extend_from_slice(ce.map(|c| c.name.as_slice()).unwrap_or(scope));
+            return Ok(v);
+        }
+        match ce.and_then(|c| c.parent.clone()) {
+            Some(p) => {
+                let mut v = b"parent:".to_vec();
+                v.extend_from_slice(&p);
+                Ok(v)
+            }
+            None => Err((
+                b"Error",
+                "Cannot access \"parent\" when current class scope has no parent".to_string(),
+            )),
+        }
     }
 
     fn fcc_function(&mut self, name: &[u8], ns_fallback: bool) -> FccResult {
