@@ -107,13 +107,30 @@ fn arg(args: &[Value], i: usize) -> Value {
 /// bc_num2str_ex() as the return value; the string is allocated first
 /// (a huge scale exhausts memory_limit, as in PHP).
 fn ret_num(vm: &mut Vm, n: &Num, scale: usize) -> R {
-    vm.memory_check(n.len.saturating_add(scale).saturating_add(26))?;
+    num2str_check(vm, n, scale)?;
     Ok(str_val(num::num2str(n, scale)))
 }
 
-/// The bc_num allocated for a quotient (or power) of `scale` digits.
-fn check_alloc(vm: &mut Vm, scale: usize) -> Result<(), VmError> {
-    vm.memory_check(scale.saturating_add(32))
+/// bc_num2str_ex()'s zend_string_alloc(n_len [+ scale + 1] + signch): the
+/// 24-byte header and the NUL, rounded up to ZEND_MM_ALIGNMENT, against
+/// memory_limit.
+fn num2str_check(vm: &mut Vm, n: &Num, scale: usize) -> Result<(), VmError> {
+    let signch = usize::from(n.neg && !n.is_zero_for_scale(n.scale.min(scale)));
+    let len = if scale > 0 {
+        n.len.saturating_add(scale).saturating_add(1)
+    } else {
+        n.len
+    }
+    .saturating_add(signch);
+    let size = len.saturating_add(25);
+    vm.memory_check(size.checked_next_multiple_of(8).unwrap_or(size))
+}
+
+/// The bc_num allocated for a quotient (or power) of `scale` digits:
+/// sizeof(bc_struct) + 1 + scale, rounded up to ZEND_MM_ALIGNMENT.
+pub(crate) fn check_alloc(vm: &mut Vm, scale: usize) -> Result<(), VmError> {
+    let size = scale.saturating_add(33);
+    vm.memory_check(size.checked_next_multiple_of(8).unwrap_or(size))
 }
 
 /// bc_standard_raise()'s safe_emalloc(n, sizeof(BC_VECTOR) * 3, 0): the
@@ -251,6 +268,7 @@ fn bcdivmod(vm: &mut Vm, args: &[Value]) -> R {
         Some((q, r)) => {
             let mut arr = goro_core::array::PhpArray::new();
             arr.push(str_val(num::num2str(&q, 0)));
+            num2str_check(vm, &r, scale)?;
             arr.push(str_val(num::num2str(&r, scale)));
             Ok(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr))))
         }

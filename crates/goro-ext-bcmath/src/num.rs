@@ -753,10 +753,10 @@ pub fn round_alloc_size(num: &Num, precision: i64, mode: i64) -> Option<u64> {
         if !ten_power || num.is_zero() {
             return None;
         }
-        return Some(32 + precision.unsigned_abs().saturating_add(1));
+        return Some((32 + precision.unsigned_abs().saturating_add(1)).next_multiple_of(8));
     }
     if precision >= 0 && (num.scale as u64) < precision as u64 {
-        return Some(32 + num.len as u64 + precision as u64);
+        return Some((32 + num.len as u64 + precision as u64).next_multiple_of(8));
     }
     None
 }

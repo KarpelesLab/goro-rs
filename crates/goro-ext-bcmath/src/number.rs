@@ -201,13 +201,57 @@ fn obj_num(o: &Rc<RefCell<PhpObject>>) -> (Num, usize) {
     (n, scale)
 }
 
+/// A Number whose declared scale needs more zero padding than this keeps
+/// its value unpadded: PHP formats the value only when it is read, and that
+/// bc_num2str() is what exhausts memory_limit for a huge scale.
+const LAZY_PAD: usize = 1 << 24;
+
 fn set_props(o: &Rc<RefCell<PhpObject>>, n: &Num, scale: usize) {
+    let shown = if scale.saturating_sub(n.scale) > LAZY_PAD {
+        n.scale
+    } else {
+        scale
+    };
     let mut ob = o.borrow_mut();
     ob.set_property(
         b"value".to_vec(),
-        Value::String(PhpString::from_vec(num::num2str(n, scale))),
+        Value::String(PhpString::from_vec(num::num2str(n, shown))),
     );
     ob.set_property(b"scale".to_vec(), Value::Long(scale as i64));
+}
+
+/// The value of a lazily padded Number (None for a regular one): formatted
+/// now, or, over memory_limit, the pending fatal error of its
+/// zend_string_alloc().
+#[inline(never)]
+fn lazy_value(o: &Rc<RefCell<PhpObject>>) -> Option<Value> {
+    let ob = o.borrow();
+    let Value::String(v) = ob.get_property(b"value") else {
+        return None;
+    };
+    let scale = ob.get_property(b"scale").to_long().max(0) as usize;
+    drop(ob);
+    let b = v.as_bytes();
+    let have = b
+        .iter()
+        .position(|&c| c == b'.')
+        .map_or(0, |p| b.len() - p - 1);
+    if have >= scale {
+        return None;
+    }
+    let (n, _) = obj_num(o);
+    let signch = usize::from(n.neg && !n.is_zero());
+    let size = (n.len + scale + 1 + signch + 25).next_multiple_of(8);
+    let limit = goro_core::value::memory_get_limit();
+    if limit > 0 && goro_core::value::memory_get_usage().saturating_add(size) > limit {
+        goro_core::value::raise_memory_exhausted(size);
+        return Some(Value::String(PhpString::from_bytes(b"")));
+    }
+    Some(Value::String(PhpString::from_vec(num::num2str(&n, scale))))
+}
+
+fn value_prop(o: &Rc<RefCell<PhpObject>>) -> Value {
+    lazy_value(o).unwrap_or_else(|| o.borrow().get_property(b"value"))
 }
 
 /// bcmath_number_new_obj()
@@ -225,6 +269,11 @@ fn new_number(vm: &mut Vm, n: &Num, scale: usize) -> Value {
 /// (zend_std_read_property(BP_VAR_W) warns for another name) into a
 /// temporary.
 fn read_property(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8], mode: u8) -> Option<Value> {
+    if name == b"value" {
+        if let Some(v) = lazy_value(o) {
+            return Some(v);
+        }
+    }
     if (mode == 3 || mode == 1) && (name == b"value" || name == b"scale") {
         return Some(o.borrow().get_property(name));
     }
@@ -764,12 +813,12 @@ fn number_method_inner(vm: &mut Vm, args: &[Value]) -> R {
         }
         "round" => round_method(vm, &m, &obj, &list),
         "compare" => compare_method(vm, &m, &obj, &list),
-        "__toString" => Ok(obj.borrow().get_property(b"value")),
+        "__toString" => Ok(value_prop(&obj)),
         "__serialize" => {
             let mut arr = PhpArray::new();
             arr.set(
                 ArrayKey::String(PhpString::from_bytes(b"value")),
-                obj.borrow().get_property(b"value"),
+                value_prop(&obj),
             );
             Ok(Value::Array(Rc::new(RefCell::new(arr))))
         }
@@ -1021,6 +1070,18 @@ fn calc_method(vm: &mut Vm, m: &Method, obj: &Rc<RefCell<PhpObject>>, list: &[Va
     }
     let (n1, s1) = obj_num(obj);
     let prefix = m.prefix(0);
+    // bc_divide()'s quotient (len + scale digits) is allocated before the
+    // division; a negative power divides too
+    if let Some(sc) = scale {
+        let divides = match op {
+            Op::Div => true,
+            Op::Pow => n2.scale == 0 && n2.neg && !n2.is_zero(),
+            _ => false,
+        };
+        if divides {
+            crate::check_alloc(vm, sc as usize)?;
+        }
+    }
     if matches!(op, Op::Pow) && n2.scale == 0 {
         // bcmath_number_pow_internal(): the result's scale first
         let exponent = num::num2long(&n2);
