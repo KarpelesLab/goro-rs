@@ -322,6 +322,60 @@ impl Vm {
         }
     }
 
+    /// The parameter names of the plain function the top pending call is
+    /// sure to call, when named arguments were already sent to it (see
+    /// place_named_before_positional()).
+    #[inline(never)]
+    pub(crate) fn unpack_positional_after_named_params(&self) -> Option<Vec<Vec<u8>>> {
+        let call = self.pending_calls.last()?;
+        if call.named_args.is_empty() {
+            return None;
+        }
+        let f = self.call_user_fn(call)?;
+        if crate::internal_frames::implicit_args(f) != 0 {
+            return None;
+        }
+        // (not the variadic parameter: names it does not declare are
+        // collected by it)
+        let declared = f
+            .variadic_param
+            .map_or(f.param_count as usize, |v| v as usize);
+        Some(f.cv_names.iter().take(declared).cloned().collect())
+    }
+
+    /// zend_handle_named_arg() raised ZEND_CALL_NUM_ARGS to cover the
+    /// declared parameters the named arguments passed (the skipped ones
+    /// left undefined): a positional argument SEND_UNPACK sends after them
+    /// takes the next slot. Moves those named arguments to their slots.
+    #[inline(never)]
+    pub(crate) fn place_named_before_positional(
+        call: &mut crate::vm::PendingCall,
+        names: &[Vec<u8>],
+    ) {
+        let last = call
+            .named_args
+            .iter()
+            .filter_map(|(n, _)| names.iter().position(|p| p == n))
+            .max();
+        let Some(last) = last else {
+            return;
+        };
+        if last < call.args.len() {
+            return;
+        }
+        call.args.resize(last + 1, crate::value::Value::Undef);
+        let mut i = 0;
+        while i < call.named_args.len() {
+            match names.iter().position(|p| *p == call.named_args[i].0) {
+                Some(pos) if matches!(call.args[pos], crate::value::Value::Undef) => {
+                    let (_, v) = call.named_args.remove(i);
+                    call.args[pos] = v;
+                }
+                _ => i += 1,
+            }
+        }
+    }
+
     /// The positional arguments sent so far to `call` (without an implicit
     /// `$this`).
     fn pending_positional_args(&self, call: &crate::vm::PendingCall) -> usize {

@@ -1682,6 +1682,30 @@ impl Vm {
             .any(|e| e.eq_ignore_ascii_case(n.as_bytes()));
         (!loaded).then(|| format!("Extension \"{}\" does not exist", n.to_string_lossy()))
     }
+
+    /// An exception a native method (`frame`, given `args`) throws: its
+    /// frame is on the trace.
+    #[cold]
+    #[inline(never)]
+    fn create_exception_in_native_frame(
+        &mut self,
+        class: &[u8],
+        msg: &str,
+        line: u32,
+        frame: &str,
+        args: Vec<Value>,
+    ) -> Value {
+        self.call_stack.push((
+            frame.to_string(),
+            self.current_file.clone(),
+            line,
+            args,
+            true,
+        ));
+        let exc = self.create_exception(class, msg, line);
+        self.call_stack.pop();
+        exc
+    }
 }
 
 /// PHP_EXTENSION_DIR: `extensions` next to the running binary.
@@ -32595,6 +32619,14 @@ impl Vm {
                                             } else {
                                                 None
                                             };
+                            // (positional arguments after an earlier unpack's
+                            // named ones go after the last parameter those
+                            // passed: the declared parameters' names)
+                            let declared_params = if pairs.iter().any(|p| !p.0) {
+                                self.unpack_positional_after_named_params()
+                            } else {
+                                None
+                            };
                             let r = if let Some(call) = self.pending_calls.last_mut() {
                                 // (unpacked arguments make a real call of a
                                 // builtin php-src would call frameless: a
@@ -32707,6 +32739,9 @@ impl Vm {
                                         if had_named {
                                             result = Err("Cannot use positional argument after named argument during unpacking".into());
                                             break;
+                                        }
+                                        if let Some(names) = declared_params.as_ref() {
+                                            Self::place_named_before_positional(call, names);
                                         }
                                         let arg_pos = call.args.len();
                                         let mut v = v;
@@ -39598,10 +39633,13 @@ impl Vm {
                                                         "Constant \"{}\" does not exist",
                                                         const_name
                                                     );
-                                                    let exc = self.create_exception(
+                                                    let arg = call.args[1].clone();
+                                                    let exc = self.create_exception_in_native_frame(
                                                         b"ReflectionException",
                                                         &msg,
                                                         op.line,
+                                                        "ReflectionConstant->__construct",
+                                                        vec![arg],
                                                     );
                                                     self.current_exception = Some(exc);
                                                     if let Some((
@@ -39705,10 +39743,12 @@ impl Vm {
                                                 self.reflection_extension_missing(&actual_value)
                                             {
                                                 drop(obj_mut);
-                                                let exc = self.create_exception(
+                                                let exc = self.create_exception_in_native_frame(
                                                     b"ReflectionException",
                                                     &msg,
                                                     op.line,
+                                                    "ReflectionExtension->__construct",
+                                                    vec![actual_value.clone()],
                                                 );
                                                 self.current_exception = Some(exc);
                                                 if let Some((catch_target, _, _, _, saved_pc)) =
@@ -49588,10 +49628,23 @@ impl Vm {
 
                 OpCode::Eval => match outlined(|| -> Result<Flow, VmError> {
                     let code_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let code = code_val.to_php_string();
+                    // zend_compile_string() of no code at all compiles
+                    // nothing: eval() fails
+                    if code.as_bytes().is_empty() {
+                        self.write_operand(
+                            &op.result,
+                            Value::False,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                        return Ok(Flow::Next);
+                    }
                     // eval()'d code starts in scripting mode (an opening
                     // tag in it is a syntax error).
                     let mut source = b"<?php ".to_vec();
-                    source.extend_from_slice(code_val.to_php_string().as_bytes());
+                    source.extend_from_slice(code.as_bytes());
 
                     let result = {
                         let mut lexer = goro_parser::Lexer::new(&source);
