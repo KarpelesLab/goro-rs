@@ -1865,7 +1865,39 @@ fn xml_parser_get_option(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 // ---------------------------------------------------------------------------
 // Registration
 
+/// xml_parser_get_gc: the xml_set_object() object and the handlers.
+fn parser_get_gc(data: &Rc<dyn std::any::Any>, visit: &mut dyn FnMut(&Value)) {
+    if Rc::strong_count(data) != 1 {
+        return;
+    }
+    let Some(st) = data.downcast_ref::<State>() else {
+        return;
+    };
+    let Ok(st) = st.try_borrow() else {
+        return;
+    };
+    if let Some(o) = &st.object {
+        visit(o);
+    }
+    for h in st.handlers.iter().flatten() {
+        match h {
+            // (php-src keeps an fcc, not the [$obj, 'm'] array: an array
+            // only the handler holds is seen through)
+            Handler::Callable(Value::Array(a)) if Rc::strong_count(a) == 1 => {
+                if let Ok(a) = a.try_borrow() {
+                    for (_, v) in a.iter() {
+                        visit(v);
+                    }
+                }
+            }
+            Handler::Callable(v) => visit(v),
+            Handler::Method { obj, .. } => visit(obj),
+        }
+    }
+}
+
 pub fn register(vm: &mut Vm) {
+    goro_core::gc::register_native_gc(&HANDLERS, parser_get_gc);
     let fns: &[(&[u8], goro_core::vm::BuiltinFn, &[&[u8]])] = &[
         (b"xml_parser_create", xml_parser_create, &[b"encoding"]),
         (
