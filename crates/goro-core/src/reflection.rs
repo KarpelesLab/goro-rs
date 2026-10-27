@@ -2715,6 +2715,12 @@ fn reflection_parameter_construct_impl(vm: &mut Vm, args: &[Value], _line: u32) 
         || matches!(&func_arg, Value::Array(a) if a.borrow().get_int(0).map(|v| v.is_closure_obj()).unwrap_or(false))
     {
         closure_legacy_arg(&func_arg)
+    } else if let Value::Object(o) = &func_arg {
+        // An invokable object: its __invoke() method
+        let mut a = PhpArray::new();
+        a.push(Value::Object(o.clone()));
+        a.push(Value::String(PhpString::from_bytes(b"__invoke")));
+        Value::Array(Rc::new(RefCell::new(a)))
     } else {
         func_arg
     };
@@ -3031,15 +3037,21 @@ fn reflection_parameter_construct_impl(vm: &mut Vm, args: &[Value], _line: u32) 
             );
         }
     } else if let Some(op_array) = vm.user_functions.get(&func_lower).cloned() {
-        let param_idx = param_idx_opt.unwrap_or(0);
-        if param_idx >= op_array.param_count as usize {
+        // A closure's leading CVs ($this, the use variables) are not
+        // parameters (see create_reflection_parameters()).
+        let hidden = closure_hidden_params(&op_array);
+        let param_idx = match (&param_arg, param_idx_opt) {
+            (Value::String(_), Some(i)) => i.saturating_sub(hidden),
+            (_, i) => i.unwrap_or(0),
+        };
+        if param_idx + hidden >= op_array.param_count as usize {
             let err_msg = "The parameter specified by its offset could not be found".to_string();
             let exc = vm.create_exception(b"ReflectionException", &err_msg, _line);
             vm.current_exception = Some(exc);
             return false;
         }
-        let param_name = if param_idx < op_array.cv_names.len() {
-            crate::string::msg_str(&op_array.cv_names[param_idx]).to_string()
+        let param_name = if param_idx + hidden < op_array.cv_names.len() {
+            crate::string::msg_str(&op_array.cv_names[param_idx + hidden]).to_string()
         } else {
             format!("param{}", param_idx)
         };
@@ -3057,6 +3069,15 @@ fn reflection_parameter_construct_impl(vm: &mut Vm, args: &[Value], _line: u32) 
             b"__reflection_param_idx".to_vec(),
             Value::Long(param_idx as i64),
         );
+        if hidden > 0 {
+            obj.set_property(
+                b"__reflection_param_cv_offset".to_vec(),
+                Value::Long(hidden as i64),
+            );
+        } else {
+            obj.properties
+                .retain(|(k, _)| k.as_slice() != b"__reflection_param_cv_offset");
+        }
     } else if let Some(idx) = param_idx_opt {
         // No userland function - still set enough for later calls.
         let internal = rfunc(vm, &func_lower);
@@ -11237,6 +11258,15 @@ fn reflection_parameter_method_body(
                     let name_str = crate::string::msg_str(&ce.name).to_string();
                     return Some(create_reflection_class(vm, &name_str));
                 }
+            }
+            // A closure's parameter: the closure's scope (func->common.scope)
+            let scope = resolved_op_array
+                .as_ref()
+                .filter(|op| crate::closure::is_closure_fn_name(&op.name))
+                .and_then(|op| op.scope_class.clone());
+            if let Some(ce) = scope.as_deref().and_then(|s| rcls(vm, s)) {
+                let name_str = crate::string::msg_str(&ce.name).to_string();
+                return Some(create_reflection_class(vm, &name_str));
             }
             Some(Value::Null)
         }
