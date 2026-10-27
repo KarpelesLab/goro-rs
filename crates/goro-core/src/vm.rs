@@ -10775,11 +10775,34 @@ impl Vm {
             Value::Reference(r) => match &*r.borrow() {
                 Value::Array(_) => false,
                 Value::Object(_) | Value::Generator(_) => true,
+                v => return Self::class_param_rejects(v, param_type),
+            },
+            v => return Self::class_param_rejects(v, param_type),
+        };
+        self.builtin_arg_rejected_slow(value, param_type, is_obj)
+    }
+
+    /// A scalar (or null) given for a parameter of a class type only
+    /// (`HashContext $context`, `?DateTimeZone $timezone`).
+    #[inline]
+    fn class_param_rejects(v: &Value, pt: &ParamType) -> bool {
+        let (name, nullable) = match pt {
+            ParamType::Simple(n) => (n, false),
+            ParamType::Nullable(inner) => match &**inner {
+                ParamType::Simple(n) => (n, true),
                 _ => return false,
             },
             _ => return false,
         };
-        self.builtin_arg_rejected_slow(value, param_type, is_obj)
+        if nullable && matches!(v, Value::Null | Value::Undef) {
+            return false;
+        }
+        const SCALAR: [&[u8]; 19] = [
+            b"null", b"false", b"true", b"bool", b"int", b"integer", b"float", b"double",
+            b"string", b"array", b"mixed", b"callable", b"iterable", b"object", b"void",
+            b"never", b"static", b"self", b"parent",
+        ];
+        !matches!(v, Value::Undef) && !SCALAR.iter().any(|t| name.eq_ignore_ascii_case(t))
     }
 
     #[cold]
@@ -10787,11 +10810,12 @@ impl Vm {
     fn builtin_arg_rejected_slow(&self, value: &Value, pt: &ParamType, is_obj: bool) -> bool {
         let tv = variance::TypeView::from_param_type(pt);
         let m = tv.mask;
+        if !is_obj {
+            // (iterable is array|Traversable)
+            return m & (variance::T_ARRAY | variance::T_CALLABLE) == 0;
+        }
         if !tv.elems.is_empty() || m & (variance::T_CALLABLE | variance::T_OBJECT) != 0 {
             return false;
-        }
-        if !is_obj {
-            return m & variance::T_ARRAY == 0;
         }
         !(m & variance::T_STRING != 0 && self.zpp_object_has_tostring(&value.deref()))
     }

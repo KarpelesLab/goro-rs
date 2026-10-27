@@ -182,7 +182,7 @@ fn ini_strtol_memo(slot: usize, v: &Value) -> i64 {
 }
 
 /// ZEND_STRTOL(s, NULL, 10).
-fn strtol_bytes(b: &[u8]) -> i64 {
+pub(crate) fn strtol_bytes(b: &[u8]) -> i64 {
     let mut i = 0;
     while i < b.len() && c_isspace(b[i]) {
         i += 1;

@@ -97,9 +97,10 @@ pub fn register(vm: &mut Vm) {
     );
     vm.register_builtin_param_types(b"hash_hmac", vec![s(), s(), s(), b()]);
     vm.register_builtin_param_types(b"hash_pbkdf2", vec![s(), s(), s(), i(), i(), b()]);
-    vm.register_builtin_param_types(b"hash_update", vec![None, s()]);
-    vm.register_builtin_param_types(b"hash_update_stream", vec![None, None, i()]);
-    vm.register_builtin_param_types(b"hash_update_file", vec![None, s()]);
+    let ctx = || Some(ParamType::Simple(b"HashContext".to_vec()));
+    vm.register_builtin_param_types(b"hash_update", vec![ctx(), s()]);
+    vm.register_builtin_param_types(b"hash_update_stream", vec![ctx(), None, i()]);
+    vm.register_builtin_param_types(b"hash_update_file", vec![ctx(), s()]);
 
     // Register parameter names (for deprecation messages that mention $filename, etc.)
     let names = |l: &[&str]| l.iter().map(|n| n.as_bytes().to_vec()).collect::<Vec<_>>();

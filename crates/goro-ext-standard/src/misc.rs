@@ -798,7 +798,8 @@ fn error_reporting(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     // zend_alter_ini_entry_chars(): the INI entry changes too
                     // (restored at request end / by ini_restore()).
                     let n = v.to_long();
-                    vm.error_reporting = n;
+                    // (EG(error_reporting) is a C int; the INI value keeps n)
+                    vm.error_reporting = n as i32 as i64;
                     ini_remember(vm, b"error_reporting");
                     vm.constants.insert(
                         b"error_reporting".to_vec(),
@@ -6101,19 +6102,14 @@ fn ini_set_as(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError
     }
     // Handle error_reporting
     if key == b"error_reporting" {
+        // OnUpdateErrorReporting(): atoi() of the value (EG(error_reporting)
+        // is a C int)
         let level = match &value {
             Value::Long(n) => *n,
-            Value::String(s) => {
-                let s_str = s.to_string_lossy();
-                if let Ok(n) = s_str.parse::<i64>() {
-                    n
-                } else {
-                    vm.error_reporting
-                }
-            }
-            _ => value.to_long(),
+            Value::String(s) => crate::regex::strtol_bytes(s.as_bytes()),
+            _ => crate::regex::strtol_bytes(value.to_php_string().as_bytes()),
         };
-        vm.error_reporting = level;
+        vm.error_reporting = level as i32 as i64;
     }
     // Handle serialize_precision
     if key == b"serialize_precision" {
@@ -19526,7 +19522,7 @@ pub fn apply_startup_ini(vm: &mut Vm, ini: &[(String, String)]) -> Vec<u8> {
             Err(_) => Value::String(PhpString::from_string(value.clone())),
         };
         if key == "error_reporting" {
-            vm.error_reporting = val.to_long();
+            vm.error_reporting = crate::regex::strtol_bytes(value.as_bytes()) as i32 as i64;
         }
         if let Some(msg) = ini_handler_deprecation(key.as_bytes(), &val) {
             startup_deprecations.push(msg);
