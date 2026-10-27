@@ -138,7 +138,7 @@ pub fn get_encoding(
                     pname,
                     &format!(
                         "must be a valid encoding, \"{}\" given",
-                        goro_core::string::msg_str(n)
+                        goro_core::string::msg_cstr(n)
                     ),
                 )),
                 Some(e) => {
@@ -186,7 +186,7 @@ pub fn parse_encoding_list_arg(
             pname,
             &format!(
                 "contains invalid encoding \"{}\"",
-                goro_core::string::msg_str(&bad)
+                goro_core::string::msg_cstr(&bad)
             ),
         )),
     }
@@ -236,7 +236,7 @@ pub fn parse_encoding_array(
                         pname,
                         &format!(
                             "contains invalid encoding \"{}\"",
-                            goro_core::string::msg_str(&s)
+                            goro_core::string::msg_cstr(&s)
                         ),
                     ));
                 }
@@ -339,7 +339,7 @@ fn mb_internal_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 "encoding",
                 &format!(
                     "must be a valid encoding, \"{}\" given",
-                    goro_core::string::msg_str(&n)
+                    goro_core::string::msg_cstr(&n)
                 ),
             )),
             Some(e) => {
@@ -413,7 +413,7 @@ fn mb_http_output(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     "encoding",
                     &format!(
                         "must be a valid encoding, \"{}\" given",
-                        goro_core::string::msg_str(&n)
+                        goro_core::string::msg_cstr(&n)
                     ),
                 )),
                 Some(e) => {
@@ -536,7 +536,7 @@ fn mb_preferred_mime_name(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
             "encoding",
             &format!(
                 "must be a valid encoding, \"{}\" given",
-                goro_core::string::msg_str(&name)
+                goro_core::string::msg_cstr(&name)
             ),
         )),
         Some(e) => match mbfl::preferred_mime_name(e) {

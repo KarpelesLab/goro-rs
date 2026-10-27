@@ -657,8 +657,9 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let mut first = true;
             let vals: Vec<Value> = arr.values().cloned().collect();
             drop(arr);
+            // (zend_hash_minmax(): compar(res, zv) < 0)
             for v in vals {
-                if first || vm.zend_compare(&v, &max_val) > 0 {
+                if first || vm.zend_compare(&max_val, &v) < 0 {
                     max_val = v;
                     first = false;
                 }
@@ -703,16 +704,72 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             args[1].clone()
         });
     }
-    let mut max_val = args[0].clone();
-    for arg in &args[1..] {
-        if vm.zend_compare(arg, &max_val) > 0 {
-            max_val = arg.clone();
-        }
-        if vm.current_exception.is_some() {
-            return Ok(Value::Null);
+    minmax_variadic(vm, args, true)
+}
+
+/// PHP_FUNCTION(max)/PHP_FUNCTION(min) of several values: the int and
+/// double loops (a running int moves to the double one at a double it
+/// holds exactly; a NAN neither replaces nor is replaced there), then
+/// zend_compare() from the first value that fits neither.
+#[inline(never)]
+fn minmax_variadic(vm: &mut Vm, args: &[Value], want_max: bool) -> Result<Value, VmError> {
+    enum Mode {
+        Long(i64),
+        Double(f64),
+        Generic,
+    }
+    let mut best = 0usize;
+    let mut mode = match args[0].deref() {
+        Value::Long(n) => Mode::Long(n),
+        Value::Double(d) => Mode::Double(d),
+        _ => Mode::Generic,
+    };
+    let mut i = 1;
+    while i < args.len() {
+        let a = args[i].deref();
+        match mode {
+            Mode::Long(cur) => match a {
+                Value::Long(n) => {
+                    if (want_max && cur < n) || (!want_max && cur > n) {
+                        mode = Mode::Long(n);
+                        best = i;
+                    }
+                    i += 1;
+                }
+                // (goto double_compare: this value again, in the double loop)
+                Value::Double(_) if long_fits_double(cur) => mode = Mode::Double(cur as f64),
+                _ => mode = Mode::Generic,
+            },
+            Mode::Double(cur) => {
+                let v = match a {
+                    Value::Double(d) => Some(d),
+                    Value::Long(n) if long_fits_double(n) => Some(n as f64),
+                    _ => None,
+                };
+                match v {
+                    Some(v) => {
+                        if (want_max && cur < v) || (!want_max && cur > v) {
+                            mode = Mode::Double(v);
+                            best = i;
+                        }
+                        i += 1;
+                    }
+                    None => mode = Mode::Generic,
+                }
+            }
+            Mode::Generic => {
+                let c = vm.zend_compare(&args[i], &args[best]);
+                if vm.current_exception.is_some() {
+                    return Ok(Value::Null);
+                }
+                if (want_max && c > 0) || (!want_max && c < 0) {
+                    best = i;
+                }
+                i += 1;
+            }
         }
     }
-    Ok(max_val)
+    Ok(args[best].clone())
 }
 
 fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -743,8 +800,9 @@ fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let mut first = true;
             let vals: Vec<Value> = arr.values().cloned().collect();
             drop(arr);
+            // (zend_hash_minmax(): compar(res, zv) > 0)
             for v in vals {
-                if first || vm.zend_compare(&v, &min_val) < 0 {
+                if first || vm.zend_compare(&min_val, &v) > 0 {
                     min_val = v;
                     first = false;
                 }
@@ -788,16 +846,7 @@ fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             args[1].clone()
         });
     }
-    let mut min_val = args[0].clone();
-    for arg in &args[1..] {
-        if vm.zend_compare(arg, &min_val) < 0 {
-            min_val = arg.clone();
-        }
-        if vm.current_exception.is_some() {
-            return Ok(Value::Null);
-        }
-    }
-    Ok(min_val)
+    minmax_variadic(vm, args, false)
 }
 
 fn sqrt(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

@@ -225,7 +225,7 @@ pub(crate) fn docref(vm: &mut Vm, level: Level, msg: &str) {
 
 /// _php_iconv_show_error()
 pub(crate) fn show_error(vm: &mut Vm, err: Err, out_charset: &[u8], in_charset: &[u8]) {
-    let l = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    let l = |b: &[u8]| goro_core::string::msg_cstr(b).into_owned();
     match err {
         Err::Success => {}
         Err::WrongCharset => docref(

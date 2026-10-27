@@ -1249,6 +1249,8 @@ pub fn parse_ini(
     mode: i64,
     filename: &str,
 ) -> Value {
+    // (zend_parse_ini_string() takes the mode as a C int)
+    let mode = mode as i32 as i64;
     if !matches!(mode, SCANNER_NORMAL | SCANNER_RAW | SCANNER_TYPED) {
         vm.emit_warning("Invalid scanner mode");
         return Value::False;

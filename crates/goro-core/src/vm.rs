@@ -8930,6 +8930,9 @@ impl Vm {
                 }
             }
         }
+        if message.contains('\0') {
+            Self::truncate_arg_error_at_nul(class_name, &mut message);
+        }
         err_obj.set_property(
             b"message".to_vec(),
             Value::String(PhpString::from_vec(
@@ -8947,6 +8950,34 @@ impl Vm {
         err_obj.throwable_set(b"trace", trace);
         err_obj.throwable_set(b"previous", Value::Null);
         Value::Object(Rc::new(RefCell::new(err_obj)))
+    }
+
+    /// zend_argument_error_variadic(): the formatted message goes into the
+    /// "func(): Argument #n ($name) %s" one as a C string, so it stops at
+    /// its first NUL byte.
+    #[cold]
+    #[inline(never)]
+    fn truncate_arg_error_at_nul(class_name: &[u8], message: &mut String) {
+        if !matches!(
+            class_name,
+            b"ValueError" | b"TypeError" | b"ArgumentCountError"
+        ) {
+            return;
+        }
+        let Some(p) = message.find("(): Argument #") else {
+            return;
+        };
+        let head = &message[..p];
+        if head.is_empty()
+            || !head
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b':' | b'\\'))
+        {
+            return;
+        }
+        if let Some(nul) = message.find('\0') {
+            message.truncate(nul);
+        }
     }
 
     /// Exception/Error/ErrorException::__construct() (`args[0]` is `$this`)
@@ -10735,6 +10766,36 @@ impl Vm {
     /// a finite float with a non-integer fractional part and the target type would
     /// coerce it to int. Used for typed property assignments, function parameter
     /// coercion (non-strict mode), and return-type coercion.
+    /// An array or object given for a builtin's scalar parameter, which
+    /// its zpp rejects with a TypeError.
+    fn builtin_arg_rejected(&self, value: &Value, param_type: &ParamType) -> bool {
+        let is_obj = match value {
+            Value::Array(_) => false,
+            Value::Object(_) | Value::Generator(_) => true,
+            Value::Reference(r) => match &*r.borrow() {
+                Value::Array(_) => false,
+                Value::Object(_) | Value::Generator(_) => true,
+                _ => return false,
+            },
+            _ => return false,
+        };
+        self.builtin_arg_rejected_slow(value, param_type, is_obj)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn builtin_arg_rejected_slow(&self, value: &Value, pt: &ParamType, is_obj: bool) -> bool {
+        let tv = variance::TypeView::from_param_type(pt);
+        let m = tv.mask;
+        if !tv.elems.is_empty() || m & (variance::T_CALLABLE | variance::T_OBJECT) != 0 {
+            return false;
+        }
+        if !is_obj {
+            return m & variance::T_ARRAY == 0;
+        }
+        !(m & variance::T_STRING != 0 && self.zpp_object_has_tostring(&value.deref()))
+    }
+
     /// zend_double_to_str() of a NAN given for a builtin's string parameter.
     #[cold]
     fn warn_nan_string_param(&mut self, value: &Value, param_type: &ParamType, line: u32) {
@@ -35548,6 +35609,12 @@ impl Vm {
                                         break;
                                     }
                                     if let Some(ref pt) = param_types[i] {
+                                        // (zpp stops at an argument of a type
+                                        // the parameter rejects: the later
+                                        // ones are not converted)
+                                        if self.builtin_arg_rejected(arg, pt) {
+                                            break;
+                                        }
                                         if !self_coercing {
                                             self.emit_implicit_float_to_int_if_needed(
                                                 arg, pt, op.line,

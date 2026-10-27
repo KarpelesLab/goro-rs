@@ -236,7 +236,7 @@ fn resolve_charset(vm: &mut Vm, args: &[Value], fn_name: &str, arg_idx: usize) -
             vm.emit_warning(&format!(
                 "{}(): Charset \"{}\" is not supported, assuming UTF-8",
                 fn_name,
-                String::from_utf8_lossy(&raw)
+                goro_core::string::msg_cstr(&raw)
             ));
             Charset::Utf8
         }

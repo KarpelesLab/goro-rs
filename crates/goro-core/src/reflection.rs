@@ -1370,7 +1370,10 @@ fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bo
     }
 
     if !class_exists {
-        let err_msg = format!("Class \"{}\" does not exist", given_name);
+        let err_msg = format!(
+            "Class \"{}\" does not exist",
+            crate::string::msg_cstr(given_name.as_bytes())
+        );
         let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
         vm.current_exception = Some(exc);
         return false;
@@ -2485,7 +2488,10 @@ fn reflection_function_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
     let exists = vm.user_functions.contains_key(&func_lower)
         || vm.functions.contains_key(&func_lower) && !func_lower.starts_with(b"__");
     if !exists {
-        let err_msg = format!("Function {}() does not exist", func_name);
+        let err_msg = format!(
+            "Function {}() does not exist",
+            crate::string::msg_cstr(func_name.as_bytes())
+        );
         let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
         vm.current_exception = Some(exc);
         return false;

@@ -399,7 +399,7 @@ pub fn parse_encoding_list_ini(
                 vm,
                 &format!(
                     "INI setting contains invalid encoding \"{}\"",
-                    goro_core::string::msg_str(&bad)
+                    goro_core::string::msg_cstr(&bad)
                 ),
             );
             None

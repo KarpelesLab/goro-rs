@@ -1323,7 +1323,10 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         b"null" => return Ok(Value::Null),
         _ => {}
     }
-    let msg = format!("Undefined constant \"{}\"", name_str);
+    let msg = format!(
+        "Undefined constant \"{}\"",
+        goro_core::string::msg_cstr(name.as_bytes())
+    );
     let line = vm.current_line;
     let exc = vm.create_exception(b"Error", &msg, line);
     vm.current_exception = Some(exc);

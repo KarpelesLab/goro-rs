@@ -382,7 +382,7 @@ fn mb_regex_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 "encoding",
                 &format!(
                     "must be a valid encoding, \"{}\" given",
-                    goro_core::string::msg_str(&n)
+                    goro_core::string::msg_cstr(&n)
                 ),
             )),
             Some(i) => {
