@@ -38,6 +38,32 @@ pub const T_NEVER: u16 = 4096;
 pub const T_STATIC: u16 = 8192;
 pub const T_CLASS: u16 = 16384;
 
+/// Whether `t`, one member of a stub type, is a builtin type rather than a
+/// class name.
+fn is_builtin_type_name(t: &str) -> bool {
+    matches!(
+        t,
+        "null"
+            | "false"
+            | "true"
+            | "bool"
+            | "int"
+            | "float"
+            | "string"
+            | "array"
+            | "object"
+            | "callable"
+            | "iterable"
+            | "mixed"
+            | "void"
+            | "never"
+            | "static"
+            | "self"
+            | "resource"
+            | ""
+    )
+}
+
 /// Verified flag: argument count errors match php-src.
 pub const CHECK_ARITY: u8 = 1;
 /// Verified flag: parameter type errors / coercions match php-src.
@@ -1616,7 +1642,8 @@ impl Vm {
                 let ok =
                     p.ty.split('|')
                         .map(|t| t.trim_start_matches('?'))
-                        .filter(|t| t.bytes().next().is_some_and(|c| c.is_ascii_uppercase()))
+                        // (class names: `tidy`, `finfo` are lowercase)
+                        .filter(|t| !is_builtin_type_name(t))
                         .any(|cn| {
                             self.value_matches_type_mode(
                                 &v,
