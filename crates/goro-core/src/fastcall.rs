@@ -60,6 +60,67 @@ pub(crate) struct MethodSite {
 /// How many classes a method call site remembers besides the last one.
 const METHOD_SITE_OTHERS: usize = 3;
 
+/// What the INIT_METHOD_CALL sites resolved, for any site, by object class,
+/// method name (as the site spells it) and calling scope: the answer of a
+/// site meeting more classes than it remembers (a visitor loop calling
+/// `enterNode()` on each of many classes), see init_method_call_fast().
+/// Like the sites' answers, kept for the request (SITE_EPOCH).
+#[derive(Default)]
+struct MethodMemo {
+    epoch: u32,
+    /// By memo_slot(): the method name and the site's answer.
+    slots: Vec<Option<Box<(Box<[u8]>, MethodSite)>>>,
+}
+
+/// log2 of the number of MethodMemo slots.
+const METHOD_MEMO_BITS: u32 = 10;
+
+thread_local! {
+    static METHOD_MEMO: RefCell<MethodMemo> = RefCell::new(MethodMemo::default());
+}
+
+#[inline]
+fn memo_slot(class_name: &[u8], method: &[u8], scope: Option<&[u8]>) -> usize {
+    use std::hash::Hasher;
+    let mut h = crate::fxhash::FxHasher::default();
+    h.write(class_name);
+    h.write_u8(0xff);
+    h.write(method);
+    if let Some(s) = scope {
+        h.write_u8(0xfe);
+        h.write(s);
+    }
+    (h.finish().wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - METHOD_MEMO_BITS)) as usize
+}
+
+impl MethodMemo {
+    /// The answer for `class_name`, `method` and `scope`.
+    #[inline]
+    fn get(&self, class_name: &[u8], method: &[u8], scope: Option<&[u8]>) -> Option<&MethodSite> {
+        if self.epoch != crate::opcode::site_epoch() {
+            return None;
+        }
+        let e = self.slots.get(memo_slot(class_name, method, scope))?.as_deref()?;
+        (crate::string::bytes_eq(&e.0, method) && e.1.is_for(class_name, scope)).then_some(&e.1)
+    }
+
+    /// Remember a site's answer (without its others) for `method`.
+    #[inline(never)]
+    fn put(&mut self, method: &[u8], site: &MethodSite) {
+        let epoch = crate::opcode::site_epoch();
+        if self.epoch != epoch || self.slots.is_empty() {
+            self.slots.clear();
+            self.slots.resize_with(1 << METHOD_MEMO_BITS, || None);
+            self.epoch = epoch;
+        }
+        let i = memo_slot(&site.class_name, method, site.scope.as_deref());
+        let mut s = site.clone();
+        s.others = Vec::new();
+        s.reg_gen = 0;
+        self.slots[i] = Some(Box::new((method.into(), s)));
+    }
+}
+
 impl MethodSite {
     #[inline]
     fn is_for(&self, class_name: &[u8], scope: Option<&[u8]>) -> bool {
@@ -75,6 +136,16 @@ impl MethodSite {
 /// Remember `site` for the call at `ip`: the site's previous answers (for
 /// other classes or scopes) are kept among its others.
 fn store_method_site(op_array: &OpArray, ip: usize, site: MethodSite) {
+    // (for the other sites calling the method by that name, see MethodMemo)
+    if let Some(OperandType::Const(c)) = op_array.ops.get(ip).map(|o| o.op2) {
+        if let Some(Value::String(m)) = op_array.literals.get(c as usize) {
+            METHOD_MEMO.with(|mm| {
+                if let Ok(mut mm) = mm.try_borrow_mut() {
+                    mm.put(m.as_bytes(), &site);
+                }
+            });
+        }
+    }
     let mut sites = op_array.sites().borrow_mut();
     let map = &mut sites.get_or_insert_with(Default::default).method_sites;
     let Some(mut old) = map.insert(ip as u32, site) else {
@@ -1198,6 +1269,39 @@ impl Vm {
         true
     }
 
+    /// init_method_call_fast(): what the MethodMemo says of a call of method
+    /// `m` on `obj` from the running scope (a fallback answer: no method and
+    /// an empty name).
+    #[inline(never)]
+    #[allow(clippy::type_complexity)]
+    fn memo_method_site(
+        &self,
+        obj: &Rc<RefCell<PhpObject>>,
+        m: &[u8],
+    ) -> Option<(
+        Option<Rc<OpArray>>,
+        PhpString,
+        usize,
+        bool,
+        usize,
+        Option<Rc<MethodCallInfo>>,
+    )> {
+        let ob = obj.try_borrow().ok()?;
+        let scope = self.class_scope_ref();
+        METHOD_MEMO.with(|mm| {
+            let mm = mm.try_borrow().ok()?;
+            let s = mm.get(&ob.class_name, m, scope)?;
+            if s.fallback {
+                return Some((None, PhpString::empty(), 0, false, 0, None));
+            }
+            let method = match &s.method {
+                Some(w) => Some(w.upgrade()?),
+                None => None,
+            };
+            Some((method, s.func_name.clone(), s.sep, s.is_static, 0, s.info.clone()))
+        })
+    }
+
     /// init_method_call_fast() for a class its call site has not seen last:
     /// the checks, and what the call site remembers.
     fn init_method_call_resolve(
@@ -1215,6 +1319,32 @@ impl Vm {
             return false;
         };
         let m = method_name.as_bytes();
+        // (what another site found, see MethodMemo)
+        if let Some((method, func_name, sep, is_static, _, info)) = self.memo_method_site(&obj, m) {
+            return match method {
+                Some(method_op_array) => {
+                    self.push_method_call(
+                        op_array,
+                        ip,
+                        obj,
+                        tmps,
+                        method_op_array,
+                        func_name,
+                        sep,
+                        is_static,
+                        0,
+                        info,
+                    );
+                    true
+                }
+                // (a fallback answer: see memo_method_site)
+                None if func_name.is_empty() => false,
+                None => {
+                    self.push_noctor_call(func_name, obj);
+                    true
+                }
+            };
+        }
         let is_ctor = m.eq_ignore_ascii_case(b"__construct");
         let mut mbuf = [0u8; 64];
         let Some(method_lower) = lower_into(m, &mut mbuf) else {
@@ -1445,6 +1575,9 @@ impl Vm {
                 .get_or_insert_with(Default::default)
                 .method_sites
                 .get_mut(&(ip as u32))
+                // (the site's answer for this method: not when the call is
+                // one the MethodMemo answered)
+                .filter(|s| s.func_name.ptr_eq(&func_name))
             {
                 s.reg_gen = fn_gen;
             }
