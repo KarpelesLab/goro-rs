@@ -8290,6 +8290,16 @@ impl Compiler {
                                     line: default.as_ref().map(|e| e.span.line).unwrap_or(0),
                                 });
                             }
+                            // zend_compile_const_expr(): a default made of literals,
+                            // __DIR__ / __FILE__ / __LINE__ and concatenations is
+                            // evaluated at compile time (composer's
+                            // autoload_static.php maps).
+                            let magic_folded = match default {
+                                Some(expr) if type_hint.is_none() => {
+                                    self.ct_fold_magic_literal(expr)
+                                }
+                                _ => None,
+                            };
                             let default_val = if let Some(expr) = default {
                                 // Compile the default value expression (constants only)
                                 match &expr.kind {
@@ -8302,6 +8312,9 @@ impl Compiler {
                                             &qualified_name,
                                             extends.as_deref(),
                                         )?
+                                    }
+                                    _ if magic_folded.is_some() => {
+                                        magic_folded.clone().unwrap_or(Value::Null)
                                     }
                                     ExprKind::Int(n) => Value::Long(*n),
                                     ExprKind::Float(f) => Value::Double(*f),
@@ -19505,31 +19518,9 @@ impl Compiler {
                 };
                 let val = match fold_key {
                     // Magic constants
-                    b"__line__" => Value::Long(expr.span.line as i64),
-                    b"__file__" => {
-                        if self.source_file.is_empty() {
-                            Value::String(PhpString::from_bytes(b"unknown"))
-                        } else {
-                            Value::String(PhpString::from_vec(self.source_file.clone()))
-                        }
-                    }
-                    b"__dir__" => {
-                        if self.source_file.is_empty() {
-                            Value::String(PhpString::from_bytes(b"."))
-                        } else {
-                            // Extract directory from file path
-                            let path = &self.source_file;
-                            let dir: &[u8] =
-                                if let Some(pos) = path.iter().rposition(|&c| c == b'/') {
-                                    &path[..pos]
-                                } else if let Some(pos) = path.iter().rposition(|&c| c == b'\\') {
-                                    &path[..pos]
-                                } else {
-                                    b"."
-                                };
-                            Value::String(PhpString::from_bytes(dir))
-                        }
-                    }
+                    b"__line__" | b"__file__" | b"__dir__" => self
+                        .magic_file_line_value(fold_key, expr.span.line)
+                        .unwrap_or(Value::Null),
                     b"__property__" => {
                         // Inside a property hook (op_array named `$prop::get` /
                         // `$prop::set`) this is the property name, else "".
@@ -24426,6 +24417,123 @@ impl Compiler {
                 crate::array::ArrayKey::Int(_) => arr.push(v.clone()),
                 _ => arr.set(k.clone(), v.clone()),
             }
+        }
+    }
+
+    /// __LINE__, __FILE__ and __DIR__ (`lower`) as the code compiled here
+    /// sees them.
+    fn magic_file_line_value(&self, lower: &[u8], line: u32) -> Option<Value> {
+        Some(match lower {
+            b"__line__" => Value::Long(line as i64),
+            b"__file__" => {
+                if self.source_file.is_empty() {
+                    Value::String(PhpString::from_bytes(b"unknown"))
+                } else {
+                    Value::String(PhpString::from_vec(self.source_file.clone()))
+                }
+            }
+            b"__dir__" => {
+                if self.source_file.is_empty() {
+                    Value::String(PhpString::from_bytes(b"."))
+                } else {
+                    // Extract directory from file path
+                    let path = &self.source_file;
+                    let dir: &[u8] = if let Some(pos) = path.iter().rposition(|&c| c == b'/') {
+                        &path[..pos]
+                    } else if let Some(pos) = path.iter().rposition(|&c| c == b'\\') {
+                        &path[..pos]
+                    } else {
+                        b"."
+                    };
+                    Value::String(PhpString::from_bytes(dir))
+                }
+            }
+            _ => return None,
+        })
+    }
+
+    /// A constant expression of literals (see eval_const_expr()), the
+    /// file's magic constants (__DIR__, __FILE__, __LINE__) and
+    /// concatenations of strings and integers, evaluated as php-src does at
+    /// compile time. None when it has anything else, or no magic constant.
+    #[inline(never)]
+    fn ct_fold_magic_literal(&self, expr: &Expr) -> Option<Value> {
+        fn has_magic(e: &Expr, depth: u32) -> bool {
+            depth < 64
+                && match &e.kind {
+                    ExprKind::Identifier(n) => {
+                        n.eq_ignore_ascii_case(b"__dir__")
+                            || n.eq_ignore_ascii_case(b"__file__")
+                            || n.eq_ignore_ascii_case(b"__line__")
+                    }
+                    ExprKind::BinaryOp {
+                        op: BinaryOp::Concat,
+                        left,
+                        right,
+                    } => has_magic(left, depth + 1) || has_magic(right, depth + 1),
+                    ExprKind::Array(elems) => elems.iter().any(|el| {
+                        has_magic(&el.value, depth + 1)
+                            || el.key.as_ref().is_some_and(|k| has_magic(k, depth + 1))
+                    }),
+                    _ => false,
+                }
+        }
+        if !has_magic(expr, 0) {
+            return None;
+        }
+        self.ct_fold_magic_inner(expr, 0)
+    }
+
+    fn ct_fold_magic_inner(&self, expr: &Expr, depth: u32) -> Option<Value> {
+        if depth > 64 {
+            return None;
+        }
+        match &expr.kind {
+            ExprKind::Identifier(n) => {
+                let lower = n.to_ascii_lowercase();
+                match self.magic_file_line_value(&lower, expr.span.line) {
+                    Some(v) => Some(v),
+                    None => Self::eval_const_expr(expr),
+                }
+            }
+            ExprKind::BinaryOp {
+                op: BinaryOp::Concat,
+                left,
+                right,
+            } => {
+                fn bytes(v: &Value) -> Option<Vec<u8>> {
+                    match v {
+                        Value::String(s) => Some(s.as_bytes().to_vec()),
+                        Value::Long(n) => Some(n.to_string().into_bytes()),
+                        _ => None,
+                    }
+                }
+                let mut out = bytes(&self.ct_fold_magic_inner(left, depth + 1)?)?;
+                out.extend_from_slice(&bytes(&self.ct_fold_magic_inner(right, depth + 1)?)?);
+                Some(Value::String(PhpString::from_vec(out)))
+            }
+            ExprKind::Array(elements) => {
+                let mut arr = crate::array::PhpArray::new();
+                for elem in elements {
+                    if elem.unpack || elem.by_ref {
+                        return None;
+                    }
+                    let val = self.ct_fold_magic_inner(&elem.value, depth + 1)?;
+                    if let Some(key_expr) = &elem.key {
+                        let key = match self.ct_fold_magic_inner(key_expr, depth + 1)? {
+                            Value::Long(n) => crate::array::ArrayKey::Int(n),
+                            // ("1" is the integer key 1)
+                            Value::String(s) => Self::const_str_key(s),
+                            _ => return None,
+                        };
+                        arr.set(key, val);
+                    } else {
+                        arr.push(val);
+                    }
+                }
+                Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr))))
+            }
+            _ => Self::eval_const_expr(expr),
         }
     }
 
