@@ -1180,6 +1180,12 @@ impl Vm {
             self.destructible_objects.skip_scan();
             return true;
         }
+        self.lean_release_scan(op_array, line)
+    }
+
+    /// lean_release_point(): the scan made.
+    #[inline(never)]
+    fn lean_release_scan(&mut self, op_array: &OpArray, line: u32) -> bool {
         let saved = if self.lean_depth > 0 {
             self.enter_lean_frames(op_array)
         } else {
@@ -1209,7 +1215,15 @@ impl Vm {
         call: &mut PendingCall,
         nargs: usize,
     ) -> bool {
-        if !self.lean_release_point(op_array, line) {
+        // (the first release point: see lean_release_point)
+        let budget = if self.destructible_objects.is_empty() {
+            0
+        } else {
+            self.quiet_release_budget()
+        };
+        if budget > 0 {
+            self.destructible_objects.skip_scan();
+        } else if !self.lean_release_scan(op_array, line) {
             drop(vm_frame);
             return false;
         }
@@ -1222,8 +1236,21 @@ impl Vm {
             }
         }
         if nargs > 0 && self.has_release_work() {
+            // (when the first was stepped over with room for another, and
+            // the release of the arguments changes nothing it looked at: no
+            // value is freed, no object with a destructor loses a holder,
+            // the second is stepped over too, as it would be)
+            let same = budget >= 2
+                && f.variadic_param.is_none()
+                && call.args.iter().all(|a| {
+                    no_drop(a)
+                        || matches!(a, Value::Object(o) if Rc::strong_count(o) > 1
+                            && o.try_borrow().is_ok_and(|b| !b.dtor_listed.get()))
+                });
             call.args.clear();
-            if !self.lean_release_point(op_array, line) {
+            if same {
+                self.destructible_objects.skip_scan();
+            } else if !self.lean_release_point(op_array, line) {
                 return false;
             }
         }
