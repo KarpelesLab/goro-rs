@@ -1,4 +1,5 @@
 //! php_resolve_path(): where include/require look for a relative file.
+//! Paths are strings in the message encoding (`crate::fspath`).
 
 use crate::vm::Vm;
 
@@ -8,7 +9,7 @@ fn canonical(p: &std::path::Path) -> Option<String> {
     }
     std::fs::canonicalize(p)
         .ok()
-        .map(|c| c.to_string_lossy().into_owned())
+        .map(|c| crate::fspath::path_msg(&c))
 }
 
 /// expand_filepath(): `.` and `..` components removed lexically (the
@@ -45,13 +46,13 @@ impl Vm {
         let explicit_relative =
             path.starts_with("./") || path.starts_with("../") || path == "." || path == "..";
         if explicit_relative {
-            let joined = cwd.join(path);
-            return canonical(&joined).unwrap_or_else(|| joined.to_string_lossy().into_owned());
+            let joined = cwd.join(crate::fspath::msg_path(path));
+            return canonical(&joined).unwrap_or_else(|| crate::fspath::path_msg(&joined));
         }
         let include_path = self
             .constants
             .get(b"include_path".as_slice())
-            .map(|v| v.to_php_string().to_string_lossy())
+            .map(|v| v.to_php_string().to_msg_string())
             .unwrap_or_else(|| ".".to_string());
         for dir in include_path.split(':') {
             if dir.is_empty() || dir.contains("://") {
@@ -60,9 +61,9 @@ impl Vm {
             let base = if dir == "." {
                 cwd.clone()
             } else {
-                cwd.join(dir)
+                cwd.join(crate::fspath::msg_path(dir))
             };
-            if let Some(found) = canonical(&base.join(path)) {
+            if let Some(found) = canonical(&base.join(crate::fspath::msg_path(path))) {
                 return found;
             }
         }
@@ -71,10 +72,10 @@ impl Vm {
             None => ".",
         };
         let joined = format!("{}/{}", script_dir, path);
-        canonical(std::path::Path::new(&joined))
+        canonical(&crate::fspath::msg_path(&joined))
             // (not found: the plain-files wrapper opens the name itself,
             // relative to the working directory)
-            .or_else(|| canonical(&lexical_normalize(&cwd.join(path))))
+            .or_else(|| canonical(&lexical_normalize(&cwd.join(crate::fspath::msg_path(path)))))
             .unwrap_or(joined)
     }
 }
@@ -103,12 +104,12 @@ pub(crate) fn include_failure_reason(
         let candidate = if path.is_empty() {
             std::env::current_dir().ok()
         } else {
-            Some(std::path::PathBuf::from(abs_path))
+            Some(crate::fspath::msg_path(abs_path).into_owned())
         };
         candidate
             .filter(|p| p.exists())
             .and_then(|p| std::fs::canonicalize(p).ok())
-            .map(|c| c.to_string_lossy().into_owned())
+            .map(|c| crate::fspath::path_msg(&c))
     } else {
         None
     };
@@ -140,7 +141,7 @@ impl Vm {
         let include_path = self
             .constants
             .get(b"include_path".as_slice())
-            .map(|v| v.to_php_string().to_string_lossy())
+            .map(|v| v.to_php_string().to_msg_string())
             .unwrap_or_else(|| ".".to_string());
         if include_kind == 2 || include_kind == 3 {
             let msg = format!(

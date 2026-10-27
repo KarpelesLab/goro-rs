@@ -1,4 +1,6 @@
 //! open_basedir enforcement, ported from php-src main/fopen_wrappers.c.
+//!
+//! Paths are strings in the message encoding (`crate::fspath`).
 
 use crate::vm::Vm;
 
@@ -12,7 +14,7 @@ pub fn open_basedir_value(vm: &Vm) -> String {
     }
     vm.constants
         .get(b"open_basedir".as_ref())
-        .map(|v| v.to_php_string().to_string_lossy())
+        .map(|v| v.to_php_string().to_msg_string())
         .unwrap_or_default()
 }
 
@@ -25,7 +27,7 @@ pub fn expand_filepath(path: &str) -> Option<String> {
     let base = if path.starts_with('/') {
         String::new()
     } else {
-        std::env::current_dir().ok()?.to_string_lossy().to_string()
+        crate::fspath::path_msg(&std::env::current_dir().ok()?)
     };
     let full = if base.is_empty() {
         path.to_string()
@@ -55,13 +57,13 @@ pub fn expand_filepath(path: &str) -> Option<String> {
 pub fn check_specific_open_basedir(basedir: &str, path: &str) -> bool {
     let local_basedir = if basedir == "." {
         match std::env::current_dir() {
-            Ok(d) => d.to_string_lossy().to_string(),
+            Ok(d) => crate::fspath::path_msg(&d),
             Err(_) => basedir.to_string(),
         }
     } else {
         basedir.to_string()
     };
-    if path.len() > MAXPATHLEN - 1 {
+    if crate::fspath::msg_bytes(path).len() > MAXPATHLEN - 1 {
         return false;
     }
     let expanded = match expand_filepath(path) {
@@ -72,15 +74,15 @@ pub fn check_specific_open_basedir(basedir: &str, path: &str) -> bool {
     let mut nesting = 0;
     let mut resolved_name: String;
     loop {
-        match std::fs::canonicalize(&path_tmp) {
+        match std::fs::canonicalize(crate::fspath::msg_path(&path_tmp)) {
             Ok(p) => {
-                resolved_name = p.to_string_lossy().to_string();
+                resolved_name = crate::fspath::path_msg(&p);
                 break;
             }
             Err(_) => {
                 if nesting == 0 {
-                    if let Ok(target) = std::fs::read_link(&path_tmp) {
-                        path_tmp = target.to_string_lossy().to_string();
+                    if let Ok(target) = std::fs::read_link(crate::fspath::msg_path(&path_tmp)) {
+                        path_tmp = crate::fspath::path_msg(&target);
                     }
                 }
                 match path_tmp.rfind('/') {
@@ -136,7 +138,7 @@ pub fn check_open_basedir_ex(vm: &mut Vm, func_name: &str, path: &str, warn: boo
     } else {
         format!("{}(): ", func_name)
     };
-    if path.len() > MAXPATHLEN - 1 {
+    if crate::fspath::msg_bytes(path).len() > MAXPATHLEN - 1 {
         if warn {
             vm.emit_warning(&format!(
                 "{}File name is longer than the maximum allowed path length on this platform ({}): {}",

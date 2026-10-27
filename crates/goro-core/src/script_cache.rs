@@ -206,7 +206,9 @@ pub fn now() -> i64 {
 
 fn file_mtime(path: &str) -> Option<i64> {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).ok().map(|m| m.mtime())
+    std::fs::metadata(crate::fspath::msg_path(path))
+        .ok()
+        .map(|m| m.mtime())
 }
 
 /// validate_timestamp_and_record(): whether a cached script is still
@@ -260,7 +262,7 @@ pub fn lookup(path: &str) -> Option<Rc<Compiled>> {
 /// Whether `path` would be cached at all: file_update_protection keeps
 /// files modified in the last seconds out of the cache.
 fn cacheable(path: &str, cfg: &Config) -> Option<i64> {
-    let meta = std::fs::metadata(path).ok()?;
+    let meta = std::fs::metadata(crate::fspath::msg_path(path)).ok()?;
     use std::os::unix::fs::MetadataExt;
     let mtime = meta.mtime();
     if cfg.max_file_size > 0 && meta.len() as i64 > cfg.max_file_size {
@@ -532,7 +534,7 @@ fn file_cache_storable(path: &str) -> Option<(String, (i64, i64), u64)> {
         return None;
     }
     use std::os::unix::fs::MetadataExt;
-    let meta = std::fs::metadata(path).ok()?;
+    let meta = std::fs::metadata(crate::fspath::msg_path(path)).ok()?;
     if cfg.max_file_size > 0 && meta.len() as i64 > cfg.max_file_size {
         return None;
     }
@@ -618,7 +620,7 @@ pub fn file_cache_load(path: &str) -> Option<Rc<Compiled>> {
     let cfg = CONFIG.with(|c| c.borrow().clone());
     if cfg.validate_timestamps {
         use std::os::unix::fs::MetadataExt;
-        let meta = std::fs::metadata(path).ok()?;
+        let meta = std::fs::metadata(crate::fspath::msg_path(path)).ok()?;
         if (meta.mtime(), meta.mtime_nsec()) != mtime || meta.len() != size {
             return None;
         }
@@ -657,7 +659,8 @@ pub fn in_file_cache(path: &str) -> bool {
         return true;
     }
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).is_ok_and(|m| m.mtime() == mtime && m.len() == size)
+    std::fs::metadata(crate::fspath::msg_path(path))
+        .is_ok_and(|m| m.mtime() == mtime && m.len() == size)
 }
 
 /// The key of an included file: the path as resolved by the include
@@ -665,8 +668,8 @@ pub fn in_file_cache(path: &str) -> bool {
 /// opcache.revalidate_path.
 fn cache_key(path: &str, cfg: &Config) -> String {
     if cfg.revalidate_path {
-        if let Ok(p) = std::fs::canonicalize(path) {
-            return p.to_string_lossy().into_owned();
+        if let Ok(p) = std::fs::canonicalize(crate::fspath::msg_path(path)) {
+            return crate::fspath::path_msg(&p);
         }
     }
     path.to_string()
@@ -710,7 +713,11 @@ pub fn store_main(path: &str) -> bool {
     let Some(mtime) = cacheable(path, &cfg) else {
         return false;
     };
-    let size = std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0) * 8 + 1024;
+    let size = std::fs::metadata(crate::fspath::msg_path(path))
+        .map(|m| m.len() as i64)
+        .unwrap_or(0)
+        * 8
+        + 1024;
     insert(path, None, mtime, size);
     log(LOG_INFO, &format!("Cached script '{}'", path));
     true
@@ -887,7 +894,7 @@ impl crate::vm::Vm {
     /// opcache_compile_file() and preloading.
     #[inline(never)]
     pub fn compile_file_only(&mut self, path: &str) -> CompileOnly {
-        let source = match std::fs::read(path) {
+        let source = match std::fs::read(crate::fspath::msg_path(path)) {
             Ok(s) => s,
             Err(e) => {
                 let s = e.to_string();
@@ -928,7 +935,7 @@ impl crate::vm::Vm {
             }
         };
         let mut compiler = crate::compiler::Compiler::new();
-        compiler.source_file = path.as_bytes().to_vec();
+        compiler.source_file = crate::fspath::msg_bytes(path).into_owned();
         compiler.takes_rtd_keys = true;
         let saved_file = std::mem::replace(&mut self.current_file, path.into());
         crate::compiler::take_ct_user_dependency();

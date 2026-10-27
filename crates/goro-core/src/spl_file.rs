@@ -169,7 +169,7 @@ impl Vm {
     fn sfo_file_name_str(obj: &Rc<RefCell<PhpObject>>) -> String {
         prop(obj, b"__spl_file_path")
             .to_php_string()
-            .to_string_lossy()
+            .to_msg_string()
     }
 
     fn sfo_eof(&mut self, stream: &Value) -> bool {
@@ -630,7 +630,7 @@ impl Vm {
         context: Value,
         ctor: &str,
     ) -> bool {
-        let fname_str = String::from_utf8_lossy(file_name).to_string();
+        let fname_str = crate::string::msg_str(file_name).into_owned();
         // php_stat(FS_IS_DIR): stream wrappers answer through url_stat
         let is_dir = if fname_str.contains("://") {
             let saved = self.warning_capture.replace(Vec::new());
@@ -641,7 +641,7 @@ impl Vm {
             self.warning_capture = saved;
             matches!(r, Some(Value::True))
         } else {
-            std::path::Path::new(&fname_str).is_dir()
+            crate::fspath::bytes_path(file_name).is_dir()
         };
         if is_dir {
             self.spl_throw(
@@ -702,29 +702,28 @@ impl Vm {
         let resolved = if use_include_path
             && !fname_str.contains("://")
             && !fname_str.starts_with('/')
-            && !std::path::Path::new(&fname_str).exists()
+            && !crate::fspath::bytes_path(file_name).exists()
         {
             // php_resolve_path(): the include path, then the directory of
             // the executing script.
             let inc = self
                 .constants
                 .get(b"include_path".as_slice())
-                .map(|v| v.to_php_string().to_string_lossy())
+                .map(|v| v.to_php_string().to_msg_string())
                 .unwrap_or_else(|| ".".to_string());
-            let script_dir = std::path::Path::new(&self.current_file)
+            let script_dir = crate::fspath::msg_path(&self.current_file)
                 .parent()
-                .map(|p| p.to_string_lossy().into_owned());
+                .map(crate::fspath::path_msg);
             inc.split(':')
                 .filter(|d| !d.is_empty())
                 .map(|d| d.to_string())
                 .chain(script_dir)
                 .map(|d| format!("{}/{}", d, fname_str))
-                .find(|c| std::path::Path::new(c).is_file())
+                .find(|c| crate::fspath::msg_path(c).is_file())
                 .map(|c| {
-                    std::fs::canonicalize(&c)
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .unwrap_or(c)
-                        .into_bytes()
+                    std::fs::canonicalize(crate::fspath::msg_path(&c))
+                        .map(|p| crate::fspath::os_bytes(p.as_os_str()).into_owned())
+                        .unwrap_or_else(|_| crate::fspath::msg_bytes(&c).into_owned())
                 })
         } else {
             None

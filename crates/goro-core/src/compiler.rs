@@ -1617,13 +1617,13 @@ impl Compiler {
             b"__line__" => Value::Long(line as i64),
             b"__file__" => Value::String(PhpString::from_vec(self.source_file.clone())),
             b"__dir__" => {
-                let path = String::from_utf8_lossy(&self.source_file);
-                let dir = if let Some(pos) = path.rfind('/') {
+                let path = &self.source_file;
+                let dir: &[u8] = if let Some(pos) = path.iter().rposition(|&c| c == b'/') {
                     &path[..pos]
                 } else {
-                    "."
+                    b"."
                 };
-                Value::String(PhpString::from_string(dir.to_string()))
+                Value::String(PhpString::from_bytes(dir))
             }
             b"__namespace__" => Value::String(PhpString::from_vec(self.current_namespace.clone())),
             b"__trait__" if self.in_trait_body => {
@@ -18911,15 +18911,16 @@ impl Compiler {
                             Value::String(PhpString::from_bytes(b"."))
                         } else {
                             // Extract directory from file path
-                            let path = String::from_utf8_lossy(&self.source_file);
-                            let dir = if let Some(pos) = path.rfind('/') {
-                                &path[..pos]
-                            } else if let Some(pos) = path.rfind('\\') {
-                                &path[..pos]
-                            } else {
-                                "."
-                            };
-                            Value::String(PhpString::from_string(dir.to_string()))
+                            let path = &self.source_file;
+                            let dir: &[u8] =
+                                if let Some(pos) = path.iter().rposition(|&c| c == b'/') {
+                                    &path[..pos]
+                                } else if let Some(pos) = path.iter().rposition(|&c| c == b'\\') {
+                                    &path[..pos]
+                                } else {
+                                    b"."
+                                };
+                            Value::String(PhpString::from_bytes(dir))
                         }
                     }
                     b"__property__" => {

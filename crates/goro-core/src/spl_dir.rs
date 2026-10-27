@@ -386,8 +386,8 @@ impl Vm {
                 Err(e) => error = Some(e),
             }
         } else {
-            let p = String::from_utf8_lossy(path).to_string();
-            match std::fs::read_dir(&p) {
+            let p = crate::fspath::bytes_path(path);
+            match std::fs::read_dir(p) {
                 Ok(rd) => {
                     let mut ents: Vec<(Vec<u8>, i64)> =
                         vec![(b".".to_vec(), DT_DIR), (b"..".to_vec(), DT_DIR)];
@@ -398,7 +398,7 @@ impl Vm {
                             Ok(ft) if ft.is_file() => DT_REG,
                             _ => DT_UNKNOWN,
                         };
-                        ents.push((e.file_name().to_string_lossy().as_bytes().to_vec(), t));
+                        ents.push((crate::fspath::os_bytes(&e.file_name()).into_owned(), t));
                     }
                     ents.sort();
                     let mut names = PhpArray::new();
@@ -413,9 +413,7 @@ impl Vm {
                     opened = true;
                 }
                 Err(e) => {
-                    let msg = if std::path::Path::new(&p).exists()
-                        && !std::path::Path::new(&p).is_dir()
-                    {
+                    let msg = if p.exists() && !p.is_dir() {
                         "Not a directory".to_string()
                     } else {
                         strerror(&e)
@@ -740,14 +738,14 @@ impl Vm {
             }
             _ => {}
         }
-        let p = String::from_utf8_lossy(fname).to_string();
+        let p = crate::fspath::bytes_path(fname);
         let st = if is_wrapper_url(fname) {
             self.fs_wrapper_stat(fname, link_op)
         } else {
             let md = if link_op {
-                std::fs::symlink_metadata(&p)
+                std::fs::symlink_metadata(p)
             } else {
-                std::fs::metadata(&p)
+                std::fs::metadata(p)
             };
             md.ok().map(|m| FsStat {
                 mode: m.mode() as i64,
@@ -768,7 +766,7 @@ impl Vm {
                         "SplFileInfo::{}(): {}stat failed for {}",
                         disp,
                         if link_op { "L" } else { "" },
-                        p
+                        crate::string::msg_str(fname)
                     );
                     self.spl_throw(b"RuntimeException", &msg);
                 }
@@ -1012,16 +1010,17 @@ impl Vm {
                 if f.is_empty() {
                     return self.spl_throw(b"ValueError", "Filename must not be empty");
                 }
-                let p = String::from_utf8_lossy(&f).to_string();
-                let full = if p.starts_with('/') {
-                    std::path::PathBuf::from(&p)
+                let p = crate::string::msg_str(&f).into_owned();
+                let fp = crate::fspath::bytes_path(&f);
+                let full = if f.starts_with(b"/") {
+                    fp.to_path_buf()
                 } else {
                     std::env::current_dir()
-                        .map(|c| c.join(&p))
-                        .unwrap_or_else(|_| std::path::PathBuf::from(&p))
+                        .map(|c| c.join(fp))
+                        .unwrap_or_else(|_| fp.to_path_buf())
                 };
                 match std::fs::read_link(&full) {
-                    Ok(t) => svec(t.to_string_lossy().as_bytes().to_vec()),
+                    Ok(t) => svec(crate::fspath::os_bytes(t.as_os_str()).into_owned()),
                     Err(e) => {
                         let msg = format!("Unable to read link {}, error: {}", p, strerror(&e));
                         self.spl_throw(b"RuntimeException", &msg);
@@ -1040,14 +1039,13 @@ impl Vm {
                     sprop(obj, b"__spl_orig_path").or_else(|| sprop(obj, b"__spl_file_path"));
                 match filename {
                     Some(f) => {
-                        let p = String::from_utf8_lossy(&f).to_string();
-                        let r = if p.is_empty() {
+                        let r = if f.is_empty() {
                             std::env::current_dir()
                         } else {
-                            std::fs::canonicalize(&p)
+                            std::fs::canonicalize(crate::fspath::bytes_path(&f))
                         };
                         match r {
-                            Ok(rp) => svec(rp.to_string_lossy().as_bytes().to_vec()),
+                            Ok(rp) => svec(crate::fspath::os_bytes(rp.as_os_str()).into_owned()),
                             Err(_) => Value::False,
                         }
                     }
@@ -1293,19 +1291,19 @@ impl Vm {
                         Value::False
                     } else {
                         let f = self.fs_get_file_name(obj)?;
-                        let p = String::from_utf8_lossy(&f).to_string();
+                        let p = crate::fspath::bytes_path(&f);
                         if is_wrapper_url(&f) {
                             let st = self.fs_wrapper_stat(&f, false);
                             return Some(bool_v(st.is_some_and(|st| st.mode & S_IFMT == 0o040000)));
                         }
-                        match std::fs::symlink_metadata(&p) {
+                        match std::fs::symlink_metadata(p) {
                             Err(_) => Value::False,
                             Ok(m) if !m.file_type().is_symlink() => bool_v(m.is_dir()),
                             Ok(_) => {
                                 if !allow_links && Self::fs_flags(obj) & FOLLOW_SYMLINKS == 0 {
                                     Value::False
                                 } else {
-                                    bool_v(std::path::Path::new(&p).is_dir())
+                                    bool_v(p.is_dir())
                                 }
                             }
                         }

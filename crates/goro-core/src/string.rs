@@ -222,6 +222,12 @@ impl PhpString {
         Self::from_vec(s.into_bytes())
     }
 
+    /// The bytes of a string in the diagnostic-message encoding (see
+    /// [`msg_str`]): a path kept as a message string, returned to PHP.
+    pub fn from_msg(s: &str) -> Self {
+        Self::from_vec(crate::errdisplay::raw_error_bytes(s).into_owned())
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         &self.inner.data
     }

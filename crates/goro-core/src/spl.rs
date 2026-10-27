@@ -733,7 +733,7 @@ impl Vm {
         if self.included_files.contains(abs_path) {
             return true;
         }
-        let source = match std::fs::read(abs_path) {
+        let source = match std::fs::read(crate::fspath::msg_path(abs_path)) {
             Ok(s) => s,
             Err(_) => return false,
         };
@@ -746,7 +746,7 @@ impl Vm {
             Err(_) => return false,
         };
         let mut compiler = crate::compiler::Compiler::new();
-        compiler.source_file = abs_path.as_bytes().to_vec();
+        compiler.source_file = crate::fspath::msg_bytes(abs_path).into_owned();
         let old_file = std::mem::replace(&mut self.current_file, abs_path.into());
         let ok = match compiler.compile(&program) {
             Ok((op_array, classes, warnings)) => {

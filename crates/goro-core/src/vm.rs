@@ -21009,8 +21009,8 @@ impl Vm {
         self.is_global_scope = true;
         self.arm_auto_globals(Some(op_array));
         if self.included_files_list.is_empty() && !self.current_file.is_empty() {
-            let main = std::fs::canonicalize(&self.current_file)
-                .map(|p| p.to_string_lossy().into_owned())
+            let main = std::fs::canonicalize(crate::fspath::msg_path(&self.current_file))
+                .map(|p| crate::fspath::path_msg(&p))
                 .unwrap_or_else(|_| self.current_file.to_string());
             self.included_files.insert(main.clone());
             self.included_files_list.push(main);
@@ -38381,7 +38381,7 @@ impl Vm {
                                             if call.args.len() > 1 {
                                                 let path = call.args[1]
                                                     .to_php_string()
-                                                    .to_string_lossy();
+                                                    .to_msg_string();
                                                 let mode = if call.args.len() > 2 {
                                                     call.args[2]
                                                         .to_php_string()
@@ -38391,9 +38391,7 @@ impl Vm {
                                                 };
                                                 obj_mut.set_property(
                                                     b"__spl_file_path".to_vec(),
-                                                    Value::String(PhpString::from_string(
-                                                        path.clone(),
-                                                    )),
+                                                    Value::String(PhpString::from_msg(&path)),
                                                 );
                                                 obj_mut.set_property(
                                                     b"__spl_file_mode".to_vec(),
@@ -38409,10 +38407,10 @@ impl Vm {
                                                 if is_write_mode {
                                                     if mode.starts_with('w') {
                                                         // Truncate or create
-                                                        let _ = std::fs::write(&path, b"");
+                                                        let _ = std::fs::write(crate::fspath::msg_path(&path), b"");
                                                     } else if mode.starts_with('x') {
                                                         // Create only if not exists
-                                                        if std::path::Path::new(&path).exists()
+                                                        if crate::fspath::msg_path(&path).exists()
                                                         {
                                                             drop(obj_mut);
                                                             let msg = format!(
@@ -38447,7 +38445,7 @@ impl Vm {
                                                                 line: op.line,
                                                             });
                                                         }
-                                                        let _ = std::fs::write(&path, b"");
+                                                        let _ = std::fs::write(crate::fspath::msg_path(&path), b"");
                                                     }
                                                     // For append/create modes, read existing content if file exists
                                                     let lines_arr = if mode.starts_with('a')
@@ -38455,7 +38453,7 @@ impl Vm {
                                                         || (mode.contains('+'))
                                                     {
                                                         if let Ok(content) =
-                                                            std::fs::read_to_string(&path)
+                                                            std::fs::read_to_string(crate::fspath::msg_path(&path))
                                                         {
                                                             let mut arr = PhpArray::new();
                                                             for line in content.split('\n') {
@@ -38488,7 +38486,7 @@ impl Vm {
                                                     );
                                                 // Read all lines for iterator support
                                                 } else if let Ok(content) =
-                                                    std::fs::read_to_string(&path)
+                                                    std::fs::read_to_string(crate::fspath::msg_path(&path))
                                                 {
                                                     let mut lines_arr = PhpArray::new();
                                                     let mut lines_iter =
@@ -38522,7 +38520,7 @@ impl Vm {
                                                             lines_arr,
                                                         ))),
                                                     );
-                                                } else if let Ok(content) = std::fs::read(&path)
+                                                } else if let Ok(content) = std::fs::read(crate::fspath::msg_path(&path))
                                                 {
                                                     // Binary file - store as single line
                                                     let mut lines_arr = PhpArray::new();
@@ -48340,7 +48338,7 @@ impl Vm {
                     let path_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // An object path goes through __toString(), which may throw.
                     let path_str = if let Value::Object(_) = &path_val {
-                        let s = self.value_to_string(&path_val).to_string_lossy();
+                        let s = self.value_to_string(&path_val).to_msg_string();
                         native_exc_check!(
                             self,
                             exception_handlers,
@@ -48350,7 +48348,7 @@ impl Vm {
                         );
                         s
                     } else {
-                        path_val.to_php_string().to_string_lossy()
+                        path_val.to_php_string().to_msg_string()
                     };
 
                     // Get include kind from op2: 0=include, 1=include_once, 2=require, 3=require_once
@@ -48431,10 +48429,10 @@ impl Vm {
                     } else if std::path::Path::new(path).is_absolute() {
                         // The opened path is the real path (tsrm_realpath):
                         // "a/../b" and symlinks are resolved.
-                        let p = std::path::Path::new(path);
+                        let p = crate::fspath::msg_path(path);
                         if (path.contains("/.") || path.contains("//")) && p.is_file() {
                             std::fs::canonicalize(p)
-                                .map(|c| c.to_string_lossy().into_owned())
+                                .map(|c| crate::fspath::path_msg(&c))
                                 .unwrap_or_else(|_| path.to_string())
                         } else {
                             path.to_string()
@@ -48444,7 +48442,7 @@ impl Vm {
                         let exec_file = if op_array.filename.is_empty() {
                             self.current_file.to_string()
                         } else {
-                            String::from_utf8_lossy(&op_array.filename).into_owned()
+                            crate::string::msg_str(&op_array.filename).into_owned()
                         };
                         self.resolve_include_path_from(path, &exec_file)
                     };
@@ -48514,7 +48512,7 @@ impl Vm {
                         Some(c) => Ok(Err(c)),
                         None => hooked_source
                             .map(Ok)
-                            .unwrap_or_else(|| std::fs::read(&abs_path))
+                            .unwrap_or_else(|| std::fs::read(crate::fspath::msg_path(&abs_path)))
                             .map(Ok),
                     };
                     let result = match source_or_cached {
@@ -48558,7 +48556,7 @@ impl Vm {
                                         }
                                         Ok(program) => {
                                             let mut compiler = crate::compiler::Compiler::new();
-                                            compiler.source_file = abs_path.as_bytes().to_vec();
+                                            compiler.source_file = crate::fspath::msg_bytes(&abs_path).into_owned();
                                             compiler.takes_rtd_keys = true;
                                             let _ct = crate::compiler::CtVmGuard::new(self);
                                             crate::compiler::take_ct_user_dependency();
@@ -48724,7 +48722,7 @@ impl Vm {
                                         let mut ob = obj.borrow_mut();
                                         ob.set_property(
                                             b"file".to_vec(),
-                                            Value::String(PhpString::from_string(abs_path.clone())),
+                                            Value::String(PhpString::from_msg(&abs_path)),
                                         );
                                         ob.set_property(
                                             b"line".to_vec(),

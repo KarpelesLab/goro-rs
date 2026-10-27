@@ -23,6 +23,7 @@ pub mod fetch_w;
 pub mod fiber;
 pub mod file_cache;
 pub mod foreach_obj;
+pub mod fspath;
 pub mod function;
 pub mod fxhash;
 pub mod gc;
