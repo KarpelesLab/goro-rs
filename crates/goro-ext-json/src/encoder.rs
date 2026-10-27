@@ -1,6 +1,6 @@
 //! Port of ext/json/json_encoder.c.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -32,37 +32,11 @@ std::thread_local! {
     /// Arrays and objects being encoded (GC_PROTECT_RECURSION), across nested
     /// json_encode() calls.
     static PROTECTED: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
-    /// Stack position of the outermost encoder call (0: none running).
-    static STACK_BASE: Cell<usize> = const { Cell::new(0) };
 }
 
-/// Stack the encoder (and the code it calls back into) may use, measured
-/// from the outermost json_encode() (zend_call_stack_overflowed()).
-const STACK_BUDGET: usize = 4 << 20;
-
-#[inline(never)]
-fn stack_pos() -> usize {
-    let marker = 0u8;
-    std::hint::black_box(&marker) as *const u8 as usize
-}
-
-/// Runs `f` with the stack base recorded (outermost call only).
-pub fn with_stack_base<R>(f: impl FnOnce() -> R) -> R {
-    let outer = STACK_BASE.with(|b| b.get());
-    if outer == 0 {
-        STACK_BASE.with(|b| b.set(stack_pos()));
-    }
-    let r = f();
-    if outer == 0 {
-        STACK_BASE.with(|b| b.set(0));
-    }
-    r
-}
-
-fn stack_overflowed() -> bool {
-    let base = STACK_BASE.with(|b| b.get());
-    base != 0 && base.saturating_sub(stack_pos()) > STACK_BUDGET
-}
+/// Emulated C stack a php_json_encode_array() + php_json_encode_zval()
+/// level uses (php-src gets ~21.6k levels deep in an 8 MiB stack).
+const ENCODE_LEVEL_COST: usize = 385;
 
 fn is_protected(id: usize) -> bool {
     PROTECTED.with(|p| p.borrow().contains(&id))
@@ -345,13 +319,26 @@ pub fn encode_array(
     options: i64,
     enc: &mut Encoder,
 ) -> bool {
-    if stack_overflowed() {
+    // php_json_check_stack_limit()
+    goro_core::stack::native_level(ENCODE_LEVEL_COST, || {
+        encode_array_level(vm, buf, val, options, enc)
+    })
+    .unwrap_or_else(|| {
         enc.error_code = ERROR_DEPTH;
         if options & PARTIAL_OUTPUT_ON_ERROR != 0 {
             buf.extend_from_slice(b"null");
         }
-        return false;
-    }
+        false
+    })
+}
+
+fn encode_array_level(
+    vm: &mut Vm,
+    buf: &mut Vec<u8>,
+    val: &Value,
+    options: i64,
+    enc: &mut Encoder,
+) -> bool {
     let is_object;
     let mut encode_as_object = options & FORCE_OBJECT != 0;
     let arr_rc;

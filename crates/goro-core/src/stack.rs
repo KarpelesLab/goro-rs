@@ -366,6 +366,37 @@ pub fn enter_native(cost: usize) -> bool {
     })
 }
 
+/// Whether `bytes` more of emulated C stack would still fit (nothing is
+/// charged).
+pub fn native_fits(bytes: usize) -> bool {
+    if CTX.with(|c| c.get().emu_max) == UNSET {
+        configure(0, 0);
+    }
+    let c = CTX.with(|c| c.get());
+    c.emu_max == 0 || c.emu_used + bytes <= c.emu_max
+}
+
+/// One level of a native recursion that php-src guards with
+/// zend_call_stack_overflowed() (json_encode(), serialize(), object
+/// comparison ...): charges `cost` bytes of emulated C stack (what a level
+/// of the C recursion uses, so the reachable depth is php-src's) and runs
+/// `f` with room on the real stack. None when the emulated stack is used up
+/// (or no real stack is left), `f` not having run.
+#[inline]
+pub fn native_level<R>(cost: usize, f: impl FnOnce() -> R) -> Option<R> {
+    if !enter_native(cost) {
+        return None;
+    }
+    struct Leave(usize);
+    impl Drop for Leave {
+        fn drop(&mut self) {
+            leave_native(self.0);
+        }
+    }
+    let _leave = Leave(cost);
+    with_room(f).ok()
+}
+
 /// Undo `enter_native`.
 pub fn leave_native(cost: usize) {
     CTX.with(|cell| {

@@ -115,9 +115,7 @@ fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let mut enc = encoder::Encoder::new(depth as i32);
     let mut buf = Vec::new();
-    encoder::with_stack_base(|| {
-        encoder::encode_zval(vm, &mut buf, &parameter, options as i32 as i64, &mut enc)
-    });
+    encoder::encode_zval(vm, &mut buf, &parameter, options as i32 as i64, &mut enc);
 
     let partial = options & PARTIAL_OUTPUT_ON_ERROR != 0;
     if options & THROW_ON_ERROR == 0 || partial {
