@@ -53472,7 +53472,12 @@ impl Vm {
                                 line: op.line,
                             });
                         }
-                        let v = v.unwrap_or(Value::Null);
+                        // (offsetGet()'s value, not a reference: a temporary
+                        // the reference is made to, not the container's slot)
+                        let v = match v.unwrap_or(Value::Null) {
+                            Value::Reference(r) => Value::Reference(r),
+                            other => Value::Reference(Rc::new(RefCell::new(other))),
+                        };
                         self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
                     } else if matches!(arr_val, Value::Null | Value::Undef)
                         && matches!(op.op1, OperandType::Cv(_))
