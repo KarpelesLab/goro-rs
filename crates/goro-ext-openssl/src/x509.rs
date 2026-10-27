@@ -331,6 +331,15 @@ fn cert_from_str_opt(
     };
     let block = asn1::pem_find(&data, labels);
     if let Some(b) = &block {
+        if b.label != "TRUSTED CERTIFICATE" {
+            if let Some(errs) = cert::d2i_errors(&b.der) {
+                for (lib, reason, text) in errs {
+                    err::push(lib, reason, text);
+                }
+                err::push(err::LIB_PEM, err::RFLAG_COMMON | 13, "ASN1 lib");
+                return Ok(None);
+            }
+        }
         if cert::push_short_time_errors(&b.der) {
             err::push(err::LIB_PEM, err::RFLAG_COMMON | 13, "ASN1 lib");
             return Ok(None);

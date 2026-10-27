@@ -77,7 +77,9 @@ pub fn encode_extensions(exts: &[Ext]) -> Vec<u8> {
 
 impl Cert {
     pub fn parse(der: &[u8]) -> Option<Cert> {
-        let t = asn1::parse_one(der)?;
+        // d2i_X509() decodes one object: trailing bytes are not looked at
+        let t = asn1::parse(der)?.0;
+        let der = t.raw;
         let c = t.children()?;
         if c.len() != 3 {
             return None;
@@ -164,6 +166,54 @@ impl Cert {
         let t = asn1::parse_one(&e.value)?;
         Some(t.content.to_vec())
     }
+}
+
+/// The ASN.1 decoder errors d2i_X509() leaves for a few malformations of
+/// the outer structure and the serial number (each template level adds a
+/// "nested asn1 error"); None when none of them applies.
+#[inline(never)]
+pub fn d2i_errors(der: &[u8]) -> Option<Vec<(u32, u32, &'static str)>> {
+    use crate::err::{LIB_ASN1, RFLAG_COMMON};
+    let nested = (LIB_ASN1, RFLAG_COMMON | 266, "nested asn1 error");
+    let with_nesting = |first: Vec<(u32, u32, &'static str)>, n: usize| {
+        let mut v = first;
+        v.extend(std::iter::repeat_n(nested, n));
+        Some(v)
+    };
+    if der.first() != Some(&asn1::SEQUENCE) {
+        return with_nesting(vec![(LIB_ASN1, 168, "wrong tag")], 1);
+    }
+    let bad_header = (LIB_ASN1, 102, "bad object header");
+    match der.get(1) {
+        Some(0x80) => {
+            return with_nesting(vec![(LIB_ASN1, 123, "header too long"), bad_header], 2);
+        }
+        Some(&l) if l > 0x80 => {
+            let n = (l & 0x7f) as usize;
+            let len = der.get(2..2 + n)?.iter().fold(0usize, |a, &b| {
+                a.saturating_mul(256).saturating_add(b as usize)
+            });
+            if len > der.len().saturating_sub(2 + n) {
+                return with_nesting(vec![(LIB_ASN1, 155, "too long"), bad_header], 1);
+            }
+        }
+        Some(&l) if (l as usize) > der.len() - 2 => {
+            return with_nesting(vec![(LIB_ASN1, 155, "too long"), bad_header], 1);
+        }
+        _ => {}
+    }
+    let t = asn1::parse(der)?.0;
+    let tbs = *t.children()?.first()?;
+    let tc = tbs.children()?;
+    let serial = tc.get(usize::from(tc.first()?.context() == Some(0)))?;
+    if serial.tag != asn1::INTEGER {
+        return with_nesting(vec![(LIB_ASN1, 168, "wrong tag")], 3);
+    }
+    let c = serial.content;
+    if c.len() > 1 && ((c[0] == 0 && c[1] & 0x80 == 0) || (c[0] == 0xff && c[1] & 0x80 != 0)) {
+        return with_nesting(vec![(LIB_ASN1, 221, "illegal padding")], 2);
+    }
+    None
 }
 
 pub fn spki_bits(spki: &[u8]) -> Option<Vec<u8>> {
