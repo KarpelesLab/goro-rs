@@ -4974,8 +4974,11 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                         "Class {} does not have a constructor, so you cannot pass any constructor arguments",
                         canonical_name
                     );
+                    // (object_init_ex() made the object first: freed after)
+                    let made = vm.alloc_object_id();
                     let exc =
                         vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
+                    crate::object::FREED_OBJECT_IDS.with(|f| f.borrow_mut().push(made));
                     vm.current_exception = Some(exc);
                     return Some(Value::Null);
                 }
@@ -4994,9 +4997,12 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                             "Access to non-public constructor of class {}",
                             canonical_name
                         );
-                        let exc =
+                        // (object_init_ex() made the object first: freed after)
+                    let made = vm.alloc_object_id();
+                    let exc =
                             vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
-                        vm.current_exception = Some(exc);
+                        crate::object::FREED_OBJECT_IDS.with(|f| f.borrow_mut().push(made));
+                    vm.current_exception = Some(exc);
                         return Some(Value::Null);
                     }
                 }
@@ -5103,8 +5109,11 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                         "Class {} does not have a constructor, so you cannot pass any constructor arguments",
                         canonical_name
                     );
+                    // (object_init_ex() made the object first: freed after)
+                    let made = vm.alloc_object_id();
                     let exc =
                         vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
+                    crate::object::FREED_OBJECT_IDS.with(|f| f.borrow_mut().push(made));
                     vm.current_exception = Some(exc);
                     return Some(Value::Null);
                 }
@@ -5123,9 +5132,12 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                             "Access to non-public constructor of class {}",
                             canonical_name
                         );
-                        let exc =
+                        // (object_init_ex() made the object first: freed after)
+                    let made = vm.alloc_object_id();
+                    let exc =
                             vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
-                        vm.current_exception = Some(exc);
+                        crate::object::FREED_OBJECT_IDS.with(|f| f.borrow_mut().push(made));
+                    vm.current_exception = Some(exc);
                         return Some(Value::Null);
                     }
                 }
@@ -7672,7 +7684,15 @@ fn eval_internal_default(vm: &mut Vm, def: &str, scope: Option<&[u8]>) -> Option
     let mut parser = goro_parser::Parser::new(tokens);
     let program = parser.parse().ok()?;
     let compiler = crate::compiler::Compiler::new();
-    let (op_array, _classes, _warnings) = compiler.compile(&program).ok()?;
+    let (mut op_array, _classes, _warnings) = compiler.compile(&program).ok()?;
+    // (evaluated where getDefaultValue() is called: its diagnostics too)
+    let line = vm.current_line;
+    if line > 0 {
+        for op in &mut op_array.ops {
+            op.line = line;
+        }
+        op_array.filename = vm.current_file.as_bytes().to_vec();
+    }
     let cvs = vec![Value::Undef; op_array.cv_names.len()];
     vm.execute_op_array_pub(&op_array, cvs).ok()
 }

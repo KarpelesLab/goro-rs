@@ -12376,6 +12376,8 @@ impl Vm {
                 // zend_lazy_object_revert_init(): the object stays lazy.
                 obj.borrow_mut().properties = snapshot.into();
                 if !threw {
+                    // (the returned value is released first)
+                    drop(result);
                     let exc = self.create_exception(
                         b"TypeError",
                         "Lazy object initializer must return NULL or no value",
