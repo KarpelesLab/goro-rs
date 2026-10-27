@@ -2372,6 +2372,12 @@ pub fn php_dval_to_lval_cap(d: f64) -> i64 {
 /// String to int conversion as done by (int) casts / zval_get_long:
 /// leading numeric prefix, integer overflow and float strings saturate.
 pub fn php_str_to_lval(b: &[u8]) -> i64 {
+    // (only digits, too few to overflow: what the scan below makes of them)
+    if (1..=18).contains(&b.len()) && b.iter().all(u8::is_ascii_digit) {
+        return b
+            .iter()
+            .fold(0i64, |acc, &c| acc * 10 + i64::from(c - b'0'));
+    }
     let mut i = 0;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
         i += 1;
