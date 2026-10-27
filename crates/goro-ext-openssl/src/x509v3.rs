@@ -57,8 +57,21 @@ fn bit_set(bits: &[u8], i: usize) -> bool {
         .unwrap_or(false)
 }
 
+/// c2i_ASN1_BIT_STRING(): the unused-bits count must be at most 7 and the
+/// unused bits zero.
+fn bits_strict<'a>(t: &Tlv<'a>) -> Option<&'a [u8]> {
+    let (&unused, rest) = t.content.split_first()?;
+    let ok = t.tag == asn1::BIT_STRING
+        && unused <= 7
+        && rest.last().is_none_or(|&l| l & ((1u8 << unused) - 1) == 0);
+    ok.then_some(rest)
+}
+
 fn bitstring_names(t: &Tlv, table: &[(&str, &str)]) -> Option<String> {
-    let bits = t.bits()?;
+    let Some(bits) = bits_strict(t) else {
+        err::push(err::LIB_ASN1, 220, "invalid bit string bits left");
+        return None;
+    };
     let names: Vec<&str> = table
         .iter()
         .enumerate()
@@ -404,8 +417,8 @@ pub fn ext_print(e: &Ext) -> Option<Vec<u8>> {
             }
             s
         }
-        OID_KU => bitstring_names(&asn1::parse_one(v)?, KU_NAMES)?,
-        OID_NS_CERT_TYPE => bitstring_names(&asn1::parse_one(v)?, NS_NAMES)?,
+        OID_KU => bitstring_names(&asn1::parse(v)?.0, KU_NAMES)?,
+        OID_NS_CERT_TYPE => bitstring_names(&asn1::parse(v)?.0, NS_NAMES)?,
         OID_EKU => {
             let t = asn1::parse_one(v)?;
             let names: Option<Vec<String>> = t
@@ -1917,7 +1930,11 @@ pub fn ex_flags(c: &Cert) -> ExFlags {
                 }
                 None => f.invalid = true,
             },
-            OID_KU => match asn1::parse_one(&e.value).and_then(|t| t.bits().map(|b| b.to_vec())) {
+            OID_KU => match asn1::parse_one(&e.value)
+                .as_ref()
+                .and_then(bits_strict)
+                .map(|b| b.to_vec())
+            {
                 Some(b) => {
                     let v = b.first().copied().unwrap_or(0) as u32
                         | ((b.get(1).copied().unwrap_or(0) as u32) << 8);
@@ -1949,12 +1966,22 @@ pub fn ex_flags(c: &Cert) -> ExFlags {
                 None => f.invalid = true,
             },
             OID_NS_CERT_TYPE => {
-                match asn1::parse_one(&e.value).and_then(|t| t.bits().map(|b| b.to_vec())) {
+                match asn1::parse_one(&e.value)
+                    .as_ref()
+                    .and_then(bits_strict)
+                    .map(|b| b.to_vec())
+                {
                     Some(b) => f.nscert = Some(b.first().copied().unwrap_or(0) as u32),
                     None => f.invalid = true,
                 }
             }
             _ => {}
+        }
+    }
+    // a repeated extension makes the certificate invalid (EXFLAG_DUPLICATE)
+    for (i, e) in c.extensions.iter().enumerate() {
+        if c.extensions[..i].iter().any(|p| p.oid == e.oid) {
+            f.invalid = true;
         }
     }
     if c.subject.eq_canon(&c.issuer) {

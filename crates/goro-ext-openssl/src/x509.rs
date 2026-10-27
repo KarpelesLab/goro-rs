@@ -1105,6 +1105,10 @@ pub fn openssl_x509_parse(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
     r.set(key("signatureTypeLN"), sval(&ln));
     r.set(key("signatureTypeNID"), Value::Long(nid));
     let mut purposes = PhpArray::new();
+    // ossl_x509v3_cache_extensions() for the first X509_check_purpose()
+    if x509v3::ex_flags(&c).invalid {
+        err::push(err::LIB_X509V3, 158, "invalid certificate");
+    }
     for (id, sname, lname) in x509v3::PURPOSES {
         let mut sub = PhpArray::new();
         sub.push(vbool(x509v3::check_purpose(&c, *id, false) != 0));
