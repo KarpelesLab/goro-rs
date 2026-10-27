@@ -5444,7 +5444,15 @@ impl Parser {
                 self.advance();
                 let e = self.parse_expression()?;
                 self.expect(&TokenKind::CloseBrace)?;
-                e
+                // `->{NAME}`: the value of constant (or magic constant)
+                // NAME, not a member called NAME.
+                match e.kind {
+                    ExprKind::Identifier(name) => Expr {
+                        kind: ExprKind::ConstantAccess(vec![name]),
+                        span: e.span,
+                    },
+                    _ => e,
+                }
             }
             TokenKind::Variable(_)
             | TokenKind::DollarOpenBrace
