@@ -1,0 +1,45 @@
+--TEST--
+PKCS#8 and PKCS#12 PBE decryption with a wrong password reports bad decrypt + pkcs12 cipherfinal error
+--EXTENSIONS--
+openssl
+--FILE--
+<?php
+function errs() { $o = []; while ($e = openssl_error_string()) $o[] = $e; return $o ? " [" . implode(" | ", $o) . "]" : ""; }
+$enc = "-----BEGIN ENCRYPTED PRIVATE KEY-----
+MIIC5TBfBgkqhkiG9w0BBQ0wUjAxBgkqhkiG9w0BBQwwJAQQkoM+Su2zEpeIYZnn
+hDUeHwICCAAwDAYIKoZIhvcNAgkFADAdBglghkgBZQMEAQIEEJ4LlNDTNNY40RT9
+b9RPaHUEggKAtpruh5AGjxh9+phsJgQER8+kWEtGQI+DHGj19PT1Bgg48cQLaXZB
+x2E79vP+QTeq1AMzLlFVtjpnU0yxmE9tJJScSv4cUUjzRhalHPE5tgeo0wTmvTRM
+tIJ/jkwIhsUGwKYQyWY8WMT2FaCgGDzPd0WfQIGeAm+iTHo1yOA4OEWxxTo14Lrm
+/J3RHPkJlbGsvxiHAKtb5AnIxzXL5nwxF9G9cm7/w06GfXFu39lAJVosFKdZivph
+Y3TsQnXQxd2QwvCQS5UK0lO9QO+RlHuZjjZkDe6zqS7uevWyv4J2Ow74v1gEmNoQ
+L1A5zgtSR/maW0MPA7xJvh5p1U+sXMDAJPXzx1ZEYL1jGjBk+WwsIzo+K2KR7Ga2
+mvftihJ7OH8EK8i8CGaWBM8pIpmzpMtZbbhuxuvnVX0i+GPn1KQbGaQ4p96RpcX1
+x2J0a9OiRDjFiLV7CvtR1O9w9atSaFYXSPbzsYUXp66TG/p/pFnvFF62KnRB0ru9
+3fFEYwH09i+xoUt07B4kQwuLcP+ku0E+OJTUn9p4K8S2avXJr5HLkYtyBWhaHHBr
+Uo85o5V83hi47EtpRJWhv/yOGcYTR5WLmSwaw8cUHNsSc1op5Sgj5WM4d7SpGAxG
+pwvnEtUTqdTmrSgWwR4WDk42va/24REDcpa/WJsCEUkpUDtjjDaZ2EYFIuw8M91b
+7wXko/J1+i7DD9Yw+KZp1naNPSppgGntRXDmhOLGVV4YbjNnZ+h+d6kV2eU0Syxq
+sox0Cffv/Op85yhGJPKDiZG3BiBKDtStJHakwLEDDbqBDCMWIpBDEm3b6lqY3rBn
+i8n/7uY/veGFmAGT59i/Qvbu3YjgA7iRag==
+-----END ENCRYPTED PRIVATE KEY-----";
+echo "pkcs8 no pass: ", var_export(openssl_pkey_get_private($enc), true), errs(), "\n";
+echo "pkcs8 wrong pass: ", var_export(openssl_pkey_get_private($enc, "wrong"), true), errs(), "\n";
+echo "pkcs8 right pass: ", get_class(openssl_pkey_get_private($enc, "secret")), errs(), "\n";
+// no MAC: plain cert bag + shrouded key bag
+$p12 = base64_decode("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");
+// no MAC: encrypted cert bag + shrouded key bag
+$p12b = base64_decode("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");
+foreach (['shrouded' => $p12, 'encrypted data' => $p12b] as $n => $p) {
+  echo "$n wrong pass: ", var_export(openssl_pkcs12_read($p, $c, "wrong"), true), errs(), "\n";
+  echo "$n right pass: ", var_export(openssl_pkcs12_read($p, $c, "p12pass"), true), " ", implode(",", array_keys($c)), errs(), "\n";
+}
+?>
+--EXPECT--
+pkcs8 no pass: false [error:1C800064:Provider routines::bad decrypt | error:11800074:PKCS12 routines::pkcs12 cipherfinal error | error:1C800064:Provider routines::bad decrypt | error:11800074:PKCS12 routines::pkcs12 cipherfinal error]
+pkcs8 wrong pass: false [error:1C800064:Provider routines::bad decrypt | error:11800074:PKCS12 routines::pkcs12 cipherfinal error | error:1C800064:Provider routines::bad decrypt | error:11800074:PKCS12 routines::pkcs12 cipherfinal error]
+pkcs8 right pass: OpenSSLAsymmetricKey
+shrouded wrong pass: false [error:1C800064:Provider routines::bad decrypt | error:11800074:PKCS12 routines::pkcs12 cipherfinal error | error:11800072:PKCS12 routines::parse error]
+shrouded right pass: true cert,pkey
+encrypted data wrong pass: false [error:1C800064:Provider routines::bad decrypt | error:11800074:PKCS12 routines::pkcs12 cipherfinal error | error:11800072:PKCS12 routines::parse error]
+encrypted data right pass: true cert,pkey

@@ -1196,6 +1196,12 @@ fn decrypt(der: &[u8], key: &PKey, cert: &Cert, cms: bool) -> Option<Vec<u8>> {
         );
         return None;
     }
+    // PKCS7_decrypt() checks the key against the recipient certificate
+    // before looking at the recipients.
+    if !cms && !x509::check_private_key(&cert.spki, key) {
+        err::push(lib, 127, "private key does not match certificate");
+        return None;
+    }
     let inner = inner?;
     let c = inner.children()?;
     let mut i = 1;

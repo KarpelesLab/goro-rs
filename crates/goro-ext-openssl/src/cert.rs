@@ -378,12 +378,48 @@ pub fn sig_alg_for(key: &PKey, md: Option<Md>) -> Option<Vec<u8>> {
 
 /// Sign a TBS structure: returns (algid, signature bits).
 pub fn sign_tbs(tbs: &[u8], key: &PKey, md: Option<Md>) -> Option<(Vec<u8>, Vec<u8>)> {
-    if matches!(key, PKey::Ecx(_)) && md.is_some() {
-        // EVP_DigestSignInit() with a digest for EdDSA.
-        crate::err::push(crate::err::LIB_PROV, 122, "invalid digest");
-        return None;
+    use crate::ecx::EcxKind;
+    use crate::err;
+    match key {
+        // EVP_DigestSignInit(): no signature operation for X25519/X448/DH.
+        PKey::Dh(_) => {
+            err::push(
+                err::LIB_EVP,
+                150,
+                "operation not supported for this keytype",
+            );
+            return None;
+        }
+        PKey::Ecx(x) if matches!(x.kind, EcxKind::X25519 | EcxKind::X448) => {
+            err::push(
+                err::LIB_EVP,
+                150,
+                "operation not supported for this keytype",
+            );
+            return None;
+        }
+        PKey::Ecx(_) if md.is_some() => {
+            // EVP_DigestSignInit() with a digest for EdDSA.
+            err::push(err::LIB_PROV, 122, "invalid digest");
+            return None;
+        }
+        _ => {}
     }
-    let alg = sig_alg_for(key, md)?;
+    let Some(alg) = sig_alg_for(key, md) else {
+        match key {
+            // the DSA provider refuses the digest in EVP_DigestSignInit()
+            PKey::Dsa(_) => err::push(err::LIB_PROV, 174, "digest not allowed"),
+            // ASN1_item_sign_ctx(): the ECDSA provider has no AlgorithmIdentifier
+            // for this digest (ERR_R_PASSED_NULL_PARAMETER)
+            PKey::Ec(_) => err::push(
+                err::LIB_CRYPTO,
+                err::RFLAG_COMMON | (1 << 18) | 258,
+                "passed a null parameter",
+            ),
+            _ => {}
+        }
+        return None;
+    };
     let sig = key.sign(md, tbs, false).ok()?;
     Some((alg, sig))
 }

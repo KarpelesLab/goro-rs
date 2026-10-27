@@ -1614,8 +1614,13 @@ pub fn openssl_x509_checkpurpose(vm: &mut Vm, args: &[Value]) -> Result<Value, V
     let Some(c) = cert_from_arg(vm, f, 1, a)? else {
         return Ok(Value::Long(-1));
     };
-    if purpose >= 0 && !(1..=9).contains(&purpose) {
+    // X509_STORE_CTX_set_purpose() failing only records the error: the
+    // chain is then verified without a purpose check.
+    let mut purpose = purpose;
+    // (0 keeps the default "no purpose"; 1..=10 are SSL_CLIENT..CODE_SIGN)
+    if purpose > 10 {
         err::push(err::LIB_X509, 121, "unknown purpose id");
+        purpose = 0;
     }
     let r = verify_chain(&store, &c, &chain, purpose);
     Ok(vbool(r == 1))

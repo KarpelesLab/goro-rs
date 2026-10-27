@@ -634,6 +634,9 @@ pub enum ReadErr {
     Unsupported,
     /// Decryption failed (wrong passphrase).
     BadDecrypt,
+    /// An "ENCRYPTED PRIVATE KEY" (PKCS#8 PBE) failed to decrypt: both the
+    /// PEM and the DER decoder attempt it, each failing in PKCS12_pbe_crypt.
+    BadDecryptPkcs8,
 }
 
 /// Decrypt an EncryptedPrivateKeyInfo.
@@ -862,7 +865,10 @@ pub fn read_private_pem(data: &[u8], pass: &[u8]) -> Result<PKey, ReadErr> {
     let key = match block.label.as_str() {
         "PRIVATE KEY" => parse_pkcs8(&block.der),
         "ENCRYPTED PRIVATE KEY" => {
-            let plain = pkcs8_decrypt(&block.der, pass)?;
+            let plain = pkcs8_decrypt(&block.der, pass).map_err(|e| match e {
+                ReadErr::BadDecrypt => ReadErr::BadDecryptPkcs8,
+                e => e,
+            })?;
             match parse_pkcs8(&plain) {
                 Some(k) => Some(k),
                 None => return Err(ReadErr::BadDecrypt),
@@ -939,6 +945,10 @@ pub fn push_read_error(e: &ReadErr) {
         ReadErr::BadDecrypt => {
             err::prov_bad_decrypt();
             err::push(err::LIB_PEM, 101, "bad decrypt");
+        }
+        ReadErr::BadDecryptPkcs8 => {
+            crate::pkcs12::pbe_decrypt_failed();
+            crate::pkcs12::pbe_decrypt_failed();
         }
     }
 }
@@ -2029,7 +2039,9 @@ impl PKey {
                 let d = a.priv_key.as_ref()?;
                 a.group.ecdh(d, b.pub_key.as_ref()?)
             }
-            (PKey::Ecx(a), PKey::Ecx(b)) if a.kind == b.kind => {
+            (PKey::Ecx(a), PKey::Ecx(b))
+                if a.kind == b.kind && matches!(a.kind, EcxKind::X25519 | EcxKind::X448) =>
+            {
                 ecx::derive(a.kind, a.priv_key.as_deref()?, &b.pub_key)
             }
             _ => {

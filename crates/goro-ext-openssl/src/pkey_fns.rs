@@ -1471,8 +1471,10 @@ pub fn openssl_pkey_derive(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
             if key_len > 0 {
                 let kl = key_len as usize;
                 match &*key {
-                    PKey::Dh(_) if kl < s.len() => {
-                        err::push(err::LIB_PROV, 109, "invalid secret length");
+                    // dh_plain_derive() / ecx_derive(): PROV_R_OUTPUT_BUFFER_TOO_SMALL;
+                    // only ECDH truncates to the requested length.
+                    PKey::Dh(_) | PKey::Ecx(_) if kl < s.len() => {
+                        err::push(err::LIB_PROV, 106, "output buffer too small");
                         return Ok(Value::False);
                     }
                     _ => {

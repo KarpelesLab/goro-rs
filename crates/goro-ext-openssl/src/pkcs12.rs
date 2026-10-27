@@ -278,7 +278,7 @@ fn parse_bags(sc: &[u8], pass: Option<&[u8]>, out: &mut Parsed) -> bool {
                         }
                     }
                     Err(_) => {
-                        err::push(LIB_PKCS12, 115, "pkcs12 pbe crypt error");
+                        pbe_decrypt_failed();
                         return false;
                     }
                 }
@@ -336,6 +336,14 @@ fn verify_mac(auth_safe: &[u8], mac_data: &Tlv, pass: Option<&[u8]>) -> bool {
     let iter = m.get(2).and_then(|i| i.as_i64()).unwrap_or(1) as u32;
     let key = kdf(md, &bmp_password(pass), salt, iter, 3, md.size());
     digest::hmac(md, &key, auth_safe) == expected
+}
+
+/// PKCS12_pbe_crypt_ex() failing in EVP_CipherFinal_ex() (wrong password):
+/// the provider's "bad decrypt" then PKCS12_R_PKCS12_CIPHERFINAL_ERROR.
+#[inline(never)]
+pub(crate) fn pbe_decrypt_failed() {
+    err::prov_bad_decrypt();
+    err::push(LIB_PKCS12, 116, "pkcs12 cipherfinal error");
 }
 
 /// d2i_PKCS12_bio() + PKCS12_parse(): (key, cert, ca certificates)
@@ -399,8 +407,8 @@ fn parse(der: &[u8], pass: &[u8]) -> Option<(Option<PKey>, Option<Cert>, Vec<Cer
                     Ok(p) => p,
                     Err(_) => {
                         err::restore(mark);
-                        err::push(LIB_PKCS12, 117, "pkcs12 cipherfinal error");
-                        err::push(LIB_PKCS12, 115, "pkcs12 pbe crypt error");
+                        pbe_decrypt_failed();
+                        err::push(LIB_PKCS12, 114, "parse error");
                         return None;
                     }
                 };
