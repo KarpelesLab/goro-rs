@@ -766,8 +766,12 @@ impl PhpGenerator {
             }
             self.current_value = Value::Null;
             if freed {
-                // Destructors run from the frame that resumed the generator.
-                if let Some((_, line)) = vm.generator_caller.as_ref().filter(|c| c.1 > 0) {
+                // Destructors run from the frame that resumed the generator
+                // (for a delegate, the one that resumed the outermost one).
+                let (owner, line) = vm.delegate_release_line;
+                if line > 0 && owner == self as *const PhpGenerator as usize {
+                    vm.current_line = line;
+                } else if let Some((_, line)) = vm.generator_caller.as_ref().filter(|c| c.1 > 0) {
                     vm.current_line = *line;
                 }
                 vm.run_pending_destructors_pub();
@@ -1269,6 +1273,13 @@ impl PhpGenerator {
                 self.yield_from_site()
             };
             vm.generator_caller = Some(site.clone());
+            let saved_release = std::mem::replace(
+                &mut vm.delegate_release_line,
+                (
+                    &*rb as *const PhpGenerator as usize,
+                    outer_caller.as_ref().map_or(0, |c| c.1),
+                ),
+            );
             let r = match kick {
                 Kick::Throw => rb.resume_single_throw(vm),
                 Kick::Resume => {
@@ -1277,6 +1288,7 @@ impl PhpGenerator {
                 }
                 Kick::Fresh => rb.resume_single(vm),
             };
+            vm.delegate_release_line = saved_release;
             vm.generator_caller = outer_caller.clone();
             if vm.exit_requested || vm.fiber_suspended {
                 drop(rb);
@@ -2618,10 +2630,17 @@ impl PhpGenerator {
             self.yield_from_source,
             Some(Value::Array(_)) | Some(Value::Object(_))
         ) {
+            // (released at the generator's `yield from`)
+            let (_, yf_line) = self.yield_from_site();
+            let saved_line = vm.current_line;
+            if yf_line > 0 {
+                vm.current_line = yf_line;
+            }
             let src = self.yield_from_source.take();
             self.yield_from_pos = 0;
             drop(src);
             vm.run_pending_destructors_pub();
+            vm.current_line = saved_line;
         }
 
         // Try to find an exception handler in the generator
@@ -2653,6 +2672,16 @@ impl PhpGenerator {
             if pushed_scope {
                 vm.pop_class_scope();
             }
+            // zend_generator_close(): the frame is freed now (its
+            // variables' destructors are called from the internal
+            // Generator method)
+            let saved_file = std::mem::replace(&mut vm.current_file, crate::rcstr::RcStr::new());
+            let saved_line = std::mem::replace(&mut vm.current_line, 0);
+            let saved_caller = vm.generator_caller.take();
+            self.release_finished_frame(vm);
+            vm.generator_caller = saved_caller;
+            vm.current_file = saved_file;
+            vm.current_line = saved_line;
             vm.leave_generator_resume();
             return Err(VmError {
                 message: "Uncaught exception in generator".to_string(),

@@ -2150,6 +2150,10 @@ pub struct Vm {
     /// from user code (e.g., foreach iteration). When None, the generator's frame
     /// in stack traces is recorded as "[internal function]".
     pub generator_caller: Option<(RcStr, u32)>,
+    /// While a delegated generator (the root of a `yield from` tree) runs:
+    /// the line of the code that resumed the outermost generator, where
+    /// the variables of the delegate's finished frame are released.
+    pub(crate) delegate_release_line: (usize, u32),
     /// The currently executing Fiber object (for Fiber::getCurrent())
     pub current_fiber: Option<Value>,
     /// Stack of fiber objects for nested fibers
@@ -2782,6 +2786,7 @@ impl Vm {
             fiber_depth: 0,
             fiber_force_closing: false,
             generator_caller: None,
+            delegate_release_line: (0, 0),
             current_fiber: None,
             fiber_stack: Vec::new(),
             custom_fibers: HashMap::new(),

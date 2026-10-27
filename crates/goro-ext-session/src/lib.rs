@@ -1243,7 +1243,19 @@ fn serializer_decode(vm: &mut Vm, data: &[u8]) -> bool {
 
 /// php_session_decode
 fn session_decode_data(vm: &mut Vm, data: &[u8]) -> R<bool> {
+    // (the session function's frame is on the stack while the data is
+    // decoded: an autoloader it triggers is called from it)
+    let outer = FN_STACK.with(|s| s.borrow().last().cloned());
+    let pushed_outer = outer.is_some();
+    if let Some((fname, file, line)) = outer {
+        let is_method = fname.contains("::");
+        vm.call_stack
+            .push((fname, file, line, Vec::new(), is_method));
+    }
     let ok = serializer_decode(vm, data);
+    if pushed_outer {
+        vm.call_stack.pop();
+    }
     if var::BAILOUT.with(|b| b.replace(false)) {
         // zend_catch: cancel the decode, then continue the bailout. The
         // bailout is caught while the session is destroyed, so the destroy
