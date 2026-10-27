@@ -4674,9 +4674,11 @@ impl Vm {
             ));
         }
         if !meth.is_static {
+            // (zend_non_static_method_call(): the declaring class)
+            let decl = self.class_name_for_display(&meth.declaring_class.to_ascii_lowercase());
             return Some(format!(
                 "Non-static method {}::{}() cannot be called statically",
-                crate::string::msg_str(&c.name),
+                crate::string::msg_str(decl.as_deref().unwrap_or(&c.name)),
                 crate::string::msg_str(&meth.name)
             ));
         }
@@ -37765,14 +37767,19 @@ impl Vm {
                                         }
                                         None => (orig.clone(), String::new()),
                                     };
-                                    let cls_display = self
-                                        .classes
-                                        .get(
-                                            &func_name_lower[..func_name_lower
-                                                .windows(2)
-                                                .position(|w| w == b"::")
-                                                .unwrap_or(0)],
-                                        )
+                                    // (zend_non_static_method_call(): the
+                                    // declaring class)
+                                    let cls_display = declaring_lower
+                                        .as_deref()
+                                        .and_then(|d| self.classes.get(d))
+                                        .or_else(|| {
+                                            self.classes.get(
+                                                &func_name_lower[..func_name_lower
+                                                    .windows(2)
+                                                    .position(|w| w == b"::")
+                                                    .unwrap_or(0)],
+                                            )
+                                        })
                                         .map(|c| crate::string::msg_str(&c.name).to_string())
                                         .unwrap_or(cls);
                                     let meth_display =

@@ -151,11 +151,29 @@ impl Vm {
         if matches!(cl.as_slice(), b"self" | b"static" | b"parent") {
             return None;
         }
-        let c = self
+        let ml = method.to_ascii_lowercase();
+        let Some(c) = self
             .classes
             .get(cl.as_slice())
-            .filter(|c| c.filename.is_some())?;
-        let ml = method.to_ascii_lowercase();
+            .filter(|c| c.filename.is_some())
+        else {
+            // An internal class's public non-static method, from no $this.
+            if has_this || self.classes.contains_key(cl.as_slice()) {
+                return None;
+            }
+            crate::stubs::find_class_lower(&cl)?;
+            // (the error names the method's declaring class)
+            let (owner, sm) = crate::stubs::find_method(&cl, &ml)?;
+            if sm.flags & (crate::stubs::F_STATIC | crate::stubs::F_ABSTRACT) != 0
+                || sm.flags & crate::stubs::F_PUBLIC == 0
+            {
+                return None;
+            }
+            return Some(format!(
+                "Non-static method {}::{}() cannot be called statically",
+                owner.name, sm.name
+            ));
+        };
         let meth = c.get_method(&ml)?;
         if meth.op_array.ops.is_empty() && !meth.is_abstract {
             return None;
@@ -193,9 +211,11 @@ impl Vm {
             ));
         }
         if !meth.is_static && !has_this {
+            // (zend_non_static_method_call(): the declaring class)
+            let decl = self.class_name_for_display(&decl);
             return Some(format!(
                 "Non-static method {}::{}() cannot be called statically",
-                crate::string::msg_str(&c.name),
+                crate::string::msg_str(decl.as_deref().unwrap_or(&c.name)),
                 crate::string::msg_str(&meth.name)
             ));
         }
