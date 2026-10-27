@@ -62,14 +62,15 @@ fn to_str(
     let _ = is_strict(vm);
     match v {
         Value::String(s) => Ok(s.as_bytes().to_vec()),
-        Value::Array(_) => Err(type_error(
+        Value::Array(_) | Value::Resource(..) => Err(type_error(
             vm,
             format!(
-                "{}(): Argument #{} (${}) must be of type {}, array given",
+                "{}(): Argument #{} (${}) must be of type {}, {} given",
                 func,
                 idx + 1,
                 pname,
-                tname
+                tname,
+                type_name(v)
             ),
         )),
         Value::Object(_) => {
