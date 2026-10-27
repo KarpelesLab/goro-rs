@@ -912,6 +912,17 @@ pub(crate) fn rprops<'a>(vm: &'a Vm, lower: &[u8]) -> Vec<&'a crate::object::Pro
                 out.push(mine.unwrap_or(pp));
             }
         }
+        // (then the abstract properties of the interfaces it implements:
+        // zend_do_implement_interfaces() inherits them)
+        if !ce.is_interface {
+            for iface in &ce.interfaces {
+                for ip in collect(vm, &iface.to_ascii_lowercase(), depth + 1) {
+                    if !out.iter().any(|x| x.name == ip.name) {
+                        out.push(ip);
+                    }
+                }
+            }
+        }
         for p in &ce.properties {
             if !out.iter().any(|x| x.name == p.name) {
                 out.push(p);

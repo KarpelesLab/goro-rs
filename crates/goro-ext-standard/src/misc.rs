@@ -21038,6 +21038,28 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     fn class_has_visible_prop(vm: &Vm, class_lower: &[u8], pname: &[u8]) -> bool {
         vm.class_view_prop(class_lower, pname).is_some()
             || enum_declared_props(vm, class_lower).contains(&pname)
+            || interface_declares_prop(vm, class_lower, pname)
+    }
+    // (an abstract property of an interface the class implements is one
+    // of its properties: zend_do_implement_interfaces() inherits it)
+    #[inline(never)]
+    fn interface_declares_prop(vm: &Vm, class_lower: &[u8], pname: &[u8]) -> bool {
+        let mut cur = Some(class_lower.to_vec());
+        for _ in 0..64 {
+            let Some(c) = cur.take().and_then(|c| vm.classes.get(&c)) else {
+                return false;
+            };
+            let found = c.interfaces.iter().any(|i| {
+                vm.classes
+                    .get(&i.to_ascii_lowercase())
+                    .is_some_and(|ic| ic.properties.iter().any(|p| p.name == pname))
+            });
+            if found {
+                return true;
+            }
+            cur = c.parent.as_ref().map(|p| p.to_ascii_lowercase());
+        }
+        false
     }
 
     // Extension-provided property handlers (has_property with ZEND_PROPERTY_EXISTS)

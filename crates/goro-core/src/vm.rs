@@ -183,6 +183,17 @@ thread_local! {
 /// The end line of the last of property `prop`'s hooks `class` declares
 /// (where zend_verify_hooked_property() runs), if known.
 #[inline(never)]
+fn has_concrete_hook(class: &ClassEntry, prop: &[u8]) -> bool {
+    [&b"__property_get_"[..], b"__property_set_"]
+        .iter()
+        .any(|kind| {
+            let mut m = kind.to_vec();
+            m.extend(prop.iter().map(|b| b.to_ascii_lowercase()));
+            class.methods.get(&m).is_some_and(|md| !md.is_abstract)
+        })
+}
+
+#[inline(never)]
 fn hooks_end_line(class: &ClassEntry, prop: &[u8]) -> Option<u32> {
     let mut best = 0;
     for kind in [&b"__property_get_"[..], b"__property_set_"] {
@@ -51524,9 +51535,13 @@ impl Vm {
                                             let pl: Vec<u8> =
                                                 p.iter().map(|b| b.to_ascii_lowercase()).collect();
                                             if let Some(pc) = self.classes.get(&pl) {
+                                                // (an abstract hook is no hook a
+                                                // redeclaration inherits)
                                                 if pc.properties.iter().any(|pp| {
                                                     pp.name == prop_name.as_bytes()
                                                         && (pp.has_get_hook || pp.has_set_hook)
+                                                        && (!pp.is_abstract
+                                                            || has_concrete_hook(pc, &pp.name))
                                                 }) {
                                                     found = true;
                                                     break;
