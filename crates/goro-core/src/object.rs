@@ -32,6 +32,21 @@ pub struct RuntimeAttribute {
     pub validation_error: Option<String>,
 }
 
+/// Whether a call of code with attributes `attrs` has nothing to check for
+/// them: none is #[\Deprecated] or #[\NoDiscard] (see
+/// Vm::get_deprecated_message, Vm::emit_nodiscard_warning), the only ones a
+/// call looks at (#[\Override], #[\ReturnTypeWillChange] & co. are seen
+/// when the class is linked).
+#[inline]
+pub(crate) fn call_attributes_inert(attrs: &[RuntimeAttribute]) -> bool {
+    attrs.is_empty() || attrs.iter().all(|a| call_attribute_inert(&a.name))
+}
+
+#[inline(never)]
+fn call_attribute_inert(name: &[u8]) -> bool {
+    !(name.eq_ignore_ascii_case(b"deprecated") || name.eq_ignore_ascii_case(b"nodiscard"))
+}
+
 /// Metadata for a class constant (visibility and final flag)
 #[derive(Debug, Clone)]
 pub struct ConstantMeta {

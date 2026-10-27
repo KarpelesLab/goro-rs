@@ -1085,7 +1085,7 @@ impl OpArray {
                 && self
                     .variadic_param
                     .is_none_or(|v| !self.by_ref_params.get(v as usize).copied().unwrap_or(false))
-                && self.attributes.is_empty()
+                && crate::object::call_attributes_inert(&self.attributes)
                 && self.internal_sig.is_none()
                 && !self.name.is_empty()
                 && self.cv_name_info().plain_cvs;

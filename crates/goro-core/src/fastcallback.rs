@@ -65,7 +65,7 @@ impl Vm {
                         }
                         let lower = lower_into(name, &mut buf)?;
                         let f = self.user_functions.get(lower)?;
-                        if f.scope_class.is_some() || !f.attributes.is_empty() {
+                        if f.scope_class.is_some() || !crate::object::call_attributes_inert(&f.attributes) {
                             return None;
                         }
                         let f = Rc::clone(f);
@@ -98,7 +98,7 @@ impl Vm {
                     None if crate::closure::is_closure_fn_name(name.as_bytes()) => {
                         let f = lower_into(name.as_bytes(), &mut buf)
                             .and_then(|l| self.user_functions.get(l))
-                            .filter(|f| f.attributes.is_empty())
+                            .filter(|f| crate::object::call_attributes_inert(&f.attributes))
                             .map(Rc::clone);
                         if let Some(f) = &f {
                             if !name.as_bytes().contains(&b':') {
@@ -204,8 +204,8 @@ impl Vm {
                 || md.visibility != Visibility::Public
                 || md.is_static
                 || md.is_abstract
-                || !md.attributes.is_empty()
-                || !md.op_array.attributes.is_empty()
+                || !crate::object::call_attributes_inert(&md.attributes)
+                || !crate::object::call_attributes_inert(&md.op_array.attributes)
             {
                 return None;
             }
@@ -286,8 +286,8 @@ impl Vm {
                 || md.visibility != Visibility::Public
                 || !md.is_static
                 || md.is_abstract
-                || !md.attributes.is_empty()
-                || !md.op_array.attributes.is_empty()
+                || !crate::object::call_attributes_inert(&md.attributes)
+                || !crate::object::call_attributes_inert(&md.op_array.attributes)
             {
                 return None;
             }
@@ -339,7 +339,7 @@ impl Vm {
         call_args.extend_from_slice(args);
         let ok = !op_array.is_generator
             && op_array.variadic_param.is_none()
-            && op_array.attributes.is_empty();
+            && crate::object::call_attributes_inert(&op_array.attributes);
         let lead = if ok {
             self.fast_callback_args(op_array, &mut call_args)
         } else {

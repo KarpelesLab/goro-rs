@@ -1339,8 +1339,8 @@ impl Vm {
                     .is_some_and(|c| c.filename.is_some() && !c.is_enum)
         };
         if !visible
-            || !method.attributes.is_empty()
-            || !method.op_array.attributes.is_empty()
+            || !crate::object::call_attributes_inert(&method.attributes)
+            || !crate::object::call_attributes_inert(&method.op_array.attributes)
             || scope_private
             || !(self.user_class_chain(class_lower) || user_method())
         {

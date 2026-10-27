@@ -24343,7 +24343,7 @@ impl Vm {
                 && f.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
                 && matches!(call.args.first(), Some(Value::Object(_))),
         );
-        let simple = f.attributes.is_empty()
+        let simple = crate::object::call_attributes_inert(&f.attributes)
             && !f.is_generator
             && f.variadic_param.is_none()
             && !f.display_name.is_empty()
@@ -24357,7 +24357,7 @@ impl Vm {
         let implicit = usize::from(has_this);
         let nargs = call.args.len();
         let required = f.required_param_count as usize;
-        f.attributes.is_empty()
+        crate::object::call_attributes_inert(&f.attributes)
             && !f.is_generator
             && (method || f.scope_class.is_none())
             // (a variadic parameter taken by value: the extra arguments
