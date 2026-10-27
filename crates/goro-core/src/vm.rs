@@ -33095,6 +33095,9 @@ impl Vm {
                 OpCode::DoFCall if fast_failure.is_some() => {
                     let e = fast_failure.take().expect("fast call failure");
                     if self.current_exception.is_some() {
+                        // (dispatched here: an error handler's exception is
+                        // not dispatched again after the next opcode)
+                        self.error_handler_threw = false;
                         if let Some((catch_target, finally_target, _, _, saved_pc)) =
                             exception_handlers.pop()
                         {
@@ -47508,6 +47511,12 @@ impl Vm {
                     if matches!(exception_handlers.last(), Some(h) if h.0 as usize == ip - 1) {
                         exception_handlers.pop();
                     }
+                    // (a catch block entered with the exception an error
+                    // handler threw: it was dispatched, the after-opcode check
+                    // must not dispatch it again to this handler)
+                    if self.error_handler_threw && self.current_exception.is_some() {
+                        self.error_handler_threw = false;
+                    }
                     exception_handlers.push((
                         catch_target,
                         finally_target,
@@ -47576,6 +47585,10 @@ impl Vm {
                     }
                     if matches!(exception_handlers.last(), Some(h) if h.0 as usize == ip - 1) {
                         exception_handlers.pop();
+                    }
+                    // (see TryBegin: the exception was dispatched)
+                    if self.error_handler_threw && self.current_exception.is_some() {
+                        self.error_handler_threw = false;
                     }
                     // The catch of a try with a finally starts with the finally
                     // guard's TryBegin, already pushed above the caught level.
