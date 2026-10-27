@@ -9923,11 +9923,18 @@ impl Vm {
                             }
                             // Check parent chain and interfaces
                             if let Some(class_entry) = self.classes.get(&obj_class_lower) {
-                                // (a class_alias() of the object's own class)
+                                // (a class_alias() of the object's own class; a
+                                // class declaring __toString() implements
+                                // Stringable implicitly)
                                 return self.class_is_a(class_entry, &class_name_lower)
                                     || self.classes.get(&class_name_lower).is_some_and(|t| {
                                         t.name.eq_ignore_ascii_case(&obj_class_lower)
-                                    });
+                                    })
+                                    || (class_name_lower == b"stringable"
+                                        && self.class_implements_interface(
+                                            &obj_class_lower,
+                                            b"stringable",
+                                        ));
                             }
                             // Check built-in class hierarchy
                             if is_builtin_subclass(&obj_class_lower, &class_name_lower) {
