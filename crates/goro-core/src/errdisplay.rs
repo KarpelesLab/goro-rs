@@ -620,14 +620,18 @@ impl Vm {
                     }
                     format!(
                         "{} [<a href='{}{}'>{}</a>]: {}",
-                        escape_html(origin),
+                        escape_html_cs(origin, utf8),
                         root,
                         docref,
                         docref,
-                        escape_html(rest)
+                        escape_html_cs(rest, utf8)
                     )
                 } else {
-                    format!("{}: {}", escape_html(origin), escape_html(rest))
+                    format!(
+                        "{}: {}",
+                        escape_html_cs(origin, utf8),
+                        escape_html_cs(rest, utf8)
+                    )
                 }
             } else {
                 msg.to_string()

@@ -151,7 +151,11 @@ impl Vm {
             if ce.name.contains(&0) && !bound.contains(&ce.name) {
                 continue;
             }
-            // Aliases are listed under their (lowercased) alias name.
+            // Aliases are listed under their (lowercased) alias name (an
+            // empty one is not listed).
+            if key.is_empty() {
+                continue;
+            }
             if !ce.name.eq_ignore_ascii_case(key) && !ce.name.contains(&0) {
                 out.push(key.clone());
             } else {

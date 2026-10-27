@@ -917,6 +917,9 @@ pub struct Compiler {
     is_top_level: bool,
     /// True while compiling a hoisted (early-bound) class declaration.
     in_hoisting_pass: bool,
+    /// The line of the `static` statement whose initializer is being
+    /// compiled (0: none).
+    static_init_line: u32,
     /// compiled_classes index of each hoisted class (lowercase qualified name).
     hoisted_class_idx: HashMap<Vec<u8>, i64>,
     /// The declarations of the top-level classes extending a class this file
@@ -1205,6 +1208,7 @@ impl Compiler {
             keep_relative_class_names: false,
             is_top_level: false,
             in_hoisting_pass: false,
+            static_init_line: 0,
             hoisted_class_idx: HashMap::new(),
             delayed_hoist_ops: Vec::new(),
             deferred_fatal_errors: Vec::new(),
@@ -3961,8 +3965,11 @@ impl Compiler {
         // Namespace/use must be processed in order so that class/function names are prefixed correctly
         if let Err(e) = self.compile_hoisting_pass(&program.statements) {
             self.stash_compile_time_binds(e.line, None);
-            self.main_pass_diags_before(&program.statements, e.line, pending_diag_base);
-            return Err(e);
+            // (an error in the main code before the failing declaration
+            // comes first)
+            let earlier =
+                self.main_pass_diags_before(&program.statements, e.line, pending_diag_base);
+            return Err(earlier.unwrap_or(e));
         }
         self.emit_delayed_hoisted_decls();
         let hoist_end = self.op_array.ops.len();
@@ -4324,19 +4331,25 @@ impl Compiler {
     /// Compiles those top-level statements for their diagnostics only and
     /// puts the pending diagnostics in source order.
     #[inline(never)]
-    fn main_pass_diags_before(&mut self, stmts: &[Statement], err_line: u32, base: usize) {
+    fn main_pass_diags_before(
+        &mut self,
+        stmts: &[Statement],
+        err_line: u32,
+        base: usize,
+    ) -> Option<CompileError> {
         if err_line == 0
             || stmts
                 .iter()
                 .any(|s| matches!(s.kind, StmtKind::NamespaceDecl { .. }))
         {
-            return;
+            return None;
         }
         self.current_namespace = Vec::new();
         self.use_map = HashMap::new();
         self.use_function_map = HashMap::new();
         self.use_const_map = HashMap::new();
         self.in_main_pass = true;
+        let mut earlier = None;
         for stmt in stmts {
             if stmt.span.line >= err_line {
                 break;
@@ -4347,7 +4360,8 @@ impl Compiler {
             ) {
                 continue;
             }
-            if self.compile_stmt(stmt).is_err() {
+            if let Err(e) = self.compile_stmt(stmt) {
+                earlier = Some(e);
                 break;
             }
         }
@@ -4357,6 +4371,7 @@ impl Compiler {
             let base = base.min(w.len());
             w[base..].sort_by_key(|d| d.2);
         });
+        earlier
     }
 
     /// Whether a `catch (Throwable ...)` name resolves to \Throwable (it then
@@ -6930,7 +6945,12 @@ impl Compiler {
                             .push((key_idx, v));
                     }
                     let default_val = if let Some(expr) = default {
-                        self.compile_expr(expr)?
+                        // (a constant initializer is evaluated on the
+                        // statement's line)
+                        let saved = std::mem::replace(&mut self.static_init_line, stmt.span.line);
+                        let r = self.compile_expr(expr);
+                        self.static_init_line = saved;
+                        r?
                     } else {
                         let idx = self.op_array.add_literal(Value::Null);
                         OperandType::Const(idx)
@@ -8236,6 +8256,7 @@ impl Compiler {
                                                     if let ExprKind::ClassConstAccess {
                                                         class: class_expr,
                                                         constant,
+                                                        ..
                                                     } = &elem.value.kind
                                                     {
                                                         let cname = match &class_expr.kind {
@@ -8393,6 +8414,7 @@ impl Compiler {
                                     ExprKind::ClassConstAccess {
                                         class: cc_class,
                                         constant,
+                                        ..
                                     } => {
                                         // Handle self::CONST, ClassName::CONST in property defaults
                                         let class_name = match &cc_class.kind {
@@ -8461,7 +8483,7 @@ impl Compiler {
                                             if let Some(v) = resolved {
                                                 return Some(v);
                                             }
-                                            if let ExprKind::ClassConstAccess { class: class_expr, constant } = &operand.kind {
+                                            if let ExprKind::ClassConstAccess { class: class_expr, constant, .. } = &operand.kind {
                                                 let class_name = match &class_expr.kind {
                                                     ExprKind::Identifier(ident_name) => {
                                                         let resolved_name = self.resolve_class_name(ident_name);
@@ -10919,6 +10941,7 @@ impl Compiler {
                                     ExprKind::ClassConstAccess {
                                         class: class_expr,
                                         constant,
+                                        ..
                                     } => {
                                         // First try to resolve from the same class's already-compiled constants
                                         if let Some(val) = Self::eval_class_const_expr(
@@ -11108,6 +11131,7 @@ impl Compiler {
                                                     if let ExprKind::ClassConstAccess {
                                                         class: class_expr,
                                                         constant,
+                                                        ..
                                                     } = &elem.value.kind
                                                     {
                                                         let cname = match &class_expr.kind {
@@ -11708,6 +11732,7 @@ impl Compiler {
                                         ExprKind::ClassConstAccess {
                                             class: class_expr,
                                             constant,
+                                            ..
                                         } => {
                                             // Try to resolve from same class or other classes
                                             if let Some(val) = Self::eval_class_const_expr(
@@ -12549,6 +12574,8 @@ impl Compiler {
     #[inline(never)]
     fn compile_ref_fetch(&mut self, expr: &Expr) -> CompileResult<OperandType> {
         let line = expr.span.line;
+        // (compiling the fetch moves CG(zend_lineno) to it)
+        self.zend_lineno = line;
         match &expr.kind {
             ExprKind::Variable(name) if name != b"this" && name != b"GLOBALS" => {
                 let cv = self.op_array.get_or_create_cv(name);
@@ -15672,7 +15699,9 @@ impl Compiler {
         expr: &Expr,
     ) -> CompileResult<(OperandType, OperandType)> {
         match &expr.kind {
-            ExprKind::StaticPropertyAccess { class, property } => {
+            ExprKind::StaticPropertyAccess {
+                class, property, ..
+            } => {
                 if let ExprKind::Identifier(n) = &class.kind {
                     self.check_static_prop_parent(n, class.span.line)?;
                 }
@@ -17480,7 +17509,9 @@ impl Compiler {
                         });
                         Ok(OperandType::Tmp(result_tmp))
                     }
-                    ExprKind::StaticPropertyAccess { class, property } => {
+                    ExprKind::StaticPropertyAccess {
+                        class, property, ..
+                    } => {
                         // self::$n op= $val — read-modify-write the static property.
                         let class_operand = self.compile_static_class_operand(class)?;
                         let prop_idx = self
@@ -17915,7 +17946,10 @@ impl Compiler {
                     // Increment/decrement on a static property: self::$n++, C::$n--, etc.
                     // Without write-back here the increment would land on a throwaway
                     // temp and the static property would never change.
-                    if let ExprKind::StaticPropertyAccess { class, property } = &operand.kind {
+                    if let ExprKind::StaticPropertyAccess {
+                        class, property, ..
+                    } = &operand.kind
+                    {
                         let class_operand = self.compile_static_class_operand(class)?;
                         let prop_idx = self
                             .op_array
@@ -18798,14 +18832,20 @@ impl Compiler {
                     }
                 }
                 if Self::array_has_illegal_ct_key(elements, 0) {
-                    // (zend_try_ct_eval_array(), on the array's line)
+                    // (zend_try_ct_eval_array(), on the line of the array's
+                    // first element; a constant expression's is evaluated
+                    // on the declaration's line)
                     return Err(CompileError {
                         message: "Illegal offset type".into(),
                         line: elements
                             .first()
                             .map(|e| e.value.span.line)
-                            .filter(|&l| l > 0)
-                            .unwrap_or(expr.span.line),
+                            .filter(|&l| l > 0 && !self.in_const_expr && self.static_init_line == 0)
+                            .unwrap_or(if self.static_init_line > 0 {
+                                self.static_init_line
+                            } else {
+                                expr.span.line
+                            }),
                     });
                 }
                 let arr_tmp = self.op_array.alloc_temp();
@@ -20198,7 +20238,10 @@ impl Compiler {
                     }
                     // isset(C::$p) / isset($obj::$p) — static property isset
                     // never throws, just returns bool.
-                    if let ExprKind::StaticPropertyAccess { class, property } = &exprs[0].kind {
+                    if let ExprKind::StaticPropertyAccess {
+                        class, property, ..
+                    } = &exprs[0].kind
+                    {
                         let class_operand = self.compile_static_class_operand(class)?;
                         let prop_idx = self
                             .op_array
@@ -20917,6 +20960,12 @@ impl Compiler {
                     // Subsequent elements: captured use var values
                     for use_var in use_vars {
                         let cv = self.op_array.get_or_create_cv(&use_var.variable);
+                        // (ZEND_BIND_LEXICAL is on the variable's line)
+                        let use_line = if use_var.line > 0 {
+                            use_var.line
+                        } else {
+                            expr.span.line
+                        };
                         if use_var.by_ref {
                             // By-reference capture: make the CV a reference first,
                             // then append the raw Reference value (not dereffed)
@@ -20925,7 +20974,7 @@ impl Compiler {
                                 op1: OperandType::Cv(cv),
                                 op2: OperandType::Unused,
                                 result: OperandType::Unused,
-                                line: expr.span.line,
+                                line: use_line,
                             });
                             // Use ArrayAppendRef to preserve the Reference wrapper
                             self.op_array.emit(Op {
@@ -20933,7 +20982,7 @@ impl Compiler {
                                 op1: OperandType::Tmp(arr_tmp),
                                 op2: OperandType::Cv(cv),
                                 result: OperandType::Unused,
-                                line: expr.span.line,
+                                line: use_line,
                             });
                         } else {
                             self.op_array.emit(Op {
@@ -20941,7 +20990,7 @@ impl Compiler {
                                 op1: OperandType::Tmp(arr_tmp),
                                 op2: OperandType::Cv(cv),
                                 result: OperandType::Unused,
-                                line: expr.span.line,
+                                line: use_line,
                             });
                         }
                     }
@@ -21468,7 +21517,17 @@ impl Compiler {
                 Ok(OperandType::Const(null_idx))
             }
 
-            ExprKind::ClassConstAccess { class, constant } => {
+            ExprKind::ClassConstAccess {
+                class,
+                constant,
+                const_line,
+            } => {
+                // (the fetch is on the constant name's line)
+                let fetch_line = if *const_line > 0 {
+                    *const_line
+                } else {
+                    expr.span.line
+                };
                 // Handle ClassName::class, ClassName::CONST, self::CONST
                 let class_name = match &class.kind {
                     ExprKind::Identifier(name) => {
@@ -21525,7 +21584,7 @@ impl Compiler {
                             op1: obj_operand,
                             op2: OperandType::Const(const_name_idx),
                             result: OperandType::Tmp(tmp),
-                            line: expr.span.line,
+                            line: fetch_line,
                         });
                         return Ok(OperandType::Tmp(tmp));
                     }
@@ -21580,7 +21639,7 @@ impl Compiler {
                     op1: OperandType::Const(class_idx),
                     op2: OperandType::Const(const_name_idx),
                     result: OperandType::Tmp(tmp),
-                    line: expr.span.line,
+                    line: fetch_line,
                 });
                 Ok(OperandType::Tmp(tmp))
             }
@@ -21901,7 +21960,11 @@ impl Compiler {
                 Ok(OperandType::Tmp(tmp))
             }
 
-            ExprKind::StaticPropertyAccess { class, property } => {
+            ExprKind::StaticPropertyAccess {
+                class,
+                property,
+                prop_line,
+            } => {
                 if is_illegal_class_literal(class) {
                     return Err(CompileError {
                         message: "Illegal class name".into(),
@@ -21975,7 +22038,12 @@ impl Compiler {
                     op1: class_operand,
                     op2: OperandType::Const(prop_idx),
                     result: OperandType::Tmp(tmp),
-                    line: expr.span.line,
+                    // (on the property name's line)
+                    line: if *prop_line > 0 {
+                        *prop_line
+                    } else {
+                        expr.span.line
+                    },
                 });
 
                 if let Some(jmp) = jmp_null {
@@ -23317,7 +23385,9 @@ impl Compiler {
                     rec(property)
                 }
             }),
-            E::ClassConstAccess { class, constant } => {
+            E::ClassConstAccess {
+                class, constant, ..
+            } => {
                 if constant.eq_ignore_ascii_case(b"class") {
                     // zend_compile_const_expr_class_name()
                     match name_of(class) {
@@ -24605,6 +24675,7 @@ impl Compiler {
             ExprKind::ClassConstAccess {
                 class: class_expr,
                 constant,
+                ..
             } => {
                 let target_class = match &class_expr.kind {
                     ExprKind::Identifier(name) => {
@@ -24741,6 +24812,7 @@ impl Compiler {
             ExprKind::ClassConstAccess {
                 class: class_expr,
                 constant,
+                ..
             } => {
                 // Unresolved: emit a deferred marker.
                 let class_name = match &class_expr.kind {
@@ -24897,6 +24969,7 @@ impl Compiler {
             ExprKind::ClassConstAccess {
                 class: class_expr,
                 constant,
+                ..
             } => {
                 if constant == b"class" {
                     return;
@@ -26153,7 +26226,9 @@ fn trait_const_expr_uses_scope(expr: &Expr) -> bool {
     let rec = trait_const_expr_uses_scope;
     match &expr.kind {
         E::Identifier(n) => n.eq_ignore_ascii_case(b"__CLASS__"),
-        E::ClassConstAccess { class, constant } => {
+        E::ClassConstAccess {
+            class, constant, ..
+        } => {
             constant.eq_ignore_ascii_case(b"class")
                 && matches!(&class.kind, E::Identifier(n) if n.eq_ignore_ascii_case(b"self"))
         }
@@ -26301,7 +26376,9 @@ fn expr_to_source_string(expr: &Expr) -> String {
                 expr_to_source_string(property)
             )
         }
-        ExprKind::StaticPropertyAccess { class, property } => {
+        ExprKind::StaticPropertyAccess {
+            class, property, ..
+        } => {
             format!(
                 "{}::${}",
                 expr_to_source_string(class),
@@ -26315,7 +26392,9 @@ fn expr_to_source_string(expr: &Expr) -> String {
                 expr_to_source_string(property)
             )
         }
-        ExprKind::ClassConstAccess { class, constant } => {
+        ExprKind::ClassConstAccess {
+            class, constant, ..
+        } => {
             format!(
                 "{}::{}",
                 expr_to_source_string(class),
@@ -26637,7 +26716,9 @@ fn check_duplicate_params(params: &[Param], line: u32) -> CompileResult<()> {
 /// Whether a constant expression reads a `self::` / `parent::` constant.
 fn expr_has_relative_class_const(e: &Expr) -> bool {
     match &e.kind {
-        ExprKind::ClassConstAccess { class, constant } => {
+        ExprKind::ClassConstAccess {
+            class, constant, ..
+        } => {
             constant.as_slice() != b"class"
                 && matches!(&class.kind, ExprKind::Identifier(n)
                     if n.eq_ignore_ascii_case(b"self") || n.eq_ignore_ascii_case(b"parent"))
@@ -26741,11 +26822,9 @@ impl Compiler {
                 _ if CT_FOLD_CONSTS.with(|f| f.get()) != 0 => self.ct_fold_global_const(n),
                 _ => None,
             },
-            ExprKind::ClassConstAccess { class, constant }
-                if CT_FOLD_CONSTS.with(|f| f.get()) != 0 =>
-            {
-                self.ct_fold_class_const(class, constant)
-            }
+            ExprKind::ClassConstAccess {
+                class, constant, ..
+            } if CT_FOLD_CONSTS.with(|f| f.get()) != 0 => self.ct_fold_class_const(class, constant),
             ExprKind::Ternary {
                 condition,
                 if_true,
@@ -27031,7 +27110,9 @@ impl Compiler {
                     }
                 }
             }
-            ExprKind::ClassConstAccess { class, constant } => {
+            ExprKind::ClassConstAccess {
+                class, constant, ..
+            } => {
                 let cls = match &class.kind {
                     ExprKind::Identifier(n) => {
                         // Zend marks the name fully qualified only if resolution
@@ -27229,8 +27310,12 @@ impl Compiler {
         expr: &Expr,
         class_scope: Option<&[u8]>,
     ) -> Option<String> {
-        if let (Some(cls), ExprKind::ClassConstAccess { class, constant }) =
-            (class_scope, &expr.kind)
+        if let (
+            Some(cls),
+            ExprKind::ClassConstAccess {
+                class, constant, ..
+            },
+        ) = (class_scope, &expr.kind)
         {
             if constant.eq_ignore_ascii_case(b"class")
                 && !cls.starts_with(b"__anonymous")
@@ -27249,7 +27334,10 @@ impl Compiler {
             return Some(crate::reflection::format_default_value(&v));
         }
         // `X::class` on a known (non-relative) class folds to a string.
-        if let ExprKind::ClassConstAccess { class, constant } = &expr.kind {
+        if let ExprKind::ClassConstAccess {
+            class, constant, ..
+        } = &expr.kind
+        {
             if constant.eq_ignore_ascii_case(b"class") {
                 if let ExprKind::Identifier(n) = &class.kind {
                     let lower = n.to_ascii_lowercase();

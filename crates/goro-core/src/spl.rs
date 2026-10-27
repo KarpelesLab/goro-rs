@@ -109,7 +109,7 @@ impl Vm {
     }
 
     /// The built-in SPL class an object's class derives from (or is).
-    pub(crate) fn spl_builtin_base(&self, class_lower: &[u8]) -> Option<&'static [u8]> {
+    pub fn spl_builtin_base(&self, class_lower: &[u8]) -> Option<&'static [u8]> {
         // Most-derived first so the walk stops at the nearest built-in.
         self.spl_find_base(class_lower, SPL_CLASSES)
     }

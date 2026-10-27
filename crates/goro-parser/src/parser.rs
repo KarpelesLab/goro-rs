@@ -2330,6 +2330,7 @@ impl Parser {
                 kind: ExprKind::ClassConstAccess {
                     class: Box::new(class),
                     constant: b"class".to_vec(),
+                    const_line: cspan.line,
                 },
             },
             _ => class,
@@ -5734,6 +5735,7 @@ impl Parser {
                 }
                 TokenKind::DoubleColon => {
                     self.advance();
+                    let member_line = self.span().line;
                     let member = match self.peek().clone() {
                         TokenKind::Variable(name) => {
                             self.advance();
@@ -5754,6 +5756,7 @@ impl Parser {
                         kind: ExprKind::StaticPropertyAccess {
                             class: Box::new(expr),
                             property: member,
+                            prop_line: member_line,
                         },
                         span: s,
                     };
@@ -5887,6 +5890,7 @@ impl Parser {
                                 kind: ExprKind::ClassConstAccess {
                                     class: Box::new(expr),
                                     constant: name,
+                                    const_line: member_span.line,
                                 },
                             };
                         }
@@ -5903,6 +5907,7 @@ impl Parser {
                                 kind: ExprKind::ClassConstAccess {
                                     class: Box::new(expr),
                                     constant: b"class".to_vec(),
+                                    const_line: member_span.line,
                                 },
                             };
                         }
@@ -5937,6 +5942,7 @@ impl Parser {
                                     kind: ExprKind::StaticPropertyAccess {
                                         class: Box::new(expr),
                                         property: name,
+                                        prop_line: member_span.line,
                                     },
                                 };
                             }
@@ -6031,6 +6037,7 @@ impl Parser {
                                     kind: ExprKind::ClassConstAccess {
                                         class: Box::new(expr),
                                         constant: name,
+                                        const_line: member_span.line,
                                     },
                                 };
                             }
@@ -6186,10 +6193,12 @@ impl Parser {
                                 let br = self.eat(&TokenKind::Ampersand);
                                 match self.peek().clone() {
                                     TokenKind::Variable(n) => {
+                                        let line = self.span().line;
                                         self.advance();
                                         v.push(ClosureUse {
                                             variable: n,
                                             by_ref: br,
+                                            line,
                                         });
                                     }
                                     _ => break,
@@ -6979,6 +6988,7 @@ impl Parser {
                     let mut vars = Vec::new();
                     loop {
                         let by_ref = self.eat(&TokenKind::Ampersand);
+                        let var_line = self.span().line;
                         let name = match self.peek().clone() {
                             TokenKind::Variable(name) => {
                                 self.advance();
@@ -6998,6 +7008,7 @@ impl Parser {
                         vars.push(ClosureUse {
                             variable: name,
                             by_ref,
+                            line: var_line,
                         });
                         if !self.eat(&TokenKind::Comma) {
                             break;
@@ -7120,6 +7131,7 @@ impl Parser {
                         let mut vars = Vec::new();
                         loop {
                             let by_ref = self.eat(&TokenKind::Ampersand);
+                            let var_line = self.span().line;
                             let name = match self.peek().clone() {
                                 TokenKind::Variable(name) => {
                                     self.advance();
@@ -7130,6 +7142,7 @@ impl Parser {
                             vars.push(ClosureUse {
                                 variable: name,
                                 by_ref,
+                                line: var_line,
                             });
                             if !self.eat(&TokenKind::Comma) {
                                 break;

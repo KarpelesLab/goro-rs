@@ -317,6 +317,15 @@ fn desc_from_array(
             // php://fd/N are the process's own descriptors.
             let fd = match php_fd_stream(&file) {
                 Some(n) => unsafe { libc::dup(n) },
+                None if open_flags(&mode).is_none() => {
+                    // (the plain files wrapper rejects the mode)
+                    vm.emit_warning(&format!(
+                        "proc_open({}): Failed to open stream: `{}' is not a valid mode for fopen",
+                        goro_core::string::msg_str(&file),
+                        goro_core::string::msg_cstr(&mode)
+                    ));
+                    return Err(None);
+                }
                 None => {
                     let path = match file.get(..7) {
                         Some(p) if p.eq_ignore_ascii_case(b"file://") => {

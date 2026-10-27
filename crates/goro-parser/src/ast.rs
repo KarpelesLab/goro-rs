@@ -176,6 +176,8 @@ pub enum ExprKind {
     StaticPropertyAccess {
         class: Box<Expr>,
         property: Vec<u8>,
+        /// The line of the property's name (the fetch is emitted there).
+        prop_line: u32,
     },
     DynamicStaticPropertyAccess {
         class: Box<Expr>,
@@ -253,6 +255,8 @@ pub enum ExprKind {
     ClassConstAccess {
         class: Box<Expr>,
         constant: Vec<u8>,
+        /// The line of the constant's name (the fetch is emitted there).
+        const_line: u32,
     },
     DynamicClassConstAccess {
         class: Box<Expr>,
@@ -446,6 +450,8 @@ pub struct CatchClause {
 pub struct ClosureUse {
     pub variable: Vec<u8>,
     pub by_ref: bool,
+    /// The variable's line (its binding is compiled there).
+    pub line: u32,
 }
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ClassModifiers {

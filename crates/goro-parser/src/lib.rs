@@ -80,6 +80,13 @@ pub fn is_php_parse_error(msg: &str) -> bool {
         || msg == "memory exhausted"
 }
 
+/// A scanner error php-src raises before the file is being compiled
+/// (flexible heredoc indentation of a body starting with an
+/// interpolation): reported in "[no active file]" on line 0.
+pub fn is_no_active_file_error(msg: &str, line: u32) -> bool {
+    line == 0 && msg.starts_with("Invalid body indentation level")
+}
+
 /// Take the pending lexer error, if any.
 pub fn take_lexer_error() -> Option<(String, u32)> {
     LEXER_ERROR.with(|e| e.borrow_mut().take())

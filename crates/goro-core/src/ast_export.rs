@@ -469,7 +469,9 @@ fn ex(s: &mut String, e: &Expr, prio: i32, indent: usize) {
             s.push_str(if *nullsafe { "?->" } else { "->" });
             export_var(s, property, indent);
         }
-        ExprKind::StaticPropertyAccess { class, property } => {
+        ExprKind::StaticPropertyAccess {
+            class, property, ..
+        } => {
             export_ns_name(s, class, indent);
             s.push_str("::$");
             if valid_var_name(property) {
@@ -801,7 +803,9 @@ fn ex(s: &mut String, e: &Expr, prio: i32, indent: usize) {
             binary(s, " |> ", (183, 183, 184), value, callable, prio, indent)
         }
         ExprKind::ConstantAccess(parts) => s.push_str(&join_name(parts)),
-        ExprKind::ClassConstAccess { class, constant } => {
+        ExprKind::ClassConstAccess {
+            class, constant, ..
+        } => {
             export_ns_name(s, class, indent);
             s.push_str("::");
             s.push_str(&lossy(constant));

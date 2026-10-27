@@ -288,6 +288,52 @@ impl Vm {
         )
     }
 
+    /// zend_handle_named_arg() for a named argument sent to the top pending
+    /// call: the error it raises at that send (an unknown name, or a
+    /// parameter a positional argument or an earlier named one already
+    /// passed), when the callee is known.
+    #[inline(never)]
+    pub(crate) fn named_send_error(&self, name: &[u8]) -> Option<String> {
+        let call = self.pending_calls.last()?;
+        // (a class without a constructor takes no arguments by name)
+        if call.target.no_ctor {
+            return Some(format!(
+                "Unknown named parameter ${}",
+                crate::string::msg_str(name)
+            ));
+        }
+        if call.named_args.iter().any(|(n, _)| n.as_slice() == name) {
+            return Some(format!(
+                "Named parameter ${} overwrites previous argument",
+                crate::string::msg_str(name)
+            ));
+        }
+        let params = self.unpack_known_params()?;
+        match params.iter().position(|p| p.as_slice() == name) {
+            None => Some(format!(
+                "Unknown named parameter ${}",
+                crate::string::msg_str(name)
+            )),
+            Some(i) if i < self.pending_positional_args(call) => Some(format!(
+                "Named parameter ${} overwrites previous argument",
+                crate::string::msg_str(name)
+            )),
+            Some(_) => None,
+        }
+    }
+
+    /// The positional arguments sent so far to `call` (without an implicit
+    /// `$this`).
+    fn pending_positional_args(&self, call: &crate::vm::PendingCall) -> usize {
+        match self.call_user_fn(call) {
+            Some(f) => call
+                .args
+                .len()
+                .saturating_sub(crate::internal_frames::implicit_args(f)),
+            None => call.args.len(),
+        }
+    }
+
     /// Whether the argument the top pending call takes next is known to be
     /// by value (a builtin's by-reference `array &$array` is passed the
     /// variable's array itself).

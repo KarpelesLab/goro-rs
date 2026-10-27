@@ -1343,6 +1343,12 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                 Value::String(s) if s.as_bytes() == b"proxy" => "lazy proxy ",
                 _ => "",
             };
+            // (an uninitialized lazy object whose properties table was
+            // built: its declared slots)
+            let prop_count = match obj_borrow.get_property(b"__lazy_htcount") {
+                Value::Long(n) if !lazy_prefix.is_empty() => n as usize,
+                _ => prop_count,
+            };
 
             // Initialized proxy: show as `lazy proxy object(C)#N (1) { ["instance"]=> <real> }`
             if lazy_prefix == "lazy proxy " {

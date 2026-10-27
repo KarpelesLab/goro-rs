@@ -5303,6 +5303,9 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 let mut removed: Vec<Value> = Vec::new();
                 let mut skipped: Vec<Vec<u8>> = Vec::new();
                 let mut lazy_count = 0usize;
+                // (dynamic properties mean the object's properties table
+                // was built: var_dump() then counts its declared slots)
+                let had_dynamic;
                 {
                     let mut ob = obj.borrow_mut();
                     let dyn_names: Vec<Vec<u8>> = ob
@@ -5313,6 +5316,7 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                         })
                         .map(|(n, _)| n.clone())
                         .collect();
+                    had_dynamic = !dyn_names.is_empty();
                     for n in dyn_names.iter().rev() {
                         removed.push(ob.get_property(n));
                         ob.remove_property(n);
@@ -5360,6 +5364,15 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                         })),
                     );
                     ob.set_property(b"__lazy_initializer".to_vec(), initializer);
+                    if had_dynamic {
+                        let slots = obj_defs
+                            .iter()
+                            .filter(|d| !(d.is_virtual && (d.has_get_hook || d.has_set_hook)))
+                            .count();
+                        ob.set_property(b"__lazy_htcount".to_vec(), Value::Long(slots as i64));
+                    } else {
+                        ob.remove_property(b"__lazy_htcount");
+                    }
                     if !skipped.is_empty() {
                         ob.set_property(
                             b"__lazy_skipped".to_vec(),

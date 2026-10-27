@@ -1669,6 +1669,8 @@ fn execute_php_inner_impl(
                     "\nFatal error: {} in {} on line {}\n",
                     err_msg, filename, e.span.line
                 )
+            } else if goro_parser::is_no_active_file_error(err_msg, e.span.line) {
+                format!("\nParse error: {} in [no active file] on line 0\n", err_msg)
             } else if goro_parser::is_php_parse_error(err_msg)
                 || err_msg.starts_with("The (real) cast")
                 || err_msg.starts_with("Invalid UTF-8 codepoint")
@@ -1693,7 +1695,11 @@ fn execute_php_inner_impl(
             // (the scanner's deprecations for what it read before the error)
             lexer_deprecations.sort_by_key(|(_, line)| *line);
             let mut out = String::new();
-            for (m, l) in lexer_deprecations.iter().filter(|(_, l)| *l <= e.span.line) {
+            // (not those zend_compile raises: nothing is compiled)
+            for (m, l) in lexer_deprecations
+                .iter()
+                .filter(|(m, l)| *l <= e.span.line && !m.starts_with("Using ${"))
+            {
                 out.push_str(&format!(
                     "\nDeprecated: {} in {} on line {}\n",
                     m, filename, l

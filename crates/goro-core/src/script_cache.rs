@@ -924,9 +924,14 @@ impl crate::vm::Vm {
                 let exc = self.create_exception(b"ParseError", &msg, e.span.line);
                 if let Value::Object(ref obj) = exc {
                     let mut ob = obj.borrow_mut();
+                    let file = if goro_parser::is_no_active_file_error(&e.message, e.span.line) {
+                        "[no active file]"
+                    } else {
+                        path
+                    };
                     ob.set_property(
                         b"file".to_vec(),
-                        Value::String(crate::string::PhpString::from_string(path.to_string())),
+                        Value::String(crate::string::PhpString::from_string(file.to_string())),
                     );
                     ob.set_property(b"line".to_vec(), Value::Long(e.span.line as i64));
                 }

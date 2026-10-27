@@ -1856,12 +1856,22 @@ impl<'a> Lexer<'a> {
                             break;
                         }
                         if (c != b' ' && c != b'\t') || in_code(k + skip) {
+                            // (a body starting with an interpolation is
+                            // checked before the file is compiled: no
+                            // active file, line 0)
+                            let interp = in_code(0)
+                                || content.starts_with(b"{$")
+                                || (content[0] == b'$'
+                                    && content.get(1).is_some_and(|&b| {
+                                        b.is_ascii_alphabetic() || b == b'_' || b >= 0x80
+                                    }));
+                            let at = if k + skip == 0 && interp { 0 } else { line_no };
                             crate::push_lexer_error(
                                 format!(
                                     "Invalid body indentation level (expecting an indentation level of at least {})",
                                     indent_len
                                 ),
-                                line_no,
+                                at,
                             );
                             break;
                         }

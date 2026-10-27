@@ -2037,7 +2037,21 @@ fn call_scoped_method_callable(
                 Ok(Value::Null)
             });
         }
-        let (native, h) = vm.find_native_class_handler(&target)?;
+        let Some((native, h)) = vm.find_native_class_handler(&target) else {
+            // An SPL class's method, on an object of a subclass
+            let obj = this.filter(|_| vm.spl_builtin_base(&target).is_some())?;
+            let mut a = Vec::with_capacity(call_args.len() + 1);
+            a.push(obj);
+            a.extend_from_slice(call_args);
+            let had = vm.current_exception.is_some();
+            let line = vm.current_line;
+            let r = vm.spl_deferred_call_ex(m, &a, named_args, line, false, true);
+            return Some(if !had && vm.current_exception.is_some() {
+                Err(fail(vm))
+            } else {
+                Ok(r)
+            });
+        };
         if !(h.has_method)(&native, m, this.is_none()) {
             return None;
         }
@@ -6851,8 +6865,13 @@ fn class_exists_impl(
     let raw_bytes = name.as_bytes();
     let name_bytes = raw_bytes.strip_prefix(b"\\").unwrap_or(raw_bytes);
     let name_lower = name_bytes.to_ascii_lowercase();
+    let autoload = args.get(1).is_none_or(|v| v.to_bool());
+    // (zend_lookup_class() finds no class of an empty name)
+    if autoload && name_bytes.is_empty() {
+        return Ok(Value::False);
+    }
     let mut kind = vm.class_kind(&name_lower);
-    if kind.is_none() && args.get(1).is_none_or(|v| v.to_bool()) {
+    if kind.is_none() && autoload {
         vm.try_autoload_class(name_bytes);
         kind = vm.class_kind(&name_lower);
     }
@@ -6868,10 +6887,53 @@ fn class_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         matches!(k, ClassKind::Class | ClassKind::Enum)
     })
 }
+/// The class table's order: the internal classes as their modules
+/// register them (in module startup order), then the user classes and
+/// aliases as they are declared.
+#[inline(never)]
+fn class_table_order(vm: &Vm, names: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    use std::collections::HashMap;
+    let mut rank: HashMap<Vec<u8>, (usize, usize)> = HashMap::new();
+    for (ext, list) in goro_core::ext_order::EXT_CLASSES {
+        let m = MODULE_ORDER
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case(ext))
+            .unwrap_or(MODULE_ORDER.len());
+        for (i, c) in list.iter().enumerate() {
+            rank.entry(c.to_ascii_lowercase().into_bytes())
+                .or_insert((m, i));
+        }
+    }
+    let mut keyed: Vec<((usize, usize, usize), Vec<u8>)> = names
+        .into_iter()
+        .enumerate()
+        .map(|(pos, n)| {
+            let l = n.to_ascii_lowercase();
+            let internal = match vm.classes.get(&l) {
+                // (an alias is declared like a user class)
+                Some(c) => c.filename.is_none() && c.name.eq_ignore_ascii_case(&n),
+                None => true,
+            };
+            let key = if !internal {
+                (2, 0, pos)
+            } else {
+                match rank.get(&l) {
+                    Some(&(m, i)) => (0, m, i),
+                    None => (1, 0, pos),
+                }
+            };
+            (key, n)
+        })
+        .collect();
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    keyed.into_iter().map(|(_, n)| n).collect()
+}
+
 fn get_declared_classes(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     use goro_core::class_table::ClassKind;
     let mut result = PhpArray::new();
-    for name in vm.declared_class_names(&[ClassKind::Class, ClassKind::Enum]) {
+    let names = vm.declared_class_names(&[ClassKind::Class, ClassKind::Enum]);
+    for name in class_table_order(vm, names) {
         result.push(Value::String(PhpString::from_vec(name)));
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
@@ -6880,7 +6942,8 @@ fn get_declared_classes(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> 
 fn get_declared_traits_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     use goro_core::class_table::ClassKind;
     let mut result = PhpArray::new();
-    for name in vm.declared_class_names(&[ClassKind::Trait]) {
+    let names = vm.declared_class_names(&[ClassKind::Trait]);
+    for name in class_table_order(vm, names) {
         result.push(Value::String(PhpString::from_vec(name)));
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
@@ -6889,7 +6952,8 @@ fn get_declared_traits_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError
 fn get_declared_interfaces_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     use goro_core::class_table::ClassKind;
     let mut result = PhpArray::new();
-    for name in vm.declared_class_names(&[ClassKind::Interface]) {
+    let names = vm.declared_class_names(&[ClassKind::Interface]);
+    for name in class_table_order(vm, names) {
         result.push(Value::String(PhpString::from_vec(name)));
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
@@ -11337,6 +11401,10 @@ fn is_subclass_of_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// zend_lookup_class(): true if the class exists, autoloading it if needed.
 fn class_known_or_autoload(vm: &mut Vm, name: &[u8]) -> bool {
     let name = name.strip_prefix(b"\\").unwrap_or(name);
+    // (zend_lookup_class() finds no class of an empty name)
+    if name.is_empty() {
+        return false;
+    }
     let lower = lower_bytes(name);
     if vm.classes.contains_key(&lower) || vm.is_known_builtin_class(&lower) {
         return true;
@@ -11480,15 +11548,21 @@ fn get_parent_class_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(Value::String(s)) => {
             let name = s.as_bytes().strip_prefix(b"\\").unwrap_or(s.as_bytes());
             let lower = lower_bytes(name);
-            if !vm.classes.contains_key(&lower) && !vm.is_known_builtin_class(&lower) {
-                vm.try_autoload_class(name);
+            if name.is_empty()
+                || !vm.classes.contains_key(&lower) && !vm.is_known_builtin_class(&lower)
+            {
+                if !name.is_empty() {
+                    vm.try_autoload_class(name);
+                }
                 if vm.current_exception.is_some() {
                     return Err(VmError {
                         message: "Uncaught exception".into(),
                         line: vm.current_line,
                     });
                 }
-                if !vm.classes.contains_key(&lower) && !vm.is_known_builtin_class(&lower) {
+                if name.is_empty()
+                    || !vm.classes.contains_key(&lower) && !vm.is_known_builtin_class(&lower)
+                {
                     return Err(throw_type_error_msg(vm, "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, string given".to_string()));
                 }
             }
@@ -16544,7 +16618,7 @@ fn get_class_methods_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::String(s) => {
             let name = s.as_bytes().to_vec();
             let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if !vm.classes.contains_key(&lower) {
+            if !vm.classes.contains_key(&lower) && !name.is_empty() {
                 vm.try_autoload_class(&name);
                 if vm.current_exception.is_some() {
                     return Err(VmError {
@@ -16553,8 +16627,9 @@ fn get_class_methods_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     });
                 }
             }
-            if !vm.classes.contains_key(&lower)
-                && goro_core::reflection::class_method_list(vm, &lower).is_none()
+            if name.is_empty()
+                || (!vm.classes.contains_key(&lower)
+                    && goro_core::reflection::class_method_list(vm, &lower).is_none())
             {
                 return Err(throw_type_error_msg(
                     vm,
@@ -16818,7 +16893,7 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     // Z_PARAM_CLASS throws a TypeError when the class is not declared;
     // the message uses the original-case spelling supplied by the caller.
-    if !vm.classes.contains_key(&name_lower) && internal.is_none() {
+    if bare.is_empty() || (!vm.classes.contains_key(&name_lower) && internal.is_none()) {
         let msg = format!(
             "get_class_vars(): Argument #1 ($class) must be a valid class name, {} given",
             goro_core::string::msg_cstr(class_name.as_bytes())

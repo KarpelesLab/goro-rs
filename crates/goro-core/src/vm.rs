@@ -4499,6 +4499,42 @@ impl Vm {
         None
     }
 
+    /// internal_parent_property_error() for a parent registered natively
+    /// (its class entry may not list the virtual properties its stub
+    /// declares): the stub's properties the native entry does not have.
+    #[cold]
+    #[inline(never)]
+    fn native_parent_property_error(
+        &self,
+        class: &ClassEntry,
+        parent_lower: &[u8],
+    ) -> Option<String> {
+        let stub = crate::stubs::class_entry(self, parent_lower)?;
+        let native = self.classes.get(parent_lower);
+        for pp in &stub.properties {
+            if pp.visibility == Visibility::Private
+                || native.is_some_and(|n| n.properties.iter().any(|p| p.name == pp.name))
+            {
+                continue;
+            }
+            let Some(cp) = class
+                .properties
+                .iter()
+                .find(|p| p.name == pp.name && p.declaring_class.eq_ignore_ascii_case(&class.name))
+            else {
+                continue;
+            };
+            let mut pp = pp.clone();
+            if let Some(c) = crate::stubs::find_class(&pp.declaring_class) {
+                pp.declaring_class = c.name.as_bytes().to_vec();
+            }
+            if let Some(e) = self.trait_property_inheritance_error(class, cp, &pp) {
+                return Some(e);
+            }
+        }
+        None
+    }
+
     /// zend_do_link_class() binds a class's (concrete) trait methods before
     /// it inherits its parent's: the method table lists the class's own
     /// methods, then the trait ones (in binding order, each alias before its
@@ -32190,6 +32226,26 @@ impl Vm {
                             op.line,
                         )
                     };
+                    if !self.pending_calls.is_empty() {
+                        // zend_handle_named_arg(): a name the callee does not
+                        // take, or one already passed, fails at its send (on
+                        // that argument's line)
+                        if let Some(msg) = self.named_send_error(&name) {
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     if let Some(call) = self.pending_calls.last_mut() {
                         call.named_args.push((name, val));
                     }
@@ -49417,10 +49473,15 @@ impl Vm {
                                         self.create_exception(b"ParseError", &msg, e.span.line);
                                     if let Value::Object(ref obj) = exc {
                                         let mut ob = obj.borrow_mut();
-                                        ob.set_property(
-                                            b"file".to_vec(),
-                                            Value::String(PhpString::from_msg(&abs_path)),
-                                        );
+                                        let file = if goro_parser::is_no_active_file_error(
+                                            &e.message,
+                                            e.span.line,
+                                        ) {
+                                            PhpString::from_bytes(b"[no active file]")
+                                        } else {
+                                            PhpString::from_msg(&abs_path)
+                                        };
+                                        ob.set_property(b"file".to_vec(), Value::String(file));
                                         ob.set_property(
                                             b"line".to_vec(),
                                             Value::Long(e.span.line as i64),
@@ -50511,7 +50572,7 @@ impl Vm {
                             let isset_guard_key =
                                 (isset_obj_id, prop_name.as_bytes().to_vec(), 1u8);
                             let isset_already = self.magic_prop_guards.contains(&isset_guard_key);
-                            if has_isset && !isset_already && self.magic_depth < 5 {
+                            if has_isset && !isset_already {
                                 // (a #[\Deprecated] magic method warns)
                                 self.magic_method_deprecation(&class_lower, b"__isset");
                                 self.magic_depth += 1;
@@ -51523,7 +51584,7 @@ impl Vm {
                                     message: msg,
                                     line: op.line,
                                 });
-                            } else if has_unset && self.magic_depth < 5 && {
+                            } else if has_unset && {
                                 let oid = obj.borrow().object_id;
                                 !self.magic_prop_guards.contains(&(
                                     oid,
@@ -55825,6 +55886,9 @@ impl Vm {
                                         };
                                         let t1 = thunk_op(const_val, &trait_def);
                                         let t2 = thunk_op(&ev, &class);
+                                        // (an exception evaluating them stays pending:
+                                        // the incompatibility error reports it first)
+                                        let mut thunk_exc: Option<Value> = None;
                                         let thunks_same = if t1.is_none() && t2.is_none() {
                                             None
                                         } else {
@@ -55840,16 +55904,16 @@ impl Vm {
                                                             &class.name,
                                                             "",
                                                         );
-                                                        if r.is_err() {
-                                                            vm.current_exception = None;
-                                                        }
                                                         r.ok()
                                                     }
                                                     None => Some(vm.resolve_deferred_value(v)),
                                                 }
                                             };
                                             let e1 = eval(self, &t1, const_val);
+                                            thunk_exc = self.current_exception.take();
                                             let e2 = eval(self, &t2, &ev);
+                                            let exc2 = self.current_exception.take();
+                                            thunk_exc = thunk_exc.or(exc2);
                                             Some(match (e1, e2) {
                                                 (Some(a), Some(b)) => a.identical(&b),
                                                 _ => {
@@ -55899,14 +55963,19 @@ impl Vm {
                                                         .map(|t| t.name.clone())
                                                 })
                                                 .unwrap_or_else(|| class.name.clone());
+                                            let message = format!(
+                                                "{} and {} define the same constant ({}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
+                                                crate::string::msg_str(&first_def),
+                                                crate::string::msg_str(&trait_def.name),
+                                                crate::string::msg_str(const_name),
+                                                crate::string::msg_str(&class.name)
+                                            );
+                                            if thunk_exc.is_some() {
+                                                self.current_exception = thunk_exc;
+                                                return Err(self.emit_fatal_at(&message, op.line));
+                                            }
                                             return Err(VmError {
-                                                message: format!(
-                                                    "{} and {} define the same constant ({}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
-                                                    crate::string::msg_str(&first_def),
-                                                    crate::string::msg_str(&trait_def.name),
-                                                    crate::string::msg_str(const_name),
-                                                    crate::string::msg_str(&class.name)
-                                                ),
+                                                message,
                                                 line: op.line,
                                             });
                                         }
@@ -56231,6 +56300,16 @@ impl Vm {
                                         ),
                                         line: op.line,
                                     });
+                                }
+                                // A native parent's declared (stub) properties the
+                                // class redeclares (do_inherit_property()).
+                                if parent.filename.is_none() {
+                                    if let Some(msg) = self.native_parent_property_error(&class, &parent_lower) {
+                                        return Err(VmError {
+                                            message: msg,
+                                            line: op.line,
+                                        });
+                                    }
                                 }
                                 // Check readonly inheritance rules
                                 if !class.is_readonly && parent.is_readonly {
@@ -62068,7 +62147,6 @@ impl Vm {
                                 });
                             } else if matches!(prop, Value::Null)
                                 && (hidden_private_prop || !obj.borrow().has_property(&storage_key))
-                                && self.magic_depth < 5
                             {
                                 // Try __get magic method (with recursion guard)
                                 let has_get = self
@@ -63686,7 +63764,6 @@ impl Vm {
                             let already_setting = self.magic_prop_guards.contains(&guard_key);
                             if has_set
                                 && !obj.borrow().has_property(&pkey)
-                                && self.magic_depth < 5
                                 && !already_setting
                             {
                                 // (a #[\Deprecated] magic method warns)

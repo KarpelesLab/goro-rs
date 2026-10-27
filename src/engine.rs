@@ -343,9 +343,10 @@ pub fn compile(
             };
             // (the scanner's deprecations for what it read before the
             // error: non-canonical casts...)
+            // (not those zend_compile raises: nothing is compiled)
             let prior = lexer_deprecations
                 .into_iter()
-                .filter(|(_, l)| *l <= e.span.line)
+                .filter(|(m, l)| *l <= e.span.line && !m.starts_with("Using ${"))
                 .map(|(m, l)| ("Deprecated", m, l))
                 .collect();
             return Err(CompileError {
@@ -561,6 +562,13 @@ pub fn report_compile_error(vm: &mut Vm, e: &CompileError, filename: &str) {
             return;
         }
     }
+    // (a scanner error raised before the file is compiled)
+    let filename =
+        if e.kind == "Parse error" && goro_parser::is_no_active_file_error(&e.message, e.line) {
+            "[no active file]"
+        } else {
+            filename
+        };
     vm.display_error(e.kind, &e.message, filename, e.line);
 }
 

@@ -300,9 +300,10 @@ fn use_path_arg(args: &[Value], i: usize) -> i64 {
 /// PHP_FUNCTION(gzopen)
 pub(crate) fn h_gzopen(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     let p = path_arg(vm, args, "gzopen")?;
+    // (raw bytes kept for the invalid-mode diagnostic)
     let mode = args
         .get(1)
-        .map(|v| v.deref().to_php_string().to_string_lossy())
+        .map(|v| goro_core::string::msg_str(v.deref().to_php_string().as_bytes()).into_owned())
         .unwrap_or_default();
     let options = REPORT_ERRORS | use_path_arg(args, 2);
     let ctx = default_context();
