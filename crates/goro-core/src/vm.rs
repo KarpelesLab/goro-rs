@@ -50781,10 +50781,8 @@ impl Vm {
                                 self.class_scope_stack.pop();
                                 self.magic_prop_guards.remove(&isset_guard_key);
                                 self.magic_depth -= 1;
-                                if {
-                                    self.warn_nan_bool_unsilenced(&isset_result, op.line);
-                                    isset_result.is_truthy()
-                                } {
+                                self.warn_nan_bool_unsilenced(&isset_result, op.line);
+                                if isset_result.is_truthy() {
                                     Value::True
                                 } else {
                                     Value::False
@@ -54592,10 +54590,8 @@ impl Vm {
                                         line: op.line,
                                     });
                                 }
-                                if {
-                                    self.warn_nan_bool_unsilenced(&exists_result, op.line);
-                                    exists_result.is_truthy()
-                                } {
+                                self.warn_nan_bool_unsilenced(&exists_result, op.line);
+                                if exists_result.is_truthy() {
                                     // empty() on an SplFixedArray overriding
                                     // offsetExists(): its result alone
                                     // (spl_fixedarray_object_has_dimension()
