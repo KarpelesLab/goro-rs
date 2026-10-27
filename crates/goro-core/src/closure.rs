@@ -2600,14 +2600,15 @@ thread_local! {
     /// their own (see closure_with_own_statics): the variables go with the
     /// closure (zend_closure_free_storage destroys its op array's statics).
     static DEAD_CLOSURE_STATICS: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+    /// DEAD_CLOSURE_STATICS is not empty (a flag without drop glue: the
+    /// release points' idle test reads it).
+    static DEAD_CLOSURE_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Freed closures whose static variables are still to be released.
 #[inline]
 pub(crate) fn has_dead_closure_statics() -> bool {
-    DEAD_CLOSURE_STATICS
-        .try_with(|d| !d.borrow().is_empty())
-        .unwrap_or(false)
+    DEAD_CLOSURE_PENDING.with(|p| p.get())
 }
 
 /// A Closure object is freed: remember its function when it has static
@@ -2623,7 +2624,12 @@ pub(crate) fn note_dropped_closure(inner: &Value) {
             match a.values().next() {
                 Some(Value::String(s)) if s.as_bytes().contains(&b'#') => {
                     let n = s.as_bytes().to_vec();
-                    let _ = DEAD_CLOSURE_STATICS.try_with(|d| d.borrow_mut().push(n));
+                    if DEAD_CLOSURE_STATICS
+                        .try_with(|d| d.borrow_mut().push(n))
+                        .is_ok()
+                    {
+                        DEAD_CLOSURE_PENDING.with(|p| p.set(true));
+                    }
                 }
                 _ => {}
             }
@@ -2633,7 +2639,12 @@ pub(crate) fn note_dropped_closure(inner: &Value) {
     };
     if name.contains(&b'#') && is_closure_fn_name(name) {
         let n = name.to_vec();
-        let _ = DEAD_CLOSURE_STATICS.try_with(|d| d.borrow_mut().push(n));
+        if DEAD_CLOSURE_STATICS
+            .try_with(|d| d.borrow_mut().push(n))
+            .is_ok()
+        {
+            DEAD_CLOSURE_PENDING.with(|p| p.set(true));
+        }
     }
 }
 
@@ -2644,6 +2655,7 @@ impl Vm {
     #[inline(never)]
     pub(crate) fn release_dead_closure_statics(&mut self) {
         let dead = DEAD_CLOSURE_STATICS.with(|d| std::mem::take(&mut *d.borrow_mut()));
+        DEAD_CLOSURE_PENDING.with(|p| p.set(false));
         if dead.is_empty() {
             return;
         }
@@ -2674,6 +2686,7 @@ impl Vm {
         }
         if !retry.is_empty() {
             DEAD_CLOSURE_STATICS.with(|d| d.borrow_mut().extend(retry));
+            DEAD_CLOSURE_PENDING.with(|p| p.set(true));
         }
         drop(released);
     }

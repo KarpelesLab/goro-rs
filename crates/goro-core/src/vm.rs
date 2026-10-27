@@ -11663,18 +11663,21 @@ impl Vm {
     #[inline(never)]
     pub(crate) fn quiet_release_budget(&self) -> u32 {
         if !self.finally_generators.is_empty()
+            || self.unset_slot_pending.is_some()
             || crate::value::has_freed_resources()
             || !crate::gc::release_quiet()
-            || self.unset_slot_pending.is_some()
             || crate::closure::has_dead_closure_statics()
         {
             return 0;
         }
         let (start, n) = self.destructible_objects.young_scan(64);
+        // (the young entries: none, mostly, the long-lived ones only listed)
+        let young = self.destructible_objects.get(start..).unwrap_or_default();
         if n == 0
-            || self.destructible_objects[start..]
-                .iter()
-                .any(|v| !matches!(v, Value::Object(o) if Rc::strong_count(o) > 1))
+            || (!young.is_empty()
+                && young
+                    .iter()
+                    .any(|v| !matches!(v, Value::Object(o) if Rc::strong_count(o) > 1)))
         {
             return 0;
         }
