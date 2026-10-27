@@ -44,6 +44,8 @@ pub enum Mode {
     Xts,
     Wrap,
     WrapPad,
+    /// CBC with ciphertext stealing, OpenSSL's default "CS1" variant.
+    CbcCts,
 }
 
 #[derive(Clone, Debug)]
@@ -167,6 +169,17 @@ fn build_table() -> Vec<CipherSpec> {
             16,
             false,
             Some(oids[1]),
+        ));
+        t.push(spec(
+            &n("cbc-cts"),
+            &[],
+            Algo::Aes,
+            Mode::CbcCts,
+            k,
+            16,
+            1,
+            false,
+            None,
         ));
         t.push(spec(
             &n("ofb"),
@@ -434,6 +447,17 @@ fn build_table() -> Vec<CipherSpec> {
             k,
             16,
             16,
+            false,
+            None,
+        ));
+        t.push(spec(
+            &n("cbc-cts"),
+            &[],
+            Algo::Camellia,
+            Mode::CbcCts,
+            k,
+            16,
+            1,
             false,
             None,
         ));
@@ -1267,11 +1291,89 @@ pub fn run(op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail> {
         Mode::Ccm => ccm(blk.as_ref(), op, data),
         Mode::Ocb => ocb(blk.as_ref(), op, data),
         Mode::Wrap | Mode::WrapPad => wrap(blk.as_ref(), op, data),
+        Mode::CbcCts => cbc_cts(blk.as_ref(), op, data),
         Mode::Stream | Mode::Xts => Err(Fail::Silent),
     }
 }
 
 /// CTR keystream XOR; `inc32` restricts the increment to the low 32 bits (GCM).
+/// CBC with ciphertext stealing, CS1 (OpenSSL's cipher_cts.c): the data
+/// (at least one block) is CBC-processed, a partial last block steals the
+/// tail of the previous ciphertext block, which is output truncated before
+/// the last one. No padding.
+#[inline(never)]
+fn cbc_cts(blk: &dyn Block, op: &Op, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Fail> {
+    let bs = blk.bs();
+    if data.len() < bs {
+        return Err(Fail::Silent);
+    }
+    let mut iv = op.iv[..bs.min(op.iv.len())].to_vec();
+    iv.resize(bs, 0);
+    let tail = data.len() % bs;
+    // (the blocks processed as plain CBC)
+    let full = if tail == 0 {
+        data.len()
+    } else {
+        data.len() - tail - bs
+    };
+    let mut out = data.to_vec();
+    let mut chain = iv;
+    for c in out[..full].chunks_mut(bs) {
+        if op.enc {
+            for i in 0..bs {
+                c[i] ^= chain[i];
+            }
+            blk.enc(c);
+            chain.copy_from_slice(c);
+        } else {
+            let saved = c.to_vec();
+            blk.dec(c);
+            for i in 0..bs {
+                c[i] ^= chain[i];
+            }
+            chain = saved;
+        }
+    }
+    if tail == 0 {
+        return Ok((out, Vec::new()));
+    }
+    let d = tail;
+    if op.enc {
+        // C(n-1) = E(P(n-1) ^ chain); Cn = E(C(n-1) ^ (Pn || 0))
+        let mut cn1 = data[full..full + bs].to_vec();
+        for i in 0..bs {
+            cn1[i] ^= chain[i];
+        }
+        blk.enc(&mut cn1);
+        let mut cn = vec![0u8; bs];
+        cn[..d].copy_from_slice(&data[full + bs..]);
+        for i in 0..bs {
+            cn[i] ^= cn1[i];
+        }
+        blk.enc(&mut cn);
+        out.truncate(full);
+        out.extend_from_slice(&cn1[..d]);
+        out.extend_from_slice(&cn);
+    } else {
+        // the input is C(n-1)[..d] || Cn
+        let cpart = &data[full..full + d];
+        let mut x = data[full + d..].to_vec();
+        blk.dec(&mut x);
+        let mut cn1 = cpart.to_vec();
+        cn1.extend_from_slice(&x[d..]);
+        let pn: Vec<u8> = (0..d).map(|i| x[i] ^ cpart[i]).collect();
+        let mut pn1 = cn1;
+        blk.dec(&mut pn1);
+        for i in 0..bs {
+            pn1[i] ^= chain[i];
+        }
+        out.truncate(full);
+        out.extend_from_slice(&pn1);
+        out.extend_from_slice(&pn);
+    }
+    Ok((out, Vec::new()))
+}
+
 fn ctr_xor(blk: &dyn Block, ctr: &mut [u8], data: &[u8], inc32: bool) -> Vec<u8> {
     let bs = blk.bs();
     let mut out = Vec::with_capacity(data.len());
