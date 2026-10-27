@@ -366,6 +366,18 @@ macro_rules! native_exc_check {
     };
 }
 
+/// The property an Exception / Error getter returns.
+#[inline]
+fn throwable_getter_prop(method_lower: &[u8]) -> Option<&'static [u8]> {
+    Some(match method_lower {
+        b"getmessage" => b"message",
+        b"getcode" => b"code",
+        b"getfile" => b"file",
+        b"getline" => b"line",
+        _ => return None,
+    })
+}
+
 /// INIT_*: the pending call just set up names a function or method sure
 /// not to exist (see Vm::init_call_undefined): the call is dropped and the
 /// Error thrown, before any argument is evaluated.
@@ -5307,12 +5319,15 @@ impl Vm {
         }
     }
 
-    /// unset() of typed property `prop` declared by an internal class (no
-    /// user declaration): the slot stays, uninitialized (var_dump() shows
-    /// it as such).
+    /// unset() of a property declared by an internal class (no user
+    /// declaration): the slot stays, undefined (a typed one is shown as
+    /// uninitialized by var_dump(); an untyped one is not shown, rather
+    /// than with its stub default).
     #[inline(never)]
     pub(crate) fn unset_keeps_internal_slot(&self, class_lower: &[u8], prop: &[u8]) -> bool {
-        self.unset_internal_typed_prop(class_lower, prop)
+        let scope = self.current_class_scope().map(|s| s.to_ascii_lowercase());
+        self.find_property_def_walk(class_lower, prop, scope.as_deref())
+            .map(|(_, decl, ..)| decl)
             .is_some_and(|d| {
                 self.classes
                     .get(&d.to_ascii_lowercase())
@@ -21111,6 +21126,84 @@ impl Vm {
         self.throwable_builtin_method(obj, named_lower, method_lower)
     }
 
+    /// Exception / Error reading its own property `name` for a getter
+    /// (GET_PROPERTY(): zend_read_property() in the scope of the base
+    /// class): an unset property warns ("Undefined property"), or, typed,
+    /// throws its uninitialized-access Error from the getter's frame
+    /// (current_exception is set; the value is then null).
+    #[inline(never)]
+    pub(crate) fn throwable_own_prop(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        name: &[u8],
+        method: &[u8],
+        line: u32,
+    ) -> Value {
+        let (found, class_name) = {
+            let b = obj.borrow();
+            (
+                b.properties
+                    .iter()
+                    .find(|(k, _)| k.as_slice() == name)
+                    .map(|(_, v)| v.deref()),
+                b.class_name.clone(),
+            )
+        };
+        match found {
+            Some(Value::Undef) | None => {}
+            Some(v) => return v,
+        }
+        let cls_lower = class_name.to_ascii_lowercase();
+        let base: &[u8] = if cls_lower == b"error"
+            || is_builtin_subclass(&cls_lower, b"error")
+            || self.class_extends(&cls_lower, b"error")
+        {
+            b"Error"
+        } else {
+            b"Exception"
+        };
+        let name_s = String::from_utf8_lossy(name);
+        if matches!(name, b"file" | b"line") {
+            let msg = format!(
+                "Typed property {}::${} must not be accessed before initialization",
+                String::from_utf8_lossy(base),
+                name_s
+            );
+            // (thrown inside the getter: its frame is the trace's first)
+            let method_disp: &[u8] = match method.to_ascii_lowercase().as_slice() {
+                b"getfile" => b"getFile",
+                b"getline" => b"getLine",
+                b"__tostring" => b"__toString",
+                _ => method,
+            };
+            self.call_stack.push((
+                format!(
+                    "{}->{}",
+                    String::from_utf8_lossy(base),
+                    String::from_utf8_lossy(method_disp)
+                ),
+                self.current_file.clone(),
+                line,
+                Vec::new(),
+                true,
+            ));
+            self.note_frame_this(&Value::Object(obj.clone()));
+            let exc = self.create_exception(b"Error", &msg, line);
+            self.call_stack.pop();
+            self.current_exception = Some(exc);
+            return Value::Null;
+        }
+        self.emit_warning_at(
+            &format!(
+                "Undefined property: {}::${}",
+                crate::value::display_class_name(&class_name),
+                name_s
+            ),
+            line,
+        );
+        Value::Null
+    }
+
     /// Exception::getMessage() / getFile() / getLine() of a property not of
     /// its type: zval_get_string() (a Stringable's __toString()) /
     /// zval_get_long().
@@ -21119,6 +21212,9 @@ impl Vm {
         let v = v.deref();
         if method_lower == b"getline" {
             return Value::Long(v.to_long());
+        }
+        if matches!(v, Value::Array(_)) {
+            self.emit_warning("Array to string conversion");
         }
         Value::String(self.value_to_string(&v))
     }
@@ -21163,11 +21259,19 @@ impl Vm {
                 v
             }
         };
+        if let Some(pname) = throwable_getter_prop(method_lower) {
+            let disp = String::from_utf8_lossy(method_lower).into_owned();
+            let line = self.current_line;
+            let v = self.throwable_own_prop(obj, pname, disp.as_bytes(), line);
+            if self.current_exception.is_some() {
+                return Some(Value::Null);
+            }
+            return Some(match method_lower {
+                b"getcode" => v,
+                _ => cast(self, v),
+            });
+        }
         Some(match method_lower {
-            b"getmessage" => cast(self, prop(b"message")),
-            b"getcode" => prop(b"code"),
-            b"getfile" => cast(self, prop(b"file")),
-            b"getline" => cast(self, prop(b"line")),
             b"gettrace" => obj.borrow().throwable_get(b"trace"),
             b"getprevious" => obj.borrow().throwable_get(b"previous"),
             b"getseverity" => {
@@ -26808,6 +26912,26 @@ impl Vm {
                                 Value::Undef => Value::Null,
                                 v => self.dup_array_value(v.deref()),
                             };
+                            self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
+                            continue 'exec;
+                        }
+                        if matches!(op_array.literals.get(k as usize), Some(Value::Long(5))) {
+                            // The value of `$a[k] = $v` / `$o->p = $v` used as
+                            // a value: an undefined $v is left undefined, for
+                            // ASSIGN_DIM / ASSIGN_OBJ to report when it reads
+                            // its OP_DATA (undef_op_data_warn()).
+                            if matches!(Self::read_operand_raw(&cvs, &op.op1).deref(), Value::Undef) {
+                                self.write_operand(
+                                    &op.result,
+                                    Value::Undef,
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                );
+                                continue 'exec;
+                            }
+                            let v = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                            let v = self.dup_stored_array(&op.op1, v);
                             self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
                             continue 'exec;
                         }
@@ -43710,6 +43834,9 @@ impl Vm {
                         } else {
                             key_val
                         };
+                        if Self::undef_tmp(&op.op2, &tmps) {
+                            self.undef_op_data_warn(op_array, ip, &op.op2, &cvs, &mut tmps, op.line);
+                        }
                         let val = self.read_operand_warn(
                             &op.op2,
                             &cvs,
@@ -43797,6 +43924,12 @@ impl Vm {
                             };
                             // Assigning to an element that is a reference writes through it.
                             // (Storing a Reference itself rebinds the slot.)
+                            // The array is separated first: of storage shared
+                            // with copies, a reference only the storage holds
+                            // is a plain value of this array's own copy.
+                            if let Ok(mut a) = arr.try_borrow_mut() {
+                                a.make_unique();
+                            }
                             let existing_ref = if matches!(val, Value::Reference(_)) {
                                 None
                             } else {
@@ -51674,8 +51807,16 @@ impl Vm {
                 OpCode::PropertyUnset => match outlined(|| -> Result<Flow, VmError> {
                     // Remove property from object: op1 = object, op2 = property name
                     let obj_val_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // (UNSET_OBJ reads its name: an undefined variable warns)
                     let prop_name = self
-                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                        .read_operand_warn(
+                            &op.op2,
+                            &cvs,
+                            &tmps,
+                            &op_array.literals,
+                            op_array,
+                            op.line,
+                        )
                         .to_php_string();
                     // $obj->p naming a static property (zend_get_property_offset).
                     if let Value::Object(o) = &obj_val_raw {
@@ -53368,6 +53509,24 @@ impl Vm {
                         line: op.line,
                     });
                 }
+                OpCode::CufCheck => match outlined(|| -> Result<Flow, VmError> {
+                    let fname = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    self.cuf_init_check(&fname, op.line);
+                    native_exc_check!(
+                        self,
+                        exception_handlers,
+                        pending_calls_catch_depth,
+                        ip,
+                        op.line
+                    );
+                    Ok(Flow::Next)
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => continue 'exec,
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => return Err(e),
+                },
+
                 OpCode::EmitNotice => {
                     // op2 = Const(1): only when the preceding call did not
                     // return by reference.
@@ -53992,8 +54151,17 @@ impl Vm {
 
                 OpCode::PropertyGetRef => match outlined(|| -> Result<Flow, VmError> {
                     let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // (FETCH_OBJ_W reads its name: an undefined variable warns)
+                    let name_val = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     let prop_name =
-                        match self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).deref() {
+                        match name_val.deref() {
                             // A dynamic name object is converted with __toString().
                             o @ Value::Object(_) => self.value_to_string(&o),
                             v => v.to_php_string(),
@@ -61599,7 +61767,7 @@ impl Vm {
                     // zval_try_get_string() of the property name (an undefined
                     // variable warns; ++/--'s write-back reports it)
                     let name_val = if matches!(op.op2, OperandType::Cv(_))
-                        && matches!(op.opcode, OpCode::PropertyGet | OpCode::PropertyGetRW)
+                        && !matches!(op.opcode, OpCode::PropertyGetIncDec | OpCode::PropertyGetIs)
                     {
                         self.read_operand_warn(
                             &op.op2,
@@ -65385,6 +65553,13 @@ impl Vm {
                                         b"string",
                                         Value::String(PhpString::from_string(s.clone())),
                                     );
+                                    native_exc_check!(
+                                        self,
+                                        exception_handlers,
+                                        pending_calls_catch_depth,
+                                        ip,
+                                        op.line
+                                    );
                                     Some(s)
                                 }
                                 _ => None,
@@ -65394,13 +65569,22 @@ impl Vm {
                         };
                         let builtin_result = if let Some(t) = throwable_string {
                             Some(Value::String(PhpString::from_string(t)))
+                        } else if is_throwable
+                            && !has_user_method
+                            && let Some(pname) = throwable_getter_prop(&method_name_lower)
+                        {
+                            let v = self.throwable_own_prop(obj, pname, method_name.as_bytes(), op.line);
+                            native_exc_check!(
+                                self,
+                                exception_handlers,
+                                pending_calls_catch_depth,
+                                ip,
+                                op.line
+                            );
+                            Some(v)
                         } else if is_throwable && !has_user_method {
                             let obj_borrow = obj.borrow();
                             match method_name_lower.as_slice() {
-                                b"getmessage" => Some(obj_borrow.get_property(b"message")),
-                                b"getcode" => Some(obj_borrow.get_property(b"code")),
-                                b"getfile" => Some(obj_borrow.get_property(b"file")),
-                                b"getline" => Some(obj_borrow.get_property(b"line")),
                                 b"gettrace" => Some(obj_borrow.throwable_get(b"trace")),
                                 b"gettraceasstring" | b"__tostring" => None,
                                 b"getprevious" => Some(obj_borrow.throwable_get(b"previous")),
@@ -66772,10 +66956,11 @@ impl Vm {
     ) -> String {
         let obj_borrow = obj.borrow();
         let class_display = crate::value::display_class_name(&obj_borrow.class_name);
-        let message = obj_borrow
-            .get_property(b"message")
-            .to_php_string()
-            .to_msg_string();
+        let message = obj_borrow.get_property(b"message");
+        if matches!(message, Value::Array(_)) {
+            warnings.push("Array to string conversion".to_string());
+        }
+        let message = message.to_php_string().to_msg_string();
         let file = obj_borrow
             .get_property(b"file")
             .to_php_string()
@@ -66806,12 +66991,121 @@ impl Vm {
     /// Exception::__toString(): the previous chain from the innermost one,
     /// each followed by "Next" and the exception it led to.
     pub fn throwable_chain_string(&mut self, obj: &Rc<RefCell<PhpObject>>) -> String {
+        if Self::throwable_chain_has_unset(obj) {
+            return self.throwable_chain_string_unset(obj);
+        }
         let mut warnings = Vec::new();
         let s = self.throwable_chain_text(obj, &mut warnings);
         for w in warnings {
             self.emit_warning(&w);
         }
         s
+    }
+
+    /// Whether an exception of the chain of `obj` has its message, file or
+    /// line unset.
+    fn throwable_chain_has_unset(obj: &Rc<RefCell<PhpObject>>) -> bool {
+        let mut cur = Some(obj.clone());
+        let mut n = 0;
+        while let Some(o) = cur {
+            let b = o.borrow();
+            let set = |name: &[u8]| {
+                b.properties
+                    .iter()
+                    .any(|(k, v)| k.as_slice() == name && !matches!(v.deref(), Value::Undef))
+            };
+            if !set(b"message") || !set(b"file") || !set(b"line") {
+                return true;
+            }
+            n += 1;
+            cur = match b.throwable_get(b"previous") {
+                Value::Object(p) if n < 64 && !Rc::ptr_eq(&p, obj) => Some(p),
+                _ => None,
+            };
+        }
+        false
+    }
+
+    /// Exception::__toString() of a chain with an exception whose message,
+    /// file or line is unset: an unset message warns, an uninitialized file
+    /// or line throws (each Error chained to the one before), and once an
+    /// exception is pending, getTraceAsString() fails ("#0 {main}" and a
+    /// newline).
+    #[cold]
+    #[inline(never)]
+    fn throwable_chain_string_unset(&mut self, obj: &Rc<RefCell<PhpObject>>) -> String {
+        let line_now = self.current_line;
+        let mut out = String::new();
+        let mut cur = Some(obj.clone());
+        let mut seen: Vec<*const RefCell<PhpObject>> = Vec::new();
+        while let Some(o) = cur {
+            let class_display = crate::value::display_class_name(&o.borrow().class_name);
+            let message = self.throwable_own_prop(&o, b"message", b"__toString", line_now);
+            let message = message.to_php_string().to_msg_string();
+            let pending = self.current_exception.take();
+            let file = self.throwable_own_prop(&o, b"file", b"__toString", line_now);
+            self.throwable_chain_pending(pending);
+            let pending = self.current_exception.take();
+            let line = self.throwable_own_prop(&o, b"line", b"__toString", line_now);
+            self.throwable_chain_pending(pending);
+            let file = file.to_php_string().to_string_lossy();
+            let line = line.to_long();
+            let trace_str = if self.current_exception.is_some() {
+                "#0 {main}\n".to_string()
+            } else {
+                let trace = o.borrow().throwable_get(b"trace");
+                let mut warnings = Vec::new();
+                let t = Self::trace_text(
+                    &trace,
+                    true,
+                    self.exception_string_param_max_len,
+                    &mut warnings,
+                );
+                for w in warnings {
+                    self.emit_warning(&w);
+                }
+                t
+            };
+            let part = if message.is_empty() {
+                format!(
+                    "{} in {}:{}\nStack trace:\n{}",
+                    class_display, file, line, trace_str
+                )
+            } else {
+                let conn = Self::exception_location_connector(&message);
+                format!(
+                    "{}: {}{}{}:{}\nStack trace:\n{}",
+                    class_display, message, conn, file, line, trace_str
+                )
+            };
+            out = if out.is_empty() {
+                part
+            } else {
+                format!("{}\n\nNext {}", part, out)
+            };
+            seen.push(Rc::as_ptr(&o));
+            cur = match o.borrow().throwable_get(b"previous") {
+                Value::Object(p) if seen.len() < 10_000 && !seen.contains(&Rc::as_ptr(&p)) => {
+                    Some(p)
+                }
+                _ => None,
+            };
+        }
+        out
+    }
+
+    /// An exception thrown while another was pending: the pending one
+    /// becomes its previous (zend_throw_exception_internal()).
+    fn throwable_chain_pending(&mut self, pending: Option<Value>) {
+        let Some(old) = pending else {
+            return;
+        };
+        match &self.current_exception {
+            Some(Value::Object(new)) => {
+                new.borrow_mut().throwable_set(b"previous", old);
+            }
+            _ => self.current_exception = Some(old),
+        }
     }
 
     fn throwable_chain_text(
@@ -67216,6 +67510,88 @@ impl Vm {
             }
         }
         self.read_operand(operand, cvs, tmps, literals)
+    }
+
+    /// The OP_DATA of ASSIGN_DIM read as undefined: the copy
+    /// of an undefined variable made for the assignment's value (QM_ASSIGN
+    /// marked 5) left its temporary undefined, for the warning to come
+    /// after the key's diagnostics. The temporary (the expression's value)
+    /// becomes null.
+    /// ZEND_INIT_USER_CALL: the callback just sent to `call_user_func()` /
+    /// `call_user_func_array()` (`fname`) must be callable, or its TypeError
+    /// is thrown before the other arguments are evaluated (chained to what
+    /// an autoloader threw). The deprecations of a callable one are raised
+    /// by the call.
+    #[cold]
+    #[inline(never)]
+    fn cuf_init_check(&mut self, fname: &Value, line: u32) {
+        let Some(cb) = self
+            .pending_calls
+            .last()
+            .and_then(|c| c.args.first())
+            .cloned()
+        else {
+            return;
+        };
+        let r = self.zend_is_callable_ex(&cb, crate::callable::IS_CALLABLE_SUPPRESS_DEPRECATIONS);
+        if r.ok {
+            return;
+        }
+        let prev = self.current_exception.take();
+        // (a callback that fails raises its deprecations first)
+        if prev.is_none() {
+            let pure = self.is_callable_pure(&cb, 0);
+            for d in pure.deprecations {
+                self.emit_deprecated_at(&d, line);
+            }
+        }
+        let msg = format!(
+            "{}(): Argument #1 ($callback) must be a valid callback, {}",
+            fname.to_php_string().to_string_lossy(),
+            r.error.unwrap_or_default()
+        );
+        let exc = self.create_exception(b"TypeError", &msg, line);
+        if let Some(p) = prev {
+            Self::exception_set_previous(&exc, p);
+        }
+        self.current_exception = Some(exc);
+    }
+
+    /// Whether `operand` is a temporary left undefined.
+    #[inline(always)]
+    fn undef_tmp(operand: &OperandType, tmps: &[Value]) -> bool {
+        matches!(operand, OperandType::Tmp(t) if matches!(tmps.get(*t as usize), Some(Value::Undef)))
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn undef_op_data_warn(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        operand: &OperandType,
+        cvs: &[Value],
+        tmps: &mut [Value],
+        line: u32,
+    ) {
+        let OperandType::Tmp(t) = *operand else {
+            return;
+        };
+        let src = op_array.ops[..ip.min(op_array.ops.len())]
+            .iter()
+            .rev()
+            .find(|o| o.result == OperandType::Tmp(t))
+            .filter(|o| {
+                o.opcode == OpCode::QmAssign
+                    && matches!(o.op2, OperandType::Const(k) if matches!(op_array.literals.get(k as usize), Some(Value::Long(5))))
+            })
+            .map(|o| o.op1);
+        if let Some(cv @ OperandType::Cv(_)) = src {
+            self.check_undefined_cv(&cv, cvs, op_array, line);
+        }
+        if let Some(slot) = tmps.get_mut(t as usize) {
+            *slot = Value::Null;
+        }
     }
 
     /// Opcodes that may store into CV slots other than their operands.

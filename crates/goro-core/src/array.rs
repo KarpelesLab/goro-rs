@@ -92,11 +92,11 @@ pub struct PhpArray {
     shared: Option<std::rc::Rc<Store>>,
 }
 
-/// The storage of an array shared by copies of it, copy-on-write. Only
-/// storage holding no references is shared: an element that is a
-/// reference is written through without the array itself being written
-/// (and zend_array_dup() turns the references only the array holds into
-/// values when a copy is made).
+/// The storage of an array shared by copies of it, copy-on-write (PHP's
+/// refcounted zend_array). A reference it holds counts the storage once,
+/// however many arrays share it: the copy separating from the storage
+/// turns the references only the storage holds into values
+/// (zend_array_dup()).
 #[derive(Debug)]
 pub(crate) struct Store {
     entries: Vec<(ArrayKey, Value)>,
@@ -230,8 +230,8 @@ pub fn cow_copy(a: &std::rc::Rc<std::cell::RefCell<PhpArray>>) -> PhpArray {
 
 /// cow_copy() of `a` for a new holder, made in its own allocation, when it
 /// is the common copy: storage shared with the copy (cow_clone()), or an
-/// empty array (clone()). None: the general copy (storage holding
-/// references, the symbol table, an array being borrowed ...).
+/// empty array (clone()). None: the general copy (the symbol table, an
+/// array being borrowed ...).
 #[inline]
 pub(crate) fn cow_copy_rc(
     a: &std::rc::Rc<std::cell::RefCell<PhpArray>>,
@@ -266,6 +266,48 @@ pub fn cow_copy_new(
         Some(copy) => copy,
         None => std::rc::Rc::new(std::cell::RefCell::new(cow_copy(a))),
     }
+}
+
+/// zend_array_dup() of shared storage for the copy separating from it:
+/// a reference only the storage holds (refcount 1) becomes its value,
+/// unless it points back at an array sharing the storage (the captured
+/// variables of a closure stay bound).
+#[inline(never)]
+fn dup_shared_entries(st: &std::rc::Rc<Store>) -> Vec<(ArrayKey, Value)> {
+    let is_closure = matches!(st.entries.first(), Some((_, Value::String(s)))
+        if s.as_bytes().starts_with(b"__closure_") || s.as_bytes().starts_with(b"__arrow_"));
+    if is_closure
+        || !st
+            .entries
+            .iter()
+            .any(|(_, v)| matches!(v, Value::Reference(r) if std::rc::Rc::strong_count(r) == 1))
+    {
+        return st.entries.clone();
+    }
+    st.entries
+        .iter()
+        .map(|(k, v)| {
+            let v2 = match v {
+                Value::Reference(r) if std::rc::Rc::strong_count(r) == 1 => {
+                    let inner = r.borrow();
+                    match &*inner {
+                        Value::Array(a)
+                            if a.try_borrow().map_or(true, |b| {
+                                b.shared
+                                    .as_ref()
+                                    .is_some_and(|s| std::rc::Rc::ptr_eq(s, st))
+                            }) =>
+                        {
+                            v.clone()
+                        }
+                        other => other.clone(),
+                    }
+                }
+                _ => v.clone(),
+            };
+            (k.clone(), v2)
+        })
+        .collect()
 }
 
 impl Clone for PhpArray {
@@ -449,8 +491,7 @@ impl PhpArray {
 
     /// A copy of this array (`$b = $a`) that shares its storage until
     /// either is written (PHP's refcounted zend_array): the storage moves
-    /// into a Store both hold. Storage holding references is copied at
-    /// once, as clone() does (see Store).
+    /// into a Store both hold (see Store).
     pub fn cow_clone(&mut self) -> PhpArray {
         if self.shared.is_none() && !self.share_storage() {
             return self.clone();
@@ -459,19 +500,12 @@ impl PhpArray {
     }
 
     /// Move this array's own storage into a Store its copies can share
-    /// (see cow_clone()). False: it is not shared (empty, holding
-    /// references, or the global symbol table, whose variables' cells are
-    /// its own).
+    /// (see cow_clone()). False: it is not shared (empty, or the global
+    /// symbol table, whose variables' cells are its own).
     #[inline]
     fn share_storage(&mut self) -> bool {
         debug_assert!(self.shared.is_none());
-        if self.is_empty()
-            || self.untracked
-            || self
-                .live()
-                .iter()
-                .any(|(_, v)| matches!(v, Value::Reference(_)))
-        {
+        if self.is_empty() || self.untracked {
             return false;
         }
         // (the table's accounting goes with it)
@@ -556,7 +590,7 @@ impl PhpArray {
 
     /// The first write to an array sharing its storage: the storage becomes
     /// its own again when no other array holds it any more, else it gets
-    /// its own copy (zend_array_dup(); the storage holds no references).
+    /// its own copy (zend_array_dup(): see dup_shared_entries()).
     #[cold]
     #[inline(never)]
     fn unshare(&mut self) {
@@ -570,7 +604,7 @@ impl PhpArray {
                 std::mem::replace(&mut st.charged, 0)
             }
             Err(rc) => {
-                self.entries = rc.entries.clone();
+                self.entries = dup_shared_entries(&rc);
                 self.index = rc.index.clone();
                 0
             }

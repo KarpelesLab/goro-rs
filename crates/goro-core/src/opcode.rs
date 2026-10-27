@@ -359,6 +359,11 @@ pub enum OpCode {
     ArrayGetRef,
     /// Emit a Notice: op1 = message string literal
     EmitNotice,
+    /// ZEND_INIT_USER_CALL's check of `call_user_func($cb, ...)` /
+    /// `call_user_func_array($cb, ...)`, right after $cb is sent (before
+    /// the other arguments are evaluated): a callback that is not callable
+    /// throws its TypeError. op1 = the function name literal.
+    CufCheck,
     /// Throw an Error: op1 = message string literal
     ThrowErrorMsg,
     /// Dynamic variable read: op1 = name expr, result = value

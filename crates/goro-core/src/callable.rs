@@ -869,8 +869,13 @@ impl Vm {
                 if !self.callable_class_exists(&lower(&name)) {
                     self.try_autoload_class(&name);
                     if self.current_exception.is_some() {
+                        // (zend_is_callable_check_class(): the lookup failed)
                         return CallableCheck {
                             name: self.callable_name(&callable),
+                            error: Some(format!(
+                                "class \"{}\" not found",
+                                crate::string::msg_str(&name)
+                            )),
                             ..Default::default()
                         };
                     }

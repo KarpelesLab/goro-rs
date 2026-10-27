@@ -278,6 +278,20 @@ impl Vm {
                 let mut cur = exc.clone();
                 for _ in 0..100 {
                     let Value::Object(o) = &cur else { break };
+                    // (__toString() reads an unset message: it warns, from
+                    // no executing frame)
+                    let unset = !o.borrow().properties.iter().any(|(k, v)| {
+                        k.as_slice() == b"message" && !matches!(v.deref(), Value::Undef)
+                    });
+                    if unset {
+                        let cls = crate::value::display_class_name(&o.borrow().class_name);
+                        let saved = std::mem::replace(
+                            &mut self.current_file,
+                            crate::rcstr::RcStr::from("Unknown"),
+                        );
+                        self.emit_warning_at(&format!("Undefined property: {}::$message", cls), 0);
+                        self.current_file = saved;
+                    }
                     let msg = o.borrow().get_property(b"message");
                     if matches!(msg.deref(), Value::Object(_)) {
                         match self.value_to_string_checked(&msg.deref()) {

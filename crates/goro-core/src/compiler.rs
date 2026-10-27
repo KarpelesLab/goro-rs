@@ -754,6 +754,10 @@ pub struct Compiler {
     /// next has no compile-time known callee (zend_compile_args() without
     /// fbc): a variable argument is sent on the argument list's line.
     send_unknown_fbc: bool,
+    /// The call whose arguments compile_send_args_with_name() compiles
+    /// next is `call_user_func()` / `call_user_func_array()` compiled as
+    /// ZEND_INIT_USER_CALL: its callback is checked once sent (CufCheck).
+    cuf_check: Option<&'static [u8]>,
     /// Reserved variable names (not expressible in PHP source) standing for
     /// already-computed operands while synthesized code is compiled (target
     /// keys evaluated before an assigned value).
@@ -1170,6 +1174,7 @@ impl Compiler {
             memoize_root: 0,
             zend_lineno: 0,
             send_unknown_fbc: false,
+            cuf_check: None,
             tmp_aliases: Vec::new(),
             dynvar_count: 0,
             dynvar_pending: Vec::new(),
@@ -2745,7 +2750,22 @@ impl Compiler {
             .then(|| args.first().map(|a| a.value.span.line))
             .flatten()
             .filter(|&l| l > 0);
+        let cuf_check = self.cuf_check.take();
         for (i, arg) in args.iter().enumerate() {
+            if i == 1 {
+                if let Some(f) = cuf_check {
+                    let lit = self
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_bytes(f)));
+                    self.op_array.emit(Op {
+                        opcode: OpCode::CufCheck,
+                        op1: OperandType::Const(lit),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line,
+                    });
+                }
+            }
             // The operand of a pipe: a temporary (ZEND_SEND_VAL_EX).
             if matches!(&arg.value.kind, ExprKind::Variable(n) if n.starts_with(PIPE_ALIAS_PREFIX))
             {
@@ -12790,6 +12810,23 @@ impl Compiler {
         false
     }
 
+    /// The pads a quiet dimension chain (isset() / empty() / `??`) jumps to
+    /// from a missing level: pad `i` reads the variable keys of levels `i..`
+    /// (each FETCH_DIM_IS / ISSET_ISEMPTY_DIM_OBJ below a missing level runs
+    /// on null, and an undefined key variable still warns), falling through
+    /// to the code that follows. One pad per level, at its start offset.
+    #[inline(never)]
+    fn compile_missing_level_key_pads(&mut self, chain: &[&Expr]) -> CompileResult<Vec<u32>> {
+        let mut pads = Vec::with_capacity(chain.len() + 1);
+        for idx_expr in chain {
+            pads.push(self.op_array.current_offset());
+            if matches!(idx_expr.kind, ExprKind::Variable(_)) {
+                self.compile_key_unsilenced(idx_expr, true)?;
+            }
+        }
+        Ok(pads)
+    }
+
     fn snapshot_cv(&mut self, op: OperandType, line: u32) -> OperandType {
         if let OperandType::Cv(i) = op {
             let name = self
@@ -17204,13 +17241,30 @@ impl Compiler {
                     || (!result_discarded && matches!(val, OperandType::Cv(_)) && target_simple)
                 {
                     let t = self.op_array.alloc_temp();
-                    self.op_array.emit(Op {
-                        opcode: OpCode::Assign,
-                        op1: OperandType::Tmp(t),
-                        op2: val,
-                        result: OperandType::Unused,
-                        line: expr.span.line,
-                    });
+                    // An undefined variable assigned to an element warns
+                    // when ASSIGN_DIM reads its OP_DATA, after the key's
+                    // diagnostics: the copy is quiet (see
+                    // Vm::undef_op_data_warn()).
+                    let quiet = matches!(target.kind, ExprKind::ArrayAccess { index: Some(_), .. })
+                        && matches!(val, OperandType::Cv(i) if self.op_array.cv_names.get(i as usize).is_some_and(|n| n != b"this" && !crate::vm::is_auto_global_name(n)));
+                    if quiet {
+                        let lit = self.op_array.add_literal(Value::Long(5));
+                        self.op_array.emit(Op {
+                            opcode: OpCode::QmAssign,
+                            op1: val,
+                            op2: OperandType::Const(lit),
+                            result: OperandType::Tmp(t),
+                            line: expr.span.line,
+                        });
+                    } else {
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Assign,
+                            op1: OperandType::Tmp(t),
+                            op2: val,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                    }
                     val = OperandType::Tmp(t);
                 }
                 match &target.kind {
@@ -18534,6 +18588,26 @@ impl Compiler {
                     (ExprKind::Identifier(_), _) => fallback_name.is_some(),
                     _ => true,
                 };
+                // zend_compile_func_cuf() / zend_compile_func_cufa() (global
+                // code or a fully qualified name)
+                self.cuf_check = match (&name.kind, &resolved_name) {
+                    (ExprKind::Identifier(n), Some(r))
+                        if fallback_name.is_none()
+                            && (self.current_namespace.is_empty() || n.starts_with(b"\\"))
+                            && args.first().is_some_and(|a| !a.unpack && a.name.is_none()) =>
+                    {
+                        let r = r.strip_prefix(b"\\").unwrap_or(r);
+                        if r.eq_ignore_ascii_case(b"call_user_func") {
+                            Some(b"call_user_func")
+                        } else if r.eq_ignore_ascii_case(b"call_user_func_array") && args.len() == 2
+                        {
+                            Some(b"call_user_func_array")
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
                 self.compile_send_args_with_name(args, expr.span.line, func_name_for_ref)?;
 
                 // Do the call (op1 signals if result is being discarded for #[\NoDiscard])
@@ -18736,13 +18810,26 @@ impl Compiler {
 
                     // zend_delayed_compile_dim(): every key is evaluated
                     // before the quiet fetches run (a `??=` reuses them for
-                    // its write even when a level is missing).
+                    // its write even when a level is missing). A variable
+                    // key is an operand of its FETCH_DIM_IS (an undefined
+                    // one warns there), read even below a missing level.
+                    let mut misses: Vec<(usize, usize)> =
+                        jmp_to_right.drain(..).map(|pos| (pos, 0)).collect();
+                    let cv_key = |e: &Expr| matches!(e.kind, ExprKind::Variable(_));
                     let mut keys = Vec::with_capacity(chain.len());
                     for idx_expr in chain.iter() {
-                        keys.push(self.compile_key_unsilenced(idx_expr, true)?);
+                        keys.push(if cv_key(idx_expr) {
+                            None
+                        } else {
+                            Some(self.compile_key_unsilenced(idx_expr, true)?)
+                        });
                     }
-                    for idx in keys {
+                    for (level, idx) in keys.into_iter().enumerate() {
                         // (snapshotted while unsilenced)
+                        let idx = match idx {
+                            Some(idx) => idx,
+                            None => self.compile_key_unsilenced(chain[level], true)?,
+                        };
 
                         // Check offsetExists first (FETCH_DIM_IS)
                         let isset_tmp = self.op_array.alloc_temp();
@@ -18754,7 +18841,7 @@ impl Compiler {
                             line: expr.span.line,
                         });
                         let jmp_pos = self.op_array.ops.len();
-                        jmp_to_right.push(jmp_pos);
+                        misses.push((jmp_pos, level + 1));
                         self.op_array.emit(Op {
                             opcode: OpCode::JmpZ,
                             op1: OperandType::Tmp(isset_tmp),
@@ -18818,10 +18905,17 @@ impl Compiler {
                         line: expr.span.line,
                     });
 
+                    // A missing level: the variable keys of the levels below
+                    // it are still read (FETCH_DIM_IS of null), from its pad.
+                    let mut pads = self.compile_missing_level_key_pads(&chain)?;
                     // Right side: use default value
                     let right_target = self.op_array.current_offset();
+                    pads.push(right_target);
                     for jmp_pos in jmp_to_right {
                         self.op_array.ops[jmp_pos].op2 = OperandType::JmpTarget(right_target);
+                    }
+                    for (jmp_pos, from) in misses {
+                        self.op_array.ops[jmp_pos].op2 = OperandType::JmpTarget(pads[from]);
                     }
                     self.op_array.emit(Op {
                         opcode: OpCode::ErrorRestore,
@@ -20298,6 +20392,9 @@ impl Compiler {
                         let _false_label = self.op_array.ops.len() as u32 + 9999; // placeholder
 
                         let mut current = base_op;
+                        // (a missing level: see the pads below)
+                        let mut misses: Vec<(usize, usize)> =
+                            jmp_patches.drain(..).map(|pos| (pos, 0)).collect();
                         for (i, idx_expr) in chain.iter().enumerate() {
                             let is_last = i == chain.len() - 1;
                             let idx = self.compile_key_unsilenced(idx_expr, false)?;
@@ -20328,7 +20425,7 @@ impl Compiler {
                             } else {
                                 // Intermediate level: if false, jump to end
                                 let jmp_pos = self.op_array.ops.len();
-                                jmp_patches.push(jmp_pos);
+                                misses.push((jmp_pos, i + 1));
                                 self.op_array.emit(Op {
                                     opcode: OpCode::JmpZ,
                                     op1: OperandType::Tmp(isset_tmp),
@@ -20360,6 +20457,10 @@ impl Compiler {
                             line: expr.span.line,
                         });
 
+                        // A missing level: the variable keys of the levels
+                        // below it are still read (ISSET_ISEMPTY_DIM_OBJ of
+                        // null warns about an undefined one).
+                        let pads = self.compile_missing_level_key_pads(&chain)?;
                         // False label: set result to false
                         let false_target = self.op_array.ops.len() as u32;
                         let false_lit = self.op_array.add_literal(Value::False);
@@ -20375,8 +20476,9 @@ impl Compiler {
                         let end_target = self.op_array.ops.len() as u32;
 
                         // Patch all jump positions
-                        for jmp_pos in jmp_patches {
-                            self.op_array.ops[jmp_pos].op2 = OperandType::JmpTarget(false_target);
+                        for (jmp_pos, from) in misses {
+                            let t = pads.get(from).copied().unwrap_or(false_target);
+                            self.op_array.ops[jmp_pos].op2 = OperandType::JmpTarget(t);
                         }
                         self.op_array.ops[jmp_end_pos].op1 = OperandType::JmpTarget(end_target);
 
@@ -20498,6 +20600,9 @@ impl Compiler {
                     let result_tmp = self.op_array.alloc_temp();
                     let mut current = base_op;
 
+                    // (a missing level: see the pads below)
+                    let mut misses: Vec<(usize, usize)> =
+                        jmp_to_true.drain(..).map(|pos| (pos, 0)).collect();
                     for (i, idx_expr) in chain.iter().enumerate() {
                         let is_last = i == chain.len() - 1;
                         let idx = self.compile_key_unsilenced(idx_expr, true)?;
@@ -20518,7 +20623,7 @@ impl Compiler {
                             line: expr.span.line,
                         });
                         let jmp_pos = self.op_array.ops.len();
-                        jmp_to_true.push(jmp_pos);
+                        misses.push((jmp_pos, i + 1));
                         self.op_array.emit(Op {
                             opcode: OpCode::JmpZ,
                             op1: OperandType::Tmp(isset_tmp),
@@ -20574,6 +20679,9 @@ impl Compiler {
                         line: expr.span.line,
                     });
 
+                    // A missing level: the variable keys of the levels below
+                    // it are still read.
+                    let pads = self.compile_missing_level_key_pads(&chain)?;
                     // True label (key doesn't exist -> empty is true)
                     let true_target = self.op_array.ops.len() as u32;
                     let true_lit = self.op_array.add_literal(Value::True);
@@ -20593,8 +20701,9 @@ impl Compiler {
                     });
 
                     let end_target = self.op_array.ops.len() as u32;
-                    for jmp_pos in jmp_to_true {
-                        self.op_array.ops[jmp_pos].op2 = OperandType::JmpTarget(true_target);
+                    for (jmp_pos, from) in misses {
+                        let t = pads.get(from).copied().unwrap_or(true_target);
+                        self.op_array.ops[jmp_pos].op2 = OperandType::JmpTarget(t);
                     }
                     self.op_array.ops[jmp_end_pos].op1 = OperandType::JmpTarget(end_target);
 
