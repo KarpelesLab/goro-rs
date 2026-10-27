@@ -32257,6 +32257,27 @@ impl Vm {
                                         op.line,
                                     ),
                                 };
+                                // (a call's by-value array result bound to a
+                                // reference parameter is a temporary of its
+                                // own: writes don't reach where it came from)
+                                let val = match val {
+                                    Value::Array(a)
+                                        if Rc::strong_count(&a) > 2
+                                            && matches!(&op.op1, OperandType::Tmp(_))
+                                            && matches!(
+                                                self.read_operand(
+                                                    &op.result,
+                                                    &cvs,
+                                                    &tmps,
+                                                    &op_array.literals
+                                                ),
+                                                Value::Long(0)
+                                            ) =>
+                                    {
+                                        Value::Array(crate::array::cow_copy_new(&a))
+                                    }
+                                    v => v,
+                                };
                                 if let Some(call) = self.pending_calls.last_mut() {
                                     call.args.push(val);
                                 }
@@ -32283,6 +32304,16 @@ impl Vm {
                             let val = if matches!(op.opcode, OpCode::SendVal)
                                 && matches!(op.result, OperandType::Const(_))
                             {
+                                val.deref()
+                            } else if matches!(val, Value::Reference(_))
+                                && matches!(op.opcode, OpCode::SendValChecked)
+                                && matches!(&op.op1, OperandType::Tmp(_))
+                                && matches!(
+                                    self.read_operand(&op.result, &cvs, &tmps, &op_array.literals),
+                                    Value::Long(0)
+                                )
+                            {
+                                // (a reference a call returned, sent by value)
                                 val.deref()
                             } else {
                                 self.globals_by_value(val)

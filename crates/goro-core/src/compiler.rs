@@ -3437,6 +3437,20 @@ impl Compiler {
                         _ => Some(1),
                     }
                 };
+                // (a call's result sent where the callee, known at run time,
+                // may take a reference: the call keeps a returned reference,
+                // SEND_VAR_NO_REF_EX passes it; a by-value send drops it)
+                if checked == Some(0)
+                    && matches!(
+                        &arg.value.kind,
+                        ExprKind::FunctionCall { .. }
+                            | ExprKind::MethodCall { .. }
+                            | ExprKind::StaticMethodCall { .. }
+                            | ExprKind::DynamicStaticMethodCall { .. }
+                    )
+                {
+                    self.mark_ref_call(&val);
+                }
                 let checked_kind = checked
                     .map(|kind| OperandType::Const(self.op_array.add_literal(Value::Long(kind))));
                 self.op_array.emit(Op {
