@@ -1250,8 +1250,22 @@ impl Vm {
                         // the VM (foreach): its frame is at the current line.
                         // (So do the get_iterator handlers' calls of other
                         // methods, like RecursiveIteratorIterator's
-                        // getChildren())
-                        Some(false) | None if !internal => {
+                        // getChildren()); a non-SPL class's own iterator
+                        // methods (DatePeriod, PDOStatement) have no frame.
+                        r @ (Some(false) | None)
+                            if !internal
+                                && (r.is_some()
+                                    || ![
+                                        &b"rewind"[..],
+                                        b"valid",
+                                        b"current",
+                                        b"key",
+                                        b"next",
+                                        b"getiterator",
+                                    ]
+                                    .iter()
+                                    .any(|m| m.eq_ignore_ascii_case(method))) =>
+                        {
                             let cl = obj_class_lower(o);
                             let ml = method.to_ascii_lowercase();
                             if let Some(name) = self.internal_method_frame_name(&cl, &ml) {
