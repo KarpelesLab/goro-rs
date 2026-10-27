@@ -11791,9 +11791,7 @@ fn reflection_running_generator(
             at.map(|(f, _)| f)
                 .unwrap_or_else(|| vm.current_file.to_string()),
         )),
-        b"getexecutingline" => {
-            Value::Long(at.map_or(vm.current_line, |(_, l)| l) as i64)
-        }
+        b"getexecutingline" => Value::Long(at.map_or(vm.current_line, |(_, l)| l) as i64),
         b"getexecutinggenerator" => Value::Generator(g.clone()),
         b"getthis" => Value::Null,
         b"getfunction" => {

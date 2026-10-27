@@ -2768,8 +2768,12 @@ impl Vm {
             None => Rc::from(self.generator_function_name_of(g)),
         };
         let depth = self.call_stack.len();
-        self.running_generators
-            .push((g as *const PhpGenerator as usize, fname, g.object_id, depth));
+        self.running_generators.push((
+            g as *const PhpGenerator as usize,
+            fname,
+            g.object_id,
+            depth,
+        ));
     }
 
     /// The object handle of a generator (also while it runs).

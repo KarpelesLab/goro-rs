@@ -2856,14 +2856,15 @@ impl Compiler {
                         // (a user function declared before: an expression
                         // that is no function result, e.g. strlen($s)
                         // compiled to an opcode, cannot be passed either)
-                        (false, None) => match self.declared_fn_cannot_pass_by_ref(func_name, i, line)
-                        {
-                            Some(m) => (OpCode::ThrowErrorMsg, m.into_bytes()),
-                            None => (
-                                OpCode::EmitNotice,
-                                b"Only variables should be passed by reference".to_vec(),
-                            ),
-                        },
+                        (false, None) => {
+                            match self.declared_fn_cannot_pass_by_ref(func_name, i, line) {
+                                Some(m) => (OpCode::ThrowErrorMsg, m.into_bytes()),
+                                None => (
+                                    OpCode::EmitNotice,
+                                    b"Only variables should be passed by reference".to_vec(),
+                                ),
+                            }
+                        }
                         _ => (
                             OpCode::EmitNotice,
                             b"Only variables should be passed by reference".to_vec(),
@@ -2879,10 +2880,10 @@ impl Compiler {
                         op2: OperandType::Unused,
                         result: OperandType::Unused,
                         line: if arg.value.span.line > 0 {
-                                    arg.value.span.line
-                                } else {
-                                    line
-                                },
+                            arg.value.span.line
+                        } else {
+                            line
+                        },
                     });
                 }
                 // For by-ref builtin args on $arr[$key], compile as
