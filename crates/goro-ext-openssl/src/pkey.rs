@@ -30,6 +30,9 @@ pub struct Rsa {
     pub dmp1: Option<Bn>,
     pub dmq1: Option<Bn>,
     pub iqmp: Option<Bn>,
+    /// RSASSA-PSS key (EVP_PKEY_RSA_PSS): the AlgorithmIdentifier
+    /// parameters as encoded (empty when unrestricted).
+    pub pss: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +96,8 @@ fn ffc_pub(g: &Bn, x: &Bn, p: &Bn) -> Option<Bn> {
 impl PKey {
     pub fn type_const(&self) -> i64 {
         match self {
+            // EVP_PKEY_RSA_PSS has no OPENSSL_KEYTYPE_* constant
+            PKey::Rsa(r) if r.pss.is_some() => -1,
             PKey::Rsa(_) => KEYTYPE_RSA,
             PKey::Dsa(_) => KEYTYPE_DSA,
             PKey::Dh(_) => KEYTYPE_DH,
@@ -167,6 +172,9 @@ impl PKey {
 
     fn algid(&self) -> Vec<u8> {
         match self {
+            PKey::Rsa(Rsa {
+                pss: Some(params), ..
+            }) => asn1::algid(OID_RSA_PSS, (!params.is_empty()).then(|| params.clone())),
             PKey::Rsa(_) => asn1::algid(OID_RSA, Some(asn1::null())),
             PKey::Dsa(f) => asn1::algid(OID_DSA, Some(Self::ffc_params_der(f, true))),
             PKey::Dh(f) => asn1::algid(OID_DH, Some(Self::ffc_params_der(f, false))),
@@ -372,6 +380,7 @@ fn parse_rsa_public(der: &[u8]) -> Option<Rsa> {
         dmp1: None,
         dmq1: None,
         iqmp: None,
+        pss: None,
     })
 }
 
@@ -390,6 +399,7 @@ fn parse_rsa_private(der: &[u8]) -> Option<Rsa> {
         dmp1: Some(c[6].uint()),
         dmq1: Some(c[7].uint()),
         iqmp: Some(c[8].uint()),
+        pss: None,
     })
 }
 
@@ -439,7 +449,12 @@ pub fn parse_spki(der: &[u8]) -> Option<PKey> {
     let oid = alg.first()?.oid()?;
     let bits = c[1].bits()?;
     match oid.as_str() {
-        OID_RSA | OID_RSA_PSS => Some(PKey::Rsa(parse_rsa_public(bits)?)),
+        OID_RSA => Some(PKey::Rsa(parse_rsa_public(bits)?)),
+        OID_RSA_PSS => {
+            let mut r = parse_rsa_public(bits)?;
+            r.pss = Some(alg.get(1).map(|p| p.raw.to_vec()).unwrap_or_default());
+            Some(PKey::Rsa(r))
+        }
         OID_DSA => {
             let (p, q, g) = parse_ffc_params(alg.get(1)?)?;
             let y = asn1::parse_one(bits)?.uint();
@@ -507,7 +522,12 @@ pub fn parse_pkcs8(der: &[u8]) -> Option<PKey> {
     let oid = alg.first()?.oid()?;
     let inner = c[2].content;
     match oid.as_str() {
-        OID_RSA | OID_RSA_PSS => Some(PKey::Rsa(parse_rsa_private(inner)?)),
+        OID_RSA => Some(PKey::Rsa(parse_rsa_private(inner)?)),
+        OID_RSA_PSS => {
+            let mut r = parse_rsa_private(inner)?;
+            r.pss = Some(alg.get(1).map(|p| p.raw.to_vec()).unwrap_or_default());
+            Some(PKey::Rsa(r))
+        }
         OID_DSA => {
             let (p, q, g) = parse_ffc_params(alg.get(1)?)?;
             let x = asn1::parse_one(inner)?.uint();
@@ -667,32 +687,6 @@ pub fn pkcs8_decrypt(der: &[u8], pass: &[u8]) -> Result<Vec<u8>, ReadErr> {
                 .get(1)
                 .and_then(|p| p.children())
                 .ok_or(ReadErr::Unsupported)?;
-            if kdf.first().and_then(|o| o.oid()).as_deref() != Some("1.2.840.113549.1.5.12") {
-                return Err(ReadErr::Unsupported);
-            }
-            let kp = kdf
-                .get(1)
-                .and_then(|p| p.children())
-                .ok_or(ReadErr::Unsupported)?;
-            let salt = kp.first().ok_or(ReadErr::Unsupported)?.content;
-            let iter = kp
-                .get(1)
-                .and_then(|i| i.as_i64())
-                .ok_or(ReadErr::Unsupported)? as u32;
-            let mut md = Md::Sha1;
-            let mut key_len_param = None;
-            for x in &kp[2..] {
-                if x.tag == asn1::INTEGER {
-                    key_len_param = x.as_i64();
-                } else if x.tag == asn1::SEQUENCE {
-                    let pc = x.children().ok_or(ReadErr::Unsupported)?;
-                    md = pc
-                        .first()
-                        .and_then(|o| o.oid())
-                        .and_then(|o| prf_md(&o))
-                        .ok_or(ReadErr::Unsupported)?;
-                }
-            }
             let coid = enc
                 .first()
                 .and_then(|o| o.oid())
@@ -706,8 +700,61 @@ pub fn pkcs8_decrypt(der: &[u8], pass: &[u8]) -> Result<Vec<u8>, ReadErr> {
                 let ic = iv_t.children().ok_or(ReadErr::Unsupported)?;
                 ic.last().ok_or(ReadErr::Unsupported)?.content.to_vec()
             };
-            let klen = key_len_param.map(|k| k as usize).unwrap_or(spec.key_len);
-            let key = digest::pbkdf2(md, pass, salt, iter, klen);
+            let kp = kdf
+                .get(1)
+                .and_then(|p| p.children())
+                .ok_or(ReadErr::Unsupported)?;
+            let salt = kp.first().ok_or(ReadErr::Unsupported)?.content;
+            let int = |i: usize| {
+                kp.get(i)
+                    .and_then(|x| x.as_i64())
+                    .ok_or(ReadErr::Unsupported)
+            };
+            let key = match kdf.first().and_then(|o| o.oid()).as_deref() {
+                Some("1.2.840.113549.1.5.12") => {
+                    let iter = int(1)? as u32;
+                    let mut md = Md::Sha1;
+                    let mut key_len_param = None;
+                    for x in &kp[2..] {
+                        if x.tag == asn1::INTEGER {
+                            key_len_param = x.as_i64();
+                        } else if x.tag == asn1::SEQUENCE {
+                            let pc = x.children().ok_or(ReadErr::Unsupported)?;
+                            md = pc
+                                .first()
+                                .and_then(|o| o.oid())
+                                .and_then(|o| prf_md(&o))
+                                .ok_or(ReadErr::Unsupported)?;
+                        }
+                    }
+                    let klen = key_len_param.map(|k| k as usize).unwrap_or(spec.key_len);
+                    digest::pbkdf2(md, pass, salt, iter, klen)
+                }
+                // id-scrypt (RFC 7914 §7): salt, N, r, p [, keyLength]
+                Some("1.3.6.1.4.1.11591.4.11") => {
+                    let (n, r, p) = (int(1)?, int(2)?, int(3)?);
+                    let klen = kp
+                        .get(4)
+                        .and_then(|x| x.as_i64())
+                        .map(|k| k as usize)
+                        .unwrap_or(spec.key_len);
+                    if n < 2 || n & (n - 1) != 0 || r <= 0 || p <= 0 {
+                        return Err(ReadErr::Unsupported);
+                    }
+                    let mut key = vec![0u8; klen];
+                    purecrypto::kdf::scrypt::scrypt(
+                        pass,
+                        salt,
+                        n.trailing_zeros() as u8,
+                        r as u32,
+                        p as u32,
+                        &mut key,
+                    )
+                    .map_err(|_| ReadErr::Unsupported)?;
+                    key
+                }
+                _ => return Err(ReadErr::Unsupported),
+            };
             decrypt_quiet(&spec.name, data, &key, &iv)
         }
         "1.2.840.113549.1.5.3"
@@ -984,6 +1031,7 @@ fn rsa_with_crt(n: Bn, e: Bn, d: Bn, p: Bn, q: Bn) -> Rsa {
         dmp1: Some(dmp1),
         dmq1: Some(dmq1),
         iqmp: Some(iqmp),
+        pss: None,
     }
 }
 
@@ -1872,13 +1920,14 @@ impl PKey {
                     .ok_or(SignErr::Failed)
             }
             PKey::Ec(e) if e.sm2 => {
-                // OpenSSL 3 SM2 without a distinguishing ID: e = H(M), no Z
                 let d = e.priv_key.as_ref().ok_or(SignErr::Failed)?;
                 let md = md.unwrap_or(Md::Sm3);
-                let (r, s) = e
-                    .group
-                    .sm2_sign(d, &md.digest(data))
-                    .ok_or(SignErr::Failed)?;
+                if md != Md::Sm3 {
+                    prov_invalid_digest();
+                    return Err(SignErr::Failed);
+                }
+                let hash = sm2_message_digest(e, data).ok_or(SignErr::Failed)?;
+                let (r, s) = e.group.sm2_sign(d, &hash).ok_or(SignErr::Failed)?;
                 Ok(dsa_sig_der(&r, &s))
             }
             PKey::Ec(e) => {
@@ -1961,12 +2010,18 @@ impl PKey {
                 }
             }
             PKey::Ec(e) if e.sm2 => {
-                let md = md.unwrap_or(Md::Sm3);
+                if md.unwrap_or(Md::Sm3) != Md::Sm3 {
+                    prov_invalid_digest();
+                    return -1;
+                }
                 let Some(q) = &e.pub_key else { return -1 };
                 let Some((r, s)) = parse_dsa_sig(sig) else {
                     return 0;
                 };
-                if e.group.sm2_verify(q, &md.digest(data), &r, &s) {
+                let Some(hash) = sm2_message_digest(e, data) else {
+                    return -1;
+                };
+                if e.group.sm2_verify(q, &hash, &r, &s) {
                     1
                 } else {
                     0
@@ -2054,6 +2109,30 @@ impl PKey {
             }
         }
     }
+}
+
+/// The distinguishing ID: PHP sets none, so the provider hashes an empty
+/// one (ENTL = 0) into Z.
+const SM2_DEFAULT_ID: &[u8] = b"";
+
+/// SM2 digest-sign input: e = SM3(Z || M) with
+/// Z = SM3(ENTL || ID || a || b || xG || yG || xA || yA)
+/// (ossl_sm2_compute_z_digest() under EVP_DigestSign/Verify).
+fn sm2_message_digest(e: &EcKey, data: &[u8]) -> Option<Vec<u8>> {
+    let Some(Point::Aff(xa, ya)) = &e.pub_key else {
+        return None;
+    };
+    let g = &e.group;
+    let len = g.p.byte_len();
+    let entl = (SM2_DEFAULT_ID.len() as u16 * 8).to_be_bytes();
+    let mut zin = entl.to_vec();
+    zin.extend_from_slice(SM2_DEFAULT_ID);
+    for v in [&g.a, &g.b, &g.gx, &g.gy, xa, ya] {
+        zin.extend_from_slice(&v.pad(len));
+    }
+    let mut m = Md::Sm3.digest(&zin);
+    m.extend_from_slice(data);
+    Some(Md::Sm3.digest(&m))
 }
 
 /// php_openssl_dh_pub_from_priv(): g^priv mod p (constant time in priv)

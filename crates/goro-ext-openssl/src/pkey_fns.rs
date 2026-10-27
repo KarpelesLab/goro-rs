@@ -251,6 +251,7 @@ fn init_rsa(a: &PhpArray) -> Option<PKey> {
         dmp1: arr_bn(a, "dmp1"),
         dmq1: arr_bn(a, "dmq1"),
         iqmp: arr_bn(a, "iqmp"),
+        pss: None,
     }))
 }
 
@@ -791,6 +792,8 @@ pub fn openssl_pkey_get_details(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
     );
     let mut sub = PhpArray::new();
     let sub_name = match &*key {
+        // php_openssl_pkey_get_details() has no case for EVP_PKEY_RSA_PSS
+        PKey::Rsa(r) if r.pss.is_some() => "",
         PKey::Rsa(r) => {
             set_bn(&mut sub, "n", &Some(r.n.clone()));
             set_bn(&mut sub, "e", &Some(r.e.clone()));
@@ -846,7 +849,9 @@ pub fn openssl_pkey_get_details(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
             }
         }
     };
-    res.set(key_name(sub_name), Value::Array(Rc::new(RefCell::new(sub))));
+    if !sub_name.is_empty() {
+        res.set(key_name(sub_name), Value::Array(Rc::new(RefCell::new(sub))));
+    }
     res.set(key_name("type"), Value::Long(key.type_const()));
     Ok(Value::Array(Rc::new(RefCell::new(res))))
 }
@@ -946,7 +951,8 @@ fn setup_padding(vm: &mut Vm, f: &str, key: &PKey, padding: i64) -> Result<bool,
             return Err(());
         }
     }
-    Ok(false)
+    // RSA-PSS keys only sign with PSS padding
+    Ok(matches!(key, PKey::Rsa(r) if r.pss.is_some()))
 }
 
 /// Default digest for EVP_DigestSignInit with md=NULL.
@@ -1150,9 +1156,21 @@ pub fn openssl_private_decrypt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
         return Ok(Value::False);
     };
     let Some(r) = rsa_of(&key) else {
-        not_rsa();
+        // SM2 keys can encrypt: only the RSA padding ctrl then fails, quietly
+        if !matches!(&*key, PKey::Ec(e) if e.sm2) {
+            not_rsa();
+        }
         return Ok(Value::False);
     };
+    if r.pss.is_some() {
+        // the RSA-PSS keymgmt has no asymmetric cipher operations
+        err::push(
+            err::LIB_PROV,
+            178,
+            "operation not supported for this keytype",
+        );
+        return Ok(Value::False);
+    }
     if !valid_enc_padding(padding) {
         return Ok(Value::False);
     }
@@ -1194,9 +1212,21 @@ pub fn openssl_public_encrypt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
         return Ok(Value::False);
     };
     let Some(r) = rsa_of(&key) else {
-        not_rsa();
+        // SM2 keys can encrypt: only the RSA padding ctrl then fails, quietly
+        if !matches!(&*key, PKey::Ec(e) if e.sm2) {
+            not_rsa();
+        }
         return Ok(Value::False);
     };
+    if r.pss.is_some() {
+        // the RSA-PSS keymgmt has no asymmetric cipher operations
+        err::push(
+            err::LIB_PROV,
+            178,
+            "operation not supported for this keytype",
+        );
+        return Ok(Value::False);
+    }
     if !valid_enc_padding(padding) {
         return Ok(Value::False);
     }

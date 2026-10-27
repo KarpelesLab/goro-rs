@@ -153,11 +153,35 @@ fn escape_rfc2253(v: &[u8]) -> String {
     out
 }
 
+/// The otherName forms OpenSSL prints: (type, label, value) for
+/// SmtpUTF8Mailbox, XmppAddr, SRVName, UPN and NAIRealm whose value has the
+/// expected string type (IA5String for SRVName, UTF8String otherwise).
+fn other_name(g: &Tlv) -> Option<(&'static str, Vec<u8>)> {
+    let parts = asn1::parse_all(g.content)?;
+    let oid = parts.first()?.oid()?;
+    let val = asn1::parse_one(parts.get(1)?.content)?;
+    let (label, tag) = match oid.as_str() {
+        "1.3.6.1.5.5.7.8.9" => ("SmtpUTF8Mailbox", 0x0c),
+        "1.3.6.1.5.5.7.8.5" => ("XmppAddr", 0x0c),
+        "1.3.6.1.5.5.7.8.7" => ("SRVName", 0x16),
+        "1.3.6.1.4.1.311.20.2.3" => ("UPN", 0x0c),
+        "1.3.6.1.5.5.7.8.8" => ("NAIRealm", 0x0c),
+        _ => return None,
+    };
+    if val.tag != tag {
+        return None;
+    }
+    Some((label, val.content.to_vec()))
+}
+
 /// GENERAL_NAME_print()
 pub fn general_name_print(g: &Tlv) -> String {
     let raw = |c: &[u8]| String::from_utf8_lossy(c).to_string();
     match g.tag & 0x1f {
-        0 => "othername:<unsupported>".to_string(),
+        0 => match other_name(g) {
+            Some((label, v)) => format!("othername:{}:{}", label, raw(&v)),
+            None => "othername:<unsupported>".to_string(),
+        },
         1 => format!("email:{}", raw(g.content)),
         2 => format!("DNS:{}", raw(g.content)),
         3 => "X400Name:<unsupported>".to_string(),
@@ -186,7 +210,13 @@ fn general_name_v(g: &Tlv) -> String {
             None => "DirName:<invalid>".to_string(),
         },
         7 => format!("IP Address:{}", ip_text(g.content)),
-        0 => "othername:<unsupported>".to_string(),
+        // i2v_GENERAL_NAME(): X509V3_add_value("othername: UPN", ...)
+        0 => match other_name(g) {
+            Some((label, v)) => {
+                format!("othername: {}:{}", label, String::from_utf8_lossy(&v))
+            }
+            None => "othername:<unsupported>".to_string(),
+        },
         _ => general_name_print(g),
     }
 }
@@ -477,25 +507,30 @@ pub fn ext_print(e: &Ext) -> Option<Vec<u8>> {
         }
         "2.5.29.30" => {
             let t = asn1::parse_one(v)?;
-            let mut out = String::new();
+            // i2r_NAME_CONSTRAINTS(): subtrees separated (not terminated)
+            // by newlines, a newline between the two lists
+            let mut sections = Vec::new();
             for f in t.children()? {
                 let label = match f.context() {
                     Some(0) => "Permitted",
                     Some(1) => "Excluded",
                     _ => continue,
                 };
-                out.push_str(&format!("{}:\n", label));
+                let mut lines = Vec::new();
                 for st in asn1::parse_all(f.content)? {
                     let sc = st.children()?;
                     let g = sc.first()?;
                     if g.tag & 0x1f == 7 {
-                        out.push_str(&format!("  IP:{}\n", ip_mask_text(g.content)));
+                        lines.push(format!("  IP:{}", ip_mask_text(g.content)));
                     } else {
-                        out.push_str(&format!("  {}\n", general_name_print(g)));
+                        lines.push(format!("  {}", general_name_print(g)));
                     }
                 }
+                if !lines.is_empty() {
+                    sections.push(format!("{}:\n{}", label, lines.join("\n")));
+                }
             }
-            out
+            sections.join("\n")
         }
         "1.3.6.1.5.5.7.1.24" => {
             let t = asn1::parse_one(v)?;

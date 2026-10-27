@@ -94,11 +94,16 @@ impl Name {
     /// X509_NAME_oneline()
     pub fn oneline(&self) -> String {
         let mut out = String::new();
-        for e in self.entries() {
+        // entries of a multi-valued RDN are joined with '+'
+        let entries = self
+            .rdns
+            .iter()
+            .flat_map(|rdn| rdn.iter().enumerate().map(|(i, e)| (i > 0, e)));
+        for (same_rdn, e) in entries {
             let sn = obj::by_oid(&e.oid)
                 .map(|o| o.sn)
                 .unwrap_or_else(|| e.oid.clone());
-            out.push('/');
+            out.push(if same_rdn { '+' } else { '/' });
             out.push_str(&sn);
             out.push('=');
             let q = &e.value;
