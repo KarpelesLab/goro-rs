@@ -10419,6 +10419,14 @@ impl Vm {
         {
             return true;
         }
+        // (an enum is a UnitEnum, a backed one a BackedEnum: also the
+        // internal enums, RoundingMode, Random\IntervalBoundary ...)
+        if class_entry.is_enum
+            && (target_lower == b"unitenum"
+                || (target_lower == b"backedenum" && class_entry.enum_backing_type.is_some()))
+        {
+            return true;
+        }
         // (a class_alias() names the aliased class)
         if let Some(t) = self.classes.get(target_lower) {
             if !t.name.eq_ignore_ascii_case(target_lower) {
