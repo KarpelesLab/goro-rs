@@ -1916,7 +1916,20 @@ fn build_csr(
     ]);
     let (alg, sig) = cert::sign_tbs(&info, key, md)?;
     let der = asn1::seq(&[info, alg, asn1::bitstr(&sig)]);
-    Csr::parse(&der)
+    // i2d sorts the SET OF attributes, but the request in memory keeps
+    // them in the order they were added (what X509_REQ_print() shows)
+    let order: Vec<String> = attrs
+        .iter()
+        .filter_map(|d| {
+            asn1::parse_one(d)
+                .and_then(|t| t.children())
+                .and_then(|c| c.first().and_then(|o| o.oid()))
+        })
+        .collect();
+    let mut csr = Csr::parse(&der)?;
+    csr.attributes
+        .sort_by_key(|(oid, _)| order.iter().position(|o| o == oid).unwrap_or(usize::MAX));
+    Some(csr)
 }
 
 fn req_digest(r: &req::Req) -> Option<Md> {
