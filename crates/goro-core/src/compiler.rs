@@ -17344,10 +17344,13 @@ impl Compiler {
                         // original array, not $a after its first element is assigned.
                         let arr_op = if matches!(val, OperandType::Cv(_)) {
                             let t = self.op_array.alloc_temp();
+                            // (op2 set: an undefined variable warns, as
+                            // FETCH_LIST_R's container read does)
+                            let warn = self.op_array.add_literal(Value::True);
                             self.op_array.emit(Op {
                                 opcode: OpCode::LoadConst,
                                 op1: val,
-                                op2: OperandType::Unused,
+                                op2: OperandType::Const(warn),
                                 result: OperandType::Tmp(t),
                                 line: expr.span.line,
                             });
@@ -19081,7 +19084,35 @@ impl Compiler {
                         }
                     } else if let Some(key_expr) = &elem.key {
                         let key = self.compile_expr(key_expr)?;
-                        let val = self.compile_expr(&elem.value)?;
+                        let mut val = self.compile_expr(&elem.value)?;
+                        let mut key = key;
+                        // ADD_ARRAY_ELEMENT reads its value, then its key: an
+                        // undefined key variable warns after the value's and
+                        // is the empty string (no null offset deprecation).
+                        if matches!(key, OperandType::Cv(_)) {
+                            if matches!(val, OperandType::Cv(_)) {
+                                let t = self.op_array.alloc_temp();
+                                let warn = self.op_array.add_literal(Value::True);
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::LoadConst,
+                                    op1: val,
+                                    op2: OperandType::Const(warn),
+                                    result: OperandType::Tmp(t),
+                                    line: el_line,
+                                });
+                                val = OperandType::Tmp(t);
+                            }
+                            let t = self.op_array.alloc_temp();
+                            let as_key = self.op_array.add_literal(Value::Long(1));
+                            self.op_array.emit(Op {
+                                opcode: OpCode::LoadConst,
+                                op1: key,
+                                op2: OperandType::Const(as_key),
+                                result: OperandType::Tmp(t),
+                                line: el_line,
+                            });
+                            key = OperandType::Tmp(t);
+                        }
                         self.op_array.emit(Op {
                             opcode: OpCode::ArraySet,
                             op1: OperandType::Tmp(arr_tmp),

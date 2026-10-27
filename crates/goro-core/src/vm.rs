@@ -55169,8 +55169,34 @@ impl Vm {
                 },
 
                 OpCode::LoadConst => {
-                    // Copy op1's current value into result (QM_ASSIGN).
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // Copy op1's current value into result (QM_ASSIGN); with
+                    // op2, an undefined variable warns (a list() source).
+                    let val = if matches!(op.op2, OperandType::Unused) {
+                        self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
+                    } else if matches!(op.op2, OperandType::Const(k)
+                        if matches!(op_array.literals.get(k as usize), Some(Value::Long(1))))
+                        && matches!(Self::read_operand_raw(&cvs, &op.op1).deref(), Value::Undef)
+                    {
+                        // (an array literal's undefined key variable: "")
+                        let _ = self.read_operand_warn(
+                            &op.op1,
+                            &cvs,
+                            &tmps,
+                            &op_array.literals,
+                            op_array,
+                            op.line,
+                        );
+                        Value::String(PhpString::empty())
+                    } else {
+                        self.read_operand_warn(
+                            &op.op1,
+                            &cvs,
+                            &tmps,
+                            &op_array.literals,
+                            op_array,
+                            op.line,
+                        )
+                    };
                     self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::FastConcat => {

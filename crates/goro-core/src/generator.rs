@@ -340,7 +340,9 @@ impl PhpGenerator {
         let num = |v: &Value| matches!(v, Value::Long(_) | Value::Double(_));
         let undef_cv = |o: &OperandType| matches!(o, OperandType::Cv(i) if matches!(self.cvs.get(*i as usize), Some(Value::Undef) | None));
         match op.opcode {
-            OpCode::Nop | OpCode::Jmp | OpCode::LoadConst => true,
+            OpCode::Nop | OpCode::Jmp => true,
+            // (a list() source warns when undefined: the VM's handler)
+            OpCode::LoadConst => matches!(op.op2, OperandType::Unused) || !undef_cv(&op.op1),
             // Scalars only, no foreach state, no destructor pending.
             OpCode::FreeTmps => {
                 !vm.has_release_work()
