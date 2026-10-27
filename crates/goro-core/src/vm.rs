@@ -23930,9 +23930,8 @@ impl Vm {
         let lower = &buf[..total];
         let method_lower = &lower[sep + 2..];
         let ce = self.classes.get(&lower[..sep])?;
-        if ce.filename.is_none() {
-            return None;
-        }
+        // (a user class)
+        ce.filename.as_ref()?;
         let m = ce.get_method(method_lower)?;
         // (an enum's instance methods take the general path; its static
         // ones are plain methods: their parameters' by-reference sends
