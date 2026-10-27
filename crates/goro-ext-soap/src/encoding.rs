@@ -3505,12 +3505,14 @@ fn to_zval_map(vm: &mut Vm, _t: &EncRef, data: Option<Node>) -> SR<Value> {
                 "Encoding: Can't decode apache map, missing key",
             ));
         };
-        let xml_value = xml::get_node(xml::children(item), "value");
-        let key = master_to_zval(vm, None, xml_key)?;
-        let value = match xml_value {
-            Some(v) => master_to_zval(vm, None, v)?,
-            None => Value::Null,
+        let Some(xml_value) = xml::get_node(xml::children(item), "value") else {
+            return Err(soap_error(
+                vm,
+                "Encoding: Can't decode apache map, missing value",
+            ));
         };
+        let key = master_to_zval(vm, None, xml_key)?;
+        let value = master_to_zval(vm, None, xml_value)?;
         match key.deref() {
             Value::String(s) => ret.borrow_mut().set(symtable_key(s.as_bytes()), value),
             Value::Long(n) => ret.borrow_mut().set(ArrayKey::Int(n), value),
