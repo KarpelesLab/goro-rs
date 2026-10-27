@@ -475,8 +475,11 @@ fn invoke_method_inner(
             let op = m.op_array.clone();
             let declaring = m.declaring_class.clone();
             let mut a = new_arr();
+            // zend_call_function() keeps reference arguments as references
+            // when calling through the __call trampoline (stream_open's
+            // $opened_path stays by-reference in $args).
             for v in args {
-                a.push(v.deref());
+                a.push(v);
             }
             let display = vm
                 .classes
