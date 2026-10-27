@@ -423,8 +423,23 @@ fn ser_destroy() {
 struct Serializer {
     buf: Vec<u8>,
     hash: Rc<RefCell<SerHash>>,
-    depth: usize,
     line: u32,
+}
+
+/// Emulated C stack a php_var_serialize_intern() level (with
+/// php_var_serialize_nested_data()) uses: php-src gets ~5.4k levels deep in
+/// an 8 MiB stack.
+const SERIALIZE_LEVEL_COST: usize = 1544;
+
+/// zend_call_stack_size_error()
+#[cold]
+#[inline(never)]
+fn serialize_stack_error(vm: &mut Vm) {
+    let msg = format!(
+        "Maximum call stack size of {} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?",
+        goro_core::stack::emulated_size()
+    );
+    throw(vm, b"Error", &msg);
 }
 
 fn push_long(buf: &mut Vec<u8>, n: i64) {
@@ -582,14 +597,17 @@ impl Serializer {
         if vm.current_exception.is_some() {
             return;
         }
-        if self.depth > 3000 {
-            let msg = format!(
-                "Maximum call stack size of {} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?",
-                goro_core::stack::emulated_size()
-            );
-            throw(vm, b"Error", &msg);
-            return;
+        // php_serialize_check_stack_limit()
+        if goro_core::stack::native_level(SERIALIZE_LEVEL_COST, || {
+            self.serialize_level(vm, val, is_root)
+        })
+        .is_none()
+        {
+            serialize_stack_error(vm);
         }
+    }
+
+    fn serialize_level(&mut self, vm: &mut Vm, val: &Value, is_root: bool) {
         let already = self.add_var_hash(val);
         if already != 0 {
             if already == -1 {
@@ -648,7 +666,6 @@ impl Serializer {
                         .map(|(k, v)| (k.clone(), element_value(v, 0)))
                         .collect()
                 };
-                self.depth += 1;
                 self.buf
                     .extend_from_slice(format!("{}:{{", items.len()).as_bytes());
                 for (k, item) in &items {
@@ -663,13 +680,8 @@ impl Serializer {
                     self.serialize(vm, item, false);
                 }
                 self.buf.push(b'}');
-                self.depth -= 1;
             }
-            Value::Object(obj) => {
-                self.depth += 1;
-                self.serialize_object(vm, &v, obj);
-                self.depth -= 1;
-            }
+            Value::Object(obj) => self.serialize_object(vm, &v, obj),
             Value::Resource(_) => self.buf.extend_from_slice(b"i:0;"),
             Value::Reference(_) => self.buf.extend_from_slice(b"N;"),
         }
@@ -952,7 +964,6 @@ pub fn php_serialize(vm: &mut Vm, val: &Value) -> Option<Vec<u8>> {
     let mut s = Serializer {
         buf: Vec::new(),
         hash,
-        depth: 0,
         line: vm.current_line,
     };
     s.serialize(vm, val, true);
@@ -1361,7 +1372,11 @@ impl<'a> Parser<'a> {
     /// entries added on failure.
     fn unserialize(&mut self, vm: &mut Vm, p: &mut usize, slot: &Slot) -> bool {
         let orig = self.d.borrow().entries.len();
-        let ok = self.unserialize_internal(vm, p, Some(slot)).is_some();
+        // (php-src recurses on the C stack without a check; nesting is
+        // bounded by max_depth, and only by the stack when that is 0)
+        let ok =
+            goro_core::stack::with_room(|| self.unserialize_internal(vm, p, Some(slot)).is_some())
+                .unwrap_or(false);
         if !ok {
             let mut d = self.d.borrow_mut();
             for e in d.entries.iter_mut().skip(orig) {
