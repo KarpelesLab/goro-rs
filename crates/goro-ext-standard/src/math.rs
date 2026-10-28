@@ -408,7 +408,10 @@ pub fn number_format_int(
     let mut digits = v.unsigned_abs().to_string();
     if decimals > 0 {
         digits.push('.');
-        digits.extend(std::iter::repeat_n('0', decimals.min(i32::MAX as i64) as usize));
+        digits.extend(std::iter::repeat_n(
+            '0',
+            decimals.min(i32::MAX as i64) as usize,
+        ));
     }
     assemble(v < 0, &digits, dec_point, thousands_sep)
 }
