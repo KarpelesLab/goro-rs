@@ -3,6 +3,7 @@
 //! Everything here works on plain Rust values (`&[u8]` strings, `i64`,
 //! `f64`); the engine wires the functions to PHP values.
 
+pub mod encoding;
 pub mod error;
 pub mod float;
 pub mod html;
