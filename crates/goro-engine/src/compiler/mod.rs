@@ -34,6 +34,11 @@ pub(crate) fn lit(s: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     }
 }
 
+/// A name class_alias() refuses (a reserved type name).
+pub fn is_reserved_class_alias(l: &[u8]) -> bool {
+    decl::is_reserved_type_name_pub(l)
+}
+
 pub fn is_superglobal_name(n: &[u8]) -> bool {
     scan::is_superglobal(n)
 }
@@ -1143,7 +1148,10 @@ impl<'a> Compiler<'a> {
         match kind {
             UseKind::Normal => {
                 let la = alias.to_ascii_lowercase();
-                if matches!(&la[..], b"self" | b"parent" | b"static") {
+                // tests Zend/tests/type_declarations/scalar_reserved*_use
+                if matches!(&la[..], b"self" | b"parent" | b"static")
+                    || decl::is_reserved_type_name_pub(&la)
+                {
                     return self.err(
                         format!(
                             "Cannot use {} as {} because '{}' is a special class name",

@@ -3142,17 +3142,31 @@ impl Vm {
             }
             Check::Fail => {
                 let fname = self.func_display_name(&func);
+                // static names the called class (test Zend/tests/
+                // type_declarations/static_type_return).
+                let mut shown = ty.display();
+                if ty.mask & tmask::STATIC != 0 && !static_class.is_null() {
+                    let cn = unsafe { (*static_class).name.dname() };
+                    shown = shown
+                        .split('|')
+                        .map(|p| match p {
+                            "static" => cn.clone(),
+                            "?static" => format!("?{}", cn),
+                            o => o.to_string(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("|");
+                }
                 if none && ty.mask & tmask::NULL == 0 {
                     return self.type_error(&format!(
                         "{}(): Return value must be of type {}, none returned",
-                        fname,
-                        ty.display()
+                        fname, shown
                     ));
                 }
                 self.type_error(&format!(
                     "{}(): Return value must be of type {}, {} returned",
                     fname,
-                    ty.display(),
+                    shown,
                     v.tname()
                 ))
             }

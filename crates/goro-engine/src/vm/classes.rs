@@ -489,6 +489,35 @@ impl Vm {
                         ),
                     );
                 }
+                // Typed constants: covariant types (tests Zend/tests/
+                // type_declarations/typed_class_constants_inheritance_*).
+                if let Some(pt) = &prev.ty
+                    && prev.flags & mflags::PRIVATE == 0
+                    && !std::ptr::eq(prev.class, cp)
+                {
+                    let ok = match &c.ty {
+                        None => false,
+                        Some(ct) => {
+                            ct.display() == pt.display()
+                                || self.type_sub(ct, &cls, pt, unsafe { &*prev.class })?
+                                    != super::variance::Sub::No
+                        }
+                    };
+                    if !ok {
+                        let pcn = unsafe { (*prev.class).name.dname() };
+                        return self.link_err(
+                            decl,
+                            &format!(
+                                "Type of {}::{} must be compatible with {}::{} of type {}",
+                                cname,
+                                c.name.dname(),
+                                pcn,
+                                c.name.dname(),
+                                pt.display()
+                            ),
+                        );
+                    }
+                }
                 let pvis = prev.flags & mflags::VISIBILITY;
                 let nvis = c.flags & mflags::VISIBILITY;
                 if vis_rank(nvis) > vis_rank(pvis) && prev.flags & mflags::PRIVATE == 0 {

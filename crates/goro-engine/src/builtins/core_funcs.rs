@@ -1325,6 +1325,13 @@ fn class_alias(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.value_error("class_alias(): Argument #1 ($class) must be a user-defined class name, internal class name given");
     }
     let la = lower(alias.strip_prefix(b"\\").unwrap_or(&alias));
+    // tests Zend/tests/type_declarations/scalar_reserved*_class_alias
+    if crate::compiler::is_reserved_class_alias(&la) {
+        return Err(vm.fatal(&format!(
+            "Cannot use \"{}\" as a class alias as it is reserved",
+            alias.to_string_lossy()
+        )));
+    }
     if vm.classes.contains_key(&la) {
         vm.warn(&format!(
             "Cannot declare class {}, because the name is already in use",

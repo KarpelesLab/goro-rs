@@ -331,6 +331,17 @@ impl<'a> Compiler<'a> {
                 }
                 Some(th)
             }
+            // __toString() returns string implicitly (PHP 8.0, RFC:
+            // Stringable; test Zend/tests/magic_methods/bug26166).
+            None if matches!(spec.kind, FnKind::Method { .. })
+                && spec.name.eq_ignore_ascii_case(b"__tostring") =>
+            {
+                flags |= fflags::HAS_RETURN_TYPE;
+                Some(TypeHint {
+                    mask: tmask::STRING,
+                    classes: Vec::new(),
+                })
+            }
             None => None,
         };
         if let FnKind::Method { is_ctor: true, .. } = spec.kind
@@ -2580,6 +2591,10 @@ fn set_vis_flags(m: u16) -> u32 {
         f |= mflags::PRIVATE_SET;
     }
     f
+}
+
+pub(crate) fn is_reserved_type_name_pub(l: &[u8]) -> bool {
+    is_reserved_type_name(l)
 }
 
 fn is_reserved_type_name(l: &[u8]) -> bool {
