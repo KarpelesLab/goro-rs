@@ -2197,6 +2197,16 @@ impl Arena {
             (NodeData::Document(_), NodeData::Document(_))
             | (NodeData::Fragment, NodeData::Fragment) => true,
             (NodeData::EntityRef(x), NodeData::EntityRef(y)) => x == y,
+            (NodeData::EntityDecl(x), NodeData::EntityDecl(y)) => {
+                return x.name == y.name
+                    && x.public_id == y.public_id
+                    && x.system_id == y.system_id
+                    && x.value == y.value
+                    && x.notation == y.notation;
+            }
+            (NodeData::Notation(x), NodeData::Notation(y)) => {
+                return x.name == y.name && x.public_id == y.public_id && x.system_id == y.system_id;
+            }
             (NodeData::Namespace(x), NodeData::Namespace(y)) => return x == y,
             _ => false,
         };

@@ -199,7 +199,7 @@ pub fn cached_list(vm: &mut Vm, owner: &ObjRef, k: ListKind) -> R<Value> {
     if let Some(o) = found {
         return Ok(Value::Object(o));
     }
-    let v = new_list(vm, k, true)?;
+    let v = new_list_owned(vm, k, true, Some(owner.clone()))?;
     if let Value::Object(o) = &v {
         super::with_dom_obj(owner, |d| d.cached.borrow_mut().push((tag, o.clone())));
     }
@@ -505,7 +505,11 @@ fn list_dim(
             }
             DimKey::Index(f as i64)
         }
-        Value::Str(s) => match goro_runtime::array::canonical_int(s.as_bytes()) {
+        Value::Str(s) => match goro_runtime::array::canonical_int(s.as_bytes()).or_else(|| {
+            let t = std::str::from_utf8(s.as_bytes()).ok()?;
+            let f: f64 = t.trim_start_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']).parse().ok()?;
+            Some(f as i64)
+        }) {
             Some(i) => DimKey::Index(i),
             None => {
                 if named_ok {

@@ -2205,7 +2205,9 @@ fn ext_iter(vm: &mut Vm, a: &Args, op: u8) -> Option<R<Value>> {
             Ok(Value::Null)
         }
         _ => {
-            with(o, |d: &mut ExtIter| d.pos = 0);
+            if pos > 0 {
+                return Some(vm.throw("Error", "Iterator does not support rewinding"));
+            }
             Ok(Value::Null)
         }
     })

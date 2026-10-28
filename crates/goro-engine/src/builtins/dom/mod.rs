@@ -420,6 +420,15 @@ pub(crate) fn arg_node(vm: &mut Vm, a: &Args, i: usize) -> R<NodeId> {
     }
 }
 
+/// The node of object argument `i` of a mutation method: an object
+/// without node is "Invalid State Error".
+pub(crate) fn arg_node_state(vm: &mut Vm, a: &Args, i: usize) -> R<NodeId> {
+    match a.obj(i).as_ref().and_then(node_of) {
+        Some(n) => Ok(n),
+        None => throw_dom(vm, DomError::InvalidState),
+    }
+}
+
 /// The node of optional object argument `i` (None when null or absent).
 pub(crate) fn opt_arg_node(vm: &mut Vm, a: &Args, i: usize) -> R<Option<NodeId>> {
     match a.val(i) {

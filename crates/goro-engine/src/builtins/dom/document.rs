@@ -1418,6 +1418,10 @@ fn impl_create_doctype(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if name.is_empty() && !modern {
         return vm.fthrow(a, "ValueError", "Argument #1 ($qualifiedName) must not be empty");
     }
+    if !modern && name.to_ascii_lowercase().contains("%00") {
+        vm.fwarn(a, "URI must not contain percent-encoded NUL bytes")?;
+        return Ok(Value::Bool(false));
+    }
     if !goro_xml::chars::is_qname(&name) {
         let e = if modern || goro_xml::chars::is_name(&name) {
             DomError::Namespace

@@ -637,7 +637,16 @@ pub(crate) fn set_prop(vm: &mut Vm, o: &ObjRef, name: &str, v: Value) -> R<()> {
         "value" => {
             super::element::set_attr_node_value(n, &text);
         }
-        "id" => super::element::set_attr_by_name(vm, n, "id", &text)?,
+        "id" => {
+            super::element::set_attr_by_name(vm, n, "id", &text)?;
+            if !modern {
+                with_arena(|a| {
+                    if let Some(at) = a.get_attr_node(n, "id") {
+                        a.attr_mut(at).unwrap().is_id = true;
+                    }
+                });
+            }
+        }
         "className" => super::element::set_attr_by_name(vm, n, "class", &text)?,
         "prefix" if !modern => super::element::set_prefix(vm, n, &text)?,
         "innerHTML" if modern => super::modern::set_inner_html(vm, n, &text)?,

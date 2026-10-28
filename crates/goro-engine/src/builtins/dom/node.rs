@@ -119,15 +119,6 @@ pub(crate) fn legacy_insert(
         if matches!(a.data(node), NodeData::Attribute(_)) {
             return Err(LegacyInsertError::Attr);
         }
-        if matches!(a.data(parent), NodeData::Document(_)) {
-            // Only one document element, doctype before it.
-            if let Err(e) = a.check_pre_insert(parent, node, child)
-                && !(e == DomError::HierarchyRequest
-                    && matches!(a.data(node), NodeData::Text(_) | NodeData::CData(_)))
-            {
-                return Err(LegacyInsertError::Dom(e));
-            }
-        }
         let mut child = child;
         if child == Some(node) {
             child = a.next_sibling(node);
@@ -275,8 +266,8 @@ pub(crate) fn modern_insert(
 }
 
 fn do_insert(vm: &mut Vm, a: &Args, child: Option<NodeId>, op: InsertOp) -> R<Value> {
+    let node = super::arg_node_state(vm, a, 0)?;
     let parent = this_node(vm, a)?;
-    let node = arg_node(vm, a, 0)?;
     if modern_fn(a) {
         return match modern_insert(parent, node, child) {
             Ok(_) => Ok(a.val(0)),
@@ -317,8 +308,8 @@ fn insert_before(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn remove_child(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let child = super::arg_node_state(vm, a, 0)?;
     let parent = this_node(vm, a)?;
-    let child = arg_node(vm, a, 0)?;
     let modern = modern_fn(a);
     let r = with_arena(|ar| {
         if !matches!(
@@ -338,9 +329,9 @@ fn remove_child(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn replace_child(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let node = super::arg_node_state(vm, a, 0)?;
+    let child = super::arg_node_state(vm, a, 1)?;
     let parent = this_node(vm, a)?;
-    let node = arg_node(vm, a, 0)?;
-    let child = arg_node(vm, a, 1)?;
     let modern = modern_fn(a);
     let r = xmlstore::with(|s| {
         let ar = &mut s.arena;

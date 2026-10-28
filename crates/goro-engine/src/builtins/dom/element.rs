@@ -851,7 +851,8 @@ fn toggle_attribute(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     let r = xmlstore::with(|s| {
         let ar = &mut s.arena;
-        let n = if modern && lower_names(ar, el) {
+        let html = ar.doc(ar.doc_of(el)).kind == DocKind::Html;
+        let n = if (modern && lower_names(ar, el)) || html {
             name.to_ascii_lowercase()
         } else {
             name.clone()
@@ -1313,8 +1314,7 @@ fn convert_nodes(vm: &mut Vm, a: &Args, ctx: NodeId) -> R<(Vec<NodeId>, Vec<supe
                     let root = vm.find_class(base.as_bytes(), false)?.unwrap();
                     let cls = vm.class_of(&o);
                     if cls.is_subclass_of(&root) {
-                        let c = cls.name.to_string_lossy();
-                        return vm.throw("Error", &format!("Couldn't fetch {c}"));
+                        return throw_dom(vm, DomError::InvalidState);
                     }
                     return vm.fthrow(
                         a,

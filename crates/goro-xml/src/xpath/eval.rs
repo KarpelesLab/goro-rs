@@ -71,13 +71,15 @@ fn lookup_prefix(
     ctx: &Context<'_>,
     prefix: &str,
 ) -> Option<String> {
-    if let Some((_, u)) = ctx.namespaces.iter().rev().find(|(p, _)| p == prefix) {
-        return Some(u.clone());
-    }
+    // The context node's in-scope declarations, registered after the
+    // user's, win (observed on PHP 8.5, test ext/dom/tests/bug55700.phpt).
     if ctx.register_node_ns
         && let Some(u) = arena.lookup_ns(context, Some(prefix))
     {
         return Some(u.to_string());
+    }
+    if let Some((_, u)) = ctx.namespaces.iter().rev().find(|(p, _)| p == prefix) {
+        return Some(u.clone());
     }
     if prefix == "xml" {
         return Some(XML_NS.into());
