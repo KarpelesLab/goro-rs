@@ -83,9 +83,11 @@ pub fn parse(fname: &[u8], data: &[u8], opts: &ParseOptions) -> Result<Archive, 
     let mut sig_bin: Option<(usize, Vec<u8>)> = None;
     let mut metas: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut links: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut ended = false;
     while p + 512 <= data.len() {
         let h = &data[p..p + 512];
         if h.iter().all(|&c| c == 0) {
+            ended = true;
             break;
         }
         let stored = octal(&h[148..156]);
@@ -187,6 +189,10 @@ pub fn parse(fname: &[u8], data: &[u8], opts: &ParseOptions) -> Result<Archive, 
             }
         }
         a.put(e);
+    }
+    // a header cut short (test tar/tar_001.phpt)
+    if !ended && p < data.len() && data[p..].iter().any(|&c| c != 0) {
+        return Err(corrupt(fname, "truncated"));
     }
     // symbolic links read as their target (test tar/links4.phpt)
     let syms: Vec<(Vec<u8>, Vec<u8>)> = a

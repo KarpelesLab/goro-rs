@@ -2091,6 +2091,10 @@ fn user_stat(vm: &mut Vm, a: &Args, flags: i64) -> R<Option<Option<PhpArray>>> {
 /// is_writable() read the mode bits, as for user wrappers).
 fn native_stat(vm: &mut Vm, a: &Args) -> R<Option<Option<PhpArray>>> {
     let f = a.str(0);
+    let f = match super::streams::rewrite_path(vm, &f) {
+        Some(p) => PhpStr::from(p),
+        None => f,
+    };
     match super::streams::wrapper_for(vm, &f).and_then(|w| w.url_stat) {
         Some(op) => Ok(Some(op(vm, &f, 2)?.map(|st| stat_from_user(&st)))),
         None => Ok(None),

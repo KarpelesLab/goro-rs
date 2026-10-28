@@ -272,6 +272,9 @@ fn phar_init(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let is_data = a.bool(2);
     let format = a.int_or(3, 0);
     let cls = if is_data { "PharData" } else { "Phar" };
+    if native::<PharObj>(a.this_obj()).is_some() {
+        return vm.throw("BadMethodCallException", "Cannot call constructor twice");
+    }
     if fname.windows(3).any(|w| w == b"://") && !fname.starts_with(b"phar://") {
         return vm.throw(
             "UnexpectedValueException",
@@ -462,7 +465,28 @@ fn add_empty_dir(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn add_from_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (s, _) = this_phar(vm, a)?;
     check_write(vm, &s, "UnexpectedValueException", RO)?;
-    let n = local_name(a.bytes(0));
+    let raw = a.bytes(0).to_vec();
+    if raw.contains(&0) {
+        return vm.throw(
+            "ValueError",
+            &format!(
+                "{}(): Argument #1 ($localName) must not contain any null bytes",
+                a.fname()
+            ),
+        );
+    }
+    if let Some(why) = bad_path(&raw) {
+        return vm.throw(
+            "BadMethodCallException",
+            &format!(
+                "Entry {} does not exist and cannot be created: phar error: invalid path \"{}\" {}",
+                lossy(&raw),
+                lossy(&raw),
+                why
+            ),
+        );
+    }
+    let n = local_name(&raw);
     if !magic_check(vm, &n)? {
         return Ok(Value::Null);
     }
@@ -1320,7 +1344,9 @@ fn convert(
             };
         }
         if format != from {
-            na.alias = (format == Format::Tar).then(|| target.clone());
+            // observed in test phar_convert_repeated.phpt: a tar made from
+            // an archive with an alias takes its file name as alias
+            na.alias = (format == Format::Tar && na.alias.is_some()).then(|| target.clone());
         }
         if na.sig_type.is_none() {
             na.sig_type = Some(SigType::Sha256);
@@ -1526,6 +1552,12 @@ fn extract_to(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (s, _) = this_phar(vm, a)?;
     let dir = a.str(0).to_vec();
     let overwrite = a.bool_or(2, false);
+    if dir.is_empty() {
+        return vm.throw(
+            "PharException",
+            "Invalid argument, extraction path must be non-zero length",
+        );
+    }
     let base = super::abs_path(vm, &dir);
     let bp = super::os_path(&base);
     if bp.is_file() {
@@ -1556,7 +1588,7 @@ fn extract_to(vm: &mut Vm, a: &mut Args) -> R<Value> {
                     _ => {
                         return vm.throw(
                             "PharException",
-                            "Invalid argument, expected a filename (string) or array of filenames",
+                            "Invalid argument, array of filenames to extract contains non-string value",
                         );
                     }
                 }
@@ -1565,9 +1597,25 @@ fn extract_to(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
         _ => all.clone(),
     };
+    let _ = std::fs::create_dir_all(&bp);
     for w in wanted {
         let list: Vec<Vec<u8>> = {
             let l = s.borrow();
+            if !w.is_empty() && l.mounts.iter().any(|(m, _)| m == &w) {
+                // mounted files are not part of the archive
+                continue;
+            }
+            if w.is_empty() {
+                drop(l);
+                return vm.throw(
+                    "PharException",
+                    &format!(
+                        "phar error: attempted to extract non-existent file or directory \"{}\" from phar \"{}\"",
+                        lossy(&w),
+                        fmt_name(&s)
+                    ),
+                );
+            }
             if l.a.get(&w).is_some() {
                 let mut v = vec![w.clone()];
                 if l.a.get(&w).is_some_and(|e| e.is_dir) {
@@ -1614,7 +1662,15 @@ fn extract_to(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 continue;
             }
             if tp.exists() && !overwrite {
-                continue;
+                return vm.throw(
+                    "PharException",
+                    &format!(
+                        "Extraction from phar \"{}\" failed: Cannot extract \"{}\" to \"{}\", path already exists",
+                        fmt_name(&s),
+                        lossy(&n),
+                        lossy(&target)
+                    ),
+                );
             }
             let data = match data {
                 Ok(d) => d,
