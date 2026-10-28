@@ -191,8 +191,19 @@ fn invalid_data<T>(vm: &mut Vm, what: &str) -> R<T> {
     )
 }
 
+fn in_hierarchy(vm: &Vm, o: &ObjRef, name: &[u8]) -> bool {
+    let mut c = Some(vm.class_of(o));
+    while let Some(k) = c {
+        if k.name.as_bytes().eq_ignore_ascii_case(name) {
+            return true;
+        }
+        c = k.parent.clone();
+    }
+    false
+}
+
 /// Restores the properties of serialized data other than `skip`.
-fn restore_props(vm: &mut Vm, o: &ObjRef, data: &PhpArray, skip: &[&str]) -> R<()> {
+pub(crate) fn restore_props(vm: &mut Vm, o: &ObjRef, data: &PhpArray, skip: &[&str]) -> R<()> {
     for (k, v) in data.iter() {
         let name = match k {
             KeyRef::Str(s) => s.clone(),
@@ -205,7 +216,15 @@ fn restore_props(vm: &mut Vm, o: &ObjRef, data: &PhpArray, skip: &[&str]) -> R<(
         // mangled names: "\0Class\0prop" / "\0*\0prop"
         let plain = match name.as_bytes() {
             [0, rest @ ..] => match rest.iter().position(|&c| c == 0) {
-                Some(p) => PhpStr::new(&rest[p + 1..]),
+                Some(p) => {
+                    // a private property of a class the object is not
+                    // (test gh10747-error.phpt) is dropped
+                    let owner = &rest[..p];
+                    if owner != b"*" && !in_hierarchy(vm, o, owner) {
+                        continue;
+                    }
+                    PhpStr::new(&rest[p + 1..])
+                }
                 None => name.clone(),
             },
             _ => name.clone(),
@@ -267,7 +286,44 @@ fn date_from_data(data: &PhpArray) -> Option<DateTime> {
         Value::Str(s) => s,
         _ => return None,
     };
+    let zone = DateTime::zone_from_parts(ty, &tz.to_string_lossy())?;
+    if let Some(d) = dump_date(&date, &zone) {
+        return Some(d);
+    }
     DateTime::from_parts(&date, ty, &tz.to_string_lossy())
+}
+
+/// The "[-]Y-m-d H:i:s.uuuuuu" form var_dump() and serialize() write,
+/// read directly so that years beyond four digits round-trip (test
+/// bug75035.phpt).
+fn dump_date(s: &[u8], zone: &TimeZone) -> Option<DateTime> {
+    let t = std::str::from_utf8(s).ok()?;
+    let (neg, t) = match t.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
+    let (date, time) = t.split_once(' ')?;
+    let mut d = date.split('-');
+    let y: i64 = d.next()?.parse().ok()?;
+    let m: i64 = d.next()?.parse().ok()?;
+    let dd: i64 = d.next()?.parse().ok()?;
+    if d.next().is_some() {
+        return None;
+    }
+    let (hms, us) = time.split_once('.')?;
+    if us.len() != 6 {
+        return None;
+    }
+    let us: i64 = us.parse().ok()?;
+    let mut h = hms.split(':');
+    let hh: i64 = h.next()?.parse().ok()?;
+    let mi: i64 = h.next()?.parse().ok()?;
+    let ss: i64 = h.next()?.parse().ok()?;
+    if h.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&dd) {
+        return None;
+    }
+    let y = if neg { -y } else { y };
+    Some(DateTime::from_local(y, m, dd, hh, mi, ss, us, zone.clone()))
 }
 
 const DATE_KEYS: &[&str] = &["date", "timezone_type", "timezone"];
@@ -312,9 +368,23 @@ fn dt_create_from_other(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Object(new_date(vm, &cls, dt)?))
 }
 
+/// "f(): Argument #N ($name) must not contain any null bytes" (test
+/// bug72963.phpt).
+pub(crate) fn no_nul(vm: &mut Vm, a: &Args, v: &[u8], n: usize, name: &str) -> R<()> {
+    if v.contains(&0) {
+        return vm.value_error(&format!(
+            "{}(): Argument #{n} (${name}) must not contain any null bytes",
+            a.fname()
+        ));
+    }
+    Ok(())
+}
+
 fn create_from_format_impl(vm: &mut Vm, a: &Args, imm: bool) -> R<Value> {
     let fmt = a.str(0);
     let input = a.str(1);
+    no_nul(vm, a, &fmt, 1, "format")?;
+    no_nul(vm, a, &input, 2, "datetime")?;
     let zone = zone_arg(vm, a, 2)?;
     let (n, us) = now();
     let cls = if a.func.scope().is_some() {
@@ -531,6 +601,7 @@ pub(super) fn dt_diff(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn tz_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
+    no_nul(vm, a, &a.str(0), 1, "timezone")?;
     match parse_zone(&a.str(0)) {
         Ok(z) => {
             set_tz(&o, z);
@@ -692,7 +763,7 @@ fn tz_set_state(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(z) = zone_from_data(&data) else {
         return invalid_data(vm, "DateTimeZone");
     };
-    let o = vm.instantiate_raw(&cls)?;
+    let o = vm.instantiate(&cls)?;
     set_tz(&o, z);
     restore_props(vm, &o, &data, ZONE_KEYS)?;
     Ok(Value::Object(o))
@@ -797,7 +868,7 @@ pub(super) fn iv_create_from_date_string(vm: &mut Vm, a: &mut Args) -> R<Value> 
             } else {
                 class(vm, "DateInterval")?
             };
-            let o = vm.instantiate_raw(&cls)?;
+            let o = vm.instantiate(&cls)?;
             set_iv(vm, &o, &iv);
             Ok(Value::Object(o))
         }
@@ -820,7 +891,19 @@ pub(super) fn iv_format(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn iv_serialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     get_iv(vm, &o)?;
-    Ok(Value::Array(vm.plain_props_array(&o, true)))
+    let all = vm.plain_props_array(&o, true);
+    let mut out = PhpArray::new();
+    for k in IV_KEYS {
+        if let Some(v) = all.get_bytes(k.as_bytes()) {
+            out.insert(key(k), v.clone());
+        }
+    }
+    for (k, v) in all.iter() {
+        if out.get(k).is_none() {
+            out.insert(k.to_owned(), v.clone());
+        }
+    }
+    Ok(Value::Array(out))
 }
 
 const IV_KEYS: &[&str] = &[
@@ -880,10 +963,15 @@ fn iv_from_data(vm: &mut Vm, data: &PhpArray) -> R<Interval> {
             ..Default::default()
         });
     }
+    // fields missing or not numbers read as -1 (test bug73091.phpt)
     let int = |vm: &mut Vm, k: &str| -> R<i64> {
-        match data.get_bytes(k.as_bytes()) {
-            Some(v) => vm.to_int(&v.deref()),
-            None => Ok(0),
+        match data.get_bytes(k.as_bytes()).map(|v| v.deref()) {
+            Some(v @ (Value::Int(_) | Value::Float(_) | Value::Bool(_))) => vm.to_int(&v),
+            // strings convert quietly, other values are -1 (tests
+            // bug53437_var5.phpt, bug73091.phpt)
+            Some(Value::Str(t)) => Ok(goro_runtime::convert::str_to_int(&t)),
+            Some(_) => Ok(-1),
+            None => Ok(if k == "invert" { 0 } else { -1 }),
         }
     };
     let y = int(vm, "y")?;
@@ -897,9 +985,19 @@ fn iv_from_data(vm: &mut Vm, data: &PhpArray) -> R<Interval> {
         Some(v) => vm.to_float(&v.deref())?,
         None => 0.0,
     };
+    let us_f = (f * 1_000_000.0).round();
+    if !(-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&us_f) {
+        // test bug79015.phpt
+        vm.warn(&format!(
+            "The float {} is not representable as an int, cast occurred",
+            goro_runtime::convert::float_repr(us_f)
+        ))?;
+    }
     let days = match data.get_bytes(b"days").map(|v| v.deref()) {
         None | Some(Value::Bool(false)) | Some(Value::Null) => None,
-        Some(v) => Some(vm.to_int(&v)?),
+        Some(v @ (Value::Int(_) | Value::Float(_) | Value::Bool(_))) => Some(vm.to_int(&v)?),
+        Some(Value::Str(t)) => Some(goro_runtime::convert::str_to_int(&t)),
+        Some(_) => Some(-1),
     };
     Ok(Interval {
         y,
@@ -936,7 +1034,7 @@ fn iv_set_state(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let cls = static_class(vm, a);
     let data = a.array(0);
     let iv = iv_from_data(vm, &data)?;
-    let o = vm.instantiate_raw(&cls)?;
+    let o = vm.instantiate(&cls)?;
     set_iv(vm, &o, &iv);
     restore_props(vm, &o, &data, IV_KEYS)?;
     Ok(Value::Object(o))

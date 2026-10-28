@@ -213,7 +213,7 @@ const CLASSES: &[(&str, &str)] = &[
     const int EXCLUDE_START_DATE = 1;
     const int INCLUDE_END_DATE = 2;
     public static function createFromISO8601String(string $specification, int $options = 0): static {}
-    public function __construct($start, $interval = null, $end = null, $options = null) {}
+    public function __construct($start = null, $interval = null, $end = null, $options = null) {}
     public function getStartDate(): DateTimeInterface {}
     public function getEndDate(): ?DateTimeInterface {}
     public function getDateInterval(): DateInterval {}
@@ -338,6 +338,8 @@ pub(crate) fn startup_timezone_check(vm: &mut Vm, ini: &[(Vec<u8>, Vec<u8>)]) {
         return;
     };
     let name = String::from_utf8_lossy(v).into_owned();
+    // an ini line's comment (";...") is not part of the value
+    let name = name.split(';').next().unwrap_or("").trim().to_string();
     if goro_ext_date::api::default_timezone(&name).is_none() {
         let _ = vm.raise_at(
             crate::vm::errors::E_WARNING,
@@ -462,7 +464,7 @@ pub(crate) fn set_tz(o: &ObjRef, tz: TimeZone) {
 /// A new object of `cls` (DateTime, DateTimeImmutable or a subclass)
 /// holding `dt`.
 pub(crate) fn new_date(vm: &mut Vm, cls: &Rc<Class>, dt: DateTime) -> R<ObjRef> {
-    let o = vm.instantiate_raw(cls)?;
+    let o = vm.instantiate(cls)?;
     set_dt(&o, dt);
     Ok(o)
 }
@@ -474,7 +476,7 @@ pub(crate) fn new_date_named(vm: &mut Vm, name: &str, dt: DateTime) -> R<ObjRef>
 
 pub(crate) fn new_tz(vm: &mut Vm, tz: TimeZone) -> R<ObjRef> {
     let cls = class(vm, "DateTimeZone")?;
-    let o = vm.instantiate_raw(&cls)?;
+    let o = vm.instantiate(&cls)?;
     set_tz(&o, tz);
     Ok(o)
 }
@@ -519,8 +521,14 @@ pub(crate) fn key(k: &str) -> Key {
 
 /// "date", "timezone_type", "timezone" (observed on PHP 8.5).
 pub(crate) fn date_parts(dt: &DateTime, out: &mut PhpArray) {
-    out.insert(key("date"), sv(&dt.dump_date()));
+    out.insert(key("date"), s(&dump_date(dt)));
     zone_parts(&dt.zone, out);
+}
+
+/// The "date" member: "Y-m-d H:i:s.u", with a '+' before years beyond
+/// four digits (test bug80483.phpt).
+pub(crate) fn dump_date(dt: &DateTime) -> Vec<u8> {
+    dt.format(b"x-m-d H:i:s.u")
 }
 
 pub(crate) fn zone_parts(z: &TimeZone, out: &mut PhpArray) {
@@ -546,6 +554,28 @@ fn zone_props(vm: &mut Vm, o: &ObjRef) -> Option<PhpArray> {
     Some(out)
 }
 
+/// Reads of a missing property warn as undefined instead of finding the
+/// var_dump view's members (test bug75232.phpt).
+fn no_view_read(
+    vm: &mut Vm,
+    o: &ObjRef,
+    name: &PhpStr,
+    op: crate::class::DynPropOp,
+) -> Option<R<Value>> {
+    if op != crate::class::DynPropOp::Read {
+        return None;
+    }
+    let cls = vm.class_of(o).name.to_string_lossy();
+    Some(
+        vm.warn(&format!(
+            "Undefined property: {}::${}",
+            cls,
+            name.to_string_lossy()
+        ))
+        .map(|_| Value::Null),
+    )
+}
+
 fn date_hooks() -> NativeHooks {
     NativeHooks {
         create: Some(|_, o| {
@@ -556,6 +586,7 @@ fn date_hooks() -> NativeHooks {
             *to.obj().native.borrow_mut() = Some(Box::new(DateObj(d)));
         }),
         compare: Some(date_compare),
+        dyn_prop: Some(no_view_read),
         debug_props: Some(date_props),
         props_for: Some(date_props),
         ..Default::default()
@@ -593,6 +624,7 @@ fn zone_hooks() -> NativeHooks {
             *to.obj().native.borrow_mut() = Some(Box::new(TzObj(d)));
         }),
         compare: Some(zone_compare),
+        dyn_prop: Some(no_view_read),
         debug_props: Some(zone_props),
         props_for: Some(zone_props),
         ..Default::default()
@@ -655,9 +687,17 @@ fn interval_hooks() -> NativeHooks {
             {
                 return None;
             }
+            let r = with_native::<IvObj, _>(o, |d| d.from_string.as_ref().map(|f| f.relative))
+                .flatten()?;
             Some(Ok(match name.as_bytes() {
-                b"y" | b"m" | b"d" | b"h" | b"i" | b"s" | b"invert" => Value::Int(0),
-                b"f" => Value::Float(0.0),
+                b"y" => Value::Int(r.y),
+                b"m" => Value::Int(r.m),
+                b"d" => Value::Int(r.d),
+                b"h" => Value::Int(r.h),
+                b"i" => Value::Int(r.i),
+                b"s" => Value::Int(r.s),
+                b"f" => Value::Float(r.us as f64 / 1_000_000.0),
+                b"invert" => Value::Int(0),
                 b"days" => Value::Bool(false),
                 _ => return None,
             }))
@@ -770,7 +810,7 @@ pub(crate) fn set_iv(vm: &mut Vm, o: &ObjRef, iv: &Interval) {
 
 pub(crate) fn new_iv(vm: &mut Vm, iv: &Interval) -> R<ObjRef> {
     let cls = class(vm, "DateInterval")?;
-    let o = vm.instantiate_raw(&cls)?;
+    let o = vm.instantiate(&cls)?;
     set_iv(vm, &o, iv);
     Ok(o)
 }

@@ -468,7 +468,9 @@ fn date_parse(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(date_parse_value(&p.date_parse()))
 }
 
-fn date_parse_from_format(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+fn date_parse_from_format(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    no_nul(vm, a, &a.str(0), 1, "format")?;
+    no_nul(vm, a, &a.str(1), 2, "datetime")?;
     let p = goro_ext_date::from_format::parse_from_format(&a.str(0), &a.str(1));
     Ok(date_parse_value(&p.date_parse()))
 }
@@ -479,6 +481,7 @@ pub(super) fn get_last_errors(vm: &mut Vm, _a: &mut Args) -> R<Value> {
 
 fn timezone_open(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let name = a.str(0);
+    no_nul(vm, a, &name, 1, "timezone")?;
     match parse_zone(&name) {
         Ok(z) => Ok(Value::Object(new_tz(vm, z)?)),
         Err(msg) => {

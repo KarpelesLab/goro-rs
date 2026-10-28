@@ -88,6 +88,15 @@ fn sync_props(vm: &mut Vm, o: &ObjRef) -> R<()> {
     Ok(())
 }
 
+/// A period's interval as its properties show it: a createFromDateString()
+/// interval appears as its relative numbers (test
+/// DatePeriod_serialize-004.phpt).
+fn plain_interval(iv: &goro_ext_date::interval::Interval) -> goro_ext_date::interval::Interval {
+    let mut out = iv.clone();
+    out.from_string = None;
+    out
+}
+
 /// The seven properties, in PHP's order.
 fn period_parts(vm: &mut Vm, o: &ObjRef, out: &mut PhpArray) -> R<()> {
     let Some((p, sc, ec, cur)) = peek(o) else {
@@ -110,7 +119,7 @@ fn period_parts(vm: &mut Vm, o: &ObjRef, out: &mut PhpArray) -> R<()> {
         None => Value::Null,
     };
     out.insert(key("end"), end);
-    let iv = new_iv(vm, &p.interval)?;
+    let iv = new_iv(vm, &plain_interval(&p.interval))?;
     out.insert(key("interval"), Value::Object(iv));
     out.insert(key("recurrences"), Value::Int(p.recurrences_property()));
     out.insert(key("include_start_date"), Value::Bool(p.include_start));
@@ -156,6 +165,22 @@ pub(super) fn period_hooks() -> NativeHooks {
                 }
             }
         }),
+        get_iterator: Some(|vm, o, _| {
+            let cls = vm.class_of(o);
+            match cls.find_method(b"getiterator") {
+                Some(f) if !f.is_native() => match vm.call_method(o, b"getiterator", Vec::new())? {
+                    Value::Object(it) => Ok(it),
+                    _ => vm.throw(
+                        "Exception",
+                        &format!(
+                            "Objects returned by {}::getIterator() must be traversable or implement interface Iterator",
+                            cls.name.to_string_lossy()
+                        ),
+                    ),
+                },
+                _ => new_iterator(vm, o),
+            }
+        }),
         ..Default::default()
     }
 }
@@ -196,6 +221,9 @@ const BAD_ARGS: &str = "DatePeriod::__construct() accepts (DateTimeInterface, Da
 pub(super) fn dp_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let func = "DatePeriod::__construct";
+    if a.is_empty() {
+        return vm.type_error(BAD_ARGS);
+    }
     match a.val(0) {
         Value::Object(st) if is_date(&st) => {
             let Value::Object(ivo) = a.val(1) else {
@@ -249,11 +277,11 @@ pub(super) fn dp_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 pub(super) fn dp_create_from_iso(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let cls = static_class(vm, a);
+    let o = vm.instantiate(&cls)?;
     let spec = a.str(0);
     let options = a.int_or(1, 0);
     match from_iso(&spec, options, "DatePeriod::createFromISO8601String") {
         Ok(p) => {
-            let o = vm.instantiate_raw(&cls)?;
             let sc = class(vm, "DateTimeImmutable")?;
             store(vm, &o, p, sc, None, None)?;
             Ok(Value::Object(o))
@@ -268,6 +296,9 @@ pub(super) fn dp_get_start(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 pub(super) fn dp_get_end(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if peek(a.this_obj()).is_none() {
+        return Ok(Value::Null);
+    }
     let (p, _, ec, _) = get(vm, a.this_obj())?;
     match p.end {
         Some(d) => Ok(Value::Object(new_date(vm, &ec, d)?)),
@@ -277,10 +308,13 @@ pub(super) fn dp_get_end(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 pub(super) fn dp_get_interval(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (p, _, _, _) = get(vm, a.this_obj())?;
-    Ok(Value::Object(new_iv(vm, &p.interval)?))
+    Ok(Value::Object(new_iv(vm, &plain_interval(&p.interval))?))
 }
 
 pub(super) fn dp_get_recurrences(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if peek(a.this_obj()).is_none() {
+        return Ok(Value::Null);
+    }
     let (p, _, _, _) = get(vm, a.this_obj())?;
     Ok(match p.get_recurrences() {
         Some(n) => Value::Int(n),
@@ -320,7 +354,7 @@ fn period_from_data(vm: &mut Vm, data: &PhpArray) -> R<Option<Restored>> {
             _ => Err(()),
         }
     };
-    let Ok(Some(start)) = date(data.get_bytes(b"start")) else {
+    let Ok(start) = date(data.get_bytes(b"start")) else {
         return Ok(None);
     };
     let Ok(cur) = date(data.get_bytes(b"current")) else {
@@ -329,6 +363,10 @@ fn period_from_data(vm: &mut Vm, data: &PhpArray) -> R<Option<Restored>> {
     let Ok(end) = date(data.get_bytes(b"end")) else {
         return Ok(None);
     };
+    // a null start only goes with a null end (test gh20936.phpt)
+    if start.is_none() && end.is_some() {
+        return Ok(None);
+    }
     let iv = match data.get_bytes(b"interval").map(|v| v.deref()) {
         Some(Value::Object(o)) if with_native::<IvObj, _>(&o, |d| d.init) == Some(true) => {
             get_iv(vm, &o)?
@@ -338,6 +376,9 @@ fn period_from_data(vm: &mut Vm, data: &PhpArray) -> R<Option<Restored>> {
     let Some(Value::Int(rec)) = data.get_bytes(b"recurrences").map(|v| v.deref()) else {
         return Ok(None);
     };
+    if rec < 0 {
+        return Ok(None);
+    }
     let Some(Value::Bool(is)) = data.get_bytes(b"include_start_date").map(|v| v.deref()) else {
         return Ok(None);
     };
@@ -350,10 +391,17 @@ fn period_from_data(vm: &mut Vm, data: &PhpArray) -> R<Option<Restored>> {
     } else {
         Some(given)
     };
-    let sc = vm.class_of(&start);
+    // a null start is accepted; the period then starts at the epoch
+    let (sc, start_dt) = match &start {
+        Some(st) => (vm.class_of(st), peek_dt(st).expect("checked")),
+        None => (
+            class(vm, "DateTime")?,
+            DateTime::from_ts(0, 0, goro_ext_date::TimeZone::utc()),
+        ),
+    };
     let ec = end.as_ref().map(|e| vm.class_of(e));
     let p = Period {
-        start: peek_dt(&start).expect("checked"),
+        start: start_dt,
         interval: iv,
         end: end.as_ref().and_then(peek_dt),
         recurrences,
@@ -365,23 +413,71 @@ fn period_from_data(vm: &mut Vm, data: &PhpArray) -> R<Option<Restored>> {
 
 fn restore(vm: &mut Vm, a: &Args, o: &ObjRef, data: &PhpArray) -> R<()> {
     let Some((p, sc, ec, cur)) = period_from_data(vm, data)? else {
+        partial_restore(vm, o, data)?;
         return vm.throw("Error", "Invalid serialization data for DatePeriod object");
     };
     store(vm, o, p, sc, ec, cur)?;
     let _ = a;
-    for (k, v) in data.iter() {
-        if let goro_runtime::KeyRef::Str(s) = k
-            && PERIOD_KEYS.iter().any(|n| n.as_bytes() == s.as_bytes())
-        {
-            continue;
-        }
-        let name = match k {
-            goro_runtime::KeyRef::Str(s) => s.as_bytes().to_vec(),
-            goro_runtime::KeyRef::Int(i) => i.to_string().into_bytes(),
-        };
-        vm.set_prop_raw(o, &name, v.deref());
-    }
+    super::classes::restore_props(vm, o, data, PERIOD_KEYS)?;
     Ok(())
+}
+
+/// Invalid data still replaces the fields read before the bad one, in
+/// the order start, end, current, interval, recurrences (test
+/// date_period_unserialize3.phpt).
+fn partial_restore(vm: &mut Vm, o: &ObjRef, data: &PhpArray) -> R<()> {
+    let Some((mut p, mut sc, mut ec, mut cur)) = peek(o) else {
+        return Ok(());
+    };
+    let date = |k: &[u8]| -> Option<Option<ObjRef>> {
+        match data.get_bytes(k).map(|v| v.deref()) {
+            Some(Value::Object(d)) if peek_dt(&d).is_some() => Some(Some(d)),
+            Some(Value::Null) => Some(None),
+            _ => None,
+        }
+    };
+    'apply: {
+        match date(b"start") {
+            Some(Some(d)) => {
+                p.start = peek_dt(&d).expect("checked");
+                sc = Some(vm.class_of(&d));
+            }
+            _ => break 'apply,
+        }
+        match date(b"end") {
+            Some(Some(d)) => {
+                p.end = peek_dt(&d);
+                ec = Some(vm.class_of(&d));
+            }
+            Some(None) => p.end = None,
+            None => break 'apply,
+        }
+        match date(b"current") {
+            Some(d) => cur = d.as_ref().and_then(peek_dt),
+            None => break 'apply,
+        }
+        match data.get_bytes(b"interval").map(|v| v.deref()) {
+            Some(Value::Object(i)) if with_native::<IvObj, _>(&i, |d| d.init) == Some(true) => {
+                p.interval = get_iv(vm, &i)?;
+            }
+            _ => break 'apply,
+        }
+        if let Some(Value::Int(r)) = data.get_bytes(b"recurrences").map(|v| v.deref())
+            && r >= 0
+        {
+            let given = r - i64::from(p.include_start) - i64::from(p.include_end);
+            p.recurrences = if p.end.is_some() && given <= 0 {
+                None
+            } else {
+                Some(given)
+            };
+        }
+    }
+    let sc = match sc {
+        Some(c) => c,
+        None => class(vm, "DateTime")?,
+    };
+    store(vm, o, p, sc, ec, cur)
 }
 
 pub(super) fn dp_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -404,7 +500,7 @@ pub(super) fn dp_wakeup(vm: &mut Vm, a: &mut Args) -> R<Value> {
 pub(super) fn dp_set_state(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let cls = static_class(vm, a);
     let data = a.array(0);
-    let o = vm.instantiate_raw(&cls)?;
+    let o = vm.instantiate(&cls)?;
     restore(vm, a, &o, &data)?;
     Ok(Value::Object(o))
 }
@@ -439,6 +535,12 @@ impl goro_runtime::NativeData for DpIter {
 }
 
 fn new_iterator(vm: &mut Vm, o: &ObjRef) -> R<ObjRef> {
+    if peek(o).is_none() {
+        return vm.throw(
+            "DateObjectError",
+            "Object of type DatePeriod has not been correctly initialized by calling parent::__construct() in its constructor",
+        );
+    }
     let (p, sc, _, _) = get(vm, o)?;
     let cls = class(vm, "DatePeriodIterator")?;
     let it = vm.instantiate_raw(&cls)?;
