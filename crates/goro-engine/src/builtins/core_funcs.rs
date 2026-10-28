@@ -1795,6 +1795,13 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
             &format!("{} INI setting is deprecated", k.to_string_lossy()),
         )?;
     }
+    for m in vm.modules.clone() {
+        if let Some(f) = m.on_ini_set
+            && !f(vm, &k, &v)?
+        {
+            return Ok(Value::Bool(false));
+        }
+    }
     vm.ini
         .originals
         .entry(k.clone())
@@ -1809,6 +1816,11 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn ini_restore(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let k = a.str(0);
     if let Some(Some(orig)) = vm.ini.originals.remove(&k) {
+        for m in vm.modules.clone() {
+            if let Some(f) = m.on_ini_set {
+                f(vm, &k, &orig)?;
+            }
+        }
         vm.set_ini(&k, &orig);
     }
     Ok(Value::Null)

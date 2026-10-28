@@ -203,6 +203,11 @@ fn sqrt(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn pow(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let x = a.val(0);
     let y = a.val(1);
+    // Objects with overloaded operators (GMP, BcMath\Number) take `**`'s
+    // path (test ext/bcmath/tests/gh20006.phpt).
+    if matches!(x, Value::Object(_)) || matches!(y, Value::Object(_)) {
+        return vm.binary_op(crate::bytecode::Bin::Pow, &x, &y);
+    }
     let r = goro_runtime::ops::pow(&x, &y, vm);
     vm.check_deferred()?;
     r.map_err(|e| vm.php_error(e))

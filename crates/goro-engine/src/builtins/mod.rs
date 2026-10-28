@@ -2,6 +2,7 @@
 //! handling, output control, strings, arrays, math, files, json...
 
 pub mod array;
+pub mod bcmath;
 pub mod core_classes;
 pub mod core_funcs;
 pub mod ctype;
@@ -67,5 +68,6 @@ pub fn modules() -> Vec<&'static Module> {
         &array::MODULE,
         &math::MODULE,
         &random::MODULE,
+        &bcmath::MODULE,
     ]
 }
