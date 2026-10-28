@@ -121,7 +121,7 @@ impl Period {
                     recurrences = Some(n);
                 }
                 b'P' => {
-                    let iv = Interval::parse_iso(part).map_err(|_| bad())?;
+                    let iv = Interval::parse_duration(part).map_err(|_| bad())?;
                     interval = Some(match interval {
                         None => iv,
                         Some(prev) => Interval {

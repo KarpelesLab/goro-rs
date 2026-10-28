@@ -219,36 +219,10 @@ fn date(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(s(&goro_ext_date::time::date(&fmt, ts, &zone)))
 }
 
-/// gmdate(): UTC, with "GMT" as the abbreviation (observed on PHP 8.5:
-/// `gmdate("e T")` is "UTC GMT").
-pub(super) fn gmt_format(fmt: &[u8], ts: i64, us: u32) -> Vec<u8> {
-    let zone = TimeZone::utc();
-    let t = goro_ext_date::LocalTime::new(ts, us, &zone);
-    let mut out = Vec::with_capacity(fmt.len() * 2);
-    let mut start = 0;
-    let mut i = 0;
-    while i < fmt.len() {
-        match fmt[i] {
-            b'\\' => i += 2,
-            b'T' => {
-                goro_ext_date::format::format_into(&mut out, &fmt[start..i], &t, &zone);
-                out.extend_from_slice(b"GMT");
-                i += 1;
-                start = i;
-            }
-            _ => i += 1,
-        }
-    }
-    if start < fmt.len() {
-        goro_ext_date::format::format_into(&mut out, &fmt[start..], &t, &zone);
-    }
-    out
-}
-
 fn gmdate(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     let fmt = a.str(0);
     let ts = ts_arg(a, 1);
-    Ok(s(&gmt_format(&fmt, ts, 0)))
+    Ok(s(&goro_ext_date::time::gmdate(&fmt, ts, 0)))
 }
 
 fn idate(vm: &mut Vm, a: &mut Args) -> R<Value> {

@@ -521,14 +521,8 @@ pub(crate) fn key(k: &str) -> Key {
 
 /// "date", "timezone_type", "timezone" (observed on PHP 8.5).
 pub(crate) fn date_parts(dt: &DateTime, out: &mut PhpArray) {
-    out.insert(key("date"), s(&dump_date(dt)));
+    out.insert(key("date"), sv(&dt.dump_date()));
     zone_parts(&dt.zone, out);
-}
-
-/// The "date" member: "Y-m-d H:i:s.u", with a '+' before years beyond
-/// four digits (test bug80483.phpt).
-pub(crate) fn dump_date(dt: &DateTime) -> Vec<u8> {
-    dt.format(b"x-m-d H:i:s.u")
 }
 
 pub(crate) fn zone_parts(z: &TimeZone, out: &mut PhpArray) {

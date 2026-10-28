@@ -29,6 +29,7 @@ pub mod spl_autoload;
 pub mod streams;
 pub mod string;
 pub mod strmisc;
+pub mod uri;
 pub mod userstream;
 pub mod var;
 pub mod weakmap;
@@ -66,5 +67,6 @@ pub fn modules() -> Vec<&'static Module> {
         &date::MODULE,
         &array::MODULE,
         &math::MODULE,
+        &uri::MODULE,
     ]
 }

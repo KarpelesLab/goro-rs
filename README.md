@@ -51,8 +51,8 @@ Fresh start. The previous code base is kept on the `old` branch for the
 record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
 
-php-src test suite (8.5.4), share of the tests that run: **76.1%** overall
-(9,390 tests), as of 2026-10-28. Several
+php-src test suite (8.5.4), share of the tests that run: **77.5%** overall
+(9,559 tests), as of 2026-10-28. Several
 extension libraries below are finished but not yet wired into the engine.
 
 - `goro-engine` and the `goro` binary: compiler and VM running PHP 8.5

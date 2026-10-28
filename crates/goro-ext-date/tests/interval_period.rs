@@ -89,6 +89,25 @@ fn iso_durations() {
             "{s}"
         );
     }
+    // two ISO dates (test bug52808.phpt)
+    let i = Interval::parse_iso(b"2008-05-11T15:30:00Z/2007-03-01T13:00:00Z").unwrap();
+    assert_eq!(fields(&i), [1, 2, 10, 2, 30, 0, 0]);
+    assert!(i.invert);
+    assert_eq!(i.days, Some(437));
+    let i = Interval::parse_iso(b"20070301T130000Z/20080511T153000Z").unwrap();
+    assert_eq!((fields(&i), i.invert), ([1, 2, 10, 2, 30, 0, 0], false));
+    assert_eq!(
+        Interval::parse_iso(b"2007-05-11T15:30:00Z/"),
+        Err("Failed to parse interval (2007-05-11T15:30:00Z/)".to_string())
+    );
+    assert_eq!(
+        Interval::parse_iso(b"2007-05-11T15:30:00Z"),
+        Err("Failed to parse interval (2007-05-11T15:30:00Z)".to_string())
+    );
+    assert_eq!(
+        Interval::parse_iso(b"2007-05-11T15:30:00Z/x"),
+        Err("Unknown or bad format (2007-05-11T15:30:00Z/x)".to_string())
+    );
 }
 
 #[test]
@@ -136,6 +155,66 @@ fn from_date_string() {
     assert_eq!(
         Interval::from_date_string(b"foo"),
         Err("Unknown or bad format (foo) at position 0 (f): The timezone could not be found in the database".into())
+    );
+}
+
+#[test]
+fn diff_across_dst_transitions() {
+    // observed on PHP 8.5; Unix times, shown in the zone
+    let at = |ts: i64, zone: &str| DateTime::from_ts(ts, 0, TimeZone::from_id(zone).unwrap());
+    let d = |a: &DateTime, b: &DateTime| {
+        String::from_utf8(interval::diff(a, b, false).format(b"%R%yy%mm%dd %h:%i:%s %a")).unwrap()
+    };
+    let ny = "America/New_York";
+    // 2010-11-06 01:30 EDT to 2010-11-07 01:30 EDT, the first pass of the
+    // overlap (tests rfc-datetime_and_daylight_saving_time-type3-bd1/bd2)
+    assert_eq!(
+        d(&at(1289021400, ny), &at(1289107800, ny)),
+        "+0y0m0d 24:0:0 1"
+    );
+    // to 01:30 EST, the second pass: one day
+    assert_eq!(
+        d(&at(1289021400, ny), &at(1289111400, ny)),
+        "+0y0m1d 0:0:0 1"
+    );
+    // 2010-10-07 01:30 EDT to 11-07 01:30 EDT
+    assert_eq!(
+        d(&at(1286429400, ny), &at(1289107800, ny)),
+        "+0y1m-1d 24:0:0 31"
+    );
+    // from EST in March, the wall clock difference
+    assert_eq!(
+        d(&at(1268465400, ny), &at(1289107800, ny)),
+        "+0y7m24d 23:0:0 238"
+    );
+    // London resolves 01:30 to GMT: no correction
+    let lon = "Europe/London";
+    assert_eq!(
+        d(&at(1477699200, lon), &at(1477787400, lon)),
+        "+0y0m1d 0:30:0 1"
+    );
+    // spring forward: 2010-03-13 00:00 EST to 03-14 03:00 EDT, and from
+    // 02:30 EST (the next day's 02:30 is in the gap)
+    assert_eq!(
+        d(&at(1268456400, ny), &at(1268550000, ny)),
+        "+0y0m1d 2:0:0 1"
+    );
+    assert_eq!(
+        d(&at(1268465400, ny), &at(1268550000, ny)),
+        "+0y0m1d 0:30:0 1"
+    );
+    // Amman starts DST at midnight: 2017-03-01 to 03-31 is 30 days (test
+    // bug52480.phpt)
+    let amman = "Asia/Amman";
+    assert_eq!(
+        d(&at(1488319200, amman), &at(1490911200, amman)),
+        "+0y0m30d 0:0:0 30"
+    );
+    // Dublin's winter time is the DST one: no correction
+    let dub = "Europe/Dublin";
+    assert_eq!(
+        d(&at(1456360200, dub), &at(1459040400, dub)),
+        "+0y1m2d 1:30:0 31"
     );
 }
 

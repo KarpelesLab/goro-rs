@@ -18,6 +18,7 @@ members = [
     "crates/goro-ext-gmp",
     "crates/goro-ext-uri",
     "crates/goro-ext-sodium",
+    "crates/goro-xml",
 ]
 
 [workspace.package]
