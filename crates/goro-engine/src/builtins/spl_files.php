@@ -171,6 +171,7 @@ class SplFileObject extends SplFileInfo implements RecursiveIterator, SeekableIt
     protected $__sep = ',';
     protected $__enc = '"';
     protected $__esc = '\\';
+    protected $__escSet = false;
     public function __construct(string $filename, string $mode = "r", bool $useIncludePath = false, $context = null) {
         if (is_dir($filename)) {
             throw new LogicException("Cannot use SplFileObject with directories");
@@ -191,7 +192,8 @@ class SplFileObject extends SplFileInfo implements RecursiveIterator, SeekableIt
     }
     protected function __h_fchk() {
         if ($this->__fp === null) {
-            throw new Error("Object not initialized");
+            // observed on PHP 8.5
+            throw new Error($this->__path === null ? "The parent constructor was not called: the object is in an invalid state" : "Object not initialized");
         }
     }
     protected function __h_free() {
@@ -262,6 +264,10 @@ class SplFileObject extends SplFileInfo implements RecursiveIterator, SeekableIt
                 return false;
             }
             $v = $this->getCurrentLine();
+            if (!is_string($v)) {
+                // test SplFileObject_getCurrentLine_invalid_override
+                throw new TypeError(get_class($this) . "::getCurrentLine(): Return value must be of type string, " . get_debug_type($v) . " returned");
+            }
             $this->__h_free();
             if (is_string($v)) {
                 $this->__line = $v;
@@ -326,32 +332,67 @@ class SplFileObject extends SplFileInfo implements RecursiveIterator, SeekableIt
         }
         return fread($this->__fp, $length);
     }
+    /* Arguments left out take the object's CSV control; an escape set
+     * nowhere is deprecated (observed on PHP 8.5). */
+    protected function __h_csvDefaults($m, $n, &$separator, &$enclosure, &$escape) {
+        if ($n < 1) {
+            $separator = $this->__sep;
+        }
+        if ($n < 2) {
+            $enclosure = $this->__enc;
+        }
+        if ($n < 3) {
+            $escape = $this->__esc;
+            return !$this->__escSet;
+        }
+        return false;
+    }
+    /* After the arguments are checked. */
+    protected function __h_csvDeprecated($m) {
+        trigger_error("SplFileObject::$m(): the \$escape parameter must be provided, as its default value will change, either explicitly or via SplFileObject::setCsvControl()", E_USER_DEPRECATED);
+    }
     public function fgetcsv(string $separator = ",", string $enclosure = "\"", string $escape = "\\"): array|false {
         $this->__h_fchk();
+        $dep = $this->__h_csvDefaults('fgetcsv', func_num_args(), $separator, $enclosure, $escape);
         $this->__h_csvArgs('fgetcsv', $separator, $enclosure, $escape);
+        if ($dep) {
+            $this->__h_csvDeprecated('fgetcsv');
+        }
         if (!$this->__h_readCsv($separator, $enclosure, $escape, true)) {
             return false;
         }
         return $this->__csv;
     }
-    protected function __h_csvArgs($m, $s, $e, $esc) {
+    protected function __h_csvArgs($m, $s, $e, $esc, $first = 1) {
         if (strlen($s) !== 1) {
-            throw new ValueError("SplFileObject::$m(): Argument #1 (\$separator) must be a single character");
+            throw new ValueError("SplFileObject::$m(): Argument #$first (\$separator) must be a single character");
         }
+        $n = $first + 1;
         if (strlen($e) !== 1) {
-            throw new ValueError("SplFileObject::$m(): Argument #2 (\$enclosure) must be a single character");
+            throw new ValueError("SplFileObject::$m(): Argument #$n (\$enclosure) must be a single character");
         }
+        $n++;
         if (strlen($esc) > 1) {
-            throw new ValueError("SplFileObject::$m(): Argument #3 (\$escape) must be empty or a single character");
+            throw new ValueError("SplFileObject::$m(): Argument #$n (\$escape) must be empty or a single character");
         }
     }
     public function fputcsv(array $fields, string $separator = ",", string $enclosure = "\"", string $escape = "\\", string $eol = "\n"): int|false {
         $this->__h_fchk();
-        $this->__h_csvArgs('fputcsv', $separator, $enclosure, $escape);
+        $dep = $this->__h_csvDefaults('fputcsv', func_num_args() - 1, $separator, $enclosure, $escape);
+        $this->__h_csvArgs('fputcsv', $separator, $enclosure, $escape, 2);
+        if ($dep) {
+            $this->__h_csvDeprecated('fputcsv');
+        }
         return fputcsv($this->__fp, $fields, $separator, $enclosure, $escape, $eol);
     }
     public function setCsvControl(string $separator = ",", string $enclosure = "\"", string $escape = "\\"): void {
         $this->__h_csvArgs('setCsvControl', $separator, $enclosure, $escape);
+        if (func_num_args() < 3) {
+            // observed on PHP 8.5
+            trigger_error('SplFileObject::setCsvControl(): the $escape parameter must be provided as its default value will change', E_USER_DEPRECATED);
+        } else {
+            $this->__escSet = true;
+        }
         $this->__sep = $separator;
         $this->__enc = $enclosure;
         $this->__esc = $escape;
@@ -409,6 +450,10 @@ class SplFileObject extends SplFileInfo implements RecursiveIterator, SeekableIt
     public function fstat(): array { $this->__h_fchk(); return fstat($this->__fp); }
     public function ftruncate(int $size): bool {
         $this->__h_fchk();
+        if ($size < 0) {
+            // test gh17463
+            throw new ValueError('SplFileObject::ftruncate(): Argument #1 ($size) must be greater than or equal to 0');
+        }
         if (!@ftruncate($this->__fp, $size)) {
             if (!str_contains($this->__mode, '+') && !str_contains($this->__mode, 'w') && !str_contains($this->__mode, 'a') && !str_contains($this->__mode, 'x') && !str_contains($this->__mode, 'c')) {
                 throw new LogicException("Can't truncate file " . $this->getPathname());
@@ -467,7 +512,15 @@ class SplFileObject extends SplFileInfo implements RecursiveIterator, SeekableIt
         }
     }
     public function getCurrentLine(): string { return $this->fgets(); }
-    public function __toString(): string { return (string) $this->current(); }
+    /* The current line as text, read if needed, also with READ_CSV
+     * (observed on PHP 8.5; test SplFileObject/bug77024). */
+    public function __toString(): string {
+        $this->__h_fchk();
+        if ($this->__line === null && $this->__csv === null) {
+            $this->__h_readRaw(true, false);
+        }
+        return (string) $this->__line;
+    }
     public function __debugInfo(): array {
         $out = parent::__debugInfo();
         $out["\0SplFileObject\0openMode"] = $this->__mode;
@@ -501,6 +554,7 @@ class DirectoryIterator extends SplFileInfo implements SeekableIterator {
     protected $__index = 0;
     protected $__dflags = 0;
     protected $__glob = false;
+    protected $__globPat = '';
     protected $__globList = null;
     public function __construct(string $directory) {
         $this->__h_open($directory, 0, static::class);
@@ -521,9 +575,12 @@ class DirectoryIterator extends SplFileInfo implements SeekableIterator {
         if (str_starts_with($directory, 'glob://') || ($this instanceof GlobIterator)) {
             $pattern = str_starts_with($directory, 'glob://') ? substr($directory, 7) : $directory;
             $this->__glob = true;
+            $this->__globPat = 'glob://' . $pattern;
             $this->__globList = glob($pattern) ?: [];
-            $this->__dir = dirname($pattern);
-            if ($this->__globList) {
+            /* Paths keep the pattern's directory, none without a slash
+             * (observed on PHP 8.5; test gh12721). */
+            $this->__dir = str_contains($pattern, '/') ? dirname($pattern) : '';
+            if ($this->__globList && str_contains($this->__globList[0], '/')) {
                 $this->__dir = dirname($this->__globList[0]);
             }
         } else {
@@ -574,15 +631,15 @@ class DirectoryIterator extends SplFileInfo implements SeekableIterator {
     }
     protected function __h_file() {
         if ($this->__entry === '') {
-            return $this->__dir === null ? '' : ($this->__glob ? '' : '');
+            return '';
         }
-        return $this->__dir . '/' . $this->__entry;
+        return $this->__dir === '' ? $this->__entry : $this->__dir . '/' . $this->__entry;
     }
     public function getFilename(): string { $this->__h_chk(); return $this->__entry; }
     public function getPath(): string { $this->__h_chk(); return $this->__dir; }
     public function getPathname(): string {
         $this->__h_chk();
-        return $this->__entry === '' ? '' : $this->__dir . '/' . $this->__entry;
+        return $this->__h_file();
     }
     public function getExtension(): string {
         $f = $this->getFilename();
@@ -631,11 +688,12 @@ class DirectoryIterator extends SplFileInfo implements SeekableIterator {
     public function __toString(): string { return $this->getFilename(); }
     public function __debugInfo(): array {
         $out = get_mangled_object_vars($this);
+        /* observed on PHP 8.5 (test dit_001) */
         $out["\0SplFileInfo\0pathName"] = $this->__dir === null ? '' : $this->getPathname();
-        if ($this->__entry !== '' && !$this->isDot() && false) {
+        if ($this->__entry !== '') {
             $out["\0SplFileInfo\0fileName"] = $this->getFilename();
         }
-        $out["\0DirectoryIterator\0glob"] = $this->__glob;
+        $out["\0DirectoryIterator\0glob"] = $this->__glob ? $this->__globPat : false;
         $out["\0RecursiveDirectoryIterator\0subPathName"] = '';
         return $out;
     }
@@ -722,5 +780,11 @@ class GlobIterator extends FilesystemIterator implements Countable {
     public function __construct(string $pattern, int $flags = FilesystemIterator::KEY_AS_PATHNAME | FilesystemIterator::CURRENT_AS_FILEINFO) {
         $this->__h_open($pattern, $flags, static::class);
     }
-    public function count(): int { $this->__h_chk(); return count($this->__globList); }
+    public function count(): int {
+        if ($this->__dir === null) {
+            // test GlobIterator_constructor_count
+            throw new Error('GlobIterator is not initialized');
+        }
+        return count($this->__globList);
+    }
 }

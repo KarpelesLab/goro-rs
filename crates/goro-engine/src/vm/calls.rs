@@ -1799,6 +1799,11 @@ impl Vm {
             Some((self.cur_file(), self.cur_line()))
         };
         let argc = p.argc;
+        let named_hi = if p.has_named {
+            (64 - p.passed.leading_zeros()).min(code.params.len() as u32)
+        } else {
+            0
+        };
         let mut flags = 0;
         if entry {
             flags |= frame_flags::ENTRY;
@@ -1843,7 +1848,14 @@ impl Vm {
         let Pending { args, .. } = p;
         self.give_args_vec(args);
         self.push_frame(frame);
-        let saved_loc = self.loc_override.replace(code as *const FuncCode);
+        // Argument errors of internal classes written in PHP are located at
+        // the call, as an internal function's are (test
+        // ext/spl/tests/AppendIterator_invalid_ctor).
+        let saved_loc = if code.file.is_empty() {
+            self.loc_override.take()
+        } else {
+            self.loc_override.replace(code as *const FuncCode)
+        };
         let r = self.bind_args(
             &func,
             code,
@@ -1859,6 +1871,12 @@ impl Vm {
         if let Err(e) = r {
             self.pop_frame();
             return Err(e);
+        }
+        // With named arguments, func_num_args() counts up to the last
+        // parameter passed, skipped ones taking their defaults (observed on
+        // PHP 8.5).
+        if named_hi > argc {
+            self.frame_mut().argc = named_hi;
         }
         if code.flags & fflags::GENERATOR != 0 {
             let f = self.ex.frames.pop().unwrap();

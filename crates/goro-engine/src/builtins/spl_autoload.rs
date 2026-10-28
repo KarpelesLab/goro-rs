@@ -188,7 +188,22 @@ fn spl_autoload(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Null)
 }
 
+/// spl_classes(): the SPL classes, name => name (list and order observed
+/// on PHP 8.5).
+fn spl_classes(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    const NAMES: &str = "AppendIterator,ArrayIterator,ArrayObject,BadFunctionCallException,BadMethodCallException,CachingIterator,CallbackFilterIterator,DirectoryIterator,DomainException,EmptyIterator,FilesystemIterator,FilterIterator,GlobIterator,InfiniteIterator,InvalidArgumentException,IteratorIterator,LengthException,LimitIterator,LogicException,MultipleIterator,NoRewindIterator,OuterIterator,OutOfBoundsException,OutOfRangeException,OverflowException,ParentIterator,RangeException,RecursiveArrayIterator,RecursiveCachingIterator,RecursiveCallbackFilterIterator,RecursiveDirectoryIterator,RecursiveFilterIterator,RecursiveIterator,RecursiveIteratorIterator,RecursiveRegexIterator,RecursiveTreeIterator,RegexIterator,RuntimeException,SeekableIterator,SplDoublyLinkedList,SplFileInfo,SplFileObject,SplFixedArray,SplHeap,SplMinHeap,SplMaxHeap,SplObjectStorage,SplObserver,SplPriorityQueue,SplQueue,SplStack,SplSubject,SplTempFileObject,UnderflowException,UnexpectedValueException";
+    let mut out = PhpArray::new();
+    for n in NAMES.split(',') {
+        out.insert(
+            goro_runtime::Key::Str(PhpStr::from(n)),
+            Value::Str(PhpStr::from(n)),
+        );
+    }
+    Ok(Value::Array(out))
+}
+
 pub(crate) const FUNCTIONS: &[(&str, crate::func::NativeFn)] = &[
+    ("function spl_classes(): array", spl_classes),
     (
         "function spl_autoload_register(?callable $callback = null, bool $throw = true, bool $prepend = false): bool",
         spl_autoload_register,

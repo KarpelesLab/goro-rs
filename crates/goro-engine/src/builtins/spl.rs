@@ -1256,6 +1256,22 @@ fn ao_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "Incomplete or ill-typed serialization data",
         );
     };
+    // The iterator class (ArrayObject only) is a string or null (test
+    // unserialize_errors).
+    let ic = if is_iterator_class(vm, a) {
+        None
+    } else {
+        match data.get_int(3).map(|v| v.deref()) {
+            None | Some(Value::Null) => None,
+            Some(Value::Str(s)) => Some(s),
+            Some(_) => {
+                return vm.throw(
+                    "UnexpectedValueException",
+                    "Incomplete or ill-typed serialization data",
+                );
+            }
+        }
+    };
     if flags & AO_IS_SELF != 0 {
         with(&o, |d: &mut AoData| {
             d.flags = flags & !AO_IS_SELF;
@@ -1266,8 +1282,8 @@ fn ao_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     if !matches!(storage, Value::Array(_) | Value::Object(_)) {
         return vm.throw(
-            "UnexpectedValueException",
-            "Incomplete or ill-typed serialization data",
+            "InvalidArgumentException",
+            "Passed variable is not an array or object",
         );
     }
     let storage = if matches!(storage, Value::Object(_)) {
@@ -1281,9 +1297,30 @@ fn ao_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
         d.storage = storage;
     });
     restore_members(vm, &o, &m)?;
-    if let Some(Value::Str(ic)) = data.get_int(3).map(|v| v.deref()) {
-        let ic = check_iter_class(vm, &ic, "__unserialize(): Argument #1 ($data)")?;
-        with(&o, |d: &mut AoData| d.iter_class = ic);
+    if let Some(ic) = ic {
+        let cname = ao_class_name(vm, a);
+        let Some(c) = vm.find_class(&ic, true)? else {
+            return vm.throw(
+                "UnexpectedValueException",
+                &format!(
+                    "Cannot deserialize {} with iterator class '{}'; no such class exists",
+                    cname,
+                    ic.to_string_lossy()
+                ),
+            );
+        };
+        let iter = vm.core.iterator.clone();
+        if !iter.is_some_and(|i| c.is_subclass_of(&i)) {
+            return vm.throw(
+                "UnexpectedValueException",
+                &format!(
+                    "Cannot deserialize {} with iterator class '{}'; this class does not implement the Iterator interface",
+                    cname,
+                    ic.to_string_lossy()
+                ),
+            );
+        }
+        with(&o, |d: &mut AoData| d.iter_class = c.name.clone());
     }
     Ok(Value::Null)
 }
@@ -3058,7 +3095,12 @@ fn os_key(vm: &mut Vm, s: &ObjRef, obj: &ObjRef) -> R<OsKey> {
         let r = vm.call_callee(c, vec![Value::Object(obj.clone())])?;
         return match r {
             Value::Str(h) => Ok(OsKey::Hash(h)),
-            _ => vm.throw("RuntimeException", "Hash needs to be a string"),
+            // test SplObjectStorage_getHash
+            other => vm.type_error(&format!(
+                "{}::getHash(): Return value must be of type string, {} returned",
+                cls.name.dname(),
+                crate::class::TypeName::tname(&other)
+            )),
         };
     }
     Ok(OsKey::Handle(obj.handle()))
@@ -3307,9 +3349,8 @@ fn os_seek(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn os_offset_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let s = a.this_obj().clone();
-    let Some(o) = a.obj(0) else {
-        return Ok(Value::Bool(false));
-    };
+    // test SplObjectStorage_coalesce
+    let o = obj_arg(vm, a, 0, "offsetExists")?;
     Ok(Value::Bool(os_find(vm, &s, &o)?.is_some()))
 }
 fn os_offset_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -3564,6 +3605,16 @@ fn mi_valid(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn mi_values(vm: &mut Vm, a: &Args, current: bool) -> R<Value> {
     let (entries, flags) = os(a.this_obj(), |d| (d.live_entries(), d.flags));
+    if entries.is_empty() {
+        // test multiple_iterator_001
+        return vm.throw(
+            "RuntimeException",
+            &format!(
+                "Called {}() on an invalid iterator",
+                if current { "current" } else { "key" }
+            ),
+        );
+    }
     let mut out = PhpArray::new();
     for (it, inf) in entries {
         let valid = vm.call_method(&it, b"valid", Vec::new())?;

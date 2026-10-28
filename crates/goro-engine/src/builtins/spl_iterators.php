@@ -25,14 +25,14 @@ class IteratorIterator implements OuterIterator {
     }
     /* Unknown methods are the inner iterator's (observed on PHP 8.5). */
     protected function __h_call($name, $args) {
-        if ($this->__it === null || !method_exists($this->__it, $name)) {
+        if ($this->__it === null || !is_callable([$this->__it, $name])) {
             throw new Error('Call to undefined method ' . static::class . '::' . $name . '()');
         }
         return $this->__it->$name(...$args);
     }
     protected function __h_chk() {
         if ($this->__it === null) {
-            throw new LogicException("The object is in an invalid state as the parent constructor was not called");
+            throw new Error("The object is in an invalid state as the parent constructor was not called");
         }
     }
     protected function __h_fetch() {
@@ -86,6 +86,7 @@ abstract class RecursiveFilterIterator extends FilterIterator implements Recursi
 }
 
 class ParentIterator extends RecursiveFilterIterator {
+    public function __construct(RecursiveIterator $iterator) { parent::__construct($iterator); }
     public function accept(): bool { $this->__h_chk(); return $this->__it->hasChildren(); }
 }
 
@@ -135,7 +136,14 @@ class LimitIterator extends IteratorIterator {
                 $this->__it->next();
                 $this->__pos++;
             }
-            $this->__h_fetch();
+            /* valid() is asked again before the fetch (test iterator_039). */
+            if ($this->__it->valid()) {
+                $this->__h_fetch();
+            } else {
+                $this->__valid = false;
+                $this->__cur = null;
+                $this->__key = null;
+            }
         }
         return $this->__pos;
     }
@@ -253,22 +261,28 @@ class CachingIterator extends IteratorIterator implements ArrayAccess, Countable
             throw new BadMethodCallException(static::class . ' does not use a full cache (see CachingIterator::__construct)');
         }
     }
-    public function offsetGet($key): mixed {
+    /* Keys are strings (PHP manual: CachingIterator::offsetGet); a
+     * missing one is named in quotes (test iterator_044). */
+    public function offsetGet(string $key): mixed {
         $this->__h_chk();
         $this->__h_full();
+        if (!array_key_exists($key, $this->__cache)) {
+            trigger_error("Undefined array key \"$key\"", E_USER_WARNING);
+            return null;
+        }
         return $this->__cache[$key];
     }
-    public function offsetSet($key, mixed $value): void {
+    public function offsetSet(string $key, mixed $value): void {
         $this->__h_chk();
         $this->__h_full();
         $this->__cache[$key] = $value;
     }
-    public function offsetUnset($key): void {
+    public function offsetUnset(string $key): void {
         $this->__h_chk();
         $this->__h_full();
         unset($this->__cache[$key]);
     }
-    public function offsetExists($key): bool {
+    public function offsetExists(string $key): bool {
         $this->__h_chk();
         $this->__h_full();
         return isset($this->__cache[$key]);
@@ -322,7 +336,7 @@ class AppendIterator extends IteratorIterator {
     public function __construct() { $this->__its = new ArrayIterator(); }
     protected function __h_chk() {
         if ($this->__its === null) {
-            throw new LogicException("The object is in an invalid state as the parent constructor was not called");
+            throw new Error("The object is in an invalid state as the parent constructor was not called");
         }
     }
     protected function __h_nextit() {
@@ -423,7 +437,7 @@ class RecursiveIteratorIterator implements OuterIterator {
     }
     protected function __h_chk() {
         if ($this->__its === null) {
-            throw new LogicException("The object is in an invalid state as the parent constructor was not called");
+            throw new Error("The " . static::class . " instance wasn't initialized properly");
         }
     }
     protected function __h_fwd() {
@@ -551,7 +565,7 @@ class RecursiveIteratorIterator implements OuterIterator {
      * PHP 8.5; test RecursiveDirectoryIterator_getSubPath_basic). */
     protected function __h_call($name, $args) {
         $it = $this->__its === null ? null : $this->__its[count($this->__its) - 1];
-        if ($it === null || !method_exists($it, $name)) {
+        if ($it === null || !is_callable([$it, $name])) {
             throw new Error('Call to undefined method ' . static::class . '::' . $name . '()');
         }
         return $it->$name(...$args);
