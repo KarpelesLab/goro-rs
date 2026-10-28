@@ -1240,6 +1240,28 @@ impl Vm {
             Some(v) => v.deref(),
         };
         let new = self.incdec_value(op, &cur)?;
+        // An int typed reference can't overflow into a float.
+        if let (Value::Int(_), Value::Float(_)) = (&cur, &new)
+            && let Some(Value::Ref(rf)) = unsafe { &*p }
+            && rf.is_typed()
+        {
+            let rf = rf.clone();
+            let props = self.typed_ref_props(&rf);
+            if let Some(pi) = props
+                .iter()
+                .find(|pi| pi.ty.as_ref().is_some_and(|t| t.mask & tmask::FLOAT == 0))
+            {
+                let t = pi.ty.as_ref().unwrap();
+                return self.type_error(&format!(
+                    "Cannot {} a reference held by property {}::${} of type {} past its {} value",
+                    if op.is_inc() { "increment" } else { "decrement" },
+                    unsafe { crate::class::DisplayName::dname(&(*pi.class).name) },
+                    crate::class::DisplayName::dname(&pi.name),
+                    t.display(),
+                    if op.is_inc() { "maximal" } else { "minimal" }
+                ));
+            }
+        }
         if res != NONE {
             let v = if op.is_post() {
                 cur.clone()
@@ -1273,8 +1295,17 @@ impl Vm {
         unsafe {
             match &mut *p {
                 Some(Value::Ref(rf)) => {
-                    let old = rf.set(v);
-                    drop(old);
+                    let v = if rf.is_typed() {
+                        let rf = rf.clone();
+                        self.typed_ref_value(&rf, v)?
+                    } else {
+                        v
+                    };
+                    let p = self.slot_ptr(var);
+                    if let Some(Value::Ref(rf)) = &*p {
+                        let old = rf.set(v);
+                        drop(old);
+                    }
                 }
                 slot @ Some(_) => {
                     let old = slot.replace(v);

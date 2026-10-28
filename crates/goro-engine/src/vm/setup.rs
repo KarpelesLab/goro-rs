@@ -51,6 +51,7 @@ impl Vm {
             err: ErrorState::default(),
             core: CoreClasses::default(),
             autoloaders: Vec::new(),
+            typed_refs: HashMap::new(),
             user_wrappers: std::collections::HashMap::new(),
             disabled_wrappers: Vec::new(),
             autoloading: Vec::new(),

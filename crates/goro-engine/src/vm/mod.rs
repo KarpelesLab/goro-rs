@@ -279,6 +279,15 @@ pub struct ExecState {
     pub top: TopFrame,
 }
 
+/// A typed property a reference is bound to: the object (none for static
+/// properties) and the property; it stops counting once the object is gone
+/// or the property no longer holds the reference.
+#[derive(Clone)]
+pub struct TypedRefSource {
+    pub obj: Option<goro_runtime::WeakObj>,
+    pub prop: Rc<crate::class::PropInfo>,
+}
+
 #[derive(Clone, Copy)]
 pub struct TopFrame {
     pub base: *mut Slot,
@@ -406,6 +415,9 @@ pub struct Vm {
     pub err: ErrorState,
     pub core: CoreClasses,
     pub autoloaders: Vec<Value>,
+    /// Typed references: the properties each one is bound to (by
+    /// reference address; valid while the reference's typed flag is set).
+    pub typed_refs: HashMap<usize, Vec<TypedRefSource>>,
     /// User stream wrappers: lowercase protocol to class name.
     pub user_wrappers: std::collections::HashMap<Vec<u8>, PhpStr>,
     /// Built-in wrappers disabled by stream_wrapper_unregister().

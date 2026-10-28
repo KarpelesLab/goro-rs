@@ -18,6 +18,8 @@ use std::rc::{Rc, Weak};
 use crate::gc;
 use crate::value::Value;
 
+const R_TYPED: u8 = 2;
+
 pub(crate) struct RefInner {
     pub(crate) val: RefCell<Value>,
     pub(crate) flags: Cell<u8>,
@@ -76,6 +78,18 @@ impl PhpRef {
     #[inline]
     pub fn ptr_eq(a: &PhpRef, b: &PhpRef) -> bool {
         Rc::ptr_eq(&a.0, &b.0)
+    }
+
+    /// Whether the reference is bound to a typed property (the engine
+    /// keeps the type constraints, RFC "Typed Properties 2.0").
+    #[inline]
+    pub fn is_typed(&self) -> bool {
+        self.0.flags.get() & R_TYPED != 0
+    }
+
+    pub fn set_typed(&self, on: bool) {
+        let f = self.0.flags.get();
+        self.0.flags.set(if on { f | R_TYPED } else { f & !R_TYPED });
     }
 
     /// An identity usable as a map key while the reference is alive.

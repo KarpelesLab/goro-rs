@@ -606,6 +606,87 @@ impl Vm {
         }
     }
 
+    /// Records that reference `r` is bound to typed property `p`.
+    pub(crate) fn type_ref(&mut self, r: &PhpRef, p: &Rc<PropInfo>, obj: Option<&ObjRef>) {
+        if p.ty.is_none() {
+            return;
+        }
+        let e = self.typed_refs.entry(r.addr()).or_default();
+        if !r.is_typed() {
+            e.clear();
+            r.set_typed(true);
+        }
+        let same = |s: &super::TypedRefSource| {
+            Rc::ptr_eq(&s.prop, p)
+                && match (&s.obj, obj) {
+                    (Some(w), Some(o)) => w.upgrade().is_some_and(|x| ObjRef::ptr_eq(&x, o)),
+                    (None, None) => true,
+                    _ => false,
+                }
+        };
+        if !e.iter().any(same) {
+            e.push(super::TypedRefSource {
+                obj: obj.map(|o| o.downgrade()),
+                prop: p.clone(),
+            });
+        }
+    }
+
+    /// The live typed properties a reference is bound to.
+    pub(crate) fn typed_ref_props(&mut self, r: &PhpRef) -> Vec<Rc<PropInfo>> {
+        let Some(srcs) = self.typed_refs.get_mut(&r.addr()) else { return Vec::new() };
+        srcs.retain(|s| match &s.obj {
+            None => true,
+            Some(w) => match w.upgrade() {
+                Some(o) => matches!(o.obj().slots.borrow().get(s.prop.slot as usize),
+                    Some(Value::Ref(x)) if PhpRef::ptr_eq(x, r)),
+                None => false,
+            },
+        });
+        let out: Vec<Rc<PropInfo>> = srcs.iter().map(|s| s.prop.clone()).collect();
+        if out.is_empty() {
+            r.set_typed(false);
+        }
+        out
+    }
+
+    /// A value assigned through a typed reference, coerced to the types of
+    /// the properties it is bound to (TypeError when it doesn't fit).
+    pub(crate) fn typed_ref_value(&mut self, r: &PhpRef, v: Value) -> R<Value> {
+        if !r.is_typed() {
+            return Ok(v);
+        }
+        let props = self.typed_ref_props(r);
+        let strict = self.caller_strict();
+        let mut v = v;
+        for p in &props {
+            let Some(t) = &p.ty else { continue };
+            match self.check_type(&v, t, strict, p.class, p.class)? {
+                crate::vm::types::Check::Ok => {}
+                crate::vm::types::Check::Coerced(c) => v = c,
+                crate::vm::types::Check::Fail => {
+                    return self.type_error(&format!(
+                        "Cannot assign {} to reference held by property {}::${} of type {}",
+                        Vm::type_name_given(&v),
+                        unsafe { (*p.class).name.dname() },
+                        p.name.dname(),
+                        t.display()
+                    ));
+                }
+            }
+        }
+        Ok(v)
+    }
+
+    /// The declared property `name` of `o` from the current scope, if typed.
+    pub(crate) fn typed_prop_info(&self, o: &ObjRef, name: &PhpStr) -> Option<Rc<PropInfo>> {
+        let cls = self.class_of(o);
+        match self.lookup_prop(&cls, name, self.scope_ptr()) {
+            PropLookup::Found(p) if p.ty.is_some() => Some(p),
+            _ => None,
+        }
+    }
+
     /// `$o->name = v`.
     pub fn write_prop(&mut self, o: &ObjRef, name: &PhpStr, v: Value, cache: Option<u32>) -> R<()> {
         if o.is_lazy()
@@ -924,7 +1005,13 @@ impl Vm {
                 Ok(if op.is_post() { old } else { new })
             }
             PathAction::MakeRef | PathAction::FetchW => match self.prop_ptr(o, name, false)? {
-                Some(p) => Ok(Value::Ref(unsafe { (*p).make_ref() })),
+                Some(p) => {
+                    let r = unsafe { (*p).make_ref() };
+                    if let Some(pi) = self.typed_prop_info(o, name) {
+                        self.type_ref(&r, &pi, Some(o));
+                    }
+                    Ok(Value::Ref(r))
+                }
                 None => {
                     let v = self.read_prop(o, name, true, None)?;
                     let cls = self.class_of(o);
@@ -943,6 +1030,32 @@ impl Vm {
                 };
                 match self.prop_ptr(o, name, false)? {
                     Some(p) => {
+                        // Binding a typed property: the referenced value
+                        // must fit its type.
+                        if let Some(pi) = self.typed_prop_info(o, name) {
+                            let cur = r.get();
+                            let t = pi.ty.as_ref().unwrap();
+                            let strict = self.caller_strict();
+                            match self.check_type(&cur, t, strict, pi.class, pi.class)? {
+                                crate::vm::types::Check::Ok => {}
+                                crate::vm::types::Check::Coerced(c) => {
+                                    let old = r.set(c);
+                                    drop(old);
+                                }
+                                crate::vm::types::Check::Fail => {
+                                    return self.type_error(&format!(
+                                        "Cannot assign {} to property {}::${} of type {}",
+                                        Vm::type_name_given(&cur),
+                                        unsafe { (*pi.class).name.dname() },
+                                        name.dname(),
+                                        t.display()
+                                    ));
+                                }
+                            }
+                            let cur = r.get();
+                            let _ = self.typed_ref_value(&r, cur)?;
+                            self.type_ref(&r, &pi, Some(o));
+                        }
                         let old = unsafe { std::mem::replace(&mut *p, Value::Ref(r.clone())) };
                         drop(old);
                     }
@@ -1289,6 +1402,24 @@ impl Vm {
                     n.to_string_lossy()
                 ),
             );
+        }
+        // References to typed static properties are typed references.
+        if let Some(t) = &sp.ty
+            && !sp.cell.is_typed()
+        {
+            let pi = Rc::new(PropInfo {
+                name: sp.name.clone(),
+                slot: 0,
+                flags: sp.flags,
+                ty: Some(t.clone()),
+                class: sp.class,
+                get: None,
+                set: None,
+                doc: None,
+                attrs: sp.attrs.clone(),
+                default: None,
+            });
+            self.type_ref(&sp.cell, &pi, None);
         }
         Ok(sp.cell.clone())
     }
