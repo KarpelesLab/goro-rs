@@ -14,5 +14,6 @@ goro-ext-hash = { path = "../goro-ext-hash" }
 goro-ext-random = { path = "../goro-ext-random" }
 goro-ext-date = { path = "../goro-ext-date" }
 goro-ext-bcmath = { path = "../goro-ext-bcmath" }
+goro-ext-gmp = { path = "../goro-ext-gmp" }
 libc = "0.2"
 corosensei = "0.2"

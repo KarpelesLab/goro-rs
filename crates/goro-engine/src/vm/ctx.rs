@@ -182,13 +182,24 @@ impl Vm {
                     ),
                 }
             }
-            None => self.throw(
-                "Error",
-                &format!(
-                    "Object of class {} could not be converted to string",
-                    cls.name.dname()
-                ),
-            ),
+            None => {
+                // Internal classes converting without __toString (GMP).
+                if let Some(h) = cls.native.cast
+                    && let Some(r) = h(self, o, CastTo::String)
+                {
+                    return match r? {
+                        Value::Str(s) => Ok(s),
+                        v => self.to_php_str(&v),
+                    };
+                }
+                self.throw(
+                    "Error",
+                    &format!(
+                        "Object of class {} could not be converted to string",
+                        cls.name.dname()
+                    ),
+                )
+            }
         }
     }
 

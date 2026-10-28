@@ -1609,6 +1609,21 @@ fn sum_product(vm: &mut Vm, a: &mut Args, product: bool) -> R<Value> {
                 vm.fwarn(a, &format!("{} is not supported on type array", what))?;
                 continue;
             }
+            // Objects with a numeric cast (GMP) count as their number
+            // (test ext/gmp/tests/gh16890.phpt).
+            Value::Object(o)
+                if let Some(h) = vm.class_of(o).native.cast
+                    && let Some(r) = h(vm, o, crate::bytecode::CastTo::Int) =>
+            {
+                let n = r?;
+                let r = if product {
+                    ops::mul(&acc, &n, vm)
+                } else {
+                    ops::add(&acc, &n, vm)
+                };
+                acc = r.map_err(|e| vm.php_error(e))?;
+                continue;
+            }
             Value::Object(o) => {
                 let n = o.class_name().to_string_lossy();
                 vm.fwarn(a, &format!("{} is not supported on type {}", what, n))?;
