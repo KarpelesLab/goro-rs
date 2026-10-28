@@ -354,21 +354,68 @@ impl Vm {
         scope: *const Class,
         flags: u32,
     ) {
+        let statics = &func.statics as *const RefCell<Vec<Option<PhpRef>>>;
+        self.push_user_ex(func, this, static_class, scope, flags, None, statics);
+    }
+
+    /// Pushes a call of closure object `o` when it runs user code (one
+    /// look at its data, which [`push_callee`](Self::push_callee) would
+    /// take twice); false for other closures.
+    pub(crate) fn push_user_closure(&mut self, o: &ObjRef) -> bool {
+        let n = o.obj().native.borrow();
+        let Some(nd) = n.as_ref() else {
+            return false;
+        };
+        let any: &dyn std::any::Any = &**nd;
+        let Some(cd) = any.downcast_ref::<ClosureData>() else {
+            return false;
+        };
+        if cd.magic_name.is_some() {
+            return false;
+        }
+        let FuncKind::User(code) = &cd.func.kind else {
+            return false;
+        };
+        let base = self.push_user_ex(
+            cd.func.clone(),
+            cd.this.clone(),
+            cd.called_scope,
+            cd.scope,
+            0,
+            Some(o.clone()),
+            &cd.statics,
+        );
+        for (k, (inner, _, _)) in code.uses.iter().enumerate() {
+            if let Some(Some(v)) = cd.captured.get(k) {
+                // SAFETY: the callee's fresh slots.
+                unsafe { *base.add(*inner as usize) = Some(v.clone()) };
+            }
+        }
+        true
+    }
+
+    /// Pushes a pending call of a user function; its slots.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn push_user_ex(
+        &mut self,
+        func: Rc<Func>,
+        this: Option<ObjRef>,
+        static_class: *const Class,
+        scope: *const Class,
+        flags: u32,
+        closure: Option<ObjRef>,
+        statics: *const RefCell<Vec<Option<PhpRef>>>,
+    ) -> *mut Slot {
         let FuncKind::User(code) = &func.kind else {
             unreachable!()
         };
-        const SLOW: u32 = fflags::DEPRECATED
-            | fflags::ABSTRACT
-            | fflags::NODISCARD
-            | fflags::GENERATOR
-            | fflags::VARIADIC;
         let mut fl = flags;
-        if code.flags & SLOW != 0 || code.file.is_empty() {
+        if code.flags & SLOW_ACTIVATION != 0 || code.file.is_empty() {
             fl |= pending_flags::SLOW;
         }
         let (base, mark) = self.ex.stack.alloc(code.num_slots as usize);
         let (byref, np) = (code.byref_mask, code.direct_params);
-        let statics = &func.statics as *const RefCell<Vec<Option<PhpRef>>>;
         let v = &mut self.ex.pending;
         v.reserve(1);
         // SAFETY: as in push_callee.
@@ -385,7 +432,7 @@ impl Vm {
             at!((*d).this).write(this);
             at!((*d).static_class).write(static_class);
             at!((*d).scope).write(scope);
-            at!((*d).closure).write(None);
+            at!((*d).closure).write(closure);
             at!((*d).flags).write(fl);
             at!((*d).magic_name).write(None);
             at!((*d).statics).write(statics);
@@ -395,6 +442,7 @@ impl Vm {
             at!((*d).np).write(np);
             v.set_len(v.len() + 1);
         }
+        base
     }
 
     /// Drops a pending call that won't be made.
@@ -556,6 +604,11 @@ impl Vm {
         // Closures, without copying the value.
         if let Some(Value::Object(o)) = self.peek(r) {
             let o = o.clone();
+            if self.push_user_closure(&o) {
+                drop(o);
+                self.drop_tmp(r);
+                return Ok(());
+            }
             if let Some(c) = self.closure_data(&o) {
                 drop(o);
                 self.drop_tmp(r);
