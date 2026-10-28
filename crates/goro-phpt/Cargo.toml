@@ -6,3 +6,6 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+fancy-regex = "0.20"
+libc = "0.2"
+regex = "1.11"
