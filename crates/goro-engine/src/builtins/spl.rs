@@ -540,6 +540,7 @@ pub static MODULE: Module = Module {
         ("splpriorityqueue", heap_hooks),
         ("splobjectstorage", os_hooks),
         ("multipleiterator", os_hooks),
+        ("splfileobject", sfo_hooks),
     ],
     listed: true,
     ..Module::EMPTY
@@ -592,11 +593,13 @@ fn key_desc(k: &Key) -> String {
 }
 
 fn call_fn(vm: &mut Vm, name: &str, args: Vec<Value>) -> R<Value> {
-    let f = vm
-        .functions
-        .get(&PhpStr::from(name))
-        .cloned()
-        .expect("function");
+    let Some(f) = vm.functions.get(&PhpStr::from(name)).cloned() else {
+        // Removed by disable_functions (test ArrayObject/asort_disabled).
+        return vm.throw(
+            "Error",
+            &format!("Cannot call method {name} when function {name} is disabled"),
+        );
+    };
     vm.call_callee(Callee::func(f), args)
 }
 
@@ -753,27 +756,52 @@ fn ao_input(vm: &mut Vm, a: &Args, v: Value, fname: &str) -> R<Value> {
     match v {
         Value::Array(_) => Ok(v),
         Value::Object(ref x) => {
-            if is_ao(x) {
-                return Ok(v);
-            }
-            let cls = vm.class_of(x);
-            if cls.is_enum() {
-                return vm.type_error(&format!(
-                    "{}::{}(): Argument #1 ($array) must not be an enum",
-                    ao_class_name(vm, a),
-                    fname
-                ));
-            }
-            vm.deprecated(&format!(
-                "{}::{}(): Using an object as a backing array for {} is deprecated, as it allows violating class constraints and invariants",
-                ao_class_name(vm, a),
-                fname,
-                ao_class_name(vm, a)
-            ))?;
+            ao_deprecate_object(vm, a, fname)?;
+            ao_check_object(vm, a, x)?;
             Ok(v)
         }
         _ => Ok(Value::Array(PhpArray::new())),
     }
+}
+
+/// PHP 8.5 deprecates every object backing, ArrayObjects included (test
+/// ArrayObject/arrayObject_getFlags_basic1).
+fn ao_deprecate_object(vm: &mut Vm, a: &Args, fname: &str) -> R<()> {
+    vm.deprecated(&format!(
+        "{}::{}(): Using an object as a backing array for {} is deprecated, as it allows violating class constraints and invariants",
+        ao_class_name(vm, a),
+        fname,
+        ao_class_name(vm, a)
+    ))
+}
+
+/// Refuses objects that can't back an ArrayObject.
+fn ao_check_object(vm: &mut Vm, a: &Args, x: &ObjRef) -> R<()> {
+    if is_ao(x) {
+        return Ok(());
+    }
+    let cls = vm.class_of(x);
+    if cls.is_enum() {
+        // test ArrayObject/ArrayObject_enum
+        return vm.throw(
+            "InvalidArgumentException",
+            &format!("Enums are not compatible with {}", ao_class_name(vm, a)),
+        );
+    }
+    // Objects whose property table is computed (SplFixedArray, the date
+    // classes, WeakMap) are refused (tests ArrayObject_overloaded_*;
+    // observed on PHP 8.5).
+    if cls.native.props_for.is_some() || cls.native.dyn_prop.is_some() {
+        return vm.throw(
+            "InvalidArgumentException",
+            &format!(
+                "Overloaded object of type {} is not compatible with {}",
+                cls.name.to_string_lossy(),
+                ao_class_name(vm, a)
+            ),
+        );
+    }
+    Ok(())
 }
 
 fn ao_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -783,14 +811,16 @@ fn ao_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     } else {
         Value::Array(PhpArray::new())
     };
-    let storage = ao_input(vm, a, v, "__construct")?;
     let flags = a.int_or(1, 0);
     let ic = if a.has(2) {
         a.str(2)
     } else {
         PhpStr::from("ArrayIterator")
     };
+    // The iterator class is checked first (test
+    // arrayObject___construct_error1: no deprecation then).
     let ic = check_iter_class(vm, &ic, "__construct(): Argument #3 ($iteratorClass)")?;
+    let storage = ao_input(vm, a, v, "__construct")?;
     with(&o, |d: &mut AoData| {
         d.storage = storage;
         d.flags = flags;
@@ -1089,6 +1119,12 @@ fn ao_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "Incomplete or ill-typed serialization data",
         );
     }
+    let storage = if matches!(storage, Value::Object(_)) {
+        // test ArrayObject/array_025
+        ao_input(vm, a, storage, "__unserialize")?
+    } else {
+        storage
+    };
     with(&o, |d: &mut AoData| {
         d.flags = flags;
         d.storage = storage;
@@ -1146,13 +1182,21 @@ fn ao_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !matches!(storage, Value::Array(_) | Value::Object(_)) {
         return bad(vm, semi + 1, b.len());
     }
+    // The deprecation, the members, then the object check (test
+    // ArrayObject/bug70155).
+    if matches!(storage, Value::Object(_)) {
+        ao_deprecate_object(vm, a, "unserialize")?;
+    }
+    if let Value::Array(m) = m {
+        restore_members(vm, &o, &m)?;
+    }
+    if let Value::Object(x) = &storage {
+        ao_check_object(vm, a, x)?;
+    }
     with(&o, |d: &mut AoData| {
         d.flags = flags;
         d.storage = storage;
     });
-    if let Value::Array(m) = m {
-        restore_members(vm, &o, &m)?;
-    }
     Ok(Value::Null)
 }
 
@@ -1398,6 +1442,11 @@ fn rai_get_children(vm: &mut Vm, a: &mut Args) -> R<Value> {
         };
         vm.call_callee(c, vec![cur, Value::Int(flags)])?;
     } else {
+        if matches!(cur, Value::Object(_)) {
+            // The child is constructed from the object (test
+            // ArrayObject/bug38618).
+            vm.deprecated("ArrayIterator::__construct(): Using an object as a backing array for ArrayIterator is deprecated, as it allows violating class constraints and invariants")?;
+        }
         with(&child, |d: &mut AoData| {
             d.storage = cur;
             d.flags = flags;
@@ -1426,10 +1475,15 @@ impl goro_runtime::NativeData for FaData {
 
 fn fa_hooks() -> NativeHooks {
     fn table(vm: &mut Vm, o: &ObjRef) -> Option<PhpArray> {
-        let mut out = vm.plain_props_array(o, true);
+        // The elements, then the properties (test
+        // SplFixedArray_get_properties_for).
+        let mut out = PhpArray::new();
         let items = with(o, |d: &mut FaData| d.items.clone()).unwrap_or_default();
         for (i, v) in items.into_iter().enumerate() {
             out.insert(Key::Int(i as i64), v);
+        }
+        for (k, v) in vm.plain_props_array(o, true).iter() {
+            out.insert(k.to_owned(), v.clone());
         }
         Some(out)
     }
@@ -3141,6 +3195,22 @@ fn os_debug_info(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     out.insert(private_key("SplObjectStorage", "storage"), Value::Array(st));
     Ok(Value::Array(out))
+}
+
+// ================================================================ SplFileObject
+
+/// SplFileObject (written in PHP, spl_files.php) can't be cloned (test
+/// SplFileObject/bug72888: "Trying to clone an uncloneable object of
+/// class SplFileObject").
+fn sfo_hooks() -> NativeHooks {
+    NativeHooks {
+        create: Some(|vm, o| {
+            let cls = vm.class_of(o);
+            cls.flags
+                .set(cls.flags.get() | crate::class::cflags::NOT_CLONEABLE);
+        }),
+        ..Default::default()
+    }
 }
 
 // ================================================================ MultipleIterator

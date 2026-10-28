@@ -11,6 +11,10 @@ class SplFileInfo implements Stringable {
     protected $__fileClass = 'SplFileObject';
     protected $__infoClass = 'SplFileInfo';
     public function __construct(string $filename) {
+        if (str_contains($filename, "\0")) {
+            // test bug77431
+            throw new ValueError('SplFileInfo::__construct(): Argument #1 ($filename) must not contain any null bytes');
+        }
         $this->__h_setPath($filename);
     }
     protected function __h_setPath($p) {
@@ -502,8 +506,16 @@ class DirectoryIterator extends SplFileInfo implements SeekableIterator {
         $this->__h_open($directory, 0, static::class);
     }
     protected function __h_open($directory, $flags, $cls) {
+        if ($this->__dir !== null) {
+            // test bug61828
+            throw new Error('Directory object is already initialized');
+        }
         if ($directory === '') {
-            throw new ValueError($cls . '::__construct(): Argument #1 ($directory) cannot be empty');
+            throw new ValueError($cls . '::__construct(): Argument #1 ($directory) must not be empty');
+        }
+        if (str_contains($directory, "\0")) {
+            // tests bug54291, bug78863
+            throw new ValueError($cls . '::__construct(): Argument #1 ($directory) must not contain any null bytes');
         }
         $this->__dflags = $flags;
         if (str_starts_with($directory, 'glob://') || ($this instanceof GlobIterator)) {

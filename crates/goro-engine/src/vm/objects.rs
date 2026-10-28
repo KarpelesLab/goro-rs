@@ -2307,6 +2307,20 @@ impl Vm {
     /// numeric keys in object/array casts).
     pub fn object_props_cast(&mut self, o: &ObjRef) -> PhpArray {
         let a = self.object_props_array(o, true);
+        Self::int_keys(a)
+    }
+
+    /// get_mangled_object_vars(): the declared and dynamic properties
+    /// only, whatever the class's property-table hooks give (observed on
+    /// PHP 8.5: ArrayObject, SplFixedArray, DateTime give `[]`; test
+    /// ext/spl/tests/SplFixedArray_get_properties_for).
+    pub fn object_props_mangled(&mut self, o: &ObjRef) -> PhpArray {
+        let o = &self.lazy_target(o);
+        let a = self.plain_props_array(o, true);
+        Self::int_keys(a)
+    }
+
+    fn int_keys(a: PhpArray) -> PhpArray {
         if !a.iter().any(|(k, _)| matches!(k, goro_runtime::KeyRef::Str(s) if matches!(Key::from_php_str(s), Key::Int(_)))) {
             return a;
         }

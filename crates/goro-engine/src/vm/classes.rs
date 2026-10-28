@@ -1436,7 +1436,10 @@ impl Vm {
         m.set = get(b"__set");
         m.isset = get(b"__isset");
         m.unset = get(b"__unset");
-        m.call = get(b"__call");
+        // Internal classes written in PHP may take unknown method calls
+        // through a hidden `__h_call` (SPL's iterators forward them to
+        // the inner iterator; test RecursiveDirectoryIterator_getSubPath_basic).
+        m.call = get(b"__call").or_else(|| get(b"__h_call"));
         m.call_static = get(b"__callstatic");
         m.to_string = get(b"__tostring");
         m.invoke = get(b"__invoke");

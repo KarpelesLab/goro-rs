@@ -14,9 +14,21 @@ class IteratorIterator implements OuterIterator {
     protected $__cur = null;
     public function __construct(Traversable $iterator, ?string $class = null) {
         while ($iterator instanceof IteratorAggregate) {
+            $agg = $iterator;
             $iterator = $iterator->getIterator();
+            if (!$iterator instanceof Traversable) {
+                // observed on PHP 8.5
+                throw new LogicException(get_class($agg) . '::getIterator() must return an object that implements Traversable');
+            }
         }
         $this->__it = $iterator;
+    }
+    /* Unknown methods are the inner iterator's (observed on PHP 8.5). */
+    protected function __h_call($name, $args) {
+        if ($this->__it === null || !method_exists($this->__it, $name)) {
+            throw new Error('Call to undefined method ' . static::class . '::' . $name . '()');
+        }
+        return $this->__it->$name(...$args);
     }
     protected function __h_chk() {
         if ($this->__it === null) {
@@ -387,7 +399,12 @@ class RecursiveIteratorIterator implements OuterIterator {
     protected $__initer = false;
     public function __construct(Traversable $iterator, int $mode = RecursiveIteratorIterator::LEAVES_ONLY, int $flags = 0) {
         if ($iterator instanceof IteratorAggregate) {
+            $agg = $iterator;
             $iterator = $iterator->getIterator();
+            if (!$iterator instanceof Traversable) {
+                // test RecursiveIteratorIterator_invalid_aggregate
+                throw new LogicException(get_class($agg) . '::getIterator() must return an object that implements Traversable');
+            }
         }
         if (!$iterator instanceof RecursiveIterator) {
             throw new InvalidArgumentException("An instance of RecursiveIterator or IteratorAggregate creating it is required");
@@ -523,6 +540,15 @@ class RecursiveIteratorIterator implements OuterIterator {
         return $this->__its[$level];
     }
     public function getInnerIterator(): RecursiveIterator { $this->__h_chk(); return $this->__its[count($this->__its) - 1]; }
+    /* Unknown methods are those of the current sub-iterator (observed on
+     * PHP 8.5; test RecursiveDirectoryIterator_getSubPath_basic). */
+    protected function __h_call($name, $args) {
+        $it = $this->__its === null ? null : $this->__its[count($this->__its) - 1];
+        if ($it === null || !method_exists($it, $name)) {
+            throw new Error('Call to undefined method ' . static::class . '::' . $name . '()');
+        }
+        return $it->$name(...$args);
+    }
     public function beginIteration(): void {}
     public function endIteration(): void {}
     public function callHasChildren(): bool {

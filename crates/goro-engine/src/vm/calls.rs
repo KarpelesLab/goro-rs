@@ -1940,6 +1940,24 @@ impl Vm {
                 ),
             );
         }
+        // Internal functions check the argument count before the types
+        // (test ext/spl/tests/CallbackFilterIteratorTest-002).
+        if internal && !has_named && (argc as usize) < code.num_required as usize {
+            let exact = code.num_required as usize == np && code.flags & fflags::VARIADIC == 0;
+            let n = code.num_required;
+            let fname = self.func_display_name(func);
+            return self.throw(
+                "ArgumentCountError",
+                &format!(
+                    "{}() expects {} {} argument{}, {} given",
+                    fname,
+                    if exact { "exactly" } else { "at least" },
+                    n,
+                    if n == 1 { "" } else { "s" },
+                    argc
+                ),
+            );
+        }
         let called_in = |loc: &Option<(PhpStr, u32)>| match loc {
             Some((f, l)) => format!(", called in {} on line {}", f.to_string_lossy(), l),
             None => String::new(),
@@ -2184,6 +2202,25 @@ impl Vm {
                     None => *slot = Some(c),
                 }
                 Ok(())
+            }
+            Check::Fail
+                if code.file.is_empty()
+                    && ty.mask & !tmask::NULL == tmask::CALLABLE
+                    && ty.classes.is_empty() =>
+            {
+                // Internal classes written in PHP word callable errors as
+                // internal functions do (test
+                // ext/spl/tests/CallbackFilterIteratorTest-002).
+                let why = self.callable_error(&val);
+                let msg = format!(
+                    "{}(): Argument #{} (${}) must be a valid callback{}, {}",
+                    self.func_display_name(func),
+                    i + 1,
+                    code.params[i].name.dname(),
+                    if ty.allows_null() { " or null" } else { "" },
+                    why
+                );
+                self.throw("TypeError", &msg)
             }
             Check::Fail => {
                 let msg = format!(
