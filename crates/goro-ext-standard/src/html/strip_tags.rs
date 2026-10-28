@@ -4,11 +4,12 @@
 //! fixture tests/fixtures/html.txt).
 //!
 //! Observed rules: a `<` followed by whitespace is text; inside a tag, `<`
-//! opens a nested level that the next `>` closes, and that count carries
-//! over into the text after a comment or PHP block (a `>` there closes a
-//! level and is dropped); `<!` and `<?` start a declaration or a PHP block
-//! even inside a tag; `<!--` starts a comment ended by `-->`; quotes hide
-//! `<` and `>` in tags, declarations and PHP blocks; NUL bytes are dropped.
+//! opens a nested level that the next `>` closes (both left out of a kept
+//! tag), and that count carries over into the text after a comment or PHP
+//! block (a `>` there closes a level and is dropped); `<!` and `<?` start a
+//! declaration or a PHP block even inside a tag; `<!--` starts a comment
+//! ended by `-->`; quotes hide `<` and `>` in tags, declarations and PHP
+//! blocks (a backslash escapes them in the last two); NUL bytes are dropped.
 
 /// The `$allowed_tags` argument.
 #[derive(Clone, Copy, Debug)]
@@ -71,8 +72,7 @@ fn tag_allowed(buf: &[u8], allowed: &[u8]) -> bool {
     allowed.windows(norm.len()).any(|w| w == &norm[..])
 }
 
-/// Whether the `?` at `s[q]` starts `?xml:`: an XML namespace tag, ended by
-/// `>` like other tags (test bug45485.phpt).
+/// Whether the `?` at `s[q]` starts `?xml:`, an XML namespace tag.
 fn xml_ns(s: &[u8], q: usize) -> bool {
     s[q + 1..]
         .get(..4)
@@ -86,6 +86,10 @@ pub fn strip_tags(s: &[u8], allowed: AllowedTags) -> Vec<u8> {
     let mut buf: Vec<u8> = Vec::new();
     let mut depth = 0usize;
     let mut quote: u8 = 0;
+    // In a "<?xml:" block, "/>" ends it too (test bug45485.phpt), and so
+    // does any ">" when it started inside a tag (observed on PHP 8.5).
+    let mut xml = false;
+    let mut xml_in_tag = false;
     let mut i = 0;
     while i < s.len() {
         let c = s[i];
@@ -101,8 +105,10 @@ pub fn strip_tags(s: &[u8], allowed: AllowedTags) -> Vec<u8> {
                         state = State::Bang;
                         quote = 0;
                         i += 1;
-                    } else if next == Some(b'?') && !xml_ns(s, i + 1) {
+                    } else if next == Some(b'?') {
                         state = State::Php;
+                        xml = xml_ns(s, i + 1);
+                        xml_in_tag = false;
                         quote = 0;
                         i += 1;
                     } else {
@@ -127,22 +133,27 @@ pub fn strip_tags(s: &[u8], allowed: AllowedTags) -> Vec<u8> {
                             quote = c;
                             buf.push(c);
                         }
+                        // A nested "<" (not followed by whitespace) and the
+                        // ">" closing it are left out of the tag's text
+                        // (observed on PHP 8.5: "<a <b> c>" keeps "<a b c>").
                         b'<' => {
-                            if !next.is_some_and(is_space) {
+                            if next.is_some_and(is_space) {
+                                buf.push(c);
+                            } else {
                                 depth += 1;
                             }
-                            buf.push(c);
                         }
                         b'!' if prev == b'<' => {
                             state = State::Bang;
                         }
-                        b'?' if prev == b'<' && !xml_ns(s, i) => {
+                        b'?' if prev == b'<' => {
                             state = State::Php;
+                            xml = xml_ns(s, i);
+                            xml_in_tag = true;
                         }
                         b'>' => {
                             if depth > 0 {
                                 depth -= 1;
-                                buf.push(c);
                             } else {
                                 if let Some(al) = &allowed
                                     && tag_allowed(&buf, al)
@@ -167,20 +178,22 @@ pub fn strip_tags(s: &[u8], allowed: AllowedTags) -> Vec<u8> {
                     match c {
                         b'"' | b'\'' if !escaped => quote = c,
                         b'>' if depth > 0 => depth -= 1,
-                        b'>' if prev == b'?' => state = State::Text,
+                        b'>' if prev == b'?' || (xml && (prev == b'/' || xml_in_tag)) => {
+                            state = State::Text
+                        }
                         _ => {}
                     }
                 }
             }
             State::Bang => {
                 if quote != 0 {
-                    if c == quote {
+                    if c == quote && prev != b'\\' {
                         quote = 0;
                     }
                 } else if c == b'-' && next == Some(b'-') && prev == b'!' {
                     state = State::Comment;
                     i += 1;
-                } else if c == b'"' || c == b'\'' {
+                } else if (c == b'"' || c == b'\'') && prev != b'\\' {
                     quote = c;
                 } else if c == b'>' {
                     if depth > 0 {

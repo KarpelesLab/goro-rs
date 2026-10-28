@@ -364,6 +364,11 @@ fn strip_tags_allowed() {
     assert_eq!(st(s, None), "USDCDN");
     assert_eq!(st("<a/b>", Some("<a>")), "");
     assert_eq!(st("<s/trong>b</strong>", Some("<strong>")), "b</strong>");
+    // observed on PHP 8.5
+    assert_eq!(st("<a <b> c>d", Some("<a>")), "<a b c>d");
+    assert_eq!(st("<?xml:x>y", None), "");
+    assert_eq!(st("<x<?xml:y>z>w", None), "w");
+    assert_eq!(st("</a<?>>-", None), "");
     let s = "1:<!-- abc -  -->\n2:<!doctype -- >\n3:\n4:<abc - def>\n5:abc - def\n6:</abc>\n";
     assert_eq!(st(s, None), "1:\n2:\n3:\n4:\n5:abc - def\n6:\n");
     assert_eq!(

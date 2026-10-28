@@ -488,11 +488,10 @@ fn decode(s: &[u8], flags: i64, cs: Charset, all: bool) -> Vec<u8> {
     out
 }
 
-/// What html_entity_decode() decodes in a CJK charset: printable ASCII,
-/// except 0x5C and 0x7E in the Japanese charsets (observed on PHP 8.5).
+/// What html_entity_decode() decodes in a CJK charset: printable ASCII
+/// but 0x7E, and but 0x5C in the Japanese charsets (observed on PHP 8.5).
 fn cjk_decodable(cs: Charset, c: u32) -> bool {
-    (0x20..0x7F).contains(&c)
-        && !(matches!(c, 0x5C | 0x7E) && matches!(cs, Charset::ShiftJis | Charset::EucJp))
+    (0x20..0x7E).contains(&c) && !(c == 0x5C && matches!(cs, Charset::ShiftJis | Charset::EucJp))
 }
 
 fn is_basic_name(doctype: Doctype, name: &[u8]) -> bool {

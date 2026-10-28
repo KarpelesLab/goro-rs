@@ -325,8 +325,14 @@ fn diff_window(e: &str, g: &str) -> (String, String) {
     (format!("…s{}", &e[st..]), format!("…s{}", &g[st..]))
 }
 
-/// Runs every case through `f` and fails with a report of the mismatches.
+/// Runs every case through `f` and fails with a report of the mismatches;
+/// the second-round probes in extra.txt are checked too.
 pub fn check(name: &str, f: impl Fn(&Case) -> Option<(Out, Vec<Diag>)>) {
+    check_file(name, &f, true);
+    check_file("extra", &f, false);
+}
+
+fn check_file(name: &str, f: &impl Fn(&Case) -> Option<(Out, Vec<Diag>)>, need_cases: bool) {
     let cases = load(name);
     let mut bad = 0;
     let mut report = String::new();
@@ -363,7 +369,7 @@ pub fn check(name: &str, f: impl Fn(&Case) -> Option<(Out, Vec<Diag>)>) {
             }
         }
     }
-    assert!(ran > 0, "no cases ran");
+    assert!(ran > 0 || !need_cases, "no cases ran");
     assert!(
         bad == 0,
         "{bad} of {ran} cases differ from PHP 8.5:\n{report}"
