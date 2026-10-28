@@ -193,6 +193,8 @@ pub struct Compiler<'a> {
     pub(crate) file: PhpStr,
     pub(crate) ns: Vec<u8>,
     pub(crate) use_class: HashMap<Vec<u8>, Vec<u8>>,
+    /// Classes declared at the top of this file (lower-case full names).
+    pub(crate) declared_classes: std::collections::HashSet<Vec<u8>>,
     pub(crate) use_func: HashMap<Vec<u8>, Vec<u8>>,
     pub(crate) use_const: HashMap<Vec<u8>, Vec<u8>>,
     pub(crate) class: Option<ClassCtx>,
@@ -225,6 +227,7 @@ pub fn compile_program<'a>(
         file: PhpStr::new(file),
         ns: Vec::new(),
         use_class: HashMap::new(),
+        declared_classes: Default::default(),
         use_func: HashMap::new(),
         use_const: HashMap::new(),
         class: None,
@@ -266,6 +269,7 @@ pub fn compile_program<'a>(
     let mut hoisted = Vec::new();
     let mut classes = Vec::new();
     c.check_strict_types(prog.stmts)?;
+    c.check_namespaces(prog.stmts)?;
     c.top_stmts(prog.stmts, &mut hoisted, &mut classes)?;
     // Implicit `return 1` of a file (include's result).
     let one = c.int_const(1);
@@ -614,6 +618,61 @@ impl<'a> Compiler<'a> {
 
     // ------------------------------------------------------------ statements
 
+    /// Namespace placement rules (messages observed on PHP 8.5).
+    fn check_namespaces(&mut self, stmts: &'a [Stmt<'a>]) -> CResult<()> {
+        let mut style: Option<bool> = None;
+        let mut code_before = false;
+        let mut first = true;
+        for s in stmts {
+            match &s.kind {
+                StmtKind::Namespace { body, .. } => {
+                    let bracketed = body.is_some();
+                    if let Some(b) = style
+                        && b != bracketed
+                    {
+                        return self.err(
+                            "Cannot mix bracketed namespace declarations with unbracketed namespace declarations",
+                            s.span.line,
+                        );
+                    }
+                    if code_before && style.is_none() {
+                        return self.err(
+                            "Namespace declaration statement has to be the very first statement or after any declare call in the script",
+                            s.span.line,
+                        );
+                    }
+                    style = Some(bracketed);
+                }
+                StmtKind::Declare(_) | StmtKind::Nop | StmtKind::HaltCompiler { .. } => {}
+                StmtKind::InlineHtml(t) if first && is_shebang_or_empty(t) => {}
+                _ => {
+                    if style == Some(true) {
+                        return self.err("No code may exist outside of namespace {}", s.span.line);
+                    }
+                    code_before = true;
+                }
+            }
+            first = false;
+        }
+        if style == Some(true) && code_before {
+            // Code before the first bracketed namespace.
+            for s in stmts {
+                match &s.kind {
+                    StmtKind::Namespace { .. } => break,
+                    StmtKind::Declare(_) | StmtKind::Nop | StmtKind::HaltCompiler { .. } => {}
+                    StmtKind::InlineHtml(t) if is_shebang_or_empty(t) => {}
+                    _ => {
+                        return self.err(
+                            "Namespace declaration statement has to be the very first statement or after any declare call in the script",
+                            s.span.line,
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn check_strict_types(&mut self, stmts: &'a [Stmt<'a>]) -> CResult<()> {
         let mut first = true;
         for s in stmts {
@@ -948,6 +1007,23 @@ impl<'a> Compiler<'a> {
                             "Cannot use {} as {} because '{}' is a special class name",
                             String::from_utf8_lossy(&full),
                             String::from_utf8_lossy(&alias),
+                            String::from_utf8_lossy(&alias)
+                        ),
+                        line,
+                    );
+                }
+                let mut local = self.ns.clone();
+                if !local.is_empty() {
+                    local.push(b'\\');
+                }
+                local.extend_from_slice(&alias);
+                if self.declared_classes.contains(&local.to_ascii_lowercase())
+                    && !local.eq_ignore_ascii_case(&full)
+                {
+                    return self.err(
+                        format!(
+                            "Cannot use {} as {} because the name is already in use",
+                            String::from_utf8_lossy(&full),
                             String::from_utf8_lossy(&alias)
                         ),
                         line,

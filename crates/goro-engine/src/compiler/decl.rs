@@ -1046,7 +1046,20 @@ impl<'a> Compiler<'a> {
                         line,
                     );
                 }
-                self.qualify_pub(n.name)
+                let full = self.qualify_pub(n.name);
+                if let Some(imp) = self.use_class.get(&l)
+                    && !imp.eq_ignore_ascii_case(&full)
+                {
+                    return self.err(
+                        format!(
+                            "Cannot redeclare class {} (previously declared as local import)",
+                            String::from_utf8_lossy(&full)
+                        ),
+                        line,
+                    );
+                }
+                self.declared_classes.insert(full.to_ascii_lowercase());
+                full
             }
             None => {
                 // "class@anonymous" + NUL + file:line$n (observed on PHP 8.5).
@@ -2395,6 +2408,7 @@ pub fn parse_native_sig(
         file: PhpStr::empty(),
         ns: Vec::new(),
         use_class: Default::default(),
+        declared_classes: Default::default(),
         use_func: Default::default(),
         use_const: Default::default(),
         class: None,

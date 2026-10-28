@@ -1772,7 +1772,16 @@ impl Vm {
                 let _ = v;
             }
         }
-        let cls = self.resolve_class_spec(class, true)?;
+        let cls = if self.code_ref().flags & crate::bytecode::fflags::CONST_EXPR != 0 {
+            // Its errors show the constant expression's frame too (test
+            // Zend/tests/type_declarations/typed_properties_022.phpt).
+            let saved = std::mem::replace(&mut self.trace_const_expr, true);
+            let r = self.resolve_class_spec(class, true);
+            self.trace_const_expr = saved;
+            r?
+        } else {
+            self.resolve_class_spec(class, true)?
+        };
         let n = self.get(name)?;
         let n = match n {
             Value::Str(s) => s,
