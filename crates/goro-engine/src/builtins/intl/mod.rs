@@ -28,9 +28,10 @@ use crate::vm::{R, Vm};
 
 mod collator;
 mod locale;
+mod numfmt;
 
 /// Every module of the extension (all named "intl").
-pub static MODULES: &[&Module] = &[&MODULE, &locale::MODULE, &collator::MODULE];
+pub static MODULES: &[&Module] = &[&MODULE, &locale::MODULE, &collator::MODULE, &numfmt::MODULE];
 
 pub static MODULE: Module = Module {
     name: "intl",
