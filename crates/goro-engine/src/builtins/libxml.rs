@@ -365,14 +365,20 @@ fn call_user_loader(
             Some(b) => Ok(UserLoad::Bytes(b)),
             None => Ok(UserLoad::Invalid),
         },
-        Value::Resource(res) => Ok(match read_resource(vm, &res) {
-            Some(b) => UserLoad::Bytes(b),
-            None => UserLoad::Invalid,
-        }),
+        Value::Resource(res) => match read_resource(vm, &res) {
+            Some(b) => Ok(UserLoad::Bytes(b)),
+            None => {
+                let n = callable_name(vm, &cb);
+                vm.throw(
+                    "TypeError",
+                    &format!("{fname}(): The user entity loader callback \"{n}\" has returned a resource, but it is not a stream"),
+                )
+            }
+        },
         other => {
+            let n = callable_name(vm, &cb);
             vm.warn(&format!(
-                "{fname}(): The user entity loader callback '{}' has returned a value of type {}; string or resource expected",
-                callable_name(&cb),
+                "{fname}(): The user entity loader callback \"{n}\" has returned a value of type {}; string or resource expected",
                 crate::class::TypeName::tname(&other)
             ))?;
             Ok(UserLoad::Invalid)
@@ -380,9 +386,20 @@ fn call_user_loader(
     }
 }
 
-fn callable_name(cb: &Value) -> String {
+/// A callable's name as PHP shows it ("f", "C::m", "{closure}").
+fn callable_name(vm: &mut Vm, cb: &Value) -> String {
     match cb {
         Value::Str(s) => s.to_string_lossy(),
+        Value::Array(a) => {
+            let first = a.get_int(0).map(|v| v.deref());
+            let m = a.get_int(1).and_then(|v| v.deref().as_str().cloned());
+            let c = match first {
+                Some(Value::Object(o)) => vm.class_of(&o).name.to_string_lossy(),
+                Some(Value::Str(s)) => s.to_string_lossy(),
+                _ => String::new(),
+            };
+            format!("{c}::{}", m.map(|m| m.to_string_lossy()).unwrap_or_default())
+        }
         _ => "{closure}".to_string(),
     }
 }
@@ -496,6 +513,10 @@ pub struct PhpLoader {
     pub warnings: Vec<String>,
     /// Network access forbidden (LIBXML_NONET).
     pub nonet: bool,
+    /// Loads made outside a parse (`DOMDocument::validate()`): the user
+    /// loader's `$context` has no details (test
+    /// libxml_set_external_entity_loader_basic.phpt).
+    pub bare: bool,
 }
 
 impl PhpLoader {
@@ -508,6 +529,7 @@ impl PhpLoader {
             pending: None,
             warnings: Vec::new(),
             nonet: false,
+            bare: false,
         }
     }
 
@@ -547,7 +569,10 @@ impl EntityLoader for PhpLoader {
         let vm = unsafe { &mut *self.vm };
         let url = resolve(vm, system_id, base);
         if has_user_loader(vm) {
+            let empty = LoadContext::default();
+            let ctx = if self.bare { &empty } else { ctx };
             let dir = match base {
+                _ if self.bare => None,
                 Some(b) => {
                     let d = super::file::dirname_bytes(b.as_bytes());
                     Some(String::from_utf8_lossy(&d).into_owned())

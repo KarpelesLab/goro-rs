@@ -1039,6 +1039,7 @@ fn validate(vm: &mut Vm, a: &mut Args) -> R<Value> {
     });
     if let Some((public, system, base)) = need {
         let mut loader = PhpLoader::new(vm, &fname);
+        loader.bare = true;
         let r = super::chardata::load_external_subset(vm, d, public.as_deref(), &system, base.as_deref(), &mut loader);
         loader.finish(vm)?;
         if !r {

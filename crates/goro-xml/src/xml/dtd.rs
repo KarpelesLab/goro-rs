@@ -151,7 +151,12 @@ impl Parser<'_> {
         let text = self.decode_external(&bytes)?;
         // Internal declarations take precedence (XML 1.0 2.8): the external
         // subset is parsed into the same maps, where first declarations win.
+        let saved_base = self.ext_base.replace(super::parser::resolve_system_id(
+            &system,
+            base.as_deref(),
+        ));
         let r = self.with_buffer(text, |p| p.parse_subset(sink, true));
+        self.ext_base = saved_base;
         let combined = self.dtd.take().unwrap();
         let mut ext = DtdData {
             name: internal.name.clone(),
@@ -345,7 +350,7 @@ impl Parser<'_> {
     }
 
     fn load_text(&mut self, public: Option<&str>, system: &str) -> R<Option<String>> {
-        let base = self.opts.url.clone();
+        let base = self.ext_base.clone().or_else(|| self.opts.url.clone());
         let ctx = self.load_context();
         let res = match self.loader.as_mut() {
             Some(l) => l.load_with(public, system, base.as_deref(), &ctx),

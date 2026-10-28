@@ -127,6 +127,9 @@ pub struct Parser<'l> {
     pub dtd: Option<DtdData>,
     /// The external subset, when loaded.
     pub ext: Option<DtdData>,
+    /// The URL of the external subset being read: references in it
+    /// resolve against it (XML 1.0 4.2.2).
+    pub(crate) ext_base: Option<String>,
     pub(crate) standalone: i8,
     /// The declared version.
     pub version: Option<String>,
@@ -211,6 +214,7 @@ impl<'l> Parser<'l> {
             names: HashSet::default(),
             dtd: None,
             ext: None,
+            ext_base: None,
             standalone: -1,
             version: None,
             encoding: None,
