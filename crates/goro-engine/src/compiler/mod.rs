@@ -760,6 +760,24 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// A function can't take the name of a `use function` import (test
+    /// Zend/tests/name_collision/name_collision_08).
+    fn func_import_check(&mut self, fd: &'a FunctionDecl<'a>, line: u32) -> CResult<()> {
+        let full = self.qualify(fd.name.name);
+        if let Some(imp) = self.use_func.get(&fd.name.name.to_ascii_lowercase())
+            && !imp.eq_ignore_ascii_case(&full)
+        {
+            return self.err(
+                format!(
+                    "Cannot redeclare function {}() (previously declared as local import)",
+                    String::from_utf8_lossy(&full)
+                ),
+                line,
+            );
+        }
+        Ok(())
+    }
+
     fn top_stmts(
         &mut self,
         stmts: &'a [Stmt<'a>],
@@ -770,6 +788,7 @@ impl<'a> Compiler<'a> {
             match &s.kind {
                 StmtKind::Function(fd) => {
                     self.f.line = s.span.line;
+                    self.func_import_check(fd, s.span.line)?;
                     let idx = self.func_decl(fd)?;
                     hoisted.push(idx);
                 }
@@ -1047,6 +1066,7 @@ impl<'a> Compiler<'a> {
                 return Ok(());
             }
             StmtKind::Function(fd) => {
+                self.func_import_check(fd, s.span.line)?;
                 let idx = self.func_decl(fd)?;
                 self.emit(Op::DeclareFunction { func: idx });
             }
@@ -1099,6 +1119,18 @@ impl<'a> Compiler<'a> {
                     // Zend/tests/first_class_callable/constexpr/error_*).
                     self.check_const_expr(&c.value)?;
                     let full = self.qualify(c.name.name);
+                    // Test Zend/tests/name_collision/name_collision_09.
+                    if let Some(imp) = self.use_const.get(c.name.name)
+                        && *imp != full
+                    {
+                        return self.err(
+                            format!(
+                                "Cannot declare const {} because the name is already in use",
+                                String::from_utf8_lossy(&full)
+                            ),
+                            s.span.line,
+                        );
+                    }
                     let name = self.str_const(&full);
                     self.in_const_stmt = true;
                     let v = self.expr(&c.value);
@@ -1279,6 +1311,13 @@ impl<'a> Compiler<'a> {
             }
         }
         let by_ref = f.by_ref || list_has_ref(&f.value);
+        // Tests Zend/tests/restrict_globals/invalid_foreach*.
+        if matches!(f.value.kind, ExprKind::Variable(b"GLOBALS")) {
+            return self.err(
+                "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax",
+                line,
+            );
+        }
         // A `?->` chain is iterated as a value (test Zend/tests/
         // nullsafe_operator/023).
         let src = if by_ref && !expr::contains_nullsafe(&f.expr) {

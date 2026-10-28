@@ -2072,10 +2072,19 @@ impl Vm {
             }
             c = k.parent.as_deref();
         }
-        cls.interfaces
+        if cls
+            .interfaces
             .borrow()
             .iter()
             .any(|i| i.lname.as_bytes() == lname)
+        {
+            return true;
+        }
+        // A class_alias() name (test Zend/tests/class_alias/class_alias_001).
+        match self.classes.get(&PhpStr::new(lname)) {
+            Some(t) if t.lname.as_bytes() != lname => cls.is_subclass_of(t),
+            _ => false,
+        }
     }
 
     // ------------------------------------------------------------ class constants

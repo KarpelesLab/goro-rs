@@ -1264,6 +1264,7 @@ impl<'a> Compiler<'a> {
             line_start: cd.span.line,
             line_end: cd.span.end_line,
             declared: std::cell::Cell::new(false),
+            run_declared: std::cell::Cell::new(false),
         };
         self.f.classes.push(Rc::new(decl));
         Ok(self.f.classes.len() as u32 - 1)

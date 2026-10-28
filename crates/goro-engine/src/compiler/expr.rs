@@ -1996,6 +1996,13 @@ impl<'a> Compiler<'a> {
                     let var = self.cv(v);
                     self.emit(Op::SendVar { var, arg: i });
                 }
+                // $GLOBALS is passed by value only (test Zend/tests/
+                // restrict_globals/invalid_pass_by_ref).
+                ExprKind::Variable(b"GLOBALS") => {
+                    let v = self.expr(&a.value)?;
+                    self.free(v);
+                    self.emit(Op::Send { src: v, arg: i });
+                }
                 ExprKind::Index { index: None, .. } => {
                     // `f($a[])`: only valid for by-reference parameters.
                     let j = self.emit(Op::JmpArgByRef { arg: i, t: 0 });
@@ -2123,6 +2130,16 @@ impl<'a> Compiler<'a> {
                     base: PathBase::Global(name),
                     elems: Vec::new(),
                 })
+            }
+            // Tests Zend/tests/restrict_globals/invalid_append*.
+            ExprKind::Index { base, index: None }
+                if matches!(base.kind, ExprKind::Variable(b"GLOBALS")) =>
+            {
+                if for_unset {
+                    self.err("Cannot use [] for unsetting", line)
+                } else {
+                    self.err("Cannot append to $GLOBALS", line)
+                }
             }
             ExprKind::Variable(n) => {
                 if *n == b"this" {
@@ -2737,6 +2754,16 @@ impl<'a> Compiler<'a> {
     fn assign_ref(&mut self, target: &'a Expr<'a>, value: &'a Expr<'a>, res: Reg) -> CResult<()> {
         let line = target.span.line;
         self.nullsafe_ref_check(value)?;
+        // Tests Zend/tests/restrict_globals/invalid_assign_ref_*.
+        if matches!(target.kind, ExprKind::Variable(b"GLOBALS")) {
+            return self.err(
+                "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax",
+                line,
+            );
+        }
+        if matches!(value.kind, ExprKind::Variable(b"GLOBALS")) {
+            return self.err("Cannot acquire reference to $GLOBALS", line);
+        }
         if let ExprKind::New { .. } = &value.kind {
             return self.err("Cannot assign reference to non referenceable value", line);
         }
@@ -2819,6 +2846,13 @@ impl<'a> Compiler<'a> {
         res: Reg,
     ) -> CResult<Reg> {
         let line = target.span.line;
+        // Test Zend/tests/restrict_globals/invalid_assign_op.
+        if matches!(target.kind, ExprKind::Variable(b"GLOBALS")) {
+            return self.err(
+                "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax",
+                line,
+            );
+        }
         let bin = match op {
             AssignOp::Add => Bin::Add,
             AssignOp::Sub => Bin::Sub,

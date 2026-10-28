@@ -948,9 +948,17 @@ impl Vm {
                 }
                 Op::DeclareClass { class } => {
                     let decl = self.code_ref().classes[class as usize].clone();
+                    if decl.run_declared.get()
+                        && let Some(prev) =
+                            self.classes.get(&crate::class::lower(&decl.name)).cloned()
+                    {
+                        let msg = crate::vm::classes::redeclare_msg(&prev, &decl.name);
+                        return Err(self.fatal_at(&msg, &decl.file, decl.line_start));
+                    }
                     if !decl.declared.get() {
                         self.declare_class(&decl)?;
                     }
+                    decl.run_declared.set(true);
                 }
                 Op::Tick { every } => self.tick(every)?,
                 Op::DeclareConst { name, val } => {
