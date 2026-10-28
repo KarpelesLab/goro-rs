@@ -1083,6 +1083,9 @@ impl<'a> Compiler<'a> {
                         .push((PhpStr::from(full), s.span.line, a));
                 }
                 for c in *items {
+                    // A constant expression (PHP manual: Constants; tests
+                    // Zend/tests/first_class_callable/constexpr/error_*).
+                    self.check_const_expr(&c.value)?;
                     let full = self.qualify(c.name.name);
                     let name = self.str_const(&full);
                     let v = self.expr(&c.value)?;

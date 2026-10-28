@@ -299,6 +299,18 @@ impl<'a> Compiler<'a> {
 
     fn expr_inner(&mut self, e: &'a Expr<'a>, hint: Reg) -> CResult<Reg> {
         let line = e.span.line;
+        // test Zend/tests/first_class_callable/first_class_callable_012
+        if let ExprKind::MethodCall {
+            nullsafe: true,
+            args: Args::FirstClassCallable,
+            ..
+        } = &e.kind
+        {
+            return self.err(
+                "Cannot combine nullsafe operator with Closure creation",
+                line,
+            );
+        }
         match &e.kind {
             ExprKind::Int(i) => Ok(self.int_const(*i)),
             ExprKind::Float(f) => Ok(self.add_const(Value::Float(*f))),

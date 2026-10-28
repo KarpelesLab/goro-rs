@@ -887,6 +887,40 @@ impl<'a> Compiler<'a> {
 
     // ------------------------------------------------------------ const expressions
 
+    /// Class constant and property initializers take no `new` and no
+    /// object casts (tests Zend/tests/constexpr/new_not_allowed_*,
+    /// constant_expressions_cast_object_property).
+    fn member_init_checks(&self, e: &'a Expr<'a>) -> CResult<()> {
+        let mut bad: Option<(&'static str, u32)> = None;
+        walk_expr(e, &mut |x| {
+            if bad.is_some() {
+                return;
+            }
+            match &x.kind {
+                ExprKind::New { .. } => {
+                    bad = Some((
+                        "New expressions are not supported in this context",
+                        x.span.line,
+                    ))
+                }
+                ExprKind::Cast {
+                    kind: CastKind::Object,
+                    ..
+                } => {
+                    bad = Some((
+                        "Object casts are not supported in this context",
+                        x.span.line,
+                    ))
+                }
+                _ => {}
+            }
+        });
+        match bad {
+            Some((m, l)) => self.err(m, l),
+            None => Ok(()),
+        }
+    }
+
     /// Checks that `e` is a valid constant expression.
     pub(crate) fn check_const_expr(&self, e: &'a Expr<'a>) -> CResult<()> {
         // Errors PHP finds while compiling the expression come before the
@@ -915,6 +949,31 @@ impl<'a> Compiler<'a> {
                 ExprKind::StaticCall(sc) if matches!(sc.class, ClassRef::Static(_)) => {
                     Some("\"static\" is not allowed in compile-time constants")
                 }
+                // tests Zend/tests/constexpr/constant_expressions_*_class_name_error,
+                // class_on_expression_in_constant_expression
+                ExprKind::ClassConst(cc) if matches!(cc.class, ClassRef::Static(_)) => {
+                    Some("\"static::\" is not allowed in compile-time constants")
+                }
+                ExprKind::ClassConst(cc) if matches!(cc.class, ClassRef::Expr(_)) => {
+                    let is_class = matches!(&cc.name, MemberName::Ident(i) if i.name.eq_ignore_ascii_case(b"class"));
+                    Some(if is_class {
+                        "(expression)::class cannot be used in constant expressions"
+                    } else {
+                        "Dynamic class names are not allowed in compile-time class constant references"
+                    })
+                }
+                ExprKind::New {
+                    args: Some(Args::FirstClassCallable),
+                    ..
+                } => Some("Cannot create Closure for new expression"),
+                // tests Zend/tests/first_class_callable/constexpr/error_dynamic_*
+                ExprKind::CallExpr {
+                    callee,
+                    args: Args::FirstClassCallable,
+                } => Some(match callee.kind {
+                    ExprKind::Int(_) | ExprKind::Float(_) => "Illegal function name",
+                    _ => "Cannot use dynamic function name in constant expression",
+                }),
                 _ => None,
             };
             if let Some(m) = msg {
@@ -1258,6 +1317,7 @@ impl<'a> Compiler<'a> {
                                 item.span.line,
                             );
                         }
+                        self.member_init_checks(&item.value)?;
                         let value = self.const_expr(&item.value)?;
                         consts.push(ConstDecl {
                             name: PhpStr::intern(item.name.name),
@@ -1425,6 +1485,7 @@ impl<'a> Compiler<'a> {
                                         it.span.line,
                                     );
                                 }
+                                self.member_init_checks(d)?;
                                 let ce = self.const_expr(d)?;
                                 if let (Some(t), ConstExpr::Value(v)) = (&ty, &ce)
                                     && !const_fits_type(t, v)
