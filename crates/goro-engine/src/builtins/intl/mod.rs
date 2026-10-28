@@ -26,11 +26,13 @@ use crate::func::Args;
 use crate::registry::{ConstVal, Module};
 use crate::vm::{R, Vm};
 
+mod breakiter;
 mod calendar;
 mod collator;
 mod datefmt;
 mod datehook;
 mod dtpg;
+mod iter;
 mod locale;
 mod msgfmt;
 mod numfmt;
@@ -49,6 +51,8 @@ pub static MODULES: &[&Module] = &[
     &datefmt::MODULE,
     &dtpg::MODULE,
     &text::MODULE,
+    &iter::MODULE,
+    &breakiter::MODULE,
 ];
 
 pub static MODULE: Module = Module {

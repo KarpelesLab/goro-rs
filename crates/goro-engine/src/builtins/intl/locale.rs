@@ -195,6 +195,10 @@ fn grandfathered(id: &str) -> bool {
 fn get_primary_language(vm: &mut Vm, a: &mut Args) -> R<Value> {
     reset(vm);
     let l = locale_or_default(vm, a, 0, "locale")?;
+    // ICU's language buffer is bounded (bug #72241)
+    if l.len() > MAX_LOCALE_LEN {
+        return Ok(Value::Null);
+    }
     if grandfathered(&l) {
         return Ok(Value::from(l.to_ascii_lowercase().as_str()));
     }
@@ -540,6 +544,12 @@ fn lookup(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn accept_from_http(vm: &mut Vm, a: &mut Args) -> R<Value> {
     reset(vm);
     let h = String::from_utf8_lossy(a.bytes(0)).into_owned();
+    // each language range is bounded by ICU's locale ID capacity (bug
+    // #72533)
+    if h.split(',').any(|r| r.split(';').next().unwrap_or("").trim().len() > MAX_LOCALE_LEN) {
+        fail(vm, a, ue::U_ILLEGAL_ARGUMENT_ERROR, "locale string too long")?;
+        return Ok(Value::Bool(false));
+    }
     match loc::accept_from_http(&h) {
         Some(l) => Ok(Value::from(l.as_str())),
         None => Ok(Value::Bool(false)),

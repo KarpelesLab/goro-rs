@@ -531,6 +531,13 @@ fn idn(vm: &mut Vm, a: &Args, ascii: bool) -> R<Value> {
         && let Some(rf) = a.ref_at(3)
     {
         let mut info = PhpArray::new();
+        // a domain over 253 bytes leaves the details empty
+        // (ext/intl/tests/bug72506.phpt)
+        if r.errors & idna::ERROR_DOMAIN_NAME_TOO_LONG != 0 {
+            let v = vm.typed_ref_value(&rf, Value::Array(PhpArray::new()))?;
+            drop(rf.set(v));
+            return Ok(Value::Bool(false));
+        }
         info.insert(Key::from_bytes(b"result"), Value::from(r.result.as_str()));
         info.insert(
             Key::from_bytes(b"isTransitionalDifferent"),
@@ -543,6 +550,7 @@ fn idn(vm: &mut Vm, a: &Args, ascii: bool) -> R<Value> {
     if r.errors != 0 {
         return Ok(Value::Bool(false));
     }
+    let _ = idna::ERROR_DOMAIN_NAME_TOO_LONG;
     Ok(Value::from(r.result.as_str()))
 }
 

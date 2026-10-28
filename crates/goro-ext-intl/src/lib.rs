@@ -10,6 +10,7 @@
 //! units (as ICU counts them) are converted where the PHP API exposes
 //! them.
 
+pub mod breakiter;
 pub mod calendar;
 pub mod collator;
 pub mod datefmt;
@@ -21,6 +22,7 @@ pub mod locale;
 pub mod msgfmt;
 pub mod numfmt;
 pub mod timezone;
+pub mod uset;
 pub mod utf16;
 
 /// The intl crate, for the wiring.

@@ -114,7 +114,7 @@ pub static MODULE: Module = Module {
             tz_use_daylight_time,
         ),
     ],
-    classes: &[("intltimezone", TZ_CLASS), ("intliterator", ITER_CLASS)],
+    classes: &[("intltimezone", TZ_CLASS)],
     methods: &[
         ("intltimezone::countequivalentids", tz_count_equivalent),
         ("intltimezone::createdefault", tz_create_default),
@@ -144,13 +144,8 @@ pub static MODULE: Module = Module {
         ("intltimezone::hassamerules", tz_has_same_rules),
         ("intltimezone::todatetimezone", tz_to_dtz),
         ("intltimezone::usedaylighttime", tz_use_daylight_time),
-        ("intliterator::current", it_current),
-        ("intliterator::key", it_key),
-        ("intliterator::next", it_next),
-        ("intliterator::rewind", it_rewind),
-        ("intliterator::valid", it_valid),
     ],
-    hooks: &[("intltimezone", tz_hooks), ("intliterator", it_hooks)],
+    hooks: &[("intltimezone", tz_hooks)],
     ..Module::EMPTY
 };
 
@@ -192,14 +187,6 @@ const TZ_CLASS: &str = r#"<?php class IntlTimeZone {
     public function hasSameRules(IntlTimeZone $other): bool {}
     public function toDateTimeZone(): DateTimeZone|false {}
     public function useDaylightTime(): bool {}
-}"#;
-
-const ITER_CLASS: &str = r#"<?php class IntlIterator implements Iterator {
-    public function current(): mixed {}
-    public function key(): mixed {}
-    public function next(): void {}
-    public function rewind(): void {}
-    public function valid(): bool {}
 }"#;
 
 // ---------------------------------------------------------------- helpers
@@ -342,74 +329,7 @@ fn iterator(vm: &mut Vm, items: Vec<String>) -> R<Value> {
     Ok(Value::Object(new_string_iterator(vm, items)?))
 }
 
-// ---------------------------------------------------------------- IntlIterator
-
-/// The state of an IntlIterator over strings.
-#[derive(Clone)]
-pub(crate) struct StrIter {
-    pub items: Vec<String>,
-    pub pos: usize,
-}
-
-/// A new IntlIterator over `items`.
-pub(crate) fn new_string_iterator(vm: &mut Vm, items: Vec<String>) -> R<ObjRef> {
-    new_obj(vm, "IntlIterator", StrIter { items, pos: 0 })
-}
-
-fn it_state<U>(vm: &mut Vm, a: &Args, f: impl FnOnce(&mut StrIter) -> U) -> R<U> {
-    let o = a.this_obj().clone();
-    match with_obj::<StrIter, U>(&o, |x| f(&mut x.v)) {
-        Some(u) => Ok(u),
-        None => vm.throw("Error", "The IntlIterator is not properly constructed"),
-    }
-}
-
-fn it_current(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    it_state(vm, a, |s| match s.items.get(s.pos) {
-        Some(v) => Value::from(v.as_str()),
-        None => Value::Null,
-    })
-}
-
-fn it_key(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    it_state(vm, a, |s| {
-        if s.pos < s.items.len() {
-            Value::Int(s.pos as i64)
-        } else {
-            Value::Null
-        }
-    })
-}
-
-fn it_next(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    it_state(vm, a, |s| {
-        if s.pos < s.items.len() {
-            s.pos += 1;
-        }
-    })?;
-    Ok(Value::Null)
-}
-
-fn it_rewind(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    it_state(vm, a, |s| s.pos = 0)?;
-    Ok(Value::Null)
-}
-
-fn it_valid(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    it_state(vm, a, |s| Value::Bool(s.pos < s.items.len()))
-}
-
-fn it_hooks() -> NativeHooks {
-    NativeHooks {
-        clone: Some(|vm, _from, _to| {
-            clone_error(
-                vm,
-                "Trying to clone an uncloneable object of class IntlIterator",
-            );
-        }),
-        ..Default::default()
-    }
-}
+pub(crate) use super::iter::new_string_iterator;
 
 // ---------------------------------------------------------------- hooks
 
