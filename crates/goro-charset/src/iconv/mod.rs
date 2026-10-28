@@ -35,9 +35,9 @@
 //! - //TRANSLIT into the ISO-2022 encoders: glibc drops or repeats escape
 //!   sequences in a few multi-character replacements (U+3395 into
 //!   ISO-2022-JP, most replacements into ISO-2022-KR);
-//! - //TRANSLIT replacement lists come from UCD/CLDR corrected for the 15
-//!   target charsets that were observed; other targets may pick another
-//!   replacement where glibc's locale data has one unknown here;
+//! - //TRANSLIT replacement lists come from UCD/CLDR corrected against every
+//!   table target observed over the BMP; supplementary-plane replacements
+//!   and the 62 code points no candidate list explains may differ;
 //! - MIME: Q encoding into stateful charsets (ISO-2022-JP, UTF-7), some
 //!   ICONV_MIME_DECODE_CONTINUE_ON_ERROR recoveries, the errno shown in
 //!   "Unknown error (N)", and lone CRs or 8-bit bytes in headers.

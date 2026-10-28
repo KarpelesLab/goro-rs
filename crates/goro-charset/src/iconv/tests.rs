@@ -1168,3 +1168,35 @@ fn fast_paths_match_generic() {
         }
     }
 }
+
+/// Development aid: //TRANSLIT//IGNORE of the BMP into every charset,
+/// against checksums from PHP (scratch file trall.out).
+#[test]
+#[ignore]
+fn translit_all_targets() {
+    let Ok(text) =
+        std::fs::read_to_string("/tmp/claude-1000/goro-work/charset-iconv/obs/trall.out")
+    else {
+        return;
+    };
+    let mut bad = Vec::new();
+    let mut n = 0;
+    for line in text.lines() {
+        let p: Vec<&str> = line.split(' ').collect();
+        let lo = u32::from_str_radix(p[2], 16).unwrap();
+        let input = block(lo.max(0x80), lo + 0x1000);
+        let mut d = Vec::new();
+        let r = iconv(
+            b"UTF-32BE",
+            format!("{}//TRANSLIT//IGNORE", p[1]).as_bytes(),
+            &input,
+            &mut d,
+        )
+        .unwrap_or_else(|| b"F".to_vec());
+        n += 1;
+        if format!("{:08x}", crc32(&r)) != p[3] {
+            bad.push(format!("{}@{lo:X}", p[1]));
+        }
+    }
+    eprintln!("{} of {n} blocks differ: {bad:?}", bad.len());
+}

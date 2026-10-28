@@ -5,8 +5,9 @@ the code points where they differ to tools/charset/iconv-data/translit.txt.
 
 usage: python3 -I iconv_mktranslit.py <obs-dir> <out-dir>
 
-<obs-dir> holds translit.out (tools/charset/iconv_obs_translit.php) and
-tables.out (iconv_obs_tables.php, for the target charsets' repertoires).
+<obs-dir> holds translit.out (tools/charset/iconv_obs_translit.php), the
+iconv_mkdata.py inputs (for the target charsets' repertoires), and
+<out-dir> the iconv-data charsets.txt.
 """
 import os
 import sys
@@ -14,41 +15,53 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import iconv_translit_base  # noqa: E402
 
-TARGETS = {
-    'ASCII': None, 'ISO-8859-1': 'ISO_8859-1:1987', 'ISO-8859-2': 'ISO_8859-2:1987',
-    'ISO-8859-15': 'ISO-8859-15', 'CP1252': 'windows-1252', 'ISO-8859-5': 'ISO_8859-5:1988',
-    'KOI8-R': 'KOI8-R', 'ISO-8859-7': 'ISO_8859-7:1987', 'SJIS': 'Shift_JIS',
-    'EUC-KR': 'EUC-KR', 'GBK': 'GBK', 'EUC-JP': 'EUC-JP', 'BIG5': 'Big5',
-    'CP1250': 'windows-1250', 'CP1251': 'windows-1251',
-}
-
-
-def load_repertoires(obs_dir):
-    """Per target: {bytes: cps} decoding and {cp: bytes} encoding maps
-    (shortest, then lowest, sequence, corrected by the observed E lines)."""
-    path = os.path.join(obs_dir, 'tables.out')
-    import re
-    reps = {v: k for k, v in TARGETS.items() if v}
-    dec = {k: {} for k in TARGETS}
-    extra = {k: {} for k in TARGETS}
-    entry = re.compile(r'^[0-9A-F]+(\+[0-9A-F]+)*$')
-    with open(path, encoding='latin-1') as f:
+def load_targets(obs_dir, data_dir):
+    """{target: representative name in tables.out}: ASCII, UCS-2 and every
+    table charset (GB18030 apart: it encodes everything)."""
+    import iconv_mkdata
+    reps = iconv_mkdata.representatives(obs_dir)
+    out = {'ASCII': None, 'UCS-2': None}
+    with open(os.path.join(data_dir, 'charsets.txt')) as f:
         for line in f:
             p = line.split()
-            if len(p) < 3 or p[1] not in reps:
-                continue
-            t = reps[p[1]]
-            if p[0] == 'D':
-                pre = b'' if p[2] == '-' else bytes.fromhex(p[2])
-                for b, e in enumerate(p[3:]):
-                    if entry.match(e):
-                        dec[t][pre + bytes([b])] = tuple(int(x, 16) for x in e.split('+'))
-            elif p[0] == 'E':
-                extra[t][int(p[2], 16)] = None if p[3] == 'x' else bytes.fromhex(p[3])
+            if p and not line.startswith('#') and p[1] in ('table', 'compose'):
+                out[p[0]] = reps[p[0]]
+    return out
+
+
+def load_repertoires(obs_dir, targets):
+    """Per target: {bytes: cps} decoding and {cp: bytes} encoding maps
+    (shortest, then lowest, sequence, corrected by the observed E lines)."""
+    import re
+    import iconv_mkdata
+    reps = {}
+    for k, v in targets.items():
+        if v:
+            reps.setdefault(v, []).append(k)
+    dec = {k: {} for k in targets}
+    extra = {k: {} for k in targets}
+    entry = re.compile(r'^[0-9A-F]+(\+[0-9A-F]+)*$')
+    for path in iconv_mkdata.dump_files(obs_dir):
+        with open(path, encoding='latin-1') as f:
+            for line in f:
+                p = line.split()
+                if len(p) < 3 or p[1] not in reps:
+                    continue
+                for t in reps[p[1]]:
+                    if p[0] == 'D':
+                        pre = b'' if p[2] == '-' else bytes.fromhex(p[2])
+                        for b, e in enumerate(p[3:]):
+                            if entry.match(e):
+                                dec[t][pre + bytes([b])] = tuple(int(x, 16) for x in e.split('+'))
+                    elif p[0] == 'E':
+                        extra[t][int(p[2], 16)] = None if p[3] == 'x' else bytes.fromhex(p[3])
     for i in range(0x80):
         dec['ASCII'][bytes([i])] = (i,)
+    for cp in range(0x10000):
+        if not 0xD800 <= cp < 0xE000:
+            dec['UCS-2'][cp.to_bytes(2, 'little')] = (cp,)
     enc = {}
-    for t in TARGETS:
+    for t in targets:
         m = {}
         for seq in sorted((s for s, c in dec[t].items() if len(c) == 1), key=lambda s: (len(s), s)):
             m.setdefault(dec[t][seq][0], seq)
@@ -76,7 +89,8 @@ def decode(table, data):
 
 def main():
     obs_dir, out_dir = sys.argv[1], sys.argv[2]
-    dec, enc = load_repertoires(obs_dir)
+    TARGETS = load_targets(obs_dir, out_dir)
+    dec, enc = load_repertoires(obs_dir, TARGETS)
     obs = {}
     with open(os.path.join(obs_dir, 'translit.out')) as f:
         for line in f:
@@ -98,7 +112,9 @@ def main():
             # Not printed: the ASCII result, encoded in t.
             if a == 'x':
                 return None
-            return b'?' if a == '3f' else encode(tuple(bytes.fromhex(a if a != '-' else '')), t)
+            if a == '3f':
+                return encode((0x3F,), t)
+            return encode(tuple(bytes.fromhex(a if a != '-' else '')), t)
         if r == 'x':
             return None
         return b'' if r == '-' else bytes.fromhex(r)
@@ -108,7 +124,7 @@ def main():
             b = encode(c, t)
             if b is not None:
                 return b
-        return b'?'
+        return encode((0x3F,), t)
 
     cps = set(obs)
     for cp in range(0x80, 0x110000):
@@ -134,14 +150,17 @@ def main():
         pool = list(cands)
         for t in targets:
             r = want[t]
-            if r is not None and r != b'?':
-                c = decode(dec[t], r)
+            if r is not None and r != encode((0x3F,), t):
+                try:
+                    c = decode(dec[t], r)
+                except ValueError:
+                    continue
                 if c not in pool:
                     pool.append(c)
         used = {}
         for t in targets:
             r = want[t]
-            if r is None or r == b'?':
+            if r is None or r == encode((0x3F,), t):
                 continue
             m = [c for c in pool if encode(c, t) == r]
             if m:
