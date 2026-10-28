@@ -363,6 +363,7 @@ pub(crate) fn assert_ini_deprecated(k: &[u8], v: &[u8]) -> bool {
 /// Startup diagnostics for deprecated `-d` settings, in registration
 /// order (observed on PHP 8.5).
 pub(crate) fn startup_ini_deprecations(vm: &mut Vm, ini: &[(Vec<u8>, Vec<u8>)]) {
+    super::date::startup_timezone_check(vm, ini);
     for k in [
         &b"assert.active"[..],
         b"assert.bail",

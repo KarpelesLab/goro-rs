@@ -5,6 +5,7 @@ pub mod array;
 pub mod core_classes;
 pub mod core_funcs;
 pub mod ctype;
+pub mod date;
 pub mod enums;
 pub mod exec;
 pub mod fiber;
@@ -59,6 +60,7 @@ pub fn modules() -> Vec<&'static Module> {
         &pcre::MODULE,
         &mbstring::MODULE,
         &ctype::MODULE,
+        &date::MODULE,
         &array::MODULE,
         &math::MODULE,
     ]
