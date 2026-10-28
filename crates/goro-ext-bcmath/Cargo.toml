@@ -6,3 +6,6 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+# The maintainer's pure-Rust bignum crate: sub-quadratic multiplication,
+# division, square root and decimal conversion for large operands.
+puremp = { version = "0.3.2", default-features = false, features = ["int"] }

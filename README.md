@@ -86,6 +86,14 @@ bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
   and enums through an engine hook trait. Checked against a 33.7k-line
   PHP 8.5 fixture; 1.25-7.6x PHP's throughput on multi-MB documents
   (iterative, so nesting depth is bounded by `$depth` only).
+- `goro-ext-bcmath`: ext/bcmath on byte strings: every `bc*()` function
+  (all `RoundingMode`s, `bcdivmod`), `BcMath\Number` (scale rules,
+  operators, comparison, serialization), PHP's error messages and their
+  order, and the `bcmath.scale` ini quantity parsing. Checked against a
+  25.8k-case PHP 8.5 fixture. SWAR digit arithmetic on the ASCII strings,
+  base-10⁸ limbs (Karatsuba, Knuth division) and puremp for large
+  divisions and roots: faster than PHP on 20-digit operands and 4-500x
+  faster at 10k-100k digits.
 - `goro-ext-random`: ext/random on plain values: the Mt19937 (both
   modes), PcgOneseq128XslRr64, Xoshiro256StarStar and Secure engines with
   their seeding, jumps and serialized states, user engines through a trait,
