@@ -811,6 +811,12 @@ fn refl_error<T>(vm: &mut Vm, msg: &str) -> R<T> {
 
 /// A new Reflection object of `class` reflecting `r`.
 fn new_refl(vm: &mut Vm, class: &str, r: Refl) -> R<ObjRef> {
+    // Classes handed out by Reflection are ReflectionEnum for enums
+    // (observed on PHP 8.5: getDeclaringClass() of an enum method).
+    let class = match &r {
+        Refl::Class(c) if class == "ReflectionClass" && c.is_enum() => "ReflectionEnum",
+        _ => class,
+    };
     let cls = vm
         .find_class(class.as_bytes(), false)?
         .expect("reflection class");
@@ -1063,10 +1069,8 @@ fn fa_in_namespace(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Bool(f.name.contains(&b'\\')))
 }
 fn fa_is_closure(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let (f, c, _) = need_func!(vm, a);
-    Ok(Value::Bool(
-        c.is_some() && code_of(&f).is_some_and(|c| c.flags & fflags::CLOSURE != 0),
-    ))
+    let (_, c, _) = need_func!(vm, a);
+    Ok(Value::Bool(c.is_some()))
 }
 fn fa_is_deprecated(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, _, _) = need_func!(vm, a);
@@ -3294,30 +3298,47 @@ fn c_get_static(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     }
 }
+/// Assigns a static property with its type's coercion; the message names
+/// the reference when the property is bound to one (observed on PHP 8.5).
+fn set_static_checked(
+    vm: &mut Vm,
+    c: &Rc<Class>,
+    sp: &crate::class::StaticProp,
+    v: Value,
+) -> R<()> {
+    let mut v = v;
+    if let Some(t) = &sp.ty {
+        match vm.check_type(&v, t, false, sp.class, Rc::as_ptr(c))? {
+            crate::vm::types::Check::Ok => {}
+            crate::vm::types::Check::Coerced(x) => v = x,
+            crate::vm::types::Check::Fail => {
+                return vm.type_error(&format!(
+                    "Cannot assign {} to {}property {}::${} of type {}",
+                    v.tname(),
+                    if sp.cell.refcount() > 1 {
+                        "reference held by "
+                    } else {
+                        ""
+                    },
+                    unsafe { (*sp.class).name.dname() },
+                    sp.name.dname(),
+                    t.display()
+                ));
+            }
+        }
+    }
+    let old = sp.cell.set(v);
+    drop(old);
+    Ok(())
+}
+
 fn c_set_static(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let n = a.str(0);
     vm.ensure_statics(&c)?;
     match c.find_static(&n) {
         Some(sp) => {
-            let mut v = a.val(1);
-            if let Some(t) = &sp.ty {
-                match vm.check_type(&v, t, false, sp.class, Rc::as_ptr(&c))? {
-                    crate::vm::types::Check::Ok => {}
-                    crate::vm::types::Check::Coerced(x) => v = x,
-                    crate::vm::types::Check::Fail => {
-                        return vm.type_error(&format!(
-                            "Cannot assign {} to property {}::${} of type {}",
-                            v.tname(),
-                            c.name.dname(),
-                            n.dname(),
-                            t.display()
-                        ));
-                    }
-                }
-            }
-            let old = sp.cell.set(v);
-            drop(old);
+            set_static_checked(vm, &c, &sp, a.val(1))?;
             Ok(Value::Null)
         }
         None => refl_error(
@@ -3478,11 +3499,17 @@ fn pinfo(cls: &Class, name: &PhpStr) -> Option<PInfo> {
         is_static: true,
         doc: s.doc.clone(),
         attrs: s.attrs.to_vec(),
-        default: s
-            .init
-            .borrow()
-            .clone()
-            .or_else(|| Some(ConstExpr::Value(s.cell.get()))),
+        default: unsafe { &*s.class }
+            .decl
+            .as_ref()
+            .and_then(|d| d.props.iter().find(|p| p.name == *name))
+            .map(|p| p.default.clone())
+            .unwrap_or_else(|| {
+                s.init
+                    .borrow()
+                    .clone()
+                    .or_else(|| Some(ConstExpr::Value(s.cell.get())))
+            }),
         has_hooks: (false, false),
         slot: None,
     })
@@ -3602,13 +3629,14 @@ fn p_get_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "ReflectionProperty::getValue(): Argument #1 ($object) must be provided for instance properties"
         ));
     };
-    if !vm.class_of(&o).is_subclass_of(&c) {
+    let decl = info.as_ref().map(|p| p.class).unwrap_or(Rc::as_ptr(&c));
+    if !vm.class_of(&o).is_subclass_of(unsafe { &*decl }) {
         return refl_error(
             vm,
             "Given object is not an instance of the class this property was declared in",
         );
     }
-    let scope = info.map(|p| p.class).unwrap_or(Rc::as_ptr(&c));
+    let scope = decl;
     with_scope(vm, scope, |vm| vm.read_prop(&o, &n, false, None))
 }
 fn p_set_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -3618,10 +3646,18 @@ fn p_set_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
         && p.is_static
     {
         vm.ensure_statics(&c)?;
-        let v = if a.has(1) { a.val(1) } else { a.val(0) };
+        // Observed on PHP 8.5: the static form takes (null, value).
+        let v = if a.has(1) {
+            if !matches!(a.val(0), Value::Null | Value::Object(_)) {
+                vm.deprecated("Calling ReflectionProperty::setValue() with a 1st argument which is not null or an object is deprecated")?;
+            }
+            a.val(1)
+        } else {
+            vm.deprecated("Calling ReflectionProperty::setValue() with a single argument is deprecated")?;
+            a.val(0)
+        };
         let sp = c.find_static(&n).unwrap();
-        let old = sp.cell.set(v);
-        drop(old);
+        set_static_checked(vm, &c, &sp, v)?;
         return Ok(Value::Null);
     }
     let Some(o) = a.obj(0) else {
