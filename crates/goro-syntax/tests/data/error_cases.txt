@@ -1,0 +1,414 @@
+goto 'abcdefghijklmnopqrstuvwxyz012\\'';
+goto 'abcdefghijklmnopqrstuvwxyz01\\\\\\\\';
+goto 'ééééééééééééééééééééééééééééééé';
+goto 'éééééééééééééééééé';
+new foreach;
+new namespace;
+new 1;
+new );
+new array;
+new static;
+new if;
+$x = #[A] 1;
+foo(,);
+foo(1,
+function f(1) {}
+function f(int 1) {}
+function f($a $b) {}
+function f($a, ,) {}
+isset($a, ,);
+unset($a, ,);
+$f = function() use ($a, ,) {};
+match(1) { 1 => 2, , };
+#[A, ,] function f() {}
+class A { use B, ; }
+class A implements B, {}
+list($a);
+echo 1, ;
+{ catch }
+function f() { catch }
+if (1) { catch }
+class A { catch }
+class A { public catch }
+class A { public function f() }
+class A { function f(); }
+class A { public $a { get } }
+class A { public $a { } }
+if (1) 1; else catch;
+while (1) catch;
+switch (1) { catch }
+switch (1) { case 1 catch }
+if (1): catch endif;
+foreach ($a as $b) catch;
+try {} catch (A
+try {} catch (A $e $f) {}
+try {} catch (A | ) {}
+try {} catch () {}
+try {} finally
+try {} catch (A) 
+try {} 1;
+declare(1);
+declare(a 1);
+$a = 1 ? 2 3;
+$a = 1 ? 2;
+$a->b(1 2);
+$a = [1 => 2 3];
+$a = array(1 2);
+$a = $b[1 2];
+$a = $b{1};
+$a = 1[0];
+$a = (1)(2);
+isset(1 2);
+unset($a 2);
+exit(1 2);
+return 1 2;
+const A = 1 2;
+static $a = 1 2;
+class A { const B = 1 2; }
+class A { public $a = 1 2; }
+enum A { case B = 1 2; }
+for (1 2;;);
+while (1 2);
+foreach ($a 2 as $b);
+switch (1) { case 1 2: }
+$a = "{$a 2}";
+$a = match(1 2) {};
+f(a: 1 2);
+#[A(1 2)] function f() {}
+$f = function() use ($a $b) {};
+list($a 2) = 1;
+$a->{1 2};
+${1 2};
+clone(1 2);
+new A(1 2);
+break 1 2;
+echo 1 ? 2 : 3 4;
+class A { public $a { get => 1 2; } }
+fn() => 1 2;
+yield 1 2;
+throw 1 2;
+print 1 2;
+include 1 2;
+goto a 2;
+global $a 2;
+use A B;
+use A as B C;
+namespace A B;
+class A extends B, C {}
+interface A extends B C {}
+class A implements B C {}
+enum A: int implements B C {}
+$a = <<<A\n  x\n  A 1;
+function f(): int 1 {}
+function f() 1 {}
+function() 1 {};
+fn() 1;
+fn(): int 1;
+class A { function f() 1 }
+class A { function f(): int 1 }
+clone($a, 1 2);
+clone(1, 2);
+clone(...);
+clone();
+clone($a,);
+clone($a, b: 1);
+clone(...$a);
+clone($a)->b;
+clone ($a)->b;
+clone $a->b();
+clone($a, [1])->b;
+clone(a: $x);
+foo(print);
+foo(new);
+foo(new 1);
+foo(class);
+foo(list);
+foo(fn);
+foo(static);
+foo(function);
+foo(array);
+foo(isset);
+class A { use B { C as } }
+class A { use B { C as public } }
+class A { use B { C } }
+class A { use B { C::D } }
+class A { use B { C::D insteadof } }
+class A { use B { 1 } }
+class A { use B; 1 }
+class A { const 1; }
+class A { const A; }
+class A { const int 1; }
+class A { public const; }
+class A { var; }
+class A { var $a }
+class A { public int; }
+class A { public ?; }
+class A { public function; }
+class A { public function 1() {} }
+class A { function &; }
+interface I { case A; }
+enum E { case; }
+enum E { case 1; }
+enum E: { }
+use;
+use 1;
+use \\Foo;
+use function;
+use A\\{B C};
+use A\\{B as};
+use A\\{B as C D};
+use A\\{function};
+use \\A\\{B};
+namespace;
+namespace 1;
+namespace A\\B {
+namespace A; namespace;
+$a = ;
+$a = 1 +;
+if ()
+if (1) else;
+while () {}
+do {} while (1)
+do {} while 1;
+for ;
+for (;;) 
+foreach ($a) {}
+foreach ($a as) {}
+foreach ($a as $k => ) {}
+foreach ($a as &$k => $v) {}
+switch {}
+switch (1) {
+switch (1) { case: }
+switch (1) { default }
+switch (1): endswitch
+switch (1): case 1: catch endswitch;
+while (1): catch endwhile;
+for (;;): catch endfor;
+foreach ($a as $b): catch endforeach;
+declare(a=1): catch enddeclare;
+if (1): else: catch endif;
+if (1): elseif (1): catch endif;
+if (1): elseif catch endif;
+function f(...$a, $b) {}
+function f(int|) {}
+function f(?) {}
+function f(A&) {}
+function f((A&B)) {}
+function f((A|B)) {}
+function f(A&B|C) {}
+function f(public $a) {}
+function f(&...$a) {}
+function f(...&$a) {}
+$a = [1, 2
+$a = [&];
+$a = [... ];
+$a = [1 => &];
+$a->;
+$a?->;
+A::;
+A::1;
+static::;
+$a::$;
+$$;
+${};
+$a = &;
+$a = &1;
+$a = &$b + 1;
+$a = &new A;
+$a = &f();
+"$a[]"
+"$a[1"
+"$a->"
+"${a"
+"${1}"
+"{$}"
+"{$a->}"
+`$a
+<<<A\n$a[\nA;
+f(...$a, 1);
+f(a: 1, 2);
+f(&$a);
+f(...);
+f(..., 1);
+f(1, ...);
+$a->f(...);
+new A(...);
+A::f(...);
+#[A] echo 1;
+#[A] $a = 1;
+#[A]
+#[]
+#[1]
+#[A(]
+#[A B]
+#[A] class
+#[A] static 1;
+#[A] fn 1;
+goto 1;
+a: b:
+echo;
+print;
+exit;
+exit();
+die(1);
+exit(1, 2);
+exit(...);
+list() = $a;
+[] = $a;
+list(, $b) = $a;
+[$a, [$b]] = $c;
+[$a] += 1;
+($a) = 1;
+($a)++;
+++($a);
+f() = 1;
+A::B = 1;
+FOO = 1;
+1 = 1;
+"a" = 1;
+$a + 1 = 2;
+[1, 2][0] = 1;
+$a->b() = 1;
+new A = 1;
+$a?->b = 1;
+isset();
+isset($a,);
+empty();
+empty($a, $b);
+eval();
+eval(1, 2);
+unset();
+unset($a,);
+unset(1);
+unset($a, 1);
+function f() { return; }
+fn() => return;
+match(1) {};
+match(1) { default, => 1 };
+match(1) { default => 1, default => 2 };
+match(1) { 1, 2, => 3 };
+match(1) { , };
+match(1) { 1 2 };
+match(1) { 1 => };
+static fn() => 1;
+static function() {};
+static $a;
+static;
+static 1;
+static::$a;
+static::A;
+static::f();
+static $a = 1, $b;
+abstract function f();
+final function f() {}
+abstract class A extends B implements C {}
+final readonly class A {}
+readonly final class A {}
+readonly abstract class A {}
+readonly enum A {}
+final interface A {}
+abstract trait A {}
+readonly();
+readonly(1);
+readonly;
+enum();
+enum;
+enum = 1;
+enum E: string implements A, B { case A = "a"; const B = 1; public function f() {} use T; }
+function exit() {}
+const exit = 1;
+echo 1 2;
+$a = [1, 2;
+foo(1 2);
+class A { public function }
+class A { public $x }
+1 == 2 == 3;
+function f($a = 1 2) {}
+new class { } 1;
+match(1) { 1 => 2 3 };
+class A extends B C {}
+interface I extends A, {}
+$x = 1 +;
+goto ?>abc
+"$a[1x]";
+$x = <<<A\nA\nA;
+$x = <<<A\n$x A;
+"{$a";
+$a = "${a}
+foo(]
+foo(}
+{ ( }
+[(}
+{\n\n)
+$x = (1 2
+"$a[
+goto 0x;
+goto 0b12;
+goto 1__0;
+goto 1e;
+goto 089;
+goto 0o9;
+"\\u{110000}";
+"\\u{zz}";
+"\\u{}";
+"\\u{1";
+'\\u{zz}';
+$a = <<<A\n  a\n b\n  A;\n
+$a = <<<A\n \ta\n \tA;\n
+$a = <<<A\n\t a\n \tA;\n
+$a = <<<A\n  a\n \n  A;\n
+$a = <<<A\n\ta\n  A;\n
+$a = <<<A\n  a\n\tb\n  A;\n
+$a = <<<A\n  a\n \tA;\n
+$a = <<<A\n  a\n\n\n \tA;\n
+$a = <<<A\n    a\n  \tb\n  A;\n
+$a = <<<A\n  a\n  b $x\n c\n  A;\n
+$a = <<<A\n  a\n  b {$x\n} c\n  A;\n
+$a = <<<'A'\n  a\n b\n  A;\n
+$a = <<<A\n  \\u{zz}\n  A;\n
+$a = "abc\n\n\\u{zz}";
+1;\n\n089;
+echo <<<A\n  x\n   A;\n
+goto 'abc\ndefghijklmnopqrstuvwxyz0123456789abcd';
+goto 'abcdefghijklmnopqrstuvwxyz0123456789abcd\nx';
+goto \n__halt_compiler
+"$a->
+catch
+fn()
+static
+namespace A
+const A
+class
+class A
+abstract
+new
+$a->
+A::$
+global
+global $a
+if
+if (1):
+match(1)
+break
+function f(&
+__halt_compiler
+__halt_compiler()
+`
+function
+function &
+&$a
+$$
+\\
+namespace\\
+new class
+abstract class
+readonly function
+$x = ''; $y = $x ?: 1 ?: 2;
+$y = 1 ? 2 : 3 ? 4 : 5;
+$y = 1 |> fn($x) => $x;
+echo (int) $a, (integer) $b, (real) $c;
+$a = (unset) $b;
+(void) foo();
+$a = (void) foo();
+class A { private (set) mixed $v1; }
+class C { use T { x as y?><?= as my_echo; } }

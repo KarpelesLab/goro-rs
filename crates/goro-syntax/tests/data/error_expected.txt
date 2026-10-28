@@ -1,0 +1,414 @@
+1	syntax error, unexpected single-quoted string "abcdefghijklmnopqrstuvwxyz012\\'", expecting identifier
+1	syntax error, unexpected single-quoted string "abcdefghijklmnopqrstuvwxyz01\\\\\\\\", expecting identifier
+1	syntax error, unexpected single-quoted string "ééééééééééééééé...", expecting identifier
+1	syntax error, unexpected single-quoted string "ééééééééééééééé...", expecting identifier
+1	syntax error, unexpected token "foreach", expecting "class"
+1	syntax error, unexpected token "namespace", expecting "class"
+1	syntax error, unexpected integer "1", expecting "class"
+1	Unmatched ')'
+1	syntax error, unexpected token "array", expecting "class"
+OK
+1	syntax error, unexpected token "if", expecting "class"
+1	syntax error, unexpected integer "1", expecting "function" or "fn" or "static" or "#["
+1	syntax error, unexpected token ","
+1	Unclosed '('
+1	syntax error, unexpected integer "1", expecting variable
+1	syntax error, unexpected integer "1", expecting variable
+1	syntax error, unexpected variable "$b", expecting ")"
+1	syntax error, unexpected token ",", expecting variable
+1	syntax error, unexpected token ",", expecting ")"
+1	syntax error, unexpected token ",", expecting ")"
+1	syntax error, unexpected token ",", expecting ")"
+1	syntax error, unexpected token ",", expecting "}"
+1	syntax error, unexpected token ",", expecting "]"
+1	syntax error, unexpected token ";"
+1	syntax error, unexpected token "{"
+1	syntax error, unexpected token ";", expecting "="
+1	syntax error, unexpected token ";"
+1	syntax error, unexpected token "catch"
+1	syntax error, unexpected token "catch"
+1	syntax error, unexpected token "catch"
+1	syntax error, unexpected token "catch", expecting "function"
+1	syntax error, unexpected token "catch", expecting variable
+1	syntax error, unexpected token "}", expecting ";" or "{"
+OK
+1	syntax error, unexpected token "}", expecting "=>" or ";" or "{"
+OK
+1	syntax error, unexpected token "catch"
+1	syntax error, unexpected token "catch"
+1	syntax error, unexpected token "catch", expecting "case" or "default" or "}"
+1	syntax error, unexpected token "catch"
+1	syntax error, unexpected token "catch", expecting "elseif" or "else" or "endif"
+1	syntax error, unexpected token "catch"
+1	Unclosed '('
+1	syntax error, unexpected variable "$f", expecting ")"
+1	syntax error, unexpected token ")"
+1	syntax error, unexpected token ")"
+1	syntax error, unexpected end of file, expecting "{"
+1	syntax error, unexpected end of file, expecting "{"
+OK
+1	syntax error, unexpected integer "1", expecting identifier
+1	syntax error, unexpected integer "1", expecting "="
+1	syntax error, unexpected integer "3"
+1	syntax error, unexpected token ";"
+1	syntax error, unexpected integer "2", expecting ")"
+1	syntax error, unexpected integer "3", expecting "]"
+1	syntax error, unexpected integer "2", expecting ")"
+1	syntax error, unexpected integer "2", expecting "]"
+1	syntax error, unexpected token "{"
+1	syntax error, unexpected token "["
+OK
+1	syntax error, unexpected integer "2", expecting ")"
+1	syntax error, unexpected integer "2", expecting "->" or "?->" or "["
+1	syntax error, unexpected integer "2", expecting ")"
+1	syntax error, unexpected integer "2", expecting ";"
+1	syntax error, unexpected integer "2", expecting "," or ";"
+1	syntax error, unexpected integer "2", expecting "," or ";"
+1	syntax error, unexpected integer "2", expecting "," or ";"
+1	syntax error, unexpected integer "2", expecting "," or ";"
+1	syntax error, unexpected integer "2", expecting ";"
+1	syntax error, unexpected integer "2", expecting ";"
+1	syntax error, unexpected integer "2"
+1	syntax error, unexpected integer "2"
+1	syntax error, unexpected integer "2"
+1	syntax error, unexpected integer "2", expecting "->" or "?->" or "["
+1	syntax error, unexpected integer "2"
+1	syntax error, unexpected integer "2", expecting ")"
+1	syntax error, unexpected integer "2", expecting ")"
+1	syntax error, unexpected variable "$b", expecting ")"
+1	syntax error, unexpected integer "2", expecting ")"
+1	syntax error, unexpected integer "2"
+1	syntax error, unexpected integer "2"
+1	syntax error, unexpected integer "2"
+1	syntax error, unexpected integer "2", expecting ")"
+1	syntax error, unexpected integer "2", expecting ";"
+1	syntax error, unexpected integer "4", expecting "," or ";"
+1	syntax error, unexpected integer "2"
+1	syntax error, unexpected integer "2"
+1	syntax error, unexpected integer "2"
+1	syntax error, unexpected integer "2"
+1	syntax error, unexpected integer "2"
+1	syntax error, unexpected integer "2"
+1	syntax error, unexpected integer "2", expecting ";"
+1	syntax error, unexpected integer "2", expecting "," or ";"
+1	syntax error, unexpected identifier "B", expecting "," or ";"
+1	syntax error, unexpected identifier "C", expecting "," or ";"
+1	syntax error, unexpected identifier "B", expecting "{"
+1	syntax error, unexpected token ",", expecting "{"
+1	syntax error, unexpected identifier "C", expecting "{"
+1	syntax error, unexpected identifier "C", expecting "{"
+1	syntax error, unexpected identifier "C", expecting "{"
+3	syntax error, unexpected integer "1"
+1	syntax error, unexpected integer "1", expecting "{"
+1	syntax error, unexpected integer "1", expecting "{"
+1	syntax error, unexpected integer "1", expecting "{"
+1	syntax error, unexpected integer "1", expecting "=>"
+1	syntax error, unexpected integer "1", expecting "=>"
+1	syntax error, unexpected integer "1", expecting ";" or "{"
+1	syntax error, unexpected integer "1", expecting ";" or "{"
+1	syntax error, unexpected integer "2", expecting ")"
+OK
+OK
+OK
+OK
+OK
+OK
+OK
+OK
+OK
+1	syntax error, unexpected token "->"
+OK
+1	syntax error, unexpected token ")", expecting ":"
+1	syntax error, unexpected token ")", expecting ":"
+1	syntax error, unexpected integer "1", expecting ":"
+1	syntax error, unexpected token ")", expecting ":"
+1	syntax error, unexpected token ")", expecting ":"
+1	syntax error, unexpected token ")", expecting "("
+1	syntax error, unexpected token ")", expecting ":"
+1	syntax error, unexpected token ")", expecting "("
+1	syntax error, unexpected token "(array)"
+1	syntax error, unexpected token ")", expecting ":"
+1	syntax error, unexpected token "}"
+1	syntax error, unexpected token "}", expecting ";"
+1	syntax error, unexpected token "}", expecting "::"
+1	syntax error, unexpected token "}", expecting "as"
+1	syntax error, unexpected token "}"
+1	syntax error, unexpected integer "1"
+1	syntax error, unexpected integer "1", expecting "function"
+1	syntax error, unexpected integer "1"
+1	syntax error, unexpected token ";"
+1	syntax error, unexpected integer "1"
+1	syntax error, unexpected token ";"
+1	syntax error, unexpected token ";", expecting variable
+1	syntax error, unexpected token "}", expecting "," or ";"
+1	syntax error, unexpected token ";", expecting variable
+1	syntax error, unexpected token ";"
+1	syntax error, unexpected token ";"
+1	syntax error, unexpected integer "1"
+1	syntax error, unexpected token ";"
+OK
+1	syntax error, unexpected token ";"
+1	syntax error, unexpected integer "1"
+1	syntax error, unexpected token "{"
+1	syntax error, unexpected token ";"
+1	syntax error, unexpected integer "1"
+OK
+1	syntax error, unexpected token ";", expecting identifier or fully qualified name or namespaced name
+1	syntax error, unexpected identifier "C", expecting "}"
+1	syntax error, unexpected token "}", expecting identifier
+1	syntax error, unexpected identifier "D", expecting "}"
+1	syntax error, unexpected token "}", expecting identifier or namespaced name
+OK
+1	syntax error, unexpected token ";", expecting "{"
+1	syntax error, unexpected integer "1", expecting "{"
+1	Unclosed '{'
+1	syntax error, unexpected token ";", expecting "{"
+1	syntax error, unexpected token ";"
+1	syntax error, unexpected token ";"
+1	syntax error, unexpected token ")"
+1	syntax error, unexpected token "else"
+1	syntax error, unexpected token ")"
+1	syntax error, unexpected end of file, expecting ";"
+1	syntax error, unexpected integer "1", expecting "("
+1	syntax error, unexpected token ";", expecting "("
+1	syntax error, unexpected end of file
+1	syntax error, unexpected token ")"
+1	syntax error, unexpected token ")"
+1	syntax error, unexpected token ")"
+OK
+1	syntax error, unexpected token "{", expecting "("
+1	Unclosed '{'
+1	syntax error, unexpected token ":"
+1	syntax error, unexpected token "}", expecting ":" or ";"
+1	syntax error, unexpected end of file, expecting ";"
+1	syntax error, unexpected token "catch", expecting "endswitch" or "case" or "default"
+1	syntax error, unexpected token "catch"
+1	syntax error, unexpected token "catch"
+1	syntax error, unexpected token "catch"
+1	syntax error, unexpected token "catch"
+1	syntax error, unexpected token "catch"
+1	syntax error, unexpected token "catch", expecting "elseif" or "else" or "endif"
+1	syntax error, unexpected token "catch", expecting "("
+OK
+1	syntax error, unexpected token ")"
+1	syntax error, unexpected token ")"
+1	syntax error, unexpected token ")"
+1	syntax error, unexpected token ")", expecting "|"
+1	syntax error, unexpected token "|", expecting token "&"
+1	syntax error, unexpected token "|", expecting variable
+OK
+OK
+1	syntax error, unexpected token "&", expecting variable
+1	Unclosed '['
+1	syntax error, unexpected token "]"
+1	syntax error, unexpected token "]"
+1	syntax error, unexpected token "]"
+1	syntax error, unexpected token ";", expecting identifier or variable or "{" or "$"
+1	syntax error, unexpected token ";", expecting identifier or variable or "{" or "$"
+1	syntax error, unexpected token ";"
+1	syntax error, unexpected integer "1"
+1	syntax error, unexpected token ";"
+1	syntax error, unexpected token ";", expecting variable or "{" or "$"
+1	syntax error, unexpected token ";", expecting variable or "{" or "$"
+1	syntax error, unexpected token "}"
+1	syntax error, unexpected token ";"
+1	syntax error, unexpected integer "1"
+OK
+1	syntax error, unexpected token ";", expecting "("
+OK
+1	syntax error, unexpected token "]", expecting "-" or identifier or variable or number
+1	syntax error, unexpected double-quote mark, expecting "]"
+1	syntax error, unexpected end of file
+1	syntax error, unexpected double-quote mark
+1	syntax error, unexpected end of file
+1	syntax error, unexpected token "}", expecting variable or "{" or "$"
+1	syntax error, unexpected token "}", expecting identifier or variable or "{" or "$"
+1	syntax error, unexpected end of file, expecting "`"
+2	syntax error, unexpected string content "", expecting "-" or identifier or variable or number
+OK
+OK
+1	syntax error, unexpected token "&"
+OK
+1	syntax error, unexpected token ","
+1	syntax error, unexpected token ")"
+OK
+OK
+OK
+1	syntax error, unexpected token "echo"
+1	syntax error, unexpected variable "$a"
+1	syntax error, unexpected end of file
+1	syntax error, unexpected token "]"
+1	syntax error, unexpected integer "1"
+1	Unclosed '(' does not match ']'
+1	syntax error, unexpected identifier "B", expecting "]"
+1	syntax error, unexpected end of file, expecting identifier
+1	syntax error, unexpected integer "1", expecting "function" or "fn"
+1	syntax error, unexpected integer "1", expecting "("
+1	syntax error, unexpected integer "1", expecting identifier
+OK
+1	syntax error, unexpected token ";"
+1	syntax error, unexpected token ";"
+OK
+OK
+OK
+OK
+OK
+OK
+OK
+OK
+OK
+1	syntax error, unexpected token "+="
+1	syntax error, unexpected token "="
+1	syntax error, unexpected token "++"
+1	syntax error, unexpected token ";", expecting "->" or "?->" or "["
+OK
+1	syntax error, unexpected token "="
+1	syntax error, unexpected token "="
+1	syntax error, unexpected token "="
+1	syntax error, unexpected token "="
+1	syntax error, unexpected token "="
+OK
+OK
+1	syntax error, unexpected token "="
+OK
+1	syntax error, unexpected token ")"
+OK
+1	syntax error, unexpected token ")"
+1	syntax error, unexpected token ","
+1	syntax error, unexpected token ")"
+1	syntax error, unexpected token ","
+1	syntax error, unexpected token ")"
+OK
+1	syntax error, unexpected integer "1"
+1	syntax error, unexpected integer "1", expecting ")"
+OK
+1	syntax error, unexpected token "return"
+OK
+OK
+OK
+OK
+1	syntax error, unexpected token ",", expecting "}"
+1	syntax error, unexpected integer "2", expecting "=>"
+1	syntax error, unexpected token "}"
+OK
+OK
+OK
+1	syntax error, unexpected token ";", expecting "::"
+1	syntax error, unexpected integer "1", expecting "::"
+OK
+OK
+OK
+OK
+1	syntax error, unexpected token "function", expecting "abstract" or "final" or "readonly" or "class"
+1	syntax error, unexpected token "function", expecting "abstract" or "final" or "readonly" or "class"
+OK
+OK
+OK
+OK
+1	syntax error, unexpected token "enum", expecting "abstract" or "final" or "readonly" or "class"
+1	syntax error, unexpected token "interface", expecting "abstract" or "final" or "readonly" or "class"
+1	syntax error, unexpected token "trait", expecting "abstract" or "final" or "readonly" or "class"
+OK
+OK
+1	syntax error, unexpected token ";", expecting "abstract" or "final" or "readonly" or "class"
+OK
+OK
+1	syntax error, unexpected token "="
+OK
+1	syntax error, unexpected token "exit", expecting "("
+1	syntax error, unexpected token "exit", expecting identifier
+1	syntax error, unexpected integer "2", expecting "," or ";"
+1	syntax error, unexpected token ";", expecting "]"
+1	syntax error, unexpected integer "2", expecting ")"
+1	syntax error, unexpected token "}"
+1	syntax error, unexpected token "}", expecting "," or ";"
+1	syntax error, unexpected token "=="
+1	syntax error, unexpected integer "2", expecting ")"
+1	syntax error, unexpected integer "1"
+1	syntax error, unexpected integer "3", expecting "}"
+1	syntax error, unexpected identifier "C", expecting "{"
+1	syntax error, unexpected token "{"
+1	syntax error, unexpected token ";"
+1	syntax error, unexpected token ";", expecting identifier
+1	syntax error, unexpected identifier "x", expecting "]"
+3	syntax error, unexpected identifier "A"
+2	syntax error, unexpected end of file
+1	syntax error, unexpected double-quote mark, expecting "->" or "?->" or "["
+1	syntax error, unexpected end of file
+1	Unclosed '(' does not match ']'
+1	Unclosed '(' does not match '}'
+1	Unclosed '(' does not match '}'
+1	Unclosed '(' does not match '}'
+3	Unclosed '{' on line 1 does not match ')'
+1	syntax error, unexpected integer "2"
+1	syntax error, unexpected end of file, expecting "-" or identifier or variable or number
+1	syntax error, unexpected integer "0", expecting identifier
+1	syntax error, unexpected integer "0b1", expecting identifier
+1	syntax error, unexpected integer "1", expecting identifier
+1	syntax error, unexpected integer "1", expecting identifier
+1	Invalid numeric literal
+1	syntax error, unexpected integer "0", expecting identifier
+1	Invalid UTF-8 codepoint escape sequence: Codepoint too large
+1	Invalid UTF-8 codepoint escape sequence
+1	Invalid UTF-8 codepoint escape sequence
+1	Invalid UTF-8 codepoint escape sequence
+OK
+3	Invalid body indentation level (expecting an indentation level of at least 2)
+2	Invalid indentation - tabs and spaces cannot be mixed
+2	Invalid indentation - tabs and spaces cannot be mixed
+OK
+2	Invalid indentation - tabs and spaces cannot be mixed
+3	Invalid indentation - tabs and spaces cannot be mixed
+2	Invalid indentation - tabs and spaces cannot be mixed
+2	Invalid indentation - tabs and spaces cannot be mixed
+OK
+4	Invalid body indentation level (expecting an indentation level of at least 2)
+OK
+3	Invalid body indentation level (expecting an indentation level of at least 2)
+2	Invalid UTF-8 codepoint escape sequence
+3	Invalid UTF-8 codepoint escape sequence
+3	Invalid numeric literal
+2	Invalid body indentation level (expecting an indentation level of at least 3)
+2	syntax error, unexpected single-quoted string "abc", expecting identifier
+2	syntax error, unexpected single-quoted string "abcdefghijklmnopqrstuvwxyz0123...", expecting identifier
+2	syntax error, unexpected token "__halt_compiler", expecting identifier
+1	syntax error, unexpected end of file
+1	syntax error, unexpected token "catch", expecting end of file
+1	syntax error, unexpected end of file, expecting "=>"
+1	syntax error, unexpected end of file, expecting "::"
+1	syntax error, unexpected end of file, expecting "{"
+1	syntax error, unexpected end of file, expecting "="
+1	syntax error, unexpected end of file, expecting identifier
+1	syntax error, unexpected end of file, expecting "{"
+1	syntax error, unexpected end of file, expecting "abstract" or "final" or "readonly" or "class"
+1	syntax error, unexpected end of file, expecting "class"
+1	syntax error, unexpected end of file, expecting identifier or variable or "{" or "$"
+1	syntax error, unexpected end of file, expecting variable or "{" or "$"
+1	syntax error, unexpected end of file, expecting variable or "$"
+1	syntax error, unexpected end of file, expecting "," or ";"
+1	syntax error, unexpected end of file, expecting "("
+1	syntax error, unexpected end of file, expecting "elseif" or "else" or "endif"
+1	syntax error, unexpected end of file, expecting "{"
+1	syntax error, unexpected end of file, expecting ";"
+1	syntax error, unexpected token "&", expecting variable
+1	syntax error, unexpected end of file, expecting "("
+1	syntax error, unexpected end of file, expecting ";"
+1	syntax error, unexpected end of file, expecting "`"
+1	syntax error, unexpected end of file, expecting "("
+1	syntax error, unexpected end of file, expecting "("
+1	syntax error, unexpected token "&", expecting end of file
+1	syntax error, unexpected end of file, expecting variable or "{" or "$"
+1	syntax error, unexpected token "\\", expecting end of file
+1	syntax error, unexpected token "\\", expecting "{"
+1	syntax error, unexpected end of file, expecting "{"
+1	syntax error, unexpected end of file, expecting identifier
+1	syntax error, unexpected token "function", expecting "abstract" or "final" or "readonly" or "class"
+OK
+OK
+OK
+1	The (real) cast has been removed, use (float) instead
+OK
+OK
+1	syntax error, unexpected token "(void)"
+1	syntax error, unexpected token ")", expecting token "&"
+1	Cannot use "<?=" as an identifier

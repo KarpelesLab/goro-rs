@@ -1,0 +1,971 @@
+//! The abstract syntax tree.
+//!
+//! Nodes borrow identifiers and literal text from the source (`'a`). Every
+//! node carries a [`Span`]: byte offsets and the first and last line.
+//! Language constructs follow the PHP manual's Language Reference.
+
+use std::borrow::Cow;
+
+/// Source location of a node: byte range and lines (1-based).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Span {
+    pub start: u32,
+    pub end: u32,
+    /// Line of the first token.
+    pub line: u32,
+    /// Line of the last token (the line it starts on).
+    pub end_line: u32,
+}
+
+impl Span {
+    pub fn new(start: u32, end: u32, line: u32, end_line: u32) -> Self {
+        Span {
+            start,
+            end,
+            line,
+            end_line,
+        }
+    }
+
+    /// The span covering `self` and `other`.
+    pub fn to(self, other: Span) -> Span {
+        Span {
+            start: self.start,
+            end: other.end,
+            line: self.line,
+            end_line: other.end_line,
+        }
+    }
+}
+
+/// An identifier: function, class, constant, member or label name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ident<'a> {
+    pub name: &'a [u8],
+    pub span: Span,
+}
+
+/// How a name is qualified (PHP manual: "Namespaces: Basics").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameKind {
+    /// `foo`
+    Unqualified,
+    /// `foo\bar`
+    Qualified,
+    /// `\foo\bar`
+    FullyQualified,
+    /// `namespace\foo`
+    Relative,
+}
+
+/// A class, function or constant name as written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Name<'a> {
+    pub kind: NameKind,
+    /// The name without a leading `\` or `namespace\` prefix.
+    pub name: &'a [u8],
+    pub span: Span,
+}
+
+impl<'a> Name<'a> {
+    /// Whether the (unqualified) name is `self`, `parent` or `static`
+    /// (case-insensitive).
+    pub fn is_special_class(&self) -> bool {
+        self.kind == NameKind::Unqualified
+            && (self.name.eq_ignore_ascii_case(b"self")
+                || self.name.eq_ignore_ascii_case(b"parent")
+                || self.name.eq_ignore_ascii_case(b"static"))
+    }
+}
+
+/// A whole file or `eval()`'d string.
+#[derive(Debug)]
+pub struct Program<'a> {
+    pub stmts: Vec<Stmt<'a>>,
+    /// Byte offset of the data after `__halt_compiler();`
+    /// (`__COMPILER_HALT_OFFSET__`), if present at top level.
+    pub halt_compiler_offset: Option<u32>,
+    /// Compile-time errors the parser detected that PHP reports after a
+    /// successful parse (Fatal error), in source order. The compiler merges
+    /// them with its own diagnostics.
+    pub compile_errors: Vec<CompileError>,
+    /// Deprecations and warnings emitted while parsing (for example
+    /// non-canonical casts), in source order.
+    pub notices: Vec<Notice>,
+}
+
+/// A compile-time error found while parsing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompileError {
+    pub message: String,
+    pub line: u32,
+    pub offset: u32,
+}
+
+/// The level of a parser notice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoticeKind {
+    Deprecated,
+    Warning,
+}
+
+/// A deprecation or warning found while parsing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub kind: NoticeKind,
+    pub message: String,
+    pub line: u32,
+}
+
+// ===== statements =====
+
+#[derive(Debug)]
+pub struct Stmt<'a> {
+    pub kind: StmtKind<'a>,
+    pub span: Span,
+}
+
+/// A block body: `{ ... }`, a single statement, or the alternative syntax
+/// (`: ... endif;`).
+pub type Block<'a> = Vec<Stmt<'a>>;
+
+#[derive(Debug)]
+pub enum StmtKind<'a> {
+    /// `expr;`
+    Expr(Expr<'a>),
+    /// `echo a, b;` and `<?= a ?>`.
+    Echo(Vec<Expr<'a>>),
+    /// Text outside PHP tags.
+    InlineHtml(&'a [u8]),
+    /// `{ ... }`
+    Block(Block<'a>),
+    If(Box<IfStmt<'a>>),
+    While {
+        cond: Expr<'a>,
+        body: Block<'a>,
+        alt_syntax: bool,
+    },
+    DoWhile {
+        body: Block<'a>,
+        cond: Expr<'a>,
+    },
+    For(Box<ForStmt<'a>>),
+    Foreach(Box<ForeachStmt<'a>>),
+    Switch(Box<SwitchStmt<'a>>),
+    /// `break n;` (`None`: no level given).
+    Break(Option<Expr<'a>>),
+    Continue(Option<Expr<'a>>),
+    Return(Option<Expr<'a>>),
+    /// `global $a, $$b;`
+    Global(Vec<Expr<'a>>),
+    /// `static $a = 1, $b;`
+    Static(Vec<StaticVar<'a>>),
+    /// `unset($a, $b[1]);`
+    Unset(Vec<Expr<'a>>),
+    Try(Box<TryStmt<'a>>),
+    /// `goto label;`
+    Goto(Ident<'a>),
+    /// `label:`
+    Label(Ident<'a>),
+    Declare(Box<DeclareStmt<'a>>),
+    Function(Box<FunctionDecl<'a>>),
+    Class(Box<ClassDecl<'a>>),
+    /// `namespace Foo;` (body `None`) or `namespace Foo { ... }`.
+    Namespace {
+        name: Option<Name<'a>>,
+        body: Option<Block<'a>>,
+    },
+    /// `use A\B as C, D;`, `use function f;`, `use const C;`
+    Use {
+        kind: UseKind,
+        uses: Vec<UseItem<'a>>,
+    },
+    /// `use A\{B, function c, const D};`
+    GroupUse {
+        kind: UseKind,
+        prefix: Name<'a>,
+        uses: Vec<UseItem<'a>>,
+    },
+    /// `const A = 1, B = 2;` (top level / namespace).
+    Const {
+        attrs: Vec<AttributeGroup<'a>>,
+        items: Vec<ConstItem<'a>>,
+    },
+    /// `__halt_compiler();`: the data starts at `offset`.
+    HaltCompiler {
+        offset: u32,
+    },
+    /// `;` alone.
+    Nop,
+}
+
+#[derive(Debug)]
+pub struct IfStmt<'a> {
+    pub cond: Expr<'a>,
+    pub then: Block<'a>,
+    pub elseifs: Vec<ElseIf<'a>>,
+    pub else_: Option<Block<'a>>,
+    /// `if (...): ... endif;`
+    pub alt_syntax: bool,
+}
+
+#[derive(Debug)]
+pub struct ElseIf<'a> {
+    pub cond: Expr<'a>,
+    pub body: Block<'a>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct ForStmt<'a> {
+    pub init: Vec<Expr<'a>>,
+    pub cond: Vec<Expr<'a>>,
+    pub step: Vec<Expr<'a>>,
+    pub body: Block<'a>,
+    pub alt_syntax: bool,
+}
+
+#[derive(Debug)]
+pub struct ForeachStmt<'a> {
+    pub expr: Expr<'a>,
+    pub key: Option<Expr<'a>>,
+    /// The value target: a variable, `list()`/`[...]` destructuring, or
+    /// any writable expression.
+    pub value: Expr<'a>,
+    /// `as &$v`
+    pub by_ref: bool,
+    pub body: Block<'a>,
+    pub alt_syntax: bool,
+}
+
+#[derive(Debug)]
+pub struct SwitchStmt<'a> {
+    pub subject: Expr<'a>,
+    pub cases: Vec<SwitchCase<'a>>,
+    pub alt_syntax: bool,
+}
+
+#[derive(Debug)]
+pub struct SwitchCase<'a> {
+    /// `None` for `default:`.
+    pub cond: Option<Expr<'a>>,
+    pub body: Block<'a>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct StaticVar<'a> {
+    pub name: Ident<'a>,
+    pub default: Option<Expr<'a>>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct TryStmt<'a> {
+    pub body: Block<'a>,
+    pub catches: Vec<Catch<'a>>,
+    pub finally: Option<Block<'a>>,
+}
+
+#[derive(Debug)]
+pub struct Catch<'a> {
+    pub types: Vec<Name<'a>>,
+    /// `catch (E)` without a variable (PHP 8.0).
+    pub var: Option<Ident<'a>>,
+    pub body: Block<'a>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct DeclareStmt<'a> {
+    pub directives: Vec<(Ident<'a>, Expr<'a>)>,
+    pub body: DeclareBody<'a>,
+}
+
+#[derive(Debug)]
+pub enum DeclareBody<'a> {
+    /// `declare(...);`
+    None,
+    /// `declare(...) stmt` or `declare(...) { ... }`
+    Block(Block<'a>),
+    /// `declare(...): ... enddeclare;`
+    Alt(Block<'a>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UseKind {
+    Normal,
+    Function,
+    Const,
+}
+
+#[derive(Debug)]
+pub struct UseItem<'a> {
+    pub name: Name<'a>,
+    pub alias: Option<Ident<'a>>,
+    /// In a group use, the kind given on the item.
+    pub kind: UseKind,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct ConstItem<'a> {
+    pub name: Ident<'a>,
+    pub value: Expr<'a>,
+    pub doc_comment: Option<&'a [u8]>,
+    pub span: Span,
+}
+
+// ===== declarations =====
+
+/// Modifier flags for classes, members and promoted parameters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Modifiers(pub u16);
+
+impl Modifiers {
+    pub const PUBLIC: u16 = 1;
+    pub const PROTECTED: u16 = 2;
+    pub const PRIVATE: u16 = 4;
+    pub const STATIC: u16 = 8;
+    pub const ABSTRACT: u16 = 16;
+    pub const FINAL: u16 = 32;
+    pub const READONLY: u16 = 64;
+    pub const PUBLIC_SET: u16 = 128;
+    pub const PROTECTED_SET: u16 = 256;
+    pub const PRIVATE_SET: u16 = 512;
+    /// `var` (a property declared with `var`).
+    pub const VAR: u16 = 1024;
+    pub const VISIBILITY: u16 = Self::PUBLIC | Self::PROTECTED | Self::PRIVATE;
+    pub const SET_VISIBILITY: u16 = Self::PUBLIC_SET | Self::PROTECTED_SET | Self::PRIVATE_SET;
+
+    #[inline]
+    pub fn has(self, f: u16) -> bool {
+        self.0 & f != 0
+    }
+    #[inline]
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+#[derive(Debug)]
+pub struct AttributeGroup<'a> {
+    pub attrs: Vec<Attribute<'a>>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct Attribute<'a> {
+    pub name: Name<'a>,
+    pub args: Vec<Arg<'a>>,
+    /// Whether an argument list was written (`#[A()]` vs `#[A]`).
+    pub has_args: bool,
+    pub span: Span,
+}
+
+/// A type declaration (PHP manual: "Type declarations").
+#[derive(Debug, Clone)]
+pub enum Type<'a> {
+    /// A class or scalar type name (`int`, `Foo`, `self`, `mixed`...).
+    Named(Name<'a>),
+    /// `array`
+    Array(Span),
+    /// `callable`
+    Callable(Span),
+    /// `static`
+    Static(Span),
+    /// `?T`
+    Nullable(Box<Type<'a>>, Span),
+    /// `A|B`
+    Union(Vec<Type<'a>>, Span),
+    /// `A&B`
+    Intersection(Vec<Type<'a>>, Span),
+}
+
+impl Type<'_> {
+    pub fn span(&self) -> Span {
+        match self {
+            Type::Named(n) => n.span,
+            Type::Array(s) | Type::Callable(s) | Type::Static(s) => *s,
+            Type::Nullable(_, s) | Type::Union(_, s) | Type::Intersection(_, s) => *s,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Param<'a> {
+    pub attrs: Vec<AttributeGroup<'a>>,
+    /// Constructor promotion modifiers (visibility, `readonly`, set
+    /// visibility, `final`).
+    pub modifiers: Modifiers,
+    pub ty: Option<Type<'a>>,
+    pub by_ref: bool,
+    pub variadic: bool,
+    /// Name without `$`.
+    pub name: Ident<'a>,
+    pub default: Option<Expr<'a>>,
+    /// Property hooks on a promoted parameter (PHP 8.4).
+    pub hooks: Vec<PropertyHook<'a>>,
+    pub doc_comment: Option<&'a [u8]>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct FunctionDecl<'a> {
+    pub name: Ident<'a>,
+    pub attrs: Vec<AttributeGroup<'a>>,
+    pub by_ref: bool,
+    pub params: Vec<Param<'a>>,
+    pub ret: Option<Type<'a>>,
+    pub body: Block<'a>,
+    pub doc_comment: Option<&'a [u8]>,
+    /// Span of the whole declaration (start line to closing brace line).
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClassKind {
+    Class,
+    Interface,
+    Trait,
+    Enum,
+}
+
+#[derive(Debug)]
+pub struct ClassDecl<'a> {
+    pub kind: ClassKind,
+    /// `None` for anonymous classes.
+    pub name: Option<Ident<'a>>,
+    pub attrs: Vec<AttributeGroup<'a>>,
+    /// `abstract`, `final`, `readonly`.
+    pub modifiers: Modifiers,
+    /// `extends` of a class.
+    pub extends: Option<Name<'a>>,
+    /// `implements` of a class or enum; `extends` of an interface.
+    pub implements: Vec<Name<'a>>,
+    /// Backing type of an enum (`enum E: string`).
+    pub enum_backing: Option<Type<'a>>,
+    pub members: Vec<ClassMember<'a>>,
+    pub doc_comment: Option<&'a [u8]>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub enum ClassMember<'a> {
+    Property(PropertyDecl<'a>),
+    Const(ClassConstDecl<'a>),
+    Method(MethodDecl<'a>),
+    TraitUse(TraitUse<'a>),
+    EnumCase(EnumCase<'a>),
+}
+
+#[derive(Debug)]
+pub struct PropertyDecl<'a> {
+    pub attrs: Vec<AttributeGroup<'a>>,
+    pub modifiers: Modifiers,
+    pub ty: Option<Type<'a>>,
+    pub props: Vec<PropertyItem<'a>>,
+    pub doc_comment: Option<&'a [u8]>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct PropertyItem<'a> {
+    /// Name without `$`.
+    pub name: Ident<'a>,
+    pub default: Option<Expr<'a>>,
+    /// Property hooks (PHP 8.4); empty when there is no hook list.
+    pub hooks: Vec<PropertyHook<'a>>,
+    /// Whether a `{ ... }` hook list was written.
+    pub has_hook_list: bool,
+    pub doc_comment: Option<&'a [u8]>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct PropertyHook<'a> {
+    pub attrs: Vec<AttributeGroup<'a>>,
+    /// `final` (and other modifiers the grammar accepts, which the
+    /// compiler rejects).
+    pub modifiers: Modifiers,
+    pub by_ref: bool,
+    /// `get` or `set` (any identifier is accepted by the grammar).
+    pub name: Ident<'a>,
+    /// `set(Type $v)`: explicit parameter list.
+    pub params: Option<Vec<Param<'a>>>,
+    pub body: HookBody<'a>,
+    pub doc_comment: Option<&'a [u8]>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub enum HookBody<'a> {
+    /// `get;`
+    Abstract,
+    /// `get => expr;`
+    Expr(Box<Expr<'a>>),
+    /// `get { ... }`
+    Block(Block<'a>),
+}
+
+#[derive(Debug)]
+pub struct ClassConstDecl<'a> {
+    pub attrs: Vec<AttributeGroup<'a>>,
+    pub modifiers: Modifiers,
+    /// Typed class constant (PHP 8.3).
+    pub ty: Option<Type<'a>>,
+    pub items: Vec<ConstItem<'a>>,
+    pub doc_comment: Option<&'a [u8]>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct MethodDecl<'a> {
+    pub attrs: Vec<AttributeGroup<'a>>,
+    pub modifiers: Modifiers,
+    pub by_ref: bool,
+    pub name: Ident<'a>,
+    pub params: Vec<Param<'a>>,
+    pub ret: Option<Type<'a>>,
+    /// `None` for abstract / interface methods (`;` body).
+    pub body: Option<Block<'a>>,
+    pub doc_comment: Option<&'a [u8]>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct TraitUse<'a> {
+    pub traits: Vec<Name<'a>>,
+    pub adaptations: Vec<TraitAdaptation<'a>>,
+    /// Whether a `{ ... }` block was written.
+    pub has_block: bool,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub enum TraitAdaptation<'a> {
+    /// `A::foo insteadof B, C;`
+    Precedence {
+        trait_: Name<'a>,
+        method: Ident<'a>,
+        insteadof: Vec<Name<'a>>,
+        span: Span,
+    },
+    /// `[A::]foo as [visibility] [bar];`
+    Alias {
+        trait_: Option<Name<'a>>,
+        method: Ident<'a>,
+        modifiers: Modifiers,
+        alias: Option<Ident<'a>>,
+        span: Span,
+    },
+}
+
+#[derive(Debug)]
+pub struct EnumCase<'a> {
+    pub attrs: Vec<AttributeGroup<'a>>,
+    pub name: Ident<'a>,
+    pub value: Option<Expr<'a>>,
+    pub doc_comment: Option<&'a [u8]>,
+    pub span: Span,
+}
+
+// ===== expressions =====
+
+#[derive(Debug)]
+pub struct Expr<'a> {
+    pub kind: ExprKind<'a>,
+    pub span: Span,
+}
+
+/// Binary operators.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Pow,
+    Concat,
+    BitAnd,
+    BitOr,
+    BitXor,
+    ShiftLeft,
+    ShiftRight,
+    /// `&&` / `and`
+    BoolAnd,
+    /// `||` / `or`
+    BoolOr,
+    /// `xor`
+    LogicalXor,
+    Equal,
+    NotEqual,
+    Identical,
+    NotIdentical,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    Spaceship,
+    /// `??`
+    Coalesce,
+    /// `|>` (PHP 8.5 pipe operator).
+    Pipe,
+}
+
+/// Compound assignment operators (`+=` ...).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AssignOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Pow,
+    Concat,
+    BitAnd,
+    BitOr,
+    BitXor,
+    ShiftLeft,
+    ShiftRight,
+    Coalesce,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum UnaryOp {
+    /// `!`
+    Not,
+    /// `~`
+    BitNot,
+    /// `-`
+    Neg,
+    /// `+`
+    Plus,
+    /// `@`
+    Silence,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum IncDec {
+    PreInc,
+    PreDec,
+    PostInc,
+    PostDec,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CastKind {
+    Int,
+    Float,
+    String,
+    Bool,
+    Array,
+    Object,
+    /// `(unset)`: removed in PHP 8.0, a compile error.
+    Unset,
+    /// `(void)` (PHP 8.5).
+    Void,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum IncludeKind {
+    Include,
+    IncludeOnce,
+    Require,
+    RequireOnce,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MagicConst {
+    Line,
+    File,
+    Dir,
+    Class,
+    Trait,
+    Method,
+    Function,
+    Property,
+    Namespace,
+}
+
+/// The class part of `A::b`, `new A`, `$x instanceof A`.
+#[derive(Debug)]
+pub enum ClassRef<'a> {
+    /// A name (including `self`, `parent`).
+    Name(Name<'a>),
+    /// `static`
+    Static(Span),
+    /// Any expression (`$obj::X`, `(expr)::X`, `new $cls`).
+    Expr(Box<Expr<'a>>),
+}
+
+/// A member name after `->`, `?->` or `::`.
+#[derive(Debug)]
+pub enum MemberName<'a> {
+    Ident(Ident<'a>),
+    /// `->$name`, `->{expr}`, `::{expr}`, `::$name()`.
+    Expr(Box<Expr<'a>>),
+}
+
+/// A static property name: `A::$x` or `A::$$x` / `A::${expr}`.
+#[derive(Debug)]
+pub enum StaticPropName<'a> {
+    Ident(Ident<'a>),
+    Expr(Box<Expr<'a>>),
+}
+
+#[derive(Debug)]
+pub struct Arg<'a> {
+    /// Named argument (PHP 8.0).
+    pub name: Option<Ident<'a>>,
+    pub value: Expr<'a>,
+    /// `...$args`
+    pub unpack: bool,
+    pub span: Span,
+}
+
+/// Call arguments.
+#[derive(Debug)]
+pub enum Args<'a> {
+    List(Vec<Arg<'a>>),
+    /// `f(...)`: first-class callable syntax (PHP 8.1).
+    FirstClassCallable,
+}
+
+impl<'a> Args<'a> {
+    pub fn as_slice(&self) -> &[Arg<'a>] {
+        match self {
+            Args::List(v) => v,
+            Args::FirstClassCallable => &[],
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ArrayItem<'a> {
+    pub key: Option<Expr<'a>>,
+    pub value: Expr<'a>,
+    pub by_ref: bool,
+    /// `...$spread`
+    pub unpack: bool,
+    pub span: Span,
+}
+
+/// A part of an interpolated string.
+#[derive(Debug)]
+pub enum StrPart<'a> {
+    /// Literal text, escapes decoded.
+    Lit(Cow<'a, [u8]>),
+    Expr(Expr<'a>),
+}
+
+#[derive(Debug)]
+pub struct ClosureUse<'a> {
+    pub name: Ident<'a>,
+    pub by_ref: bool,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct Closure<'a> {
+    pub attrs: Vec<AttributeGroup<'a>>,
+    pub is_static: bool,
+    pub by_ref: bool,
+    pub params: Vec<Param<'a>>,
+    pub uses: Vec<ClosureUse<'a>>,
+    pub ret: Option<Type<'a>>,
+    pub body: Block<'a>,
+    pub doc_comment: Option<&'a [u8]>,
+}
+
+#[derive(Debug)]
+pub struct ArrowFn<'a> {
+    pub attrs: Vec<AttributeGroup<'a>>,
+    pub is_static: bool,
+    pub by_ref: bool,
+    pub params: Vec<Param<'a>>,
+    pub ret: Option<Type<'a>>,
+    pub body: Box<Expr<'a>>,
+    pub doc_comment: Option<&'a [u8]>,
+}
+
+#[derive(Debug)]
+pub struct MatchArm<'a> {
+    /// `None` for `default`.
+    pub conds: Option<Vec<Expr<'a>>>,
+    pub body: Expr<'a>,
+    pub span: Span,
+}
+
+/// What `new` instantiates.
+#[derive(Debug)]
+pub enum NewClass<'a> {
+    Ref(ClassRef<'a>),
+    Anonymous(Box<ClassDecl<'a>>),
+}
+
+/// How a string literal was written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrKind {
+    SingleQuoted,
+    DoubleQuoted,
+    Heredoc,
+    Nowdoc,
+}
+
+#[derive(Debug)]
+pub enum ExprKind<'a> {
+    // --- literals ---
+    Int(i64),
+    Float(f64),
+    /// A string without interpolation; escapes and heredoc indentation
+    /// already processed.
+    String(Cow<'a, [u8]>, StrKind),
+    /// `"a $b c"`, heredoc with interpolation.
+    Interpolated(Vec<StrPart<'a>>, StrKind),
+    /// `` `cmd $x` ``
+    ShellExec(Vec<StrPart<'a>>),
+    /// `[1, 2]` / `array(1, 2)`.
+    Array {
+        items: Vec<Option<ArrayItem<'a>>>,
+        short: bool,
+    },
+    /// `list(...)` / `[...]` on the left of `=` or in `foreach`. Skipped
+    /// elements are `None`.
+    List {
+        items: Vec<Option<ArrayItem<'a>>>,
+        short: bool,
+    },
+    MagicConst(MagicConst),
+
+    // --- variables and access ---
+    /// `$name` (name without `$`).
+    Variable(&'a [u8]),
+    /// `$$expr` / `${expr}`.
+    VariableVariable(Box<Expr<'a>>),
+    /// `a[b]` / `a[]` (index `None`). `a{b}` is not PHP 8 syntax.
+    Index {
+        base: Box<Expr<'a>>,
+        index: Option<Box<Expr<'a>>>,
+    },
+    /// `a->b`, `a?->b`.
+    Prop {
+        obj: Box<Expr<'a>>,
+        name: MemberName<'a>,
+        nullsafe: bool,
+    },
+    /// `A::$b`
+    StaticProp {
+        class: ClassRef<'a>,
+        name: StaticPropName<'a>,
+    },
+    /// `FOO`, `\Foo\BAR`, `true`, `null`...
+    Const(Name<'a>),
+    /// `A::B`, `A::class`, `A::{expr}` (PHP 8.3 dynamic constant fetch).
+    ClassConst {
+        class: ClassRef<'a>,
+        name: MemberName<'a>,
+    },
+
+    // --- calls ---
+    /// `f(...)` with a name.
+    Call {
+        name: Name<'a>,
+        args: Args<'a>,
+    },
+    /// `$f(...)`, `(expr)(...)`.
+    CallExpr {
+        callee: Box<Expr<'a>>,
+        args: Args<'a>,
+    },
+    MethodCall {
+        obj: Box<Expr<'a>>,
+        name: MemberName<'a>,
+        args: Args<'a>,
+        nullsafe: bool,
+    },
+    StaticCall {
+        class: ClassRef<'a>,
+        name: MemberName<'a>,
+        args: Args<'a>,
+    },
+    New {
+        class: NewClass<'a>,
+        /// `None`: no parentheses (`new A`).
+        args: Option<Args<'a>>,
+    },
+
+    // --- operators ---
+    Assign {
+        target: Box<Expr<'a>>,
+        value: Box<Expr<'a>>,
+    },
+    /// `$a = &$b`
+    AssignRef {
+        target: Box<Expr<'a>>,
+        value: Box<Expr<'a>>,
+    },
+    AssignOp {
+        op: AssignOp,
+        target: Box<Expr<'a>>,
+        value: Box<Expr<'a>>,
+    },
+    Binary {
+        op: BinaryOp,
+        left: Box<Expr<'a>>,
+        right: Box<Expr<'a>>,
+    },
+    Unary {
+        op: UnaryOp,
+        expr: Box<Expr<'a>>,
+    },
+    IncDec {
+        op: IncDec,
+        expr: Box<Expr<'a>>,
+    },
+    Cast {
+        kind: CastKind,
+        expr: Box<Expr<'a>>,
+    },
+    /// `a ? b : c`, `a ?: c` (`then` is `None`).
+    Ternary {
+        cond: Box<Expr<'a>>,
+        then: Option<Box<Expr<'a>>>,
+        else_: Box<Expr<'a>>,
+    },
+    Instanceof {
+        expr: Box<Expr<'a>>,
+        class: ClassRef<'a>,
+    },
+
+    // --- language constructs ---
+    Isset(Vec<Expr<'a>>),
+    Empty(Box<Expr<'a>>),
+    Eval(Box<Expr<'a>>),
+    Include {
+        kind: IncludeKind,
+        expr: Box<Expr<'a>>,
+    },
+    /// `exit`, `exit(...)`, `die(...)`: `None` without parentheses.
+    Exit(Option<Args<'a>>),
+    Print(Box<Expr<'a>>),
+    /// `clone $x` (`args` `None`), or the PHP 8.5 function form
+    /// `clone($x, [...])` / `clone(...)`.
+    Clone {
+        expr: Option<Box<Expr<'a>>>,
+        args: Option<Args<'a>>,
+    },
+    Throw(Box<Expr<'a>>),
+    Yield {
+        key: Option<Box<Expr<'a>>>,
+        value: Option<Box<Expr<'a>>>,
+    },
+    YieldFrom(Box<Expr<'a>>),
+    Closure(Box<Closure<'a>>),
+    ArrowFn(Box<ArrowFn<'a>>),
+    Match {
+        subject: Box<Expr<'a>>,
+        arms: Vec<MatchArm<'a>>,
+    },
+}
