@@ -1257,9 +1257,9 @@ impl Vm {
         Ok(())
     }
 
+    #[inline]
     pub(crate) fn class_ptr_of(&self, o: &ObjRef) -> *const Class {
-        let c: &Rc<dyn goro_runtime::ClassInfo> = o.class();
-        Rc::as_ptr(c) as *const Class
+        o.class_addr() as *const Class
     }
 
     /// `parent::$prop::get()` / `parent::$prop::set()`: calls the parent
@@ -1688,7 +1688,7 @@ impl Vm {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn send_val(&mut self, arg: u32, v: Value, from_call: bool) -> R<()> {
         if let Some(s) = self.direct_arg_slot(arg) {
             let old = unsafe { (*s).replace(v) };
@@ -3170,6 +3170,9 @@ impl Vm {
                 (Some(Value::Bool(_)), m) => m & tmask::BOOL == tmask::BOOL,
                 (Some(Value::Float(_)), m) => m & tmask::FLOAT != 0,
                 (Some(Value::Null), m) => m & tmask::NULL != 0,
+                (Some(Value::Object(o)), m) => {
+                    m & tmask::OBJECT != 0 || names_class_of(self, ty, o)
+                }
                 _ => false,
             };
             if ok {
@@ -3998,6 +4001,24 @@ struct NativeParts {
 /// code), and each value matches its parameter's type exactly. Pure (no
 /// diagnostics, no autoloading): anything else is left to the general
 /// path.
+/// Whether type `ty` names the class of `o` itself (one of its plain
+/// class alternatives); other matches are left to the general check.
+#[inline]
+fn names_class_of(vm: &Vm, ty: &TypeHint, o: &ObjRef) -> bool {
+    // SAFETY: an object's class outlives it.
+    let name = unsafe { &*vm.class_ptr_of(o) }.name.as_bytes();
+    for t in &ty.classes {
+        if let [n] = &t[..] {
+            let n = n.as_bytes();
+            let n = n.strip_prefix(b"\\").unwrap_or(n);
+            if n.len() == name.len() && (n == name || n.eq_ignore_ascii_case(name)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[inline(always)]
 fn args_bind_simply(vm: &Vm, code: &FuncCode, base: *mut Slot, argc: u32) -> bool {
     for (i, param) in code.params.iter().enumerate() {
@@ -4020,19 +4041,7 @@ fn args_bind_simply(vm: &Vm, code: &FuncCode, base: *mut Slot, argc: u32) -> boo
             Some(Value::Bool(true)) => m & tmask::TRUE != 0,
             Some(Value::Bool(false)) => m & tmask::FALSE != 0,
             Some(Value::Null) => m & tmask::NULL != 0,
-            Some(Value::Object(o)) => {
-                m & tmask::OBJECT != 0 || {
-                    // SAFETY: an object's class outlives it.
-                    let cls = unsafe { &*vm.class_ptr_of(o) };
-                    ty.classes.iter().any(|t| {
-                        t.len() == 1 && {
-                            let n = t[0].as_bytes();
-                            let n = n.strip_prefix(b"\\").unwrap_or(n);
-                            cls.name.as_bytes().eq_ignore_ascii_case(n)
-                        }
-                    })
-                }
-            }
+            Some(Value::Object(o)) => m & tmask::OBJECT != 0 || names_class_of(vm, ty, o),
             _ => false,
         };
         if !ok {

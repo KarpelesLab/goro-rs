@@ -302,6 +302,22 @@ impl Vm {
         }
     }
 
+    /// [`put`](Self::put) inlined for a temporary that holds nothing to
+    /// drop (the usual destination of an expression).
+    #[inline(always)]
+    pub(crate) fn put_hot(&mut self, dst: Reg, v: Value) {
+        if dst != NONE && dst & TMP != 0 {
+            let p = self.slot_ptr(dst);
+            unsafe {
+                if holds_no_resources(&*p) {
+                    std::ptr::write(p, Some(v));
+                    return;
+                }
+            }
+        }
+        self.put(dst, v)
+    }
+
     #[inline(always)]
     pub(crate) fn put_int(&mut self, dst: Reg, i: i64) {
         let p = self.slot_ptr(dst);
@@ -428,7 +444,7 @@ impl Vm {
                     {
                         self.drop_tmp(a);
                         self.drop_tmp(b);
-                        self.put(dst, r);
+                        self.put_hot(dst, r);
                     } else {
                         self.binop_slow(Bin::Add, dst, a, b)?;
                     }
@@ -447,7 +463,7 @@ impl Vm {
                     {
                         self.drop_tmp(a);
                         self.drop_tmp(b);
-                        self.put(dst, r);
+                        self.put_hot(dst, r);
                     } else {
                         self.binop_slow(Bin::Sub, dst, a, b)?;
                     }
@@ -466,7 +482,7 @@ impl Vm {
                     {
                         self.drop_tmp(a);
                         self.drop_tmp(b);
-                        self.put(dst, r);
+                        self.put_hot(dst, r);
                     } else {
                         self.binop_slow(Bin::Mul, dst, a, b)?;
                     }
@@ -522,7 +538,7 @@ impl Vm {
                     {
                         self.drop_tmp(a);
                         self.drop_tmp(b);
-                        self.put(dst, r);
+                        self.put_hot(dst, r);
                     } else {
                         self.binop_slow(op, dst, a, b)?
                     }

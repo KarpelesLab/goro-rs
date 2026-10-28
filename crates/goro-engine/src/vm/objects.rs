@@ -171,6 +171,47 @@ impl Vm {
 
     // ------------------------------------------------------------ reads
 
+    /// `FetchProp` on an inline cache hit (a plain property of a known
+    /// class), without taking a handle to the object; false when the
+    /// general path must run.
+    #[inline(always)]
+    fn fetch_prop_hit(&mut self, dst: Reg, obj: Reg, name: Reg, cache: u32) -> bool {
+        if !is_const(name) {
+            return false;
+        }
+        let c = self.code_ref().caches[cache as usize].get();
+        if c.key == 0 || c.b & IC_PLAIN == 0 {
+            return false;
+        }
+        let op: Option<*const ObjRef> = if obj == THIS {
+            self.ex
+                .frames
+                .last()
+                .and_then(|f| f.this.as_ref())
+                .map(|o| o as *const ObjRef)
+        } else {
+            match self.peek(obj) {
+                Some(Value::Object(o)) => Some(o as *const ObjRef),
+                _ => None,
+            }
+        };
+        // SAFETY: the frame or slot holding the handle is not touched
+        // until the value is copied out.
+        let Some(o) = op else { return false };
+        if unsafe { (*o).class_addr() } != c.key {
+            return false;
+        }
+        let v = unsafe { (*o).obj().slots.borrow()[c.a].clone() };
+        if self.is_uninit(&v) {
+            return false;
+        }
+        if obj != THIS {
+            self.drop_tmp(obj);
+        }
+        self.put_hot(dst, v.into_deref());
+        true
+    }
+
     pub(crate) fn op_fetch_prop(
         &mut self,
         dst: Reg,
@@ -179,6 +220,9 @@ impl Vm {
         cache: u32,
         quiet: bool,
     ) -> R<()> {
+        if self.fetch_prop_hit(dst, obj, name, cache) {
+            return Ok(());
+        }
         let o = if obj == THIS {
             match self.this_obj() {
                 Some(o) => o,
@@ -682,7 +726,7 @@ impl Vm {
                 && c.b & IC_PLAIN != 0
                 && !o.is_lazy()
             {
-                let v = self.get(val)?;
+                let v = self.get_hot(val)?;
                 let mut slots = o.obj().slots.borrow_mut();
                 let slot = &mut slots[c.a];
                 let typed_ok = c.b & IC_TYPED == 0

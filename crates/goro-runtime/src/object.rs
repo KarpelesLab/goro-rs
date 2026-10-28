@@ -91,6 +91,8 @@ pub struct Object {
     /// Root-buffer entry (when buffered).
     pub(crate) gc_idx: Cell<u32>,
     class: Rc<dyn ClassInfo>,
+    /// The address of the class data (see [`ObjRef::class_addr`]).
+    class_addr: usize,
     /// Declared property slots, laid out by the engine's class.
     pub slots: RefCell<Vec<Value>>,
     /// The property table for dynamic properties (and anything else the
@@ -162,6 +164,7 @@ impl ObjRef {
             handle,
             flags: Cell::new(flags),
             gc_idx: Cell::new(0),
+            class_addr: Rc::as_ptr(&class) as *const () as usize,
             class,
             slots: RefCell::new(slots),
             props: RefCell::new(PhpArray::new()),
@@ -175,6 +178,13 @@ impl ObjRef {
     #[inline]
     pub fn handle(&self) -> u32 {
         self.0.handle
+    }
+
+    /// The address of the class data, `Rc::as_ptr(self.class())` without
+    /// the vtable lookup (inline caches key on it).
+    #[inline]
+    pub fn class_addr(&self) -> usize {
+        self.0.class_addr
     }
 
     #[inline]
