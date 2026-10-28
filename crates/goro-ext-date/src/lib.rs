@@ -9,6 +9,7 @@
 //! - [`time`]: the DateTime value.
 //! - [`format`]: `date()` / `DateTime::format()`.
 
+pub mod api;
 pub mod civil;
 pub mod format;
 pub mod from_format;

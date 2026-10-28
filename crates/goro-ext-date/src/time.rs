@@ -121,3 +121,89 @@ impl DateTime {
 pub fn date(fmt: &[u8], ts: i64, zone: &TimeZone) -> Vec<u8> {
     crate::format::format(fmt, &LocalTime::new(ts, 0, zone), zone)
 }
+
+impl DateTime {
+    /// `setDate()`: new date, same wall clock time; out-of-range values
+    /// carry (`setDate(2021, 2, 30)` is March 2nd).
+    pub fn set_date(&self, y: i64, m: i64, d: i64) -> DateTime {
+        let l = self.local();
+        let local = civil::civil_to_ts(y, m, d, l.h as i64, l.i as i64, l.s as i64);
+        DateTime {
+            ts: self.zone.local_to_ts_with_dst(local, l.is_dst),
+            us: self.us,
+            zone: self.zone.clone(),
+        }
+    }
+
+    /// `setISODate()`: ISO year, week and day of the week (1 = Monday;
+    /// out-of-range weeks and days carry).
+    pub fn set_iso_date(&self, y: i64, week: i64, dow: i64) -> DateTime {
+        let days = civil::days_from_iso_week(y, week, dow);
+        let (ny, nm, nd) = civil::civil_from_days(days);
+        self.set_date(ny, nm as i64, nd as i64)
+    }
+
+    /// `setTime()`: new wall clock time on the same date; out-of-range
+    /// values carry, microseconds included.
+    pub fn set_time(&self, h: i64, i: i64, s: i64, us: i64) -> DateTime {
+        let l = self.local();
+        let carry = us.div_euclid(1_000_000);
+        let local = civil::civil_to_ts(l.y, l.m as i64, l.d as i64, h, i, s.saturating_add(carry));
+        DateTime {
+            ts: self.zone.local_to_ts_with_dst(local, l.is_dst),
+            us: us.rem_euclid(1_000_000) as u32,
+            zone: self.zone.clone(),
+        }
+    }
+
+    /// `setTimestamp()`: same zone, microseconds reset.
+    pub fn set_timestamp(&self, ts: i64) -> DateTime {
+        DateTime {
+            ts,
+            us: 0,
+            zone: self.zone.clone(),
+        }
+    }
+
+    /// `setTimezone()`: same instant in another zone.
+    pub fn set_timezone(&self, zone: TimeZone) -> DateTime {
+        DateTime {
+            ts: self.ts,
+            us: self.us,
+            zone,
+        }
+    }
+
+    /// `getOffset()`.
+    pub fn offset(&self) -> i32 {
+        self.zone.offset_at(self.ts)
+    }
+
+    /// The "date" member of `var_dump()`, `serialize()` and `json_encode()`
+    /// output: "Y-m-d H:i:s.u" (observed on PHP 8.5).
+    pub fn dump_date(&self) -> String {
+        String::from_utf8(self.format(b"Y-m-d H:i:s.u")).unwrap_or_default()
+    }
+
+    /// `DateTime::createFromTimestamp()` with a float: rounded to the
+    /// microsecond, at +00:00. `None` for a non-finite or out-of-range
+    /// value ("must be a finite number between -9223372036854775808 and
+    /// 9223372036854775807.999999", observed on PHP 8.5).
+    pub fn from_float_timestamp(t: f64) -> Option<DateTime> {
+        if !t.is_finite() || !(-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&t) {
+            return None;
+        }
+        let secs = t.floor();
+        let mut us = ((t - secs) * 1_000_000.0).round() as i64;
+        let mut secs = secs as i64;
+        if us >= 1_000_000 {
+            us -= 1_000_000;
+            secs = secs.checked_add(1)?;
+        }
+        Some(DateTime {
+            ts: secs,
+            us: us as u32,
+            zone: TimeZone::Offset(0),
+        })
+    }
+}

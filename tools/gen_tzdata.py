@@ -616,7 +616,7 @@ def main():
     for name, target in links.items():
         while target in links:
             target = links[target]
-        entries.append((name, zone_index[target], 2))
+        entries.append((name, zone_index[target], 2 | (1 if name in locs else 0)))
     entries.sort(key=lambda e: e[0].lower())
 
     header_len = 4 + 4 * 7
