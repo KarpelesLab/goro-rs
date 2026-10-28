@@ -5276,7 +5276,6 @@ fn php_builtin_sort(
     // Sorting arrays nested into themselves does not raise the comparison
     // recursion error (bug63882_2).
     let _ = goro_core::value::compare_recursion_take();
-    let _ = goro_core::value::compare_stack_overflow_take();
     r
 }
 

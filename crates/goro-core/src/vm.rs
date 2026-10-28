@@ -26750,11 +26750,7 @@ impl Vm {
             // A comparison of the previous op recursed into a container
             // already being compared (zend_hash_compare()).
             if crate::value::compare_recursion_take() && self.current_exception.is_none() {
-                let msg = if crate::value::compare_stack_overflow_take() {
-                    "Maximum call stack size reached during object comparison"
-                } else {
-                    "Nesting level too deep - recursive dependency?"
-                };
+                let msg = "Nesting level too deep - recursive dependency?";
                 let line = self.current_line;
                 let exc = self.create_exception(b"Error", msg, line);
                 self.current_exception = Some(exc);
