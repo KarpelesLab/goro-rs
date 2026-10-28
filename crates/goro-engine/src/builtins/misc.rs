@@ -539,3 +539,34 @@ fn version_compare(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     Ok(Value::Bool(r))
 }
+
+// ---------------------------------------------------------- deprecated constants
+
+/// Why an internal constant is deprecated: the text after "Constant X is
+/// deprecated since " (observed on PHP 8.5 through
+/// ReflectionConstant::isDeprecated() and constant()).
+pub(crate) fn const_deprecation(name: &[u8]) -> Option<&'static str> {
+    const ASSERT: &str = "8.3, as assert_options() is deprecated";
+    const SUN: &str = "8.4, as date_sunrise() and date_sunset() were deprecated in 8.1";
+    const FILE: &str = "8.1, as the constant has no effect";
+    const FILTER: &str = "8.1, use htmlspecialchars() instead";
+    Some(match name {
+        b"E_STRICT" => "8.4, the error level was removed",
+        b"DATE_RFC7231" => {
+            "8.5, as this format ignores the associated timezone and always uses GMT"
+        }
+        b"SUNFUNCS_RET_TIMESTAMP" | b"SUNFUNCS_RET_STRING" | b"SUNFUNCS_RET_DOUBLE" => SUN,
+        b"FILTER_SANITIZE_STRING" | b"FILTER_SANITIZE_STRIPPED" => FILTER,
+        b"MT_RAND_PHP" => "8.3, as it uses a biased non-standard variant of Mt19937",
+        b"ASSERT_ACTIVE" | b"ASSERT_CALLBACK" | b"ASSERT_BAIL" | b"ASSERT_WARNING"
+        | b"ASSERT_EXCEPTION" => ASSERT,
+        b"FILE_TEXT" | b"FILE_BINARY" => FILE,
+        b"CURLOPT_BINARYTRANSFER" => "8.4, as it had no effect since 5.1.2",
+        b"DOM_PHP_ERR" => "8.4, as it is no longer used",
+        b"SOAP_FUNCTIONS_ALL" => {
+            "8.4, as enabling all functions is a possible security concern"
+        }
+        n if n.starts_with(b"MHASH_") => "8.5, as the mhash*() functions were deprecated",
+        _ => return None,
+    })
+}

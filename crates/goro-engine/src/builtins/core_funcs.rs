@@ -925,7 +925,10 @@ fn constant(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.class_constant(&c, &cn);
     }
     match vm.lookup_constant(&name)? {
-        Some(v) => Ok(v),
+        Some(v) => {
+            vm.const_deprecated(&name)?;
+            Ok(v)
+        }
         None => vm.throw(
             "Error",
             &format!("Undefined constant \"{}\"", name.to_string_lossy()),
