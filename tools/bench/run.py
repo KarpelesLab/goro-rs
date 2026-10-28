@@ -4,7 +4,8 @@ prints the wall times and the ratio to the first binary.
 
 usage: tools/bench/run.py [-n RUNS] BINARY [BINARY ...]
 Extra php options can follow a binary after a comma:
-  run.py target/release/goro "/path/php85,-n"
+  run.py target/release/goro "/path/php85,-n,-d,memory_limit=-1"
+(sieve and binary_trees need more than the default 128M memory_limit)
 """
 import glob
 import os
