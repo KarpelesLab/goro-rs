@@ -6,13 +6,15 @@ pub mod core_classes;
 pub mod core_funcs;
 pub mod ctype;
 pub mod enums;
+pub mod exec;
 pub mod fiber;
 pub mod file;
+pub mod info;
+mod info_text;
 pub mod ini;
 pub mod json;
 pub mod math;
 pub mod mbstring;
-pub mod exec;
 pub mod misc;
 pub mod output;
 pub mod password;
@@ -35,6 +37,7 @@ pub fn modules() -> Vec<&'static Module> {
         &core_classes::MODULE,
         &var::MODULE,
         &output::MODULE,
+        &info::MODULE,
         &fiber::MODULE,
         &file::MODULE,
         &serialize::MODULE,

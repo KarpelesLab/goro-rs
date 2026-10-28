@@ -1670,7 +1670,9 @@ impl Vm {
                 }
                 Check::Ok => {}
                 Check::Coerced(v) => args[i] = v,
-                Check::Fail if ty.mask & !tmask::NULL == tmask::CALLABLE && ty.classes.is_empty() => {
+                Check::Fail
+                    if ty.mask & !tmask::NULL == tmask::CALLABLE && ty.classes.is_empty() =>
+                {
                     // PHP explains why a value is not callable (observed on
                     // PHP 8.5: "must be a valid callback or null, function
                     // \"x\" not found or invalid function name").
@@ -1820,7 +1822,7 @@ impl Vm {
         }
         if code.flags & fflags::GENERATOR != 0 {
             let f = self.ex.frames.pop().unwrap();
-        self.ex.sync_top();
+            self.ex.sync_top();
             if let Some(top) = self.ex.frames.last() {
                 self.ex.ip = top.ip as usize;
             }
@@ -1978,16 +1980,7 @@ impl Vm {
                 continue;
             }
             if let Some(ty) = &param.ty {
-                self.check_param(
-                    func,
-                    code,
-                    base,
-                    i,
-                    ty,
-                    strict,
-                    static_class,
-                    &call_loc,
-                )?;
+                self.check_param(func, code, base, i, ty, strict, static_class, &call_loc)?;
             }
         }
         // Variadics and extra arguments.
@@ -2141,7 +2134,8 @@ impl Vm {
                     ty.display(),
                     Vm::type_name_given(&val),
                     match call_loc {
-                        Some((f, l)) => format!(", called in {} on line {}", f.to_string_lossy(), l),
+                        Some((f, l)) =>
+                            format!(", called in {} on line {}", f.to_string_lossy(), l),
                         None => String::new(),
                     }
                 );
@@ -2573,7 +2567,11 @@ impl Vm {
             if d.flags & mflags::PUBLIC == 0 {
                 let scope = self.scope_ptr();
                 if !self.method_visible(&d, scope) {
-                    let vis = if d.flags & mflags::PRIVATE != 0 { "private" } else { "protected" };
+                    let vis = if d.flags & mflags::PRIVATE != 0 {
+                        "private"
+                    } else {
+                        "protected"
+                    };
                     let msg = format!(
                         "Call to {} {}::__destruct() from {}",
                         vis,

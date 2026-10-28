@@ -89,7 +89,9 @@ impl PhpRef {
 
     pub fn set_typed(&self, on: bool) {
         let f = self.0.flags.get();
-        self.0.flags.set(if on { f | R_TYPED } else { f & !R_TYPED });
+        self.0
+            .flags
+            .set(if on { f | R_TYPED } else { f & !R_TYPED });
     }
 
     /// An identity usable as a map key while the reference is alive.

@@ -110,7 +110,10 @@ pub fn register_weak_key(key: &ObjRef, map: &ObjRef) {
     let _ = WEAK_KEYS.try_with(|w| {
         let mut w = w.borrow_mut();
         let v = w.entry(addr).or_default();
-        if !v.iter().any(|m| m.upgrade().is_some_and(|m| ObjRef::ptr_eq(&m, map))) {
+        if !v
+            .iter()
+            .any(|m| m.upgrade().is_some_and(|m| ObjRef::ptr_eq(&m, map)))
+        {
             v.retain(|m| m.upgrade().is_some());
             v.push(map.downgrade());
         }

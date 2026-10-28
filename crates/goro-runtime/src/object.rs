@@ -312,7 +312,8 @@ impl fmt::Debug for ObjRef {
 /// Whether objects are waiting for their destructor to run.
 #[inline]
 pub fn has_pending_destructors() -> bool {
-    PENDING_ANY.load(std::sync::atomic::Ordering::Relaxed) != 0 && PENDING_LEN.with(|n| n.get() != 0)
+    PENDING_ANY.load(std::sync::atomic::Ordering::Relaxed) != 0
+        && PENDING_LEN.with(|n| n.get() != 0)
 }
 
 /// Takes the next object whose destructor must run now (oldest first). The

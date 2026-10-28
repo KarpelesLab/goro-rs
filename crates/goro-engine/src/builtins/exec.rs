@@ -89,7 +89,7 @@ fn errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
-fn strerror(e: i32) -> String {
+pub(crate) fn strerror(e: i32) -> String {
     let s = std::io::Error::from_raw_os_error(e).to_string();
     // "No such file or directory (os error 2)" -> the C library text.
     match s.rfind(" (os error") {

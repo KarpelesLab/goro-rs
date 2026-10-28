@@ -114,7 +114,10 @@ fn run_lines(vm: &mut Vm, lm: &LineMode) -> i32 {
                 }
             }
             let g = &mut vm.globals.dyn_vars;
-            g.insert(Key::from("argn"), Value::Str(goro_runtime::PhpStr::from(line)));
+            g.insert(
+                Key::from("argn"),
+                Value::Str(goro_runtime::PhpStr::from(line)),
+            );
             g.insert(Key::from("argi"), Value::Int(n));
             let r = vm.run_main_code(&src, &path);
             let stop = r.is_err();
@@ -142,6 +145,17 @@ pub fn run(opts: RunOptions) -> i32 {
         vm.set_ini(k, v);
     }
     builtins::misc::startup_ini_deprecations(&mut vm, &opts.ini);
+    // disable_functions: since PHP 8.0 disabled functions are not defined
+    // at all (PHP manual: php.ini directives; test
+    // Zend/tests/errmsg/errmsg_020.phpt).
+    if let Some(list) = vm.get_ini(b"disable_functions") {
+        for name in list.split(|&c| c == b',') {
+            let n = name.trim_ascii().to_ascii_lowercase();
+            if !n.is_empty() {
+                vm.functions.remove(&goro_runtime::PhpStr::from(n));
+            }
+        }
+    }
     if let Some(lm) = &opts.lines {
         let mut argv = vec![b"Standard input code".to_vec()];
         argv.extend(opts.args.iter().cloned());

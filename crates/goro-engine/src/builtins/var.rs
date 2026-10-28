@@ -211,7 +211,11 @@ impl Vm {
             match inst {
                 Some((_, Some(i))) => {
                     lazy_prefix = "lazy proxy ";
-                    vec![(b"\"instance\"".to_vec(), String::new(), Some(Value::Object(i)))]
+                    vec![(
+                        b"\"instance\"".to_vec(),
+                        String::new(),
+                        Some(Value::Object(i)),
+                    )]
                 }
                 Some((proxy, None)) => {
                     lazy_prefix = if proxy { "lazy proxy " } else { "lazy ghost " };

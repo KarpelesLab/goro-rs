@@ -401,7 +401,12 @@ impl Vm {
             }
             let methods = cls.methods.borrow();
             let old = cls.method_order.borrow().clone();
-            let is_iface = |n: &PhpStr| methods.get(n).and_then(|f| f.scope()).is_some_and(|c| c.is_interface());
+            let is_iface = |n: &PhpStr| {
+                methods
+                    .get(n)
+                    .and_then(|f| f.scope())
+                    .is_some_and(|c| c.is_interface())
+            };
             for n in old.iter().filter(|n| !is_iface(n)) {
                 if !order.contains(n) {
                     order.push(n.clone());
@@ -1495,7 +1500,11 @@ impl Vm {
             let cls = self.declare_class(decl)?;
             cls.flags.set(cls.flags.get() | cflags::INTERNAL);
             // Stub-only markers (php-src stubs' @not-serializable).
-            if cls.attrs.iter().any(|a| a.name.as_bytes() == b"NotSerializable") {
+            if cls
+                .attrs
+                .iter()
+                .any(|a| a.name.as_bytes() == b"NotSerializable")
+            {
                 cls.flags
                     .set(cls.flags.get() | cflags::NOT_SERIALIZABLE | cflags::NO_DYNAMIC);
             }

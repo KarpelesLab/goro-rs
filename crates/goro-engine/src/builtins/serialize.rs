@@ -194,8 +194,10 @@ impl Vm {
         // lazy object flagged SKIP_INITIALIZATION_ON_SERIALIZE is
         // serialized uninitialized.
         let skip_init = self.is_lazy_uninit(o)
-            && crate::vm::lazy::with_lazy(o, |d| d.options & crate::vm::lazy::SKIP_INITIALIZATION_ON_SERIALIZE != 0)
-                .unwrap_or(false);
+            && crate::vm::lazy::with_lazy(o, |d| {
+                d.options & crate::vm::lazy::SKIP_INITIALIZATION_ON_SERIALIZE != 0
+            })
+            .unwrap_or(false);
         let props = if skip_init {
             self.plain_props_array(o, true)
         } else {
@@ -541,10 +543,13 @@ impl Vm {
                 return Err(UErr::At(start));
             };
             if cls.has_flag(cflags::NOT_SERIALIZABLE) {
-                return Err(UErr::Php(self.throw::<()>(
-                    "Exception",
-                    &format!("Unserialization of '{}' is not allowed", cls.name.dname()),
-                ).unwrap_err()));
+                return Err(UErr::Php(
+                    self.throw::<()>(
+                        "Exception",
+                        &format!("Unserialization of '{}' is not allowed", cls.name.dname()),
+                    )
+                    .unwrap_err(),
+                ));
             }
             let o = self.instantiate(&cls)?;
             u.vals.push(Value::Object(o.clone()));

@@ -1714,7 +1714,11 @@ impl<'a> Compiler<'a> {
                 let spec = self.class_spec(c)?;
                 self.free_spec(spec);
                 self.f.line = line;
-                let cache = if matches!(spec, ClassSpec::Named(_)) { self.cache() } else { 0 };
+                let cache = if matches!(spec, ClassSpec::Named(_)) {
+                    self.cache()
+                } else {
+                    0
+                };
                 self.emit(Op::New {
                     dst: d,
                     class: spec,

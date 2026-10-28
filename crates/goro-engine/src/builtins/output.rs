@@ -47,45 +47,57 @@ pub static MODULE: Module = Module {
 fn handler_name(vm: &mut Vm, cb: &Value) -> PhpStr {
     match cb {
         Value::Null => PhpStr::from("default output handler"),
-        Value::Object(o) if vm.closure_data(o).is_some() => PhpStr::from("Closure::__invoke"),
+        Value::Object(o) if vm.closure_data(o).is_some() => {
+            let c = vm.closure_data(o).unwrap();
+            PhpStr::from(vm.func_display_name(&c.func))
+        }
         other => vm.callable_name(other),
     }
 }
 
+/// Output functions other than the read-only ones are fatal inside a
+/// handler (tests tests/output/ob_011.phpt, ob_start_error_005.phpt).
+fn check_not_in_handler(vm: &mut Vm, what: &str) -> R<()> {
+    if vm.out.handler_level().is_some() {
+        // Output buffering shuts down: buffered output is lost and later
+        // ob_start() calls fail (tests tests/output/gh20837.phpt,
+        // gh20352.phpt).
+        vm.out.deactivated = true;
+        let levels = std::mem::take(&mut vm.out.buffers);
+        let r = vm.fatal(&format!(
+            "{}(): Cannot use output buffering in output buffering display handlers",
+            what
+        ));
+        drop(levels);
+        return Err(r);
+    }
+    Ok(())
+}
+
 fn ob_start(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let cb = a.val(0);
-    if !cb.is_null() && !vm.is_callable_value(&cb, false) {
-        let name = vm.callable_name(&cb);
-        vm.warn(&format!(
-            "ob_start(): {} \"{}\" not found or invalid function name",
-            if matches!(cb, Value::Array(_)) {
-                "class"
-            } else {
-                "function"
-            },
-            name.to_string_lossy()
-        ))?;
+    check_not_in_handler(vm, "ob_start")?;
+    if vm.out.deactivated {
         vm.notice_msg("ob_start(): Failed to create buffer")?;
         return Ok(Value::Bool(false));
     }
-    if vm.out.buffers.iter().any(|b| b.in_handler) {
-        return vm.throw(
-            "Error",
-            "ob_start(): Cannot use output buffering in output buffering display handlers",
-        );
+    if !cb.is_null() && !vm.is_callable_value(&cb, false) {
+        let why = vm.callable_error(&cb);
+        vm.warn(&format!("ob_start(): {}", why))?;
+        vm.notice_msg("ob_start(): Failed to create buffer")?;
+        return Ok(Value::Bool(false));
     }
+    // Since PHP 5.4 a chunk size of 1 is no longer special (PHP manual:
+    // ob_start changelog).
     let chunk = a.int_or(1, 0).max(0) as usize;
     let flags = a.int_or(2, crate::vm::output::PHP_OUTPUT_HANDLER_STDFLAGS);
     let name = handler_name(vm, &cb);
-    vm.out.buffers.push(ObBuffer {
-        data: Vec::new(),
-        callback: if cb.is_null() { None } else { Some(cb) },
-        chunk_size: if chunk == 1 { 4096 } else { chunk },
+    vm.out.buffers.push(ObBuffer::new(
+        if cb.is_null() { None } else { Some(cb) },
+        chunk,
         flags,
         name,
-        started: false,
-        in_handler: false,
-    });
+    ));
     Ok(Value::Bool(true))
 }
 
@@ -97,29 +109,40 @@ fn no_buffer(vm: &mut Vm, what: &str, verb: &str) -> R<Value> {
     Ok(Value::Bool(false))
 }
 
-fn check_flag(vm: &mut Vm, what: &str, verb: &str, flag: i64) -> R<bool> {
+/// Whether the top buffer allows the operation; otherwise the notices
+/// PHP gives (one per refused step), as observed on PHP 8.5.
+fn check_flag(vm: &mut Vm, what: &str, verbs: &[&str], flag: i64) -> R<bool> {
+    let level = vm.out.buffers.len() - 1;
     let b = vm.out.buffers.last().unwrap();
     if b.flags & flag == 0 {
         let n = b.name.dname();
-        vm.notice_msg(&format!(
-            "{}(): Failed to {} buffer of {} (0)",
-            what, verb, n
-        ))?;
+        for verb in verbs {
+            vm.notice_msg(&format!(
+                "{}(): Failed to {} buffer of {} ({})",
+                what, verb, n, level
+            ))?;
+        }
         return Ok(false);
     }
     Ok(true)
 }
 
+use crate::vm::output::{
+    PHP_OUTPUT_HANDLER_CLEANABLE, PHP_OUTPUT_HANDLER_FLUSH, PHP_OUTPUT_HANDLER_FLUSHABLE,
+    PHP_OUTPUT_HANDLER_REMOVABLE,
+};
+
 fn ob_get_clean(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     if vm.out.buffers.is_empty() {
         return Ok(Value::Bool(false));
     }
+    check_not_in_handler(vm, "ob_get_clean")?;
     let data = vm.out.buffers.last().unwrap().data.clone();
     if !check_flag(
         vm,
         "ob_get_clean",
-        "discard",
-        crate::vm::output::PHP_OUTPUT_HANDLER_REMOVABLE,
+        &["discard", "delete"],
+        PHP_OUTPUT_HANDLER_REMOVABLE,
     )? {
         return Ok(Value::Str(PhpStr::from(data)));
     }
@@ -141,7 +164,16 @@ fn ob_get_flush(vm: &mut Vm, _a: &mut Args) -> R<Value> {
         )?;
         return Ok(Value::Bool(false));
     }
+    check_not_in_handler(vm, "ob_get_flush")?;
     let data = vm.out.buffers.last().unwrap().data.clone();
+    if !check_flag(
+        vm,
+        "ob_get_flush",
+        &["send", "delete"],
+        PHP_OUTPUT_HANDLER_REMOVABLE,
+    )? {
+        return Ok(Value::Str(PhpStr::from(data)));
+    }
     vm.ob_end_flush()?;
     Ok(Value::Str(PhpStr::from(data)))
 }
@@ -150,11 +182,12 @@ fn ob_end_clean(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     if vm.out.buffers.is_empty() {
         return no_buffer(vm, "ob_end_clean", "delete");
     }
+    check_not_in_handler(vm, "ob_end_clean")?;
     if !check_flag(
         vm,
         "ob_end_clean",
-        "discard",
-        crate::vm::output::PHP_OUTPUT_HANDLER_REMOVABLE,
+        &["discard"],
+        PHP_OUTPUT_HANDLER_REMOVABLE,
     )? {
         return Ok(Value::Bool(false));
     }
@@ -169,12 +202,8 @@ fn ob_end_flush(vm: &mut Vm, _a: &mut Args) -> R<Value> {
         )?;
         return Ok(Value::Bool(false));
     }
-    if !check_flag(
-        vm,
-        "ob_end_flush",
-        "send",
-        crate::vm::output::PHP_OUTPUT_HANDLER_REMOVABLE,
-    )? {
+    check_not_in_handler(vm, "ob_end_flush")?;
+    if !check_flag(vm, "ob_end_flush", &["send"], PHP_OUTPUT_HANDLER_REMOVABLE)? {
         return Ok(Value::Bool(false));
     }
     vm.ob_end_flush()?;
@@ -185,12 +214,8 @@ fn ob_clean(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     if vm.out.buffers.is_empty() {
         return no_buffer(vm, "ob_clean", "delete");
     }
-    if !check_flag(
-        vm,
-        "ob_clean",
-        "delete",
-        crate::vm::output::PHP_OUTPUT_HANDLER_CLEANABLE,
-    )? {
+    check_not_in_handler(vm, "ob_clean")?;
+    if !check_flag(vm, "ob_clean", &["delete"], PHP_OUTPUT_HANDLER_CLEANABLE)? {
         return Ok(Value::Bool(false));
     }
     vm.ob_clean_top(false)?;
@@ -201,15 +226,11 @@ fn ob_flush(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     if vm.out.buffers.is_empty() {
         return no_buffer(vm, "ob_flush", "flush");
     }
-    if !check_flag(
-        vm,
-        "ob_flush",
-        "flush",
-        crate::vm::output::PHP_OUTPUT_HANDLER_FLUSHABLE,
-    )? {
+    check_not_in_handler(vm, "ob_flush")?;
+    if !check_flag(vm, "ob_flush", &["flush"], PHP_OUTPUT_HANDLER_FLUSHABLE)? {
         return Ok(Value::Bool(false));
     }
-    vm.ob_flush_top(crate::vm::output::PHP_OUTPUT_HANDLER_FLUSH)?;
+    vm.ob_flush_top(PHP_OUTPUT_HANDLER_FLUSH)?;
     Ok(Value::Bool(true))
 }
 
@@ -231,22 +252,16 @@ fn status_of(b: &ObBuffer, level: usize) -> PhpArray {
         Key::from("type"),
         Value::Int(if b.callback.is_some() { 1 } else { 0 }),
     );
-    let mut flags = b.flags;
-    if b.started {
-        flags |= 0x1000;
-    }
-    a.insert(Key::from("flags"), Value::Int(flags));
+    a.insert(Key::from("flags"), Value::Int(b.status_flags()));
     a.insert(Key::from("level"), Value::Int(level as i64));
     a.insert(Key::from("chunk_size"), Value::Int(b.chunk_size as i64));
-    a.insert(
-        Key::from("buffer_size"),
-        Value::Int(if b.chunk_size > 0 {
-            b.chunk_size.max(16384) as i64
-        } else {
-            16384
-        }),
-    );
-    a.insert(Key::from("buffer_used"), Value::Int(b.data.len() as i64));
+    let (size, used) = if b.disabled {
+        (0, 0)
+    } else {
+        (b.size as i64, b.data.len() as i64)
+    };
+    a.insert(Key::from("buffer_size"), Value::Int(size));
+    a.insert(Key::from("buffer_used"), Value::Int(used));
     a
 }
 

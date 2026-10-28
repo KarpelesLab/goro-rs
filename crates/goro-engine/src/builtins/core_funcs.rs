@@ -1748,7 +1748,10 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
     // open_basedir can only be tightened at run time (PHP manual: "can only
     // be set to a more restrictive value").
     if k.as_bytes() == b"open_basedir" && !old.is_empty() {
-        if v.is_empty() || v.split(|&c| c == b':').any(|d| !d.is_empty() && !vm.basedir_allows(d)) {
+        if v.is_empty()
+            || v.split(|&c| c == b':')
+                .any(|d| !d.is_empty() && !vm.basedir_allows(d))
+        {
             return Ok(Value::Bool(false));
         }
     }
@@ -2357,6 +2360,8 @@ fn core_init(vm: &mut Vm) {
         rem % 3600 / 60,
         rem % 60
     );
-    vm.constants
-        .insert(PhpStr::intern(b"PHP_BUILD_DATE"), Value::Str(PhpStr::from(s)));
+    vm.constants.insert(
+        PhpStr::intern(b"PHP_BUILD_DATE"),
+        Value::Str(PhpStr::from(s)),
+    );
 }

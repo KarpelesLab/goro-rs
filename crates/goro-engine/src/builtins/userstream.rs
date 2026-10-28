@@ -23,8 +23,14 @@ pub static MODULE: Module = Module {
             "function stream_register_wrapper(string $protocol, string $class, int $flags = 0): bool",
             register,
         ),
-        ("function stream_wrapper_unregister(string $protocol): bool", unregister),
-        ("function stream_wrapper_restore(string $protocol): bool", restore),
+        (
+            "function stream_wrapper_unregister(string $protocol): bool",
+            unregister,
+        ),
+        (
+            "function stream_wrapper_restore(string $protocol): bool",
+            restore,
+        ),
     ],
     constants: &[
         ("STREAM_USE_PATH", crate::registry::ConstVal::Int(1)),
@@ -35,9 +41,18 @@ pub static MODULE: Module = Module {
         ("STREAM_MKDIR_RECURSIVE", crate::registry::ConstVal::Int(1)),
         ("STREAM_IS_URL", crate::registry::ConstVal::Int(1)),
         ("STREAM_OPTION_BLOCKING", crate::registry::ConstVal::Int(1)),
-        ("STREAM_OPTION_READ_TIMEOUT", crate::registry::ConstVal::Int(4)),
-        ("STREAM_OPTION_READ_BUFFER", crate::registry::ConstVal::Int(2)),
-        ("STREAM_OPTION_WRITE_BUFFER", crate::registry::ConstVal::Int(3)),
+        (
+            "STREAM_OPTION_READ_TIMEOUT",
+            crate::registry::ConstVal::Int(4),
+        ),
+        (
+            "STREAM_OPTION_READ_BUFFER",
+            crate::registry::ConstVal::Int(2),
+        ),
+        (
+            "STREAM_OPTION_WRITE_BUFFER",
+            crate::registry::ConstVal::Int(3),
+        ),
         ("STREAM_BUFFER_NONE", crate::registry::ConstVal::Int(0)),
         ("STREAM_BUFFER_LINE", crate::registry::ConstVal::Int(1)),
         ("STREAM_BUFFER_FULL", crate::registry::ConstVal::Int(2)),
@@ -54,7 +69,16 @@ pub static MODULE: Module = Module {
     ..Module::EMPTY
 };
 
-const BUILTIN: &[&[u8]] = &[b"php", b"file", b"glob", b"data", b"http", b"ftp", b"compress.zlib", b"phar"];
+const BUILTIN: &[&[u8]] = &[
+    b"php",
+    b"file",
+    b"glob",
+    b"data",
+    b"http",
+    b"ftp",
+    b"compress.zlib",
+    b"phar",
+];
 
 fn valid_protocol(p: &[u8]) -> bool {
     !p.is_empty()
@@ -67,19 +91,32 @@ fn register(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let class = a.str(1);
     let lp = proto.to_ascii_lowercase();
     if !valid_protocol(&proto) {
-        vm.fwarn(a, &format!("Invalid protocol scheme specified. Unable to register wrapper class {} to {}://", class.to_string_lossy(), proto.to_string_lossy()))?;
+        vm.fwarn(
+            a,
+            &format!(
+                "Invalid protocol scheme specified. Unable to register wrapper class {} to {}://",
+                class.to_string_lossy(),
+                proto.to_string_lossy()
+            ),
+        )?;
         return Ok(Value::Bool(false));
     }
     let Some(cls) = vm.find_class(&class, true)? else {
         return vm.fthrow(
             a,
             "TypeError",
-            &format!("Argument #2 ($class) must be a valid class name, {} given", class.to_string_lossy()),
+            &format!(
+                "Argument #2 ($class) must be a valid class name, {} given",
+                class.to_string_lossy()
+            ),
         );
     };
     let builtin_active = BUILTIN.contains(&&lp[..]) && !vm.disabled_wrappers.contains(&lp);
     if vm.user_wrappers.contains_key(&lp) || builtin_active {
-        vm.fwarn(a, &format!("Protocol {}:// is already defined", proto.to_string_lossy()))?;
+        vm.fwarn(
+            a,
+            &format!("Protocol {}:// is already defined", proto.to_string_lossy()),
+        )?;
         return Ok(Value::Bool(false));
     }
     vm.user_wrappers.insert(lp, cls.name.clone());
@@ -96,7 +133,13 @@ fn unregister(vm: &mut Vm, a: &mut Args) -> R<Value> {
         vm.disabled_wrappers.push(lp);
         return Ok(Value::Bool(true));
     }
-    vm.fwarn(a, &format!("Unable to unregister protocol {}://", proto.to_string_lossy()))?;
+    vm.fwarn(
+        a,
+        &format!(
+            "Unable to unregister protocol {}://",
+            proto.to_string_lossy()
+        ),
+    )?;
     Ok(Value::Bool(false))
 }
 
@@ -104,14 +147,26 @@ fn restore(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let proto = a.str(0);
     let lp = proto.to_ascii_lowercase();
     if !BUILTIN.contains(&&lp[..]) {
-        vm.fwarn(a, &format!("{}:// never existed, nothing to restore", proto.to_string_lossy()))?;
+        vm.fwarn(
+            a,
+            &format!(
+                "{}:// never existed, nothing to restore",
+                proto.to_string_lossy()
+            ),
+        )?;
         return Ok(Value::Bool(false));
     }
     let was_disabled = vm.disabled_wrappers.contains(&lp);
     let was_user = vm.user_wrappers.remove(&lp).is_some();
     vm.disabled_wrappers.retain(|p| *p != lp);
     if !was_disabled && !was_user {
-        vm.fnotice(a, &format!("{}:// was never changed, nothing to restore", proto.to_string_lossy()))?;
+        vm.fnotice(
+            a,
+            &format!(
+                "{}:// was never changed, nothing to restore",
+                proto.to_string_lossy()
+            ),
+        )?;
     }
     Ok(Value::Bool(true))
 }
@@ -204,7 +259,11 @@ pub fn open_named(
     let ok = match r {
         None => {
             if !quiet {
-                vm.warn(&format!("{}(): {}::stream_open is not implemented!", fname, class.dname()))?;
+                vm.warn(&format!(
+                    "{}(): {}::stream_open is not implemented!",
+                    fname,
+                    class.dname()
+                ))?;
             }
             false
         }
@@ -221,7 +280,13 @@ pub fn open_named(
         }
         return Ok(None);
     }
-    let mut s = Stream::new(Backing::User { obj: o }, mode, path, "user-space", "user-space");
+    let mut s = Stream::new(
+        Backing::User { obj: o },
+        mode,
+        path,
+        "user-space",
+        "user-space",
+    );
     s.readable = true;
     s.writable = true;
     Ok(Some(s))
@@ -229,7 +294,9 @@ pub fn open_named(
 
 /// Reads one chunk from a user stream into its buffer; false at EOF.
 pub fn fill(vm: &mut Vm, s: &mut Stream) -> R<bool> {
-    let Backing::User { obj } = &s.backing else { return Ok(false) };
+    let Backing::User { obj } = &s.backing else {
+        return Ok(false);
+    };
     let o = obj.clone();
     if s.eof {
         return Ok(false);
@@ -237,7 +304,10 @@ pub fn fill(vm: &mut Vm, s: &mut Stream) -> R<bool> {
     let r = call(vm, &o, b"stream_read", vec![Value::Int(8192)])?;
     let data = match r {
         None => {
-            vm.warn(&format!("fread(): {}::stream_read is not implemented!", class_name(vm, &o)))?;
+            vm.warn(&format!(
+                "fread(): {}::stream_read is not implemented!",
+                class_name(vm, &o)
+            ))?;
             s.eof = true;
             return Ok(false);
         }
@@ -272,12 +342,17 @@ pub fn fill(vm: &mut Vm, s: &mut Stream) -> R<bool> {
 }
 
 pub fn write(vm: &mut Vm, s: &mut Stream, data: &[u8]) -> R<usize> {
-    let Backing::User { obj } = &s.backing else { return Ok(0) };
+    let Backing::User { obj } = &s.backing else {
+        return Ok(0);
+    };
     let o = obj.clone();
     let r = call(vm, &o, b"stream_write", vec![Value::Str(PhpStr::new(data))])?;
     match r {
         None => {
-            vm.warn(&format!("fwrite(): {}::stream_write is not implemented!", class_name(vm, &o)))?;
+            vm.warn(&format!(
+                "fwrite(): {}::stream_write is not implemented!",
+                class_name(vm, &o)
+            ))?;
             Ok(0)
         }
         Some(v) => {
@@ -298,14 +373,28 @@ pub fn write(vm: &mut Vm, s: &mut Stream, data: &[u8]) -> R<usize> {
 }
 
 pub fn seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> R<bool> {
-    let Backing::User { obj } = &s.backing else { return Ok(false) };
+    let Backing::User { obj } = &s.backing else {
+        return Ok(false);
+    };
     let o = obj.clone();
     // A relative seek counts from the position the caller sees (after
     // what was buffered).
-    let (off, whence) = if whence == 1 { (s.upos + off, 0) } else { (off, whence) };
-    let r = call(vm, &o, b"stream_seek", vec![Value::Int(off), Value::Int(whence)])?;
+    let (off, whence) = if whence == 1 {
+        (s.upos + off, 0)
+    } else {
+        (off, whence)
+    };
+    let r = call(
+        vm,
+        &o,
+        b"stream_seek",
+        vec![Value::Int(off), Value::Int(whence)],
+    )?;
     let Some(r) = r else {
-        vm.warn(&format!("fseek(): {}::stream_seek is not implemented!", class_name(vm, &o)))?;
+        vm.warn(&format!(
+            "fseek(): {}::stream_seek is not implemented!",
+            class_name(vm, &o)
+        ))?;
         return Ok(false);
     };
     if !vm.to_bool(&r) {
@@ -322,7 +411,9 @@ pub fn seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> R<bool> {
 }
 
 pub fn simple(vm: &mut Vm, s: &Stream, method: &[u8], args: Vec<Value>) -> R<Option<Value>> {
-    let Backing::User { obj } = &s.backing else { return Ok(None) };
+    let Backing::User { obj } = &s.backing else {
+        return Ok(None);
+    };
     let o = obj.clone();
     call(vm, &o, method, args)
 }
@@ -330,7 +421,12 @@ pub fn simple(vm: &mut Vm, s: &Stream, method: &[u8], args: Vec<Value>) -> R<Opt
 /// url_stat() of a user wrapper URL.
 pub fn url_stat(vm: &mut Vm, class: &PhpStr, path: &[u8], flags: i64) -> R<Option<PhpArray>> {
     let o = instance(vm, class, None)?;
-    let r = call(vm, &o, b"url_stat", vec![Value::Str(PhpStr::new(path)), Value::Int(flags)])?;
+    let r = call(
+        vm,
+        &o,
+        b"url_stat",
+        vec![Value::Str(PhpStr::new(path)), Value::Int(flags)],
+    )?;
     match r {
         Some(Value::Array(a)) => Ok(Some(a)),
         None => {
@@ -350,7 +446,10 @@ pub fn path_op(vm: &mut Vm, a: &Args, class: &PhpStr, method: &str, args: Vec<Va
     match call(vm, &o, method.as_bytes(), args)? {
         Some(v) => Ok(Value::Bool(vm.to_bool(&v))),
         None => {
-            vm.fwarn(a, &format!("{}::{} is not implemented!", class.dname(), method))?;
+            vm.fwarn(
+                a,
+                &format!("{}::{} is not implemented!", class.dname(), method),
+            )?;
             Ok(Value::Bool(false))
         }
     }
@@ -393,10 +492,18 @@ pub fn list(vm: &mut Vm, a: &Args, class: &PhpStr, path: &[u8]) -> R<Option<Vec<
 /// opendir() on a user wrapper URL.
 pub fn opendir(vm: &mut Vm, a: &Args, class: &PhpStr, path: &[u8]) -> R<Option<ResRef>> {
     let o = instance(vm, class, None)?;
-    let r = call(vm, &o, b"dir_opendir", vec![Value::Str(PhpStr::new(path)), Value::Int(0)])?;
+    let r = call(
+        vm,
+        &o,
+        b"dir_opendir",
+        vec![Value::Str(PhpStr::new(path)), Value::Int(0)],
+    )?;
     let ok = match r {
         None => {
-            vm.fwarn(a, &format!("{}::dir_opendir is not implemented!", class.dname()))?;
+            vm.fwarn(
+                a,
+                &format!("{}::dir_opendir is not implemented!", class.dname()),
+            )?;
             false
         }
         Some(v) => vm.to_bool(&v),

@@ -103,7 +103,8 @@ fn cli(args: Vec<OsString>) -> i32 {
                     }
                 }
             }
-            b"-B" | b"--process-begin" | b"-E" | b"--process-end" | b"-R" | b"--process-code" | b"-F" | b"--process-file" => {
+            b"-B" | b"--process-begin" | b"-E" | b"--process-end" | b"-R" | b"--process-code"
+            | b"-F" | b"--process-file" => {
                 let opt = a.clone();
                 i += 1;
                 let Some(v) = args.get(i).cloned() else {
@@ -183,7 +184,7 @@ fn cli(args: Vec<OsString>) -> i32 {
             0
         }
         Mode::Info => {
-            let code = b"echo \"phpinfo()\\nPHP Version => \", PHP_VERSION, \"\\n\\nSystem => \", php_uname(), \"\\nServer API => Command Line Interface\\n\";".to_vec();
+            let code = b"phpinfo();".to_vec();
             goro_engine::run(RunOptions {
                 script: Script::Code(code),
                 ini,

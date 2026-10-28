@@ -80,7 +80,9 @@ fn hooks() -> NativeHooks {
             let cls = vm.class_of(o);
             cls.flags
                 .set(cls.flags.get() | cflags::NO_DYNAMIC | cflags::NOT_SERIALIZABLE);
-            *o.obj().native.borrow_mut() = Some(Box::new(WmData { entries: Vec::new() }));
+            *o.obj().native.borrow_mut() = Some(Box::new(WmData {
+                entries: Vec::new(),
+            }));
         }),
         clone: Some(|_, from, to| {
             let entries = with(from, |d| {
@@ -141,7 +143,10 @@ fn key_obj(vm: &mut Vm, a: &Args) -> R<ObjRef> {
 }
 
 fn find(o: &ObjRef, k: &ObjRef) -> Option<PhpRef> {
-    live(o).into_iter().find(|(x, _)| ObjRef::ptr_eq(x, k)).map(|(_, v)| v)
+    live(o)
+        .into_iter()
+        .find(|(x, _)| ObjRef::ptr_eq(x, k))
+        .map(|(_, v)| v)
 }
 
 fn wm_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -171,7 +176,9 @@ fn wm_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
             drop(old);
         }
         None => {
-            with(&o, |d| d.entries.push((k.downgrade(), k.handle(), PhpRef::new(v))));
+            with(&o, |d| {
+                d.entries.push((k.downgrade(), k.handle(), PhpRef::new(v)))
+            });
             goro_runtime::gc::register_weak_key(&k, &o);
         }
     }
@@ -181,7 +188,9 @@ fn wm_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn wm_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let k = key_obj(vm, a)?;
-    Ok(Value::Bool(find(&o, &k).is_some_and(|v| !v.get().is_null())))
+    Ok(Value::Bool(
+        find(&o, &k).is_some_and(|v| !v.get().is_null()),
+    ))
 }
 
 fn wm_unset(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -210,7 +219,10 @@ fn wm_count(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn wm_entries(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut flat = PhpArray::new();
     for (k, v) in live(a.this_obj()) {
-        let _ = flat.push(Value::Array(PhpArray::from_values([Value::Object(k), v.get()])));
+        let _ = flat.push(Value::Array(PhpArray::from_values([
+            Value::Object(k),
+            v.get(),
+        ])));
     }
     Ok(Value::Array(flat))
 }

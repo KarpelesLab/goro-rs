@@ -229,7 +229,13 @@ impl Vm {
     ) -> R<bool> {
         // Case-insensitive name compare against lowercase class names (no
         // allocation on this hot path: every class-typed parameter).
-        let is = |l: &[u8]| l.len() == name.len() && name.iter().zip(l).all(|(a, b)| a.to_ascii_lowercase() == *b);
+        let is = |l: &[u8]| {
+            l.len() == name.len()
+                && name
+                    .iter()
+                    .zip(l)
+                    .all(|(a, b)| a.to_ascii_lowercase() == *b)
+        };
         if is(b"self") && !self_class.is_null() {
             return Ok(cls.is_subclass_of(unsafe { &*self_class }));
         }

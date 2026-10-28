@@ -102,7 +102,8 @@ impl Vm {
     /// `o` itself, `Some(target)` after initializing (ghost: `o` again;
     /// proxy: its instance).
     pub fn lazy_route(&mut self, o: &ObjRef, name: &[u8], kind: LazyAccess) -> R<Option<ObjRef>> {
-        let Some((inst, initializing)) = with_lazy(o, |d| (d.instance.clone(), d.initializing)) else {
+        let Some((inst, initializing)) = with_lazy(o, |d| (d.instance.clone(), d.initializing))
+        else {
             return Ok(None);
         };
         let cls = self.class_of(o);
@@ -113,7 +114,9 @@ impl Vm {
             // magic method (GH-18038).
             if let PropLookup::Dynamic = self.lookup_prop(&cls, name, scope) {
                 let n = goro_runtime::PhpStr::new(name);
-                if i.obj().props.borrow().get_str(&n).is_none() && self.magic_unguarded(o, &cls, name, kind) {
+                if i.obj().props.borrow().get_str(&n).is_none()
+                    && self.magic_unguarded(o, &cls, name, kind)
+                {
                     return Ok(None);
                 }
             }
@@ -132,8 +135,10 @@ impl Vm {
                 if (hooked && !self.in_hook_name(o, &p.name)) || p.flags & mflags::VIRTUAL != 0 {
                     false
                 } else {
-                    with_lazy(o, |d| d.lazy_slots.get(p.slot as usize).copied().unwrap_or(false))
-                        .unwrap_or(false)
+                    with_lazy(o, |d| {
+                        d.lazy_slots.get(p.slot as usize).copied().unwrap_or(false)
+                    })
+                    .unwrap_or(false)
                 }
             }
             PropLookup::Hidden(_) => false,
@@ -159,7 +164,8 @@ impl Vm {
         if !o.is_lazy() {
             return Ok(o.clone());
         }
-        let Some((inst, initializing)) = with_lazy(o, |d| (d.instance.clone(), d.initializing)) else {
+        let Some((inst, initializing)) = with_lazy(o, |d| (d.instance.clone(), d.initializing))
+        else {
             return Ok(o.clone());
         };
         if let Some(i) = inst {
@@ -173,7 +179,9 @@ impl Vm {
 
     /// Initializes a lazy object; the object holding its state afterwards.
     pub fn lazy_init(&mut self, o: &ObjRef) -> R<ObjRef> {
-        let Some((proxy, init, inst)) = with_lazy(o, |d| (d.proxy, d.init.clone(), d.instance.clone())) else {
+        let Some((proxy, init, inst)) =
+            with_lazy(o, |d| (d.proxy, d.init.clone(), d.instance.clone()))
+        else {
             return Ok(o.clone());
         };
         if let Some(i) = inst {
@@ -337,8 +345,10 @@ impl Vm {
     /// Whether the slot of `o` is still lazy.
     pub fn lazy_slot(&self, o: &ObjRef, slot: usize) -> bool {
         o.is_lazy()
-            && with_lazy(o, |d| d.instance.is_none() && d.lazy_slots.get(slot).copied().unwrap_or(false))
-                .unwrap_or(false)
+            && with_lazy(o, |d| {
+                d.instance.is_none() && d.lazy_slots.get(slot).copied().unwrap_or(false)
+            })
+            .unwrap_or(false)
     }
 
     /// The class has the magic method for `kind`, not running for `name`.
@@ -376,7 +386,8 @@ impl Vm {
             .collect();
         let n0 = self.prop_guards.len();
         for k in kinds {
-            self.prop_guards.push((to.handle(), goro_runtime::PhpStr::new(name), k));
+            self.prop_guards
+                .push((to.handle(), goro_runtime::PhpStr::new(name), k));
         }
         let r = f(self);
         self.prop_guards.truncate(n0);
@@ -384,7 +395,9 @@ impl Vm {
     }
 
     fn in_hook_name(&self, o: &ObjRef, name: &[u8]) -> bool {
-        self.hook_guards.iter().any(|(h, n)| *h == o.handle() && n.as_bytes() == name)
+        self.hook_guards
+            .iter()
+            .any(|(h, n)| *h == o.handle() && n.as_bytes() == name)
     }
 }
 

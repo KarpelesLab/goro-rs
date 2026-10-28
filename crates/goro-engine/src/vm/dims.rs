@@ -318,7 +318,9 @@ impl Vm {
                 // ArrayObject/ArrayIterator: isset() is false for null
                 // elements (php85: `isset(new ArrayObject(['n' => null])['n'])`).
                 if cls.native.dim_storage.is_some()
-                    && cls.find_method(b"offsetexists").is_some_and(|f| f.is_native())
+                    && cls
+                        .find_method(b"offsetexists")
+                        .is_some_and(|f| f.is_native())
                 {
                     let v = crate::builtins::spl::ao_isset(self, o, k)?;
                     return Ok(match v {
@@ -577,7 +579,11 @@ impl Vm {
                     }
                 }
                 (PathAction::IncDec(op), Value::Int(i)) => {
-                    let r = if op.is_inc() { i.checked_add(1) } else { i.checked_sub(1) };
+                    let r = if op.is_inc() {
+                        i.checked_add(1)
+                    } else {
+                        i.checked_sub(1)
+                    };
                     match r {
                         Some(x) => (Value::Int(x), Some(*i)),
                         None => return Ok(false),
@@ -608,7 +614,10 @@ impl Vm {
         if path.elems.len() == 1
             && let PathElem::Prop(n, cache) = path.elems[0]
             && n & CONST != 0
-            && matches!(path.action, PathAction::AssignOp(..) | PathAction::IncDec(_))
+            && matches!(
+                path.action,
+                PathAction::AssignOp(..) | PathAction::IncDec(_)
+            )
             && self.prop_rmw_fast(path, n, cache, res)?
         {
             return Ok(());

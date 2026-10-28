@@ -142,7 +142,19 @@ impl Vm {
                 } else {
                     format!("\n{}: {} in {} on line {}\n", label, msg, file, line)
                 };
-                self.echo(text.as_bytes());
+                // A fatal error inside an output handler is shown below
+                // that level (observed on PHP 8.5).
+                let fatal = level
+                    & (E_ERROR | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR | E_PARSE)
+                    != 0;
+                match self.out.handler_level() {
+                    Some(i) if fatal && self.out.redirect.is_none() => {
+                        self.out.redirect = Some(i);
+                        self.echo(text.as_bytes());
+                        self.out.redirect = None;
+                    }
+                    _ => self.echo(text.as_bytes()),
+                }
             }
         }
     }
@@ -339,7 +351,10 @@ impl Vm {
                     let p = self.slot_ptr(tr.exc_slot);
                     if let Some(Value::Object(prev)) = unsafe { (*p).take() }
                         && !ObjRef::ptr_eq(&prev, &ex)
-                        && !matches!(prev.class_name().as_bytes(), b"GeneratorExit_" | b"FiberExit_")
+                        && !matches!(
+                            prev.class_name().as_bytes(),
+                            b"GeneratorExit_" | b"FiberExit_"
+                        )
                     {
                         self.chain_previous(&ex, prev);
                     }
@@ -577,16 +592,17 @@ impl Vm {
             // (or from the engine itself: shutdown functions, fibers).
             let called_from_native =
                 natives > 0 && ex.native_calls[natives - 1].depth as usize == i;
-            let (file, line) = if called_from_native || i == 0 || ex.frames[i - 1].code().file.is_empty() {
-                (None, 0)
-            } else {
-                let caller = &ex.frames[i - 1];
-                let cip = caller.ip.saturating_sub(1);
-                (
-                    Some(caller.code().file.clone()),
-                    caller.code().line_of(cip as usize),
-                )
-            };
+            let (file, line) =
+                if called_from_native || i == 0 || ex.frames[i - 1].code().file.is_empty() {
+                    (None, 0)
+                } else {
+                    let caller = &ex.frames[i - 1];
+                    let cip = caller.ip.saturating_sub(1);
+                    (
+                        Some(caller.code().file.clone()),
+                        caller.code().line_of(cip as usize),
+                    )
+                };
             if code.flags & crate::bytecode::fflags::PSEUDO_MAIN != 0 {
                 if f.flags & frame_flags::ATTACHED == 0 {
                     continue;
@@ -913,6 +929,26 @@ pub fn php_quote(s: &[u8]) -> String {
     out
 }
 
+/// Control and non-ASCII bytes of a trace argument as C-style escapes
+/// (observed on PHP 8.5: `f('a\nb\x01\xC3\xA9')`).
+fn trace_escape(s: &[u8]) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &c in s {
+        match c {
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            0x0b => out.push_str("\\v"),
+            0x0c => out.push_str("\\f"),
+            0x1b => out.push_str("\\e"),
+            b'\\' => out.push_str("\\\\"),
+            0x20..=0x7e => out.push(c as char),
+            _ => out.push_str(&format!("\\x{:02X}", c)),
+        }
+    }
+    out
+}
+
 /// An argument as `getTraceAsString()` prints it.
 pub fn trace_arg(v: &Value) -> String {
     match v {
@@ -922,11 +958,12 @@ pub fn trace_arg(v: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => goro_runtime::float_fmt::to_php_string(*f, 17),
         Value::Str(s) => {
-            if s.len() > 15 {
-                format!("'{}...'", String::from_utf8_lossy(&s[..15]))
+            let (head, more) = if s.len() > 15 {
+                (&s[..15], "...")
             } else {
-                format!("'{}'", String::from_utf8_lossy(s))
-            }
+                (&s[..], "")
+            };
+            format!("'{}{}'", trace_escape(head), more)
         }
         Value::Array(_) => "Array".into(),
         Value::Object(o) => format!("Object({})", o.class_name().to_string_lossy()),

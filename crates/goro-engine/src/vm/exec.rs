@@ -7,7 +7,6 @@ use goro_runtime::{PhpArray, PhpStr, Value};
 use super::{R, Slot, Unwind, Vm, frame_flags};
 use crate::bytecode::*;
 
-
 /// A slot whose value needs no drop (empty, or a scalar): it can be
 /// overwritten without running the destructor glue.
 #[inline(always)]
@@ -30,14 +29,27 @@ pub(crate) fn fast_arith(op: Bin, x: &Value, y: &Value) -> Option<Value> {
         (Int(a), Int(b)) => {
             let (a, b) = (*a, *b);
             Some(match op {
-                Bin::Add => a.checked_add(b).map(Int).unwrap_or(Float(a as f64 + b as f64)),
-                Bin::Sub => a.checked_sub(b).map(Int).unwrap_or(Float(a as f64 - b as f64)),
-                Bin::Mul => a.checked_mul(b).map(Int).unwrap_or(Float(a as f64 * b as f64)),
+                Bin::Add => a
+                    .checked_add(b)
+                    .map(Int)
+                    .unwrap_or(Float(a as f64 + b as f64)),
+                Bin::Sub => a
+                    .checked_sub(b)
+                    .map(Int)
+                    .unwrap_or(Float(a as f64 - b as f64)),
+                Bin::Mul => a
+                    .checked_mul(b)
+                    .map(Int)
+                    .unwrap_or(Float(a as f64 * b as f64)),
                 Bin::Div => {
                     if b == 0 || (a == i64::MIN && b == -1) {
                         return None;
                     }
-                    if a % b == 0 { Int(a / b) } else { Float(a as f64 / b as f64) }
+                    if a % b == 0 {
+                        Int(a / b)
+                    } else {
+                        Float(a as f64 / b as f64)
+                    }
                 }
                 Bin::Mod => {
                     if b == 0 {
@@ -578,17 +590,21 @@ impl Vm {
                 Op::Switch { .. } => {
                     return Err(self.throw_error_msg("Error", "switch tables are not supported"));
                 }
-                Op::Echo { src } => match self.peek(src) {
-                    Some(Value::Str(s)) => {
-                        let s = s.clone();
-                        self.drop_tmp(src);
-                        self.echo(&s);
+                Op::Echo { src } => {
+                    match self.peek(src) {
+                        Some(Value::Str(s)) => {
+                            let s = s.clone();
+                            self.drop_tmp(src);
+                            self.echo(&s);
+                        }
+                        _ => {
+                            let v = self.get(src)?;
+                            self.echo_value(&v)?;
+                        }
                     }
-                    _ => {
-                        let v = self.get(src)?;
-                        self.echo_value(&v)?;
-                    }
-                },
+                    // An output handler run by a full chunk may have thrown.
+                    self.check_deferred()?;
+                }
                 Op::Return { src } => {
                     let v = self.get(src)?;
                     if let Some(v) = self.do_return(v, false)? {
@@ -1254,7 +1270,11 @@ impl Vm {
                 let t = pi.ty.as_ref().unwrap();
                 return self.type_error(&format!(
                     "Cannot {} a reference held by property {}::${} of type {} past its {} value",
-                    if op.is_inc() { "increment" } else { "decrement" },
+                    if op.is_inc() {
+                        "increment"
+                    } else {
+                        "decrement"
+                    },
                     unsafe { crate::class::DisplayName::dname(&(*pi.class).name) },
                     crate::class::DisplayName::dname(&pi.name),
                     t.display(),

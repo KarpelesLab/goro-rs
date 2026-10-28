@@ -552,7 +552,8 @@ impl Vm {
                     || (exact_type(&v, c.b >> 8) && !matches!(slot, Value::Ref(_)));
                 // An uninitialized typed property (not an unset() one,
                 // which goes through __set) takes the value directly.
-                let fresh = c.b & IC_TYPED != 0 && self.is_uninit(slot) && !self.is_unset_mark(slot);
+                let fresh =
+                    c.b & IC_TYPED != 0 && self.is_uninit(slot) && !self.is_unset_mark(slot);
                 if typed_ok && fresh {
                     let old = std::mem::replace(slot, v);
                     drop(slots);
@@ -634,7 +635,9 @@ impl Vm {
 
     /// The live typed properties a reference is bound to.
     pub(crate) fn typed_ref_props(&mut self, r: &PhpRef) -> Vec<Rc<PropInfo>> {
-        let Some(srcs) = self.typed_refs.get_mut(&r.addr()) else { return Vec::new() };
+        let Some(srcs) = self.typed_refs.get_mut(&r.addr()) else {
+            return Vec::new();
+        };
         srcs.retain(|s| match &s.obj {
             None => true,
             Some(w) => match w.upgrade() {
@@ -770,7 +773,8 @@ impl Vm {
                 }
                 let typed = p.ty.as_ref().map(|t| (t.mask, t.classes.is_empty()));
                 if let Some(c) = cache
-                    && typed.is_none_or(|(m, plain)| plain && m < (1 << 24) && m & tmask::MIXED == 0)
+                    && typed
+                        .is_none_or(|(m, plain)| plain && m < (1 << 24) && m & tmask::MIXED == 0)
                     && p.flags & (mflags::READONLY | mflags::VIRTUAL | mflags::SET_VISIBILITY) == 0
                     && p.set.is_none()
                     && p.get.is_none()
@@ -2138,7 +2142,8 @@ impl Vm {
     pub fn object_props_array(&mut self, o: &ObjRef, mangle: bool) -> PhpArray {
         let o = &self.lazy_target(o);
         let cls = self.class_of(o);
-        if mangle && let Some(h) = cls.native.props_for
+        if mangle
+            && let Some(h) = cls.native.props_for
             && let Some(a) = h(self, o)
         {
             return a;
