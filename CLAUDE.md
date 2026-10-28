@@ -8,6 +8,7 @@ restate it, including prompts for sub-agents.
 
 - Never open, read, grep, port or generate from php-src source, the source of
   any library PHP uses, PECL source, or this repository's `old` branch.
+- Write from scratch. Don't translate goro (the Go implementation) either.
 - To learn a behaviour: read the PHP manual or RFC, read a `.phpt` test's
   expected output, or run a script on the reference PHP binary.
 - Cite behaviour sources in commits and comments ("PHP manual: …", "test

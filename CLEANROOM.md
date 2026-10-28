@@ -35,6 +35,8 @@ This policy applies to everyone who contributes, human or AI agent.
   OpenSSL, libcurl, ICU, lexbor, uriparser, tidy-html5, libpq, and the rest.
   Implement these from their documentation and the relevant specifications.
 - **Source code of PECL extensions and other PHP implementations.**
+- **goro, the Go implementation.** It is clean-room too, but goro-rs is
+  written from scratch: design and code are not translated from it.
 - **The `old` branch of this repository.** It was written with php-src and
   library source as a reference, so it is derived code. Nothing may be copied,
   ported or consulted from it.

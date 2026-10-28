@@ -1,6 +1,12 @@
 # goro-rs
 
-A clean-room implementation of PHP 8.5 in Rust.
+A clean-room implementation of PHP 8.5 in Rust, written from scratch.
+
+goro-rs is the Rust counterpart of [goro](https://github.com/KarpelesLab/goro),
+a clean-room implementation of PHP in Go. It shares goro's clean-room approach,
+not its code: goro-rs is written from scratch, not translated from the Go
+version. PHP is a well-documented language, and the manual and the test suite
+are enough to build it.
 
 ## Goals
 
