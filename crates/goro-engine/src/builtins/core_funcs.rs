@@ -1715,10 +1715,9 @@ fn assert(vm: &mut Vm, a: &mut Args) -> R<Value> {
     {
         return Ok(Value::Bool(true));
     }
-    let desc = match a.val(1) {
-        Value::Null => Value::from("assert(false)"),
-        d => d,
-    };
+    // The compiler passes the assertion's source text when no description
+    // is given; an explicit null stays null.
+    let desc = a.val(1);
     // assert.callback / assert.exception / assert.warning / assert.bail.
     super::misc::assert_failed(vm, desc)
 }
@@ -1754,6 +1753,9 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
         .entry(k.clone())
         .or_insert(Some(old.clone()));
     vm.set_ini(&k, &v);
+    if k.as_bytes() == b"assert.callback" {
+        super::misc::assert_callback_reset(vm);
+    }
     Ok(Value::Str(old))
 }
 

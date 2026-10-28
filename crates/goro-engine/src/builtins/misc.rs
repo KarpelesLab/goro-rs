@@ -328,6 +328,12 @@ pub(crate) fn startup_ini_deprecations(vm: &mut Vm, ini: &[(Vec<u8>, Vec<u8>)]) 
     }
 }
 
+/// ini_set("assert.callback") replaces a callback set by assert_options()
+/// (test assert/assert03.phpt).
+pub(crate) fn assert_callback_reset(vm: &mut Vm) {
+    vm.ext::<AssertState>().callback = None;
+}
+
 fn assert_callback(vm: &mut Vm) -> Value {
     if let Some(cb) = vm.ext::<AssertState>().callback.clone() {
         return cb;
@@ -343,6 +349,15 @@ fn assert_callback(vm: &mut Vm) -> Value {
 /// assert). `desc` is the description argument (a string or Throwable).
 pub(crate) fn assert_failed(vm: &mut Vm, desc: Value) -> R<Value> {
     let cb = assert_callback(vm);
+    if !cb.is_null() && !vm.is_callable_value(&cb, false) {
+        // Test assert/assert_variation.phpt.
+        let why = vm.callable_error(&cb);
+        let shown = match &cb {
+            Value::Str(s) => s.to_string_lossy(),
+            _ => "Array".to_string(),
+        };
+        return vm.throw("Error", &format!("Invalid callback {}, {}", shown, why));
+    }
     if !cb.is_null() {
         let file = vm.cur_file();
         let line = vm.cur_line() as i64;
@@ -358,6 +373,10 @@ pub(crate) fn assert_failed(vm: &mut Vm, desc: Value) -> R<Value> {
     if ini_flag(vm, b"assert.exception") != 0 {
         return match desc {
             Value::Object(o) => Err(Unwind::Throw(o)),
+            Value::Null => {
+                let e = vm.create_exception("AssertionError", "", 0)?;
+                Err(Unwind::Throw(e))
+            }
             other => {
                 let msg = vm.to_php_str(&other)?;
                 let e = vm.create_exception("AssertionError", &msg.to_string_lossy(), 0)?;
@@ -370,8 +389,13 @@ pub(crate) fn assert_failed(vm: &mut Vm, desc: Value) -> R<Value> {
             Value::Object(o) => vm.get_prop_raw(o, b"message"),
             other => other.clone(),
         };
-        let m = vm.to_php_str(&msg)?;
-        vm.warn(&format!("assert(): {} failed", m.to_string_lossy()))?;
+        // Observed on PHP 8.5: a null description gives "Assertion failed".
+        if msg.is_null() {
+            vm.warn("assert(): Assertion failed")?;
+        } else {
+            let m = vm.to_php_str(&msg)?;
+            vm.warn(&format!("assert(): {} failed", m.to_string_lossy()))?;
+        }
     }
     if ini_flag(vm, b"assert.bail") != 0 {
         vm.exit_status = 255;
