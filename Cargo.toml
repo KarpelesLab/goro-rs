@@ -11,6 +11,7 @@ members = [
     "crates/goro-charset",
     "crates/goro-ext-hash",
     "crates/goro-ext-json",
+    "crates/goro-ext-zlib",
 ]
 
 [workspace.package]
