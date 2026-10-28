@@ -814,7 +814,14 @@ fn settype(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let nv = match &t[..] {
         b"int" | b"integer" => vm.cast(crate::bytecode::CastTo::Int, v)?,
         b"float" | b"double" => vm.cast(crate::bytecode::CastTo::Float, v)?,
-        b"string" => vm.cast(crate::bytecode::CastTo::String, v)?,
+        b"string" => match vm.cast(crate::bytecode::CastTo::String, v) {
+            Ok(v) => v,
+            Err(e) => {
+                // Observed on PHP 8.5: a failed conversion leaves "".
+                drop(r.set(Value::Str(PhpStr::empty())));
+                return Err(e);
+            }
+        },
         b"bool" | b"boolean" => vm.cast(crate::bytecode::CastTo::Bool, v)?,
         b"array" => vm.cast(crate::bytecode::CastTo::Array, v)?,
         b"object" => vm.cast(crate::bytecode::CastTo::Object, v)?,

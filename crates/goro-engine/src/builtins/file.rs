@@ -395,6 +395,12 @@ impl Stream {
         }
     }
 
+    /// A pipe or socket from proc_open()/popen() (made without a wrapper):
+    /// reads return what is available, it is not seekable.
+    pub fn is_pipe(&self) -> bool {
+        matches!(self.backing, Backing::File(_)) && self.wrapper.is_empty()
+    }
+
     pub fn read_some(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if !self.pending.is_empty() {
             let n = buf.len().min(self.pending.len());
@@ -541,6 +547,11 @@ pub fn with_stream<T>(
     let cell: *const std::cell::RefCell<Stream> = cell;
     drop(data);
     let mut s = unsafe { (*cell).borrow_mut() };
+    // Output is written before blocking on standard input (PHP's CLI
+    // output is unbuffered; a parent may wait for it).
+    if matches!(s.backing, Backing::Stdin) {
+        vm.out.flush();
+    }
     f(vm, &mut s)
 }
 
@@ -766,7 +777,7 @@ fn fread(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 }
                 Ok(k) => {
                     got += k;
-                    if matches!(s.backing, Backing::Stdin) {
+                    if matches!(s.backing, Backing::Stdin) || s.is_pipe() {
                         break;
                     }
                 }
@@ -1131,18 +1142,22 @@ fn stream_get_meta_data(vm: &mut Vm, a: &mut Args) -> R<Value> {
             _ => s.eof,
         };
         m.insert(Key::from("eof"), Value::Bool(eof));
-        m.insert(Key::from("wrapper_type"), Value::from(s.wrapper));
+        let pipe = s.is_pipe();
+        if !pipe {
+            m.insert(Key::from("wrapper_type"), Value::from(s.wrapper));
+        }
         m.insert(Key::from("stream_type"), Value::from(s.stream_type));
         m.insert(Key::from("mode"), Value::Str(s.mode.clone()));
         m.insert(Key::from("unread_bytes"), Value::Int(0));
         m.insert(
             Key::from("seekable"),
-            Value::Bool(matches!(
-                s.backing,
-                Backing::File(_) | Backing::Memory { .. }
-            )),
+            Value::Bool(
+                !pipe && matches!(s.backing, Backing::File(_) | Backing::Memory { .. }),
+            ),
         );
-        m.insert(Key::from("uri"), Value::Str(s.uri.clone()));
+        if !pipe {
+            m.insert(Key::from("uri"), Value::Str(s.uri.clone()));
+        }
         Ok(Value::Array(m))
     })
 }
