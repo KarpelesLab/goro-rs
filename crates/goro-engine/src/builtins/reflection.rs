@@ -3469,10 +3469,7 @@ fn par_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
             match ps.iter().position(|p| p.name == n) {
                 Some(i) => i,
                 None => {
-                    return refl_error(
-                        vm,
-                        "The parameter specified by its name could not be found",
-                    );
+                    return refl_error(vm, "The parameter specified by its name could not be found");
                 }
             }
         }
