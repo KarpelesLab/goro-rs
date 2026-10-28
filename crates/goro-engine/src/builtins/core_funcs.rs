@@ -275,9 +275,12 @@ pub static MODULE: Module = Module {
         ),
         (
             "function memory_get_peak_usage(bool $real_usage = false): int",
-            memory_get_usage,
+            memory_get_peak_usage,
         ),
-        ("function memory_reset_peak_usage(): void", noop_void),
+        (
+            "function memory_reset_peak_usage(): void",
+            memory_reset_peak_usage,
+        ),
         ("function php_sapi_name(): string|false", php_sapi_name),
         (
             "function phpversion(?string $extension = null): string|false",
@@ -1861,9 +1864,11 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
             v = cap;
         } else if n != -1 {
-            let Value::Int(used) = memory_get_usage(vm, a)? else {
-                unreachable!()
-            };
+            // The heap in use, in PHP's 2 MB chunks (observed on PHP 8.5:
+            // "Current memory usage is 2097152 bytes"; test
+            // Zend/tests/bug81070).
+            const CHUNK: usize = 2 << 20;
+            let used = ((vm.memory_in_use() / CHUNK + 1) * CHUNK) as i64;
             if n < used {
                 vm.warn(&format!(
                     "Failed to set memory limit to {n} bytes (Current memory usage is {used} bytes)"
@@ -2058,12 +2063,37 @@ fn gc_status(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Array(a))
 }
 
-fn memory_get_usage(vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    // An estimate: live objects and slots in use.
-    let base = 2 * 1024 * 1024;
-    let objs = goro_runtime::object::live_object_count() * 64;
-    let slots = vm.ex.stack.used_slots() * 16;
-    Ok(Value::Int((base + objs + slots) as i64))
+/// The heap the script uses as memory_get_usage() reports it: what the
+/// allocator counts since the script started, plus about what PHP's own
+/// startup takes (observed on PHP 8.5: 461800 for an empty script); with
+/// `$real_usage`, in the 2 MB chunks PHP gets from the system.
+fn shown_usage(bytes: usize, real: bool) -> i64 {
+    const START: usize = 460 * 1024;
+    const CHUNK: usize = 2 << 20;
+    let n = bytes + START;
+    (if real { n.div_ceil(CHUNK) * CHUNK } else { n }) as i64
+}
+
+/// PHP manual: memory_get_usage().
+fn memory_get_usage(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Int(shown_usage(
+        vm.memory_in_use(),
+        a.bool_or(0, false),
+    )))
+}
+
+/// PHP manual: memory_get_peak_usage().
+fn memory_get_peak_usage(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Int(shown_usage(
+        vm.memory_peak(),
+        a.bool_or(0, false),
+    )))
+}
+
+/// PHP manual: memory_reset_peak_usage().
+fn memory_reset_peak_usage(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    goro_runtime::mem::reset_peak();
+    Ok(Value::Null)
 }
 
 /// The response's Content-Type set by header(), for the output handlers

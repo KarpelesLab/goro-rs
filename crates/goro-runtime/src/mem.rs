@@ -19,6 +19,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 pub struct CountingAlloc;
 
 static USED: AtomicUsize = AtomicUsize::new(0);
+/// The highest [`USED`] since the last [`reset_peak`].
+static PEAK: AtomicUsize = AtomicUsize::new(0);
 /// The count an allocation may not exceed (`usize::MAX`: unarmed).
 static LIMIT: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// Set when the limit was crossed; cleared by the engine.
@@ -63,6 +65,9 @@ fn charge(size: usize) {
         over(size, n);
     }
     USED.store(n, Relaxed);
+    if n > PEAK.load(Relaxed) {
+        PEAK.store(n, Relaxed);
+    }
 }
 
 #[inline(always)]
@@ -119,6 +124,17 @@ unsafe impl GlobalAlloc for CountingAlloc {
 #[inline]
 pub fn used() -> usize {
     USED.load(Relaxed)
+}
+
+/// The highest heap use since the last [`reset_peak`].
+#[inline]
+pub fn peak() -> usize {
+    PEAK.load(Relaxed)
+}
+
+/// Starts a new peak measurement from the current use.
+pub fn reset_peak() {
+    PEAK.store(USED.load(Relaxed), Relaxed);
 }
 
 /// Arms the limit: allocations may take the count up to `limit` bytes in
