@@ -58,8 +58,28 @@ fn unhex(s: &str) -> Vec<u8> {
 
 #[test]
 fn lexer_matches_php85() {
-    let cases = include_str!("data/lexer_cases.txt");
-    let expected = include_str!("data/lexer_expected.txt");
+    compare(
+        include_str!("data/lexer_cases.txt"),
+        include_str!("data/lexer_expected.txt"),
+        // The reference runs with short_open_tag=Off (production php.ini).
+        &|src| tokenize(src, false),
+    );
+}
+
+#[test]
+fn token_parse_matches_php85() {
+    let opts = goro_syntax::ParseOptions {
+        short_open_tag: false,
+        ..Default::default()
+    };
+    compare(
+        include_str!("data/token_parse_cases.txt"),
+        include_str!("data/token_parse_expected.txt"),
+        &|src| goro_syntax::tokenize_parse(src, opts).expect("parses"),
+    );
+}
+
+fn compare(cases: &str, expected: &str, lex: &dyn Fn(&[u8]) -> Vec<goro_syntax::Token>) {
     let cases: Vec<&str> = cases.trim_end_matches('\n').split("\n%%%%\n").collect();
     let expected: Vec<&str> = expected.trim_end_matches('\n').split("\n%%%%\n").collect();
     assert_eq!(cases.len(), expected.len());
@@ -70,8 +90,7 @@ fn lexer_matches_php85() {
         } else {
             case.as_bytes().to_vec()
         };
-        // The reference runs with short_open_tag=Off (production php.ini).
-        let toks = tokenize(&src, false);
+        let toks = lex(&src);
         let got: Vec<String> = toks
             .iter()
             .map(|t| {

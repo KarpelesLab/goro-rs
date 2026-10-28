@@ -847,7 +847,25 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        self.expect(T::RParen, &[T::Comma, T::RParen])?;
+        let close = self.expect(T::RParen, &[T::Comma, T::RParen])?;
+        // `declare(encoding=...)` is handled while parsing (observed on PHP
+        // 8.5 with token_get_all(TOKEN_PARSE)): a fatal error when the value
+        // is not a literal, else a warning (zend.multibyte is not supported).
+        for (name, value) in directives.iter() {
+            if name.name.eq_ignore_ascii_case(b"encoding") {
+                if !matches!(
+                    value.kind,
+                    ExprKind::String(..) | ExprKind::Int(_) | ExprKind::Float(_)
+                ) {
+                    return Err(self.fatal("Encoding must be a literal", value.span));
+                }
+                self.notice(
+                    NoticeKind::Warning,
+                    "declare(encoding=...) ignored because Zend multibyte feature is turned off by settings",
+                    close.line,
+                );
+            }
+        }
         let body = if self.eat(T::Colon) {
             let b = self.inner_statements(&[T::Enddeclare])?;
             self.expect(T::Enddeclare, &[])?;
@@ -876,6 +894,9 @@ impl<'a> Parser<'a> {
         let k = self.peek_kind();
         let name = if k == T::String || k == T::NameQualified || k.is_semi_reserved() {
             let t = self.bump();
+            if k.is_semi_reserved() {
+                self.reserved_identifiers.push(t.start);
+            }
             Some(self.name_from(&t))
         } else {
             None

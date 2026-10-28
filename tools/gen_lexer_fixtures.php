@@ -5,7 +5,8 @@
 // Usage (from the repository root):
 //   /tmp/claude-1000/bin/php85 tools/gen_lexer_fixtures.php
 //
-// Input: crates/goro-syntax/tests/data/lexer_cases.txt, cases separated by a
+// Input: crates/goro-syntax/tests/data/lexer_cases.txt (and
+// token_parse_cases.txt, run with TOKEN_PARSE), cases separated by a
 // line holding only "%%%%". The newline before a separator is not part of
 // the case. Escapes in a case: "\n" is literal unless the case starts with
 // "#escaped#", then PHP double-quote escapes are decoded.
@@ -13,14 +14,16 @@
 // token, "id line hex(text)", cases separated by "%%%%".
 
 $dir = __DIR__ . '/../crates/goro-syntax/tests/data';
-$cases = explode("\n%%%%\n", rtrim(file_get_contents("$dir/lexer_cases.txt"), "\n"));
+// lexer_cases.txt: token_get_all(); token_parse_cases.txt: TOKEN_PARSE.
+foreach (['lexer' => 0, 'token_parse' => TOKEN_PARSE] as $name => $flags) {
+$cases = explode("\n%%%%\n", rtrim(file_get_contents("$dir/{$name}_cases.txt"), "\n"));
 $out = [];
 foreach ($cases as $case) {
     if (str_starts_with($case, "#escaped#")) {
         $case = stripcslashes(substr($case, 9));
     }
     $lines = [];
-    foreach (token_get_all($case) as $t) {
+    foreach (token_get_all($case, $flags) as $t) {
         if (is_array($t)) {
             $lines[] = $t[0] . ' ' . $t[2] . ' ' . bin2hex($t[1]);
         } else {
@@ -29,4 +32,5 @@ foreach ($cases as $case) {
     }
     $out[] = implode("\n", $lines);
 }
-file_put_contents("$dir/lexer_expected.txt", implode("\n%%%%\n", $out) . "\n");
+file_put_contents("$dir/{$name}_expected.txt", implode("\n%%%%\n", $out) . "\n");
+}

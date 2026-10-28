@@ -13,9 +13,18 @@ fn main() {
     for t in goro_syntax::tokenize(&src, short) {
         let text = t.text(&src);
         if t.kind.is_char() {
-            out.push_str(&format!("'{}' {}\n", String::from_utf8_lossy(text), text.len()));
+            out.push_str(&format!(
+                "'{}' {}\n",
+                String::from_utf8_lossy(text),
+                text.len()
+            ));
         } else {
-            out.push_str(&format!("{} {} {}\n", t.kind.php_name().unwrap_or("?"), t.line, text.len()));
+            out.push_str(&format!(
+                "{} {} {}\n",
+                t.kind.php_name().unwrap_or("?"),
+                t.line,
+                text.len()
+            ));
         }
     }
     print!("{}", out);

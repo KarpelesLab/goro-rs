@@ -30,6 +30,37 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// The string literals passed directly to `eval()` in a source, decoded.
+fn eval_literals(src: &[u8]) -> Vec<Vec<u8>> {
+    use goro_syntax::T;
+    let toks: Vec<_> = goro_syntax::tokenize(src, true)
+        .into_iter()
+        .filter(|t| !t.kind.is_trivia())
+        .collect();
+    let mut out = Vec::new();
+    for w in toks.windows(4) {
+        if w[0].kind == T::Eval
+            && w[1].kind == T::LParen
+            && w[2].kind == T::ConstantEncapsedString
+            && w[3].kind == T::RParen
+        {
+            // Decode the literal by parsing it.
+            let mut code = b"<?php ".to_vec();
+            code.extend_from_slice(w[2].text(src));
+            code.push(b';');
+            let arena = goro_syntax::Arena::new();
+            if let Ok(p) = goro_syntax::parse(&arena, &code)
+                && let Some(st) = p.stmts.first()
+                && let goro_syntax::ast::StmtKind::Expr(e) = st.kind
+                && let goro_syntax::ast::ExprKind::String(s, _) = e.kind
+            {
+                out.push(s.to_vec());
+            }
+        }
+    }
+    out
+}
+
 /// Splits a .phpt file into (section name, content) pairs.
 fn sections(data: &[u8]) -> Vec<(String, &[u8])> {
     let mut out: Vec<(String, &[u8])> = Vec::new();
@@ -138,6 +169,7 @@ const PARSER_FATALS: &[&str] = &[
     "Arrow functions on the right hand side of |> must be parenthesized",
     "Cannot use try without catch or finally",
     "__HALT_COMPILER() can only be used from the outermost scope",
+    "Encoding must be a literal",
 ];
 
 struct Expected {
@@ -218,6 +250,8 @@ fn run() {
     let mut bytes = 0usize;
     let mut skipped = 0;
     let mut fatal_ok = 0;
+    let mut eval_ok = 0;
+    let mut eval_bad = Vec::new();
     let mut fatal_bad = Vec::new();
     let mut fatal_missed = Vec::new();
     let mut nested = Vec::new();
@@ -288,6 +322,37 @@ fn run() {
         let res = parse_with(&arena, &src, opts);
         parse_time += t0.elapsed();
         let rel = f.strip_prefix(&dir).unwrap_or(f).display().to_string();
+        // Parse errors of `eval('literal')` calls must appear in the
+        // expected output.
+        if res.is_ok() {
+            for code in eval_literals(&src) {
+                let arena = goro_syntax::Arena::new();
+                if let Err(e) = goro_syntax::parse_eval(&arena, &code)
+                    && e.kind == ErrorKind::Parse
+                {
+                    let printed = expect.lines().any(|l| l.contains("arse"));
+                    let msg = format!("Parse error: {}", e.message);
+                    if expect.contains(&e.message)
+                        || expect.lines().any(|l| {
+                            l.contains('%')
+                                && l.rfind(" in ")
+                                    .is_some_and(|p| wild_match(l[..p].trim(), &msg))
+                        })
+                    {
+                        eval_ok += 1;
+                    } else if !printed {
+                        // The test does not print the message.
+                    } else {
+                        eval_bad.push(format!(
+                            "{}: eval({:?}): {}",
+                            rel,
+                            String::from_utf8_lossy(&code),
+                            e.message
+                        ));
+                    }
+                }
+            }
+        }
         let exp = expected_parse_error(&expect);
         match (exp, res) {
             (None, Ok(prog)) => {
@@ -379,6 +444,11 @@ fn run() {
         fatal_bad.len(),
         fatal_missed.len()
     );
+    println!(
+        "eval('...') parse errors: {} found in the expected output, {} not",
+        eval_ok,
+        eval_bad.len()
+    );
     println!("expected a parse error:  {}", expected_errors);
     println!("  exact message + line:  {}", err_match);
     println!("  wrong line:            {}", err_line_mismatch.len());
@@ -403,6 +473,8 @@ fn run() {
     lines.push("== compile errors found by the parser".to_string());
     lines.extend(fatal_bad);
     lines.extend(fatal_missed);
+    lines.push("== eval() parse errors not in the expected output".to_string());
+    lines.extend(eval_bad);
     lines.push("== wrong error message".to_string());
     lines.extend(err_msg_mismatch);
     lines.push("== wrong error line".to_string());

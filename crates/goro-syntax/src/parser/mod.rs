@@ -162,6 +162,7 @@ pub(crate) struct Parser<'a> {
     doc_consumed: u32,
     stack_base: usize,
     stack_limit: usize,
+    pub(crate) reserved_identifiers: Vec<u32>,
 }
 
 /// Maximum nesting of expressions and statements before giving up (PHP
@@ -242,6 +243,7 @@ impl<'a> Parser<'a> {
             doc_consumed: 0,
             stack_base: 0,
             stack_limit: opts.stack_limit,
+            reserved_identifiers: Vec::new(),
         }
     }
 
@@ -255,6 +257,7 @@ impl<'a> Parser<'a> {
             halt_compiler_offset: self.halt_offset,
             compile_errors: std::mem::take(&mut self.compile_errors),
             notices: std::mem::take(&mut self.notices),
+            reserved_identifiers: std::mem::take(&mut self.reserved_identifiers),
         })
     }
 

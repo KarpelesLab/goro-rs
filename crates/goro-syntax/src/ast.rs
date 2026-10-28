@@ -90,6 +90,11 @@ pub struct Program<'a> {
     /// Deprecations and warnings emitted while parsing (for example
     /// non-canonical casts), in source order.
     pub notices: Vec<Notice>,
+    /// Byte offsets of keyword tokens the parser used as names (`X::class`,
+    /// `$o->list()`, `function list()`, named arguments...). With
+    /// `TOKEN_PARSE`, `token_get_all()` reports these as `T_STRING` (test
+    /// ext/tokenizer/tests/token_get_all_TOKEN_PARSE_001.phpt).
+    pub reserved_identifiers: Vec<u32>,
 }
 
 /// A compile-time error found while parsing.

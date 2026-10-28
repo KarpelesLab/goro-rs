@@ -841,6 +841,7 @@ impl<'a> Parser<'a> {
                 // `readonly(...)` calls a function named readonly
                 // (observed on PHP 8.5).
                 self.bump();
+                self.reserved_identifiers.push(t.start);
                 let name = Name {
                     kind: NameKind::Unqualified,
                     name: self.text(&t),
@@ -1213,10 +1214,13 @@ impl<'a> Parser<'a> {
     }
 
     /// An identifier token (or a keyword used as one).
-    pub(crate) fn ident_from(&self, t: &Token) -> PResult<Ident<'a>> {
-        if t.kind == T::Echo && t.flags & TF_TAG != 0 {
-            // Test Zend/tests/short_echo_as_identifier.phpt.
-            return Err(self.parse_error_at("Cannot use \"<?=\" as an identifier", t));
+    pub(crate) fn ident_from(&mut self, t: &Token) -> PResult<Ident<'a>> {
+        if t.kind != T::String {
+            if t.kind == T::Echo && t.flags & TF_TAG != 0 {
+                // Test Zend/tests/short_echo_as_identifier.phpt.
+                return Err(self.parse_error_at("Cannot use \"<?=\" as an identifier", t));
+            }
+            self.reserved_identifiers.push(t.start);
         }
         Ok(Ident {
             name: self.text(t),

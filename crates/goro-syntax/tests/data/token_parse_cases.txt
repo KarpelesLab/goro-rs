@@ -1,0 +1,9 @@
+#escaped#<?php\nX::continue;\nX::$continue;\n$x->$continue;\nX::continue();\n$x->continue();\nX::class;\n$x->__halt_compiler();\n\nclass X {\n    const CONTINUE = 1;\n    public $x = self::CONTINUE + 1;\n}\n
+%%%%
+<?php class A { function list() {} const FOREACH = 1; public static function new() { return new static; } } A::new()->list(); f(array: 1, class: 2);
+%%%%
+<?php enum E: int { case DEFAULT = 1; case Static = 2; } trait T { function print() {} } class B { use T { print as public echo; T::print insteadof X; } }
+%%%%
+<?php namespace fn; use function fn\test; $a = new class { public function match() {} }; $a->match(); readonly(); A::{'x'};
+%%%%
+<?php $o?->default; $o->public; A::FOREACH; A::new(...); $x = #[A(class: 1)] fn() => 1;
