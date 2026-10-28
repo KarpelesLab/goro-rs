@@ -54,14 +54,22 @@ impl Vm {
         if let Value::Ref(r) = v {
             if r.refcount() > 1 {
                 if let Some(&n) = s.refs.get(&r.addr()) {
-                    s.n += 1;
+                    // `R:` takes no value number (counting_of_references).
                     s.out.extend_from_slice(format!("R:{};", n).as_bytes());
                     return Ok(());
                 }
                 s.refs.insert(r.addr(), s.n + 1);
             }
             let inner = r.get();
-            return self.ser(s, &inner, _in_array);
+            self.ser(s, &inner, _in_array)?;
+            if let Value::Object(o) = &inner
+                && !s.objs.contains_key(&o.handle())
+            {
+                // Serializable::serialize() gave null: not registered
+                // either (bug80411).
+                s.refs.remove(&r.addr());
+            }
+            return Ok(());
         }
         s.n += 1;
         match v {
@@ -180,7 +188,12 @@ impl Vm {
                     s.out.extend_from_slice(&d);
                     s.out.push(b'}');
                 }
-                Value::Null => s.out.extend_from_slice(b"N;"),
+                Value::Null => {
+                    // Not registered: a repeat serializes again
+                    // (ref_to_failed_serialize).
+                    s.objs.remove(&o.handle());
+                    s.out.extend_from_slice(b"N;")
+                }
                 _ => {
                     return self.throw(
                         "Exception",
@@ -204,12 +217,35 @@ impl Vm {
             let t = self.lazy_realize(o)?;
             self.object_props_array(&t, true)
         };
+        // An incomplete object keeps its original class name and data
+        // (bug27469).
+        let (name, props) = if cls.lname.as_bytes() == b"__php_incomplete_class" {
+            let mut rest = PhpArray::new();
+            let mut orig = name.clone();
+            for (k, x) in props.iter() {
+                match k {
+                    KeyRef::Str(n) if n.as_bytes() == b"__PHP_Incomplete_Class_Name" => {
+                        if let Value::Str(o) = x.deref() {
+                            orig = o;
+                        }
+                    }
+                    _ => {
+                        rest.insert(k.to_owned(), x.clone());
+                    }
+                }
+            }
+            (orig, rest)
+        } else {
+            (name, props)
+        };
         let selected: PhpArray = if let Some(f) = cls.find_method(b"__sleep") {
             let r = self.call_func_this(&f, Some(o.clone()), Vec::new())?;
+            let bad_sleep = format!(
+                "serialize(): {}::__sleep() should return an array only containing the names of instance-variables to serialize",
+                cls.name.dname()
+            );
             let Value::Array(names) = r else {
-                self.warn(&format!(
-                    "serialize(): __sleep should return an array only containing the names of instance-variables to serialize"
-                ))?;
+                self.warn(&bad_sleep)?;
                 s.out.extend_from_slice(b"N;");
                 return Ok(());
             };
@@ -217,14 +253,25 @@ impl Vm {
             for (_, n) in names.iter() {
                 let n = match n.deref() {
                     Value::Str(st) => st,
-                    other => self.to_php_str(&other)?,
+                    other => {
+                        self.warn(&bad_sleep)?;
+                        self.to_php_str(&other)?
+                    }
                 };
-                // The name, or its mangled forms.
+                // The name, or its mangled forms (observed on PHP 8.5:
+                // only the class's own private properties).
                 let cands = mangled_forms(&cls, &n);
                 let mut found = false;
                 for c in cands {
                     if let Some(v) = props.get_str(&c) {
-                        sel.insert(Key::Str(c), v.clone());
+                        if sel.get_str(&c).is_some() {
+                            self.warn(&format!(
+                                "serialize(): \"{}\" is returned from __sleep() multiple times",
+                                n.to_string_lossy()
+                            ))?;
+                        } else {
+                            sel.insert(Key::Str(c), v.clone());
+                        }
                         found = true;
                         break;
                     }
@@ -269,18 +316,17 @@ impl Vm {
 /// A property name and its mangled private/protected forms.
 fn mangled_forms(cls: &Class, n: &PhpStr) -> Vec<PhpStr> {
     let mut v = vec![n.clone()];
+    if n.first() == Some(&0) {
+        return v;
+    }
+    let mut q = vec![0u8];
+    q.extend_from_slice(&cls.name);
+    q.push(0);
+    q.extend_from_slice(n);
+    v.push(PhpStr::from(q));
     let mut p = b"\0*\0".to_vec();
     p.extend_from_slice(n);
     v.push(PhpStr::from(p));
-    let mut c = Some(cls);
-    while let Some(k) = c {
-        let mut q = vec![0u8];
-        q.extend_from_slice(&k.name);
-        q.push(0);
-        q.extend_from_slice(n);
-        v.push(PhpStr::from(q));
-        c = k.parent.as_deref();
-    }
     v
 }
 
@@ -291,12 +337,22 @@ fn serialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 // ---------------------------------------------------------------- unserialize
+//
+// Values are numbered as PHP numbers them (every value but array keys;
+// `r:` takes a number, `R:` does not). Each value is built in a cell so
+// that a later `R:n` can bind to it; cells nobody bound are unwrapped once
+// the whole value is read. Error offsets follow PHP's scanner (observed on
+// PHP 8.5): a malformed token is reported at its start, a bad back
+// reference or key after its token, a missing closing at the position
+// where it was expected.
 
 struct Unser<'a> {
     d: &'a [u8],
     pos: usize,
-    /// Values by number (for R: and r:).
-    vals: Vec<Value>,
+    /// The cells of values by number (for `R:` and `r:`).
+    vals: Vec<PhpRef>,
+    /// Cells bound by `R:` (kept as references).
+    shared: std::collections::HashSet<usize>,
     allowed: Option<Vec<PhpStr>>,
     max_depth: i64,
     depth: i64,
@@ -318,6 +374,19 @@ impl From<Unwind> for UErr {
 type UR<T> = Result<T, UErr>;
 
 impl Unser<'_> {
+    fn new<'a>(d: &'a [u8], allowed: Option<Vec<PhpStr>>, max_depth: i64) -> Unser<'a> {
+        Unser {
+            d,
+            pos: 0,
+            vals: Vec::new(),
+            shared: std::collections::HashSet::new(),
+            allowed,
+            max_depth,
+            depth: 0,
+            wakeups: Vec::new(),
+            unserializes: Vec::new(),
+        }
+    }
     fn peek(&self) -> Option<u8> {
         self.d.get(self.pos).copied()
     }
@@ -329,91 +398,136 @@ impl Unser<'_> {
             Err(UErr::At(self.pos))
         }
     }
-    fn int_until(&mut self, end: u8) -> UR<i64> {
-        let start = self.pos;
-        while self.pos < self.d.len() && self.d[self.pos] != end {
+    /// Digits (with an optional sign when `signed`) followed by `end`; on
+    /// failure, the error is at `tok` (the token start).
+    fn num(&mut self, end: u8, signed: bool, tok: usize) -> UR<(bool, Vec<u8>)> {
+        let mut neg = false;
+        if signed && matches!(self.peek(), Some(b'+') | Some(b'-')) {
+            neg = self.peek() == Some(b'-');
             self.pos += 1;
         }
-        let s = &self.d[start..self.pos];
-        let txt = std::str::from_utf8(s).map_err(|_| UErr::At(start))?;
-        let txt = txt.strip_prefix('+').unwrap_or(txt);
-        let v = txt.parse::<i64>().map_err(|_| UErr::At(start))?;
-        self.expect(end)?;
-        Ok(v)
-    }
-    fn uint_until(&mut self, end: u8) -> UR<usize> {
-        let start = self.pos;
-        let v = self.int_until(end)?;
-        if v < 0 {
-            return Err(UErr::At(start));
+        let st = self.pos;
+        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+            self.pos += 1;
         }
-        Ok(v as usize)
+        if self.pos == st || self.peek() != Some(end) {
+            return Err(UErr::At(tok));
+        }
+        let digits = self.d[st..self.pos].to_vec();
+        self.pos += 1;
+        Ok((neg, digits))
     }
-    fn string_body(&mut self) -> UR<PhpStr> {
-        let start = self.pos;
-        let len = self.uint_until(b':')?;
-        self.expect(b'"')?;
+    fn len(&mut self, end: u8, tok: usize) -> UR<usize> {
+        let (_, d) = self.num(end, false, tok)?;
+        std::str::from_utf8(&d)
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .ok_or(UErr::At(tok))
+    }
+    /// `len:"bytes"` after the type letter and colon.
+    fn quoted(&mut self, tok: usize) -> UR<PhpStr> {
+        let len = self.len(b':', tok)?;
+        if self.peek() != Some(b'"') {
+            return Err(UErr::At(tok));
+        }
+        self.pos += 1;
+        // A length past the data is reported at the length (bug25378).
         if self.pos + len > self.d.len() {
-            return Err(UErr::At(start - 2));
+            return Err(UErr::At(tok + 2));
         }
         let s = PhpStr::new(&self.d[self.pos..self.pos + len]);
         self.pos += len;
         self.expect(b'"')?;
         Ok(s)
     }
+    fn cell(&mut self, v: Value) -> PhpRef {
+        let c = PhpRef::new(v);
+        self.vals.push(c.clone());
+        c
+    }
+}
+
+/// An array key or value read by [`Vm::unser_value`].
+enum Item {
+    Key(Key),
+    Val(Value),
 }
 
 impl Vm {
-    fn unser_value(&mut self, u: &mut Unser, as_key: bool) -> UR<Value> {
-        let start = self.pos_of(u);
+    /// One value (in a cell) or, with `as_key`, an array key.
+    fn unser_value(&mut self, u: &mut Unser, as_key: bool) -> UR<Item> {
+        let start = u.pos;
         let Some(t) = u.peek() else {
             return Err(UErr::At(start));
         };
-        u.pos += 1;
         if t == b'N' {
-            u.expect(b';')?;
-            if !as_key {
-                u.vals.push(Value::Null);
+            if u.d.get(start + 1) != Some(&b';') {
+                return Err(UErr::At(start));
             }
-            return Ok(Value::Null);
+            u.pos += 2;
+            if as_key {
+                return Err(UErr::At(u.pos));
+            }
+            return Ok(Item::Val(Value::Ref(u.cell(Value::Null))));
         }
-        u.expect(b':').map_err(|_| UErr::At(start))?;
+        if u.d.get(start + 1) != Some(&b':') {
+            return Err(UErr::At(start));
+        }
+        u.pos += 2;
         let v = match t {
             b'b' => {
-                let v = u.int_until(b';')?;
-                if v != 0 && v != 1 {
-                    return Err(UErr::At(start));
-                }
-                Value::Bool(v == 1)
+                let v = match u.peek() {
+                    Some(c @ (b'0' | b'1')) if u.d.get(u.pos + 1) == Some(&b';') => c == b'1',
+                    _ => return Err(UErr::At(start)),
+                };
+                u.pos += 2;
+                Value::Bool(v)
             }
-            b'i' => Value::Int(u.int_until(b';')?),
+            b'i' => {
+                let (neg, d) = u.num(b';', true, start)?;
+                let txt = std::str::from_utf8(&d).unwrap_or("0");
+                let full = if neg { format!("-{}", txt) } else { txt.to_string() };
+                match full.parse::<i64>() {
+                    Ok(i) => Value::Int(i),
+                    Err(_) => {
+                        self.warn("unserialize(): Numerical result out of range")?;
+                        Value::Int(if neg { i64::MIN } else { i64::MAX })
+                    }
+                }
+            }
             b'd' => {
-                let s = u.pos;
-                while u.pos < u.d.len() && u.d[u.pos] != b';' {
+                let st = u.pos;
+                while u.peek().is_some_and(|c| c != b';') {
                     u.pos += 1;
                 }
-                let txt = &u.d[s..u.pos];
-                u.expect(b';')?;
+                if u.peek() != Some(b';') {
+                    return Err(UErr::At(start));
+                }
+                let txt = &u.d[st..u.pos];
+                u.pos += 1;
+                let ok_chars = txt
+                    .iter()
+                    .all(|c| c.is_ascii_digit() || matches!(c, b'.' | b'e' | b'E' | b'+' | b'-'));
                 let f = match txt {
                     b"INF" => f64::INFINITY,
                     b"-INF" => f64::NEG_INFINITY,
                     b"NAN" => f64::NAN,
-                    _ => {
-                        let t = std::str::from_utf8(txt).map_err(|_| UErr::At(s))?;
-                        t.parse::<f64>().map_err(|_| UErr::At(start))?
-                    }
+                    _ if ok_chars => std::str::from_utf8(txt)
+                        .ok()
+                        .and_then(|t| t.parse::<f64>().ok())
+                        .ok_or(UErr::At(start))?,
+                    _ => return Err(UErr::At(start)),
                 };
                 Value::Float(f)
             }
             b's' => {
-                let st = u.string_body()?;
+                let s = u.quoted(start)?;
                 u.expect(b';')?;
-                Value::Str(st)
+                Value::Str(s)
             }
             b'S' => {
-                // Escaped string.
-                let len = u.uint_until(b':')?;
-                u.expect(b'"')?;
+                let len = u.len(b':', start)?;
+                u.expect(b'"').map_err(|_| UErr::At(start))?;
                 let mut out = Vec::new();
                 while out.len() < len {
                     let c = u.peek().ok_or(UErr::At(u.pos))?;
@@ -429,53 +543,67 @@ impl Vm {
                 }
                 u.expect(b'"')?;
                 u.expect(b';')?;
+                self.deprecated("unserialize(): Unserializing the 'S' format is deprecated")?;
                 Value::Str(PhpStr::from(out))
             }
-            b'a' if !as_key => return self.unser_array(u, start),
-            b'O' | b'C' if !as_key => return self.unser_object(u, t, start),
-            b'E' if !as_key => {
-                let full = u.string_body()?;
-                u.expect(b';')?;
-                let v = self.unser_enum(&full, start)?;
-                u.vals.push(v.clone());
-                return Ok(v);
+            b'a' if as_key => {
+                // An array as a key: refused after its header.
+                u.len(b':', start)?;
+                u.expect(b'{').map_err(|_| UErr::At(start))?;
+                return Err(UErr::At(u.pos));
             }
-            b'R' | b'r' if !as_key => {
-                let n = u.uint_until(b';')?;
+            b'R' | b'r' => {
+                let n = u.len(b';', start)?;
+                if as_key {
+                    return Err(UErr::At(u.pos));
+                }
                 if n == 0 || n > u.vals.len() {
-                    return Err(UErr::At(start));
+                    return Err(UErr::At(u.pos));
                 }
                 let target = u.vals[n - 1].clone();
                 if t == b'R' {
-                    // A reference to an earlier value.
-                    let v = match &target {
-                        Value::Ref(r) => Value::Ref(r.clone()),
-                        other => {
-                            let r = PhpRef::new(other.clone());
-                            u.vals[n - 1] = Value::Ref(r.clone());
-                            Value::Ref(r)
-                        }
-                    };
-                    return Ok(v);
+                    u.shared.insert(target.addr());
+                    return Ok(Item::Val(Value::Ref(target)));
                 }
-                u.vals.push(target.deref());
-                return Ok(target.deref());
+                let v = target.get();
+                return Ok(Item::Val(Value::Ref(u.cell(v))));
+            }
+            _ if as_key => return Err(UErr::At(start)),
+            b'a' => return self.unser_array(u, start).map(Item::Val),
+            b'O' | b'C' => return self.unser_object(u, t, start).map(Item::Val),
+            b'E' => {
+                let full = u.quoted(start)?;
+                u.expect(b';')?;
+                let v = self.unser_enum(&full, start)?;
+                return Ok(Item::Val(Value::Ref(u.cell(v))));
             }
             _ => return Err(UErr::At(start)),
         };
-        if !as_key {
-            u.vals.push(v.clone());
+        if as_key {
+            return match v {
+                Value::Int(i) => Ok(Item::Key(Key::Int(i))),
+                Value::Str(s) => Ok(Item::Key(Key::from_php_str(&s))),
+                _ => Err(UErr::At(u.pos)),
+            };
         }
-        Ok(v)
+        Ok(Item::Val(Value::Ref(u.cell(v))))
     }
 
-    fn pos_of(&self, u: &Unser) -> usize {
-        u.pos
+    fn unser_key(&mut self, u: &mut Unser) -> UR<Key> {
+        match self.unser_value(u, true)? {
+            Item::Key(k) => Ok(k),
+            Item::Val(_) => Err(UErr::At(u.pos)),
+        }
     }
 
-    fn unser_array(&mut self, u: &mut Unser, start: usize) -> UR<Value> {
-        let n = u.uint_until(b':')?;
-        u.expect(b'{')?;
+    fn unser_elem(&mut self, u: &mut Unser) -> UR<Value> {
+        match self.unser_value(u, false)? {
+            Item::Val(v) => Ok(v),
+            Item::Key(_) => Err(UErr::At(u.pos)),
+        }
+    }
+
+    fn depth_check(&mut self, u: &mut Unser, start: usize) -> UR<()> {
         u.depth += 1;
         if u.max_depth > 0 && u.depth > u.max_depth {
             self.warn(&format!(
@@ -484,27 +612,24 @@ impl Vm {
             ))?;
             return Err(UErr::At(start));
         }
-        let idx = u.vals.len();
-        u.vals.push(Value::Null);
+        Ok(())
+    }
+
+    fn unser_array(&mut self, u: &mut Unser, start: usize) -> UR<Value> {
+        let n = u.len(b':', start)?;
+        u.expect(b'{').map_err(|_| UErr::At(start))?;
+        self.depth_check(u, start)?;
+        let cell = u.cell(Value::Null);
         let mut arr = PhpArray::new();
         for _ in 0..n {
-            let ks = u.pos;
-            let k = self.unser_value(u, true)?;
-            let key = match k {
-                Value::Int(i) => Key::Int(i),
-                Value::Str(s) => Key::from_php_str(&s),
-                _ => return Err(UErr::At(ks)),
-            };
-            let v = self.unser_value(u, false)?;
+            let key = self.unser_key(u)?;
+            let v = self.unser_elem(u)?;
             arr.insert(key, v);
         }
         u.expect(b'}')?;
         u.depth -= 1;
-        // References into this array point at copies; fix up the slot.
-        let v = Value::Array(arr);
-        u.vals[idx] = v.clone();
-        let _ = start;
-        Ok(v)
+        cell.set(Value::Array(arr));
+        Ok(Value::Ref(cell))
     }
 
     fn unser_class(&mut self, u: &Unser, name: &PhpStr) -> R<Option<Rc<Class>>> {
@@ -526,12 +651,19 @@ impl Vm {
         Ok(c)
     }
 
+    fn not_allowed(&mut self, c: &Class) -> UErr {
+        UErr::Php(self.throw_error_msg(
+            "Exception",
+            &format!("Unserialization of '{}' is not allowed", c.name.dname()),
+        ))
+    }
+
     fn unser_object(&mut self, u: &mut Unser, t: u8, start: usize) -> UR<Value> {
-        let name = u.string_body()?;
+        let name = u.quoted(start)?;
         u.expect(b':')?;
         let cls = self.unser_class(u, &name)?;
         if t == b'C' {
-            let len = u.uint_until(b':')?;
+            let len = u.len(b':', u.pos)?;
             u.expect(b'{')?;
             if u.pos + len > u.d.len() {
                 return Err(UErr::At(start));
@@ -543,24 +675,37 @@ impl Vm {
                 return Err(UErr::At(start));
             };
             if cls.has_flag(cflags::NOT_SERIALIZABLE) {
-                return Err(UErr::Php(
-                    self.throw::<()>(
-                        "Exception",
-                        &format!("Unserialization of '{}' is not allowed", cls.name.dname()),
-                    )
-                    .unwrap_err(),
-                ));
+                return Err(self.not_allowed(&cls));
             }
             let o = self.instantiate(&cls)?;
-            u.vals.push(Value::Object(o.clone()));
+            let cell = u.cell(Value::Object(o.clone()));
             if cls.find_method(b"unserialize").is_none() {
                 self.warn(&format!("Class {} has no unserializer", cls.name.dname()))?;
             } else {
                 self.call_method(&o, b"unserialize", vec![Value::Str(data)])?;
             }
-            return Ok(Value::Object(o));
+            return Ok(Value::Ref(cell));
         }
-        let n = u.uint_until(b':')?;
+        let cstart = u.pos;
+        // The property count is read after the class name: a missing ':'
+        // is reported where it was expected (bug74111).
+        let (neg, digits) = u.num(b':', true, cstart).map_err(|_| {
+            let mut p = cstart;
+            if matches!(u.d.get(p), Some(b'+') | Some(b'-')) {
+                p += 1;
+            }
+            while u.d.get(p).is_some_and(|c| c.is_ascii_digit()) {
+                p += 1;
+            }
+            UErr::At(p)
+        })?;
+        if neg && digits.iter().any(|&c| c != b'0') {
+            return Err(UErr::At(u.pos - 1));
+        }
+        let n: usize = std::str::from_utf8(&digits)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .ok_or(UErr::At(cstart))?;
         u.expect(b'{')?;
         let (o, incomplete) = match &cls {
             Some(c) => {
@@ -570,10 +715,7 @@ impl Vm {
                 if c.has_flag(cflags::NOT_SERIALIZABLE)
                     || matches!(c.lname.as_bytes(), b"closure" | b"generator")
                 {
-                    return Err(UErr::Php(self.throw_error_msg(
-                        "Exception",
-                        &format!("Unserialization of '{}' is not allowed", c.name.dname()),
-                    )));
+                    return Err(self.not_allowed(c));
                 }
                 if c.kind != crate::class::ClassKind::Class || c.has_flag(cflags::ABSTRACT) {
                     let o = self.instantiate(c);
@@ -591,8 +733,8 @@ impl Vm {
                 (o, true)
             }
         };
-        u.vals.push(Value::Object(o.clone()));
-        u.depth += 1;
+        let cell = u.cell(Value::Object(o.clone()));
+        self.depth_check(u, start)?;
         let uses_unserialize = !incomplete
             && cls
                 .as_ref()
@@ -601,14 +743,8 @@ impl Vm {
                 .is_some();
         let mut data = PhpArray::new();
         for _ in 0..n {
-            let ks = u.pos;
-            let k = self.unser_value(u, true)?;
-            let v = self.unser_value(u, false)?;
-            let key = match k {
-                Value::Int(i) => Key::Int(i),
-                Value::Str(s) => Key::from_php_str(&s),
-                _ => return Err(UErr::At(ks)),
-            };
+            let key = self.unser_key(u)?;
+            let v = self.unser_elem(u)?;
             if uses_unserialize {
                 data.insert(key, v);
                 continue;
@@ -622,7 +758,93 @@ impl Vm {
         } else if !incomplete && cls.as_ref().unwrap().find_method(b"__wakeup").is_some() {
             u.wakeups.push(o.clone());
         }
-        Ok(Value::Object(o))
+        Ok(Value::Ref(cell))
+    }
+
+    /// Unwraps the cells nobody bound with `R:` (see [`Unser`]).
+    fn unser_finish(
+        &mut self,
+        v: Value,
+        shared: &std::collections::HashSet<usize>,
+        seen: &mut std::collections::HashSet<usize>,
+    ) -> Value {
+        match v {
+            Value::Ref(c) => {
+                if shared.contains(&c.addr()) {
+                    if seen.insert(c.addr()) {
+                        let inner = c.get();
+                        let inner = self.unser_finish(inner, shared, seen);
+                        drop(c.set(inner));
+                    }
+                    Value::Ref(c)
+                } else {
+                    let inner = c.get();
+                    drop(c);
+                    self.unser_finish(inner, shared, seen)
+                }
+            }
+            Value::Array(a) => {
+                if !a.iter().any(|(_, x)| matches!(x, Value::Ref(_) | Value::Array(_) | Value::Object(_))) {
+                    return Value::Array(a);
+                }
+                let mut out = PhpArray::new();
+                for (k, x) in a.iter() {
+                    let x = self.unser_finish(x.clone(), shared, seen);
+                    out.insert(k.to_owned(), x);
+                }
+                Value::Array(out)
+            }
+            Value::Object(o) => {
+                let key = (o.handle() as usize) | (1 << 62);
+                if seen.insert(key) {
+                    let slots: Vec<Value> = o.obj().slots.borrow().clone();
+                    for (i, s) in slots.into_iter().enumerate() {
+                        if matches!(s, Value::Ref(_) | Value::Array(_)) {
+                            let s = self.unser_finish(s, shared, seen);
+                            let old = std::mem::replace(&mut o.obj().slots.borrow_mut()[i], s);
+                            drop(old);
+                        }
+                    }
+                    let props: Vec<(Key, Value)> = o
+                        .obj()
+                        .props
+                        .borrow()
+                        .iter()
+                        .map(|(k, x)| (k.to_owned(), x.clone()))
+                        .collect();
+                    for (k, x) in props {
+                        if matches!(x, Value::Ref(_) | Value::Array(_)) {
+                            let x = self.unser_finish(x, shared, seen);
+                            o.obj().props.borrow_mut().insert(k, x);
+                        }
+                    }
+                }
+                Value::Object(o)
+            }
+            other => other,
+        }
+    }
+
+    /// Runs a parse, then finishes the values and calls __unserialize()
+    /// and __wakeup() (in that order, after the whole value is built).
+    fn unser_run(&mut self, u: &mut Unser) -> UR<Value> {
+        let r = self.unser_elem(u);
+        let shared = std::mem::take(&mut u.shared);
+        let mut seen = std::collections::HashSet::new();
+        let v = match r {
+            Ok(v) => self.unser_finish(v, &shared, &mut seen),
+            Err(e) => return Err(e),
+        };
+        let unserializes = std::mem::take(&mut u.unserializes);
+        let wakeups = std::mem::take(&mut u.wakeups);
+        for (o, d) in unserializes {
+            let d = self.unser_finish(Value::Array(d), &shared, &mut seen);
+            self.call_method(&o, b"__unserialize", vec![d])?;
+        }
+        for o in wakeups {
+            self.call_method(&o, b"__wakeup", Vec::new())?;
+        }
+        Ok(v)
     }
 
     /// Sets an unserialized property (mangled names select private and
@@ -658,6 +880,19 @@ impl Vm {
                     })
             })
         };
+        // A property whose visibility changed since the data was written
+        // takes it anyway (bug49649).
+        let idx = idx.or_else(|| {
+            let map = cls.prop_map.borrow();
+            let props = cls.props.borrow();
+            map.get(&bare)
+                .and_then(|idxs| idxs.first().map(|&i| props[i as usize].clone()))
+                .filter(|p| {
+                    owner.is_none()
+                        || p.flags & mflags::PRIVATE == 0
+                        || std::ptr::eq(p.class, Rc::as_ptr(&cls))
+                })
+        });
         if let Some(p) = idx {
             if let Some(t) = &p.ty {
                 let vv = v.deref();
@@ -787,28 +1022,10 @@ impl Vm {
                 .map(|s| goro_runtime::convert::str_to_int(&s))
                 .unwrap_or(4096),
         };
-        let mut u = Unser {
-            d: data,
-            pos: 0,
-            vals: Vec::new(),
-            allowed,
-            max_depth,
-            depth: 0,
-            wakeups: Vec::new(),
-            unserializes: Vec::new(),
-        };
-        let r = self.unser_value(&mut u, false);
-        // __unserialize / __wakeup run after the whole value is built.
-        let unserializes = std::mem::take(&mut u.unserializes);
-        let wakeups = std::mem::take(&mut u.wakeups);
+        let mut u = Unser::new(data, allowed, max_depth);
+        let r = self.unser_run(&mut u);
         match r {
             Ok(v) => {
-                for (o, d) in unserializes {
-                    self.call_method(&o, b"__unserialize", vec![Value::Array(d)])?;
-                }
-                for o in wakeups {
-                    self.call_method(&o, b"__wakeup", Vec::new())?;
-                }
                 if u.pos < data.len() {
                     self.warn(&format!(
                         "unserialize(): Extra data starting at offset {} of {} bytes",
@@ -837,27 +1054,8 @@ impl Vm {
     /// Unserializes the value at the start of `data`: the value and the
     /// number of bytes it took (no warnings; `None` on errors).
     pub fn unserialize_prefix(&mut self, data: &[u8]) -> Option<(Value, usize)> {
-        let mut u = Unser {
-            d: data,
-            pos: 0,
-            vals: Vec::new(),
-            allowed: None,
-            max_depth: 4096,
-            depth: 0,
-            wakeups: Vec::new(),
-            unserializes: Vec::new(),
-        };
-        let r = self.unser_value(&mut u, false);
-        let unserializes = std::mem::take(&mut u.unserializes);
-        let wakeups = std::mem::take(&mut u.wakeups);
-        let v = r.ok()?;
-        for (o, d) in unserializes {
-            self.call_method(&o, b"__unserialize", vec![Value::Array(d)])
-                .ok()?;
-        }
-        for o in wakeups {
-            self.call_method(&o, b"__wakeup", Vec::new()).ok()?;
-        }
+        let mut u = Unser::new(data, None, 4096);
+        let v = self.unser_run(&mut u).ok()?;
         Some((v.into_deref(), u.pos))
     }
 
