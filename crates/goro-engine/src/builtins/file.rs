@@ -717,6 +717,22 @@ pub fn open_stream(
         );
     }
     let path = filename.strip_prefix(b"file://").unwrap_or(filename);
+    if !vm.basedir_allows(path) {
+        if !quiet {
+            vm.warn(&format!(
+                "{}(): open_basedir restriction in effect. File({}) is not within the allowed path(s): ({})",
+                fname,
+                String::from_utf8_lossy(path),
+                vm.get_ini(b"open_basedir").map(|v| v.to_string_lossy()).unwrap_or_default()
+            ))?;
+            vm.warn(&format!(
+                "{}({}): Failed to open stream: Operation not permitted",
+                fname,
+                String::from_utf8_lossy(filename)
+            ))?;
+        }
+        return Ok(None);
+    }
     let m = mode
         .iter()
         .filter(|&&c| c != b'b' && c != b't')
@@ -1511,6 +1527,9 @@ fn fs_warn(vm: &mut Vm, a: &Args, what: &[u8], e: &std::io::Error) -> R<Value> {
 }
 
 fn unlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     let f = a.str(0);
     if let Some(cls) = super::userstream::wrapper_for(vm, &f) {
         return super::userstream::path_op(vm, a, &cls, "unlink", vec![Value::Str(f)]);
@@ -1527,6 +1546,9 @@ fn unlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn rename(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? || !basedir_check(vm, a, 1)? {
+        return Ok(Value::Bool(false));
+    }
     let from = a.str(0);
     let to = a.str(1);
     if let Some(cls) = super::userstream::wrapper_for(vm, &from) {
@@ -1550,6 +1572,9 @@ fn rename(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn copy(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? || !basedir_check(vm, a, 1)? {
+        return Ok(Value::Bool(false));
+    }
     let from = a.str(0);
     let to = a.str(1);
     let Some(mut s) = open_stream(vm, a, &from, b"rb", false)? else {
@@ -1563,6 +1588,9 @@ fn copy(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn mkdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     let d = a.str(0);
     let perms = a.int_or(1, 0o777);
     let rec = a.bool_or(2, false);
@@ -1604,6 +1632,9 @@ fn current_umask() -> u32 {
 }
 
 fn rmdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     let d = a.str(0);
     if let Some(cls) = super::userstream::wrapper_for(vm, &d) {
         return super::userstream::path_op(vm, a, &cls, "rmdir", vec![Value::Str(d), Value::Int(8)]);
@@ -1640,24 +1671,36 @@ fn meta(vm: &Vm, a: &Args) -> Option<std::fs::Metadata> {
 }
 
 fn is_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     if let Some(st) = user_stat(vm, a, 2)? {
         return Ok(Value::Bool(st.is_some_and(|st| user_mode(&st) & 0o170000 == 0o100000)));
     }
     Ok(Value::Bool(meta(vm, a).is_some_and(|m| m.is_file())))
 }
 fn is_dir(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     if let Some(st) = user_stat(vm, a, 2)? {
         return Ok(Value::Bool(st.is_some_and(|st| user_mode(&st) & 0o170000 == 0o040000)));
     }
     Ok(Value::Bool(meta(vm, a).is_some_and(|m| m.is_dir())))
 }
 fn is_link(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     let f = a.str(0);
     Ok(Value::Bool(
         std::fs::symlink_metadata(vm.fs_path(&f)).is_ok_and(|m| m.file_type().is_symlink()),
     ))
 }
 fn file_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     if let Some(st) = user_stat(vm, a, 2)? {
         return Ok(Value::Bool(st.is_some()));
     }
@@ -1675,12 +1718,21 @@ fn access(vm: &Vm, a: &Args, mode: i32) -> bool {
 }
 
 fn is_readable(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     Ok(Value::Bool(access(vm, a, libc::R_OK)))
 }
 fn is_writable(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     Ok(Value::Bool(access(vm, a, libc::W_OK)))
 }
 fn is_executable(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     Ok(Value::Bool(
         meta(vm, a).is_some_and(|m| m.is_file()) && access(vm, a, libc::X_OK),
     ))
@@ -1697,6 +1749,9 @@ fn stat_fail(vm: &mut Vm, a: &Args, what: &str) -> R<Value> {
 macro_rules! stat_fn {
     ($name:ident, $label:literal, $m:ident => $e:expr) => {
         fn $name(vm: &mut Vm, a: &mut Args) -> R<Value> {
+            if !basedir_check(vm, a, 0)? {
+                return Ok(Value::Bool(false));
+            }
             if let Some(st) = user_stat(vm, a, 0)? {
                 let key = match stringify!($name) {
                     "filesize" => "size",
@@ -1731,6 +1786,9 @@ stat_fn!(fileowner, "stat", m => m.uid() as i64);
 stat_fn!(filegroup, "stat", m => m.gid() as i64);
 
 fn filetype(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     let f = a.str(0);
     match std::fs::symlink_metadata(vm.fs_path(&f)) {
         Ok(m) => {
@@ -1758,6 +1816,9 @@ fn filetype(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn touch(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     let f = a.str(0);
     if let Some(cls) = super::userstream::wrapper_for(vm, &f) {
         let times = match (a.opt_int(1), a.opt_int(2)) {
@@ -1799,6 +1860,9 @@ fn touch(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn chmod(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     let f = a.str(0);
     let m = a.int(1);
     if let Some(cls) = super::userstream::wrapper_for(vm, &f) {
@@ -1814,6 +1878,9 @@ fn chmod(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn stat(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     if let Some(st) = user_stat(vm, a, 0)? {
         return match st {
             Some(st) => Ok(Value::Array(st)),
@@ -1827,6 +1894,9 @@ fn stat(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn lstat(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     if let Some(st) = user_stat(vm, a, 1)? {
         return match st {
             Some(st) => Ok(Value::Array(st)),
@@ -1857,6 +1927,9 @@ fn empty_array(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 }
 
 fn realpath(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     let f = a.str(0);
     let p = if f.is_empty() {
         vm.cwd.clone()
@@ -2204,6 +2277,9 @@ fn glob_one(vm: &Vm, pat: &[u8], flags: i64, out: &mut Vec<Vec<u8>>) {
 }
 
 fn glob(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !vm.basedir_allows(&a.str(0)) {
+        return Ok(Value::Array(PhpArray::new()));
+    }
     let pat = a.str(0);
     let flags = a.int_or(1, 0);
     let pats = if flags & 1024 != 0 {
@@ -2236,6 +2312,9 @@ fn list_dir(vm: &Vm, d: &[u8]) -> std::io::Result<Vec<Vec<u8>>> {
 }
 
 fn scandir(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     let d = a.str(0);
     if d.is_empty() {
         return vm.fthrow(a, "ValueError", "Argument #1 ($directory) cannot be empty");
@@ -2278,6 +2357,10 @@ fn scandir(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn opendir(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        vm.fwarn(a, &format!("{}: Failed to open directory: Operation not permitted", a.str(0).to_string_lossy()))?;
+        return Ok(Value::Bool(false));
+    }
     let d = a.str(0);
     if let Some(cls) = super::userstream::wrapper_for(vm, &d) {
         return Ok(match super::userstream::opendir(vm, a, &cls, &d)? {
@@ -2397,6 +2480,9 @@ fn closedir(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn tempnam(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     let d = a.str(0);
     let prefix = a.str(1);
     let prefix: Vec<u8> = prefix.iter().take(63).copied().collect();
@@ -2468,6 +2554,9 @@ fn getcwd(vm: &mut Vm, _a: &mut Args) -> R<Value> {
 }
 
 fn chdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     let d = a.str(0);
     let p = vm.fs_path(&d);
     if p.is_dir() {
@@ -2495,6 +2584,9 @@ fn umask(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn readlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     let f = a.str(0);
     match std::fs::read_link(vm.fs_path(&f)) {
         Ok(p) => Ok(Value::Str(PhpStr::new(p.as_os_str().as_bytes()))),
@@ -2506,6 +2598,9 @@ fn readlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn symlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? || !basedir_check(vm, a, 1)? {
+        return Ok(Value::Bool(false));
+    }
     let t = a.str(0);
     let l = a.str(1);
     match std::os::unix::fs::symlink(os(&t), vm.fs_path(&l)) {
@@ -2518,6 +2613,9 @@ fn symlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn link(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? || !basedir_check(vm, a, 1)? {
+        return Ok(Value::Bool(false));
+    }
     let t = a.str(0);
     let l = a.str(1);
     match std::fs::hard_link(vm.fs_path(&t), vm.fs_path(&l)) {
@@ -2530,6 +2628,9 @@ fn link(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn linkinfo(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
     let f = a.str(0);
     match std::fs::symlink_metadata(vm.fs_path(&f)) {
         Ok(m) => Ok(Value::Int(m.dev() as i64)),
@@ -2848,5 +2949,84 @@ fn fscanf(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match line {
         Value::Str(l) => super::strmisc::scan_into(vm, a, &l, &fmt, 2),
         other => Ok(other),
+    }
+}
+
+/// open_basedir (PHP manual: Description of core php.ini directives): the
+/// path argument `i` must be inside one of the allowed directories; warns
+/// and gives false otherwise.
+fn basedir_check(vm: &mut Vm, a: &Args, i: usize) -> R<bool> {
+    let Some(Value::Str(p)) = a.get(i).map(|v| v.deref()) else { return Ok(true) };
+    if p.is_empty() || vm.basedir_allows(&p) {
+        return Ok(true);
+    }
+    let bd = vm.get_ini(b"open_basedir").map(|v| v.to_string_lossy()).unwrap_or_default();
+    vm.fwarn(
+        a,
+        &format!(
+            "open_basedir restriction in effect. File({}) is not within the allowed path(s): ({})",
+            p.to_string_lossy(),
+            bd
+        ),
+    )?;
+    Ok(false)
+}
+
+impl Vm {
+    /// Whether `path` is inside the open_basedir directories (always true
+    /// when it is not set). Paths resolve like realpath, with a missing
+    /// last part resolved through its directory.
+    pub fn basedir_allows(&self, path: &[u8]) -> bool {
+        let Some(bd) = self.get_ini(b"open_basedir") else { return true };
+        if bd.is_empty() {
+            return true;
+        }
+        if path.windows(3).any(|w| w == b"://") && !path.starts_with(b"file://") {
+            return true;
+        }
+        let target = self.basedir_resolve(path);
+        for d in bd.split(|&c| c == b':') {
+            if d.is_empty() {
+                continue;
+            }
+            let dir = self.basedir_resolve(d);
+            let dir_b = dir.as_os_str().as_bytes();
+            let t_b = target.as_os_str().as_bytes();
+            // A trailing slash requires the directory itself; otherwise the
+            // value is a prefix (manual: "/dir/incl" also allows
+            // "/dir/include").
+            if d.ends_with(b"/") {
+                if t_b == dir_b || (t_b.starts_with(dir_b) && t_b.get(dir_b.len()) == Some(&b'/')) {
+                    return true;
+                }
+            } else if t_b.starts_with(dir_b) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn basedir_resolve(&self, p: &[u8]) -> PathBuf {
+        let full = self.fs_path(p);
+        if let Ok(c) = std::fs::canonicalize(&full) {
+            return c;
+        }
+        // Lexical normalization, then the existing prefix canonicalized.
+        let mut out = PathBuf::from("/");
+        for comp in full.components() {
+            match comp {
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                std::path::Component::Normal(n) => out.push(n),
+                _ => {}
+            }
+        }
+        if let (Some(parent), Some(name)) = (out.parent(), out.file_name())
+            && let Ok(c) = std::fs::canonicalize(parent)
+        {
+            return c.join(name);
+        }
+        out
     }
 }

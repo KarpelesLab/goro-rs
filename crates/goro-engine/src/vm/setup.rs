@@ -256,6 +256,10 @@ impl Vm {
             Some((src, p.as_os_str().as_bytes().to_vec()))
         };
         if let Some((s, p)) = side(self, b"auto_prepend_file") {
+            let key = PhpStr::new(&p);
+            if self.included_set.insert(key.clone()) {
+                self.included.push(key);
+            }
             let r = self.run_main_code(&s, &p);
             let stop = r.is_err();
             self.handle_unwind(r);
