@@ -510,11 +510,11 @@ def iso6709(s, degdigits):
     mins = int(s[degdigits:degdigits + 2])
     secs = int(s[degdigits + 2:degdigits + 4]) if len(s) > degdigits + 2 \
         else 0
-    # PHP reports the coordinates truncated to five decimals (observed on
-    # PHP 8.5: +404251 is 40.71416, -0740023 is -74.00638).
-    total = deg * 360000 + mins * 6000 + secs * 100  # 1/100 arcseconds
-    val = total * 100000 // 360000  # 1e-5 degrees, truncated
-    return sign * val
+    # PHP reports the degrees computed in floating point, truncated to five
+    # decimals (observed on PHP 8.5: +404251 is 40.71416, -0740023 is
+    # -74.00638 and -01639 is -16.64999, 16 + 39/60 being just below 16.65).
+    val = deg + mins / 60.0 + secs / 3600.0
+    return sign * int(val * 100000)
 
 
 def main():
