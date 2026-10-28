@@ -28,9 +28,9 @@
 //! # Cycles
 //!
 //! Reference counting alone leaks cycles. Dropping an `ObjRef`, a
-//! [`PhpRef`](crate::PhpRef) or a cycle-capable array while other
+//! [`crate::PhpRef`] or a cycle-capable array while other
 //! references remain records the target as a *possible root*, and
-//! [`gc::collect_cycles`](crate::gc::collect_cycles) finds and frees garbage
+//! [`crate::gc::collect_cycles`] finds and frees garbage
 //! cycles from those roots. See [`crate::gc`].
 
 use std::any::Any;

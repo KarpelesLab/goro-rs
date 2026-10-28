@@ -21,7 +21,7 @@
 //!   vector is compacted when it next has to grow.
 //!
 //! Positions (the internal pointer used by `current()`/`next()`, and
-//! by-reference `foreach` iterators registered with [`PhpArray::iter_new`])
+//! by-reference `foreach` iterators registered with [`PhpArray::new_iter_id`])
 //! are entry indices. Converting packed → hash keeps them; compaction remaps
 //! them, so iteration stays correct while the array is modified.
 
