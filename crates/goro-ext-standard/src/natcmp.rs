@@ -26,10 +26,11 @@ fn skip_space(s: &[u8], mut i: usize) -> usize {
 /// Compares two strings in natural order; `ci` folds ASCII case.
 pub fn natcmp(a: &[u8], b: &[u8], ci: bool) -> Ordering {
     let fold = |c: u8| if ci { c.to_ascii_lowercase() } else { c };
-    // Observed on PHP 8.5: leading zeros of a leading number are ignored
-    // ("01" equals "1", "00" equals "0").
+    // Observed on PHP 8.5: leading zeros at the very start are ignored
+    // ("01" equals "1", "00" equals "0"), not after whitespace (test
+    // strnatcmp_leftalign.phpt: " 00" sorts after " 0").
     let start = |s: &[u8]| {
-        let mut i = skip_space(s, 0);
+        let mut i = 0;
         while i + 1 < s.len() && s[i] == b'0' && s[i + 1].is_ascii_digit() {
             i += 1;
         }

@@ -127,10 +127,18 @@ pub fn metaphone(s: &[u8], max_phonemes: i64) -> Result<Vec<u8>, StdError> {
             "metaphone(): Argument #2 ($max_phonemes) must be greater than or equal to 0".into(),
         ));
     }
+    // Non-letters are skipped but still end words: lookups see them as
+    // boundaries (test metaphone.phpt: "grovelling heedlessly" is
+    // ...NKHTLSL).
     let w: Vec<u8> = s
         .iter()
-        .filter(|c| c.is_ascii_alphabetic())
-        .map(|c| c.to_ascii_uppercase())
+        .map(|c| {
+            if c.is_ascii_alphabetic() {
+                c.to_ascii_uppercase()
+            } else {
+                0
+            }
+        })
         .collect();
     let max = if max_phonemes == 0 {
         usize::MAX
@@ -145,29 +153,35 @@ pub fn metaphone(s: &[u8], max_phonemes: i64) -> Result<Vec<u8>, StdError> {
             w.get(i as usize).copied().unwrap_or(0)
         }
     };
-    let mut i: usize = 0;
+    let first = w.iter().position(|&c| c != 0).unwrap_or(w.len());
+    let f = first as isize;
+    let mut i = first;
     // Initial-letter exceptions.
-    match (at(0), at(1)) {
+    match (at(f), at(f + 1)) {
         (b'A', b'E') => {
             out.push(b'E');
-            i = 2;
+            i += 2;
         }
         (b'G', b'N') | (b'K', b'N') | (b'P', b'N') | (b'W', b'R') => {
-            out.push(at(1));
-            i = 2;
+            out.push(at(f + 1));
+            i += 2;
         }
         (b'X', _) => {
             out.push(b'S');
-            i = 1;
+            i += 1;
         }
         (b'W', b'H') => {
             out.push(b'W');
-            i = 2;
+            i += 2;
         }
         _ => {}
     }
     while i < w.len() && out.len() < max {
         let c = w[i];
+        if c == 0 {
+            i += 1;
+            continue;
+        }
         let ii = i as isize;
         let prev = at(ii - 1);
         let next = at(ii + 1);
@@ -180,7 +194,7 @@ pub fn metaphone(s: &[u8], max_phonemes: i64) -> Result<Vec<u8>, StdError> {
         let mut skip = 0;
         match c {
             b'A' | b'E' | b'I' | b'O' | b'U' => {
-                if i == 0 {
+                if i == first {
                     out.push(c);
                 }
             }
@@ -302,6 +316,41 @@ mod tests {
         assert_eq!(soundex(b"Lloyd"), b"L300");
         assert_eq!(soundex(b"Lukasiewicz"), b"L222");
         assert_eq!(soundex(b""), b"0000");
+    }
+
+    // test ext/standard/tests/strings/metaphone.phpt
+    #[test]
+    fn metaphone_phpt() {
+        assert_eq!(metaphone(b"", 0).unwrap(), b"");
+        assert_eq!(metaphone(b"-1", 0).unwrap(), b"");
+        assert!(metaphone(b"valid phrase", -1).is_err());
+        assert_eq!(metaphone(b"valid phrase", 0).unwrap(), b"FLTFRS");
+        assert_eq!(metaphone(b"valid phrase", 10000).unwrap(), b"FLTFRS");
+        let cases: [(&str, &str); 4] = [
+            (
+                "They fell forward, grovelling heedlessly on the cold earth.",
+                "0FLFRWRTKRFLNKHTLSLN0KLTR0",
+            ),
+            (
+                "But the shadow of horror wheeled and returned, passing lower now, right above them, sweeping the fen-reek with its ghastly wings.",
+                "BT0XTFHRRHLTNTRTRNTPSNKLWRNRFTBF0MSWPNK0FNRKW0TSFSTLWNKS",
+            ),
+            (
+                "And then it was gone, flying back to Mordor with the speed of the wrath of Sauron; and behind it the wind roared away, leaving the Dead Marshes bare and bleak.",
+                "ANT0NTWSKNFLYNKBKTMRTRW00SPTF0R0FSRNNTBHNTT0WNTRRTWLFNK0TTMRXSBRNTBLK",
+            ),
+            (
+                "The naked waste, as far as the eye could pierce, even to the distant menace of the mountains, was dappled with the fitful moonlight.",
+                "0NKTWSTSFRS0YKLTPRSFNT0TSTNTMNSF0MNTNSWSTPLTW00FTFLMNLFT",
+            ),
+        ];
+        for (input, want) in cases {
+            assert_eq!(
+                String::from_utf8(metaphone(input.as_bytes(), 0).unwrap()).unwrap(),
+                want,
+                "{input}"
+            );
+        }
     }
 
     #[test]

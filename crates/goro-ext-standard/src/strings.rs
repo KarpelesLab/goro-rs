@@ -269,8 +269,7 @@ pub fn char_mask(list: &[u8], diags: &mut Vec<Diag>) -> [bool; 256] {
 }
 
 /// `str_word_count()`. Words are runs of ASCII letters, `'` and `-`, plus
-/// the characters of `charlist` (observed on PHP 8.5: a word may start or
-/// end with `'` or `-` when next to letters).
+/// the characters of `charlist`.
 pub fn str_word_count(
     s: &[u8],
     format: i64,
@@ -290,10 +289,17 @@ pub fn str_word_count(
     let mut count = 0i64;
     let mut words = Vec::new();
     let mut positions = Vec::new();
+    // A "'" or "-" opening the string, and a "-" closing it, are not part
+    // of a word unless the list allows them (test str_word_count.phpt:
+    // "-foo-" has the word "foo" at 1); elsewhere they are word characters.
     let mut i = 0;
-    let n = s.len();
-    // A leading "'" or "-" does not start a word unless allowed by the list
-    // ... unless observation says otherwise; see the fixture tests.
+    let mut n = s.len();
+    if n > 0 && (s[0] == b'\'' || s[0] == b'-') && !extra[s[0] as usize] {
+        i = 1;
+    }
+    if n > i && s[n - 1] == b'-' && !extra[b'-' as usize] {
+        n -= 1;
+    }
     while i < n {
         if !is_word(s[i]) {
             i += 1;
