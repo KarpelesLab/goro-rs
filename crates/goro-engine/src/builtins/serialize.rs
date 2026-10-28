@@ -199,9 +199,8 @@ impl Vm {
         let props = if skip_init {
             self.plain_props_array(o, true)
         } else {
-            let p = self.object_props_array(o, true);
-            self.check_deferred()?;
-            p
+            let t = self.lazy_realize(o)?;
+            self.object_props_array(&t, true)
         };
         let selected: PhpArray = if let Some(f) = cls.find_method(b"__sleep") {
             let r = self.call_func_this(&f, Some(o.clone()), Vec::new())?;

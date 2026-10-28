@@ -188,6 +188,7 @@ impl Vm {
                 if by_ref {
                     let names: Vec<Value> =
                         self.visible_props(&o).into_iter().map(|(k, _)| k).collect();
+                    self.check_deferred()?;
                     if names.is_empty() {
                         return Ok(false);
                     }
@@ -202,6 +203,7 @@ impl Vm {
                     return Ok(true);
                 }
                 let props = self.visible_props(&o);
+                self.check_deferred()?;
                 if props.is_empty() {
                     return Ok(false);
                 }

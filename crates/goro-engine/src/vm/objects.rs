@@ -235,7 +235,7 @@ impl Vm {
         if o.is_lazy()
             && let Some(t) = self.lazy_route(o, name, super::lazy::LazyAccess::Read)?
         {
-            return self.read_prop(&t, name, quiet, None);
+            return self.forward_guarded(o, &t, name, |vm| vm.read_prop(&t, name, quiet, None));
         }
         let cls = self.class_of(o);
         let scope = self.scope_ptr();
@@ -405,7 +405,7 @@ impl Vm {
         if o.is_lazy()
             && let Some(t) = self.lazy_route(o, name, super::lazy::LazyAccess::Isset)?
         {
-            return self.prop_isset(&t, name, empty);
+            return self.forward_guarded(o, &t, name, |vm| vm.prop_isset(&t, name, empty));
         }
         let cls = self.class_of(o);
         let scope = self.scope_ptr();
@@ -556,7 +556,7 @@ impl Vm {
         if o.is_lazy()
             && let Some(t) = self.lazy_route(o, name, super::lazy::LazyAccess::Write)?
         {
-            return self.write_prop(&t, name, v, None);
+            return self.forward_guarded(o, &t, name, |vm| vm.write_prop(&t, name, v, None));
         }
         let cls = self.class_of(o);
         let scope = self.scope_ptr();
@@ -1094,7 +1094,7 @@ impl Vm {
         if o.is_lazy()
             && let Some(t) = self.lazy_route(o, name, super::lazy::LazyAccess::Unset)?
         {
-            return self.unset_prop(&t, name);
+            return self.forward_guarded(o, &t, name, |vm| vm.unset_prop(&t, name));
         }
         let cls = self.class_of(o);
         let scope = self.scope_ptr();
@@ -1930,7 +1930,7 @@ impl Vm {
     /// The properties as an array: `(array)$o` with mangled names when
     /// `mangle`, or visible ones from the current scope otherwise.
     pub fn object_props_array(&mut self, o: &ObjRef, mangle: bool) -> PhpArray {
-        let o = &self.realize_deferred(o);
+        let o = &self.lazy_target(o);
         let cls = self.class_of(o);
         if mangle && let Some(h) = cls.native.props_for
             && let Some(a) = h(self, o)

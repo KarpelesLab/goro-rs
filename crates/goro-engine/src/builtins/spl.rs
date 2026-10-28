@@ -262,6 +262,7 @@ class MultipleIterator implements Iterator {
 
 const ITERATORS: &str = include_str!("spl_iterators.php");
 const FILES: &str = include_str!("spl_files.php");
+const REGEX: &str = include_str!("spl_regex.php");
 
 macro_rules! c {
     ($l:literal) => {
@@ -329,6 +330,8 @@ pub static MODULE: Module = Module {
         it!("recursiveiteratoriterator"),
         it!("recursivetreeiterator"),
         it!("emptyiterator"),
+        ("regexiterator", REGEX),
+        ("recursiveregexiterator", REGEX),
         fl!("splfileinfo"),
         fl!("splfileobject"),
         fl!("spltempfileobject"),

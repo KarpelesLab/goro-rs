@@ -105,14 +105,23 @@ impl Vm {
         let Some((inst, initializing)) = with_lazy(o, |d| (d.instance.clone(), d.initializing)) else {
             return Ok(None);
         };
+        let cls = self.class_of(o);
+        let scope = self.scope_ptr();
         if let Some(i) = inst {
+            // An initialized proxy: the instance's properties, except
+            // that a missing dynamic property may go to the proxy's own
+            // magic method (GH-18038).
+            if let PropLookup::Dynamic = self.lookup_prop(&cls, name, scope) {
+                let n = goro_runtime::PhpStr::new(name);
+                if i.obj().props.borrow().get_str(&n).is_none() && self.magic_unguarded(o, &cls, name, kind) {
+                    return Ok(None);
+                }
+            }
             return Ok(Some(i));
         }
         if initializing {
             return Ok(None);
         }
-        let cls = self.class_of(o);
-        let scope = self.scope_ptr();
         let needs_init = match self.lookup_prop(&cls, name, scope) {
             PropLookup::Found(p) => {
                 let hooked = match kind {
@@ -133,15 +142,7 @@ impl Vm {
                 if o.obj().props.borrow().get_str(&n).is_some() {
                     false
                 } else {
-                    let m = cls.magic.borrow();
-                    let (f, g) = match kind {
-                        LazyAccess::Read => (m.get.is_some(), 0),
-                        LazyAccess::Write => (m.set.is_some(), 1),
-                        LazyAccess::Isset => (m.isset.is_some(), 2),
-                        LazyAccess::Unset => (m.unset.is_some(), 3),
-                    };
-                    drop(m);
-                    !(f && !self.prop_guards.iter().any(|(h, nm, k)| *h == o.handle() && nm.as_bytes() == name && *k == g))
+                    !self.magic_unguarded(o, &cls, name, kind)
                 }
             }
         };
@@ -223,7 +224,6 @@ impl Vm {
                     *b = false;
                 }
             });
-            o.clear_destructor_called();
             return Ok(inst);
         }
         // Ghost: defaults first, then the initializer; reverted on errors.
@@ -240,6 +240,8 @@ impl Vm {
             }
         }
         with_lazy(o, |d| d.initializing = true);
+        // Not lazy while the initializer runs.
+        o.set_lazy(false);
         let r = self.call_value(&init, vec![Value::Object(o.clone())]);
         let r = match r {
             Ok(Value::Null) => Ok(()),
@@ -259,6 +261,7 @@ impl Vm {
                 drop(old_slots);
                 drop(old_props);
                 with_lazy(o, |d| d.initializing = false);
+                o.set_lazy(true);
                 Err(e)
             }
         }
@@ -272,7 +275,7 @@ impl Vm {
             if let Some(b) = d.lazy_slots.get_mut(slot) {
                 *b = false;
             }
-            !d.proxy && d.lazy_slots.iter().all(|b| !b)
+            d.instance.is_none() && d.lazy_slots.iter().all(|b| !b)
         })
         .unwrap_or(false);
         if none_left {
@@ -320,11 +323,64 @@ impl Vm {
         }
     }
 
+    /// The object holding the properties of `o` without initializing it
+    /// (an initialized proxy's instance).
+    pub fn lazy_target(&self, o: &ObjRef) -> ObjRef {
+        if o.is_lazy()
+            && let Some(Some(i)) = with_lazy(o, |d| d.instance.clone())
+        {
+            return i;
+        }
+        o.clone()
+    }
+
     /// Whether the slot of `o` is still lazy.
     pub fn lazy_slot(&self, o: &ObjRef, slot: usize) -> bool {
         o.is_lazy()
             && with_lazy(o, |d| d.instance.is_none() && d.lazy_slots.get(slot).copied().unwrap_or(false))
                 .unwrap_or(false)
+    }
+
+    /// The class has the magic method for `kind`, not running for `name`.
+    fn magic_unguarded(&self, o: &ObjRef, cls: &Class, name: &[u8], kind: LazyAccess) -> bool {
+        let m = cls.magic.borrow();
+        let (f, g) = match kind {
+            LazyAccess::Read => (m.get.is_some(), 0),
+            LazyAccess::Write => (m.set.is_some(), 1),
+            LazyAccess::Isset => (m.isset.is_some(), 2),
+            LazyAccess::Unset => (m.unset.is_some(), 3),
+        };
+        f && !self
+            .prop_guards
+            .iter()
+            .any(|(h, nm, k)| *h == o.handle() && nm.as_bytes() == name && *k == g)
+    }
+
+    /// Runs an access forwarded from a proxy to its instance with the
+    /// proxy's magic-method guards for `name` (GH-18038).
+    pub fn forward_guarded<T>(
+        &mut self,
+        from: &ObjRef,
+        to: &ObjRef,
+        name: &[u8],
+        f: impl FnOnce(&mut Vm) -> R<T>,
+    ) -> R<T> {
+        if ObjRef::ptr_eq(from, to) {
+            return f(self);
+        }
+        let kinds: Vec<u8> = self
+            .prop_guards
+            .iter()
+            .filter(|(h, n, _)| *h == from.handle() && n.as_bytes() == name)
+            .map(|g| g.2)
+            .collect();
+        let n0 = self.prop_guards.len();
+        for k in kinds {
+            self.prop_guards.push((to.handle(), goro_runtime::PhpStr::new(name), k));
+        }
+        let r = f(self);
+        self.prop_guards.truncate(n0);
+        r
     }
 
     fn in_hook_name(&self, o: &ObjRef, name: &[u8]) -> bool {

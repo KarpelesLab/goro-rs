@@ -459,6 +459,7 @@ impl Vm {
             }
             Value::Object(o) => {
                 let cls = self.class_of(o);
+                let o = &self.lazy_realize(o)?;
                 let id = o.handle() as usize | (1 << 62);
                 if self.dump_stack.contains(&id) {
                     self.warn("var_export does not handle circular references")?;
@@ -601,13 +602,22 @@ impl Vm {
             Value::Object(o) => {
                 let cls = self.class_of(o);
                 let entries = self.debug_entries(o)?;
-                out.extend_from_slice(format!("{}object(", pad).as_bytes());
+                let lazy = if self.is_lazy_uninit(o) {
+                    if crate::vm::lazy::with_lazy(o, |d| d.proxy).unwrap_or(false) {
+                        "lazy proxy "
+                    } else {
+                        "lazy ghost "
+                    }
+                } else {
+                    ""
+                };
+                out.extend_from_slice(format!("{}{}object(", pad, lazy).as_bytes());
                 out.extend_from_slice(cls.name.dname().as_bytes());
                 out.extend_from_slice(
                     format!(
                         ")#{} ({}) refcount({}){{\n",
                         o.handle(),
-                        entries.len(),
+                        entries.iter().filter(|e| e.2.is_some()).count(),
                         refcount.unwrap_or(o.refcount())
                     )
                     .as_bytes(),
