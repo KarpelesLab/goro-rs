@@ -34,6 +34,8 @@ mod unicode;
 mod utf7;
 
 #[cfg(test)]
+mod mime_tests;
+#[cfg(test)]
 mod tests;
 
 pub use charset::Charset;
