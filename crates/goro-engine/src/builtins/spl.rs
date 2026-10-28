@@ -542,6 +542,7 @@ pub static MODULE: Module = Module {
         ("splobjectstorage", os_hooks),
         ("multipleiterator", os_hooks),
         ("splfileobject", sfo_hooks),
+        ("globiterator", glob_hooks),
         ("recursiveiteratoriterator", rii_hooks),
     ],
     listed: true,
@@ -3806,9 +3807,66 @@ fn sfo_hooks() -> NativeHooks {
             let cls = vm.class_of(o);
             cls.flags
                 .set(cls.flags.get() | crate::class::cflags::NOT_CLONEABLE);
+            mark_check_init(&cls);
         }),
         ..Default::default()
     }
+}
+
+fn glob_hooks() -> NativeHooks {
+    NativeHooks {
+        create: Some(|vm, o| mark_check_init(&vm.class_of(o))),
+        ..Default::default()
+    }
+}
+
+/// A user subclass of SplFileObject, GlobIterator or
+/// RecursiveIteratorIterator checks, before each of its own methods, that
+/// the parent constructor ran (observed on PHP 8.5; tests gh8318,
+/// bug41828).
+fn mark_check_init(cls: &Class) {
+    if !cls.has_flag(crate::class::cflags::INTERNAL) {
+        cls.flags
+            .set(cls.flags.get() | crate::class::cflags::CHECK_INIT);
+    }
+}
+
+/// See [`mark_check_init`]: `f` is about to run on `o`.
+pub(crate) fn check_init(vm: &mut Vm, o: &ObjRef, f: &crate::func::Func) -> R<()> {
+    // Only methods the user wrote (the internal ones check for
+    // themselves), and not the constructor.
+    let scope = f.scope.get();
+    if scope.is_null()
+        || unsafe { &*scope }.has_flag(crate::class::cflags::INTERNAL)
+        || f.name.eq_ignore_ascii_case(b"__construct")
+    {
+        return Ok(());
+    }
+    let cls = vm.class_of(o);
+    if is_subclass_named(&cls, b"recursiveiteratoriterator") {
+        if vm.get_prop_raw(o, b"__its").is_null() {
+            return vm.throw(
+                "Error",
+                &format!(
+                    "The {} instance wasn't initialized properly",
+                    cls.name.dname()
+                ),
+            );
+        }
+        return Ok(());
+    }
+    let prop: &[u8] = if is_subclass_named(&cls, b"splfileobject") {
+        b"__fp"
+    } else {
+        b"__dir"
+    };
+    if vm.get_prop_raw(o, prop).is_null() {
+        return vm.throw(
+            "Error",
+            "The parent constructor was not called: the object is in an invalid state",
+        );
+    }
+    Ok(())
 }
 
 /// RecursiveIteratorIterator (spl_iterators.php): foreach over one whose
@@ -3816,6 +3874,7 @@ fn sfo_hooks() -> NativeHooks {
 /// RecursiveIteratorIterator_not_initialized, bug54281).
 fn rii_hooks() -> NativeHooks {
     NativeHooks {
+        create: Some(|vm, o| mark_check_init(&vm.class_of(o))),
         get_iterator: Some(|vm, o, _| {
             if vm.get_prop_raw(o, b"__its").is_null() {
                 return vm.throw("Error", "Object is not initialized");
