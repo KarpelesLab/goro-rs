@@ -90,7 +90,8 @@ pub fn unescape_double(s: &[u8], q: Quote) -> Decoded<'_> {
                 }
                 out.push(v as u8);
             }
-            b'x' if i < s.len() && s[i].is_ascii_hexdigit() => {
+            // `\X41` is a hex escape too (observed on PHP 8.5).
+            b'x' | b'X' if i < s.len() && s[i].is_ascii_hexdigit() => {
                 let mut v: u32 = 0;
                 let mut k = 0;
                 while k < 2 && i < s.len() && s[i].is_ascii_hexdigit() {
@@ -254,7 +255,19 @@ fn int_or_float_radix(digits: &[u8], radix: u32) -> Number {
         let s = std::str::from_utf8(digits).unwrap_or("0");
         return Number::Float(s.parse::<f64>().unwrap_or(f64::INFINITY));
     }
-    // Non-decimal overflow: accumulate as a double.
+    if radix == 2 {
+        // Binary literals keep their first 53 significant bits (observed on
+        // PHP 8.5: 64 one bits give 0x43efffffffffffff, not 2^64).
+        let digits: Vec<u8> = digits.iter().copied().skip_while(|&c| c == b'0').collect();
+        let keep = digits.len().min(53);
+        let mut m: u64 = 0;
+        for &c in &digits[..keep] {
+            m = m * 2 + (c - b'0') as u64;
+        }
+        return Number::Float(m as f64 * 2f64.powi((digits.len() - keep) as i32));
+    }
+    // Hexadecimal and octal overflow: accumulate as a double (observed on
+    // PHP 8.5: 0xFFFFFFFFFFFFFFFF gives 2^64).
     let mut f = 0.0f64;
     for &c in digits {
         let d = (c as char).to_digit(radix).unwrap_or(0) as f64;
