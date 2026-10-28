@@ -13,8 +13,7 @@ fn main() {
         let t = Instant::now();
         let mut sink = 0u8;
         for i in 0..200_000u32 {
-            sink ^= hash_hmac(algo.as_bytes(), &i.to_le_bytes(), b"key")
-                .unwrap()[0];
+            sink ^= hash_hmac(algo.as_bytes(), &i.to_le_bytes(), b"key").unwrap()[0];
         }
         let hm = t.elapsed().as_secs_f64() * 1000.0;
         println!(
