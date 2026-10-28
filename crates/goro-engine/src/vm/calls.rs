@@ -271,6 +271,9 @@ impl Vm {
     /// Prepares a call of a callable value (`$f()`, `call_user_func`...).
     pub(crate) fn init_callable_call(&mut self, v: Value, nargs: u32) -> R<()> {
         let _ = nargs;
+        if matches!(v, Value::Str(_) | Value::Array(_)) {
+            self.check_dynamic_callable(&v)?;
+        }
         let c = self.resolve_callable(&v, true)?;
         if c.func.is_native() && is_scope_introspecting(&c.func.lname) {
             return self.throw(
@@ -379,6 +382,134 @@ impl Vm {
             }
             _ => self.throw("Error", "Value not callable"),
         }
+    }
+
+    /// The PHP 8.2 deprecations of scope-relative callables, raised where
+    /// a callable is checked (parameters of internal functions,
+    /// is_callable()); observed on PHP 8.5: 'Use of "self" in callables is
+    /// deprecated', 'Callables of the form ["B", "parent::g"] are
+    /// deprecated'. Reported when the class part resolves, whether or not
+    /// the method exists.
+    pub fn callable_deprecation(&mut self, v: &Value) -> R<()> {
+        fn rel(c: &[u8]) -> Option<&'static str> {
+            let l = c.to_ascii_lowercase();
+            match &l[..] {
+                b"self" => Some("self"),
+                b"parent" => Some("parent"),
+                b"static" => Some("static"),
+                _ => None,
+            }
+        }
+        let msg = match v {
+            Value::Str(s) => match find_double_colon(s).and_then(|p| rel(&s[..p])) {
+                Some(r) if self.relative_class_resolves(r) => {
+                    format!("Use of \"{}\" in callables is deprecated", r)
+                }
+                _ => return Ok(()),
+            },
+            Value::Array(a) if a.len() == 2 => {
+                let (Some(t), Some(m)) = (a.get_int(0), a.get_int(1)) else {
+                    return Ok(());
+                };
+                let (t, m) = (t.deref(), m.deref());
+                let Value::Str(m) = m else { return Ok(()) };
+                let cname = match &t {
+                    Value::Str(c) => {
+                        if let Some(r) = rel(c) {
+                            if self.relative_class_resolves(r) {
+                                self.deprecated(&format!(
+                                    "Use of \"{}\" in callables is deprecated",
+                                    r
+                                ))?;
+                            }
+                            return Ok(());
+                        }
+                        if self.find_class(c, true)?.is_none() {
+                            return Ok(());
+                        }
+                        c.to_string_lossy()
+                    }
+                    Value::Object(o) => self.class_of(o).name.to_string_lossy(),
+                    _ => return Ok(()),
+                };
+                if !(m.len() > 8 && m[..8].eq_ignore_ascii_case(b"parent::")) {
+                    return Ok(());
+                }
+                format!(
+                    "Callables of the form [\"{}\", \"{}\"] are deprecated",
+                    cname,
+                    m.to_string_lossy()
+                )
+            }
+            _ => return Ok(()),
+        };
+        self.deprecated(&msg)
+    }
+
+    fn relative_class_resolves(&self, r: &str) -> bool {
+        let p = if r == "static" {
+            self.static_class_ptr()
+        } else {
+            self.scope_ptr()
+        };
+        !p.is_null() && (r != "parent" || unsafe { (*p).parent.is_some() })
+    }
+
+    /// `$f()` takes class names literally: no self/parent/static and no
+    /// "parent::" methods (observed on PHP 8.5: Class "self" not found).
+    fn check_dynamic_callable(&mut self, v: &Value) -> R<()> {
+        let is_rel = |c: &[u8]| {
+            let l = c.to_ascii_lowercase();
+            matches!(&l[..], b"self" | b"parent" | b"static")
+        };
+        match v {
+            Value::Str(s) => {
+                // The class part ends at the last "::" (observed on PHP 8.5:
+                // Class "B::parent" not found for "B::parent::f").
+                if let Some(p) = s.windows(2).rposition(|w| w == b"::")
+                    && (is_rel(&s[..p]) || find_double_colon(&s[..p]).is_some())
+                {
+                    return self.throw(
+                        "Error",
+                        &format!("Class \"{}\" not found", String::from_utf8_lossy(&s[..p])),
+                    );
+                }
+            }
+            Value::Array(a) if a.len() == 2 => {
+                let (Some(t), Some(m)) = (a.get_int(0), a.get_int(1)) else {
+                    return Ok(());
+                };
+                let (t, m) = (t.deref(), m.deref());
+                let cls = match &t {
+                    Value::Str(c) if is_rel(c) => {
+                        return self.throw(
+                            "Error",
+                            &format!("Class \"{}\" not found", c.to_string_lossy()),
+                        );
+                    }
+                    Value::Str(c) => match self.find_class(c, true)? {
+                        Some(c) => c,
+                        None => return Ok(()),
+                    },
+                    Value::Object(o) => self.class_of(o),
+                    _ => return Ok(()),
+                };
+                if let Value::Str(m) = m
+                    && find_double_colon(&m).is_some()
+                {
+                    return self.throw(
+                        "Error",
+                        &format!(
+                            "Call to undefined method {}::{}()",
+                            cls.name.dname(),
+                            m.to_string_lossy()
+                        ),
+                    );
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn class_for_callable(&mut self, name: &[u8]) -> R<Rc<Class>> {
@@ -1483,6 +1614,12 @@ impl Vm {
                 }
             }
             match self.check_type(&args[i], ty, strict, func.scope.get(), std::ptr::null())? {
+                Check::Ok
+                    if ty.mask & tmask::CALLABLE != 0
+                        && matches!(args[i], Value::Str(_) | Value::Array(_)) =>
+                {
+                    self.callable_deprecation(&args[i])?;
+                }
                 Check::Ok => {}
                 Check::Coerced(v) => args[i] = v,
                 Check::Fail if ty.mask & !tmask::NULL == tmask::CALLABLE && ty.classes.is_empty() => {

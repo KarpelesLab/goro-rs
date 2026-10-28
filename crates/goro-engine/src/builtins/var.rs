@@ -912,7 +912,9 @@ fn is_callable(vm: &mut Vm, a: &mut Args) -> R<Value> {
             _ => false,
         }
     } else {
-        vm.is_callable_value(&v, false)
+        let ok = vm.is_callable_value(&v, false);
+        vm.callable_deprecation(&v)?;
+        ok
     };
     if a.len() > 2 {
         let name = vm.callable_name(&v);
@@ -985,10 +987,18 @@ impl Vm {
                         }
                     }
                     Value::Str(cn) => {
-                        let Ok(Some(cls)) = self.find_class_for_call(&cn) else {
+                        let Ok(Some(mut cls)) = self.find_class_for_call(&cn) else {
                             return false;
                         };
-                        self.method_callable_static(&cls, &m)
+                        let mut m = m.as_bytes();
+                        if m.len() > 8 && m[..8].eq_ignore_ascii_case(b"parent::") {
+                            m = &m[8..];
+                            match cls.parent.clone() {
+                                Some(p) => cls = p,
+                                None => return false,
+                            }
+                        }
+                        self.method_callable_static(&cls, m)
                     }
                     _ => false,
                 }
