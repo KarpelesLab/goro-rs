@@ -381,10 +381,13 @@ fn call(vm: &mut Vm, cb: &Value, args: Vec<Value>) -> R<Value> {
     vm.call_value(cb, args)
 }
 
-/// The array's elements as (key, value) pairs, values as stored (references
-/// kept).
+/// The array's elements as (key, value) pairs; shared references are kept.
 fn entries(arr: &PhpArray) -> Vec<(Key, Value)> {
-    arr.iter().map(|(k, v)| (k.to_owned(), v.clone())).collect()
+    // References only the array holds are plain values (their count would
+    // otherwise go up with the copies made here).
+    arr.iter()
+        .map(|(k, v)| (k.to_owned(), deref_shared(v)))
+        .collect()
 }
 
 /// Rebuilds a list (keys 0..n) from values.
@@ -494,10 +497,18 @@ fn array_keys(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn array_values(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     let arr = a.array(0);
-    if arr.data().is_list() && !arr.iter().any(|(_, v)| v.is_ref()) {
+    // Tests bug75433.phpt, bug75653.phpt: the result appends after its
+    // last element.
+    if arr.data().is_list()
+        && arr.data().next_index() == Some(arr.len() as i64)
+        && !arr.iter().any(|(_, v)| v.is_ref())
+    {
         return Ok(Value::Array(arr));
     }
-    Ok(Value::Array(list_of(arr.iter().map(|(_, v)| v.deref()))))
+    // Test array_values_variation6.phpt: shared references stay.
+    Ok(Value::Array(list_of(
+        arr.iter().map(|(_, v)| deref_shared(v)),
+    )))
 }
 
 // ---------------------------------------------------------------- merge / replace
@@ -525,13 +536,26 @@ fn arrays_from(vm: &mut Vm, a: &Args, start: usize) -> R<Vec<PhpArray>> {
 
 fn array_merge(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let arrays = arrays_from(vm, a, 0)?;
-    if arrays.len() == 1 && arrays[0].data().is_list() {
+    if arrays.len() == 1
+        && arrays[0].data().is_list()
+        && arrays[0].data().next_index() == Some(arrays[0].len() as i64)
+    {
         let arr = &arrays[0];
         if !arr.iter().any(|(_, v)| v.is_ref()) {
             return Ok(Value::Array(arr.clone()));
         }
     }
     let total: usize = arrays.iter().map(|x| x.len()).sum();
+    // Test GHSA-h96m-rvf9-jgm2.phpt.
+    if total >= 1 << 30 {
+        return vm.throw(
+            "Error",
+            &format!(
+                "The total number of elements must be lower than {}",
+                1u64 << 30
+            ),
+        );
+    }
     let mut out = PhpArray::with_capacity(total);
     for arr in &arrays {
         for (k, v) in arr.iter() {
@@ -557,37 +581,59 @@ fn deref_shared(v: &Value) -> Value {
     }
 }
 
-fn merge_recursive_into(vm: &mut Vm, out: &mut PhpArray, src: &PhpArray, depth: usize) -> R<()> {
+/// The address of a reference element, for recursion detection.
+fn ref_addr(v: &Value) -> Option<usize> {
+    match v {
+        Value::Ref(r) => Some(r.addr()),
+        _ => None,
+    }
+}
+
+fn merge_recursive_into(
+    vm: &mut Vm,
+    out: &mut PhpArray,
+    src: &PhpArray,
+    stack: &mut Vec<usize>,
+) -> R<()> {
     for (k, v) in src.iter() {
         match k {
             KeyRef::Int(_) => push_or_err(vm, out, deref_shared(v))?,
             KeyRef::Str(s) => {
                 let key = Key::Str(s.clone());
-                let existing = out.get(key.as_ref()).map(|x| x.deref());
+                let existing = out.get(key.as_ref()).cloned();
                 match existing {
                     None => {
                         out.insert(key, deref_shared(v));
                     }
                     Some(old) => {
-                        if depth > 256 {
-                            vm.warn("array_merge_recursive(): Recursion detected")?;
-                            return Ok(());
+                        // Tests bug42177.phpt, bug43495.phpt: merging an
+                        // array into itself through a reference.
+                        let addrs = [ref_addr(&old), ref_addr(v)];
+                        if addrs.iter().flatten().any(|a| stack.contains(a)) {
+                            return vm.throw("Error", "Recursion detected");
                         }
-                        let mut merged = match old {
+                        let n = stack.len();
+                        stack.extend(addrs.iter().flatten());
+                        // Tests gh16053.phpt (objects are cast) and
+                        // array_merge_recursive_variation9.phpt (null kept).
+                        let mut merged = match old.deref() {
                             Value::Array(x) => x,
-                            Value::Null => {
-                                let mut x = PhpArray::new();
-                                let _ = x.push(Value::Null);
-                                x
+                            o @ Value::Object(_) => {
+                                match vm.cast(crate::bytecode::CastTo::Array, o)? {
+                                    Value::Array(x) => x,
+                                    _ => PhpArray::new(),
+                                }
                             }
                             other => list_of([other]),
                         };
-                        match v.deref() {
+                        let r = match v.deref() {
                             Value::Array(inner) => {
-                                merge_recursive_into(vm, &mut merged, &inner, depth + 1)?
+                                merge_recursive_into(vm, &mut merged, &inner, stack)
                             }
-                            other => push_or_err(vm, &mut merged, other)?,
-                        }
+                            other => push_or_err(vm, &mut merged, other),
+                        };
+                        stack.truncate(n);
+                        r?;
                         out.insert(key, Value::Array(merged));
                     }
                 }
@@ -600,8 +646,9 @@ fn merge_recursive_into(vm: &mut Vm, out: &mut PhpArray, src: &PhpArray, depth: 
 fn array_merge_recursive(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let arrays = arrays_from(vm, a, 0)?;
     let mut out = PhpArray::new();
+    let mut stack = Vec::new();
     for arr in &arrays {
-        merge_recursive_into(vm, &mut out, arr, 0)?;
+        merge_recursive_into(vm, &mut out, arr, &mut stack)?;
     }
     Ok(Value::Array(out))
 }
@@ -617,22 +664,30 @@ fn array_replace(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Array(out))
 }
 
-fn replace_recursive(vm: &mut Vm, base: &mut PhpArray, src: &PhpArray, depth: usize) -> R<()> {
+fn replace_recursive(
+    vm: &mut Vm,
+    base: &mut PhpArray,
+    src: &PhpArray,
+    stack: &mut Vec<usize>,
+) -> R<()> {
     for (k, v) in src.iter() {
-        let v = v.deref();
         let key = k.to_owned();
-        let existing = base.get(key.as_ref()).map(|x| x.deref());
-        match (existing, &v) {
+        let existing = base.get(key.as_ref()).cloned();
+        match (existing.as_ref().map(|x| x.deref()), v.deref()) {
             (Some(Value::Array(mut inner)), Value::Array(srcin)) => {
-                if depth > 256 {
-                    vm.warn("array_replace_recursive(): Recursion detected")?;
-                    return Ok(());
+                let addrs = [existing.as_ref().and_then(ref_addr), ref_addr(v)];
+                if addrs.iter().flatten().any(|a| stack.contains(a)) {
+                    return vm.throw("Error", "Recursion detected");
                 }
-                replace_recursive(vm, &mut inner, srcin, depth + 1)?;
+                let n = stack.len();
+                stack.extend(addrs.iter().flatten());
+                let r = replace_recursive(vm, &mut inner, &srcin, stack);
+                stack.truncate(n);
+                r?;
                 base.insert(key, Value::Array(inner));
             }
             _ => {
-                base.insert(key, v);
+                base.insert(key, deref_shared(v));
             }
         }
     }
@@ -643,7 +698,7 @@ fn array_replace_recursive(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let arrays = arrays_from(vm, a, 0)?;
     let mut out = arrays[0].clone();
     for arr in &arrays[1..] {
-        replace_recursive(vm, &mut out, arr, 0)?;
+        replace_recursive(vm, &mut out, arr, &mut Vec::new())?;
     }
     Ok(Value::Array(out))
 }
@@ -776,260 +831,304 @@ fn array_pad(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 // ---------------------------------------------------------------- range
 
-enum RangeArg {
+/// A classified range() boundary.
+#[derive(Clone, Copy)]
+enum Bound {
     Int(i64),
     Float(f64),
-    /// A single byte (char ranges).
-    Char(u8),
 }
 
-fn range(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    use goro_runtime::numeric::numeric_value;
-    let start = a.val(0);
-    let end = a.val(1);
-    let step_v = if a.has(2) { a.val(2) } else { Value::Int(1) };
-    // The step: a float with an integral value acts as an int (RFC
-    // wiki.php.net/rfc/proper-range-semantics).
-    let (mut step_f, step_is_float) = match &step_v {
-        Value::Int(i) => (*i as f64, false),
-        Value::Float(f) => (*f, f.fract() != 0.0 || !f.is_finite()),
-        _ => (1.0, false),
-    };
-    if step_f.is_nan() || step_f.is_infinite() {
-        return vm.fthrow(
-            a,
-            "ValueError",
-            "Argument #3 ($step) must be a finite number, INF provided",
-        );
-    }
-    let step_neg = step_f < 0.0;
-    let step_int = match &step_v {
-        Value::Int(i) => *i,
-        _ => step_f as i64,
-    };
+/// A range() argument: its numeric value, and its byte when it is a
+/// one-byte string (or a longer non-numeric one) eligible for a character
+/// range.
+struct RangeArg {
+    num: Bound,
+    ch: Option<u8>,
+    /// Non-numeric string (a letter, not a digit).
+    non_numeric: bool,
+}
 
-    // Classify an argument.
-    fn classify(vm: &mut Vm, a: &Args, v: &Value, argn: usize, name: &str) -> R<(RangeArg, bool)> {
-        // Returns the classified value and whether it was a non-numeric
-        // string (eligible for a char range).
-        Ok(match v {
-            Value::Int(i) => (RangeArg::Int(*i), false),
-            Value::Float(f) => (RangeArg::Float(*f), false),
-            Value::Bool(b) => (RangeArg::Int(*b as i64), false),
-            Value::Null => (RangeArg::Int(0), false),
-            Value::Str(s) => {
-                if s.is_empty() {
-                    vm.fwarn(
-                        a,
-                        &format!(
-                            "Argument #{} (${}) must not be empty, casted to 0",
-                            argn, name
-                        ),
-                    )?;
-                    return Ok((RangeArg::Int(0), false));
-                }
-                match numeric_value(s) {
-                    Some(goro_runtime::Number::Int(i)) => (RangeArg::Int(i), false),
-                    Some(goro_runtime::Number::Float(f)) => (RangeArg::Float(f), false),
-                    None => {
-                        if s.len() > 1 {
-                            vm.fwarn(
-                                a,
-                                &format!(
-                                    "Argument #{} (${}) must be a single byte, subsequent bytes are ignored",
-                                    argn, name
-                                ),
-                            )?;
-                        }
-                        (RangeArg::Char(s[0]), true)
+/// The largest array range() builds (observed on PHP 8.5: "Maximum size:
+/// 1073741824").
+const RANGE_MAX: u64 = 1 << 30;
+
+/// A float as range()'s messages print it ("0.1", "100000000000.0").
+fn range_float(vm: &Vm, f: f64) -> String {
+    let mut out = Vec::new();
+    vm.repr_float(f, &mut out);
+    let mut s = String::from_utf8_lossy(&out).into_owned();
+    if !s.contains(['.', 'E', 'N', 'I']) {
+        s.push_str(".0");
+    }
+    s
+}
+
+fn range_classify(vm: &mut Vm, a: &Args, v: &Value, argn: usize) -> R<RangeArg> {
+    use goro_runtime::numeric::numeric_value;
+    let name = if argn == 1 { "start" } else { "end" };
+    let plain = |num| RangeArg {
+        num,
+        ch: None,
+        non_numeric: false,
+    };
+    Ok(match v {
+        Value::Int(i) => plain(Bound::Int(*i)),
+        Value::Float(f) => plain(Bound::Float(*f)),
+        Value::Bool(b) => plain(Bound::Int(*b as i64)),
+        Value::Null => {
+            vm.fdeprecated(
+                a,
+                &format!(
+                    "Passing null to parameter #{} (${}) of type string|int|float is deprecated",
+                    argn, name
+                ),
+            )?;
+            plain(Bound::Int(0))
+        }
+        Value::Str(s) => {
+            if s.is_empty() {
+                vm.fwarn(
+                    a,
+                    &format!(
+                        "Argument #{} (${}) must not be empty, casted to 0",
+                        argn, name
+                    ),
+                )?;
+                return Ok(plain(Bound::Int(0)));
+            }
+            let num = match numeric_value(s) {
+                Some(goro_runtime::Number::Int(i)) => Some(Bound::Int(i)),
+                Some(goro_runtime::Number::Float(f)) => Some(Bound::Float(f)),
+                None => None,
+            };
+            match num {
+                Some(n) if s.len() > 1 => plain(n),
+                Some(n) => RangeArg {
+                    num: n,
+                    ch: Some(s[0]),
+                    non_numeric: false,
+                },
+                None => {
+                    if s.len() > 1 {
+                        vm.fwarn(
+                            a,
+                            &format!(
+                                "Argument #{} (${}) must be a single byte, subsequent bytes are ignored",
+                                argn, name
+                            ),
+                        )?;
+                    }
+                    RangeArg {
+                        num: Bound::Int(0),
+                        ch: Some(s[0]),
+                        non_numeric: true,
                     }
                 }
             }
-            other => {
-                return vm.fthrow(
-                    a,
-                    "TypeError",
-                    &format!(
-                        "Argument #{} (${}) must be of type string|int|float, {} given",
-                        argn,
-                        name,
-                        Vm::type_name_given(&other)
-                    ),
-                );
-            }
-        })
+        }
+        Value::Object(o) if vm.class_of(o).magic.borrow().to_string.is_some() => {
+            let s = vm.obj_to_string(o)?;
+            return range_classify(vm, a, &Value::Str(s), argn);
+        }
+        other => {
+            return vm.fthrow(
+                a,
+                "TypeError",
+                &format!(
+                    "Argument #{} (${}) must be of type string|int|float, {} given",
+                    argn,
+                    name,
+                    Vm::type_name_given(other)
+                ),
+            );
+        }
+    })
+}
+
+/// range() (RFC wiki.php.net/rfc/proper-range-semantics; tests
+/// ext/standard/tests/array/range/*.phpt; observed on PHP 8.5).
+fn range(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    const SPANNED: &str = "Argument #3 ($step) must be less than the range spanned by argument #1 ($start) and argument #2 ($end)";
+    const INCREASING: &str = "Argument #3 ($step) must be greater than 0 for increasing ranges";
+    let step_v = if a.has(2) { a.val(2) } else { Value::Int(1) };
+    let (step_f, step_frac) = match &step_v {
+        Value::Int(i) => (*i as f64, false),
+        Value::Float(f) => (*f, f.fract() != 0.0),
+        _ => (1.0, false),
+    };
+    if step_f.is_nan() || step_f.is_infinite() {
+        let what = if step_f.is_nan() { "NAN" } else { "INF" };
+        return vm.fthrow(
+            a,
+            "ValueError",
+            &format!(
+                "Argument #3 ($step) must be a finite number, {} provided",
+                what
+            ),
+        );
     }
-
-    let (s, s_char) = classify(vm, a, &start, 1, "start")?;
-    let (e, e_char) = classify(vm, a, &end, 2, "end")?;
-
+    let step_neg = step_f < 0.0;
+    let mut s = range_classify(vm, a, &a.val(0), 1)?;
+    let mut e = range_classify(vm, a, &a.val(1), 2)?;
+    for (n, r) in [(1, &s), (2, &e)] {
+        if let Bound::Float(f) = r.num
+            && !f.is_finite()
+        {
+            let name = if n == 1 { "start" } else { "end" };
+            let what = if f.is_nan() { "NAN" } else { "INF" };
+            return vm.fthrow(
+                a,
+                "ValueError",
+                &format!(
+                    "Argument #{} (${}) must be a finite number, {} provided",
+                    n, name, what
+                ),
+            );
+        }
+    }
     if step_f == 0.0 {
         return vm.fthrow(a, "ValueError", "Argument #3 ($step) cannot be 0");
     }
-
-    // Char ranges: both single-byte non-numeric strings.
-    let (s, e) = match (s, e, s_char, e_char) {
-        (RangeArg::Char(x), RangeArg::Char(y), true, true) => {
-            if step_is_float {
-                // A fractional step makes it a numeric range of 0s.
-                (RangeArg::Int(0), RangeArg::Int(0))
+    let float_step = step_frac;
+    match (s.ch, e.ch) {
+        (Some(x), Some(y)) => {
+            if step_frac {
+                if s.non_numeric || e.non_numeric {
+                    vm.fwarn(
+                        a,
+                        "Argument #3 ($step) must be of type int when generating an array of characters, inputs converted to 0",
+                    )?;
+                    s.num = Bound::Int(0);
+                    e.num = Bound::Int(0);
+                }
             } else {
+                // A character range.
+                let st = step_f.abs() as u64;
                 let mut out = PhpArray::new();
-                let st = step_int.unsigned_abs();
                 if x == y {
                     let _ = out.push(Value::Str(PhpStr::from_byte(x)));
                     return Ok(Value::Array(out));
                 }
-                if x < y {
-                    if step_neg {
-                        return vm.fthrow(
-                            a,
-                            "ValueError",
-                            "Argument #3 ($step) must be greater than 0 for increasing ranges",
-                        );
-                    }
-                    if st > (y - x) as u64 {
-                        let _ = out.push(Value::Str(PhpStr::from_byte(x)));
-                        return Ok(Value::Array(out));
-                    }
-                    let mut c = x as u64;
-                    while c <= y as u64 {
-                        let _ = out.push(Value::Str(PhpStr::from_byte(c as u8)));
-                        c += st;
-                    }
-                } else {
-                    if st > (x - y) as u64 {
-                        let _ = out.push(Value::Str(PhpStr::from_byte(x)));
-                        return Ok(Value::Array(out));
-                    }
-                    let mut c = x as i64;
-                    while c >= y as i64 {
-                        let _ = out.push(Value::Str(PhpStr::from_byte(c as u8)));
+                if x < y && step_neg {
+                    return vm.fthrow(a, "ValueError", INCREASING);
+                }
+                let span = (x as i64 - y as i64).unsigned_abs();
+                if st > span {
+                    return vm.fthrow(a, "ValueError", SPANNED);
+                }
+                let mut c = x as i64;
+                loop {
+                    let _ = out.push(Value::Str(PhpStr::from_byte(c as u8)));
+                    if x < y {
+                        c += st as i64;
+                        if c > y as i64 {
+                            break;
+                        }
+                    } else {
                         c -= st as i64;
+                        if c < y as i64 {
+                            break;
+                        }
                     }
                 }
                 return Ok(Value::Array(out));
             }
         }
-        (RangeArg::Char(_), other, true, false) => {
-            if matches!(end, Value::Str(_)) {
-                // The other one was a numeric string.
-            }
+        (Some(_), None) if s.non_numeric => {
+            vm.fwarn(
+                a,
+                "Argument #2 ($end) must be a single byte string if argument #1 ($start) is a single byte string, argument #1 ($start) converted to 0",
+            )?;
+            s.num = Bound::Int(0);
+        }
+        (None, Some(_)) if e.non_numeric => {
             vm.fwarn(
                 a,
                 "Argument #1 ($start) must be a single byte string if argument #2 ($end) is a single byte string, argument #2 ($end) converted to 0",
-            )
-            .ok();
-            let _ = other;
-            (RangeArg::Int(0), RangeArg::Int(0))
+            )?;
+            e.num = Bound::Int(0);
         }
-        (other, RangeArg::Char(_), false, true) => (other, RangeArg::Int(0)),
-        (s, e, _, _) => (s, e),
+        _ => {}
+    }
+    let float_mode =
+        float_step || matches!(s.num, Bound::Float(_)) || matches!(e.num, Bound::Float(_));
+    let to_f = |b: Bound| match b {
+        Bound::Int(i) => i as f64,
+        Bound::Float(f) => f,
     };
-
-    let as_f = |r: &RangeArg| match r {
-        RangeArg::Int(i) => *i as f64,
-        RangeArg::Float(f) => *f,
-        RangeArg::Char(c) => *c as f64,
-    };
-    let is_float =
-        matches!(s, RangeArg::Float(_)) || matches!(e, RangeArg::Float(_)) || step_is_float;
-    if is_float {
-        let (x, y) = (as_f(&s), as_f(&e));
-        if !x.is_finite() || !y.is_finite() {
-            let which = if !x.is_finite() { 1 } else { 2 };
-            let name = if which == 1 { "start" } else { "end" };
-            return vm.fthrow(
-                a,
-                "ValueError",
-                &format!(
-                    "Argument #{} (${}) must be a finite number, INF provided",
-                    which, name
-                ),
-            );
-        }
-        step_f = step_f.abs();
-        let mut out = PhpArray::new();
+    let mut out = PhpArray::new();
+    if float_mode {
+        let (x, y) = (to_f(s.num), to_f(e.num));
+        let st = step_f.abs();
         if x == y {
             let _ = out.push(Value::Float(x));
             return Ok(Value::Array(out));
         }
         if x < y && step_neg {
-            return vm.fthrow(
-                a,
-                "ValueError",
-                "Argument #3 ($step) must be greater than 0 for increasing ranges",
-            );
+            return vm.fthrow(a, "ValueError", INCREASING);
         }
         let span = (x - y).abs();
-        if step_f > span {
-            let _ = out.push(Value::Float(x));
-            return Ok(Value::Array(out));
+        if st > span {
+            return vm.fthrow(a, "ValueError", SPANNED);
         }
-        let n = (span / step_f).floor();
-        if n >= (1u64 << 31) as f64 {
-            return vm.fthrow(
-                a,
-                "ValueError",
-                &format!(
-                    "The supplied range exceeds the maximum array size by {} elements: start={}, end={}, step={}",
-                    0, x, y, step_f
-                ),
+        // Observed on PHP 8.5: range(4.5, 4.2, 0.1) has 4 elements and
+        // range(9.9, 0) has 10 elements: the quotient is taken to 15
+        // significant digits before truncation.
+        let q = span / st;
+        let n = format!("{:.14e}", q).parse::<f64>().unwrap_or(q).floor();
+        if n + 1.0 > RANGE_MAX as f64 {
+            let msg = format!(
+                "The supplied range exceeds the maximum array size by {} elements: start={}, end={}, step={}. Max size: {}",
+                range_float(vm, n + 1.0 - RANGE_MAX as f64),
+                range_float(vm, x),
+                range_float(vm, y),
+                range_float(vm, st),
+                RANGE_MAX
             );
+            return vm.throw("ValueError", &msg);
         }
-        let n = n as i64;
+        let n = n as u64;
+        let mut out = PhpArray::with_capacity(n as usize + 1);
         for i in 0..=n {
             let v = if x < y {
-                x + i as f64 * step_f
+                x + i as f64 * st
             } else {
-                x - i as f64 * step_f
+                x - i as f64 * st
             };
             let _ = out.push(Value::Float(v));
         }
         return Ok(Value::Array(out));
     }
-    let x = match s {
-        RangeArg::Int(i) => i,
-        _ => 0,
+    let (Bound::Int(x), Bound::Int(y)) = (s.num, e.num) else {
+        unreachable!()
     };
-    let y = match e {
-        RangeArg::Int(i) => i,
-        _ => 0,
-    };
-    let mut out = PhpArray::new();
     if x == y {
         let _ = out.push(Value::Int(x));
         return Ok(Value::Array(out));
     }
     if x < y && step_neg {
-        return vm.fthrow(
-            a,
-            "ValueError",
-            "Argument #3 ($step) must be greater than 0 for increasing ranges",
+        return vm.fthrow(a, "ValueError", INCREASING);
+    }
+    let st = step_f.abs() as u64;
+    let span = (x as i128 - y as i128).unsigned_abs() as u64;
+    if st > span {
+        return vm.fthrow(a, "ValueError", SPANNED);
+    }
+    let calc = span / st;
+    if calc >= RANGE_MAX {
+        let msg = format!(
+            "The supplied range exceeds the maximum array size by {} elements: start={}, end={}, step={}. Calculated size: {}. Maximum size: {}.",
+            calc.wrapping_add(1).wrapping_sub(RANGE_MAX),
+            x,
+            y,
+            st,
+            calc,
+            RANGE_MAX
         );
+        return vm.throw("ValueError", &msg);
     }
-    let st = step_int.unsigned_abs();
-    let span = (x as i128 - y as i128).unsigned_abs();
-    if st as u128 > span {
-        let _ = out.push(Value::Int(x));
-        return Ok(Value::Array(out));
-    }
-    let n = span / st as u128;
-    if n >= (1u128 << 31) {
-        return vm.fthrow(
-            a,
-            "ValueError",
-            &format!(
-                "The supplied range exceeds the maximum array size by {} elements: start={}, end={}, step={}",
-                n + 1 - (1u128 << 31) + 1,
-                x,
-                y,
-                st
-            ),
-        );
-    }
-    let mut out = PhpArray::with_capacity(n as usize + 1);
-    for i in 0..=n {
+    let mut out = PhpArray::with_capacity(calc as usize + 1);
+    for i in 0..=calc {
         let v = if x < y {
             (x as i128 + i as i128 * st as i128) as i64
         } else {
@@ -1231,9 +1330,21 @@ fn array_map(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return Ok(Value::Array(out));
     }
     let maxlen = arrays.iter().map(|x| x.len()).max().unwrap_or(0);
+    // Without a callback the elements are zipped as they are (test
+    // array_map_variation2.phpt keeps references).
     let cols: Vec<Vec<Value>> = arrays
         .iter()
-        .map(|x| x.iter().map(|(_, v)| v.deref()).collect())
+        .map(|x| {
+            x.iter()
+                .map(|(_, v)| {
+                    if cb.is_null() {
+                        deref_shared(v)
+                    } else {
+                        v.deref()
+                    }
+                })
+                .collect()
+        })
         .collect();
     let mut out = PhpArray::with_capacity(maxlen);
     for i in 0..maxlen {
@@ -1355,6 +1466,13 @@ fn unref_element(r: &PhpRef, k: &Key) {
     }
 }
 
+fn array_identity(r: &PhpRef) -> Option<*const goro_runtime::ArrayData> {
+    match &*r.borrow() {
+        Value::Array(a) => Some(a.data() as *const _),
+        _ => None,
+    }
+}
+
 fn walk_ref(
     vm: &mut Vm,
     r: &PhpRef,
@@ -1363,11 +1481,17 @@ fn walk_ref(
     recursive: bool,
     depth: usize,
 ) -> R<()> {
-    let keys: Vec<Key> = match &*r.borrow() {
-        Value::Array(arr) => arr.iter().map(|(k, _)| k.to_owned()).collect(),
-        _ => return Ok(()),
+    let snapshot = |r: &PhpRef| -> Vec<Key> {
+        match &*r.borrow() {
+            Value::Array(arr) => arr.iter().map(|(k, _)| k.to_owned()).collect(),
+            _ => Vec::new(),
+        }
     };
-    for k in keys {
+    let mut keys = snapshot(r);
+    let mut idx = 0;
+    while idx < keys.len() {
+        let k = keys[idx].clone();
+        idx += 1;
         let Some(er) = element_ref(r, &k) else {
             continue;
         };
@@ -1386,9 +1510,30 @@ fn walk_ref(
             args.push(x.clone());
         }
         drop(er);
+        let ident = array_identity(r);
         let res = call(vm, cb, args);
-        unref_element(r, &k);
         res?;
+        // Test bug70713.phpt: the callback replaced the walked variable.
+        let now = array_identity(r);
+        if now.is_none() {
+            return vm.throw(
+                "TypeError",
+                "Iterated value is no longer an array or object",
+            );
+        }
+        if now != ident {
+            // Test bug69068.phpt: a new array is walked from its start.
+            let still_same = match &*r.borrow() {
+                Value::Array(arr) => arr.get(k.as_ref()).is_some_and(|v| v.is_ref()),
+                _ => false,
+            };
+            if !still_same {
+                keys = snapshot(r);
+                idx = 0;
+                continue;
+            }
+        }
+        unref_element(r, &k);
     }
     Ok(())
 }
@@ -1655,16 +1800,18 @@ fn do_sort(
     drop(arr);
     let mut warned = false;
     sort_items(vm, &mut items, |vm, x, y| {
-        let (p, q) = if reverse { (y, x) } else { (x, y) };
         let (pv, qv) = match by {
-            SortBy::Value => (p.1.deref(), q.1.deref()),
-            SortBy::Key => (p.0.to_value(), q.0.to_value()),
+            SortBy::Value => (x.1.deref(), y.1.deref()),
+            SortBy::Key => (x.0.to_value(), y.0.to_value()),
         };
-        if user {
-            user_cmp(vm, a, &cb, pv, qv, &mut warned)
+        let o = if user {
+            user_cmp(vm, a, &cb, pv, qv, &mut warned)?
         } else {
-            flag_compare(vm, flags, &pv, &qv)
-        }
+            flag_compare(vm, flags, &pv, &qv)?
+        };
+        // Reverse sorts negate the comparison (test
+        // sort/rsort_variation9.phpt: uncomparable arrays).
+        Ok(if reverse { o.reverse() } else { o })
     })?;
     let out = if keep_keys {
         PhpArray::from_pairs(items)
@@ -1916,21 +2063,23 @@ fn row_get(vm: &mut Vm, row: &Value, k: &Value) -> R<Option<Value>> {
                 Value::Int(i) => PhpStr::from(i.to_string()),
                 _ => return Ok(None),
             };
-            if !vm.prop_isset(o, &name, false)? {
-                return Ok(None);
-            }
-            let props = vm.visible_props(o);
-            for (pk, pv) in props {
-                let matches = match (&pk, k) {
-                    (Value::Str(a), _) => a.as_bytes() == name.as_bytes(),
-                    (Value::Int(i), _) => i.to_string().as_bytes() == name.as_bytes(),
+            // Test bug72031.phpt: a visible property counts even when null.
+            for (pk, pv) in vm.visible_props(o) {
+                let matches = match &pk {
+                    Value::Str(a) => a.as_bytes() == name.as_bytes(),
+                    Value::Int(i) => i.to_string().as_bytes() == name.as_bytes(),
                     _ => false,
                 };
                 if matches {
                     return Ok(Some(pv.deref()));
                 }
             }
-            // Magic __get with __isset.
+            // Magic properties: __isset() decides, __get() reads.
+            let cls = vm.class_of(o);
+            let has_magic = cls.magic.borrow().get.is_some();
+            if !has_magic || !vm.prop_isset(o, &name, false)? {
+                return Ok(None);
+            }
             let v = vm.call_method(o, b"__get", vec![Value::Str(name)])?;
             Ok(Some(v))
         }
@@ -2036,27 +2185,7 @@ fn callable_or_error(vm: &mut Vm, a: &Args, i: usize) -> R<Value> {
     if vm.is_callable_value(&v, false) {
         return Ok(v);
     }
-    let why = match &v {
-        Value::Str(s) => {
-            if s.windows(2).any(|w| w == b"::") {
-                format!(
-                    "class \"{}\" not found",
-                    String::from_utf8_lossy(s.split(|&c| c == b':').next().unwrap_or(b""))
-                )
-            } else {
-                format!(
-                    "function \"{}\" not found or invalid function name",
-                    s.to_string_lossy()
-                )
-            }
-        }
-        Value::Array(arr) if arr.len() != 2 => {
-            "array callback must have exactly two members".to_string()
-        }
-        Value::Array(_) => "array callback must have exactly two members".to_string(),
-        Value::Object(_) => "no array or string given".to_string(),
-        _ => "no array or string given".to_string(),
-    };
+    let why = vm.callable_error(&v);
     vm.fthrow(
         a,
         "TypeError",
@@ -2064,6 +2193,57 @@ fn callable_or_error(vm: &mut Vm, a: &Args, i: usize) -> R<Value> {
     )
 }
 
+/// A value comparison of the set functions: `(string)$a === (string)$b`
+/// ordering, or a user callback.
+fn set_cmp(
+    vm: &mut Vm,
+    a: &Args,
+    cb: Option<&Value>,
+    x: &Value,
+    y: &Value,
+    warned: &mut bool,
+) -> R<Ordering> {
+    match cb {
+        Some(cb) => user_cmp(vm, a, cb, x.deref(), y.deref(), warned),
+        None => flag_compare(vm, SORT_STRING, &x.deref(), &y.deref()),
+    }
+}
+
+/// Sorts the positions of `list` by value (or by key) for the sort-merge
+/// set functions.
+fn sorted_positions(
+    vm: &mut Vm,
+    a: &Args,
+    list: &[(Key, Value)],
+    cb: Option<&Value>,
+    by_key: bool,
+    warned: &mut bool,
+) -> R<Vec<usize>> {
+    let mut idx: Vec<usize> = (0..list.len()).collect();
+    sort_items(vm, &mut idx, |vm, &x, &y| {
+        if by_key {
+            let (kx, ky) = (list[x].0.to_value(), list[y].0.to_value());
+            set_cmp(vm, a, cb, &kx, &ky, warned)
+        } else {
+            set_cmp(vm, a, cb, &list[x].1, &list[y].1, warned)
+        }
+    })?;
+    Ok(idx)
+}
+
+/// The diff/intersect functions. Which elements PHP compares, and in
+/// which order, is observable through callbacks and conversion warnings;
+/// this follows the traces observed on PHP 8.5 (user comparators logging
+/// their calls, and tests array_intersect_variation9.phpt, bug28739.phpt):
+///
+/// - value comparisons without keys (array_intersect, array_u*): every
+///   array is sorted, then the sorted first array is walked against a
+///   cursor in each other array;
+/// - key callbacks (array_*_ukey, array_*_uassoc): every array is sorted
+///   by key; intersections advance a cursor in each other array, diffs
+///   scan the other arrays from their start;
+/// - builtin keys with value comparison (*_assoc): direct key lookups;
+/// - array_diff(): the string forms are compared directly.
 fn set_op(vm: &mut Vm, a: &mut Args, op: SetOp) -> R<Value> {
     let ncb = (op.values == Cmp::User) as usize + (op.keys == Cmp::User) as usize;
     let n = a.len();
@@ -2079,8 +2259,8 @@ fn set_op(vm: &mut Vm, a: &mut Args, op: SetOp) -> R<Value> {
         ));
     }
     let narr = n - ncb;
-    // Callbacks are checked first (observed on PHP 8.5: a bad callback
-    // is reported before bad arrays).
+    // Callbacks are checked first (observed on PHP 8.5: a bad callback is
+    // reported before bad arrays).
     let mut cbs = Vec::new();
     for i in narr..n {
         cbs.push(callable_or_error(vm, a, i)?);
@@ -2092,86 +2272,255 @@ fn set_op(vm: &mut Vm, a: &mut Args, op: SetOp) -> R<Value> {
         (_, Cmp::User) => (None, Some(cbs[0].clone())),
         _ => (None, None),
     };
-    let first = &arrays[0];
-    // String forms of the values, for builtin value comparison.
-    let mut strs: Vec<Vec<PhpStr>> = Vec::new();
-    if op.values == Cmp::Builtin {
-        for arr in &arrays {
-            let mut v = Vec::with_capacity(arr.len());
-            for (_, x) in arr.iter() {
-                v.push(vm.to_php_str(&x.deref())?);
-            }
-            strs.push(v);
-        }
-    }
     let lists: Vec<Vec<(Key, Value)>> = arrays.iter().map(entries).collect();
-    let mut out = PhpArray::new();
+    let n0 = lists[0].len();
+    let mut keep = vec![!op.intersect; n0];
     let mut warned = false;
-    for (i, (k, v)) in lists[0].iter().enumerate() {
-        let mut in_all = true;
-        let mut in_any = false;
-        for (ai, other) in lists.iter().enumerate().skip(1) {
-            let mut found = false;
-            // Key-only fast path.
-            if op.values == Cmp::None && op.keys == Cmp::Builtin {
-                found = arrays[ai].get(k.as_ref()).is_some();
-            } else {
-                for (j, (k2, v2)) in other.iter().enumerate() {
-                    let key_ok = match op.keys {
-                        Cmp::None => true,
-                        Cmp::Builtin => k == k2,
-                        Cmp::User => {
-                            user_cmp(
-                                vm,
-                                a,
-                                kcb.as_ref().unwrap(),
-                                k.to_value(),
-                                k2.to_value(),
-                                &mut warned,
-                            )? == Ordering::Equal
-                        }
-                    };
-                    if !key_ok {
-                        continue;
+    let m = lists.len();
+
+    match (op.values, op.keys) {
+        // Keys only, builtin: lookups.
+        (Cmp::None, Cmp::Builtin) => {
+            for (j, (k, _)) in lists[0].iter().enumerate() {
+                let mut in_all = true;
+                let mut in_any = false;
+                for arr in &arrays[1..] {
+                    if arr.get(k.as_ref()).is_some() {
+                        in_any = true;
+                    } else {
+                        in_all = false;
                     }
-                    let val_ok = match op.values {
-                        Cmp::None => true,
-                        Cmp::Builtin => strs[0][i] == strs[ai][j],
-                        Cmp::User => {
-                            user_cmp(
-                                vm,
-                                a,
-                                vcb.as_ref().unwrap(),
-                                v.deref(),
-                                v2.deref(),
-                                &mut warned,
-                            )? == Ordering::Equal
+                }
+                keep[j] = if op.intersect { in_all } else { !in_any };
+            }
+        }
+        // array_diff(): string forms, each converted once.
+        (Cmp::Builtin, Cmp::None) if !op.intersect => {
+            let mut others = std::collections::HashSet::new();
+            let mut first = Vec::with_capacity(n0);
+            for (_, v) in &lists[0] {
+                first.push(vm.to_php_str(&v.deref())?);
+            }
+            for list in &lists[1..] {
+                for (_, v) in list {
+                    others.insert(vm.to_php_str(&v.deref())?);
+                }
+            }
+            for (j, s) in first.iter().enumerate() {
+                keep[j] = !others.contains(s);
+            }
+        }
+        // Values without keys: sort-merge.
+        (Cmp::Builtin | Cmp::User, Cmp::None) => {
+            let cb = vcb.as_ref();
+            let mut sorted = Vec::with_capacity(m);
+            for list in &lists {
+                sorted.push(sorted_positions(vm, a, list, cb, false, &mut warned)?);
+            }
+            let val = |i: usize, p: usize| &lists[i][sorted[i][p]].1;
+            let mut p = vec![0usize; m];
+            let mut j = 0usize;
+            if op.intersect {
+                'top: while j < n0 {
+                    let e = sorted[0][j];
+                    let mut failed = None;
+                    for i in 1..m {
+                        let mut c;
+                        loop {
+                            if p[i] >= lists[i].len() {
+                                // An exhausted array: nothing further is common.
+                                break 'top;
+                            }
+                            c = set_cmp(vm, a, cb, &lists[0][e].1, val(i, p[i]), &mut warned)?;
+                            if c == Ordering::Greater {
+                                p[i] += 1;
+                                continue;
+                            }
+                            break;
                         }
+                        if c != Ordering::Equal {
+                            failed = Some(i);
+                            break;
+                        }
+                        p[i] += 1;
+                    }
+                    match failed {
+                        None => {
+                            keep[e] = true;
+                            while j + 1 < n0
+                                && set_cmp(
+                                    vm,
+                                    a,
+                                    cb,
+                                    &lists[0][sorted[0][j]].1,
+                                    &lists[0][sorted[0][j + 1]].1,
+                                    &mut warned,
+                                )? == Ordering::Equal
+                            {
+                                j += 1;
+                                keep[sorted[0][j]] = true;
+                            }
+                            j += 1;
+                        }
+                        Some(i) => {
+                            // Drop elements while they stay below the
+                            // other array's cursor.
+                            loop {
+                                j += 1;
+                                if j >= n0 {
+                                    break 'top;
+                                }
+                                let e2 = sorted[0][j];
+                                let c =
+                                    set_cmp(vm, a, cb, &lists[0][e2].1, val(i, p[i]), &mut warned)?;
+                                if c != Ordering::Less {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                while j < n0 {
+                    let e = sorted[0][j];
+                    let mut found = false;
+                    for i in 1..m {
+                        let mut c = Ordering::Less;
+                        while p[i] < lists[i].len() {
+                            c = set_cmp(vm, a, cb, &lists[0][e].1, val(i, p[i]), &mut warned)?;
+                            if c == Ordering::Greater {
+                                p[i] += 1;
+                                c = Ordering::Less;
+                                continue;
+                            }
+                            break;
+                        }
+                        if c == Ordering::Equal {
+                            found = true;
+                            p[i] += 1;
+                            break;
+                        }
+                    }
+                    keep[e] = !found;
+                    while j + 1 < n0
+                        && set_cmp(
+                            vm,
+                            a,
+                            cb,
+                            &lists[0][sorted[0][j]].1,
+                            &lists[0][sorted[0][j + 1]].1,
+                            &mut warned,
+                        )? == Ordering::Equal
+                    {
+                        j += 1;
+                        keep[sorted[0][j]] = !found;
+                    }
+                    j += 1;
+                }
+            }
+        }
+        // Builtin keys with value comparison: lookups.
+        (_, Cmp::Builtin) => {
+            let cb = vcb.as_ref();
+            for (j, (k, v)) in lists[0].iter().enumerate() {
+                let mut in_all = true;
+                let mut in_any = false;
+                for arr in &arrays[1..] {
+                    let hit = match arr.get(k.as_ref()) {
+                        Some(o) => {
+                            let o = o.deref();
+                            set_cmp(vm, a, cb, v, &o, &mut warned)? == Ordering::Equal
+                        }
+                        None => false,
                     };
-                    if val_ok {
-                        found = true;
+                    if hit {
+                        in_any = true;
+                    } else {
+                        in_all = false;
+                    }
+                    if (op.intersect && !in_all) || (!op.intersect && in_any) {
                         break;
                     }
                 }
-            }
-            if found {
-                in_any = true;
-            } else {
-                in_all = false;
-            }
-            if op.intersect && !in_all {
-                break;
-            }
-            if !op.intersect && in_any {
-                break;
+                keep[j] = if op.intersect { in_all } else { !in_any };
             }
         }
-        let keep = if op.intersect { in_all } else { !in_any };
-        if keep {
-            out.insert(k.clone(), deref_shared(v));
+        // Key callbacks.
+        (_, Cmp::User) => {
+            let kc = kcb.as_ref();
+            let mut sorted = Vec::with_capacity(m);
+            for list in &lists {
+                sorted.push(sorted_positions(vm, a, list, kc, true, &mut warned)?);
+            }
+            let values = op.values != Cmp::None;
+            let vc = vcb.as_ref();
+            let mut p = vec![0usize; m];
+            for j in 0..n0 {
+                let e = sorted[0][j];
+                let ek = lists[0][e].0.to_value();
+                if op.intersect {
+                    let mut all = true;
+                    for i in 1..m {
+                        // Observed on PHP 8.5: with two callbacks, keys of
+                        // the third and later arrays go through the value
+                        // callback.
+                        let key_cb = if i >= 2 && vc.is_some() { vc } else { kc };
+                        let mut c = Ordering::Less;
+                        let mut hit = false;
+                        while p[i] < lists[i].len() {
+                            let o = &lists[i][sorted[i][p[i]]];
+                            c = set_cmp(vm, a, key_cb, &ek, &o.0.to_value(), &mut warned)?;
+                            if c == Ordering::Greater {
+                                p[i] += 1;
+                                continue;
+                            }
+                            break;
+                        }
+                        if p[i] < lists[i].len() && c == Ordering::Equal {
+                            let o = &lists[i][sorted[i][p[i]]];
+                            hit = !values
+                                || set_cmp(vm, a, vc, &lists[0][e].1, &o.1, &mut warned)?
+                                    == Ordering::Equal;
+                            if hit {
+                                p[i] += 1;
+                            }
+                        }
+                        if !hit {
+                            all = false;
+                            break;
+                        }
+                    }
+                    keep[e] = all;
+                } else {
+                    let mut found = false;
+                    'arrays: for i in 1..m {
+                        for q in 0..lists[i].len() {
+                            let o = &lists[i][sorted[i][q]];
+                            let c = set_cmp(vm, a, kc, &ek, &o.0.to_value(), &mut warned)?;
+                            if c == Ordering::Equal {
+                                if !values
+                                    || set_cmp(vm, a, vc, &lists[0][e].1, &o.1, &mut warned)?
+                                        == Ordering::Equal
+                                {
+                                    found = true;
+                                    break 'arrays;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    keep[e] = !found;
+                }
+            }
+        }
+        (Cmp::None, Cmp::None) => {}
+    }
+    let mut out = PhpArray::new();
+    for (j, (k, v)) in lists[0].iter().enumerate() {
+        if keep[j] {
+            out.insert(k.clone(), v.clone());
         }
     }
-    let _ = first;
     Ok(Value::Array(out))
 }
 
@@ -2253,8 +2602,21 @@ fn array_pop(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     drop(arr);
     let mut arr = take_ref_array(&r);
-    let v = arr.make_mut().pop();
-    arr.make_mut().reset();
+    let d = arr.make_mut();
+    let last = d.last_pos().and_then(|p| d.key_at(p)).map(|k| k.to_owned());
+    let next = d.next_index();
+    let v = match &last {
+        Some(k) => d.remove(k.as_ref()),
+        None => None,
+    };
+    // Tests bug67693.phpt, negative_index.phpt: popping the last int key
+    // lowers the next index to it, other pops keep it.
+    if let (Some(Key::Int(k)), Some(n)) = (&last, next)
+        && k.checked_add(1) == Some(n)
+    {
+        d.set_next_index(*k);
+    }
+    d.reset();
     r.set(Value::Array(arr));
     Ok(v.map(|v| v.into_deref()).unwrap_or(Value::Null))
 }
@@ -2409,11 +2771,20 @@ fn pointer_target(vm: &mut Vm, a: &Args) -> R<Option<PhpRef>> {
     Ok(Some(r))
 }
 
-fn obj_props_array(vm: &mut Vm, a: &Args) -> PhpArray {
-    match a.val(0) {
-        Value::Object(o) => vm.object_props_array(&o, true),
-        _ => PhpArray::new(),
+/// Applies `f` to the property table of an object (the internal pointer
+/// of objects with only dynamic properties persists there, as PHP keeps
+/// it in the property table: test gh16905.phpt), returning `get`'s result.
+fn with_obj_table<T>(vm: &mut Vm, a: &Args, f: impl FnOnce(&mut PhpArray) -> T) -> T {
+    let Value::Object(o) = a.val(0) else {
+        return f(&mut PhpArray::new());
+    };
+    let declared = !vm.class_of(&o).props.borrow().is_empty();
+    if declared {
+        let mut arr = vm.object_props_array(&o, true);
+        return f(&mut arr);
     }
+    let mut t = o.obj().props.borrow_mut();
+    f(&mut t)
 }
 
 fn cur_value(arr: &PhpArray) -> Value {
@@ -2425,9 +2796,12 @@ fn cur_value(arr: &PhpArray) -> Value {
 
 fn move_pointer(vm: &mut Vm, a: &mut Args, f: fn(&mut goro_runtime::ArrayData)) -> R<Value> {
     let Some(r) = pointer_target(vm, a)? else {
-        let mut arr = obj_props_array(vm, a);
-        f(arr.make_mut());
-        return Ok(cur_value(&arr));
+        return Ok(with_obj_table(vm, a, |arr| {
+            if !arr.is_empty() {
+                f(arr.make_mut());
+            }
+            cur_value(arr)
+        }));
     };
     let mut b = r.borrow_mut();
     let Value::Array(arr) = &mut *b else {
@@ -2460,24 +2834,23 @@ fn current(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 a,
                 &format!("Calling {}() on an object is deprecated", a.fname()),
             )?;
-            let arr = obj_props_array(vm, a);
-            Ok(cur_value(&arr))
+            Ok(with_obj_table(vm, a, |arr| cur_value(arr)))
         }
         _ => Ok(Value::Bool(false)),
     }
 }
 
 fn key(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let arr = match a.val(0) {
-        Value::Array(arr) => arr,
-        Value::Object(_) => {
-            vm.fdeprecated(a, "Calling key() on an object is deprecated")?;
-            obj_props_array(vm, a)
-        }
-        _ => return Ok(Value::Null),
-    };
-    Ok(match arr.data().current_key() {
+    let k = |arr: &PhpArray| match arr.data().current_key() {
         Some(k) => key_value(k),
         None => Value::Null,
-    })
+    };
+    match a.val(0) {
+        Value::Array(arr) => Ok(k(&arr)),
+        Value::Object(_) => {
+            vm.fdeprecated(a, "Calling key() on an object is deprecated")?;
+            Ok(with_obj_table(vm, a, |arr| k(arr)))
+        }
+        _ => Ok(Value::Null),
+    }
 }

@@ -12,7 +12,7 @@ use goro_ext_standard::mt_rand::{Mt19937, MtMode};
 use goro_runtime::compare::compare;
 use goro_runtime::{PhpStr, Value};
 
-use super::string::{diags, sr, sv};
+use super::string::{sr, sv};
 use crate::func::Args;
 use crate::registry::{ConstVal, Module};
 use crate::vm::{R, Vm};
@@ -97,7 +97,7 @@ pub static MODULE: Module = Module {
     ],
     classes: &[(
         "roundingmode",
-        "enum RoundingMode { case HalfAwayFromZero; case HalfTowardsZero; case HalfEven; case HalfOdd; case TowardsZero; case AwayFromZero; case NegativeInfinity; case PositiveInfinity; }",
+        "<?php enum RoundingMode { case HalfAwayFromZero; case HalfTowardsZero; case HalfEven; case HalfOdd; case TowardsZero; case AwayFromZero; case NegativeInfinity; case PositiveInfinity; }",
     )],
     constants: &[
         ("M_E", ConstVal::Float(std::f64::consts::E)),
@@ -315,8 +315,29 @@ unary_float! {
     asinh => f64::asinh,
     acosh => f64::acosh,
     atanh => f64::atanh,
-    deg2rad => f64::to_radians,
-    rad2deg => f64::to_degrees,
+}
+
+// Tests math/deg2rad_variation.phpt, rad2deg_basiclong_64bit.phpt: the
+// division comes first.
+fn deg2rad(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Float(a.float(0) / 180.0 * std::f64::consts::PI))
+}
+fn rad2deg(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Float(a.float(0) / std::f64::consts::PI * 180.0))
+}
+
+/// Raises base-conversion diagnostics, which PHP reports without the
+/// function name (tests math/bindec_basic_64bit.phpt, hexdec.phpt).
+fn base_diags(vm: &mut Vm, d: Vec<goro_ext_standard::error::Diag>) -> R<()> {
+    use goro_ext_standard::error::Diag;
+    for x in d {
+        match x {
+            Diag::Warning(m) => vm.warn(&m)?,
+            Diag::Notice(m) => vm.notice_msg(&m)?,
+            Diag::Deprecated(m) => vm.deprecated(&m)?,
+        }
+    }
+    Ok(())
 }
 
 fn log(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -431,14 +452,14 @@ fn base_convert(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut d = Vec::new();
     let r = std_ext::math::base_convert(a.bytes(0), a.int(1), a.int(2), &mut d);
     let r = sr(vm, r)?;
-    diags(vm, a, d)?;
+    base_diags(vm, d)?;
     Ok(sv(r))
 }
 
 fn parse_base_fn(vm: &mut Vm, a: &mut Args, base: u32) -> R<Value> {
     let mut d = Vec::new();
     let n = std_ext::math::parse_base(a.bytes(0), base, &mut d);
-    diags(vm, a, d)?;
+    base_diags(vm, d)?;
     Ok(number(n))
 }
 

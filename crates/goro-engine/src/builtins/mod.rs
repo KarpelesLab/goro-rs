@@ -7,13 +7,17 @@ pub mod core_funcs;
 pub mod enums;
 pub mod fiber;
 pub mod file;
+pub mod ini;
 pub mod json;
 pub mod math;
+pub mod misc;
 pub mod output;
+pub mod password;
 pub mod reflection;
 pub mod serialize;
 pub mod spl;
 pub mod string;
+pub mod strmisc;
 pub mod var;
 
 use crate::registry::Module;
@@ -32,6 +36,10 @@ pub fn modules() -> Vec<&'static Module> {
         &reflection::MODULE,
         &spl::MODULE,
         &string::MODULE,
+        &strmisc::MODULE,
+        &password::MODULE,
+        &misc::MODULE,
+        &ini::MODULE,
         &array::MODULE,
         &math::MODULE,
     ]

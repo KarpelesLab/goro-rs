@@ -298,6 +298,7 @@ fn encode(s: &[u8], flags: i64, cs: Charset, double_encode: bool, all: bool) -> 
         if all
             && doctype == Doctype::Html5
             && matches!(cp, Some(0x3C | 0x3E))
+            && i < s.len()
             && let Ok((Some(0x20D2), n2)) = cs.decode(s, i)
         {
             push_entity(&mut out, if cp == Some(0x3C) { "nvlt" } else { "nvgt" });
@@ -354,6 +355,7 @@ fn encode(s: &[u8], flags: i64, cs: Charset, double_encode: bool, all: bool) -> 
                     Doctype::Html5 => {
                         let mut found = None;
                         if html5_has_pair_prefix(c)
+                            && i < s.len()
                             && let Ok((Some(c2), n2)) = cs.decode(s, i)
                             && let Some(name) = find_html5_encode(c, c2)
                         {

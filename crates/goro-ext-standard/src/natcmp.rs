@@ -67,6 +67,13 @@ pub fn natcmp(a: &[u8], b: &[u8], ci: bool) -> Ordering {
                     return o;
                 }
             }
+            // Trailing whitespace of both sides compares equal, whatever
+            // the bytes (observed on PHP 8.5: strnatcmp("\f", "\n") is 0;
+            // test ext/standard/tests/array/sort/natcasesort_variation4.phpt).
+            (Some(x), Some(y)) if is_space(x) && is_space(y) => {
+                i += 1;
+                j += 1;
+            }
             (Some(x), Some(y)) => {
                 let o = fold(x).cmp(&fold(y));
                 if o != Ordering::Equal {

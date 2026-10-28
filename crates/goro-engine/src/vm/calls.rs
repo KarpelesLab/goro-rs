@@ -816,6 +816,114 @@ impl Vm {
         )
     }
 
+    /// Why a value is not callable, as PHP words it in "must be a valid
+    /// callback" errors (observed on PHP 8.5 and in tests
+    /// ext/standard/tests/array/array_map_object*.phpt).
+    pub fn callable_error(&mut self, v: &Value) -> String {
+        let v = v.deref();
+        let class_named = |vm: &mut Vm, n: &[u8]| -> Option<Rc<Class>> {
+            let l = crate::class::lower(n);
+            match l.as_bytes() {
+                b"self" | b"static" | b"parent" => {
+                    let p = if l.as_bytes() == b"static" {
+                        vm.static_class_ptr()
+                    } else {
+                        vm.scope_ptr()
+                    };
+                    if p.is_null() {
+                        return None;
+                    }
+                    let c = vm.rc_class(p);
+                    if l.as_bytes() == b"parent" {
+                        c.parent.clone()
+                    } else {
+                        Some(c)
+                    }
+                }
+                _ => {
+                    let saved = vm.err.deferred.take();
+                    let r = vm.find_class(n, true).ok().flatten();
+                    vm.err.deferred = saved;
+                    r
+                }
+            }
+        };
+        let method_reason = |vm: &mut Vm, cls: &Rc<Class>, m: &[u8], has_this: bool| -> String {
+            match cls.find_method(&crate::class::lower(m)) {
+                None => format!(
+                    "class {} does not have a method \"{}\"",
+                    cls.name.to_string_lossy(),
+                    String::from_utf8_lossy(m)
+                ),
+                Some(f) => {
+                    let scope = vm.scope_ptr();
+                    if !has_this && f.flags & mflags::STATIC == 0 && vm.this_obj().is_none() {
+                        return format!(
+                            "non-static method {}() cannot be called statically",
+                            f.display_name()
+                        );
+                    }
+                    if !vm.method_visible(&f, scope) {
+                        let vis = if f.flags & mflags::PRIVATE != 0 {
+                            "private"
+                        } else {
+                            "protected"
+                        };
+                        return format!("cannot access {} method {}()", vis, f.display_name());
+                    }
+                    if f.flags & mflags::ABSTRACT != 0 {
+                        return format!("cannot call abstract method {}()", f.display_name());
+                    }
+                    "no array or string given".to_string()
+                }
+            }
+        };
+        match &v {
+            Value::Str(s) => {
+                if let Some(p) = find_double_colon(s) {
+                    let cn = &s[..p];
+                    return match class_named(self, cn) {
+                        Some(c) => method_reason(self, &c, &s[p + 2..], false),
+                        None => format!("class \"{}\" not found", String::from_utf8_lossy(cn)),
+                    };
+                }
+                format!(
+                    "function \"{}\" not found or invalid function name",
+                    s.to_string_lossy()
+                )
+            }
+            Value::Array(a) => {
+                if a.len() != 2 {
+                    return "array callback must have exactly two members".to_string();
+                }
+                let (Some(t), Some(m)) = (
+                    a.get_int(0).map(|x| x.deref()),
+                    a.get_int(1).map(|x| x.deref()),
+                ) else {
+                    return "array callback must have exactly two members".to_string();
+                };
+                if !matches!(t, Value::Object(_) | Value::Str(_)) {
+                    return "first array member is not a valid class name or object".to_string();
+                }
+                let Value::Str(m) = m else {
+                    return "second array member is not a valid method".to_string();
+                };
+                match t {
+                    Value::Object(o) => {
+                        let cls = self.class_of(&o);
+                        method_reason(self, &cls, &m, true)
+                    }
+                    Value::Str(cn) => match class_named(self, &cn) {
+                        Some(c) => method_reason(self, &c, &m, false),
+                        None => format!("class \"{}\" not found", cn.to_string_lossy()),
+                    },
+                    _ => "first array member is not a valid class name or object".to_string(),
+                }
+            }
+            _ => "no array or string given".to_string(),
+        }
+    }
+
     pub fn func_display_name(&self, f: &Func) -> String {
         if let FuncKind::User(c) = &f.kind
             && c.flags & fflags::CLOSURE != 0
@@ -865,7 +973,7 @@ impl Vm {
     /// array_multisort examples passing SORT_DESC).
     fn pending_prefers_ref(&self) -> bool {
         let p = self.ex.pending.last().unwrap();
-        p.func.is_native() && p.func.lname.as_bytes() == b"array_multisort"
+        p.func.is_native() && matches!(p.func.lname.as_bytes(), b"array_multisort" | b"extract")
     }
 
     pub(crate) fn send_val(&mut self, arg: u32, v: Value, from_call: bool) -> R<()> {
@@ -1151,6 +1259,25 @@ impl Vm {
                 &format!("Cannot call {}() dynamically", func.name.dname()),
             );
         }
+        // Internal variadic functions take no extra named arguments, except
+        // the callers of callbacks (test Zend/tests/named_params/
+        // internal_variadics.phpt).
+        if named.as_ref().is_some_and(|n| !n.is_empty())
+            && func.scope().is_none()
+            && !matches!(
+                func.lname.as_bytes(),
+                b"call_user_func" | b"forward_static_call"
+            )
+        {
+            self.give_args_vec(args);
+            return self.throw(
+                "ArgumentCountError",
+                &format!(
+                    "{}() does not accept unknown named parameters",
+                    func.display_name()
+                ),
+            );
+        }
         self.ex.native_calls.push(super::NativeCall {
             func: func.clone(),
             args: &args as *const Vec<Value>,
@@ -1190,6 +1317,21 @@ impl Vm {
                     let p = &sig.params[i];
                     match &p.default {
                         ParamDefault::Const(v) => args[i] = v.clone(),
+                        // Optional parameters without a default (written
+                        // `= UNKNOWN` in signatures): observed on PHP 8.5,
+                        // "Argument #2 ($filter_value) must be passed
+                        // explicitly, because the default value is not known".
+                        ParamDefault::Lazy(_) if p.default_text.as_deref() == Some("UNKNOWN") => {
+                            return self.throw(
+                                "ArgumentCountError",
+                                &format!(
+                                    "{}(): Argument #{} (${}) must be passed explicitly, because the default value is not known",
+                                    fname,
+                                    i + 1,
+                                    p.name.to_string_lossy()
+                                ),
+                            );
+                        }
                         ParamDefault::Lazy(ce) => {
                             let ce = ce.clone();
                             args[i] = self.eval_const_expr(&ce, std::ptr::null())?;
@@ -1245,6 +1387,16 @@ impl Vm {
             );
         }
         let strict = self.caller_strict();
+        // Internal "array or object" parameters are reported as arrays
+        // (observed on PHP 8.5: "reset(): Argument #1 ($array) must be of
+        // type array, string given").
+        let shown = |ty: &TypeHint| {
+            if ty.mask == tmask::ARRAY | tmask::OBJECT && ty.classes.is_empty() {
+                "array".to_string()
+            } else {
+                ty.display()
+            }
+        };
         for i in 0..n {
             let p = if i < np {
                 &sig.params[i]
@@ -1253,9 +1405,31 @@ impl Vm {
             };
             let Some(ty) = &p.ty else { continue };
             if p.by_ref {
-                // Checked by the function itself (it writes the result).
                 if !matches!(args[i], Value::Ref(_)) {
                     args[i] = Value::Ref(PhpRef::new(std::mem::take(&mut args[i])));
+                }
+                // Container types (`array &$array`) are checked in argument
+                // order like the others (observed on PHP 8.5: usort($null,
+                // "nope") reports argument #1); scalar ones are left to the
+                // function, which writes the result.
+                let scalar = tmask::BOOL | tmask::INT | tmask::FLOAT | tmask::STRING;
+                if ty.mask & (scalar | tmask::MIXED) == 0 {
+                    let cur = args[i].deref();
+                    if let Check::Fail =
+                        self.check_type(&cur, ty, true, func.scope.get(), std::ptr::null())?
+                    {
+                        return self.throw(
+                            "TypeError",
+                            &format!(
+                                "{}(): Argument #{} (${}) must be of type {}, {} given",
+                                fname,
+                                i + 1,
+                                p.name.to_string_lossy(),
+                                shown(ty),
+                                Vm::type_name_given(&cur)
+                            ),
+                        );
+                    }
                 }
                 continue;
             }
@@ -1289,6 +1463,23 @@ impl Vm {
             match self.check_type(&args[i], ty, strict, func.scope.get(), std::ptr::null())? {
                 Check::Ok => {}
                 Check::Coerced(v) => args[i] = v,
+                Check::Fail if ty.mask & !tmask::NULL == tmask::CALLABLE && ty.classes.is_empty() => {
+                    // PHP explains why a value is not callable (observed on
+                    // PHP 8.5: "must be a valid callback or null, function
+                    // \"x\" not found or invalid function name").
+                    let why = self.callable_error(&args[i]);
+                    return self.throw(
+                        "TypeError",
+                        &format!(
+                            "{}(): Argument #{} (${}) must be a valid callback{}, {}",
+                            fname,
+                            i + 1,
+                            p.name.to_string_lossy(),
+                            if ty.allows_null() { " or null" } else { "" },
+                            why
+                        ),
+                    );
+                }
                 Check::Fail => {
                     // Variadic parameters are not named (observed on PHP
                     // 8.5: "array_diff(): Argument #2 must be of type array").
@@ -1304,7 +1495,7 @@ impl Vm {
                             fname,
                             i + 1,
                             pname,
-                            ty.display(),
+                            shown(ty),
                             Vm::type_name_given(&args[i])
                         ),
                     );
@@ -1988,6 +2179,7 @@ impl Vm {
             if !magic && self.pending_arg_by_ref(i) {
                 let v = match a {
                     Value::Ref(_) => a,
+                    other if self.pending_prefers_ref() => other,
                     other => {
                         let f = self.ex.pending.last().unwrap().func.clone();
                         let pname = self
@@ -2043,6 +2235,7 @@ impl Vm {
                     let v = if self.pending_arg_by_ref(i) {
                         match a {
                             Value::Ref(_) => a.clone(),
+                            other if self.pending_prefers_ref() => other.clone(),
                             other => {
                                 let f = self.ex.pending.last().unwrap().func.clone();
                                 let pname = self
