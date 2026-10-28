@@ -856,8 +856,21 @@ impl Vm {
         }
     }
 
+    /// Whether the pending call's by-reference parameters also accept
+    /// values without a notice ("prefer reference", as array_multisort()'s
+    /// do: test ext/standard/tests/array/sort/bug77395.phpt, PHP manual
+    /// array_multisort examples passing SORT_DESC).
+    fn pending_prefers_ref(&self) -> bool {
+        let p = self.ex.pending.last().unwrap();
+        p.func.is_native() && p.func.lname.as_bytes() == b"array_multisort"
+    }
+
     pub(crate) fn send_val(&mut self, arg: u32, v: Value, from_call: bool) -> R<()> {
         if self.pending_arg_by_ref(arg) {
+            if self.pending_prefers_ref() {
+                self.put_arg(arg, v);
+                return Ok(());
+            }
             if from_call {
                 self.notice_msg("Only variables should be passed by reference")?;
                 self.put_arg(arg, Value::Ref(PhpRef::new(v)));
@@ -1263,15 +1276,22 @@ impl Vm {
                 Check::Ok => {}
                 Check::Coerced(v) => args[i] = v,
                 Check::Fail => {
+                    // Variadic parameters are not named (observed on PHP
+                    // 8.5: "array_diff(): Argument #2 must be of type array").
+                    let pname = if p.variadic {
+                        String::new()
+                    } else {
+                        format!(" (${})", p.name.to_string_lossy())
+                    };
                     return self.throw(
                         "TypeError",
                         &format!(
-                            "{}(): Argument #{} (${}) must be of type {}, {} given",
+                            "{}(): Argument #{}{} must be of type {}, {} given",
                             fname,
                             i + 1,
-                            p.name.to_string_lossy(),
+                            pname,
                             ty.display(),
-                            args[i].type_name_for_error()
+                            Vm::type_name_given(&args[i])
                         ),
                     );
                 }
@@ -1411,7 +1431,7 @@ impl Vm {
                                 self.func_display_name(&func),
                                 vi + k + 1,
                                 ty.display(),
-                                v.type_name_for_error(),
+                                Vm::type_name_given(&v),
                                 self.cur_file().to_string_lossy(),
                                 self.cur_line()
                             );
@@ -1591,7 +1611,7 @@ impl Vm {
                     i + 1,
                     code.params[i].name.to_string_lossy(),
                     ty.display(),
-                    val.type_name_for_error(),
+                    Vm::type_name_given(&val),
                     self.cur_file().to_string_lossy(),
                     self.cur_line()
                 );
@@ -1701,7 +1721,7 @@ impl Vm {
                     param + 1,
                     code.params[param as usize].name.to_string_lossy(),
                     ty.display(),
-                    v.type_name_for_error()
+                    Vm::type_name_given(&v)
                 );
                 self.throw("TypeError", &msg)
             }

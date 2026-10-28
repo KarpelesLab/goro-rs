@@ -260,9 +260,14 @@ impl Vm {
         }
     }
 
-    /// The type of a value as PHP names it in type errors ("int",
-    /// "string", "Foo", "null").
+    /// The type of a value as PHP names it in argument type errors
+    /// ("int", "string", "Foo", "null", and "true"/"false" for booleans:
+    /// observed on PHP 8.5, "must be of type int, true given").
     pub fn type_name_given(v: &Value) -> String {
-        v.type_name_for_error()
+        match v.deref() {
+            Value::Bool(true) => "true".to_string(),
+            Value::Bool(false) => "false".to_string(),
+            v => v.type_name_for_error(),
+        }
     }
 }

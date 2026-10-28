@@ -330,7 +330,7 @@ impl Vm {
                 func,
                 n,
                 pname,
-                v.type_name_for_error()
+                Vm::type_name_given(v)
             )),
         }
     }
