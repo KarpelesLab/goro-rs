@@ -977,7 +977,7 @@ fn kind_exists(vm: &mut Vm, a: &mut Args, pred: fn(&Class) -> bool) -> R<Value> 
 }
 
 fn class_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    kind_exists(vm, a, |c| c.kind == crate::class::ClassKind::Class)
+    kind_exists(vm, a, |c| c.kind == crate::class::ClassKind::Class || c.is_enum())
 }
 fn interface_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
     kind_exists(vm, a, |c| c.is_interface())

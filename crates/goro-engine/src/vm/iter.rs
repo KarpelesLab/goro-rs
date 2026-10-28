@@ -17,6 +17,9 @@ const M_ITER: i64 = 3;
 const M_GEN_FIRST: i64 = 4;
 const M_GEN: i64 = 5;
 const M_PROPS_REF: i64 = 6;
+/// Plain object by value: [object, snapshot of its visible properties]
+/// (the object stays alive while iterated).
+const M_PROPS_VAL: i64 = 7;
 
 #[inline]
 fn enc(mode: i64, data: i64) -> Value {
@@ -211,9 +214,10 @@ impl Vm {
                     };
                     arr.insert(key, v.deref());
                 }
+                let pack = PhpArray::from_values([Value::Object(o), Value::Array(arr)]);
                 unsafe {
-                    *sa = Some(Value::Array(arr));
-                    *sb = Some(enc(M_ARRAY, 0));
+                    *sa = Some(Value::Array(pack));
+                    *sb = Some(enc(M_PROPS_VAL, 0));
                 }
                 Ok(true)
             }
@@ -283,6 +287,25 @@ impl Vm {
                 let k = k.to_value();
                 let v = v.deref();
                 unsafe { *sb = Some(enc(M_ARRAY, p as i64 + 1)) };
+                self.put(val, v);
+                if key != NONE {
+                    self.put(key, k);
+                }
+                Ok(true)
+            }
+            M_PROPS_VAL => {
+                let Some(Value::Array(pack)) = (unsafe { &*sa }) else {
+                    return Ok(false);
+                };
+                let Some(Value::Array(a)) = pack.get_int(1) else {
+                    return Ok(false);
+                };
+                let Some((p, k, v)) = a.data().next_from(data as u32) else {
+                    return Ok(false);
+                };
+                let k = k.to_value();
+                let v = v.deref();
+                unsafe { *sb = Some(enc(M_PROPS_VAL, p as i64 + 1)) };
                 self.put(val, v);
                 if key != NONE {
                     self.put(key, k);
@@ -546,7 +569,16 @@ impl Vm {
                 let fresh = self
                     .with_gen(g, |d| std::mem::replace(&mut d.delegate_fresh, false))
                     .unwrap();
-                match self.delegate_step(g, fresh, send.take(), throw.take())? {
+                // Running while its delegate runs (it cannot be resumed or
+                // force-closed meanwhile).
+                self.with_gen(g, |d| d.state = GenState::Running);
+                let r = self.delegate_step(g, fresh, send.take(), throw.take());
+                self.with_gen(g, |d| {
+                    if d.state == GenState::Running {
+                        d.state = GenState::Suspended;
+                    }
+                });
+                match r? {
                     true => return Ok(()),
                     false => {
                         // Delegate finished: its result went to yield_dst.
@@ -753,6 +785,9 @@ impl Vm {
         self.with_gen(g, |d| {
             d.delegate = None;
             d.yield_dst = NONE;
+            if d.state == GenState::Running {
+                d.state = GenState::Suspended;
+            }
         });
         self.gen_resume(g, None, Some(e))?;
         Ok(true)

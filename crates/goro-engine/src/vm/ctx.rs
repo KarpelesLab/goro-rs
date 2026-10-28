@@ -331,7 +331,7 @@ impl Vm {
                 func,
                 n,
                 pname,
-                v.tname()
+                Vm::type_name_given(v)
             )),
         }
     }

@@ -1055,6 +1055,14 @@ pub struct FuncCode {
     pub ret_type: Option<TypeHint>,
     pub flags: u32,
     pub try_ranges: Vec<TryRange>,
+    /// (start, end, try index): instructions not covered by that try
+    /// statement although inside its range (code leaving it on return,
+    /// break or goto, after its finally ran).
+    pub try_holes: Vec<(u32, u32, u32)>,
+    /// (start, end, slot, is_iterator): loop temporaries (foreach
+    /// iterators, switch subjects) live over [start, end), freed when an
+    /// exception leaves that range.
+    pub live_ranges: Vec<(u32, u32, Reg, bool)>,
     pub paths: Vec<WritePath>,
     pub lists: Vec<Vec<Reg>>,
     pub tables: Vec<SwitchTable>,

@@ -541,7 +541,8 @@ impl Vm {
     /// current directory (chdir changes it).
     pub fn fs_path(&self, p: &[u8]) -> PathBuf {
         let p = os(p);
-        if p.is_absolute() {
+        // An empty path names nothing (ENOENT), not the working directory.
+        if p.as_os_str().is_empty() || p.is_absolute() {
             p.to_path_buf()
         } else {
             self.cwd.join(p)

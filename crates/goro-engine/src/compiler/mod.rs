@@ -72,12 +72,27 @@ pub(crate) struct LoopCtx {
     /// Iterator (foreach) or subject (switch) slot to free when leaving.
     free: Option<(Reg, bool)>,
     finally_depth: usize,
+    /// `regions.len()` when the loop was entered.
+    region_len: usize,
+    /// First instruction of the loop (where its temporary is live).
+    start: u32,
+}
+
+/// A block a `goto` may leave or enter: loops (with the temporary freed
+/// when leaving), and the parts of a try statement (by try range index).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Region {
+    Loop(u32, Option<(Reg, bool)>),
+    Try(u32),
+    Catch(u32),
+    Finally(u32),
 }
 
 pub(crate) struct FinCtx {
     ret: Reg,
     fastcalls: Vec<usize>,
-    loop_depth: usize,
+    /// The try range this finally belongs to.
+    range: u32,
 }
 
 /// State of the function being compiled.
@@ -98,13 +113,17 @@ pub(crate) struct FState<'a> {
     pub children: Vec<Rc<FuncCode>>,
     pub classes: Vec<Rc<ClassDecl>>,
     pub try_ranges: Vec<TryRange>,
+    pub try_holes: Vec<(u32, u32, u32)>,
+    pub live_ranges: Vec<(u32, u32, Reg, bool)>,
     pub type_hints: Vec<TypeHint>,
     pub num_caches: u32,
     loops: Vec<LoopCtx>,
     finallys: Vec<FinCtx>,
     pub call_depth: u32,
-    labels: HashMap<&'a [u8], (u32, usize)>,
-    gotos: Vec<(&'a [u8], usize, u32, usize)>,
+    labels: HashMap<&'a [u8], (u32, Vec<Region>)>,
+    gotos: Vec<(&'a [u8], usize, u32, Vec<Region>)>,
+    regions: Vec<Region>,
+    region_ids: u32,
     pub flags: u32,
     pub num_statics: u32,
     pub line: u32,
@@ -143,6 +162,8 @@ impl<'a> FState<'a> {
             children: Vec::new(),
             classes: Vec::new(),
             try_ranges: Vec::new(),
+            try_holes: Vec::new(),
+            live_ranges: Vec::new(),
             type_hints: Vec::new(),
             num_caches: 0,
             loops: Vec::new(),
@@ -150,6 +171,8 @@ impl<'a> FState<'a> {
             call_depth: 0,
             labels: HashMap::new(),
             gotos: Vec::new(),
+            regions: Vec::new(),
+            region_ids: 0,
             flags: 0,
             num_statics: 0,
             line: 1,
@@ -535,9 +558,9 @@ impl<'a> Compiler<'a> {
     ) -> CResult<FuncCode> {
         // Resolve gotos.
         let gotos = std::mem::take(&mut self.f.gotos);
-        for (label, at, line, _depth) in gotos {
-            match self.f.labels.get(label) {
-                Some(&(target, _)) => self.patch(at, target),
+        for (label, at, line, gpath) in gotos {
+            match self.f.labels.get(label).cloned() {
+                Some((target, lpath)) => self.resolve_goto(at, line, target, &gpath, &lpath)?,
                 None => {
                     return self.err(
                         format!(
@@ -576,6 +599,8 @@ impl<'a> Compiler<'a> {
             ret_type,
             flags,
             try_ranges: std::mem::take(&mut f.try_ranges),
+            try_holes: std::mem::take(&mut f.try_holes),
+            live_ranges: std::mem::take(&mut f.live_ranges),
             paths: std::mem::take(&mut f.paths),
             lists: std::mem::take(&mut f.lists),
             tables: std::mem::take(&mut f.tables),
@@ -813,8 +838,8 @@ impl<'a> Compiler<'a> {
             StmtKind::Try(t) => self.try_stmt(t)?,
             StmtKind::Goto(l) => {
                 let at = self.emit(Op::Jmp { t: 0 });
-                let depth = self.f.loops.len();
-                self.f.gotos.push((l.name, at, s.span.line, depth));
+                let path = self.f.regions.clone();
+                self.f.gotos.push((l.name, at, s.span.line, path));
             }
             StmtKind::Label(l) => {
                 if self.f.labels.contains_key(l.name) {
@@ -827,8 +852,8 @@ impl<'a> Compiler<'a> {
                     );
                 }
                 let h = self.here();
-                let d = self.f.loops.len();
-                self.f.labels.insert(l.name, (h, d));
+                let path = self.f.regions.clone();
+                self.f.labels.insert(l.name, (h, path));
             }
             StmtKind::Declare(d) => {
                 self.declare_directives(d, s.span.line)?;
@@ -1116,19 +1141,106 @@ impl<'a> Compiler<'a> {
 
     fn push_loop(&mut self, is_switch: bool, free: Option<(Reg, bool)>) {
         let fd = self.f.finallys.len();
+        let region_len = self.f.regions.len();
+        self.f.region_ids += 1;
+        self.f.regions.push(Region::Loop(self.f.region_ids, free));
         self.f.loops.push(LoopCtx {
             breaks: Vec::new(),
             continues: Vec::new(),
             is_switch,
             free,
             finally_depth: fd,
+            region_len,
+            start: self.f.ops.len() as u32,
         });
+    }
+
+    /// Patches a goto: directly, or through a stub that frees the loop
+    /// temporaries and runs the finally blocks of the blocks it leaves.
+    fn resolve_goto(&mut self, at: usize, line: u32, target: u32, g: &[Region], l: &[Region]) -> CResult<()> {
+        let k = g.iter().zip(l.iter()).take_while(|(a, b)| a == b).count();
+        if l[k..].iter().any(|r| matches!(r, Region::Finally(_))) {
+            return self.err("jump into a finally block is disallowed", line);
+        }
+        if l[k..].iter().any(|r| matches!(r, Region::Loop(..))) {
+            return self.err("'goto' into loop or switch statement is disallowed", line);
+        }
+        if g[k..].iter().any(|r| matches!(r, Region::Finally(_))) {
+            return self.err("jump out of a finally block is disallowed", line);
+        }
+        let needs_stub = g[k..].iter().any(|r| match r {
+            Region::Loop(_, f) => f.is_some(),
+            Region::Try(i) | Region::Catch(i) => self.f.try_ranges[*i as usize].finally != 0,
+            Region::Finally(_) => false,
+        });
+        if !needs_stub {
+            self.patch(at, target);
+            return Ok(());
+        }
+        let stub = self.here();
+        self.patch(at, stub);
+        self.f.line = line;
+        self.leave_regions(&g[k..]);
+        self.emit(Op::Jmp { t: target });
+        Ok(())
+    }
+
+    /// Emits the code leaving the blocks of `path` (innermost last): loop
+    /// temporaries are freed and finally blocks called. Each instruction is
+    /// outside the try statements already left (an exception thrown by a
+    /// destructor there is not caught by them). Returns those try ranges.
+    fn leave_regions(&mut self, path: &[Region]) -> Vec<u32> {
+        let mut exited: Vec<u32> = Vec::new();
+        for r in path.iter().rev() {
+            match *r {
+                Region::Loop(_, Some((slot, is_iter))) => {
+                    let at = self.here();
+                    if is_iter {
+                        self.emit(Op::FeFree { iter: slot });
+                    } else {
+                        self.emit(Op::Free { slot });
+                    }
+                    self.add_holes(at, self.here(), &exited);
+                }
+                Region::Loop(_, None) => {}
+                Region::Try(i) | Region::Catch(i) => {
+                    let tr = self.f.try_ranges[i as usize];
+                    if tr.finally_ret != NONE {
+                        let at = self.emit(Op::FastCall {
+                            t: tr.finally,
+                            ret: tr.finally_ret,
+                        });
+                        if tr.finally == 0
+                            && let Some(fc) = self.f.finallys.iter_mut().find(|f| f.range == i)
+                        {
+                            fc.fastcalls.push(at);
+                        }
+                        self.add_holes(at as u32, at as u32 + 1, &exited);
+                    }
+                    exited.push(i);
+                }
+                Region::Finally(i) => exited.push(i),
+            }
+        }
+        exited
+    }
+
+    fn add_holes(&mut self, start: u32, end: u32, tries: &[u32]) {
+        if start < end {
+            for &t in tries {
+                self.f.try_holes.push((start, end, t));
+            }
+        }
     }
 
     /// Ends a loop: breaks jump here, continues to `cont`.
     fn pop_loop(&mut self, cont: u32) {
         let l = self.f.loops.pop().unwrap();
+        self.f.regions.truncate(l.region_len);
         let end = self.here();
+        if let Some((slot, is_iter)) = l.free {
+            self.f.live_ranges.push((l.start, end, slot, is_iter));
+        }
         for b in l.breaks {
             self.patch(b, end);
         }
@@ -1178,6 +1290,10 @@ impl<'a> Compiler<'a> {
             );
         }
         let target = self.f.loops.len() - n;
+        let rl = self.f.loops[target].region_len;
+        if self.f.regions[rl..].iter().any(|r| matches!(r, Region::Finally(_))) {
+            return self.err("jump out of a finally block is disallowed", line);
+        }
         if !is_break && self.f.loops[target].is_switch {
             // continue targeting switch acts as break (compile warning
             // emitted by PHP for `continue` without levels).
@@ -1191,33 +1307,12 @@ impl<'a> Compiler<'a> {
             };
             self.notice(goro_runtime::Level::Warning, msg, line);
         }
-        // Finally blocks between here and the target run first.
-        let fdepth = self.f.loops[target].finally_depth;
-        self.call_finallys(fdepth);
-        // Free iterators of the loops being left (not the target's own on
-        // continue).
-        let upto = if is_break || self.f.loops[target].is_switch {
-            target
-        } else {
-            target + 1
-        };
-        let mut frees = Vec::new();
-        for l in self.f.loops[upto..].iter().rev() {
-            if let Some((slot, is_iter)) = l.free {
-                frees.push((slot, is_iter));
-            }
-        }
-        // The target loop's own iterator is freed at its end label.
-        if is_break || self.f.loops[target].is_switch {
-            frees.retain(|&(s, _)| Some(s) != self.f.loops[target].free.map(|f| f.0));
-        }
-        for (slot, is_iter) in frees {
-            if is_iter {
-                self.emit(Op::FeFree { iter: slot });
-            } else {
-                self.emit(Op::Free { slot });
-            }
-        }
+        // Leave the blocks nested in the target loop: their loop
+        // temporaries are freed and finally blocks run, innermost first
+        // (the target's own iterator is freed at its end label on break,
+        // and kept on continue).
+        let path = self.f.regions[rl + 1..].to_vec();
+        self.leave_regions(&path);
         let at = self.emit(Op::Jmp { t: 0 });
         if is_break || self.f.loops[target].is_switch {
             self.f.loops[target].breaks.push(at);
@@ -1225,16 +1320,6 @@ impl<'a> Compiler<'a> {
             self.f.loops[target].continues.push(at);
         }
         Ok(())
-    }
-
-    /// Emits calls to the finally blocks entered above depth `depth`.
-    fn call_finallys(&mut self, depth: usize) {
-        let n = self.f.finallys.len();
-        for i in (depth..n).rev() {
-            let ret = self.f.finallys[i].ret;
-            let at = self.emit(Op::FastCall { t: 0, ret });
-            self.f.finallys[i].fastcalls.push(at);
-        }
     }
 
     fn return_stmt(&mut self, e: Option<&'a Expr<'a>>, line: u32) -> CResult<()> {
@@ -1318,12 +1403,12 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn has_loop_frees(&self) -> bool {
-        self.f.loops.iter().any(|l| l.free.is_some())
-    }
-
-    fn finish_return(&mut self, h: Reg, is_ref: bool, line: u32) -> CResult<()> {
-        let frees: Vec<(Reg, bool)> = self.f.loops.iter().rev().filter_map(|l| l.free).collect();
+    /// Frees the loop temporaries of loops `from..to`, innermost first.
+    fn free_loops(&mut self, from: usize, to: usize) {
+        if from >= to {
+            return;
+        }
+        let frees: Vec<(Reg, bool)> = self.f.loops[from..to].iter().rev().filter_map(|l| l.free).collect();
         for (slot, is_iter) in frees {
             if is_iter {
                 self.emit(Op::FeFree { iter: slot });
@@ -1331,13 +1416,23 @@ impl<'a> Compiler<'a> {
                 self.emit(Op::Free { slot });
             }
         }
-        self.call_finallys(0);
+    }
+
+    fn has_loop_frees(&self) -> bool {
+        self.f.loops.iter().any(|l| l.free.is_some())
+    }
+
+    fn finish_return(&mut self, h: Reg, is_ref: bool, line: u32) -> CResult<()> {
+        let path = self.f.regions.clone();
+        let exited = self.leave_regions(&path);
         self.f.line = line;
+        let at = self.here();
         if is_ref {
             self.emit(Op::ReturnRef { src: h });
         } else {
             self.emit_return(h, false);
         }
+        self.add_holes(at, self.here(), &exited);
         Ok(())
     }
 
@@ -1381,14 +1476,15 @@ impl<'a> Compiler<'a> {
             call_depth: self.f.call_depth,
         });
         if has_finally {
-            let ld = self.f.loops.len();
             self.f.finallys.push(FinCtx {
                 ret,
                 fastcalls: Vec::new(),
-                loop_depth: ld,
+                range: range_idx as u32,
             });
         }
+        self.f.regions.push(Region::Try(range_idx as u32));
         self.block(t.body)?;
+        self.f.regions.pop();
         let mut to_end = Vec::new();
         if has_finally {
             let at = self.emit(Op::FastCall { t: 0, ret });
@@ -1428,7 +1524,9 @@ impl<'a> Compiler<'a> {
                 };
                 let at = self.emit(Op::Catch { list, var, next: 0 });
                 pending_next = Some(at);
+                self.f.regions.push(Region::Catch(range_idx as u32));
                 self.block(c.body)?;
+                self.f.regions.pop();
                 if has_finally {
                     let at = self.emit(Op::FastCall { t: 0, ret });
                     self.f.finallys.last_mut().unwrap().fastcalls.push(at);
@@ -1447,7 +1545,9 @@ impl<'a> Compiler<'a> {
             for at in fc.fastcalls {
                 self.patch(at, fstart);
             }
+            self.f.regions.push(Region::Finally(range_idx as u32));
             self.block(fin)?;
+            self.f.regions.pop();
             self.emit(Op::FastRet {
                 ret,
                 try_index: range_idx as u32,

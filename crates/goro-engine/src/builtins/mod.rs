@@ -1,15 +1,18 @@
 //! The engine's built-in modules: core classes and functions, variable
 //! handling, output control, strings, arrays, math, files, json...
 
+pub mod array;
 pub mod core_classes;
 pub mod core_funcs;
 pub mod enums;
 pub mod fiber;
 pub mod file;
 pub mod json;
-pub mod reflection;
+pub mod math;
 pub mod output;
+pub mod reflection;
 pub mod serialize;
+pub mod string;
 pub mod var;
 
 use crate::registry::Module;
@@ -26,5 +29,8 @@ pub fn modules() -> Vec<&'static Module> {
         &serialize::MODULE,
         &json::MODULE,
         &reflection::MODULE,
+        &string::MODULE,
+        &array::MODULE,
+        &math::MODULE,
     ]
 }

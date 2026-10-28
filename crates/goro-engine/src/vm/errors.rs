@@ -300,12 +300,20 @@ impl Vm {
             let code = unsafe { &*code };
             let mut handled = false;
             for (i, tr) in code.try_ranges.iter().enumerate().rev() {
-                let _ = i;
                 if ip < tr.start {
+                    continue;
+                }
+                if !code.try_holes.is_empty()
+                    && code
+                        .try_holes
+                        .iter()
+                        .any(|&(s, e, t)| t == i as u32 && s <= ip && ip < e)
+                {
                     continue;
                 }
                 if ip < tr.end && tr.catch != 0 {
                     self.truncate_pending(tr.call_depth);
+                    self.free_live_ranges(code, ip, tr.catch);
                     self.cur_exception = Some(ex.clone());
                     self.ex.ip = tr.catch as usize;
                     handled = true;
@@ -313,6 +321,7 @@ impl Vm {
                 }
                 if tr.finally != 0 && ip < tr.finally {
                     self.truncate_pending(tr.call_depth);
+                    self.free_live_ranges(code, ip, tr.finally);
                     let p = self.slot_ptr(tr.exc_slot);
                     let old = unsafe { (*p).replace(Value::Object(ex.clone())) };
                     drop(old);
@@ -330,6 +339,7 @@ impl Vm {
                     let p = self.slot_ptr(tr.exc_slot);
                     if let Some(Value::Object(prev)) = unsafe { (*p).take() }
                         && !ObjRef::ptr_eq(&prev, &ex)
+                        && !matches!(prev.class_name().as_bytes(), b"GeneratorExit_" | b"FiberExit_")
                     {
                         self.chain_previous(&ex, prev);
                     }
@@ -337,6 +347,16 @@ impl Vm {
             }
             if handled {
                 return Ok(());
+            }
+            // A constructor run by `new` that throws: the object's
+            // destructor is never called (Zend/tests/try/catch_002.phpt).
+            {
+                let fr = &self.ex.frames[depth - 1];
+                if fr.flags & super::frame_flags::CTOR != 0
+                    && let Some(t) = &fr.this
+                {
+                    t.mark_destructor_called();
+                }
             }
             if depth == entry {
                 self.pop_frame();
@@ -349,6 +369,30 @@ impl Vm {
             {
                 self.chain_previous(&e2, ex);
                 ex = e2;
+            }
+        }
+    }
+
+    /// Frees the loop temporaries live at `ip` but not at the handler
+    /// `target`, innermost first (Zend/tests/try/try_finally_020.phpt).
+    fn free_live_ranges(&mut self, code: &crate::bytecode::FuncCode, ip: u32, target: u32) {
+        if code.live_ranges.is_empty() {
+            return;
+        }
+        let mut v: Vec<(u32, u32, crate::bytecode::Reg, bool)> = code
+            .live_ranges
+            .iter()
+            .copied()
+            .filter(|&(s, e, _, _)| s <= ip && ip < e && !(s <= target && target < e))
+            .collect();
+        v.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, _, slot, is_iter) in v {
+            if is_iter {
+                let _ = self.fe_free(slot);
+            } else {
+                let p = self.slot_ptr(slot);
+                let old = unsafe { (*p).take() };
+                drop(old);
             }
         }
     }
@@ -375,6 +419,18 @@ impl Vm {
         }
         if ObjRef::ptr_eq(&cur, &prev) {
             return;
+        }
+        // No cycle: `ex` must not already be in prev's chain
+        // (Zend/tests/try/try_finally_recursive_previous.phpt).
+        let mut p = prev.clone();
+        for _ in 0..10000 {
+            if ObjRef::ptr_eq(&p, ex) {
+                return;
+            }
+            match self.get_prop_raw(&p, b"previous") {
+                Value::Object(o) => p = o,
+                _ => break,
+            }
         }
         self.set_prop_raw(&cur, b"previous", Value::Object(prev));
     }

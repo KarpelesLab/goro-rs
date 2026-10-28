@@ -128,8 +128,9 @@ pub static MODULE: Module = Module {
         ),
         (
             "generator",
-            "<?php final class Generator implements Iterator { private function __construct() {} public function current(): mixed {} public function key(): mixed {} public function next(): void {} public function rewind(): void {} public function send(mixed $value): mixed {} public function throw(Throwable $exception): mixed {} public function valid(): bool {} public function getReturn(): mixed {} }",
+            "<?php final class Generator implements Iterator { private function __construct() {} public function current(): mixed {} public function key(): mixed {} public function next(): void {} public function rewind(): void {} public function send(mixed $value): mixed {} public function throw(Throwable $exception): mixed {} public function valid(): bool {} public function getReturn(): mixed {} public function __destruct() {} }",
         ),
+        ("generatorexit_", "<?php final class GeneratorExit_ {}"),
         (
             "closedgeneratorexception",
             exception_class!("ClosedGeneratorException", "Exception"),
@@ -205,6 +206,7 @@ pub static MODULE: Module = Module {
         ("closure::__invoke", closure_invoke),
         ("closure::getcurrent", closure_get_current),
         ("generator::current", gen_current),
+        ("generator::__destruct", gen_destruct),
         ("generator::key", gen_key),
         ("generator::next", gen_next),
         ("generator::rewind", gen_rewind),
@@ -690,6 +692,35 @@ fn closure_get_current(vm: &mut Vm, _a: &mut Args) -> R<Value> {
 
 fn generator_hooks() -> NativeHooks {
     NativeHooks::default()
+}
+
+/// A suspended generator that goes away runs the `finally` blocks around
+/// its paused yield, but no catch blocks (Zend/tests/try/bug71604.phpt).
+fn gen_destruct(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let g = a.this_obj().clone();
+    let pending = vm
+        .with_gen(&g, |d| {
+            d.state == crate::vm::iter::GenState::Suspended
+                && d.frame.as_ref().is_some_and(|f| {
+                    let ip = f.ip.saturating_sub(1);
+                    f.code()
+                        .try_ranges
+                        .iter()
+                        .any(|t| t.finally != 0 && t.start <= ip && ip < t.finally)
+                })
+        })
+        .unwrap_or(false);
+    if !pending {
+        return Ok(Value::Null);
+    }
+    let cls = vm.find_class(b"GeneratorExit_", false)?.expect("GeneratorExit_");
+    let marker = vm.instantiate_raw(&cls)?;
+    vm.with_gen(&g, |d| d.delegate = None);
+    match vm.gen_resume(&g, None, Some(marker.clone())) {
+        Err(crate::vm::Unwind::Throw(e)) if ObjRef::ptr_eq(&e, &marker) => Ok(Value::Null),
+        Err(e) => Err(e),
+        Ok(()) => Ok(Value::Null),
+    }
 }
 
 fn gen_current(vm: &mut Vm, a: &mut Args) -> R<Value> {
