@@ -234,6 +234,13 @@ impl Vm {
                 }
                 None => None,
             };
+            let found = match found {
+                None if code.file.is_empty() => lname
+                    .as_str()
+                    .and_then(|s| self.disabled_functions.get(s))
+                    .cloned(),
+                f => f,
+            };
             match found {
                 Some(f) => {
                     // Functions are never removed: cache the pointer.

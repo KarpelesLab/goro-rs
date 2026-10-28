@@ -152,7 +152,10 @@ pub fn run(opts: RunOptions) -> i32 {
         for name in list.split(|&c| c == b',') {
             let n = name.trim_ascii().to_ascii_lowercase();
             if !n.is_empty() {
-                vm.functions.remove(&goro_runtime::PhpStr::from(n));
+                let k = goro_runtime::PhpStr::from(n);
+                if let Some(f) = vm.functions.remove(&k) {
+                    vm.disabled_functions.insert(k, f);
+                }
             }
         }
     }

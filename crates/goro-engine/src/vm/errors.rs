@@ -568,7 +568,12 @@ impl Vm {
         }
     }
 
-    fn backtrace_ex(&self, ex: &super::ExecState, with_args: bool, out: &mut Vec<TraceFrame>) {
+    pub(crate) fn backtrace_ex(
+        &self,
+        ex: &super::ExecState,
+        with_args: bool,
+        out: &mut Vec<TraceFrame>,
+    ) {
         let n = ex.frames.len();
         let mut natives = ex.native_calls.len();
         let mut i = n;
@@ -632,67 +637,82 @@ impl Vm {
                 });
                 continue;
             }
-            if code.flags & crate::bytecode::fflags::CONST_EXPR != 0 {
-                continue;
+            if let Some(e) = self.func_frame_entry(f, file, line, with_args) {
+                out.push(e);
             }
-            // Helpers of internal classes written in PHP are not shown.
-            if code.file.is_empty() && f.func.name.starts_with(b"__h_") {
-                continue;
-            }
-            let scope = f.func.scope();
-            let is_closure = code.flags & crate::bytecode::fflags::CLOSURE != 0;
-            let class = if is_closure {
-                if f.scope.is_null() {
-                    None
-                } else {
-                    Some(unsafe { (*f.scope).name.clone() })
-                }
-            } else {
-                scope.map(|c| c.name.clone())
-            };
-            let call_type = if class.is_some() {
-                if f.this.is_some() { "->" } else { "::" }
-            } else {
-                ""
-            };
-            let args = if with_args {
-                let np = code.params.len();
-                let mut v = Vec::new();
-                let argc = f.argc as usize;
-                for k in 0..argc.min(np) {
-                    let x = unsafe { (*f.base.add(k)).as_ref() }.map(|x| x.deref());
-                    if code.params[k].variadic {
-                        if let Some(Value::Array(a)) = x {
-                            for (_, y) in a.iter() {
-                                v.push(y.deref());
-                            }
-                        }
-                        continue;
-                    }
-                    v.push(x.unwrap_or_default());
-                }
-                for x in &f.extra_args {
-                    v.push(x.deref());
-                }
-                Some(v)
-            } else {
-                None
-            };
-            let fname = if is_closure {
-                code.name.clone()
-            } else {
-                f.func.name.clone()
-            };
-            out.push(TraceFrame {
-                file,
-                line,
-                function: fname,
-                class,
-                call_type,
-                object: f.this.clone(),
-                args,
-            });
         }
+    }
+
+    /// The backtrace entry of a function frame called from `file`:`line`
+    /// (none for frames traces leave out).
+    pub(crate) fn func_frame_entry(
+        &self,
+        f: &super::Frame,
+        file: Option<PhpStr>,
+        line: u32,
+        with_args: bool,
+    ) -> Option<TraceFrame> {
+        let code = f.code();
+        if code.flags & crate::bytecode::fflags::CONST_EXPR != 0 {
+            return None;
+        }
+        // Helpers of internal classes written in PHP are not shown.
+        if code.file.is_empty() && f.func.name.starts_with(b"__h_") {
+            return None;
+        }
+        let scope = f.func.scope();
+        let is_closure = code.flags & crate::bytecode::fflags::CLOSURE != 0;
+        let class = if is_closure {
+            if f.scope.is_null() {
+                None
+            } else {
+                Some(unsafe { (*f.scope).name.clone() })
+            }
+        } else {
+            scope.map(|c| c.name.clone())
+        };
+        let call_type = if class.is_some() {
+            if f.this.is_some() { "->" } else { "::" }
+        } else {
+            ""
+        };
+        let args = if with_args {
+            let np = code.params.len();
+            let mut v = Vec::new();
+            let argc = f.argc as usize;
+            for k in 0..argc.min(np) {
+                let x = unsafe { (*f.base.add(k)).as_ref() }.map(|x| x.deref());
+                if code.params[k].variadic {
+                    if let Some(Value::Array(a)) = x {
+                        for (_, y) in a.iter() {
+                            v.push(y.deref());
+                        }
+                    }
+                    continue;
+                }
+                v.push(x.unwrap_or_default());
+            }
+            for x in &f.extra_args {
+                v.push(x.deref());
+            }
+            Some(v)
+        } else {
+            None
+        };
+        let fname = if is_closure {
+            code.name.clone()
+        } else {
+            f.func.name.clone()
+        };
+        Some(TraceFrame {
+            file,
+            line,
+            function: fname,
+            class,
+            call_type,
+            object: f.this.clone(),
+            args,
+        })
     }
 
     /// The trace as the array stored in exceptions / returned by

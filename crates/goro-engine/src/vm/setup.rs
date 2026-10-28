@@ -20,6 +20,7 @@ impl Vm {
             ex: ExecState::default(),
             arg_pool: Vec::new(),
             functions: HashMap::new(),
+            disabled_functions: HashMap::new(),
             user_functions: Vec::new(),
             classes: HashMap::new(),
             class_order: Vec::new(),

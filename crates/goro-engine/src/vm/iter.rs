@@ -58,7 +58,17 @@ pub struct GenData {
     pub saved_pending: Vec<(Pending, Vec<Slot>)>,
     /// Advanced past the first yield (rewind no longer allowed).
     pub advanced: bool,
+    /// The generator function, its closure object and class scope; kept
+    /// after the generator finishes (ReflectionGenerator, var_dump).
+    pub func_info: Option<GenFuncInfo>,
 }
+
+/// What a generator runs: the function, the closure object and the scope.
+pub type GenFuncInfo = (
+    Rc<crate::func::Func>,
+    Option<ObjRef>,
+    *const crate::class::Class,
+);
 
 impl goro_runtime::NativeData for GenData {
     fn trace(&self, visit: &mut dyn FnMut(&Value)) {
@@ -86,8 +96,14 @@ impl goro_runtime::NativeData for GenData {
             Some(Delegate::Gen(o)) | Some(Delegate::Iter(o)) => visit(&Value::Object(o.clone())),
             None => {}
         }
+        if let Some((_, Some(c), _)) = &self.func_info {
+            visit(&Value::Object(c.clone()));
+        }
     }
     fn clear(&mut self) {
+        if let Some(fi) = &mut self.func_info {
+            fi.1 = None;
+        }
         for s in self.slots.iter_mut() {
             *s = None;
         }
@@ -509,6 +525,76 @@ impl Vm {
         Some(f(g))
     }
 
+    /// The function a generator runs (also once it has finished).
+    pub(crate) fn generator_func_info(&self, g: &ObjRef) -> Option<GenFuncInfo> {
+        self.with_gen(g, |d| d.func_info.clone()).flatten()
+    }
+
+    /// The generators a `yield from` chain runs, outermost first.
+    fn generator_chain(&self, g: &ObjRef) -> Vec<ObjRef> {
+        let mut chain = vec![g.clone()];
+        let mut cur = g.clone();
+        while let Some(Some(next)) = self.with_gen(&cur, |d| match (&d.state, &d.delegate) {
+            (GenState::Done, _) => None,
+            (_, Some(Delegate::Gen(n))) => Some(n.clone()),
+            _ => None,
+        }) {
+            if chain.iter().any(|c| ObjRef::ptr_eq(c, &next)) {
+                break;
+            }
+            chain.push(next.clone());
+            cur = next;
+        }
+        chain
+    }
+
+    /// File and line where a suspended generator stands (none when it
+    /// runs or has finished).
+    pub(crate) fn generator_executing(&self, g: &ObjRef) -> Option<(goro_runtime::PhpStr, u32)> {
+        self.with_gen(g, |d| {
+            let f = d.frame.as_ref()?;
+            let code = f.code();
+            let ip = f.ip.saturating_sub(1) as usize;
+            Some((code.file.clone(), code.line_of(ip)))
+        })
+        .flatten()
+    }
+
+    /// The innermost generator of `g`'s `yield from` chain (the one whose
+    /// code runs).
+    pub(crate) fn generator_executing_gen(&self, g: &ObjRef) -> ObjRef {
+        self.generator_chain(g).pop().unwrap_or_else(|| g.clone())
+    }
+
+    /// `ReflectionGenerator::getTrace()`: the frames of the generator and
+    /// the ones it delegates to, innermost first, each called from where
+    /// the next-outer one stands (observed on PHP 8.5). `options` are the
+    /// DEBUG_BACKTRACE_* flags.
+    pub(crate) fn generator_trace(&mut self, g: &ObjRef, options: i64) -> PhpArray {
+        let with_args = options & 2 == 0;
+        let chain = self.generator_chain(g);
+        let mut frames = Vec::new();
+        for (k, gn) in chain.iter().enumerate().rev() {
+            let at = if k > 0 {
+                self.generator_executing(&chain[k - 1])
+            } else {
+                None
+            };
+            let (file, line) = match at {
+                Some((f, l)) => (Some(f), l),
+                None => (None, 0),
+            };
+            if let Some(Some(e)) = self.with_gen(gn, |d| {
+                d.frame
+                    .as_ref()
+                    .and_then(|f| self.func_frame_entry(f, file.clone(), line, with_args))
+            }) {
+                frames.push(e);
+            }
+        }
+        self.trace_array(&frames, options & 1 != 0)
+    }
+
     /// Turns an activated generator function frame into a Generator.
     pub(crate) fn create_generator(&mut self, mut frame: Frame) -> R<ObjRef> {
         let n = frame.code().num_slots as usize;
@@ -525,7 +611,9 @@ impl Vm {
         frame.ip = 0;
         let cls = self.core.generator.clone().expect("Generator class");
         let o = ObjRef::new(cls, Vec::new());
+        let func_info = Some((frame.func.clone(), frame.closure.clone(), frame.scope));
         let data = GenData {
+            func_info,
             frame: Some(frame),
             slots,
             state: GenState::Created,

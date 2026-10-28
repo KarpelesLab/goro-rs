@@ -696,7 +696,21 @@ fn closure_get_current(vm: &mut Vm, _a: &mut Args) -> R<Value> {
 // ---------------------------------------------------------------- generators
 
 fn generator_hooks() -> NativeHooks {
-    NativeHooks::default()
+    NativeHooks {
+        // var_dump() shows the generator's function (observed on PHP 8.5).
+        debug_props: Some(|vm, o| {
+            let (f, _, _) = vm.generator_func_info(o)?;
+            let mut out = PhpArray::new();
+            out.insert(
+                Key::from("function"),
+                Value::Str(PhpStr::from(vm.func_display_name(&f))),
+            );
+            Some(out)
+        }),
+        // ...but (array) and var_export() see no properties.
+        props_for: Some(|_, _| Some(PhpArray::new())),
+        ..NativeHooks::default()
+    }
 }
 
 /// A suspended generator that goes away runs the `finally` blocks around

@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use corosensei::stack::DefaultStack;
 use corosensei::{Coroutine, CoroutineResult, Yielder};
-use goro_runtime::{ObjRef, PhpStr, Value};
+use goro_runtime::{ObjRef, PhpArray, PhpStr, Value};
 
 use crate::class::NativeHooks;
 use crate::func::Args;
@@ -379,3 +379,56 @@ fn fiber_destruct(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 #[allow(dead_code)]
 fn keep(_: Rc<()>) {}
+
+impl Vm {
+    /// A Fiber's status and callable.
+    pub(crate) fn fiber_info(&self, o: &ObjRef) -> Option<(FiberStatus, Value)> {
+        with_fiber(o, |d| (d.status, d.callable.clone()))
+    }
+
+    /// The backtrace of a suspended fiber (its frames down to the
+    /// callable, with the Fiber::suspend() call on top), or of the running
+    /// fiber; none otherwise. `options` are the DEBUG_BACKTRACE_* flags.
+    pub(crate) fn fiber_trace(&mut self, o: &ObjRef, options: i64) -> Option<PhpArray> {
+        let with_args = options & 2 == 0;
+        let mut frames = Vec::new();
+        let status = with_fiber(o, |d| d.status)?;
+        match status {
+            FiberStatus::Suspended => {
+                let n = o.obj().native.borrow();
+                let any: &dyn std::any::Any = &**n.as_ref()?;
+                let d = any.downcast_ref::<FiberData>()?;
+                self.backtrace_ex(d.ex.as_ref()?, with_args, &mut frames);
+            }
+            FiberStatus::Running
+                if self
+                    .fiber_stack
+                    .last()
+                    .is_some_and(|f| ObjRef::ptr_eq(f, o)) =>
+            {
+                self.backtrace_ex(&self.ex, with_args, &mut frames);
+            }
+            _ => return None,
+        }
+        Some(self.trace_array(&frames, options & 1 != 0))
+    }
+
+    /// Where a suspended fiber stands: the file and line of its
+    /// Fiber::suspend() call.
+    pub(crate) fn fiber_executing(&self, o: &ObjRef) -> Option<(PhpStr, u32)> {
+        let n = o.obj().native.borrow();
+        let any: &dyn std::any::Any = &**n.as_ref()?;
+        let d = any.downcast_ref::<FiberData>()?;
+        if d.status != FiberStatus::Suspended {
+            return None;
+        }
+        let ex = d.ex.as_ref()?;
+        let f = ex.frames.last()?;
+        let code = f.code();
+        let line = match ex.native_calls.last() {
+            Some(nc) if nc.depth as usize == ex.frames.len() => nc.line,
+            _ => code.line_of(ex.ip.saturating_sub(1)),
+        };
+        Some((code.file.clone(), line))
+    }
+}

@@ -397,6 +397,9 @@ pub struct Vm {
     pub ex: ExecState,
     pub arg_pool: Vec<Vec<Value>>,
     pub functions: HashMap<PhpStr, Rc<Func>>,
+    /// Functions removed by disable_functions (internal classes written in
+    /// PHP still reach them).
+    pub disabled_functions: HashMap<PhpStr, Rc<Func>>,
     /// User functions in declaration order (get_defined_functions).
     pub user_functions: Vec<PhpStr>,
     pub classes: HashMap<PhpStr, Rc<Class>>,
