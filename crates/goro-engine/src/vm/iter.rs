@@ -887,6 +887,8 @@ impl Vm {
                 }
             }
             Delegate::Gen(inner) => {
+                // Who delegates to the running generator, for traces.
+                self.gen_delegators.push((inner.clone(), g.clone()));
                 let r = if fresh {
                     self.gen_ensure_started(&inner)
                 } else if let Some(e) = throw {
@@ -894,6 +896,7 @@ impl Vm {
                 } else {
                     self.gen_resume(&inner, Some(send.unwrap_or_default()), None)
                 };
+                self.gen_delegators.pop();
                 if let Err(e) = r {
                     self.with_gen(g, |d| d.delegate = None);
                     if let super::Unwind::Throw(ex) = e {
@@ -1200,6 +1203,22 @@ impl Vm {
 
     pub fn gen_current(&mut self, g: &ObjRef) -> R<(Value, Value)> {
         self.gen_ensure_started(g)?;
+        let inner = self
+            .with_gen(g, |d| match (&d.state, &d.delegate) {
+                (GenState::Suspended, Some(Delegate::Gen(i))) => Some(i.clone()),
+                _ => None,
+            })
+            .flatten();
+        if let Some(inner) = inner {
+            // The shared inner generator's element (test Zend/tests/
+            // generators/yield_from_multi_tree).
+            let done = self
+                .with_gen(&inner, |d| d.state == GenState::Done)
+                .unwrap_or(true);
+            if !done {
+                return self.gen_current(&inner);
+            }
+        }
         Ok(self
             .with_gen(g, |d| {
                 if d.state == GenState::Done {

@@ -702,6 +702,52 @@ impl Vm {
                 });
                 continue;
             }
+            // A generator run through `yield from`: the delegating
+            // generators follow, each called where the next one stands
+            // (tests Zend/tests/generators/gh15275-*, bug74954).
+            if let Some(gx) = &f.generator
+                && !self.gen_delegators.is_empty()
+            {
+                let mut chain: Vec<ObjRef> = Vec::new();
+                let mut cur = gx.clone();
+                while let Some((_, o)) = self
+                    .gen_delegators
+                    .iter()
+                    .rev()
+                    .find(|(inner, _)| ObjRef::ptr_eq(inner, &cur))
+                {
+                    if chain.iter().any(|c| ObjRef::ptr_eq(c, o)) {
+                        break;
+                    }
+                    chain.push(o.clone());
+                    cur = o.clone();
+                }
+                if !chain.is_empty() {
+                    let site = |k: usize| match self.generator_executing(&chain[k]) {
+                        Some((f, l)) => (Some(f), l),
+                        None => (None, 0),
+                    };
+                    let (f0, l0) = site(0);
+                    if let Some(e) = self.func_frame_entry(f, f0, l0, with_args) {
+                        out.push(e);
+                    }
+                    for k in 0..chain.len() {
+                        let (sf, sl) = if k + 1 < chain.len() {
+                            site(k + 1)
+                        } else {
+                            (file.clone(), line)
+                        };
+                        if let Some(Some(e)) = self.with_gen(&chain[k], |d| {
+                            d.frame
+                                .as_ref()
+                                .and_then(|fr| self.func_frame_entry(fr, sf.clone(), sl, with_args))
+                        }) {
+                            out.push(e);
+                        }
+                    }
+                    continue;
+                }
+            }
             if let Some(e) = self.func_frame_entry(f, file, line, with_args) {
                 out.push(e);
             }
@@ -899,10 +945,12 @@ impl Vm {
                 _ => out.push_str("[internal function]: "),
             }
             if let Some(c) = fr.get_bytes(b"class") {
+                // Anonymous class names end at their NUL (observed on PHP
+                // 8.5: "class@anonymous->m()").
                 out.push_str(
                     &c.deref()
                         .as_str()
-                        .map(|s| s.to_string_lossy())
+                        .map(crate::class::DisplayName::dname)
                         .unwrap_or_default(),
                 );
                 out.push_str(
