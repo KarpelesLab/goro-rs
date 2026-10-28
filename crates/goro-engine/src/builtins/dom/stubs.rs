@@ -767,6 +767,7 @@ class ProcessingInstruction extends \Dom\CharacterData {
     (
         "domxpath",
         r#"<?php
+#[\NotCloneable]
 class DOMXPath {
     public \DOMDocument $document { get {} set {} }
     public bool $registerNodeNamespaces { get {} set {} }
@@ -782,6 +783,7 @@ class DOMXPath {
     (
         "dom\\xpath",
         r#"<?php namespace Dom;
+#[\NotCloneable]
 final class XPath {
     public \Dom\Document $document { get {} set {} }
     public bool $registerNodeNamespaces { get {} set {} }

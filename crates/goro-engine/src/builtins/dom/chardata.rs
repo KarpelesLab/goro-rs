@@ -146,10 +146,8 @@ fn split_text(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let tail: String = c[off..].iter().collect();
     let t = with_arena(|ar| {
         let doc = ar.doc_of(n);
-        let data = match ar.data(n) {
-            NodeData::CData(_) => NodeData::CData(tail),
-            _ => NodeData::Text(tail),
-        };
+        // Even a CDATA section splits off a text node (test bug52656.phpt).
+        let data = NodeData::Text(tail);
         let t = ar.create(doc, data);
         if let Some(d) = ar.char_data_mut(n) {
             *d = head;

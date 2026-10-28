@@ -111,38 +111,57 @@ fn register_namespace(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn register_php_functions(vm: &mut Vm, a: &mut Args) -> R<Value> {
     this_xp(vm, a)?;
+    // Validation messages observed on PHP 8.5 (test
+    // DOMXPath_callables_errors.phpt).
+    let bad_names = "Argument #1 ($restrict) must be an array containing valid callback names";
     let new = match a.val(0) {
         Value::Null => Allowed::All,
-        Value::Str(s) => Allowed::Some(vec![(s8(&s).to_ascii_lowercase(), Value::Str(s))]),
+        Value::Str(s) => {
+            if s.is_empty() {
+                return vm.fthrow(a, "ValueError", "Argument #1 ($restrict) must be a valid callback name");
+            }
+            if vm.resolve_callable(&Value::Str(s.clone()), false).is_err() {
+                let why = vm.callable_error(&Value::Str(s.clone()));
+                return vm.fthrow(
+                    a,
+                    "TypeError",
+                    &format!("Argument #1 ($restrict) must be a callable, {why}"),
+                );
+            }
+            Allowed::Some(vec![(s8(&s).to_ascii_lowercase(), Value::Str(s))])
+        }
         Value::Array(arr) => {
             let mut v = Vec::new();
             for (k, val) in arr.iter() {
                 let val = val.deref();
                 match k {
                     goro_runtime::KeyRef::Str(name) => {
+                        if name.is_empty() || name.as_bytes().contains(&0) {
+                            return vm.fthrow(a, "ValueError", bad_names);
+                        }
                         if vm.resolve_callable(&val, false).is_err() {
+                            let why = vm.callable_error(&val);
                             return vm.fthrow(
                                 a,
                                 "TypeError",
-                                &format!(
-                                    "Argument #1 ($restrict) must be an array containing valid callback names, {} given",
-                                    "an invalid callback"
-                                ),
+                                &format!("Argument #1 ($restrict) must be an array with valid callbacks as values, {why}"),
                             );
                         }
                         v.push((s8(name).to_ascii_lowercase(), val));
                     }
                     _ => {
-                        let s = match &val {
-                            Value::Str(s) => s.clone(),
-                            _ => {
-                                return vm.fthrow(
-                                    a,
-                                    "TypeError",
-                                    "Argument #1 ($restrict) must be an array with valid callbacks as values, function \"\" not found or invalid function name",
-                                );
-                            }
-                        };
+                        let s = vm.to_php_str(&val)?;
+                        if s.is_empty() || s.as_bytes().contains(&0) {
+                            return vm.fthrow(a, "ValueError", bad_names);
+                        }
+                        if vm.resolve_callable(&Value::Str(s.clone()), false).is_err() {
+                            let why = vm.callable_error(&Value::Str(s.clone()));
+                            return vm.fthrow(
+                                a,
+                                "TypeError",
+                                &format!("Argument #1 ($restrict) must be an array with valid callbacks as values, {why}"),
+                            );
+                        }
                         v.push((s8(&s).to_ascii_lowercase(), Value::Str(s)));
                     }
                 }
@@ -193,8 +212,22 @@ fn quote(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     } else if !s.contains('"') {
         format!("\"{s}\"")
     } else {
-        let parts: Vec<String> = s.split('\'').map(|p| format!("'{p}'")).collect();
-        format!("concat({})", parts.join(", \"'\", "))
+        // Alternate quoting styles (observed on PHP 8.5, test
+        // DOMXPath_quote.phpt).
+        let mut parts = Vec::new();
+        let mut rest = s.as_str();
+        while !rest.is_empty() {
+            let n = rest.find('\'').unwrap_or(rest.len());
+            if n > 0 {
+                parts.push(format!("'{}'", &rest[..n]));
+                rest = &rest[n..];
+            } else {
+                let m = rest.find('"').unwrap_or(rest.len());
+                parts.push(format!("\"{}\"", &rest[..m]));
+                rest = &rest[m..];
+            }
+        }
+        format!("concat({})", parts.join(","))
     };
     Ok(sv(&out))
 }
@@ -313,6 +346,7 @@ impl xpath::FunctionHandler for Handler {
         if ns == PHP_NS {
             return local == "function" || local == "functionString";
         }
+        let _ = &self.fname;
         self.ns_functions
             .iter()
             .any(|(n, l, _)| n == ns && l == local)
@@ -383,7 +417,6 @@ pub(crate) fn eval_nodes(
     expr: &str,
     ns: &[(String, String)],
 ) -> R<Vec<NodeId>> {
-    let _ = vm;
     let Ok(e) = xpath::compile(expr) else {
         return Ok(Vec::new());
     };
@@ -394,10 +427,11 @@ pub(crate) fn eval_nodes(
         }
         xpath::evaluate(ar, &e, ctx_node, &mut c)
     });
-    Ok(match r {
-        Ok(xpath::Value::NodeSet(v)) => v,
-        _ => Vec::new(),
-    })
+    match r {
+        Ok(xpath::Value::NodeSet(v)) => Ok(v),
+        Ok(_) => vm.throw("TypeError", "XPath query did not return a nodeset"),
+        Err(_) => Ok(Vec::new()),
+    }
 }
 
 /// Runs an XPath evaluation for `query()` / `evaluate()`.
@@ -441,7 +475,9 @@ fn run(vm: &mut Vm, a: &Args) -> R<Option<xpath::Value>> {
         ns_functions,
         modern,
     };
-    let has_fns = !matches!(handler.allowed, Allowed::None) || !handler.ns_functions.is_empty();
+    let has_fns = !matches!(handler.allowed, Allowed::None)
+        || !handler.ns_functions.is_empty()
+        || expr.contains("php:");
     let (r, ns_nodes) = if has_fns {
         let mut arena = xmlstore::with(|s| std::mem::take(&mut s.arena));
         let mut c = xpath::Context::new();

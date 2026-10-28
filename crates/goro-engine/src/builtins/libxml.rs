@@ -262,6 +262,14 @@ pub fn show(
 ) -> R<()> {
     match style {
         Style::Dom => {
+            if e.domain == Domain::Io {
+                let what = if e.level == LEVEL_WARNING {
+                    "I/O warning"
+                } else {
+                    "I/O error"
+                };
+                return vm.warn(&format!("{fname}(): {what} : {}", e.text()));
+            }
             let m = format!("{fname}(): {}", e.dom_warning());
             if e.level == LEVEL_WARNING {
                 vm.notice_msg(&m)

@@ -405,13 +405,15 @@ fn get_element_by_id(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let d = this_doc(vm, a)?;
     let id = s8(&a.str(0));
     let modern = modern_fn(a);
-    let r = with_arena(|ar| {
-        if modern {
-            ar.descendants(d)
-                .find(|&e| ar.is_element(e) && ar.get_attribute(e, "id").as_deref() == Some(&id))
-        } else {
-            ar.get_element_by_id(d, &id)
-        }
+    let _ = modern;
+    let r = xmlstore::with(|s| {
+        let els: Vec<NodeId> = s.arena.descendants(d).filter(|&e| s.arena.is_element(e)).collect();
+        els.into_iter().find(|&e| {
+            let attrs: Vec<NodeId> = s.arena.attrs(e).collect();
+            attrs
+                .into_iter()
+                .any(|at| super::is_id_attr(s, at) && s.arena.attr_value(at) == id)
+        })
     });
     wrap_opt(vm, r)
 }
@@ -473,10 +475,7 @@ fn adopt_node(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match r {
         Ok(()) => Ok(a.val(0)),
         Err(e) if modern => throw_dom(vm, e),
-        Err(_) => {
-            vm.fwarn(a, "Cannot adopt a document node")?;
-            Ok(Value::Bool(false))
-        }
+        Err(e) => legacy_error(vm, a, d, e),
     }
 }
 
@@ -677,6 +676,11 @@ pub(crate) fn parse_xml(
 /// Reads a file for a load method: the bytes, or `None` after PHP's
 /// warning.
 fn read_for_load(vm: &mut Vm, fname: &str, path: &str) -> R<Option<Vec<u8>>> {
+    // Paths longer than PHP_MAXPATHLEN fail silently (test
+    // DOMDocument_load_error6.phpt).
+    if path.len() > 4096 {
+        return Ok(None);
+    }
     match libxml::load_document(vm, fname, path)? {
         Ok(b) => Ok(Some(b)),
         Err(Some(msg)) => {

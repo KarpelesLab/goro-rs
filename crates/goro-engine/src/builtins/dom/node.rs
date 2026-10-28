@@ -581,10 +581,24 @@ fn c14n_run(vm: &mut Vm, a: &Args, first: usize) -> R<Option<String>> {
     }
     let node_set = match xpath {
         Some(x) => {
+            let argn = first + 3;
             let Some(q) = x.get_bytes(b"query").cloned() else {
-                return vm.throw("ValueError", "\"query\" option missing in $xpath");
+                return vm.fthrow(
+                    a,
+                    "ValueError",
+                    &format!("Argument #{argn} ($xpath) must have a \"query\" key"),
+                );
             };
-            let q = vm.to_php_str(&q)?;
+            let Value::Str(q) = q.deref() else {
+                return vm.fthrow(
+                    a,
+                    "TypeError",
+                    &format!(
+                        "Argument #{argn} ($xpath) \"query\" option must be a string, {} given",
+                        crate::class::TypeName::tname(&q)
+                    ),
+                );
+            };
             let ns: Vec<(String, String)> = match x.get_bytes(b"namespaces") {
                 Some(Value::Array(m)) => m
                     .iter()

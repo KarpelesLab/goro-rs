@@ -220,7 +220,15 @@ fn compute_items(s: &mut xmlstore::Store, kind: &ListKind, modern: bool) -> Vec<
             if modern {
                 super::modern::elements_by_qname(a, *root, name)
             } else {
-                a.elements_by_tag_name(*root, name)
+                // Legacy: the qualified or the local name (observed on PHP
+                // 8.5).
+                a.descendants(*root)
+                    .filter(|&n| {
+                        a.element(n).is_some_and(|e| {
+                            name == "*" || e.name.is(name) || &*e.name.local == name.as_str()
+                        })
+                    })
+                    .collect()
             }
         }
         ListKind::TagNameNS(root, ns, local) => {
@@ -235,13 +243,9 @@ fn compute_items(s: &mut xmlstore::Store, kind: &ListKind, modern: bool) -> Vec<
 }
 
 fn this_list(vm: &mut Vm, a: &Args) -> R<(ListKind, bool)> {
-    match list_of(a.this_obj()) {
-        Some(l) => Ok(l),
-        None => {
-            let c = vm.class_of(a.this_obj()).name.to_string_lossy();
-            vm.throw("Error", &format!("Couldn't fetch {c}"))
-        }
-    }
+    let _ = vm;
+    // A list made with `new` is empty (test bug38438.phpt).
+    Ok(list_of(a.this_obj()).unwrap_or((ListKind::Static(Vec::new()), false)))
 }
 
 fn l_count(vm: &mut Vm, a: &mut Args) -> R<Value> {

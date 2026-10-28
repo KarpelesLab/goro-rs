@@ -1315,6 +1315,26 @@ impl Arena {
         self.node_mut(id).holds += 1;
         let d = self.doc_of(id);
         self.doc_mut(d).holds += 1;
+        // A namespace (or DTD declaration) node refers to its element (or
+        // doctype) without being one of its children.
+        if self.is_side_node(id)
+            && let Some(p) = self.node(id).parent
+        {
+            self.hold(p);
+        }
+    }
+
+    /// Namespace and DTD declaration nodes: they have a parent that does
+    /// not list them among its children.
+    fn is_side_node(&self, id: NodeId) -> bool {
+        matches!(
+            self.node(id).data,
+            NodeData::Namespace(_)
+                | NodeData::EntityDecl(_)
+                | NodeData::Notation(_)
+                | NodeData::ElementDecl(_)
+                | NodeData::AttributeDecl(_)
+        )
     }
 
     /// Number of holds on `id`.
@@ -1363,13 +1383,22 @@ impl Arena {
             self.unheld_docs.push(d);
             return self.collect();
         }
-        if matches!(self.node(id).data, NodeData::Namespace(_)) {
+        if self.is_side_node(id) {
+            let parent = self.node(id).parent;
             if self.node(id).holds == 0 {
                 self.free_namespace_node(id);
             }
+            if let Some(p) = parent {
+                let mut freed = self.release(p);
+                freed.extend(self.collect());
+                return freed;
+            }
         } else {
+            // An unreferenced detached root goes, its referenced
+            // descendants surviving as detached roots (PHP frees nodes
+            // nothing refers to; tests ext/dom/tests/delayed_freeing).
             let r = self.root(id);
-            if r != d && !self.subtree_held(r) {
+            if r != d && self.node(r).holds == 0 {
                 self.free_subtree(r);
             }
         }

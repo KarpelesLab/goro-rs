@@ -313,7 +313,7 @@ fn compute(a: &mut goro_xml::Arena, n: NodeId, name: &str, modern: bool) -> PV {
         "namespaceURI" => match a.data(n) {
             NodeData::Element(e) => PV::from(e.name.ns.as_ref().map(|s| s.to_string())),
             NodeData::Attribute(at) => PV::from(at.name.ns.as_ref().map(|s| s.to_string())),
-            NodeData::Namespace(_) => PV::S(goro_xml::tree::XMLNS_NS.to_string()),
+            NodeData::Namespace(d) => PV::S(d.uri.to_string()),
             _ => PV::Null,
         },
         "prefix" => {

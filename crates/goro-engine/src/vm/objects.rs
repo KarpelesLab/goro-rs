@@ -426,6 +426,12 @@ impl Vm {
             if let Value::Object(_) = v {
                 return Ok(Some(v));
             }
+            // Internal computed properties read as plain values: a null
+            // one gives "Attempt to assign property on null" (ext/dom,
+            // test bug47430.phpt).
+            if v.is_null() && p.get.as_ref().is_some_and(|g| g.is_native()) {
+                return Ok(Some(v));
+            }
         }
         self.throw(
             "Error",

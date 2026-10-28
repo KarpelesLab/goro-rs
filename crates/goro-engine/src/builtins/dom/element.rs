@@ -8,6 +8,7 @@ use goro_runtime::{PhpArray, Value};
 use goro_xml::tree::{DocKind, DomError, NodeData, NsDecl, QName, XMLNS_NS};
 use goro_xml::{Arena, NodeId};
 
+use super::NOT_ID;
 use super::lists::ListKind;
 use super::node::{LegacyInsertError, legacy_insert, modern_insert};
 use super::xmlstore;
@@ -375,7 +376,13 @@ fn remove_attribute(vm: &mut Vm, a: &mut Args) -> R<Value> {
             {
                 let before = e.ns_decls.len();
                 e.ns_decls.retain(|d| d.prefix.as_deref() != p);
-                return e.ns_decls.len() != before;
+                let changed = e.ns_decls.len() != before;
+                if changed {
+                    // Names using it get their own declaration (test
+                    // bug47531_a.phpt).
+                    declare_dangling(&mut s.arena, el);
+                }
+                return changed;
             }
         }
         false
@@ -401,6 +408,7 @@ fn remove_attribute_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
             if let Some(e) = s.arena.element_mut(el) {
                 e.ns_decls.retain(|d| d.prefix.as_deref() != p);
             }
+            declare_dangling(&mut s.arena, el);
             return;
         }
         if let Some(at) = s.arena.get_attr_node_ns(el, ns.as_deref(), &local) {
@@ -556,45 +564,59 @@ fn set_attribute_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
             return Ok(());
         }
+        let mut declared = false;
+        let mut prefix_out: Option<goro_xml::Str> = None;
         let prefix = match &q.prefix {
             Some(p) => {
                 match ar.lookup_ns(el, Some(p)) {
                     Some(bound) if bound == uri => {}
                     Some(_) => {
-                        // The prefix is bound elsewhere: redeclare here.
                         let e = ar.element_mut(el).unwrap();
                         if e.ns_decls.iter().any(|d| d.prefix.as_deref() == Some(p)) {
-                            return Err(DomError::Namespace);
+                            // Bound to another namespace on this element: a
+                            // generated prefix (observed on PHP 8.5).
+                            let g = match ar.lookup_prefix(el, &uri) {
+                                Some(x) => x.to_string(),
+                                None => {
+                                    let g = generated_prefix(ar, el);
+                                    ar.declare_ns(el, Some(&g), &uri);
+                                    declared = true;
+                                    g
+                                }
+                            };
+                            prefix_out = Some(g.as_str().into());
+                        } else {
+                            // Bound on an ancestor: redeclared here.
+                            e.ns_decls.push(NsDecl {
+                                prefix: Some(p.clone()),
+                                uri: uri.clone(),
+                            });
+                            declared = true;
                         }
-                        e.ns_decls.push(NsDecl {
-                            prefix: Some(p.clone()),
-                            uri: uri.clone(),
-                        });
                     }
                     None => {
                         ar.declare_ns(el, Some(p), &uri);
+                        declared = true;
                     }
                 }
-                Some(p.clone())
+                prefix_out.or(Some(p.clone()))
             }
             None => {
-                // libxml binds unprefixed namespaced attributes to a
-                // default declaration on the element (observed on PHP
-                // 8.5, fixture domops.out "createElementNS").
-                let has_default = ar
-                    .element(el)
-                    .is_some_and(|e| e.ns_decls.iter().any(|d| d.prefix.is_none()));
-                if !has_default && ar.lookup_ns(el, None).is_none() {
-                    ar.declare_ns(el, None, &uri);
-                    None
-                } else if ar.lookup_ns(el, None).as_deref() == Some(&*uri) {
-                    None
-                } else {
-                    match ar.lookup_prefix(el, &uri) {
-                        Some(p) => Some(p),
-                        None => {
+                // A prefix bound to the namespace in scope; else libxml binds
+                // the attribute to a new default declaration when there is
+                // none in scope, or a generated prefix (observed on PHP 8.5,
+                // fixture domops.out, test bug34276.phpt).
+                match ar.lookup_prefix(el, &uri) {
+                    Some(p) => Some(p),
+                    None => {
+                        if ar.lookup_ns(el, None).is_none() {
+                            ar.declare_ns(el, None, &uri);
+                            declared = true;
+                            None
+                        } else {
                             let p = generated_prefix(ar, el);
                             ar.declare_ns(el, Some(&p), &uri);
+                            declared = true;
                             Some(p.as_str().into())
                         }
                     }
@@ -612,6 +634,9 @@ fn set_attribute_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
             &value,
         );
         ar.raw_append_attr(el, at);
+        if declared {
+            reconcile_tree(ar, el);
+        }
         Ok(())
     });
     match r {
@@ -699,6 +724,16 @@ fn set_id(ar: &mut Arena, at: NodeId, is_id: bool) {
     if let Some(d) = ar.attr_mut(at) {
         d.is_id = is_id;
     }
+    let doc = ar.doc_of(at);
+    NOT_ID.with(|m| {
+        let mut m = m.borrow_mut();
+        let set = m.entry(doc).or_default();
+        if is_id {
+            set.remove(&at);
+        } else {
+            set.insert(at);
+        }
+    });
     let v = ar.attr_value(at);
     let doc = ar.doc_of(at);
     let el = ar.parent(at);
@@ -889,9 +924,42 @@ impl QNameMut for Arena {
 
 // --------------------------------------------------- namespace reconciling
 
-/// After a legacy insertion: namespace declarations of the inserted node
-/// that its new parent already provides go away (libxml-style
-/// reconciliation; observed on PHP 8.5, fixture domops.out).
+/// The elements of the subtree at `root` in document order.
+fn subtree_elements(ar: &Arena, root: NodeId) -> Vec<NodeId> {
+    let mut v = Vec::new();
+    if ar.is_element(root) {
+        v.push(root);
+    }
+    v.extend(ar.descendants(root).filter(|&n| ar.is_element(n)));
+    v
+}
+
+/// The names (element first, then attributes) of element `el` that refer
+/// to a namespace.
+fn ns_users(ar: &Arena, el: NodeId) -> Vec<NodeId> {
+    let mut v = vec![el];
+    v.extend(ar.attrs(el));
+    v
+}
+
+/// True if the namespace of name-holder `x` (an element or attribute) is
+/// bound by the declarations in scope at `at`.
+fn bound_at(ar: &Arena, at: NodeId, q: &QName) -> bool {
+    match &q.ns {
+        None => true,
+        Some(ns) => {
+            if q.prefix.as_deref() == Some("xml") || &**ns == XMLNS_NS {
+                return true;
+            }
+            ar.lookup_ns(at, q.prefix.as_deref()).as_deref() == Some(&**ns)
+        }
+    }
+}
+
+/// After a legacy insertion (libxml-style reconciliation, observed on
+/// PHP 8.5; tests bug67440.phpt, bug47531_*.phpt): declarations in the
+/// inserted subtree that the new context already provides go away, and
+/// names whose declaration is no longer in scope get one on their element.
 pub(crate) fn reconcile_after_insert(ar: &mut Arena, n: NodeId) {
     if !ar.is_element(n) || ar.is_modern(ar.doc_of(n)) {
         return;
@@ -899,70 +967,135 @@ pub(crate) fn reconcile_after_insert(ar: &mut Arena, n: NodeId) {
     let Some(parent) = ar.parent(n) else {
         return;
     };
-    if !ar.is_element(parent) {
+    let ctx_ok = ar.is_element(parent);
+    for el in subtree_elements(ar, n) {
+        if ctx_ok {
+            let p = ar.parent(el).unwrap_or(parent);
+            let decls = ar.element(el).map(|e| e.ns_decls.clone()).unwrap_or_default();
+            let keep: Vec<NsDecl> = decls
+                .into_iter()
+                .filter(|d| ar.lookup_ns(p, d.prefix.as_deref()).as_deref() != Some(&*d.uri))
+                .collect();
+            if let Some(e) = ar.element_mut(el) {
+                e.ns_decls = keep;
+            }
+        }
+    }
+    declare_dangling(ar, n);
+}
+
+/// Declares, on their own element, the namespaces of names in the subtree
+/// at `root` that nothing in scope binds (top-down, so descendants reuse
+/// the new declarations).
+pub(crate) fn declare_dangling(ar: &mut Arena, root: NodeId) {
+    if ar.is_modern(ar.doc_of(root)) {
         return;
     }
-    let decls = ar.element(n).map(|e| e.ns_decls.clone()).unwrap_or_default();
-    let mut keep = Vec::new();
-    for d in decls {
-        let bound = ar.lookup_ns(parent, d.prefix.as_deref());
-        if bound.as_deref() == Some(&*d.uri) {
-            continue;
+    for el in subtree_elements(ar, root) {
+        for x in ns_users(ar, el) {
+            let q = ar.qname(x).unwrap().clone();
+            if bound_at(ar, el, &q) {
+                continue;
+            }
+            let uri = q.ns.clone().unwrap();
+            match q.prefix.as_deref() {
+                Some(p) if ar.lookup_ns(el, Some(p)).is_none()
+                    || !ar
+                        .element(el)
+                        .is_some_and(|e| e.ns_decls.iter().any(|d| d.prefix.as_deref() == Some(p))) =>
+                {
+                    let e = ar.element_mut(el).unwrap();
+                    e.ns_decls.retain(|d| d.prefix.as_deref() != Some(p));
+                    e.ns_decls.push(NsDecl {
+                        prefix: Some(p.into()),
+                        uri,
+                    });
+                }
+                None if x == el => {
+                    ar.declare_ns(el, None, &uri);
+                }
+                _ => {
+                    let p = generated_prefix(ar, el);
+                    ar.declare_ns(el, Some(&p), &uri);
+                    if let Some(qq) = ar.data_mut_qname(x) {
+                        qq.prefix = Some(p.as_str().into());
+                    }
+                }
+            }
         }
-        keep.push(d);
-    }
-    if let Some(e) = ar.element_mut(n) {
-        e.ns_decls = keep;
     }
 }
 
-/// After a legacy import: namespaces used in the copy but declared outside
-/// it are declared on the copy's root.
-pub(crate) fn reconcile_imported(ar: &mut Arena, root: NodeId) {
-    if !ar.is_element(root) {
+/// A prefix bound to `href` in scope at `at` (for attributes, only a
+/// prefixed binding counts).
+fn search_by_href(ar: &Arena, at: NodeId, href: &str, attr: bool) -> Option<Option<goro_xml::Str>> {
+    let mut cur = Some(at);
+    while let Some(c) = cur {
+        if let Some(e) = ar.element(c) {
+            for d in &e.ns_decls {
+                if &*d.uri == href
+                    && (d.prefix.is_some() || !attr)
+                    && ar.lookup_ns(at, d.prefix.as_deref()).as_deref() == Some(href)
+                {
+                    return Some(d.prefix.clone());
+                }
+            }
+        }
+        cur = ar.parent(c).filter(|&p| ar.is_element(p));
+    }
+    None
+}
+
+/// libxml's reconciliation of a subtree after `setAttributeNS()` declared
+/// a namespace on `tree` (observed on PHP 8.5, fixture domops.out): every
+/// namespaced name below is looked up from `tree` upwards; those not found
+/// get a declaration on `tree` (with their prefix when free, else
+/// "default", "default1"...; default namespaces always get one).
+pub(crate) fn reconcile_tree(ar: &mut Arena, tree: NodeId) {
+    if !ar.is_element(tree) || ar.is_modern(ar.doc_of(tree)) {
         return;
     }
-    let mut stack = vec![root];
-    let mut needed: Vec<(Option<goro_xml::Str>, goro_xml::Str)> = Vec::new();
-    while let Some(x) = stack.pop() {
-        if let Some(e) = ar.element(x) {
-            if let Some(ns) = &e.name.ns {
-                needed.push((e.name.prefix.clone(), ns.clone()));
+    let mut cache: Vec<((Option<goro_xml::Str>, goro_xml::Str), Option<goro_xml::Str>)> = Vec::new();
+    for el in subtree_elements(ar, tree) {
+        for x in ns_users(ar, el) {
+            let q = ar.qname(x).unwrap().clone();
+            let Some(ns) = q.ns.clone() else {
+                continue;
+            };
+            if q.prefix.as_deref() == Some("xml") || &*ns == XMLNS_NS {
+                continue;
             }
-            for at in ar.attrs(x) {
-                let q = ar.qname(at).unwrap();
-                if let (Some(ns), Some(p)) = (&q.ns, &q.prefix)
-                    && &**p != "xml"
-                {
-                    needed.push((Some(p.clone()), ns.clone()));
-                }
+            let key = (q.prefix.clone(), ns.clone());
+            let newp = if let Some((_, p)) = cache.iter().find(|(k, _)| *k == key) {
+                p.clone()
+            } else if let Some(p) = search_by_href(ar, tree, &ns, false) {
+                cache.push((key, p.clone()));
+                p
+            } else {
+                let want = q.prefix.as_deref();
+                let p = match want {
+                    Some(w) if ar.lookup_ns(tree, Some(w)).is_none() => w.to_string(),
+                    _ => generated_prefix(ar, tree),
+                };
+                ar.declare_ns(tree, Some(&p), &ns);
+                let p: goro_xml::Str = p.as_str().into();
+                cache.push((key, Some(p.clone())));
+                Some(p)
+            };
+            if newp != q.prefix
+                && let Some(qq) = ar.data_mut_qname(x)
+            {
+                qq.prefix = newp;
             }
-            stack.extend(ar.children(x));
         }
     }
-    for (p, ns) in needed {
-        // Declared on the path from the node to the root of the copy?
-        if ar.lookup_ns(root, p.as_deref()).as_deref() == Some(&*ns) {
-            continue;
-        }
-        let declared_inside = {
-            let mut found = false;
-            let mut st = vec![root];
-            while let Some(x) = st.pop() {
-                if let Some(e) = ar.element(x) {
-                    if e.ns_decls.iter().any(|d| d.prefix == p && d.uri == ns) {
-                        found = true;
-                        break;
-                    }
-                    st.extend(ar.children(x));
-                }
-            }
-            found
-        };
-        if !declared_inside {
-            ar.declare_ns(root, p.as_deref(), &ns);
-        }
-    }
+    ar.touch();
+}
+
+/// After a legacy import: namespaces used in the copy but declared outside
+/// it are declared where they are used.
+pub(crate) fn reconcile_imported(ar: &mut Arena, root: NodeId) {
+    declare_dangling(ar, root);
 }
 
 // ---------------------------------------------------------------- queries
@@ -1075,8 +1208,22 @@ fn convert_nodes(vm: &mut Vm, a: &Args, ctx: NodeId) -> R<(Vec<NodeId>, Vec<supe
         match a.val(i) {
             Value::Object(o) => {
                 let Some(n) = node_of(&o) else {
-                    let c = vm.class_of(&o).name.to_string_lossy();
-                    return vm.throw("Error", &format!("Couldn't fetch {c}"));
+                    let base = if modern { "Dom\\Node" } else { "DOMNode" };
+                    let root = vm.find_class(base.as_bytes(), false)?.unwrap();
+                    let cls = vm.class_of(&o);
+                    if cls.is_subclass_of(&root) {
+                        let c = cls.name.to_string_lossy();
+                        return vm.throw("Error", &format!("Couldn't fetch {c}"));
+                    }
+                    return vm.fthrow(
+                        a,
+                        "TypeError",
+                        &format!(
+                            "Argument #{} must be of type {base}|string, {} given",
+                            i + 1,
+                            cls.name.to_string_lossy()
+                        ),
+                    );
                 };
                 if !modern {
                     let wrong = xmlstore::with(|s| {
@@ -1099,6 +1246,18 @@ fn convert_nodes(vm: &mut Vm, a: &Args, ctx: NodeId) -> R<(Vec<NodeId>, Vec<supe
                 out.push(n);
             }
             v => {
+                if !matches!(v, Value::Str(_)) {
+                    let base = if modern { "Dom\\Node" } else { "DOMNode" };
+                    return vm.fthrow(
+                        a,
+                        "TypeError",
+                        &format!(
+                            "Argument #{} must be of type {base}|string, {} given",
+                            i + 1,
+                            crate::class::TypeName::tname(&v)
+                        ),
+                    );
+                }
                 let s = vm.to_php_str(&v)?;
                 let t = with_arena(|ar| ar.new_text(doc, s8(&s)));
                 holds.push(xmlstore::with(|st| st.hold(t)));
@@ -1289,6 +1448,9 @@ pub(crate) fn replace_with(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 pub(crate) fn remove(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = this_node(vm, a)?;
+    if !modern_fn(a) && with_arena(|ar| ar.parent(n).is_none()) {
+        return legacy_error(vm, a, n, DomError::NotFound);
+    }
     with_arena(|ar| {
         if ar.parent(n).is_some() && !matches!(ar.data(n), NodeData::Attribute(_)) {
             ar.detach(n);
@@ -1306,12 +1468,25 @@ fn append_xml(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.fthrow(a, "ValueError", "Argument #1 ($data) must not be empty");
     }
     let modern = modern_fn(a);
-    let (_, errs, ok) = with_arena(|ar| {
+    if !modern && super::with_settings(f, |s| s.hidden) {
+        return throw_dom(vm, DomError::NoModificationAllowed);
+    }
+    let (errs, ok) = xmlstore::with(|s| {
         let opts = goro_xml::xml::ParseOptions {
             modern,
             ..Default::default()
         };
-        goro_xml::xml::parse_fragment(ar, f, data.as_bytes(), &opts)
+        let (top, errs, ok) = goro_xml::xml::parse_fragment(&mut s.arena, f, data.as_bytes(), &opts);
+        if !ok {
+            // Nothing is added from content that is not well-formed.
+            for n in top {
+                if s.arena.is_live(n) {
+                    s.arena.detach(n);
+                    s.free_if_unheld(n);
+                }
+            }
+        }
+        (errs, ok)
     });
     let fname = a.fname();
     super::super::libxml::report(

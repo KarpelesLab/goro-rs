@@ -459,6 +459,36 @@ pub(crate) fn legacy_error(vm: &mut Vm, a: &Args, n: NodeId, e: DomError) -> R<V
     Ok(Value::Bool(false))
 }
 
+thread_local! {
+    /// Attributes made non-ID with `setIdAttribute*(..., false)`, by
+    /// document (an `id` attribute of a `Dom\` or HTML document is an ID
+    /// otherwise).
+    pub(crate) static NOT_ID: std::cell::RefCell<std::collections::HashMap<NodeId, std::collections::HashSet<NodeId>>> = Default::default();
+}
+
+/// True if attribute `at` is an ID (DTD-declared or set with
+/// `setIdAttribute()`, `xml:id`, or `id` in `Dom\` and HTML documents;
+/// tests bug79701/*.phpt).
+pub(crate) fn is_id_attr(s: &xmlstore::Store, at: NodeId) -> bool {
+    let a = &s.arena;
+    let doc = a.doc_of(at);
+    if NOT_ID.with(|m| m.borrow().get(&doc).is_some_and(|set| set.contains(&at))) {
+        return false;
+    }
+    let Some(d) = a.attr(at) else {
+        return false;
+    };
+    if d.is_id {
+        return true;
+    }
+    let q = &d.name;
+    if q.ns.as_deref() == Some(goro_xml::tree::XML_NS) && &*q.local == "id" {
+        return true;
+    }
+    let dd = a.doc(doc);
+    q.ns.is_none() && &*q.local == "id" && (dd.modern || dd.kind == DocKind::Html)
+}
+
 /// The node type number PHP reports.
 pub(crate) fn node_type_num(a: &Arena, n: NodeId) -> i64 {
     let t = a.node_type(n);

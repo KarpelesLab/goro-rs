@@ -119,7 +119,7 @@ impl Store {
                 self.arena.node_type(n),
                 goro_xml::NodeType::Document | goro_xml::NodeType::HtmlDocument
             )
-            && !self.arena.subtree_held(n)
+            && self.arena.holds(n) == 0
         {
             self.arena.free_subtree(n);
         }

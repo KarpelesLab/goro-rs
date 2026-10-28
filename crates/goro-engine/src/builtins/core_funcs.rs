@@ -940,15 +940,37 @@ fn constant(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn get_defined_constants(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut out = PhpArray::new();
     if a.bool_or(0, false) {
-        let mut core = PhpArray::new();
+        // Grouped by the extension declaring them (listed modules by name,
+        // the rest under "Core"; PHP manual: get_defined_constants).
+        let mut owner: std::collections::HashMap<&[u8], &'static str> =
+            std::collections::HashMap::new();
+        for m in vm.modules.iter() {
+            if m.listed && !m.name.is_empty() {
+                for (k, _) in m.constants {
+                    owner.insert(k.as_bytes(), m.name);
+                }
+            }
+        }
+        let mut groups: Vec<(&str, PhpArray)> = vec![("Core", PhpArray::new())];
         let mut keys: Vec<&PhpStr> = vm.constants.keys().collect();
         keys.sort();
         for k in keys {
-            if !vm.user_constants.contains(k) {
-                core.insert(Key::Str(k.clone()), vm.constants[k].clone());
+            if vm.user_constants.contains(k) {
+                continue;
             }
+            let g = owner.get(k.as_bytes()).copied().unwrap_or("Core");
+            let i = match groups.iter().position(|(n, _)| *n == g) {
+                Some(i) => i,
+                None => {
+                    groups.push((g, PhpArray::new()));
+                    groups.len() - 1
+                }
+            };
+            groups[i].1.insert(Key::Str(k.clone()), vm.constants[k].clone());
         }
-        out.insert(Key::from("Core"), Value::Array(core));
+        for (n, arr) in groups {
+            out.insert(Key::from(n), Value::Array(arr));
+        }
         let mut user = PhpArray::new();
         for k in &vm.user_constants {
             if let Some(v) = vm.constants.get(k) {

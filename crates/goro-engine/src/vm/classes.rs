@@ -1863,6 +1863,13 @@ impl Vm {
                 cls.flags
                     .set(cls.flags.get() | cflags::NOT_SERIALIZABLE | cflags::NO_DYNAMIC);
             }
+            if cls
+                .attrs
+                .iter()
+                .any(|a| a.name.as_bytes() == b"NotCloneable")
+            {
+                cls.flags.set(cls.flags.get() | cflags::NOT_CLONEABLE);
+            }
             self.bind_natives(&cls);
         }
         Ok(())
