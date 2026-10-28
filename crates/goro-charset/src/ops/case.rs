@@ -132,7 +132,18 @@ pub fn convert_case_cps(cps: &[u32], mode: CaseMode, out: &mut Vec<u32>) {
     use intl::unicode::{case_fold, to_lowercase, to_titlecase, to_uppercase};
     out.reserve(cps.len());
     let mut in_word = false;
+    let upper = matches!(mode, Upper | UpperSimple);
+    let title = matches!(mode, Title | TitleSimple);
     for (i, &cp) in cps.iter().enumerate() {
+        if cp < 0x80 && !title {
+            let b = cp as u8;
+            out.push(if upper {
+                b.to_ascii_uppercase()
+            } else {
+                b.to_ascii_lowercase()
+            } as u32);
+            continue;
+        }
         if cp == ERR || cp > 0x10FFFF {
             // Invalid input does not end a word (observed on PHP 8.5).
             out.push(cp);

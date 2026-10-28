@@ -9,57 +9,13 @@ use super::{Decode, ERR, Encode, Subst, fail};
 const HI: u64 = 0x8080_8080_8080_8080;
 
 /// The length of the longest prefix of `s` that is valid UTF-8 (WHATWG
-/// rules: no surrogates, no overlongs, at most U+10FFFF), in bytes.
+/// rules, the same as Rust's: no surrogates, no overlongs, at most
+/// U+10FFFF), in bytes.
 pub(crate) fn utf8_valid_up_to(s: &[u8]) -> usize {
-    let n = s.len();
-    let mut i = 0;
-    while i < n {
-        // Skip ASCII 16 bytes at a time.
-        if s[i] < 0x80 {
-            while i + 16 <= n {
-                let a = u64::from_le_bytes(s[i..i + 8].try_into().unwrap());
-                let b = u64::from_le_bytes(s[i + 8..i + 16].try_into().unwrap());
-                if (a | b) & HI != 0 {
-                    break;
-                }
-                i += 16;
-            }
-            while i < n && s[i] < 0x80 {
-                i += 1;
-            }
-            if i >= n {
-                break;
-            }
-        }
-        let b = s[i];
-        let need = match b {
-            0xC2..=0xDF => 1,
-            0xE0..=0xEF => 2,
-            0xF0..=0xF4 => 3,
-            _ => return i,
-        };
-        if i + need >= n {
-            return i;
-        }
-        let c1 = s[i + 1];
-        let ok1 = match b {
-            0xE0 => (0xA0..=0xBF).contains(&c1),
-            0xED => (0x80..=0x9F).contains(&c1),
-            0xF0 => (0x90..=0xBF).contains(&c1),
-            0xF4 => (0x80..=0x8F).contains(&c1),
-            _ => (0x80..=0xBF).contains(&c1),
-        };
-        if !ok1 {
-            return i;
-        }
-        for k in 2..=need {
-            if !(0x80..=0xBF).contains(&s[i + k]) {
-                return i;
-            }
-        }
-        i += need + 1;
+    match simdutf8::compat::from_utf8(s) {
+        Ok(_) => s.len(),
+        Err(e) => e.valid_up_to(),
     }
-    n
 }
 
 /// Decodes one UTF-8 character at `s[i]` (WHATWG). Returns the value and the
@@ -122,6 +78,24 @@ impl Decode for Utf8Dec {
                 }
                 continue;
             }
+            // Well-formed two- and three-byte sequences first.
+            let b = s[i];
+            if i + 2 < n {
+                let (c1, c2) = (s[i + 1], s[i + 2]);
+                if (0xC2..=0xDF).contains(&b) && c1 & 0xC0 == 0x80 {
+                    out.push(((b as u32 & 0x1F) << 6) | (c1 as u32 & 0x3F));
+                    i += 2;
+                    continue;
+                }
+                if (0xE1..=0xEF).contains(&b) && b != 0xED && c1 & 0xC0 == 0x80 && c2 & 0xC0 == 0x80
+                {
+                    out.push(
+                        ((b as u32 & 0x0F) << 12) | ((c1 as u32 & 0x3F) << 6) | (c2 as u32 & 0x3F),
+                    );
+                    i += 3;
+                    continue;
+                }
+            }
             let (cp, len) = utf8_decode_one(s, i);
             out.push(cp);
             i += len;
@@ -167,14 +141,41 @@ impl Encode for Utf8Enc {
     }
 
     fn encode(&mut self, cps: &[u32], out: &mut Vec<u8>, sub: &Subst, errors: &mut usize) {
-        out.reserve(cps.len());
-        for &cp in cps {
+        // Writes into room for four bytes a value, trimmed at the end.
+        let mut o = out.len();
+        out.resize(o + cps.len() * 4, 0);
+        let mut tmp = Vec::new();
+        for (k, &cp) in cps.iter().enumerate() {
             if cp < 0x80 {
-                out.push(cp as u8);
-            } else if !self.put(cp, out) {
-                fail(self, cp, out, sub, errors);
+                out[o] = cp as u8;
+                o += 1;
+            } else if cp < 0x800 {
+                out[o] = 0xC0 | (cp >> 6) as u8;
+                out[o + 1] = 0x80 | (cp & 0x3F) as u8;
+                o += 2;
+            } else if cp < 0x10000 {
+                out[o] = 0xE0 | (cp >> 12) as u8;
+                out[o + 1] = 0x80 | ((cp >> 6) & 0x3F) as u8;
+                out[o + 2] = 0x80 | (cp & 0x3F) as u8;
+                o += 3;
+            } else if cp <= 0x10FFFF {
+                out[o] = 0xF0 | (cp >> 18) as u8;
+                out[o + 1] = 0x80 | ((cp >> 12) & 0x3F) as u8;
+                out[o + 2] = 0x80 | ((cp >> 6) & 0x3F) as u8;
+                out[o + 3] = 0x80 | (cp & 0x3F) as u8;
+                o += 4;
+            } else {
+                tmp.clear();
+                fail(self, cp, &mut tmp, sub, errors);
+                let need = o + tmp.len() + (cps.len() - k - 1) * 4;
+                if need > out.len() {
+                    out.resize(need, 0);
+                }
+                out[o..o + tmp.len()].copy_from_slice(&tmp);
+                o += tmp.len();
             }
         }
+        out.truncate(o);
     }
 }
 

@@ -25,19 +25,24 @@ use crate::Encoding;
 use crate::codec::{self, CHUNK, ERR};
 use crate::tables::detect::DEMERITS;
 
+/// The demerits of every BMP code point, from [`DEMERITS`].
+fn bmp_table() -> &'static [u8; 0x10000] {
+    static T: std::sync::OnceLock<Box<[u8; 0x10000]>> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        let mut t = Box::new([30u8; 0x10000]);
+        for &(a, b, v) in DEMERITS.iter() {
+            t[a as usize..=b as usize].fill(v);
+        }
+        t
+    })
+}
+
 /// The demerits of one decoded code point.
 pub fn demerit(cp: u32) -> u64 {
-    if cp == ERR {
-        return 1000;
-    }
-    if cp >= 0x10000 {
-        return 40;
-    }
-    let c = cp as u16;
-    let i = DEMERITS.partition_point(|e| e.1 < c);
-    match DEMERITS.get(i) {
-        Some(&(a, _, v)) if a <= c => v as u64,
-        _ => 30,
+    match cp {
+        ERR => 1000,
+        0x10000.. => 40,
+        _ => bmp_table()[cp as usize] as u64,
     }
 }
 
@@ -47,40 +52,69 @@ fn free_bom(enc: Encoding) -> bool {
     matches!(enc, Utf8 | Utf16Be | Utf16Le | Utf32Be | Utf32Le)
 }
 
-/// The total demerits of `s` decoded as `enc`.
-pub fn score(s: &[u8], enc: Encoding) -> u64 {
+/// Whether `enc` costs 500 more when the string is not valid in it.
+fn checked(enc: Encoding) -> bool {
+    use Encoding::*;
+    matches!(enc, Utf7 | Utf7Imap | Jis | Iso2022Jp)
+}
+
+/// The demerits of `s` in `enc` and whether `s` is valid in it, or `None`
+/// once the demerits reach `bound`.
+fn score_bounded(s: &[u8], enc: Encoding, bound: u64) -> Option<(u64, bool)> {
+    let table = bmp_table();
     let mut d = codec::decoder(enc);
     let mut buf = Vec::with_capacity(CHUNK + 64);
     let mut pos = 0;
     let mut total = 0u64;
+    let mut errors = false;
     let mut first = true;
     let skip_bom = free_bom(enc);
-    let mut add = |buf: &[u32], total: &mut u64| {
-        let mut it = buf.iter();
+    let mut add = |buf: &[u32], total: &mut u64, errors: &mut bool| {
+        let mut vals = buf;
         if first && !buf.is_empty() {
             first = false;
             if skip_bom && buf[0] == 0xFEFF {
-                it.next();
+                vals = &buf[1..];
             }
         }
-        *total += it.map(|&c| demerit(c)).sum::<u64>();
+        for &c in vals {
+            *total += match c {
+                ERR => {
+                    *errors = true;
+                    1000
+                }
+                0x10000.. => 40,
+                _ => table[c as usize] as u64,
+            };
+        }
     };
     while pos < s.len() {
         buf.clear();
         d.decode(s, &mut pos, &mut buf, CHUNK);
-        add(&buf, &mut total);
+        add(&buf, &mut total, &mut errors);
+        if total >= bound {
+            return None;
+        }
     }
     buf.clear();
     d.finish(&mut buf);
-    add(&buf, &mut total);
-    if matches!(
-        enc,
-        Encoding::Utf7 | Encoding::Utf7Imap | Encoding::Jis | Encoding::Iso2022Jp
-    ) && !crate::check_encoding(s, enc)
-    {
+    add(&buf, &mut total, &mut errors);
+    if total >= bound {
+        return None;
+    }
+    let valid = match enc {
+        Encoding::Utf8 => !errors,
+        _ => !errors && !d.check_failed(),
+    };
+    if checked(enc) && !valid {
         total += 500;
     }
-    total
+    Some((total, valid))
+}
+
+/// The total demerits of `s` decoded as `enc`.
+pub fn score(s: &[u8], enc: Encoding) -> u64 {
+    score_bounded(s, enc, u64::MAX).map_or(u64::MAX, |r| r.0)
 }
 
 /// `mb_detect_encoding()`: the encoding of `list` that best fits `s`; `None`
@@ -101,10 +135,14 @@ pub fn detect_encoding(s: &[u8], list: &[Encoding], strict: bool) -> Option<Enco
     let n = list.len() as u64;
     let mut best: Option<(u64, Encoding)> = None;
     for (p, &e) in list.iter().enumerate() {
-        if strict && !crate::check_encoding(s, e) {
+        // A candidate whose demerits reach the best raised total cannot win.
+        let bound = best.map_or(u64::MAX, |b| b.0);
+        let Some((t, valid)) = score_bounded(s, e, bound) else {
+            continue;
+        };
+        if strict && !valid {
             continue;
         }
-        let t = score(s, e);
         let t = t + t * 3 * p as u64 / (10 * n);
         if best.is_none_or(|(b, _)| t < b) {
             best = Some((t, e));

@@ -110,16 +110,32 @@ fn utf8_count(s: &[u8]) -> usize {
     n + rest.iter().filter(|&&b| (b as i8) >= -0x40).count()
 }
 
-/// Byte offsets of the characters of valid UTF-8, plus the end.
-fn utf8_offsets(s: &[u8]) -> Vec<usize> {
-    let mut v: Vec<usize> = s
-        .iter()
-        .enumerate()
-        .filter(|&(_, &b)| (b as i8) >= -0x40)
-        .map(|(i, _)| i)
-        .collect();
-    v.push(s.len());
-    v
+/// The byte offset of character `k` of valid UTF-8 (the length when `k` is
+/// the number of characters, `None` past that), counting eight bytes at a
+/// time.
+fn utf8_byte_index(s: &[u8], k: usize) -> Option<usize> {
+    let mut count = 0;
+    let mut i = 0;
+    let (chunks, _) = s.as_chunks::<8>();
+    for c in chunks {
+        let w = u64::from_le_bytes(*c);
+        let n = 8 - (w & !(w << 1) & 0x8080_8080_8080_8080).count_ones() as usize;
+        if count + n > k {
+            break;
+        }
+        count += n;
+        i += 8;
+    }
+    while i < s.len() {
+        if (s[i] as i8) >= -0x40 {
+            if count == k {
+                return Some(i);
+            }
+            count += 1;
+        }
+        i += 1;
+    }
+    (count == k).then_some(s.len())
 }
 
 fn valid_utf8(s: &[u8], enc: Encoding) -> bool {
@@ -148,9 +164,10 @@ pub fn substr(s: &[u8], start: i64, len: Option<i64>, enc: Encoding, sub: &Subst
         return s[a..b].to_vec();
     }
     if valid_utf8(s, enc) {
-        let offs = utf8_offsets(s);
-        let (a, b) = clamp_range(offs.len() - 1, start, len);
-        return s[offs[a]..offs[b]].to_vec();
+        let (a, b) = clamp_range(utf8_count(s), start, len);
+        let from = utf8_byte_index(s, a).unwrap_or(s.len());
+        let to = from + utf8_byte_index(&s[from..], b - a).unwrap_or(s.len() - from);
+        return s[from..to].to_vec();
     }
     if let Some(w) = enc.fixed_unit_width() {
         // Byte ranges of whole units; an open end takes a trailing partial
@@ -319,22 +336,17 @@ fn strpos_impl(
     fold: bool,
 ) -> Result<Option<usize>, MbError> {
     if !fold && valid_utf8(hay, enc) && valid_utf8(needle, enc) {
-        let offs = utf8_offsets(hay);
-        let n = offs.len() as i64 - 1;
-        let off = if offset < 0 { offset + n } else { offset };
-        if off < 0 || off > n {
-            return Err(value_error(OFFSET_ERR));
-        }
-        let from = offs[off as usize];
-        let found = if needle.is_empty() {
-            Some(from)
+        let off = if offset < 0 {
+            offset + utf8_count(hay) as i64
         } else {
-            hay[from..]
-                .windows(needle.len())
-                .position(|w| w == needle)
-                .map(|p| p + from)
+            offset
         };
-        return Ok(found.map(|b| offs.partition_point(|&o| o < b)));
+        let from = usize::try_from(off)
+            .ok()
+            .and_then(|o| utf8_byte_index(hay, o))
+            .ok_or_else(|| value_error(OFFSET_ERR))?;
+        let found = memchr::memmem::find(&hay[from..], needle);
+        return Ok(found.map(|p| off as usize + utf8_count(&hay[from..from + p])));
     }
     let raw = search_cps(hay, enc);
     let (h, n) = prepare(hay, needle, enc, fold);
