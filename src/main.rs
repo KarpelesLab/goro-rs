@@ -233,9 +233,18 @@ fn split_ini(v: &[u8]) -> (Vec<u8>, Vec<u8>) {
     match v.iter().position(|&c| c == b'=') {
         Some(p) => {
             let mut val = v[p + 1..].to_vec();
-            // Quoted values lose their quotes.
+            // Quoted values lose their quotes; elsewhere `;` starts a
+            // comment, as in php.ini (observed on PHP 8.5:
+            // `-d 'precision=5 ; x'` gives "5").
             if val.len() >= 2 && val[0] == b'"' && val[val.len() - 1] == b'"' {
                 val = val[1..val.len() - 1].to_vec();
+            } else if val.first() != Some(&b'"')
+                && let Some(c) = val.iter().position(|&c| c == b';')
+            {
+                val.truncate(c);
+                while val.last().is_some_and(|c| c.is_ascii_whitespace()) {
+                    val.pop();
+                }
             }
             (v[..p].to_vec(), val)
         }
