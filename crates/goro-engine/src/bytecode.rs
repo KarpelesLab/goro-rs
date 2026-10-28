@@ -1104,6 +1104,8 @@ pub struct FuncCode {
     pub discarded_calls: Vec<u32>,
     /// Attributes of `const` statements in this code, by constant name.
     pub const_attrs: Vec<(PhpStr, u32, Rc<[AttrInfo]>)>,
+    /// Compiled inside a namespace.
+    pub in_namespace: bool,
     /// Inline caches (instruction-local, by index).
     pub caches: Box<[Cell<Cache>]>,
     /// Lazily computed name → slot map for dynamic variable access.

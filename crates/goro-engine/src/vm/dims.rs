@@ -670,7 +670,18 @@ impl Vm {
             PathBase::StaticProp(c, n) => {
                 let unset = matches!(path.action, PathAction::Unset) && path.elems.is_empty();
                 if unset {
-                    return self.throw("Error", "Attempt to unset static property");
+                    // test Zend/tests/exceptions/exception_013
+                    let cls = self.resolve_class_spec(c, true)?;
+                    let n = self.get(n)?;
+                    let n = self.to_php_str(&n)?;
+                    return self.throw(
+                        "Error",
+                        &format!(
+                            "Attempt to unset static property {}::${}",
+                            cls.name.dname(),
+                            n.to_string_lossy()
+                        ),
+                    );
                 }
                 let write = path.elems.is_empty()
                     && matches!(path.action, PathAction::Assign(_) | PathAction::BindRef(_));

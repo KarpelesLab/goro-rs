@@ -296,7 +296,10 @@ impl Vm {
                 if self.class_of(&o).is_subclass_of(&throwable) {
                     return Unwind::Throw(o);
                 }
-                self.throw_error_msg("Error", "Can only throw objects")
+                self.throw_error_msg(
+                    "Error",
+                    "Cannot throw objects that do not implement Throwable",
+                )
             }
             _ => self.throw_error_msg("Error", "Can only throw objects"),
         }
@@ -634,11 +637,31 @@ impl Vm {
         let n = ex.frames.len();
         let mut natives = ex.native_calls.len();
         let mut i = n;
+        // call_user_func() called from user code is no frame of its own:
+        // PHP compiles it to a direct call (observed on PHP 8.5; tests
+        // Zend/tests/gh16799, exceptions/bug73338).
+        let direct_cuf = |k: usize| -> bool {
+            let nc = &ex.native_calls[k];
+            let d = nc.depth as usize;
+            nc.func.scope().is_none()
+                && matches!(
+                    nc.func.lname.as_bytes(),
+                    b"call_user_func" | b"call_user_func_array"
+                )
+                && d > 0
+                && !ex.frames[d - 1].code().file.is_empty()
+                // (in a namespace an unqualified name is resolved at run time)
+                && !ex.frames[d - 1].code().in_namespace
+                && !(k > 0 && ex.native_calls[k - 1].depth as usize == d)
+        };
         loop {
             // Native calls made from frame i-1 (depth == i).
             while natives > 0 && ex.native_calls[natives - 1].depth as usize == i {
                 let nc = &ex.native_calls[natives - 1];
                 natives -= 1;
+                if direct_cuf(natives) {
+                    continue;
+                }
                 let mut e = self.native_trace_frame(ex, nc, i, with_args);
                 // Called by another internal function (call_user_func):
                 // no call site (test ReflectionFiber_notrace_2.phpt).
@@ -661,17 +684,21 @@ impl Vm {
             // (or from the engine itself: shutdown functions, fibers).
             let called_from_native =
                 natives > 0 && ex.native_calls[natives - 1].depth as usize == i;
-            let (file, line) =
-                if called_from_native || i == 0 || ex.frames[i - 1].code().file.is_empty() {
-                    (None, 0)
-                } else {
-                    let caller = &ex.frames[i - 1];
-                    let cip = caller.ip.saturating_sub(1);
-                    (
-                        Some(caller.code().file.clone()),
-                        caller.code().line_of(cip as usize),
-                    )
-                };
+            let (file, line) = if called_from_native && direct_cuf(natives - 1) {
+                (
+                    Some(ex.frames[i - 1].code().file.clone()),
+                    ex.native_calls[natives - 1].line,
+                )
+            } else if called_from_native || i == 0 || ex.frames[i - 1].code().file.is_empty() {
+                (None, 0)
+            } else {
+                let caller = &ex.frames[i - 1];
+                let cip = caller.ip.saturating_sub(1);
+                (
+                    Some(caller.code().file.clone()),
+                    caller.code().line_of(cip as usize),
+                )
+            };
             if code.flags & crate::bytecode::fflags::PSEUDO_MAIN != 0 {
                 if f.flags & frame_flags::ATTACHED == 0 {
                     continue;
@@ -922,6 +949,10 @@ impl Vm {
 
     /// `getTraceAsString()` format.
     pub fn trace_string(&mut self, trace: &PhpArray) -> String {
+        let max_len = self
+            .get_ini(b"zend.exception_string_param_max_len")
+            .map(|v| goro_runtime::convert::str_to_int(&v).clamp(0, 1_000_000) as usize)
+            .unwrap_or(15);
         let mut out = String::new();
         let mut i = 0;
         for (_, fr) in trace.iter() {
@@ -982,7 +1013,7 @@ impl Vm {
                         out.push_str(", ");
                     }
                     first = false;
-                    out.push_str(&trace_arg(&a.deref()));
+                    out.push_str(&trace_arg_max(&a.deref(), max_len));
                 }
             }
             out.push_str(")\n");
@@ -1149,6 +1180,11 @@ fn trace_escape(s: &[u8]) -> String {
 
 /// An argument as `getTraceAsString()` prints it.
 pub fn trace_arg(v: &Value) -> String {
+    trace_arg_max(v, 15)
+}
+
+/// The same with strings cut at `max` bytes (zend.exception_string_param_max_len).
+pub fn trace_arg_max(v: &Value, max: usize) -> String {
     match v {
         Value::Null => "NULL".into(),
         Value::Bool(true) => "true".into(),
@@ -1156,8 +1192,8 @@ pub fn trace_arg(v: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => goro_runtime::float_fmt::to_php_string(*f, 17),
         Value::Str(s) => {
-            let (head, more) = if s.len() > 15 {
-                (&s[..15], "...")
+            let (head, more) = if s.len() > max {
+                (&s[..max], "...")
             } else {
                 (&s[..], "")
             };
@@ -1177,6 +1213,6 @@ pub fn trace_arg(v: &Value) -> String {
             format!("Object({})", o.class_name().to_string_lossy())
         }
         Value::Resource(r) => format!("Resource id #{}", r.id()),
-        Value::Ref(r) => trace_arg(&r.get()),
+        Value::Ref(r) => trace_arg_max(&r.get(), max),
     }
 }

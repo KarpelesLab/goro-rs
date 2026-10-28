@@ -613,6 +613,7 @@ impl<'a> Compiler<'a> {
         let byref_mask = crate::bytecode::byref_mask(&params);
         let direct_params = params.iter().filter(|p| !p.variadic).count() as u32;
         Ok(FuncCode {
+            in_namespace: !self.ns.is_empty(),
             byref_mask,
             direct_params,
             name,
