@@ -29,6 +29,7 @@
 
 pub mod c14n;
 pub mod chars;
+pub mod css;
 pub mod encoding;
 pub mod error;
 pub mod html;
