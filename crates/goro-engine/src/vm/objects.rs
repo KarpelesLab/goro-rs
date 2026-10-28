@@ -35,17 +35,15 @@ impl Vm {
     #[inline]
     pub fn is_uninit(&self, v: &Value) -> bool {
         match v {
-            Value::Resource(r) => {
-                goro_runtime::ResRef::ptr_eq(r, &self.uninit)
-                    || goro_runtime::ResRef::ptr_eq(r, &self.unset_mark)
-            }
+            Value::Resource(r) => goro_runtime::ResRef::ptr_eq(r, &self.uninit),
+            Value::Ref(r) => PhpRef::ptr_eq(r, &self.unset_mark),
             _ => false,
         }
     }
 
     #[inline]
     pub fn is_unset_mark(&self, v: &Value) -> bool {
-        matches!(v, Value::Resource(r) if goro_runtime::ResRef::ptr_eq(r, &self.unset_mark))
+        matches!(v, Value::Ref(r) if PhpRef::ptr_eq(r, &self.unset_mark))
     }
 
     pub fn uninit_value(&self) -> Value {
@@ -53,7 +51,7 @@ impl Vm {
     }
 
     pub fn unset_value(&self) -> Value {
-        Value::Resource(self.unset_mark.clone())
+        Value::Ref(self.unset_mark.clone())
     }
 
     // ------------------------------------------------------------ lookup

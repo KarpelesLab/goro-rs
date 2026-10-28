@@ -11,8 +11,11 @@ use crate::registry::{Module, sig_name};
 impl Vm {
     /// A new engine with the given modules.
     pub fn new(modules: &[&'static Module]) -> Vm {
+        // Resource ids as PHP's CLI numbers them: STDIN, STDOUT, STDERR,
+        // then one internal (here the uninitialized-property marker).
+        let stdio = crate::builtins::file::stdio_resources();
         let uninit = goro_runtime::ResRef::new(PhpStr::intern(b"uninitialized"), Box::new(()));
-        let unset_mark = goro_runtime::ResRef::new(PhpStr::intern(b"unset"), Box::new(()));
+        let unset_mark = goro_runtime::PhpRef::new(Value::Null);
         let mut vm = Vm {
             ex: ExecState::default(),
             arg_pool: Vec::new(),
@@ -66,7 +69,11 @@ impl Vm {
             dtor_depth: 0,
             compile_notices_pending: Vec::new(),
             run_depth: 0,
-            resources: resources::Resources::default(),
+            resources: resources::Resources {
+                stdin: Some(stdio.0),
+                stdout: Some(stdio.1),
+                stderr: Some(stdio.2),
+            },
             keep_alive: Vec::new(),
             fiber: None,
             strict_main: false,
@@ -87,6 +94,7 @@ impl Vm {
             halt_offsets: HashMap::new(),
             dump_stack: Vec::new(),
             weakrefs: HashMap::new(),
+            last_dir: None,
             compiling_eval: false,
             ex_parents: Vec::new(),
             fiber_stack: Vec::new(),

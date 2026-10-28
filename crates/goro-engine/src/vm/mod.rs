@@ -408,7 +408,7 @@ pub struct Vm {
     pub uncaught_reported: bool,
     /// Markers of uninitialized / unset declared properties.
     pub uninit: goro_runtime::ResRef,
-    pub unset_mark: goro_runtime::ResRef,
+    pub unset_mark: PhpRef,
     /// Magic property method recursion guards: (object, name, kind).
     pub prop_guards: Vec<(u32, PhpStr, u8)>,
     /// Property hooks running: (object, property).
@@ -431,6 +431,8 @@ pub struct Vm {
     pub halt_offsets: HashMap<PhpStr, i64>,
     /// Containers being dumped (recursion detection).
     pub dump_stack: Vec<usize>,
+    /// The directory handle of the last opendir() (readdir() default).
+    pub last_dir: Option<goro_runtime::ResRef>,
     /// WeakReference objects by target handle.
     pub weakrefs: HashMap<u32, (goro_runtime::WeakObj, goro_runtime::WeakObj)>,
     /// Compiling eval() code (compile errors are thrown).

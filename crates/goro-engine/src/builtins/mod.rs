@@ -5,7 +5,10 @@ pub mod core_classes;
 pub mod core_funcs;
 pub mod enums;
 pub mod fiber;
+pub mod file;
+pub mod json;
 pub mod output;
+pub mod serialize;
 pub mod var;
 
 use crate::registry::Module;
@@ -18,5 +21,8 @@ pub fn modules() -> Vec<&'static Module> {
         &var::MODULE,
         &output::MODULE,
         &fiber::MODULE,
+        &file::MODULE,
+        &serialize::MODULE,
+        &json::MODULE,
     ]
 }
