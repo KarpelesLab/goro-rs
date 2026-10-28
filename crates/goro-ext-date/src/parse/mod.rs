@@ -215,17 +215,18 @@ impl Parsed {
 }
 
 fn is_space(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c | b',' | b'.')
+    matches!(
+        c,
+        b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c | b',' | b'.' | 0
+    )
 }
 
 /// Parses a date/time string the way `date_parse()` and `strtotime()` do.
 pub fn parse(input: &[u8]) -> Parsed {
     let mut t = Parsed::default();
-    // the string ends at a NUL byte
-    let s = match input.iter().position(|&c| c == 0) {
-        Some(n) => &input[..n],
-        None => input,
-    };
+    // A NUL byte is skipped like a blank: "2021-01-01\0junk" reports
+    // "junk" at position 11 (observed on PHP 8.5).
+    let s = input;
     // Surrounding white space is dropped first: positions in messages
     // count from the first non-blank byte (observed on PHP 8.5).
     let ws = |c: &u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);

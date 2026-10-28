@@ -249,7 +249,9 @@ pub fn parse_error_message(input: &[u8], p: &Parsed) -> Option<String> {
     // past the end (the empty string) PHP prints a space
     let c = trimmed.get(*pos).copied().unwrap_or(b' ');
     let mut out = String::from("Failed to parse time string (");
-    out.push_str(&String::from_utf8_lossy(input));
+    // the message shows the string up to a NUL byte (observed on PHP 8.5)
+    let shown = input.split(|&c| c == 0).next().unwrap_or(b"");
+    out.push_str(&String::from_utf8_lossy(shown));
     out.push_str(&format!(") at position {pos} ("));
     out.push_str(&String::from_utf8_lossy(&[c]));
     out.push_str(&format!("): {msg}"));
@@ -257,13 +259,22 @@ pub fn parse_error_message(input: &[u8], p: &Parsed) -> Option<String> {
 }
 
 fn trim_ws(s: &[u8]) -> &[u8] {
-    let s = match s.iter().position(|&c| c == 0) {
-        Some(n) => &s[..n],
-        None => s,
-    };
     let ws = |c: &u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
     let a = s.iter().position(|c| !ws(c)).unwrap_or(s.len());
     &s[a..]
+}
+
+/// `new DateTime($input, $zone)`: `now`/`now_us` is the current time and
+/// `zone` the constructor's zone or the default one; a zone in the string
+/// wins (observed on PHP 8.5). The error is the DateMalformedStringException
+/// message; `date_create()` returns false instead, and both keep the parse
+/// result for `getLastErrors()`.
+pub fn create(input: &[u8], now: i64, now_us: u32, zone: &TimeZone) -> Result<DateTime, String> {
+    let p = crate::parse::parse(input);
+    if let Some(msg) = parse_error_message(input, &p) {
+        return Err(msg);
+    }
+    Ok(resolve(&p, now, now_us, zone, Mode::Create))
 }
 
 /// `DateTime::modify()` on (`ts`, `us`, `zone`): the new value, or the
