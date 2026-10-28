@@ -64,6 +64,7 @@ pub struct Parsed {
     pub has_dup_names: bool,
     pub turkish: bool,
     pub has_cr_lf: bool,
+    pub has_ext_class: bool,
 }
 
 /// Escapes recognised by [`Parser::escape`].
@@ -143,6 +144,7 @@ pub struct Parser<'a> {
     /// check in branch-reset groups).
     group_names: Vec<(u32, Arc<[u8]>)>,
     has_cr_lf: bool,
+    has_ext_class: bool,
 }
 
 #[inline]
@@ -1480,6 +1482,7 @@ impl<'a> Parser<'a> {
             has_dup_names: false,
             group_names: Vec::new(),
             has_cr_lf: false,
+            has_ext_class: false,
         }
     }
 
@@ -1793,6 +1796,7 @@ impl<'a> Parser<'a> {
                 _ => SetExpr::Or(a, b),
             });
         }
+        self.has_ext_class = true;
         let saved = self.o;
         // The /xx option is always on inside (pcre2pattern).
         self.o.extended_more = true;
@@ -3246,6 +3250,7 @@ pub fn parse(pattern: &[u8], cfg: &ParseConfig) -> Result<Parsed, CompileError> 
         has_dup_names: false,
         group_names: Vec::new(),
         has_cr_lf: false,
+        has_ext_class: false,
     };
     let mut out = Parsed {
         node: Node::Empty,
@@ -3267,6 +3272,7 @@ pub fn parse(pattern: &[u8], cfg: &ParseConfig) -> Result<Parsed, CompileError> 
         has_dup_names: false,
         turkish: false,
         has_cr_lf: false,
+        has_ext_class: false,
     };
     // Start-of-pattern items (pcre2pattern "Special start-of-pattern items").
     loop {
@@ -3372,6 +3378,7 @@ pub fn parse(pattern: &[u8], cfg: &ParseConfig) -> Result<Parsed, CompileError> 
     out.has_dup_names = ps.has_dup_names;
     out.turkish = ps.turkish;
     out.has_cr_lf = ps.has_cr_lf;
+    out.has_ext_class = ps.has_ext_class;
     Ok(out)
 }
 

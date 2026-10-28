@@ -30,6 +30,22 @@ pub struct Compiled {
 
 pub fn compile(mut parsed: Parsed, flags: crate::Flags) -> CResult<Compiled> {
     let mut node = std::mem::replace(&mut parsed.node, Node::Empty);
+    // Before references are checked (observed on PHP 8.5).
+    if parsed.has_ext_class {
+        let mut lb = false;
+        walk(&node, &mut |x| {
+            if let Node::Group {
+                kind: GroupKind::LookBehind { .. },
+                ..
+            } = x
+            {
+                lb = true;
+            }
+        });
+        if lb {
+            return Err(CompileError::new(E::InternalCheckLookbehinds, 0));
+        }
+    }
     Resolver {
         ncap: parsed.ncap,
         names: &parsed.names,
@@ -1124,7 +1140,9 @@ impl Emitter {
         let start = self.push(Inst::LookStart { kind, end: 0 });
         let saved_caps = std::mem::take(&mut self.open_caps);
         let saved_tags = std::mem::take(&mut self.then_tags);
-        let bcx = if kind == LookKind::NonAtomic {
+        // A lookbehind branch must end where the lookbehind started, so
+        // its repeats may need to give characters back.
+        let bcx = if kind == LookKind::NonAtomic || behind {
             Cx::NONE
         } else {
             Cx::END
@@ -1975,6 +1993,24 @@ fn first_unit(n: &Node, utf: bool) -> Option<(u8, u8)> {
                 Verb::Fail | Verb::Accept => Err(()),
                 _ => Ok(None),
             },
+            // A one-byte set acts as that byte (observed on PHP 8.5:
+            // /(*COMMIT)[2].*/ skips to the first "2").
+            Node::Set(s) => match s.single_byte() {
+                Some(b) if b < 0x80 || !utf => Ok(Some((b, b))),
+                _ => Err(()),
+            },
+            // Caseless characters beyond ASCII give none (observed on PHP
+            // 8.5: /(*COMMIT)é/iu is tried at every position).
+            Node::Char { c, caseless: true } if *c >= 0x80 => Err(()),
+            // A conditional whose branches start alike (or are empty).
+            Node::Cond { yes, no, .. } => {
+                let a = go(yes, utf, br)?;
+                let b = match no {
+                    Some(n) => go(n, utf, br)?,
+                    None => None,
+                };
+                if a == b { Ok(a) } else { Err(()) }
+            }
             Node::Char { c, caseless } => {
                 let mut v = Vec::new();
                 if *caseless {

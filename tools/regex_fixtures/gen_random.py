@@ -7,8 +7,10 @@ import sys
 
 seed = int(sys.argv[1])
 count = int(sys.argv[2])
-# Optional: maximum subject length (default 14).
+# Optional: maximum subject length (default 14) and "extra" to add rarer
+# constructs.
 maxlen = int(sys.argv[3]) if len(sys.argv) > 3 else 14
+EXTRA = len(sys.argv) > 4 and sys.argv[4] == "extra"
 R = random.Random(seed)
 
 ALPHA = ["a", "b", "c", "A", "B", "-", " ", "\n", "1", "2"]
@@ -89,9 +91,35 @@ class G:
                 return R.choice(["(*COMMIT)", "(*PRUNE)", "(*SKIP)", "(*THEN)", "(*MARK:m)", "(*F)", "(*ACCEPT)", "\\K"])
             if k < 0.95:
                 return "(?(?=%s)%s|%s)" % (self.lit(), self.seq(), self.seq())
+            if EXTRA and k < 0.975:
+                return self.extra()
             return self.lit()
         finally:
             self.depth -= 1
+
+    def extra(self):
+        # Rarer constructs: named references, recursion, verbs with names,
+        # variable lookbehinds, \X, script runs, conditions on names.
+        k = R.random()
+        n = self.ngroups
+        if k < 0.15 and n > 0:
+            g = R.randint(1, n)
+            return R.choice(["\\k<n%d>" % g, "\\k{n%d}" % g, "(?P=n%d)" % g, "\\g{n%d}" % g, "(?&n%d)" % g, "(?P>n%d)" % g, "\\g<%d>" % g])
+        if k < 0.25:
+            return R.choice(["(?R)?", "(?0)?", "(?1)?", "(?-1)?"]) if n > 0 else "(?R)?"
+        if k < 0.4:
+            return R.choice(["(*MARK:x)", "(*PRUNE:p)", "(*THEN:t)", "(*SKIP:m)", "(*SKIP:x)", "(*COMMIT:c)", "(*ACCEPT:q)", "(*:y)"])
+        if k < 0.55:
+            return "(?<=" + self.lit() + "?" + self.lit() + "|" + self.cls() + "{1,3})"
+        if k < 0.65:
+            return R.choice(["\\X", "\\X+", "\\R?", "\\C", "(*sr:\\w+)", "(*asr:.+)", "(*napla:" + self.lit() + ")"])
+        if k < 0.75 and n > 0:
+            return "(?(<n%d>)%s|%s)" % (R.randint(1, n), self.seq(), self.seq())
+        if k < 0.85:
+            return "(?(R)%s|%s)" % (self.seq(), self.seq())
+        if k < 0.92:
+            return R.choice(["(?[\\w - [b]])", "(?[\\d | [ab]])", "(?[ ![a] & \\w ])", "(?[[:alpha:] ^ [ab]])"])
+        return "(?" + R.choice(["i", "s", "m", "x", "U", "-i", "^", "J", "n"]) + ")"
 
     def fixed(self):
         # A lookbehind-safe body.

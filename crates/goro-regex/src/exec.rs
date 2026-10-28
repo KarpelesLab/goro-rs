@@ -211,6 +211,8 @@ struct Vm<'p, 's> {
     /// Emulated JIT stack limit (0: off) and use.
     jit_limit: u64,
     jit_bytes: u64,
+    /// An empty match was refused (NOTEMPTY) in this attempt.
+    rejected_empty: bool,
     mark: usize,
     last_mark: usize,
     // Slot layout.
@@ -1054,6 +1056,10 @@ impl Vm<'_, '_> {
                             }
                             match found {
                                 Some(p) => VerbAct::Skip(p),
+                                // Ignored, except after an empty match was refused
+                                // (observed on PHP 8.5: /\A(*SKIP:m)|./ then acts as
+                                // (*SKIP)).
+                                None if self.rejected_empty => VerbAct::Skip(e.c),
                                 None => continue,
                             }
                         }
@@ -1210,6 +1216,7 @@ impl Vm<'_, '_> {
         self.count = 2;
         self.frames = 2;
         self.jit_bytes = 0;
+        self.rejected_empty = false;
         if self.count > self.limits.match_limit as u64 {
             return Err(MatchError::MatchLimit);
         }
@@ -1562,7 +1569,7 @@ impl Vm<'_, '_> {
                     pc += 1;
                 }
                 Inst::SkipName(n) => {
-                    self.push_frame(sc, K_VERB, V_SKIPNAME, *n as usize, 0)?;
+                    self.push_frame(sc, K_VERB, V_SKIPNAME, *n as usize, pos)?;
                     pc += 1;
                 }
                 Inst::Then { tag } => {
@@ -1693,12 +1700,16 @@ impl Vm<'_, '_> {
     /// PCRE2_NOTEMPTY / PCRE2_NOTEMPTY_ATSTART, from the match options or
     /// the (*NOTEMPTY) / (*NOTEMPTY_ATSTART) pattern items.
     #[inline]
-    fn reject_empty(&self, ms: usize, pos: usize) -> bool {
-        pos == ms
+    fn reject_empty(&mut self, ms: usize, pos: usize) -> bool {
+        let r = pos == ms
             && (self.opts.notempty
                 || self.prog.notempty
                 || ((self.opts.notempty_atstart || self.prog.notempty_atstart)
-                    && ms == self.start_offset))
+                    && ms == self.start_offset));
+        if r {
+            self.rejected_empty = true;
+        }
+        r
     }
 
     /// Matches a deterministic pattern at `start`. `run_end` receives the
@@ -2043,6 +2054,7 @@ impl<'p, 's> Searcher<'p, 's> {
                 frames: 0,
                 jit_limit: limits.jit_stack.map_or(0, |j| j as u64),
                 jit_bytes: 0,
+                rejected_empty: false,
                 mark: NO_MARK,
                 last_mark: NO_MARK,
                 open_base,
@@ -2172,7 +2184,7 @@ impl<'p, 's> Searcher<'p, 's> {
         // "last single character that is required for a match").
         let mut req_pos: Option<usize> = None;
         loop {
-            if len - p < st.min_len {
+            if p > len || len - p < st.min_len {
                 break;
             }
             if let Some(op) = onepass
@@ -2195,7 +2207,9 @@ impl<'p, 's> Searcher<'p, 's> {
                 while r > p && self.vm.match_item(item, r - 1).is_some() {
                     r -= 1;
                 }
-                if q - r < *min as usize {
+                // A possessive run ends at the literal; a backtracking one may
+                // run past it and use a later occurrence.
+                if matches!(op.steps[li], OpStep::Rep { .. }) && q - r < *min as usize {
                     p = q + 1;
                     continue;
                 }
@@ -2215,6 +2229,9 @@ impl<'p, 's> Searcher<'p, 's> {
                     _ => {
                         // Starts inside the run can only do worse.
                         p = (q + 1).max(run_end + 1);
+                        if p > len {
+                            break;
+                        }
                         continue;
                     }
                 }
@@ -2333,18 +2350,20 @@ impl<'p, 's> Searcher<'p, 's> {
                     }
                     continue;
                 }
-                if let Some((a, b)) = st.required
-                    && req_pos.is_none_or(|r| r < p)
-                {
-                    let found = if a == b {
-                        memchr::memchr(a, &s[p..])
-                    } else {
-                        memchr::memchr2(a, b, &s[p..])
-                    };
-                    match found {
-                        Some(k) => req_pos = Some(p + k),
-                        None => break,
-                    }
+            }
+            // Anchored patterns are checked too (observed on PHP 8.5:
+            // /\A(?R)?\RΣ/u fails at once on a subject without Σ).
+            if let Some((a, b)) = st.required
+                && req_pos.is_none_or(|r| r < p)
+            {
+                let found = if a == b {
+                    memchr::memchr(a, &s[p..])
+                } else {
+                    memchr::memchr2(a, b, &s[p..])
+                };
+                match found {
+                    Some(k) => req_pos = Some(p + k),
+                    None => break,
                 }
             }
             if let Some(op) = onepass {

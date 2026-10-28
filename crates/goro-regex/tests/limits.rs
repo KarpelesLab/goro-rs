@@ -177,6 +177,26 @@ fn php85_minimal_limits() {
     assert!(bad.is_empty(), "{bad:#?}");
 }
 
+/// PCRE2's nesting limit (250) must compile within an 8 MiB stack (the
+/// main thread's) even in debug builds.
+#[test]
+fn deep_nesting_stack() {
+    std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(|| {
+            let p = format!("/{}a{}/", "(".repeat(250), ")".repeat(250));
+            let r = re(&p);
+            assert!(r.is_match(b"xa").unwrap());
+            let p = format!("/{}a{}/", "(?:".repeat(250), ")".repeat(250));
+            assert!(re(&p).is_match(b"a").unwrap());
+            let p = format!("/{}a{}/", "(".repeat(251), ")".repeat(251));
+            assert!(php::compile(p.as_bytes()).is_err());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 /// The largest subject (in repetitions of the unit) that matches without a
 /// JIT stack error, measured on PHP 8.5 with pcre.jit=1
 /// (tools/regex_fixtures/jit2.php).

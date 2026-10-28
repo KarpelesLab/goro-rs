@@ -91,6 +91,9 @@ pub enum ErrorKind {
     ExtClassNoOperator,
     ExtClassExpectedOperand,
     ExtClassMissingParen,
+    /// PCRE2 10.46 fails this way on patterns that have both an extended
+    /// class `(?[...])` and a lookbehind (observed on PHP 8.5).
+    InternalCheckLookbehinds,
     /// Invalid UTF-8 in the pattern (PCRE2's negative UTF-8 error codes).
     Utf8(Utf8Error),
     /// A matching resource problem detected at compile time (unused).
@@ -265,6 +268,7 @@ impl ErrorKind {
             ExtClassMissingParen => {
                 "terminating ] with no following closing parenthesis in (?[...]"
             }
+            InternalCheckLookbehinds => "internal error: unknown meta code in check_lookbehinds()",
             Utf8(e) => return format!("UTF-8 error: {}", e.message()),
             Internal => "internal error: unexpected repeat",
         };
