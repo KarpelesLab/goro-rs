@@ -30,6 +30,13 @@ pub enum Prop {
     DefaultIgnorable,
     Ascii,
     Assigned,
+    BidiMirrored,
+    Math,
+    Dash,
+    Diacritic,
+    HexDigit,
+    QuotationMark,
+    JoinControl,
 }
 
 impl USet {
@@ -61,6 +68,13 @@ fn prop_has(p: Prop, c: char) -> bool {
         Prop::DefaultIgnorable => u::is_default_ignorable(c),
         Prop::Ascii => (c as u32) < 0x80,
         Prop::Assigned => u::is_assigned(c),
+        Prop::BidiMirrored => u::is_bidi_mirrored(c),
+        Prop::Math => u::is_math(c),
+        Prop::Dash => u::is_dash(c),
+        Prop::Diacritic => u::is_diacritic(c),
+        Prop::HexDigit => u::is_hex_digit(c),
+        Prop::QuotationMark => u::is_quotation_mark(c),
+        Prop::JoinControl => u::is_join_control(c),
     }
 }
 
@@ -163,6 +177,13 @@ pub fn property(name: &str) -> Option<USet> {
                     "uppercase" | "upper" => Prop::Uppercase,
                     "lowercase" | "lower" => Prop::Lowercase,
                     "defaultignorablecodepoint" | "di" => Prop::DefaultIgnorable,
+                    "bidimirrored" | "bidim" => Prop::BidiMirrored,
+                    "math" => Prop::Math,
+                    "dash" => Prop::Dash,
+                    "diacritic" | "dia" => Prop::Diacritic,
+                    "hexdigit" | "hex" => Prop::HexDigit,
+                    "quotationmark" | "qmark" => Prop::QuotationMark,
+                    "joincontrol" | "joinc" => Prop::JoinControl,
                     _ => Prop::Script(script_cached(&v)?),
                 }
             }

@@ -38,6 +38,7 @@ mod msgfmt;
 mod numfmt;
 mod text;
 mod timezone;
+mod translit;
 mod uconv;
 
 /// Every module of the extension (all named "intl").
@@ -55,6 +56,7 @@ pub static MODULES: &[&Module] = &[
     &iter::MODULE,
     &breakiter::MODULE,
     &uconv::MODULE,
+    &translit::MODULE,
 ];
 
 pub static MODULE: Module = Module {
