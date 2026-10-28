@@ -244,6 +244,55 @@ impl TimeZone {
         }
     }
 
+    /// Like [`TimeZone::local_to_ts`], for a value that already has a DST
+    /// state (`modify()`, `setDate()`, `setTime()`): in a fall-back
+    /// overlap a DST value keeps the DST reading and a standard-time value
+    /// takes the later one (observed on PHP 8.5, in New York, London,
+    /// Paris, Lord Howe, Sydney, Chatham, Troll, São Paulo and Dublin,
+    /// whose winter GMT is the DST one).
+    pub fn local_to_ts_with_dst(&self, local: i64, was_dst: bool) -> i64 {
+        let TimeZone::Id(z) = self else {
+            return self.local_to_ts(local);
+        };
+        // every offset in effect within two days of `local`
+        let begin = local.saturating_sub(2 * 86_400);
+        let end = local.saturating_add(2 * 86_400);
+        let mut offsets: Vec<(i32, bool)> = Vec::with_capacity(4);
+        let first = z.zone.type_at(begin);
+        offsets.push((first.offset, first.is_dst));
+        let mut before_gap = first.offset;
+        for t in z.zone.transitions(begin, end) {
+            // a local time in the gap of this transition maps with the
+            // offset before it
+            let lo = t.ts.saturating_add(before_gap.min(t.ty.offset) as i64);
+            let hi = t.ts.saturating_add(before_gap.max(t.ty.offset) as i64);
+            if t.ty.offset > before_gap && local >= lo && local < hi {
+                return local.saturating_sub(before_gap as i64);
+            }
+            before_gap = t.ty.offset;
+            offsets.push((t.ty.offset, t.ty.is_dst));
+        }
+        let mut valid: Vec<(i64, bool)> = Vec::with_capacity(2);
+        for (o, _) in &offsets {
+            let ts = local.saturating_sub(*o as i64);
+            let ty = z.zone.type_at(ts);
+            if ty.offset == *o && !valid.iter().any(|(v, _)| *v == ts) {
+                valid.push((ts, ty.is_dst));
+            }
+        }
+        valid.sort_unstable();
+        match valid.as_slice() {
+            [] => self.local_to_ts(local),
+            [(ts, _)] => *ts,
+            many => {
+                if was_dst && let Some((ts, _)) = many.iter().find(|(_, d)| *d) {
+                    return *ts;
+                }
+                many[many.len() - 1].0
+            }
+        }
+    }
+
     /// `DateTimeZone::getLocation()` data. Zones without a zone.tab entry
     /// (and type 3 "UTC") report country "??" (observed on PHP 8.5);
     /// offset and abbreviation zones have none (`None` here, `false` in

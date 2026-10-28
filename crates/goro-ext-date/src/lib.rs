@@ -12,6 +12,7 @@
 pub mod civil;
 pub mod format;
 pub mod parse;
+pub mod resolve;
 pub mod sun;
 pub mod time;
 pub mod tz;

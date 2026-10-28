@@ -30,12 +30,13 @@ pub enum Special {
 /// How a relative weekday is resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WeekdayBehavior {
-    /// Move forward to the day unless today is that day ("monday").
+    /// Move forward to the day unless today is that day ("monday",
+    /// "+1 monday").
     #[default]
     Forward,
-    /// Like `Forward`, but always move when the count says so (counts
-    /// from "+1 monday" etc.).
-    Counted,
+    /// Move forward to the day, a week ahead when today is that day
+    /// ("next monday").
+    Strict,
     /// Within the ISO week ("monday next week", "this week").
     Week,
 }
@@ -108,6 +109,8 @@ pub struct Parsed {
     pub have_time: bool,
     /// A four-digit number after a time was read as the year.
     time_year_used: bool,
+    /// An "@timestamp" was read.
+    saw_timestamp: bool,
     zone_count: u32,
 }
 
@@ -181,6 +184,12 @@ impl Parsed {
         }
     }
 
+    /// Whether the string is an "@timestamp" with no time given after it
+    /// (`modify()` then switches to its UTC offset).
+    pub fn timestamp_only(&self) -> bool {
+        self.saw_timestamp && !self.have_time
+    }
+
     /// `date_parse()`'s `is_localtime`.
     pub fn is_localtime(&self) -> bool {
         self.zone.is_some()
@@ -227,9 +236,11 @@ pub fn parse(input: &[u8]) -> Parsed {
         let mut best: Option<(usize, Rule)> = None;
         for &rule in grammar::RULES {
             if let Some(n) = grammar::match_rule(rule, s, p)
-                && n > 0 && best.is_none_or(|(bn, _)| n > bn) {
-                    best = Some((n, rule));
-                }
+                && n > 0
+                && best.is_none_or(|(bn, _)| n > bn)
+            {
+                best = Some((n, rule));
+            }
         }
         match best {
             None => {
@@ -267,9 +278,10 @@ fn finish(t: &mut Parsed, len: usize) {
         }
     }
     if let (false, true, Some(h), Some(i), Some(s)) = (date_bad, t.have_time, t.h, t.i, t.s)
-        && (!(0..=23).contains(&h) || !(0..=59).contains(&i) || !(0..=59).contains(&s)) {
-            t.warning(len + 1, "The parsed time was invalid");
-        }
+        && (!(0..=23).contains(&h) || !(0..=59).contains(&i) || !(0..=59).contains(&s))
+    {
+        t.warning(len + 1, "The parsed time was invalid");
+    }
 }
 
 /// Reads up to `max` digits at or after `*p` (skipping non-digits),
@@ -552,6 +564,7 @@ fn action(t: &mut Parsed, rule: Rule, s: &[u8], p: usize, end: usize) -> usize {
             } else {
                 0
             };
+            t.saw_timestamp = true;
             t.y = Some(1970);
             t.m = Some(1);
             t.d = Some(1);
@@ -592,9 +605,15 @@ fn action(t: &mut Parsed, rule: Rule, s: &[u8], p: usize, end: usize) -> usize {
             t.unhave_time();
             let r = t.rel();
             r.weekday = Some(dow);
-            if behavior_last || n < 0 {
-                // "last" and "previous"
-                r.d += -7;
+            // resets an earlier "this week" (observed on PHP 8.5: "last
+            // week this fri of" counts forward, "this monday of this week"
+            // within the week)
+            r.weekday_behavior = WeekdayBehavior::Forward;
+            if behavior_last || n <= 0 {
+                // "last", "previous" and "this": counted back from the
+                // next month's first such day (observed on PHP 8.5: "this
+                // monday of" is the first Monday of next month)
+                r.d += if behavior_last { -7 } else { n * 7 };
                 r.special = Special::LastDayOfWeekInMonth;
             } else {
                 r.d += (n.max(1) - 1) * 7;
@@ -669,9 +688,10 @@ fn action(t: &mut Parsed, rule: Rule, s: &[u8], p: usize, end: usize) -> usize {
             t.m = get_nr(s, &mut q, end, 2);
             t.d = get_nr(s, &mut q, end, 2);
             if rule == American
-                && let Some((y, n)) = get_nr_len(s, &mut q, end, 4) {
-                    t.y = Some(process_year(y, n));
-                }
+                && let Some((y, n)) = get_nr_len(s, &mut q, end, 4)
+            {
+                t.y = Some(process_year(y, n));
+            }
         }
         Iso8601DateSlash | DateSlash | GnuDateShorter | Iso8601Date4 | Iso8601Date2
         | GnuDateShort | DateNoColon => {
@@ -754,9 +774,10 @@ fn action(t: &mut Parsed, rule: Rule, s: &[u8], p: usize, end: usize) -> usize {
             // "Apr 28" unsets a year set by "@ts" (observed on PHP 8.5)
             t.y = None;
             if rule == DateTextual
-                && let Some((y, n)) = get_nr_len(s, &mut q, end, 4) {
-                    t.y = Some(process_year(y, n));
-                }
+                && let Some((y, n)) = get_nr_len(s, &mut q, end, 4)
+            {
+                t.y = Some(process_year(y, n));
+            }
         }
         DateNoYearRev => {
             if !t.have_date(p) {
@@ -890,10 +911,11 @@ fn action(t: &mut Parsed, rule: Rule, s: &[u8], p: usize, end: usize) -> usize {
                     if matches!(s[q], b'+' | b'-') || s[q].is_ascii_alphabetic() || s[q] == b'(' {
                         set_zone(t, s, q, end);
                         if let Some((pos, msg)) = t.errors.last_mut()
-                            && msg == "The timezone could not be found in the database" && *pos == q
-                            {
-                                *pos = p;
-                            }
+                            && msg == "The timezone could not be found in the database"
+                            && *pos == q
+                        {
+                            *pos = p;
+                        }
                     } else {
                         t.zone = Some(ParsedZone::NotFound);
                         t.error(p, "The timezone could not be found in the database");
@@ -935,8 +957,10 @@ fn action(t: &mut Parsed, rule: Rule, s: &[u8], p: usize, end: usize) -> usize {
             let dow = read_day_name(s, &mut q, end).unwrap_or(1);
             let r = t.rel();
             r.weekday = Some(dow);
-            if r.weekday_behavior != WeekdayBehavior::Week {
-                r.weekday_behavior = WeekdayBehavior::Counted;
+            // a plain day name keeps "this week" but not the "next"
+            // reading of an earlier "second monday" (observed on PHP 8.5)
+            if r.weekday_behavior == WeekdayBehavior::Strict {
+                r.weekday_behavior = WeekdayBehavior::Forward;
             }
         }
         Ago => {
@@ -1051,7 +1075,15 @@ fn relative_unit(t: &mut Parsed, s: &[u8], p: &mut usize, end: usize, n: i64, te
             r.d += n * 7;
         }
         r.weekday = Some(dow);
-        r.weekday_behavior = WeekdayBehavior::Counted;
+        // "next sat" moves a week on a Saturday, "+1 sat" does not
+        // (observed on PHP 8.5)
+        // and a counted day name drops an earlier "this week" ("first
+        // TUESDAY next week May 309 wed")
+        r.weekday_behavior = if text && n > 0 {
+            WeekdayBehavior::Strict
+        } else {
+            WeekdayBehavior::Forward
+        };
         return;
     }
     let r = t.rel();
