@@ -9,6 +9,7 @@ pub mod ctype;
 pub mod date;
 pub mod dom;
 pub mod enums;
+pub mod exif;
 pub mod exec;
 pub mod fiber;
 pub mod file;
@@ -18,6 +19,7 @@ pub mod hash;
 pub mod highlight;
 pub mod http;
 pub mod iconv;
+pub mod image;
 pub mod info;
 mod info_text;
 pub mod ini;
@@ -104,6 +106,8 @@ pub fn modules() -> Vec<&'static Module> {
         &xmlreader::MODULE,
         &simplexml::MODULE,
         &openssl::MODULE,
+        &exif::MODULE,
+        &image::MODULE,
     ];
     v.extend_from_slice(intl::MODULES);
     v

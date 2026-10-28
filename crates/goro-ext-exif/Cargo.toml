@@ -1,0 +1,10 @@
+[package]
+name = "goro-ext-exif"
+description = "PHP exif extension and the image functions of ext/standard: Exif/TIFF parsing, getimagesize, IPTC"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Inflating compressed SWF (CWS) headers for getimagesize().
+goro-ext-zlib = { path = "../goro-ext-zlib" }

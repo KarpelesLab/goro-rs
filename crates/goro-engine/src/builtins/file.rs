@@ -1251,7 +1251,7 @@ fn ftell(vm: &mut Vm, a: &mut Args) -> R<Value> {
     })
 }
 
-fn do_seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> bool {
+pub(crate) fn do_seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> bool {
     if matches!(s.backing, Backing::User { .. }) {
         return match super::userstream::seek(vm, s, off, whence) {
             Ok(b) => b,

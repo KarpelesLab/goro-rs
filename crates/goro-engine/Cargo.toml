@@ -23,5 +23,6 @@ goro-ext-zlib = { path = "../goro-ext-zlib" }
 goro-xml = { path = "../goro-xml" }
 goro-ext-openssl = { path = "../goro-ext-openssl" }
 goro-ext-intl = { path = "../goro-ext-intl" }
+goro-ext-exif = { path = "../goro-ext-exif" }
 libc = "0.2"
 corosensei = "0.2"
