@@ -1,0 +1,155 @@
+<?php // c
+# d
+$x; /** e */ /**f*/ ?>
+ab<?= 1 ?><? 2 ?>
+x<?php
+%%%%
+#escaped#<?php\r\n&$x; &...$y; & $z; &$$ & && &= &/*x*/$a &#c\n$b & ...
+%%%%
+<?php __halt_compiler ( ) ; abc ?> def
+%%%%
+<?php __halt_compiler; abc
+%%%%
+<?php __halt_compiler ?>x
+%%%%
+#escaped#<?php yield from $x; yield\n /* c */ from $y; yield fromx; yield FROM $z; yield//x\nfrom $w;
+%%%%
+#escaped#<?php ( int )$x; (\tinteger) (Bool) (REAL) (void) ( unset ) (string) (binary) (array) (object) (float) (double) (boolean) ( int ) (int $x)
+%%%%
+<?php 0x1F 0o17 017 0b101 1_000 9223372036854775807 9223372036854775808 0x7FFFFFFFFFFFFFFF 0xFFFFFFFFFFFFFFFF 1e5 1.5e-3 .5 1. 1_0.0_1 07_7 0_1 0x 0b2 1__0 1_ 1e 1e+ 1E-5 0O7 0B1 0X1f 1..2 1.e3 077777777777777777777777 0b1111111111111111111111111111111111111111111111111111111111111111
+%%%%
+<?php "a $b $c[1] $c[-1] $c[x] $c[$y] $d->e $d?->f ${g} ${h[1]} {$i} {$j['k']} $ $1 { $" 'x' `a$b`
+%%%%
+#escaped#<?php <<<EOT\n  a $b\n  EOT;\n<<<'N'\nx\nN;\n<<<\"Q\"\nq\nQ\n;
+%%%%
+<?php \a\b a\b namespace\c \exit namespace\list a \ b NameSpace\x \namespace a\class
+%%%%
+#escaped#<?php $a->class $a->list $a?->foreach $a::class $a-> /*x*/ foo $a->\nclass; $a::\nclass; $a->/**/->b; $a->$b; $a->{'x'} $a->0
+%%%%
+#escaped#<?php #[A] # [ x\n #[\\A(1)]
+%%%%
+<?php "$a[01]" "$a[0x1]" "$a[9223372036854775808]" "$a[-0]" "$a[1_0]" "$a[0]" "$a[-1]" "$a[--1]"
+%%%%
+#escaped#<?php b'x' B\"y\" b<<<E\nz\nE;\nb\"$x\" b`x`
+%%%%
+#escaped#<?php\n$a = 1 ?>
+%%%%
+#escaped#<?php ?>\n\nx
+%%%%
+<?php exit die __CLASS__ __halt_compiler
+%%%%
+<?php "$a->b->c" "$a[b][c]" "${a}[b]"
+%%%%
+#escaped#<?php <<<EOT\nEOT;\n<<<EOT\n\nEOT;\n
+%%%%
+#escaped#<?php x\r\ny\rz
+%%%%
+#escaped#<?php $a-> /*x*/ class; $a->\nclass; $a::\nclass;
+%%%%
+#escaped#<?php enum Foo {} enum extends {} enum implements {} enum\nFoo enum(1) enum /**/ X enum\tA enum
+%%%%
+<?php readonly function readonly() {} readonly (1) readonly class
+%%%%
+<?php "$a[ x]" "$a['x']" "$a[x" "$a[$b" "$a[0"
+%%%%
+<?php 089 /* abc
+%%%%
+<?php "\u{zz}" `x` "$a->$b" "$a->1" "$a?->b" "$a?-> b"
+%%%%
+#escaped#<?php <<<A\n \ta\n \tA;\n
+%%%%
+#escaped#<?php <<< \"A\"\nb\nA . 1;
+%%%%
+#escaped#<?php <<<A\n  a\n  $x\n  {$y}\n  A;\n
+%%%%
+#escaped#<?php <<<A\nA\n;<<<A\na\nAB\nA\n
+%%%%
+#escaped#<?php <<<A\r\na\r\nA;
+%%%%
+<?php 'abc
+%%%%
+<?php "a\"b \{$x} \$y"
+%%%%
+<?php $x = "${a['b']} ${a}" . "${ a}";
+%%%%
+#escaped#<?php echo 1;\n?>\r\nabc<?php\n\n?>
+%%%%
+#escaped#<?PHP echo 1;?><?php\techo 2;
+%%%%
+#escaped#<?php\necho 1;\n\n__halt_compiler();\nfoo\n
+%%%%
+<?php #comment ?>x
+%%%%
+#escaped#<?php //comment\r\n
+%%%%
+#escaped#<?php /** */ /**\n*/ /***/ /** x
+%%%%
+ab<?php
+%%%%
+<?php $$a $ a ${'a'} $0 $é
+%%%%
+<?php fn static Static STATIC Fn FN __class__ __Property__ __LINE__ __FILE__ __DIR__ __FUNCTION__ __METHOD__ __NAMESPACE__ __TRAIT__
+%%%%
+<?php abstract and array as break callable case catch class clone const continue declare default do echo else elseif empty enddeclare endfor endforeach endif endswitch endwhile eval extends final finally for foreach function global goto if implements include include_once instanceof insteadof interface isset list match namespace new or print private protected public require require_once return switch throw trait try unset use var while xor yield
+%%%%
+<?php public(set) private(set) protected(set) PUBLIC(SET) public (set) public(set ) readonly(set)
+%%%%
+<?php |> ?-> ?? ??= ** **= ... :: => -> ++ -- <=> === !== == != <> <= >= < > << >> <<= >>= && || += -= *= /= .= %= &= |= ^= ! ~ @ ; , . [ ] ( ) { } ? : = + - * / % ^ | & $ "
+%%%%
+#escaped#<?php \x01 \x7f \x00
+%%%%
+<html><?php
+%%%%
+<?php
+%%%%
+#escaped#<?php\r
+%%%%
+<?phpx
+%%%%
+#escaped#x<?php\tfoo
+%%%%
+<?php "$a[b"
+%%%%
+#escaped#<?php `a {$b} ${c}\n$d`
+%%%%
+#escaped#<?php <<<A\n  {$a\n} b\n  A;
+%%%%
+#escaped#<?php <<<A\n  $a[0] $b->c $d?->e\n A;
+%%%%
+#escaped#<?php <<<'A'\n  $a[0] {$b}\n  A\n;
+%%%%
+#escaped#<?php <<<A\nx\nA
+%%%%
+#escaped#<?php <<<A\nx
+%%%%
+#escaped#<?php <<<A
+%%%%
+#escaped#<?php <<<A x
+%%%%
+#escaped#<?php "a\\\\$b" "\\\\{$c}" "{\\$d}"
+%%%%
+#escaped#<?php echo "x"?>\n
+%%%%
+#escaped#<?php echo 1 ?>\r\n\r\n
+%%%%
+#escaped#<?php $a = <<<A\n  a\n \n  A;\n
+%%%%
+#escaped#<?php "${a}" "${a[0]}" "${a->b}" "${$a}" "${1}"
+%%%%
+#escaped#<?php $a?->b?->c; $a?-> b; $a ?-> c; $a - > b
+%%%%
+<?php new class {}; $f = fn($x) => $x; static fn() => 1;
+%%%%
+<?php declare(strict_types=1); namespace Foo\Bar; use Baz\{A, B}; use function \strlen;
+%%%%
+<?php clone($a, ['x' => 1]); (void) foo(); array_map(...);
+%%%%
+<?php class A { public private(set) int $x { get => 1; set(int $v) { $this->x = $v; } } }
+%%%%
+#escaped#<?php /* a\n b */ $c;\n/** d\n */\n$e;
+%%%%
+#escaped#<?php # a ?>\n<?php // b ?>c
+%%%%
+#escaped#<?php echo 1;\n// comment at end
+%%%%
+#escaped#<?php echo 1;\n#comment
