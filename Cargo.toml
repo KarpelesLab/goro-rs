@@ -5,6 +5,7 @@ members = [
     "crates/goro-runtime",
     "crates/goro-engine",
     "crates/goro-phpt",
+    "crates/goro-ext-standard",
 ]
 
 [workspace.package]

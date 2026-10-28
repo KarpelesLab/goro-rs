@@ -1,0 +1,8 @@
+[package]
+name = "goro-ext-standard"
+description = "PHP standard extension: string, math, array and other core functions"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
