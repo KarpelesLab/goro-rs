@@ -106,6 +106,14 @@ class ReflectionClass implements Reflector {
     const SKIP_DESTRUCTOR = 16;
     public string $name = "";
     public function __construct(object|string $objectOrClass) {}
+    public function newLazyGhost(callable $initializer, int $options = 0): object {}
+    public function newLazyProxy(callable $factory, int $options = 0): object {}
+    public function resetAsLazyGhost(object $object, callable $initializer, int $options = 0): void {}
+    public function resetAsLazyProxy(object $object, callable $factory, int $options = 0): void {}
+    public function initializeLazyObject(object $object): object {}
+    public function isUninitializedLazyObject(object $object): bool {}
+    public function markLazyObjectAsInitialized(object $object): object {}
+    public function getLazyInitializer(object $object): ?callable {}
     public function __toString(): string {}
     public function getName(): string {}
     public function isInternal(): bool {}
@@ -214,6 +222,9 @@ class ReflectionProperty implements Reflector {
     public function getHooks(): array {}
     public function hasHook(PropertyHookType $type): bool {}
     public function getHook(PropertyHookType $type): ?ReflectionMethod {}
+    public function setRawValueWithoutLazyInitialization(object $object, mixed $value): void {}
+    public function skipLazyInitialization(object $object): void {}
+    public function isLazy(object $object): bool {}
 }
 class ReflectionClassConstant implements Reflector {
     const IS_PUBLIC = 1;
@@ -501,6 +512,14 @@ pub static MODULE: Module = Module {
         ("reflectionclass::getnamespacename", c_ns),
         ("reflectionclass::getshortname", c_short),
         ("reflectionclass::getattributes", c_attrs),
+        ("reflectionclass::newlazyghost", c_new_lazy_ghost),
+        ("reflectionclass::newlazyproxy", c_new_lazy_proxy),
+        ("reflectionclass::resetaslazyghost", c_reset_lazy_ghost),
+        ("reflectionclass::resetaslazyproxy", c_reset_lazy_proxy),
+        ("reflectionclass::initializelazyobject", c_init_lazy),
+        ("reflectionclass::isuninitializedlazyobject", c_is_uninit_lazy),
+        ("reflectionclass::marklazyobjectasinitialized", c_mark_lazy_init),
+        ("reflectionclass::getlazyinitializer", c_get_lazy_init),
         // properties
         ("reflectionproperty::__construct", p_construct),
         ("reflectionproperty::__tostring", p_to_string),
@@ -538,6 +557,9 @@ pub static MODULE: Module = Module {
         ("reflectionproperty::gethooks", p_hooks),
         ("reflectionproperty::hashook", p_has_hook),
         ("reflectionproperty::gethook", p_hook),
+        ("reflectionproperty::setrawvaluewithoutlazyinitialization", p_set_raw_lazy),
+        ("reflectionproperty::skiplazyinitialization", p_skip_lazy),
+        ("reflectionproperty::islazy", p_is_lazy),
         // class constants
         ("reflectionclassconstant::__construct", cc_construct),
         ("reflectionenumunitcase::__construct", cc_construct),
@@ -3613,3 +3635,262 @@ fn g_closed(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 #[allow(dead_code)]
 fn unused(_: Unwind) {}
+
+// ---------------------------------------------------------------- lazy objects
+
+fn lazy_class_check(vm: &mut Vm, c: &Rc<Class>) -> R<()> {
+    if c.lname.as_bytes() == b"stdclass" {
+        return Ok(());
+    }
+    if c.has_flag(cflags::INTERNAL) {
+        return vm.throw(
+            "Error",
+            &format!("Cannot make instance of internal class lazy: {} is internal", c.name.dname()),
+        );
+    }
+    let mut p = c.parent.clone();
+    while let Some(k) = p {
+        if k.has_flag(cflags::INTERNAL) {
+            if k.lname.as_bytes() == b"stdclass" {
+                return Ok(());
+            }
+            return vm.throw(
+                "Error",
+                &format!(
+                    "Cannot make instance of internal class lazy: {} inherits internal class {}",
+                    c.name.dname(),
+                    k.name.dname()
+                ),
+            );
+        }
+        p = k.parent.clone();
+    }
+    Ok(())
+}
+
+fn lazy_options(vm: &mut Vm, method: &str, argn: usize, opts: i64, allow_skip_dtor: bool) -> R<()> {
+    use crate::vm::lazy::{SKIP_DESTRUCTOR, SKIP_INITIALIZATION_ON_SERIALIZE};
+    let pname = "options";
+    if opts & !(SKIP_DESTRUCTOR | SKIP_INITIALIZATION_ON_SERIALIZE) != 0 {
+        return refl_error(
+            vm,
+            &format!("ReflectionClass::{}(): Argument #{} (${}) contains invalid flags", method, argn, pname),
+        );
+    }
+    if !allow_skip_dtor && opts & SKIP_DESTRUCTOR != 0 {
+        return refl_error(
+            vm,
+            &format!(
+                "ReflectionClass::{}(): Argument #{} (${}) does not accept ReflectionClass::SKIP_DESTRUCTOR",
+                method, argn, pname
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn new_lazy(vm: &mut Vm, a: &mut Args, proxy: bool) -> R<Value> {
+    let c = need_class!(vm, a);
+    let method = if proxy { "newLazyProxy" } else { "newLazyGhost" };
+    let opts = a.int_or(1, 0);
+    lazy_options(vm, method, 2, opts, false)?;
+    lazy_class_check(vm, &c)?;
+    let o = vm.instantiate(&c)?;
+    let init = a.val(0);
+    vm.make_lazy(&o, proxy, init, opts);
+    Ok(Value::Object(o))
+}
+fn c_new_lazy_ghost(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    new_lazy(vm, a, false)
+}
+fn c_new_lazy_proxy(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    new_lazy(vm, a, true)
+}
+
+fn obj_of_class(vm: &mut Vm, a: &Args, c: &Rc<Class>, method: &str) -> R<ObjRef> {
+    let Some(o) = a.obj(0) else { return vm.type_error("object expected") };
+    if !vm.class_of(&o).is_subclass_of(c) {
+        return vm.type_error(&format!(
+            "ReflectionClass::{}(): Argument #1 ($object) must be of type {}, {} given",
+            method,
+            c.name.dname(),
+            vm.class_of(&o).name.dname()
+        ));
+    }
+    Ok(o)
+}
+
+fn reset_lazy(vm: &mut Vm, a: &mut Args, proxy: bool) -> R<Value> {
+    let c = need_class!(vm, a);
+    let method = if proxy { "resetAsLazyProxy" } else { "resetAsLazyGhost" };
+    let opts = a.int_or(2, 0);
+    lazy_options(vm, method, 3, opts, true)?;
+    let o = obj_of_class(vm, a, &c, method)?;
+    let oc = vm.class_of(&o);
+    lazy_class_check(vm, &oc)?;
+    if o.is_lazy() {
+        let (init, uninit) = crate::vm::lazy::with_lazy(&o, |d| (d.initializing, d.instance.is_none())).unwrap_or((false, false));
+        if init {
+            return vm.throw("Error", "Can not reset an object while it is being initialized");
+        }
+        if uninit {
+            return refl_error(vm, "Object is already lazy");
+        }
+    }
+    // The destructor runs first unless skipped.
+    if opts & crate::vm::lazy::SKIP_DESTRUCTOR == 0 && !o.destructor_called() {
+        let d = oc.magic.borrow().destruct.clone();
+        if let Some(f) = d {
+            o.mark_destructor_called();
+            vm.call_func_this(&f, Some(o.clone()), Vec::new())?;
+        }
+    }
+    // Initialized readonly properties of final classes keep their value.
+    let keep: Vec<(usize, Value)> = if oc.has_flag(cflags::FINAL) {
+        let props = oc.props.borrow().clone();
+        let slots = o.obj().slots.borrow();
+        props
+            .iter()
+            .filter(|p| p.flags & mflags::READONLY != 0)
+            .filter_map(|p| {
+                let v = slots[p.slot as usize].clone();
+                (!vm.is_uninit(&v)).then_some((p.slot as usize, v))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let init = a.val(1);
+    vm.make_lazy(&o, proxy, init, opts);
+    for (slot, v) in keep {
+        o.obj().slots.borrow_mut()[slot] = v;
+        vm.lazy_clear_slot(&o, slot);
+    }
+    Ok(Value::Null)
+}
+fn c_reset_lazy_ghost(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    reset_lazy(vm, a, false)
+}
+fn c_reset_lazy_proxy(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    reset_lazy(vm, a, true)
+}
+fn c_init_lazy(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let c = need_class!(vm, a);
+    let o = obj_of_class(vm, a, &c, "initializeLazyObject")?;
+    if !o.is_lazy() {
+        return Ok(Value::Object(o));
+    }
+    Ok(Value::Object(vm.lazy_init(&o)?))
+}
+fn c_is_uninit_lazy(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let c = need_class!(vm, a);
+    let o = obj_of_class(vm, a, &c, "isUninitializedLazyObject")?;
+    Ok(Value::Bool(vm.is_lazy_uninit(&o)))
+}
+fn c_mark_lazy_init(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let c = need_class!(vm, a);
+    let o = obj_of_class(vm, a, &c, "markLazyObjectAsInitialized")?;
+    if !vm.is_lazy_uninit(&o) {
+        return Ok(Value::Object(o));
+    }
+    let oc = vm.class_of(&o);
+    let defaults = vm.class_defaults(&oc)?;
+    let lazy = crate::vm::lazy::with_lazy(&o, |d| d.lazy_slots.clone()).unwrap_or_default();
+    {
+        let mut slots = o.obj().slots.borrow_mut();
+        for (i, l) in lazy.iter().enumerate() {
+            if *l && i < slots.len() && i < defaults.len() {
+                slots[i] = defaults[i].clone();
+            }
+        }
+    }
+    *o.obj().native.borrow_mut() = None;
+    o.set_lazy(false);
+    o.clear_destructor_called();
+    Ok(Value::Object(o))
+}
+fn c_get_lazy_init(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let c = need_class!(vm, a);
+    let o = obj_of_class(vm, a, &c, "getLazyInitializer")?;
+    if !vm.is_lazy_uninit(&o) {
+        return Ok(Value::Null);
+    }
+    Ok(crate::vm::lazy::with_lazy(&o, |d| d.init.clone()).unwrap_or_default())
+}
+
+fn lazy_prop_slot(vm: &mut Vm, a: &Args, method: &str) -> R<(ObjRef, Rc<Class>, Rc<crate::class::PropInfo>)> {
+    let (c, n, dynamic) = need_prop!(vm, a);
+    let Some(o) = a.obj(0) else { return vm.type_error("object expected") };
+    let info = pinfo(&c, &n);
+    let decl = info.as_ref().map(|p| p.class).unwrap_or(Rc::as_ptr(&c));
+    let dn = unsafe { (*decl).name.dname() };
+    if dynamic || info.is_none() {
+        return refl_error(vm, &format!("Can not use {} on dynamic property {}::${}", method, dn, n.dname()));
+    }
+    let info = info.unwrap();
+    if info.is_static {
+        return refl_error(vm, &format!("Can not use {} on static property {}::${}", method, dn, n.dname()));
+    }
+    if info.flags & mflags::VIRTUAL != 0 {
+        return refl_error(vm, &format!("Can not use {} on virtual property {}::${}", method, dn, n.dname()));
+    }
+    let oc = vm.class_of(&o);
+    if !oc.is_subclass_of(&c) {
+        return vm.type_error(&format!(
+            "ReflectionProperty::{}(): Argument #1 ($object) must be of type {}, {} given",
+            method,
+            c.name.dname(),
+            oc.name.dname()
+        ));
+    }
+    let idx = c.prop_map.borrow()[&n][0];
+    let p = c.props.borrow()[idx as usize].clone();
+    Ok((o, c, p))
+}
+
+fn p_set_raw_lazy(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (o, c, p) = lazy_prop_slot(vm, a, "setRawValueWithoutLazyInitialization")?;
+    let target = if o.is_lazy() && !vm.is_lazy_uninit(&o) {
+        // An initialized proxy: the real instance.
+        crate::vm::lazy::with_lazy(&o, |d| d.instance.clone()).flatten().unwrap_or(o.clone())
+    } else {
+        o.clone()
+    };
+    let v = a.val(1);
+    let v = match &p.ty {
+        Some(t) => vm.coerce_prop(&p, t, v, &c)?,
+        None => v,
+    };
+    let old = std::mem::replace(&mut target.obj().slots.borrow_mut()[p.slot as usize], v);
+    drop(old);
+    if vm.lazy_slot(&target, p.slot as usize) {
+        vm.lazy_clear_slot(&target, p.slot as usize);
+    }
+    Ok(Value::Null)
+}
+
+fn p_skip_lazy(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (o, c, p) = lazy_prop_slot(vm, a, "skipLazyInitialization")?;
+    if !vm.lazy_slot(&o, p.slot as usize) {
+        return Ok(Value::Null);
+    }
+    let oc = vm.class_of(&o);
+    let defaults = vm.class_defaults(&oc)?;
+    let _ = c;
+    let v = defaults.get(p.slot as usize).cloned().unwrap_or_default();
+    let old = std::mem::replace(&mut o.obj().slots.borrow_mut()[p.slot as usize], v);
+    drop(old);
+    vm.lazy_clear_slot(&o, p.slot as usize);
+    Ok(Value::Null)
+}
+
+fn p_is_lazy(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (c, n, dynamic) = need_prop!(vm, a);
+    let Some(o) = a.obj(0) else { return Ok(Value::Bool(false)) };
+    if dynamic {
+        return Ok(Value::Bool(false));
+    }
+    let Some(info) = pinfo(&c, &n) else { return Ok(Value::Bool(false)) };
+    let Some(slot) = info.slot else { return Ok(Value::Bool(false)) };
+    Ok(Value::Bool(vm.lazy_slot(&o, slot as usize)))
+}

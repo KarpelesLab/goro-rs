@@ -31,6 +31,7 @@ pub mod errors;
 pub mod exec;
 pub mod include;
 pub mod iter;
+pub mod lazy;
 pub mod objects;
 pub mod output;
 pub mod setup;

@@ -70,6 +70,8 @@ pub(crate) const F_HAS_DTOR: u32 = 1;
 pub(crate) const F_DTOR_CALLED: u32 = 2;
 pub(crate) const F_GC_BUFFERED: u32 = 4;
 pub(crate) const F_GC_CLEARED: u32 = 8;
+/// A lazy object (uninitialized, or an initialized lazy proxy).
+pub(crate) const F_LAZY: u32 = 16;
 
 /// An object's storage.
 pub struct Object {
@@ -194,6 +196,24 @@ impl ObjRef {
         let f = self.0.flags.get();
         self.0.flags.set(f | F_DTOR_CALLED);
         f & F_DTOR_CALLED == 0
+    }
+
+    /// Allows the destructor to run again (a lazy object that got
+    /// initialized).
+    pub fn clear_destructor_called(&self) {
+        let f = self.0.flags.get();
+        self.0.flags.set(f & !F_DTOR_CALLED);
+    }
+
+    /// Whether the object is lazy (the engine keeps its state).
+    #[inline]
+    pub fn is_lazy(&self) -> bool {
+        self.0.flags.get() & F_LAZY != 0
+    }
+
+    pub fn set_lazy(&self, on: bool) {
+        let f = self.0.flags.get();
+        self.0.flags.set(if on { f | F_LAZY } else { f & !F_LAZY });
     }
 
     /// Whether the class has a destructor that has not been called yet.

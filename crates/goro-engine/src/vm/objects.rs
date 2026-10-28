@@ -232,6 +232,11 @@ impl Vm {
         quiet: bool,
         cache: Option<u32>,
     ) -> R<Value> {
+        if o.is_lazy()
+            && let Some(t) = self.lazy_route(o, name, super::lazy::LazyAccess::Read)?
+        {
+            return self.read_prop(&t, name, quiet, None);
+        }
         let cls = self.class_of(o);
         let scope = self.scope_ptr();
         match self.lookup_prop(&cls, name, scope) {
@@ -397,6 +402,11 @@ impl Vm {
     }
 
     pub fn prop_isset(&mut self, o: &ObjRef, name: &PhpStr, empty: bool) -> R<bool> {
+        if o.is_lazy()
+            && let Some(t) = self.lazy_route(o, name, super::lazy::LazyAccess::Isset)?
+        {
+            return self.prop_isset(&t, name, empty);
+        }
         let cls = self.class_of(o);
         let scope = self.scope_ptr();
         let val: Option<Value> = match self.lookup_prop(&cls, name, scope) {
@@ -512,7 +522,11 @@ impl Vm {
         };
         if is_const(name) {
             let c = self.code_ref().caches[cache as usize].get();
-            if c.key != 0 && c.key == self.class_ptr_of(&o) as usize && c.b & IC_PLAIN != 0 {
+            if c.key != 0
+                && c.key == self.class_ptr_of(&o) as usize
+                && c.b & IC_PLAIN != 0
+                && !o.is_lazy()
+            {
                 let v = self.get(val)?;
                 let mut slots = o.obj().slots.borrow_mut();
                 let slot = &mut slots[c.a];
@@ -539,6 +553,11 @@ impl Vm {
 
     /// `$o->name = v`.
     pub fn write_prop(&mut self, o: &ObjRef, name: &PhpStr, v: Value, cache: Option<u32>) -> R<()> {
+        if o.is_lazy()
+            && let Some(t) = self.lazy_route(o, name, super::lazy::LazyAccess::Write)?
+        {
+            return self.write_prop(&t, name, v, None);
+        }
         let cls = self.class_of(o);
         let scope = self.scope_ptr();
         match self.lookup_prop(&cls, name, scope) {
@@ -880,6 +899,9 @@ impl Vm {
     /// Pointer to an initialized, accessible property without hooks, type
     /// or readonly constraints (in-place updates).
     fn existing_plain_prop(&mut self, o: &ObjRef, name: &PhpStr) -> Option<*mut Value> {
+        if o.is_lazy() {
+            return None;
+        }
         let cls = self.class_of(o);
         let scope = self.scope_ptr();
         match self.lookup_prop(&cls, name, scope) {
@@ -911,6 +933,11 @@ impl Vm {
     /// a dynamic property as null). `None` when access goes through magic
     /// methods or hooks.
     fn prop_ptr(&mut self, o: &ObjRef, name: &PhpStr, rmw: bool) -> R<Option<*mut Value>> {
+        if o.is_lazy()
+            && let Some(t) = self.lazy_route(o, name, super::lazy::LazyAccess::Write)?
+        {
+            return self.prop_ptr(&t, name, rmw);
+        }
         let cls = self.class_of(o);
         let scope = self.scope_ptr();
         match self.lookup_prop(&cls, name, scope) {
@@ -1007,6 +1034,11 @@ impl Vm {
         _cache: u32,
         next: Option<&PathElem>,
     ) -> R<Option<super::dims::Place>> {
+        if o.is_lazy()
+            && let Some(t) = self.lazy_route(o, name, super::lazy::LazyAccess::Write)?
+        {
+            return self.prop_fetch_w(&t, name, _cache, next);
+        }
         let next_is_prop = matches!(next, Some(PathElem::Prop(..)));
         let cls = self.class_of(o);
         if !next_is_prop {
@@ -1059,6 +1091,11 @@ impl Vm {
     }
 
     pub fn unset_prop(&mut self, o: &ObjRef, name: &PhpStr) -> R<()> {
+        if o.is_lazy()
+            && let Some(t) = self.lazy_route(o, name, super::lazy::LazyAccess::Unset)?
+        {
+            return self.unset_prop(&t, name);
+        }
         let cls = self.class_of(o);
         let scope = self.scope_ptr();
         match self.lookup_prop(&cls, name, scope) {
@@ -1789,6 +1826,17 @@ impl Vm {
 
     pub fn clone_object(&mut self, o: &ObjRef) -> R<ObjRef> {
         let cls = self.class_of(o);
+        if o.is_lazy() {
+            let t = self.lazy_realize(o)?;
+            if !ObjRef::ptr_eq(&t, o) {
+                // A proxy's clone proxies a clone of the real instance.
+                let inst = self.clone_object(&t)?;
+                let info: Rc<dyn goro_runtime::ClassInfo> = cls.clone();
+                let n = ObjRef::new(info, o.obj().slots.borrow().clone());
+                self.make_initialized_proxy(&n, inst);
+                return Ok(n);
+            }
+        }
         if cls.has_flag(cflags::NOT_CLONEABLE) || cls.is_enum() {
             return self.throw(
                 "Error",
@@ -1882,6 +1930,7 @@ impl Vm {
     /// The properties as an array: `(array)$o` with mangled names when
     /// `mangle`, or visible ones from the current scope otherwise.
     pub fn object_props_array(&mut self, o: &ObjRef, mangle: bool) -> PhpArray {
+        let o = &self.realize_deferred(o);
         let cls = self.class_of(o);
         if mangle && let Some(h) = cls.native.props_for
             && let Some(a) = h(self, o)
@@ -1938,6 +1987,7 @@ impl Vm {
     /// Properties visible from the current scope (get_object_vars,
     /// foreach): (name, value) pairs.
     pub fn visible_props(&mut self, o: &ObjRef) -> Vec<(Value, Value)> {
+        let o = &self.realize_deferred(o);
         let cls = self.class_of(o);
         let scope = self.scope_ptr();
         let mut out = Vec::new();
@@ -1972,6 +2022,11 @@ impl Vm {
         if let (Value::Object(x), Value::Object(y)) = (a, b) {
             if ObjRef::ptr_eq(x, y) {
                 return Ok(Some(0));
+            }
+            if x.is_lazy() || y.is_lazy() {
+                let x = self.lazy_realize(x)?;
+                let y = self.lazy_realize(y)?;
+                return self.compare_objects(&Value::Object(x), &Value::Object(y));
             }
             let cx = self.class_of(x);
             let cy = self.class_of(y);

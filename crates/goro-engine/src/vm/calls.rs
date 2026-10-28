@@ -1293,6 +1293,12 @@ impl Vm {
             named,
         };
         let r = handler(self, &mut a);
+        // An error deferred by the builtin (lazy object initialization
+        // while enumerating properties) is raised now.
+        let r = match (r, self.err.deferred.is_some()) {
+            (Ok(_), true) if self.err.defer_depth == 0 => Err(self.err.deferred.take().unwrap()),
+            (r, _) => r,
+        };
         self.ex.native_calls.pop();
         self.give_args_vec(args);
         r

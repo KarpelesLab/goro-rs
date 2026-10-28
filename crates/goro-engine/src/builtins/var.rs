@@ -205,9 +205,25 @@ impl Vm {
             out.extend_from_slice(format!("{}*RECURSION*\n", pad).as_bytes());
             return Ok(());
         }
-        let entries = self.debug_entries(o)?;
+        let mut lazy_prefix = "";
+        let entries = if o.is_lazy() {
+            let inst = crate::vm::lazy::with_lazy(o, |d| (d.proxy, d.instance.clone()));
+            match inst {
+                Some((_, Some(i))) => {
+                    lazy_prefix = "lazy proxy ";
+                    vec![(b"\"instance\"".to_vec(), String::new(), Some(Value::Object(i)))]
+                }
+                Some((proxy, None)) => {
+                    lazy_prefix = if proxy { "lazy proxy " } else { "lazy ghost " };
+                    self.debug_entries(o)?
+                }
+                None => self.debug_entries(o)?,
+            }
+        } else {
+            self.debug_entries(o)?
+        };
         let count = entries.iter().filter(|e| e.2.is_some()).count();
-        out.extend_from_slice(format!("{}{}object(", pad, amp).as_bytes());
+        out.extend_from_slice(format!("{}{}{}object(", pad, amp, lazy_prefix).as_bytes());
         out.extend_from_slice(cls.name.dname().as_bytes());
         out.extend_from_slice(format!(")#{} ({}) {{\n", o.handle(), count).as_bytes());
         self.dump_stack.push(id);

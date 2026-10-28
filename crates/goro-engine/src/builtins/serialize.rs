@@ -190,8 +190,19 @@ impl Vm {
             }
             return Ok(());
         }
-        // Properties (all of them, mangled), or those __sleep() names.
-        let props = self.object_props_array(o, true);
+        // Properties (all of them, mangled), or those __sleep() names. A
+        // lazy object flagged SKIP_INITIALIZATION_ON_SERIALIZE is
+        // serialized uninitialized.
+        let skip_init = self.is_lazy_uninit(o)
+            && crate::vm::lazy::with_lazy(o, |d| d.options & crate::vm::lazy::SKIP_INITIALIZATION_ON_SERIALIZE != 0)
+                .unwrap_or(false);
+        let props = if skip_init {
+            self.plain_props_array(o, true)
+        } else {
+            let p = self.object_props_array(o, true);
+            self.check_deferred()?;
+            p
+        };
         let selected: PhpArray = if let Some(f) = cls.find_method(b"__sleep") {
             let r = self.call_func_this(&f, Some(o.clone()), Vec::new())?;
             let Value::Array(names) = r else {
