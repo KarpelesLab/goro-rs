@@ -1505,6 +1505,19 @@ fn render_value(vm: &mut Vm, v: &Value) -> String {
             }
             format!("[{}]", parts.join(", "))
         }
+        // Enum cases print as Name::Case, other objects as object(Class)
+        // (observed on PHP 8.5; tests gh8444, gh15902).
+        Value::Object(o) => {
+            let c = vm.class_of(o);
+            if c.is_enum() {
+                let case = vm.get_prop_raw(o, b"name");
+                let mut b = Vec::new();
+                let _ = vm.append_to_string(&mut b, &case);
+                format!("{}::{}", c.name.dname(), String::from_utf8_lossy(&b))
+            } else {
+                format!("object({})", c.name.dname())
+            }
+        }
         _ => {
             let mut out = Vec::new();
             let _ = vm.var_export_into(&mut out, v, 0);
@@ -3718,12 +3731,19 @@ fn p_get_raw(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(o) = a.obj(0) else {
         return Ok(Value::Null);
     };
-    let info = pinfo(&c, &n);
+    let info = raw_info(vm, &c, &o, &n);
     if let Some(p) = &info
         && let Some(slot) = p.slot
     {
         if p.flags & mflags::VIRTUAL != 0 {
-            return refl_error(vm, "Must not read virtual property");
+            return refl_error(
+                vm,
+                &format!(
+                    "Must not read from virtual property {}::${}",
+                    unsafe { (*p.class).name.dname() },
+                    n.dname()
+                ),
+            );
         }
         let v = o.obj().slots.borrow()[slot as usize].clone();
         if vm.is_uninit(&v) {
@@ -3740,16 +3760,37 @@ fn p_get_raw(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     p_get_value(vm, a)
 }
+/// The declaration raw access goes through: the object's class's when it
+/// redeclares the (non-private) property (observed on PHP 8.5, GH-17713).
+fn raw_info(vm: &Vm, c: &Rc<Class>, o: &ObjRef, n: &PhpStr) -> Option<PInfo> {
+    let oc = vm.class_of(o);
+    match pinfo(&oc, n) {
+        Some(p) if p.flags & mflags::PRIVATE == 0 && oc.is_subclass_of(c) => Some(p),
+        _ => pinfo(c, n),
+    }
+}
+
 fn p_set_raw(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, _) = need_prop!(vm, a);
     let Some(o) = a.obj(0) else {
         return Ok(Value::Null);
     };
     let v = a.val(1);
-    let info = pinfo(&c, &n);
+    let info = raw_info(vm, &c, &o, &n);
     if let Some(p) = &info
         && let Some(slot) = p.slot
     {
+        if p.flags & mflags::VIRTUAL != 0 {
+            return refl_error(
+                vm,
+                &format!(
+                    "Must not write to virtual property {}::${}",
+                    unsafe { (*p.class).name.dname() },
+                    n.dname()
+                ),
+            );
+        }
+        let c = vm.rc_class(p.class);
         let v = match &p.ty {
             Some(t) => {
                 let props = c.props.borrow();
@@ -4264,7 +4305,13 @@ fn par_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let ps = vm.params_of(&func).to_vec();
     let idx = match a.val(1) {
         Value::Int(i) => {
-            if i < 0 || i as usize >= ps.len() {
+            if i < 0 {
+                return vm.throw(
+                    "ValueError",
+                    "ReflectionParameter::__construct(): Argument #2 ($param) must be greater than or equal to 0",
+                );
+            }
+            if i as usize >= ps.len() {
                 return refl_error(
                     vm,
                     "The parameter specified by its offset could not be found",
@@ -4710,9 +4757,8 @@ fn t_types(vm: &mut Vm, a: &mut Args) -> R<Value> {
             },
         )?;
         let _ = out.push(Value::Object(o));
-        if !names.contains(&"array") {
-            names.push("array");
-        }
+        names.retain(|n| *n != "array");
+        names.insert(0, "array");
     }
     if t.mask & tmask::NULL != 0 && t.mask & tmask::MIXED == 0 {
         names.push("null");
