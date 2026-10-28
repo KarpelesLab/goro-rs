@@ -10,3 +10,4 @@ goro-ext-zlib = { path = "../goro-ext-zlib" }
 oxideav-mjpeg = { version = "0.1.14", default-features = false }
 oxideav-webp = { version = "0.3.1", default-features = false }
 oxideav-avif = { version = "0.0.16" }
+oxideav-ttf = { version = "0.1.8" }
