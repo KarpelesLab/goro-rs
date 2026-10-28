@@ -54,6 +54,7 @@ pub const METHODS: &[(&str, NativeFn)] = &[
     ("domdocument::append", super::element::append),
     ("domdocument::prepend", super::element::prepend),
     ("domdocument::replacechildren", super::element::replace_children),
+    ("dom\\node::__construct", node_construct),
     ("dom\\document::createelement", create_element),
     ("dom\\document::createelementns", create_element_ns),
     ("dom\\document::createtextnode", create_text_node),
@@ -112,6 +113,15 @@ pub const METHODS: &[(&str, NativeFn)] = &[
 ];
 
 // ---------------------------------------------------------- construction
+
+/// `Dom\Node::__construct()` reached through Reflection (test gh16190.phpt).
+fn node_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let c = vm.class_of(a.this_obj()).name.to_string_lossy();
+    vm.throw(
+        "Error",
+        &format!("Cannot directly construct {c}, use document methods instead"),
+    )
+}
 
 /// A new empty document (legacy or `Dom\`).
 pub(crate) fn new_doc(kind: DocKind, modern: bool) -> NodeId {
@@ -1114,6 +1124,14 @@ fn run_xinclude(vm: &mut Vm, fname: &str, d: NodeId, flags: u32) -> R<i64> {
 
 fn xinclude(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let d = this_doc(vm, a)?;
+    if a.int(0) > i32::MAX as i64 || a.int(0) < 0 {
+        // Test dom_xinclude_errors.phpt.
+        if modern_fn(a) {
+            return vm.fthrow(a, "ValueError", "Argument #1 ($options) is too large");
+        }
+        vm.fwarn(a, "Invalid flags")?;
+        return Ok(Value::Bool(false));
+    }
     let flags = a.int(0) as u32;
     let fname = a.fname();
     let n = run_xinclude(vm, &fname, d, flags)?;

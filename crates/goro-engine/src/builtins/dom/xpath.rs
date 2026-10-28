@@ -619,8 +619,8 @@ pub fn xpath_prop(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (name, is_set) = super::props::hook_name(a);
     let o = a.this_obj().clone();
     if with_xp(&o, |_| ()).is_none() {
-        let c = vm.class_of(&o).name.to_string_lossy();
-        return vm.throw("Error", &format!("Couldn't fetch {c}"));
+        // Test gh16316.phpt.
+        return super::throw_dom(vm, goro_xml::tree::DomError::InvalidState);
     }
     match (name.as_str(), is_set) {
         ("document", false) => {
@@ -649,6 +649,13 @@ pub fn xpath_hooks() -> NativeHooks {
     NativeHooks {
         debug_props: Some(|vm, o| {
             let mut out = vm.plain_props_array(o, true);
+            if with_xp(o, |_| ()).is_none() {
+                out.insert(
+                    goro_runtime::Key::Str(PhpStr::from("registerNodeNamespaces")),
+                    Value::Bool(true),
+                );
+                return Some(out);
+            }
             let d = with_xp(o, |x| x.doc.id())?;
             let _ = d;
             out.insert(
