@@ -6,3 +6,4 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+memchr = "2"

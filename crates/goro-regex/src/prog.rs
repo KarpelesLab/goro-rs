@@ -1,0 +1,216 @@
+//! The compiled form executed by the backtracking matcher.
+
+use crate::ast::{Assertion, Greed, Newline};
+use crate::class::CharSet;
+use std::sync::Arc;
+
+pub type Pc = u32;
+
+/// A matcher for exactly one character (or code unit).
+#[derive(Clone, Debug)]
+pub enum Item {
+    /// One byte (a character below 128, or any byte in non-UTF mode).
+    Byte(u8),
+    /// Either of two bytes (ASCII caseless).
+    Byte2(u8, u8),
+    /// One of a few code points (UTF caseless characters).
+    Chars(Arc<[u32]>),
+    /// A class.
+    Set(Arc<CharSet>),
+    /// Any character (`.` with dotall).
+    Any,
+    /// Any character except a newline (`.`, `\N`).
+    AnyNoNl,
+    /// One code unit (`\C`).
+    CodeUnit,
+}
+
+/// What kind of scope a lookaround barrier opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LookKind {
+    Positive,
+    Negative,
+    /// Non-atomic positive (`(*napla:`).
+    NonAtomic,
+    /// Assertion used as a condition: `negated` selects (?! / (?<!.
+    Cond {
+        negated: bool,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum Inst {
+    /// Match one character with an item.
+    One(Item),
+    /// A literal byte string (case-sensitive), index into `Prog::lits`.
+    Lit(u32),
+    /// An ASCII-caseless literal (stored lowercased), index into `Prog::lits`.
+    LitFold(u32),
+    /// Repeat an item.
+    Rep {
+        item: Item,
+        min: u32,
+        max: u32,
+        greed: Greed,
+    },
+    /// `\R`
+    Newline {
+        anycrlf: bool,
+    },
+    /// `\X`
+    Grapheme,
+    Assert(Assertion),
+    /// Push a choice to `alt`, continue with the next instruction.
+    Split {
+        alt: Pc,
+    },
+    /// Push a choice to the next instruction, continue at `to` (lazy).
+    SplitLazy {
+        to: Pc,
+    },
+    /// Alternative of a group containing (*THEN): like Split but tagged.
+    SplitTag {
+        alt: Pc,
+        tag: u32,
+    },
+    /// Marks entry into an alternation group whose branches contain (*THEN).
+    ThenScope {
+        tag: u32,
+    },
+    Jmp(Pc),
+    /// Records the start of capture group n.
+    CapOpen(u32),
+    /// Ends capture group n (or returns from a call into group n).
+    CapClose(u32),
+    /// A frame-only marker that counts towards the match and depth limits
+    /// like PCRE2's group entry.
+    GroupFrame,
+    /// Records the iteration start of a group loop.
+    LoopStart {
+        slot: u32,
+    },
+    /// End of a loop iteration: exits on an empty iteration, otherwise
+    /// loops back to `start` (greedy) or offers it as a choice (lazy).
+    LoopEnd {
+        slot: u32,
+        start: Pc,
+        greedy: bool,
+    },
+    AtomicStart,
+    AtomicEnd,
+    /// Starts a lookaround; `end` is the matching LookEnd.
+    LookStart {
+        kind: LookKind,
+        end: Pc,
+    },
+    /// Lookbehind branch: step back between min and max characters.
+    Behind {
+        min: u32,
+        max: u32,
+    },
+    /// End of a lookbehind branch: the position must be back where the
+    /// lookbehind started.
+    BehindCheck,
+    /// End of a lookaround; `no` is the no-branch of a conditional.
+    LookEnd {
+        kind: LookKind,
+        no: Pc,
+    },
+    Backref {
+        groups: Arc<[u32]>,
+        caseless: bool,
+        restrict: bool,
+    },
+    Call {
+        group: u32,
+    },
+    /// Condition: any of the groups set.
+    CondRef {
+        groups: Arc<[u32]>,
+        no: Pc,
+    },
+    /// Condition: recursion (None = any recursion).
+    CondRecurse {
+        groups: Option<Arc<[u32]>>,
+        no: Pc,
+    },
+    /// Verbs. Names index `Prog::names`.
+    Mark(u32),
+    Commit,
+    Prune,
+    Skip,
+    SkipName(u32),
+    Then {
+        tag: u32,
+    },
+    /// (*ACCEPT): closes the listed capture groups first.
+    Accept {
+        close: Arc<[u32]>,
+    },
+    Fail,
+    /// Sets the mark name without making it visible to (*SKIP:NAME)
+    /// (the names of (*PRUNE:NAME) and friends).
+    SetMarkName(u32),
+    /// `\K`
+    Keep,
+    /// Script runs.
+    ScriptRunStart,
+    ScriptRunEnd,
+    /// Scan substring: run the body anchored on the first set group.
+    ScanStart {
+        groups: Arc<[u32]>,
+        end: Pc,
+    },
+    ScanEnd,
+    Match,
+}
+
+/// Start-of-match optimisation data (pcre2api: "start-up optimizations").
+#[derive(Clone, Debug, Default)]
+pub struct StartInfo {
+    /// The match can only start at the start offset (or line starts for
+    /// multiline ^).
+    pub anchored: bool,
+    /// Every match starts after a newline or at the subject start (multiline
+    /// `^` in every branch).
+    pub startline: bool,
+    /// A literal every match starts with.
+    pub prefix: Vec<u8>,
+    /// Whether the prefix is ASCII-caseless.
+    pub prefix_fold: bool,
+    /// Possible first bytes of a match.
+    pub first_bytes: Option<Box<[bool; 256]>>,
+    /// A byte that must appear somewhere at or after the match start
+    /// (PCRE2's "last literal" check), with a caseless alternative.
+    pub required: Option<(u8, u8)>,
+    /// The minimum match length in code units.
+    pub min_len: usize,
+}
+
+#[derive(Debug)]
+pub struct Prog {
+    pub insts: Vec<Inst>,
+    pub lits: Vec<Box<[u8]>>,
+    pub names: Vec<Arc<[u8]>>,
+    /// Start pc of each capture group (index = group number; 0 = pattern).
+    pub group_pc: Vec<Pc>,
+    pub ncap: u32,
+    /// Number of loop slots.
+    pub nloops: u32,
+    pub utf: bool,
+    pub ucp: bool,
+    pub newline: Newline,
+    pub start: StartInfo,
+    /// The longest lookbehind in characters (for UTF checks with offsets).
+    pub max_lookbehind: u32,
+    pub has_verbs: bool,
+    pub notempty: bool,
+    pub notempty_atstart: bool,
+    pub limit_match: Option<u32>,
+    pub limit_depth: Option<u32>,
+    pub limit_heap: Option<u32>,
+    pub match_unset_backref: bool,
+    pub turkish: bool,
+    /// The pattern contains an explicit CR or LF (pcre2api: CRLF bumpalong).
+    pub has_cr_lf: bool,
+}
