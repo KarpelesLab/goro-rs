@@ -85,6 +85,7 @@ pub static MODULE: Module = Module {
         ("collator::geterrormessage", c_get_error_message),
         ("collator::getsortkey", c_get_sort_key),
     ],
+    hooks: &[("collator", hooks)],
     ..Module::EMPTY
 };
 
@@ -128,6 +129,18 @@ const COLLATOR_CLASS: &str = r#"<?php class Collator {
     public function getErrorMessage(): string|false {}
     public function getSortKey(string $string): string|false {}
 }"#;
+
+fn hooks() -> crate::class::NativeHooks {
+    crate::class::NativeHooks {
+        create: Some(super::numfmt::on_create),
+        clone: Some(|_, from, to| {
+            if let Some(c) = with_obj::<Collator, Collator>(from, |x| x.v.clone()) {
+                store(to, c);
+            }
+        }),
+        ..Default::default()
+    }
+}
 
 /// Builds a collator for `locale`, or the error message.
 fn make(vm: &mut Vm, locale: &PhpStr) -> Result<Collator, &'static str> {
@@ -358,6 +371,12 @@ fn sort_val(vm: &mut Vm, v: &Value, flags: i64) -> R<SortVal> {
             }
             _ => {}
         }
+    }
+    if let Value::Object(o) = &v
+        && vm.class_of(o).magic.borrow().to_string.is_none()
+    {
+        // objects without __toString() compare equal (bug #75193)
+        return Ok(SortVal::Str(String::new()));
     }
     let s = vm.to_php_str(&v)?;
     Ok(SortVal::Str(s.to_string_lossy()))

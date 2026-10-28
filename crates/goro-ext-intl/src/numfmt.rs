@@ -248,6 +248,22 @@ pub fn currency_cash_digits(code: &str) -> u32 {
     }
 }
 
+/// The currency of a symbol in a locale's data (`$` is USD in en).
+pub fn currency_for_symbol(chain: &[String], sym: &str) -> Option<String> {
+    let d = data();
+    let mut locs: Vec<&str> = chain.iter().map(String::as_str).collect();
+    locs.push("en");
+    for l in locs {
+        let prefix = k(b'C', l, "");
+        for (key, v) in &d.map {
+            if key.starts_with(&prefix) && (v[0] == sym || v.get(1) == Some(&sym)) {
+                return Some(key[prefix.len()..].to_string());
+            }
+        }
+    }
+    None
+}
+
 /// The current currency of a region.
 pub fn region_currency(region: &str) -> Option<&'static str> {
     data().map.get(&k(b'T', region, "")).map(|v| v[0])
@@ -1850,7 +1866,10 @@ impl NumberFormat {
         };
         match self.style {
             ORDINAL => {
-                let n = ax.trunc() as i64;
+                // the value rounds half-even to an integer
+                let mut d = Dec::from_f64(ax);
+                d.round_frac(0, ROUND_HALFEVEN, false);
+                let n = d.to_f64() as i64;
                 let s = intl::number::format_ordinal(&locale::to_bcp47(&self.locale), n);
                 // the digits use the locale's decimal grouping
                 let plain = intl::number::format_decimal(&locale::to_bcp47(&self.locale), n as f64);
@@ -1939,6 +1958,48 @@ impl NumberFormat {
     }
 
     // ------------------------------------------------------------ parsing
+
+    /// Parses an amount with a currency (`parseCurrency()`): a currency
+    /// symbol or ISO code before or after the number. Returns the value,
+    /// the ISO code and the end (chars).
+    pub fn parse_currency(&self, text: &str, start: usize) -> Option<(f64, String, usize)> {
+        let chars: Vec<char> = text.chars().collect();
+        let rest: String = chars[start.min(chars.len())..].iter().collect();
+        let is_space = |c: char| c.is_whitespace() || c == '\u{a0}' || c == '\u{202f}';
+        // a currency text and what it stands for
+        let ident = |t: &str| -> Option<String> {
+            let t = t.trim_matches(is_space);
+            if t.is_empty() {
+                return None;
+            }
+            if t.len() == 3 && t.bytes().all(|b| b.is_ascii_uppercase()) {
+                return Some(t.to_string());
+            }
+            if t == self.symbols[CURRENCY_SYMBOL as usize] {
+                return Some(self.currency.clone());
+            }
+            currency_for_symbol(&self.chain, t)
+        };
+        // the number: the first digit run
+        let first = rest.find(|c: char| c.is_ascii_digit() || c == '-')?;
+        let before = &rest[..first];
+        let mut plain = self.clone();
+        plain.text_affix = [Some(String::new()), Some(String::new()), None, Some(String::new())];
+        let tail: String = rest[first..].to_string();
+        let (v, _, end) = plain.parse(&tail, 0)?;
+        let after: String = tail.chars().skip(end).collect();
+        let (code, used) = if let Some(c) = ident(before) {
+            (c, 0)
+        } else {
+            let a = after.trim_matches(is_space).to_string();
+            match ident(&a) {
+                Some(c) => (c, after.chars().count()),
+                None => return None,
+            }
+        };
+        let total = start + before.chars().count() + end + used;
+        Some((v, code, total))
+    }
 
     /// Parses `text` from UTF-16 offset... here: from char index `start`.
     /// Returns the value (and whether it is an integer) with the end

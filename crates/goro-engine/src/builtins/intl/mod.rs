@@ -27,11 +27,13 @@ use crate::registry::{ConstVal, Module};
 use crate::vm::{R, Vm};
 
 mod collator;
+mod datehook;
 mod locale;
+mod msgfmt;
 mod numfmt;
 
 /// Every module of the extension (all named "intl").
-pub static MODULES: &[&Module] = &[&MODULE, &locale::MODULE, &collator::MODULE, &numfmt::MODULE];
+pub static MODULES: &[&Module] = &[&MODULE, &locale::MODULE, &collator::MODULE, &numfmt::MODULE, &msgfmt::MODULE];
 
 pub static MODULE: Module = Module {
     name: "intl",
@@ -322,6 +324,34 @@ pub(crate) fn fail_obj<T: 'static>(
     let msg = format!("{}(): {}", a.fname(), text);
     set_obj_err::<T>(o, code, &msg);
     fail_msg(vm, code, msg)
+}
+
+/// [`fail_obj`] with a message holding arbitrary bytes (the invalid
+/// UTF-8 a message quotes: ext/intl/tests/msgfmt_format_error4.phpt).
+pub(crate) fn fail_obj_bytes<T: 'static>(
+    vm: &mut Vm,
+    a: &Args,
+    o: Option<&ObjRef>,
+    code: i64,
+    text: &[u8],
+) -> R<()> {
+    let mut msg = format!("{}(): ", a.fname()).into_bytes();
+    msg.extend_from_slice(text);
+    let lossy = String::from_utf8_lossy(&msg).into_owned();
+    if let Some(o) = o {
+        set_obj_err::<T>(o, code, &lossy);
+    }
+    set_error_quiet(vm, code, lossy.clone());
+    if use_exceptions(vm) {
+        let e = vm.create_exception("IntlException", "", code)?;
+        vm.set_prop_raw(&e, b"message", Value::Str(PhpStr::from(msg)));
+        return Err(crate::vm::Unwind::Throw(e));
+    }
+    let level = error_level(vm);
+    if level != 0 {
+        vm.raise(level, &lossy)?;
+    }
+    Ok(())
 }
 
 /// Resets the global and the object's error.

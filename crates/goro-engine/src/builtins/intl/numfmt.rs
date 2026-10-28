@@ -217,7 +217,7 @@ const NF_CLASS: &str = r#"<?php class NumberFormatter {
 
 fn hooks() -> NativeHooks {
     NativeHooks {
-        create: Some(not_serializable),
+        create: Some(on_create),
         clone: Some(|_, from, to| {
             if let Some(f) = with_obj::<NumberFormat, NumberFormat>(from, |x| x.v.clone()) {
                 store(to, f);
@@ -233,6 +233,14 @@ pub(crate) fn not_serializable(vm: &mut Vm, o: &ObjRef) {
     let cls = vm.class_of(o);
     cls.flags
         .set(cls.flags.get() | crate::class::cflags::NOT_SERIALIZABLE);
+}
+
+/// Object creation: not serializable, and the global error is reset
+/// (ext/intl/tests/msgfmt_fail2.phpt: a TypeError of the constructor
+/// leaves U_ZERO_ERROR).
+pub(crate) fn on_create(vm: &mut Vm, o: &ObjRef) {
+    not_serializable(vm, o);
+    reset(vm);
 }
 
 /// Builds a formatter, or the error code and message.
@@ -500,27 +508,15 @@ fn n_parse_currency(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Some(Value::Int(p)) => char_of_u16(&text, p),
         _ => 0,
     };
-    // the currency: a symbol or ISO code before or after the number
-    let sym = f.symbols[nf::CURRENCY_SYMBOL as usize].clone();
-    let iso = f.currency.clone();
-    let stripped: String;
-    let (body, code) = if let Some(rest) = text.get(start..).and_then(|t| t.strip_prefix(sym.as_str())) {
-        stripped = rest.to_string();
-        (stripped.as_str(), Some(iso.clone()))
-    } else {
-        (&text[..], None)
-    };
-    let _ = body;
-    let has_code = code.is_some() || text.contains(sym.as_str()) || text.contains(iso.as_str());
-    match f.parse(&text, start) {
-        Some((v, _, end)) if has_code => {
-            set_out(vm, a, off + 1, Value::from(iso.as_str()))?;
+    match f.parse_currency(&text, start) {
+        Some((v, code, end)) => {
+            set_out(vm, a, off + 1, Value::from(code.as_str()))?;
             if a.has(off + 2) {
                 set_out(vm, a, off + 2, Value::Int(u16_off(&text, end)))?;
             }
             Ok(Value::Float(v))
         }
-        _ => {
+        None => {
             fail_obj::<NumberFormat>(vm, a, &o, ue::U_PARSE_ERROR, "Number parsing failed")?;
             Ok(Value::Bool(false))
         }

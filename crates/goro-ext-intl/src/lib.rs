@@ -13,5 +13,6 @@
 pub mod collator;
 pub mod error;
 pub mod locale;
+pub mod msgfmt;
 pub mod numfmt;
 pub mod utf16;
