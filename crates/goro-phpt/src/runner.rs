@@ -96,7 +96,19 @@ pub struct Config {
     pub keep: bool,
     /// Directory substituted for `{TMP}`.
     pub tmp: PathBuf,
+    /// Address-space limit of each test process (bytes).
+    pub mem_limit: Option<u64>,
+    /// Run tests needing large resources (see [`HEAVY_TESTS`]).
+    pub heavy: bool,
 }
+
+/// Tests that need several gigabytes of memory or disk: skipped unless
+/// asked for (`--heavy`).
+pub const HEAVY_TESTS: &[&str] = &[
+    "file_get_contents_file_put_contents_5gb.phpt",
+    // a 2 GB string
+    "gh15613.phpt",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Status {
@@ -423,6 +435,7 @@ fn exec(
         stdin,
         capture,
         timeout: cfg.timeout,
+        mem_limit: cfg.mem_limit,
     })
 }
 
@@ -524,6 +537,19 @@ fn run_single_inner(
     extra_env: &[(OsString, OsString)],
 ) -> TestResult {
     let title = phpt.title();
+    if !cfg.heavy
+        && path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .is_some_and(|f| HEAVY_TESTS.contains(&f))
+    {
+        return result(
+            name,
+            &title,
+            Status::Skip,
+            "needs large resources (run with --heavy)",
+        );
+    }
     if let Some(sec) = phpt.cgi_section() {
         return result(
             name,
