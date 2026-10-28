@@ -81,6 +81,23 @@ impl Vm {
         }
         let cls = self.link_class(decl)?;
         decl.declared.set(true);
+        // PHP 8.1: Serializable without __serialize()/__unserialize() is
+        // deprecated (message observed on PHP 8.5).
+        if cls.kind != ClassKind::Interface
+            && cls.interfaces.borrow().iter().any(|i| i.lname.as_bytes() == b"serializable")
+            && !(cls.find_method(b"__serialize").is_some()
+                && cls.find_method(b"__unserialize").is_some())
+        {
+            self.raise_at(
+                super::errors::E_DEPRECATED,
+                &format!(
+                    "{} implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary)",
+                    cls.name.dname()
+                ),
+                decl.file.clone(),
+                decl.line_start,
+            )?;
+        }
         Ok(cls)
     }
 

@@ -70,7 +70,49 @@ pub static MODULE: Module = Module {
 #[derive(Default)]
 pub struct JsonState {
     pub last_error: i64,
+    /// Objects being encoded by any json_encode() call (recursion across
+    /// nested calls from jsonSerialize()/__serialize(): PHP's recursion
+    /// protection is per object).
+    pub active: Vec<usize>,
 }
+
+/// One UTF-8 sequence at `s[i]` as PHP's JSON scanner reads it: a lead
+/// byte announces the length and the continuation bytes that follow are
+/// consumed with it, so an invalid or truncated sequence is one unit
+/// (observed on PHP 8.5: "\xf0\x80\x80A" substitutes one U+FFFD).
+/// Returns (valid, length).
+fn utf8_unit(s: &[u8], i: usize) -> (bool, usize) {
+    let lead = s[i];
+    let need = match lead {
+        0xC0..=0xDF => 1,
+        0xE0..=0xEF => 2,
+        0xF0..=0xF7 => 3,
+        _ => return (false, 1),
+    };
+    let mut k = 0;
+    while k < need && s.get(i + 1 + k).is_some_and(|&c| (0x80..0xC0).contains(&c)) {
+        k += 1;
+    }
+    if k < need {
+        return (false, 1 + k);
+    }
+    let len = 1 + need;
+    (std::str::from_utf8(&s[i..i + len]).is_ok(), len)
+}
+
+/// The length of a UTF-8 sequence from its lead byte.
+fn utf8_len(c: u8) -> usize {
+    match c {
+        0xF0..=0xF7 => 4,
+        0xE0..=0xEF => 3,
+        0xC0..=0xDF => 2,
+        _ => 1,
+    }
+}
+
+/// The encoder's maximum nesting: deeper structures fail like PHP's
+/// stack limit does (test gh15168), before the native stack runs out.
+const MAX_NESTING: usize = 10000;
 
 pub fn error_msg(code: i64) -> &'static str {
     match code {
@@ -136,7 +178,10 @@ impl Vm {
                         goro_runtime::Number::Int(i) => Value::Int(i),
                         goro_runtime::Number::Float(f) => Value::Float(f),
                     };
-                    return self.json_enc(e, &nv);
+                    // Out-of-range numbers keep their text (bug64695).
+                    if !matches!(nv, Value::Float(f) if !f.is_finite()) {
+                        return self.json_enc(e, &nv);
+                    }
                 }
                 json_string(e, s)
             }
@@ -148,8 +193,12 @@ impl Vm {
                     return Ok(());
                 }
                 let list = a.data().is_list() && e.flags & 16 == 0;
-                if e.depth >= e.max_depth {
+                if e.depth >= e.max_depth || e.depth >= MAX_NESTING {
                     e.error = 1;
+                    if e.depth >= MAX_NESTING {
+                        e.out.extend_from_slice(b"null");
+                        return Ok(());
+                    }
                 }
                 e.stack.push(id);
                 e.depth += 1;
@@ -227,7 +276,13 @@ impl Vm {
                 Value::Int(i) => PhpStr::from(i.to_string()),
                 _ => PhpStr::empty(),
             };
+            let mark = e.out.len();
             json_string(e, &ks);
+            if e.out[mark..] == *b"null" {
+                // An invalid key (partial output) is written as "" (bug68567).
+                e.out.truncate(mark);
+                e.out.extend_from_slice(b"\"\"");
+            }
             e.out.push(b':');
             if e.flags & PRETTY != 0 {
                 e.out.push(b' ');
@@ -244,8 +299,13 @@ impl Vm {
     fn json_object(&mut self, e: &mut Enc, o: &ObjRef) -> R<()> {
         let cls = self.class_of(o);
         let id = (o.handle() as usize) | (1 << 62);
-        if e.stack.contains(&id) {
+        if e.stack.contains(&id) || self.ext::<JsonState>().active.contains(&id) {
             e.error = 6;
+            e.out.extend_from_slice(b"null");
+            return Ok(());
+        }
+        if e.depth >= MAX_NESTING {
+            e.error = 1;
             e.out.extend_from_slice(b"null");
             return Ok(());
         }
@@ -253,7 +313,9 @@ impl Vm {
             && cls.is_subclass_of(&js)
         {
             e.stack.push(id);
+            self.ext::<JsonState>().active.push(id);
             let r = self.call_method(o, b"jsonserialize", Vec::new());
+            self.ext::<JsonState>().active.retain(|x| *x != id);
             let r = match r {
                 Ok(v) => v,
                 Err(err) => {
@@ -335,27 +397,25 @@ fn json_string(e: &mut Enc, s: &[u8]) {
     e.out.push(b'"');
     let text: String = if valid {
         String::from_utf8(s.to_vec()).unwrap()
-    } else if flags & 2097152 != 0 {
-        String::from_utf8_lossy(s).into_owned()
     } else {
-        // Ignore invalid sequences.
-        let mut out = String::new();
-        let mut rest = s;
-        while !rest.is_empty() {
-            match std::str::from_utf8(rest) {
-                Ok(t) => {
-                    out.push_str(t);
-                    break;
-                }
-                Err(err) => {
-                    let (good, bad) = rest.split_at(err.valid_up_to());
-                    out.push_str(std::str::from_utf8(good).unwrap());
-                    let skip = err.error_len().unwrap_or(bad.len()).max(1);
-                    rest = &bad[skip..];
-                }
+        // Invalid sequences are substituted or dropped unit by unit.
+        let mut out: Vec<u8> = Vec::new();
+        let mut i = 0;
+        while i < s.len() {
+            if s[i] < 0x80 {
+                out.push(s[i]);
+                i += 1;
+                continue;
             }
+            let (ok, n) = utf8_unit(s, i);
+            if ok {
+                out.extend_from_slice(&s[i..i + n]);
+            } else if flags & 2097152 != 0 {
+                out.extend_from_slice("\u{FFFD}".as_bytes());
+            }
+            i += n;
         }
-        out
+        String::from_utf8(out).unwrap_or_default()
     };
     for c in text.chars() {
         match c {
@@ -420,14 +480,8 @@ fn json_fail(vm: &mut Vm, code: i64, flags: i64) -> R<Value> {
 fn json_encode(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let v = a.val(0);
     let flags = a.int_or(1, 0);
-    let depth = a.int_or(2, 512);
-    if depth <= 0 {
-        return vm.fthrow(
-            a,
-            "ValueError",
-            "Argument #3 ($depth) must be greater than 0",
-        );
-    }
+    // Observed on PHP 8.5: no validation; 0 allows only scalars.
+    let depth = a.int_or(2, 512).max(0);
     if flags & THROW == 0 {
         vm.ext::<JsonState>().last_error = 0;
     }
@@ -446,6 +500,8 @@ struct Dec<'a> {
     bigint_string: bool,
     max_depth: usize,
     depth: usize,
+    /// 0: error, 1: JSON_INVALID_UTF8_IGNORE, 2: _SUBSTITUTE.
+    utf8: u8,
 }
 
 enum DErr {
@@ -477,9 +533,16 @@ impl Vm {
             b'{' => {
                 d.pos += 1;
                 d.depth += 1;
-                if d.depth > d.max_depth {
+                if d.depth >= d.max_depth {
                     return Err(DErr::Code(1));
                 }
+                // The object exists before its members (object ids follow
+                // PHP's order: test pass001).
+                let early = if build && !d.assoc {
+                    Some(self.new_std_object()?)
+                } else {
+                    None
+                };
                 let mut pairs: Vec<(PhpStr, Value)> = Vec::new();
                 d.ws();
                 if d.s.get(d.pos) == Some(&b'}') {
@@ -505,6 +568,7 @@ impl Vm {
                                 d.pos += 1;
                                 break;
                             }
+                            Some(b']') => return Err(DErr::Code(2)),
                             _ => return Err(DErr::Code(4)),
                         }
                     }
@@ -520,7 +584,10 @@ impl Vm {
                     }
                     return Ok(Value::Array(a));
                 }
-                let o = self.new_std_object()?;
+                let o = match early {
+                    Some(o) => o,
+                    None => self.new_std_object()?,
+                };
                 {
                     let mut props = o.obj().props.borrow_mut();
                     for (k, v) in pairs {
@@ -536,7 +603,7 @@ impl Vm {
             b'[' => {
                 d.pos += 1;
                 d.depth += 1;
-                if d.depth > d.max_depth {
+                if d.depth >= d.max_depth {
                     return Err(DErr::Code(1));
                 }
                 let mut a = PhpArray::new();
@@ -556,6 +623,7 @@ impl Vm {
                                 d.pos += 1;
                                 break;
                             }
+                            Some(b'}') => return Err(DErr::Code(2)),
                             _ => return Err(DErr::Code(4)),
                         }
                     }
@@ -577,6 +645,7 @@ impl Vm {
                 Ok(Value::Null)
             }
             b'-' | b'0'..=b'9' => json_num(d),
+            0 => Err(DErr::Code(3)),
             _ => Err(DErr::Code(4)),
         }
     }
@@ -698,6 +767,26 @@ fn json_str(d: &mut Dec) -> Result<PhpStr, DErr> {
                 }
             }
             c if c < 0x20 => return Err(DErr::Code(3)),
+            c if c >= 0x80 => {
+                // The decoder replaces each maximal invalid subpart
+                // (observed on PHP 8.5: "\xf0\x80\x80" is three U+FFFD).
+                let end = (d.pos + 4).min(s.len());
+                let (ok, n) = match std::str::from_utf8(&s[d.pos..end]) {
+                    Ok(_) => (true, utf8_len(c)),
+                    Err(err) if err.valid_up_to() > 0 => (true, utf8_len(c)),
+                    Err(err) => (false, err.error_len().unwrap_or(end - d.pos).max(1)),
+                };
+                if ok {
+                    out.extend_from_slice(&s[d.pos..d.pos + n]);
+                } else {
+                    match d.utf8 {
+                        1 => {}
+                        2 => out.extend_from_slice("\u{FFFD}".as_bytes()),
+                        _ => return Err(DErr::Code(5)),
+                    }
+                }
+                d.pos += n;
+            }
             c => {
                 out.push(c);
                 d.pos += 1;
@@ -721,6 +810,10 @@ fn json_decode_impl(vm: &mut Vm, a: &Args, build: bool) -> R<Result<Value, i64>>
     } else {
         (false, a.int_or(1, 512), a.int_or(2, 0))
     };
+    // Observed on PHP 8.5: an empty string fails before the depth check.
+    if s.is_empty() {
+        return Ok(Err(4));
+    }
     if depth <= 0 {
         let n = if build { 3 } else { 2 };
         return vm.fthrow(
@@ -750,6 +843,13 @@ fn json_decode_impl(vm: &mut Vm, a: &Args, build: bool) -> R<Result<Value, i64>>
         bigint_string: flags & 2 != 0,
         max_depth: depth as usize,
         depth: 0,
+        utf8: if flags & 2097152 != 0 {
+            2
+        } else if flags & 1048576 != 0 {
+            1
+        } else {
+            0
+        },
     };
     match vm.json_value(&mut d, build) {
         Ok(v) => {

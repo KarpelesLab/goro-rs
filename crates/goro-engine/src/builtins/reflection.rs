@@ -2183,11 +2183,16 @@ fn const_order(cls: &Rc<Class>) -> Vec<Rc<crate::class::ClassConst>> {
         .cloned()
         .collect();
     let cp = Rc::as_ptr(cls);
-    let mut out: Vec<Rc<crate::class::ClassConst>> = all
+    // Internal classes list inherited constants first (they are added
+    // after inheritance: ext/spl/tests/bug75242).
+    let own: Vec<Rc<crate::class::ClassConst>> = all
         .iter()
         .filter(|k| std::ptr::eq(k.class, cp))
         .cloned()
         .collect();
+    let internal = cls.has_flag(cflags::INTERNAL);
+    let mut out: Vec<Rc<crate::class::ClassConst>> =
+        if internal { Vec::new() } else { own.clone() };
     if let Some(p) = &cls.parent {
         for k in const_order(p) {
             if let Some(mine) = all.iter().find(|x| x.name == k.name)
@@ -2197,7 +2202,7 @@ fn const_order(cls: &Rc<Class>) -> Vec<Rc<crate::class::ClassConst>> {
             }
         }
     }
-    for k in &all {
+    for k in own.iter().chain(all.iter()) {
         if !out.iter().any(|x| x.name == k.name) {
             out.push(k.clone());
         }
@@ -5388,7 +5393,12 @@ fn rr_from(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let key = vm.to_key(&k, "array")?;
     match arr.get(key.as_ref()) {
         None => refl_error(vm, "Array key not found"),
-        Some(Value::Ref(r)) if r.refcount() > 1 => {
+        // A directly self-referential element counts too (bug78263).
+        Some(Value::Ref(r))
+            if r.refcount() > 1
+                || matches!(r.get(), Value::Array(inner)
+                    if inner.iter().any(|(_, x)| matches!(x, Value::Ref(y) if goro_runtime::PhpRef::ptr_eq(y, r)))) =>
+        {
             let id = r.addr();
             let cls = vm.find_class(b"ReflectionReference", false)?.unwrap();
             let o = vm.instantiate_raw(&cls)?;
