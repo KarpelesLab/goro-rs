@@ -48,11 +48,7 @@ fn walk(path: &Path, out: &mut Vec<PathBuf>) {
         let p = entry.path();
         match entry.file_type() {
             Ok(t) if t.is_dir() => walk(&p, out),
-            Ok(t) if t.is_file() => {
-                if p.extension().is_some_and(|e| e == "phpt") {
-                    out.push(p);
-                }
-            }
+            Ok(t) if t.is_file() && p.extension().is_some_and(|e| e == "phpt") => out.push(p),
             _ => {}
         }
     }

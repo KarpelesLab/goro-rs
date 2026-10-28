@@ -27,6 +27,24 @@ are enough to build it.
 - Pure Rust. No C code and no FFI to C libraries (the `libc` crate for system
   calls is fine).
 
+## Running php-src's tests
+
+`goro --test` runs `.phpt` files (the `goro-phpt` crate):
+
+```sh
+goro --test -q -j 8 --copy-to /tmp/phpt-run --results new.txt /path/to/php-tests
+goro --test --php /usr/bin/php -v Zend/tests/add_001.phpt   # any PHP binary
+goro --test-compare base.txt new.txt     # tests that went from PASS to anything else
+goro --test --guard base.txt ...         # the same check at the end of a run
+```
+
+Each test runs the binary under test as a subprocess with `-n` and the ini
+defaults listed (with their reasons) in `crates/goro-phpt/src/runner.rs`
+(`DEFAULT_INI`). The working directory is the test-suite root. `--copy-to`
+runs from a copy of that root, so files the tests leave behind don't touch
+the checkout. Tests that need a web SAPI (CGI, GET, POST, ...) or phpdbg are
+reported as SKIP for now.
+
 ## Status
 
 Fresh start. The previous code base is kept on the `old` branch for the

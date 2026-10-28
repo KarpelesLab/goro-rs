@@ -76,7 +76,9 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
     };
     let mut it = args.iter();
     let value = |it: &mut std::slice::Iter<'_, OsString>, opt: &str| {
-        it.next().cloned().ok_or_else(|| format!("{opt} needs a value"))
+        it.next()
+            .cloned()
+            .ok_or_else(|| format!("{opt} needs a value"))
     };
     while let Some(a) = it.next() {
         let s = a.to_string_lossy();
@@ -87,12 +89,18 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
             "-h" | "--help" => return Err(String::new()),
             "-j" => {
                 let v = value(&mut it, "-j")?;
-                o.jobs = v.to_string_lossy().parse().map_err(|_| "bad -j value".to_string())?;
+                o.jobs = v
+                    .to_string_lossy()
+                    .parse()
+                    .map_err(|_| "bad -j value".to_string())?;
             }
             "--php" => o.php = Some(value(&mut it, "--php")?.into()),
             "--timeout" => {
                 let v = value(&mut it, "--timeout")?;
-                o.timeout = v.to_string_lossy().parse().map_err(|_| "bad --timeout value".to_string())?;
+                o.timeout = v
+                    .to_string_lossy()
+                    .parse()
+                    .map_err(|_| "bad --timeout value".to_string())?;
             }
             "-d" => {
                 let v = value(&mut it, "-d")?.to_string_lossy().into_owned();
@@ -256,24 +264,45 @@ pub fn test_main(args: &[OsString]) -> i32 {
             eprintln!("goro --test: --copy-to {} already exists", dest.display());
             return 2;
         }
+        if dest.starts_with(&root) {
+            eprintln!(
+                "goro --test: --copy-to {} is inside the root {}",
+                dest.display(),
+                root.display()
+            );
+            return 2;
+        }
         let mut mapped = Vec::new();
         for p in &paths {
             match p.strip_prefix(&root) {
                 Ok(rel) => mapped.push(dest.join(rel)),
                 Err(_) => {
-                    eprintln!("goro --test: {} is outside the root {}", p.display(), root.display());
+                    eprintln!(
+                        "goro --test: {} is outside the root {}",
+                        p.display(),
+                        root.display()
+                    );
                     return 2;
                 }
             }
         }
         let t = Instant::now();
         if let Err(e) = copy_tree(&root, &dest) {
-            eprintln!("goro --test: copying {} to {}: {e}", root.display(), dest.display());
+            eprintln!(
+                "goro --test: copying {} to {}: {e}",
+                root.display(),
+                dest.display()
+            );
             remove_tree(&dest);
             return 2;
         }
         if !o.quiet {
-            eprintln!("copied {} to {} in {:.1}s", root.display(), dest.display(), t.elapsed().as_secs_f64());
+            eprintln!(
+                "copied {} to {} in {:.1}s",
+                root.display(),
+                dest.display(),
+                t.elapsed().as_secs_f64()
+            );
         }
         paths = mapped;
         root = dest.clone();
@@ -307,7 +336,8 @@ fn run_and_report(o: &Options, php: PathBuf, root: PathBuf, paths: &[PathBuf]) -
         tmp: std::env::temp_dir(),
     };
     let jobs = schedule::jobs(&files);
-    let all: Mutex<(Vec<TestResult>, Counts)> = Mutex::new((Vec::new(), Counts { by_status: [0; 5] }));
+    let all: Mutex<(Vec<TestResult>, Counts)> =
+        Mutex::new((Vec::new(), Counts { by_status: [0; 5] }));
     let total = jobs.len();
     schedule::run_all(&jobs, o.jobs, |job| {
         let rs = runner::run_test(&cfg, &job.path);
@@ -343,7 +373,13 @@ fn run_and_report(o: &Options, php: PathBuf, root: PathBuf, paths: &[PathBuf]) -
     let c = counts.by_status;
     let n: usize = c.iter().sum();
     let ran = n - c[2];
-    let pct = |x: usize, of: usize| if of == 0 { 0.0 } else { 100.0 * x as f64 / of as f64 };
+    let pct = |x: usize, of: usize| {
+        if of == 0 {
+            0.0
+        } else {
+            100.0 * x as f64 / of as f64
+        }
+    };
     println!("----");
     println!(
         "{n} tests from {total} files: PASS {} FAIL {} SKIP {} XFAIL {} BORK {}",
@@ -408,7 +444,10 @@ pub fn compare_main(args: &[OsString]) -> i32 {
     }
     let mut maps = Vec::new();
     for f in &files {
-        match std::fs::read_to_string(f).map_err(|e| e.to_string()).and_then(|t| results::parse(&t)) {
+        match std::fs::read_to_string(f)
+            .map_err(|e| e.to_string())
+            .and_then(|t| results::parse(&t))
+        {
             Ok(m) => maps.push(m),
             Err(e) => {
                 eprintln!("goro --test-compare: {}: {e}", f.display());

@@ -55,6 +55,12 @@ pub const DEFAULT_INI: &[(&str, &str)] = &[
     ("log_errors", "0"),
     // Tests expect plain-text messages ("Warning: ... in %s on line %d").
     ("html_errors", "0"),
+    // PHP 8.5 prints a stack trace after fatal errors by default (observed),
+    // but tests expect none (ext/standard/tests/strings/
+    // wordwrap_memory_limit.phpt), and the tests that want one set
+    // fatal_error_backtraces=On themselves (Zend/tests/backtrace/
+    // fatal_error_backtraces_001.phpt).
+    ("fatal_error_backtraces", "0"),
     // assert() tests expect AssertionError to be thrown; production
     // php.ini files turn assertions off (zend.assertions=-1).
     ("zend.assertions", "1"),
@@ -316,7 +322,10 @@ pub fn base_env(cfg: &Config) -> Env {
     let extra: Vec<String> = extra.iter().map(|s| shell_quote(s)).collect();
     vec![
         ("TEST_PHP_EXECUTABLE".into(), php.clone().into()),
-        ("TEST_PHP_EXECUTABLE_ESCAPED".into(), shell_quote(&php).into()),
+        (
+            "TEST_PHP_EXECUTABLE_ESCAPED".into(),
+            shell_quote(&php).into(),
+        ),
         ("TEST_PHP_EXTRA_ARGS".into(), extra.join(" ").into()),
     ]
 }
@@ -339,7 +348,12 @@ pub fn run_test(cfg: &Config, path: &Path) -> Vec<TestResult> {
     vec![run_single(cfg, path, &name, &phpt, &[])]
 }
 
-fn prepare(cfg: &Config, path: &Path, phpt: &Phpt, extra_env: &[(OsString, OsString)]) -> Result<Prepared, (Status, String)> {
+fn prepare(
+    cfg: &Config,
+    path: &Path,
+    phpt: &Phpt,
+    extra_env: &[(OsString, OsString)],
+) -> Result<Prepared, (Status, String)> {
     let dir = path
         .parent()
         .map(Path::to_path_buf)
@@ -386,7 +400,14 @@ fn prepare(cfg: &Config, path: &Path, phpt: &Phpt, extra_env: &[(OsString, OsStr
     })
 }
 
-fn exec(cfg: &Config, prep: &Prepared, script: &Path, args: &[String], stdin: Option<&[u8]>, capture: Capture) -> std::io::Result<RunOutput> {
+fn exec(
+    cfg: &Config,
+    prep: &Prepared,
+    script: &Path,
+    args: &[String],
+    stdin: Option<&[u8]>,
+    capture: Capture,
+) -> std::io::Result<RunOutput> {
     let mut argv = prep.ini_args.clone();
     argv.push("-f".into());
     argv.push(script.into());
@@ -441,7 +462,9 @@ fn read_external(dir: &Path, rel: &str) -> Result<Vec<u8>, String> {
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
     {
-        return Err(format!("external file {rel:?} is not inside the test directory"));
+        return Err(format!(
+            "external file {rel:?} is not inside the test directory"
+        ));
     }
     std::fs::read(dir.join(rel_path)).map_err(|e| format!("cannot read external file {rel}: {e}"))
 }
@@ -473,22 +496,41 @@ fn script_body(phpt: &Phpt, dir: &Path) -> Result<Vec<u8>, String> {
                 .map_or(0, |e| e + 1);
             Ok(b[..end].to_vec())
         }
-        Some("FILE_EXTERNAL") => read_external(dir, &phpt.get_line("FILE_EXTERNAL").unwrap_or_default()),
+        Some("FILE_EXTERNAL") => {
+            read_external(dir, &phpt.get_line("FILE_EXTERNAL").unwrap_or_default())
+        }
         _ => Err("no FILE section".into()),
     }
 }
 
-fn run_single(cfg: &Config, path: &Path, name: &str, phpt: &Phpt, extra_env: &[(OsString, OsString)]) -> TestResult {
+fn run_single(
+    cfg: &Config,
+    path: &Path,
+    name: &str,
+    phpt: &Phpt,
+    extra_env: &[(OsString, OsString)],
+) -> TestResult {
     let start = std::time::Instant::now();
     let mut r = run_single_inner(cfg, path, name, phpt, extra_env);
     r.elapsed = start.elapsed();
     r
 }
 
-fn run_single_inner(cfg: &Config, path: &Path, name: &str, phpt: &Phpt, extra_env: &[(OsString, OsString)]) -> TestResult {
+fn run_single_inner(
+    cfg: &Config,
+    path: &Path,
+    name: &str,
+    phpt: &Phpt,
+    extra_env: &[(OsString, OsString)],
+) -> TestResult {
     let title = phpt.title();
     if let Some(sec) = phpt.cgi_section() {
-        return result(name, &title, Status::Skip, format!("needs the CGI SAPI (--{sec}--)"));
+        return result(
+            name,
+            &title,
+            Status::Skip,
+            format!("needs the CGI SAPI (--{sec}--)"),
+        );
     }
     if phpt.has("PHPDBG") {
         return result(name, &title, Status::Skip, "needs phpdbg (--PHPDBG--)");
@@ -522,9 +564,17 @@ fn run_single_inner(cfg: &Config, path: &Path, name: &str, phpt: &Phpt, extra_en
     };
     let script_path = prep.file(".php");
     if let Err(e) = std::fs::write(&script_path, &script) {
-        return result(name, &title, Status::Bork, format!("cannot write {}: {e}", script_path.display()));
+        return result(
+            name,
+            &title,
+            Status::Bork,
+            format!("cannot write {}: {e}", script_path.display()),
+        );
     }
-    let args = phpt.get_line("ARGS").map(|a| split_args(&a)).unwrap_or_default();
+    let args = phpt
+        .get_line("ARGS")
+        .map(|a| split_args(&a))
+        .unwrap_or_default();
     let stdin = phpt.get("STDIN");
     let capture = capture_spec(phpt);
 
@@ -606,7 +656,12 @@ fn run_redirect(cfg: &Config, path: &Path, name: &str, phpt: &Phpt) -> Vec<TestR
     );
     let file = prep.file(".php");
     if let Err(e) = std::fs::write(&file, &code) {
-        return vec![result(name, &title, Status::Bork, format!("cannot write {}: {e}", file.display()))];
+        return vec![result(
+            name,
+            &title,
+            Status::Bork,
+            format!("cannot write {}: {e}", file.display()),
+        )];
     }
     let out = exec(cfg, &prep, &file, &[], None, Capture::ALL);
     if !cfg.keep {
@@ -615,10 +670,15 @@ fn run_redirect(cfg: &Config, path: &Path, name: &str, phpt: &Phpt) -> Vec<TestR
     let out = match out {
         Ok(o) if o.exit == Exit::Code(0) => o.output,
         Ok(o) => {
-            return vec![result(name, &title, Status::Fail, format!(
-                "REDIRECTTEST code failed: {}",
-                String::from_utf8_lossy(trim_ws(&o.output))
-            ))];
+            return vec![result(
+                name,
+                &title,
+                Status::Fail,
+                format!(
+                    "REDIRECTTEST code failed: {}",
+                    String::from_utf8_lossy(trim_ws(&o.output))
+                ),
+            )];
         }
         Err(e) => return vec![result(name, &title, Status::Bork, e.to_string())],
     };
@@ -634,13 +694,23 @@ fn run_redirect(cfg: &Config, path: &Path, name: &str, phpt: &Phpt) -> Vec<TestR
         }
     }
     let Some(tests_dir) = tests_dir.filter(|t| !t.is_empty()) else {
-        return vec![result(name, &title, Status::Bork, "REDIRECTTEST returned no TESTS")];
+        return vec![result(
+            name,
+            &title,
+            Status::Bork,
+            "REDIRECTTEST returned no TESTS",
+        )];
     };
     let target = cfg.root.join(&tests_dir);
     let mut files = Vec::new();
     crate::collect(&target, &mut files);
     if files.is_empty() {
-        return vec![result(name, &title, Status::Bork, format!("no tests in {tests_dir}"))];
+        return vec![result(
+            name,
+            &title,
+            Status::Bork,
+            format!("no tests in {tests_dir}"),
+        )];
     }
     let mut extra: Env = prep.env.iter().skip(base_env(cfg).len()).cloned().collect();
     let mut redir = target.into_os_string();
@@ -654,8 +724,13 @@ fn run_redirect(cfg: &Config, path: &Path, name: &str, phpt: &Phpt) -> Vec<TestR
     let mut results = Vec::new();
     for f in files {
         let sub_name = format!("{} [via {name}]", display_name(&cfg.root, &f));
-        let r = match std::fs::read(&f).map_err(|e| e.to_string()).and_then(|d| Phpt::parse(&d).map_err(|e| e.to_string())) {
-            Ok(p) if p.has("REDIRECTTEST") => result(&sub_name, &p.title(), Status::Bork, "nested REDIRECTTEST"),
+        let r = match std::fs::read(&f)
+            .map_err(|e| e.to_string())
+            .and_then(|d| Phpt::parse(&d).map_err(|e| e.to_string()))
+        {
+            Ok(p) if p.has("REDIRECTTEST") => {
+                result(&sub_name, &p.title(), Status::Bork, "nested REDIRECTTEST")
+            }
             Ok(p) => run_single(cfg, &f, &sub_name, &p, &extra),
             Err(e) => result(&sub_name, "", Status::Bork, e),
         };
@@ -670,10 +745,19 @@ mod tests {
 
     #[test]
     fn skipif_answers() {
-        assert_eq!(skip_answer(b"skip no network"), SkipAnswer::Skip("no network".into()));
-        assert_eq!(skip_answer(b"\n Skip: 64-bit only\n"), SkipAnswer::Skip("64-bit only".into()));
+        assert_eq!(
+            skip_answer(b"skip no network"),
+            SkipAnswer::Skip("no network".into())
+        );
+        assert_eq!(
+            skip_answer(b"\n Skip: 64-bit only\n"),
+            SkipAnswer::Skip("64-bit only".into())
+        );
         assert_eq!(skip_answer(b"skip"), SkipAnswer::Skip(String::new()));
-        assert_eq!(skip_answer(b"xfail bug 123"), SkipAnswer::Xfail("bug 123".into()));
+        assert_eq!(
+            skip_answer(b"xfail bug 123"),
+            SkipAnswer::Xfail("bug 123".into())
+        );
         assert_eq!(skip_answer(b"flaky"), SkipAnswer::Flaky);
         assert_eq!(skip_answer(b""), SkipAnswer::Run);
         assert_eq!(skip_answer(b"Warning: foo"), SkipAnswer::Run);
@@ -706,7 +790,10 @@ mod tests {
 
     #[test]
     fn args_and_quoting() {
-        assert_eq!(split_args("-a 1 -b 2 -- -c nope test"), vec!["-a", "1", "-b", "2", "--", "-c", "nope", "test"]);
+        assert_eq!(
+            split_args("-a 1 -b 2 -- -c nope test"),
+            vec!["-a", "1", "-b", "2", "--", "-c", "nope", "test"]
+        );
         assert_eq!(split_args(" 'a b' \"c\" '' "), vec!["a b", "c", ""]);
         assert_eq!(shell_quote("/usr/bin/php"), "/usr/bin/php");
         assert_eq!(shell_quote("it's"), r"'it'\''s'");

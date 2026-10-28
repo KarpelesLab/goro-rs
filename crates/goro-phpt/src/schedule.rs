@@ -102,10 +102,9 @@ where
                     let idx = {
                         let mut st = state.lock().unwrap();
                         loop {
-                            let pos = st
-                                .keyed
-                                .iter()
-                                .position(|&i| jobs[i].conflicts.iter().all(|c| !st.held.contains(c)));
+                            let pos = st.keyed.iter().position(|&i| {
+                                jobs[i].conflicts.iter().all(|c| !st.held.contains(c))
+                            });
                             if let Some(pos) = pos {
                                 let i = st.keyed.remove(pos);
                                 for c in &jobs[i].conflicts {

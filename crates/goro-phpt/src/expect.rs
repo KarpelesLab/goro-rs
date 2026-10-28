@@ -238,7 +238,9 @@ fn pcre_compat(re: &[u8]) -> Vec<u8> {
                             .map_or(re.len(), |p| i + p + 2);
                         out.extend_from_slice(&re[i..end]);
                         i = end;
-                    } else if matches!(c, b'[' | b'&' | b'~') || (c == b'-' && re.get(i + 1) == Some(&b'-')) {
+                    } else if matches!(c, b'[' | b'&' | b'~')
+                        || (c == b'-' && re.get(i + 1) == Some(&b'-'))
+                    {
                         out.push(b'\\');
                         out.push(c);
                         i += 1;
@@ -412,7 +414,10 @@ mod tests {
         let pat = "\nWarning: Undefined variable $x in %s on line %d\nNULL\n";
         let out = "\nWarning: Undefined variable $x in /path/to/t.php on line 3\nNULL\n";
         assert!(fmatch(pat, out));
-        assert!(!fmatch(pat, "Warning: Undefined variable $y in /p on line 3\nNULL"));
+        assert!(!fmatch(
+            pat,
+            "Warning: Undefined variable $y in /p on line 3\nNULL"
+        ));
     }
 
     #[test]

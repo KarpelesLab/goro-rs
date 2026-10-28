@@ -5,7 +5,13 @@ use crate::expect::{Kind, Matcher};
 /// Formats a unified-style diff of expected vs actual output. Lines are
 /// compared with the EXPECTF/EXPECTREGEX pattern of each expected line when
 /// the kind allows, so that only lines that really differ are marked.
-pub fn diff(kind: Kind, expected: &[u8], actual: &[u8], context: usize, max_lines: usize) -> String {
+pub fn diff(
+    kind: Kind,
+    expected: &[u8],
+    actual: &[u8],
+    context: usize,
+    max_lines: usize,
+) -> String {
     let e: Vec<&[u8]> = split(expected);
     let a: Vec<&[u8]> = split(actual);
     // One compiled pattern per expected line that has one.
@@ -27,9 +33,7 @@ pub fn diff(kind: Kind, expected: &[u8], actual: &[u8], context: usize, max_line
         pre += 1;
     }
     let mut suf = 0;
-    while suf < e.len() - pre
-        && suf < a.len() - pre
-        && eq(e.len() - 1 - suf, a[a.len() - 1 - suf])
+    while suf < e.len() - pre && suf < a.len() - pre && eq(e.len() - 1 - suf, a[a.len() - 1 - suf])
     {
         suf += 1;
     }

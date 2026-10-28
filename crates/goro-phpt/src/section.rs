@@ -113,7 +113,9 @@ impl fmt::Display for ParseError {
         match self {
             ParseError::MissingTest => write!(f, "first line is not --TEST--"),
             ParseError::Duplicate(n) => write!(f, "duplicate --{n}-- section"),
-            ParseError::NoFile => write!(f, "no FILE, FILEEOF, FILE_EXTERNAL or REDIRECTTEST section"),
+            ParseError::NoFile => {
+                write!(f, "no FILE, FILEEOF, FILE_EXTERNAL or REDIRECTTEST section")
+            }
             ParseError::ManyFiles => write!(f, "more than one FILE-type section"),
             ParseError::NoExpect => write!(f, "no EXPECT-type section"),
             ParseError::ManyExpects => write!(f, "more than one EXPECT-type section"),
@@ -138,7 +140,10 @@ fn header_name(line: &[u8]) -> Option<&'static str> {
         return None;
     }
     let inner = &rest[..len];
-    KNOWN_SECTIONS.iter().copied().find(|n| n.as_bytes() == inner)
+    KNOWN_SECTIONS
+        .iter()
+        .copied()
+        .find(|n| n.as_bytes() == inner)
 }
 
 /// Splits `data` into lines, each including its `\n` (the last one may lack it).
@@ -283,7 +288,10 @@ pub fn is_trim_char(b: u8) -> bool {
 /// Removes leading and trailing trim() characters.
 pub fn trim_ws(b: &[u8]) -> &[u8] {
     let start = b.iter().position(|&c| !is_trim_char(c)).unwrap_or(b.len());
-    let end = b.iter().rposition(|&c| !is_trim_char(c)).map_or(start, |e| e + 1);
+    let end = b
+        .iter()
+        .rposition(|&c| !is_trim_char(c))
+        .map_or(start, |e| e + 1);
     &b[start..end]
 }
 
@@ -341,7 +349,8 @@ mod tests {
 
     #[test]
     fn unknown_headers_are_body_text() {
-        let p = Phpt::parse(b"--TEST--\nt\n--FILE--\n--DONE--\n--\n----\n--EXPECT--\n--DONE--\n").unwrap();
+        let p = Phpt::parse(b"--TEST--\nt\n--FILE--\n--DONE--\n--\n----\n--EXPECT--\n--DONE--\n")
+            .unwrap();
         assert_eq!(p.get("FILE"), Some(&b"--DONE--\n--\n----\n"[..]));
         assert_eq!(p.get("EXPECT"), Some(&b"--DONE--\n"[..]));
     }

@@ -22,7 +22,13 @@ pub const HEADER: &str = "# goro-phpt results v1";
 
 fn clean(s: &str) -> String {
     s.chars()
-        .map(|c| if c == '\t' || c == '\n' || c == '\r' { ' ' } else { c })
+        .map(|c| {
+            if c == '\t' || c == '\n' || c == '\r' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -36,7 +42,13 @@ pub fn format(php: &Path, results: &[TestResult]) -> String {
         if r.reason.is_empty() || r.status == Status::Pass {
             let _ = writeln!(out, "{}\t{}", r.status.as_str(), clean(&r.name));
         } else {
-            let _ = writeln!(out, "{}\t{}\t{}", r.status.as_str(), clean(&r.name), clean(&r.reason));
+            let _ = writeln!(
+                out,
+                "{}\t{}\t{}",
+                r.status.as_str(),
+                clean(&r.name),
+                clean(&r.reason)
+            );
         }
     }
     out
@@ -51,8 +63,11 @@ pub fn parse(text: &str) -> Result<BTreeMap<String, Status>, String> {
         }
         let mut parts = line.splitn(3, '\t');
         let st = parts.next().unwrap_or_default();
-        let name = parts.next().ok_or_else(|| format!("line {}: no test name", n + 1))?;
-        let st = Status::parse(st).ok_or_else(|| format!("line {}: unknown status {st:?}", n + 1))?;
+        let name = parts
+            .next()
+            .ok_or_else(|| format!("line {}: no test name", n + 1))?;
+        let st =
+            Status::parse(st).ok_or_else(|| format!("line {}: unknown status {st:?}", n + 1))?;
         map.insert(name.to_string(), st);
     }
     Ok(map)
@@ -78,7 +93,9 @@ pub fn compare(base: &BTreeMap<String, Status>, new: &BTreeMap<String, Status>) 
         if *st == Status::Pass {
             match new.get(name) {
                 Some(Status::Pass) => {}
-                Some(other) => c.regressions.push((name.clone(), other.as_str().to_string())),
+                Some(other) => c
+                    .regressions
+                    .push((name.clone(), other.as_str().to_string())),
                 None => c.regressions.push((name.clone(), "MISSING".to_string())),
             }
         }
@@ -154,7 +171,10 @@ mod tests {
         let c = compare(&parse(&base).unwrap(), &parse(&new).unwrap());
         assert_eq!(
             c.regressions,
-            vec![("a.phpt".to_string(), "FAIL".to_string()), ("d.phpt".to_string(), "MISSING".to_string())]
+            vec![
+                ("a.phpt".to_string(), "FAIL".to_string()),
+                ("d.phpt".to_string(), "MISSING".to_string())
+            ]
         );
         assert_eq!(c.fixed, vec!["c.phpt".to_string()]);
         assert_eq!((c.base_pass, c.new_pass), (3, 2));
