@@ -2063,7 +2063,13 @@ impl<'a> Compiler<'a> {
                 {
                     // `new static`
                 }
-                self.no_class_scope_check(c, true, line)?;
+                // `new parent` in a class without parent is allowed in
+                // parameter defaults (test ext/reflection/tests/gh9447).
+                if !(self.class.is_some()
+                    && matches!(c, ClassRef::Name(n) if n.name.eq_ignore_ascii_case(b"parent")))
+                {
+                    self.no_class_scope_check(c, true, line)?;
+                }
                 let spec = self.class_spec(c)?;
                 self.free_spec(spec);
                 self.f.line = line;
