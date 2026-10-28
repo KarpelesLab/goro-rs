@@ -14,13 +14,22 @@ pub static MODULE: Module = Module {
     name: "intl",
     functions: &[
         ("function locale_get_default(): string", get_default),
-        ("function locale_set_default(string $locale): bool", set_default),
+        (
+            "function locale_set_default(string $locale): bool",
+            set_default,
+        ),
         (
             "function locale_get_primary_language(string $locale): ?string",
             get_primary_language,
         ),
-        ("function locale_get_script(string $locale): ?string", get_script),
-        ("function locale_get_region(string $locale): ?string", get_region),
+        (
+            "function locale_get_script(string $locale): ?string",
+            get_script,
+        ),
+        (
+            "function locale_get_region(string $locale): ?string",
+            get_region,
+        ),
         (
             "function locale_get_keywords(string $locale): array|false|null",
             get_keywords,
@@ -45,8 +54,14 @@ pub static MODULE: Module = Module {
             "function locale_get_display_variant(string $locale, ?string $displayLocale = null): string|false",
             display_variant,
         ),
-        ("function locale_compose(array $subtags): string|false", compose),
-        ("function locale_parse(string $locale): ?array", parse_locale),
+        (
+            "function locale_compose(array $subtags): string|false",
+            compose,
+        ),
+        (
+            "function locale_parse(string $locale): ?array",
+            parse_locale,
+        ),
         (
             "function locale_get_all_variants(string $locale): ?array",
             get_all_variants,
@@ -152,7 +167,10 @@ fn locale_arg(vm: &mut Vm, a: &Args, i: usize, name: &str) -> R<String> {
         return vm.fthrow(
             a,
             "ValueError",
-            &format!("Argument #{} (${name}) must not contain any null bytes", i + 1),
+            &format!(
+                "Argument #{} (${name}) must not contain any null bytes",
+                i + 1
+            ),
         );
     }
     Ok(String::from_utf8_lossy(b).into_owned())
@@ -339,10 +357,10 @@ fn compose(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
         }
     };
-    if let Some(g) = get("grandfathered") {
-        if let Some(s) = as_string(vm, &g)? {
-            return Ok(Value::from(s.as_str()));
-        }
+    if let Some(g) = get("grandfathered")
+        && let Some(s) = as_string(vm, &g)?
+    {
+        return Ok(Value::from(s.as_str()));
     }
     let Some(lang) = get("language") else {
         return vm.fthrow(
@@ -546,8 +564,15 @@ fn accept_from_http(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let h = String::from_utf8_lossy(a.bytes(0)).into_owned();
     // each language range is bounded by ICU's locale ID capacity (bug
     // #72533)
-    if h.split(',').any(|r| r.split(';').next().unwrap_or("").trim().len() > MAX_LOCALE_LEN) {
-        fail(vm, a, ue::U_ILLEGAL_ARGUMENT_ERROR, "locale string too long")?;
+    if h.split(',')
+        .any(|r| r.split(';').next().unwrap_or("").trim().len() > MAX_LOCALE_LEN)
+    {
+        fail(
+            vm,
+            a,
+            ue::U_ILLEGAL_ARGUMENT_ERROR,
+            "locale string too long",
+        )?;
         return Ok(Value::Bool(false));
     }
     match loc::accept_from_http(&h) {

@@ -14,10 +14,7 @@ use crate::vm::{R, Vm};
 
 pub static MODULE: Module = Module {
     name: "intl",
-    classes: &[
-        ("intllistformatter", LIST_CLASS),
-        ("intlchar", CHAR_CLASS),
-    ],
+    classes: &[("intllistformatter", LIST_CLASS), ("intlchar", CHAR_CLASS)],
     methods: &[
         ("intllistformatter::__construct", l_construct),
         ("intllistformatter::format", l_format),
@@ -180,7 +177,11 @@ fn l_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     let lang = goro_ext_intl::locale::parse(&l).language;
     if !goro_ext_intl::locale::is_known_language(&lang) {
-        return vm.fthrow(a, "ValueError", &format!("Argument #1 ($locale) \"{l}\" is invalid"));
+        return vm.fthrow(
+            a,
+            "ValueError",
+            &format!("Argument #1 ($locale) \"{l}\" is invalid"),
+        );
     }
     let ty = match a.int_or(1, 0) {
         0 => ListType::Conjunction,
@@ -362,7 +363,9 @@ fn c_foldcase(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn c_charmirror(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    Ok(cp_arg(vm, a, 0)?.map_or(Value::Null, |c| same_form(a, u::bidi_mirror(c).unwrap_or(c))))
+    Ok(cp_arg(vm, a, 0)?.map_or(Value::Null, |c| {
+        same_form(a, u::bidi_mirror(c).unwrap_or(c))
+    }))
 }
 
 /// ICU's UCharCategory numbering.
@@ -403,7 +406,9 @@ fn category_number(g: u::GeneralCategory) -> i64 {
 }
 
 fn c_chartype(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    Ok(cp_arg(vm, a, 0)?.map_or(Value::Null, |c| Value::Int(category_number(u::general_category(c)))))
+    Ok(cp_arg(vm, a, 0)?.map_or(Value::Null, |c| {
+        Value::Int(category_number(u::general_category(c)))
+    }))
 }
 
 fn c_digit(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -425,11 +430,13 @@ fn c_digit(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn c_fordigit(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     let d = a.int(0);
     let base = a.int_or(1, 10);
-    Ok(Value::Int(if (2..=36).contains(&base) && (0..base).contains(&d) {
-        std::char::from_digit(d as u32, 36).map_or(0, |c| c as i64)
-    } else {
-        0
-    }))
+    Ok(Value::Int(
+        if (2..=36).contains(&base) && (0..base).contains(&d) {
+            std::char::from_digit(d as u32, 36).map_or(0, |c| c as i64)
+        } else {
+            0
+        },
+    ))
 }
 
 fn c_numeric(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -439,7 +446,9 @@ fn c_numeric(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn c_ccc(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    Ok(cp_arg(vm, a, 0)?.map_or(Value::Null, |c| Value::Int(u::canonical_combining_class(c) as i64)))
+    Ok(cp_arg(vm, a, 0)?.map_or(Value::Null, |c| {
+        Value::Int(u::canonical_combining_class(c) as i64)
+    }))
 }
 
 fn c_unicode_version(_vm: &mut Vm, _a: &mut Args) -> R<Value> {

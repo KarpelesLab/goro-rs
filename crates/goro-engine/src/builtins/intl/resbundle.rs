@@ -23,7 +23,10 @@ pub static MODULE: Module = Module {
             "function resourcebundle_get(ResourceBundle $bundle, string|int $index, bool $fallback = true): mixed",
             r_get,
         ),
-        ("function resourcebundle_count(ResourceBundle $bundle): int", r_count),
+        (
+            "function resourcebundle_count(ResourceBundle $bundle): int",
+            r_count,
+        ),
         (
             "function resourcebundle_locales(string $bundle): array|false",
             r_locales,
@@ -189,7 +192,9 @@ fn element(res: &Res, idx: &Value) -> Option<Res> {
         }
         (Res::Table(t), Value::Int(i)) => t.get(usize::try_from(*i).ok()?).map(|(_, v)| v.clone()),
         (Res::Array(v), Value::Int(i)) => v.get(usize::try_from(*i).ok()?).cloned(),
-        (Res::IntVector(v), Value::Int(i)) => v.get(usize::try_from(*i).ok()?).map(|x| Res::Int(*x)),
+        (Res::IntVector(v), Value::Int(i)) => {
+            v.get(usize::try_from(*i).ok()?).map(|x| Res::Int(*x))
+        }
         _ => None,
     }
 }
@@ -230,7 +235,9 @@ fn r_offset_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Value::Float(_) => vm.type_error("Cannot access offset of type float on ResourceBundle"),
         Value::Object(o) => {
             let n = vm.class_of(&o).name.to_string_lossy();
-            vm.type_error(&format!("Cannot access offset of type {n} on ResourceBundle"))
+            vm.type_error(&format!(
+                "Cannot access offset of type {n} on ResourceBundle"
+            ))
         }
         Value::Str(s) if s.as_bytes().is_empty() => vm.value_error("Offset must not be empty"),
         Value::Int(i) if i32::try_from(i).is_err() => {

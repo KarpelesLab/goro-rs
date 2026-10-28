@@ -23,8 +23,14 @@ pub static MODULE: Module = Module {
         ("intlcodepointbreakiterator", CPBI_CLASS),
     ],
     methods: &[
-        ("intlbreakiterator::createcharacterinstance", create_character),
-        ("intlbreakiterator::createcodepointinstance", create_code_point),
+        (
+            "intlbreakiterator::createcharacterinstance",
+            create_character,
+        ),
+        (
+            "intlbreakiterator::createcodepointinstance",
+            create_code_point,
+        ),
         ("intlbreakiterator::createlineinstance", create_line),
         ("intlbreakiterator::createsentenceinstance", create_sentence),
         ("intlbreakiterator::createtitleinstance", create_title),
@@ -47,7 +53,10 @@ pub static MODULE: Module = Module {
         ("intlrulebasedbreakiterator::__construct", rb_construct),
         ("intlrulebasedbreakiterator::getrules", rb_rules),
         ("intlrulebasedbreakiterator::getrulestatus", rb_status),
-        ("intlrulebasedbreakiterator::getrulestatusvec", rb_status_vec),
+        (
+            "intlrulebasedbreakiterator::getrulestatusvec",
+            rb_status_vec,
+        ),
         ("intlrulebasedbreakiterator::getbinaryrules", rb_binary),
         ("intlcodepointbreakiterator::getlastcodepoint", cp_last),
     ],
@@ -146,16 +155,18 @@ impl Brk {
 fn hooks() -> NativeHooks {
     NativeHooks {
         create: Some(super::numfmt::on_create),
-        clone: Some(|vm, from, to| match with_obj::<Brk, Brk>(from, |x| x.v.clone()) {
-            Some(b) => store(to, b),
-            None => super::timezone::clone_error(
-                vm,
-                &format!(
-                    "Cannot clone uninitialized {}",
-                    vm.class_of(from).name.to_string_lossy()
+        clone: Some(
+            |vm, from, to| match with_obj::<Brk, Brk>(from, |x| x.v.clone()) {
+                Some(b) => store(to, b),
+                None => super::timezone::clone_error(
+                    vm,
+                    &format!(
+                        "Cannot clone uninitialized {}",
+                        vm.class_of(from).name.to_string_lossy()
+                    ),
                 ),
-            ),
-        }),
+            },
+        ),
         debug_props: Some(|vm, o| {
             let mut arr = PhpArray::new();
             let st = with_obj::<Brk, (Option<String>, String)>(o, |s| {
@@ -175,7 +186,10 @@ fn hooks() -> NativeHooks {
                         goro_runtime::Key::from_bytes(b"text"),
                         text.map_or(Value::Null, |t| Value::from(t.as_str())),
                     );
-                    arr.insert(goro_runtime::Key::from_bytes(b"type"), Value::from(ty.as_str()));
+                    arr.insert(
+                        goro_runtime::Key::from_bytes(b"type"),
+                        Value::from(ty.as_str()),
+                    );
                 }
                 None => {
                     arr.insert(goro_runtime::Key::from_bytes(b"valid"), Value::Bool(false));
@@ -404,7 +418,9 @@ fn b_is_boundary(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn b_get_text(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = this(vm, a)?;
     Ok(with(&o, |b| {
-        b.text.as_ref().map_or(Value::Null, |t| Value::from(t.as_str()))
+        b.text
+            .as_ref()
+            .map_or(Value::Null, |t| Value::from(t.as_str()))
     }))
 }
 

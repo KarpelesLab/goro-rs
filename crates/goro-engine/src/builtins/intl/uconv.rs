@@ -179,9 +179,21 @@ fn user_callbacks(vm: &mut Vm, o: &ObjRef) -> bool {
 }
 
 /// Calls a callback method: (result, error code after the call).
-fn call_cb(vm: &mut Vm, o: &ObjRef, name: &[u8], reason: i64, source: Value, unit: Value, err: i64) -> R<(Value, i64)> {
+fn call_cb(
+    vm: &mut Vm,
+    o: &ObjRef,
+    name: &[u8],
+    reason: i64,
+    source: Value,
+    unit: Value,
+    err: i64,
+) -> R<(Value, i64)> {
     let r = goro_runtime::PhpRef::new(Value::Int(err));
-    let res = vm.call_method(o, name, vec![Value::Int(reason), source, unit, Value::Ref(r.clone())])?;
+    let res = vm.call_method(
+        o,
+        name,
+        vec![Value::Int(reason), source, unit, Value::Ref(r.clone())],
+    )?;
     let e = match r.get() {
         Value::Int(i) => i,
         _ => 0,
@@ -191,23 +203,27 @@ fn call_cb(vm: &mut Vm, o: &ObjRef, name: &[u8], reason: i64, source: Value, uni
 
 /// Appends a toU callback result (UTF-8 text, a code point or an array of
 /// them) to the code points.
-fn push_to_u(vm: &mut Vm, v: &Value, out: &mut Vec<u32>) -> R<()> {
+fn push_to_u(v: &Value, out: &mut Vec<u32>) -> R<()> {
     match v {
-        Value::Str(s) => out.extend(String::from_utf8_lossy(s.as_bytes()).chars().map(|c| c as u32)),
+        Value::Str(s) => out.extend(
+            String::from_utf8_lossy(s.as_bytes())
+                .chars()
+                .map(|c| c as u32),
+        ),
         Value::Int(i) => out.push(*i as u32),
         Value::Array(arr) => {
             for (_, x) in arr.iter() {
-                push_to_u(vm, &x.deref(), out)?;
+                push_to_u(&x.deref(), out)?;
             }
         }
-        Value::Ref(r) => push_to_u(vm, &r.get(), out)?,
+        Value::Ref(r) => push_to_u(&r.get(), out)?,
         _ => {}
     }
     Ok(())
 }
 
 /// Appends a fromU callback result (bytes, a code point or an array).
-fn push_from_u(vm: &mut Vm, c: &Conv, v: &Value, out: &mut Vec<u8>) -> R<()> {
+fn push_from_u(c: &Conv, v: &Value, out: &mut Vec<u8>) -> R<()> {
     match v {
         Value::Str(s) => out.extend_from_slice(s.as_bytes()),
         Value::Int(i) => {
@@ -217,10 +233,10 @@ fn push_from_u(vm: &mut Vm, c: &Conv, v: &Value, out: &mut Vec<u8>) -> R<()> {
         }
         Value::Array(arr) => {
             for (_, x) in arr.iter() {
-                push_from_u(vm, c, &x.deref(), out)?;
+                push_from_u(c, &x.deref(), out)?;
             }
         }
-        Value::Ref(r) => push_from_u(vm, c, &r.get(), out)?,
+        Value::Ref(r) => push_from_u(c, &r.get(), out)?,
         _ => {}
     }
     Ok(())
@@ -243,7 +259,15 @@ fn run(
     for pass in 0..2 {
         let mut out = Vec::new();
         if let Some(o) = o {
-            call_cb(vm, o, b"toucallback", uc::REASON_RESET, Value::from(""), Value::from(""), 0)?;
+            call_cb(
+                vm,
+                o,
+                b"toucallback",
+                uc::REASON_RESET,
+                Value::from(""),
+                Value::from(""),
+                0,
+            )?;
         }
         for u in &units {
             match u {
@@ -262,7 +286,7 @@ fn run(
                         if e > 0 {
                             return Ok(None);
                         }
-                        push_to_u(vm, &r, &mut out)?;
+                        push_to_u(&r, &mut out)?;
                     } else {
                         out.push(0xFFFD);
                     }
@@ -276,7 +300,10 @@ fn run(
             break;
         }
     }
-    let stateful = matches!(dst.ty, uc::UTF7 | uc::ISO_2022 | uc::HZ | uc::IMAP_MAILBOX | uc::UTF16 | uc::UTF32);
+    let stateful = matches!(
+        dst.ty,
+        uc::UTF7 | uc::ISO_2022 | uc::HZ | uc::IMAP_MAILBOX | uc::UTF16 | uc::UTF32
+    );
     let mut result = Vec::new();
     for pass in 0..2 {
         let mut out = Vec::new();
@@ -323,7 +350,7 @@ fn run(
                         if e > 0 {
                             return Ok(None);
                         }
-                        push_from_u(vm, dst, &r, &mut out)?;
+                        push_from_u(dst, &r, &mut out)?;
                     } else {
                         out.extend_from_slice(subst);
                     }
@@ -347,13 +374,23 @@ fn u_convert(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (o, c) = state(vm, a)?;
     reset_obj::<UConv>(vm, &o);
     let reverse = a.bool_or(1, false);
-    let (src, dst) = if reverse { (c.dst, c.src) } else { (c.src, c.dst) };
+    let (src, dst) = if reverse {
+        (c.dst, c.src)
+    } else {
+        (c.src, c.dst)
+    };
     let subst = c.subst.clone().unwrap_or_else(|| uc::default_subst(dst));
     let cb = user_callbacks(vm, &o);
-    match run(vm, cb.then_some(&o), src, dst, &subst, &a.bytes(0).to_vec())? {
+    match run(vm, cb.then_some(&o), src, dst, &subst, a.bytes(0))? {
         Some(b) => Ok(Value::from(b.as_slice())),
         None => {
-            fail_obj::<UConv>(vm, a, &o, ue::U_ILLEGAL_ARGUMENT_ERROR, "Error converting string")?;
+            fail_obj::<UConv>(
+                vm,
+                a,
+                &o,
+                ue::U_ILLEGAL_ARGUMENT_ERROR,
+                "Error converting string",
+            )?;
             Ok(Value::Bool(false))
         }
     }
@@ -361,13 +398,22 @@ fn u_convert(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn u_destruct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
-    let Some(closed) = with_obj::<UConv, bool>(&o, |x| std::mem::replace(&mut x.v.closed, true)) else {
+    let Some(closed) = with_obj::<UConv, bool>(&o, |x| std::mem::replace(&mut x.v.closed, true))
+    else {
         return Ok(Value::Null);
     };
     if !closed && user_callbacks(vm, &o) {
         // the source and the destination converters close
         for _ in 0..2 {
-            call_cb(vm, &o, b"toucallback", uc::REASON_CLOSE, Value::from(""), Value::from(""), 0)?;
+            call_cb(
+                vm,
+                &o,
+                b"toucallback",
+                uc::REASON_CLOSE,
+                Value::from(""),
+                Value::from(""),
+                0,
+            )?;
             call_cb(
                 vm,
                 &o,
@@ -390,7 +436,10 @@ fn set_err_ref(vm: &mut Vm, a: &Args, i: usize, v: i64) -> R<()> {
 /// substituted beyond ICU's U+FFFD.
 fn u_to_callback(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let reason = a.int(0);
-    if matches!(reason, uc::REASON_UNASSIGNED | uc::REASON_ILLEGAL | uc::REASON_IRREGULAR) {
+    if matches!(
+        reason,
+        uc::REASON_UNASSIGNED | uc::REASON_ILLEGAL | uc::REASON_IRREGULAR
+    ) {
         set_err_ref(vm, a, 3, 0)?;
         return Ok(Value::from("\u{FFFD}"));
     }
@@ -400,7 +449,10 @@ fn u_to_callback(vm: &mut Vm, a: &mut Args) -> R<Value> {
 /// The default fromU callback: the destination's substitution.
 fn u_from_callback(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let reason = a.int(0);
-    if matches!(reason, uc::REASON_UNASSIGNED | uc::REASON_ILLEGAL | uc::REASON_IRREGULAR) {
+    if matches!(
+        reason,
+        uc::REASON_UNASSIGNED | uc::REASON_ILLEGAL | uc::REASON_IRREGULAR
+    ) {
         set_err_ref(vm, a, 3, 0)?;
         let (_, c) = state(vm, a)?;
         let s = c.subst.clone().unwrap_or_else(|| uc::default_subst(c.dst));
@@ -417,7 +469,12 @@ fn u_aliases(vm: &mut Vm, a: &mut Args) -> R<Value> {
             c.aliases.iter().map(|s| Value::from(*s)),
         ))),
         None => {
-            fail(vm, a, ue::U_FILE_ACCESS_ERROR, "ucnv_getAliases() returned error 4: U_FILE_ACCESS_ERROR")?;
+            fail(
+                vm,
+                a,
+                ue::U_FILE_ACCESS_ERROR,
+                "ucnv_getAliases() returned error 4: U_FILE_ACCESS_ERROR",
+            )?;
             Ok(Value::Bool(false))
         }
     }
@@ -545,7 +602,12 @@ fn u_transcode(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let to = uc::lookup(&a.str(1).to_string_lossy());
     let from = uc::lookup(&a.str(2).to_string_lossy());
     let (Some(to), Some(from)) = (to, from) else {
-        fail(vm, a, ue::U_FILE_ACCESS_ERROR, "Error setting encoding: 4 - U_FILE_ACCESS_ERROR")?;
+        fail(
+            vm,
+            a,
+            ue::U_FILE_ACCESS_ERROR,
+            "Error setting encoding: 4 - U_FILE_ACCESS_ERROR",
+        )?;
         return Ok(Value::Bool(false));
     };
     let opts = a.array(3);
@@ -558,7 +620,12 @@ fn u_transcode(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 other => vm.to_php_str(other)?.as_bytes().to_vec(),
             };
             if !uc::valid_subst(conv, &s) {
-                fail(vm, a, ue::U_ILLEGAL_ARGUMENT_ERROR, "returned error 1: U_ILLEGAL_ARGUMENT_ERROR")?;
+                fail(
+                    vm,
+                    a,
+                    ue::U_ILLEGAL_ARGUMENT_ERROR,
+                    "returned error 1: U_ILLEGAL_ARGUMENT_ERROR",
+                )?;
                 return Ok(Value::Bool(false));
             }
             if key == b"to_subst" {
@@ -566,7 +633,7 @@ fn u_transcode(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
         }
     }
-    match run(vm, None, from, to, &subst, &a.bytes(0).to_vec())? {
+    match run(vm, None, from, to, &subst, a.bytes(0))? {
         Some(b) => Ok(Value::from(b.as_slice())),
         None => Ok(Value::Bool(false)),
     }

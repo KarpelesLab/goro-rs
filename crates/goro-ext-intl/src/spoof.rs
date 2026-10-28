@@ -85,7 +85,8 @@ pub fn restriction_level(s: &str) -> i64 {
     {
         return HIGHLY_RESTRICTIVE;
     }
-    if sc.len() == 2 && sc.contains(&"Latin") && !sc.contains(&"Cyrillic") && !sc.contains(&"Greek") {
+    if sc.len() == 2 && sc.contains(&"Latin") && !sc.contains(&"Cyrillic") && !sc.contains(&"Greek")
+    {
         return MODERATELY_RESTRICTIVE;
     }
     MINIMALLY_RESTRICTIVE
@@ -101,7 +102,8 @@ impl Checker {
         if self.checks & MIXED_NUMBERS != 0 {
             let mut zeros: Vec<u32> = Vec::new();
             for c in s.chars() {
-                if intl::unicode::general_category(c) == intl::unicode::GeneralCategory::DecimalNumber
+                if intl::unicode::general_category(c)
+                    == intl::unicode::GeneralCategory::DecimalNumber
                     && let Some(v) = intl::unicode::numeric_value(c).and_then(|n| n.to_i64())
                 {
                     let z = c as u32 - v as u32;
@@ -130,7 +132,10 @@ impl Checker {
                 }
                 Allowed::Set(set, ci) => {
                     set.contains(c)
-                        || (*ci && intl::unicode::to_lowercase(c).chain(intl::unicode::to_uppercase(c)).any(|x| set.contains(x)))
+                        || (*ci
+                            && intl::unicode::to_lowercase(c)
+                                .chain(intl::unicode::to_uppercase(c))
+                                .any(|x| set.contains(x)))
                 }
             });
             if !ok {
@@ -157,11 +162,16 @@ impl Checker {
         let sb = scripts(b);
         let mut r = 0;
         if sa.len() <= 1 && sb.len() <= 1 {
-            r |= if sa == sb { SINGLE_SCRIPT_CONFUSABLE } else { WHOLE_SCRIPT_CONFUSABLE };
+            r |= if sa == sb {
+                SINGLE_SCRIPT_CONFUSABLE
+            } else {
+                WHOLE_SCRIPT_CONFUSABLE
+            };
         } else {
             r |= MIXED_SCRIPT_CONFUSABLE;
         }
-        let mask = self.checks & (SINGLE_SCRIPT_CONFUSABLE | MIXED_SCRIPT_CONFUSABLE | WHOLE_SCRIPT_CONFUSABLE);
+        let mask = self.checks
+            & (SINGLE_SCRIPT_CONFUSABLE | MIXED_SCRIPT_CONFUSABLE | WHOLE_SCRIPT_CONFUSABLE);
         r & mask
     }
 }
@@ -184,9 +194,11 @@ pub fn locale_scripts(id: &str) -> Vec<String> {
         "Hanb" => vec!["Han", "Bopomofo"],
         "Hans" | "Hant" => vec!["Han"],
         other => {
-            let name = include_str!("data/scripts.txt")
-                .lines()
-                .find_map(|l| l.split_once('\t').filter(|(c, _)| *c == other).map(|(_, n)| n));
+            let name = include_str!("data/scripts.txt").lines().find_map(|l| {
+                l.split_once('\t')
+                    .filter(|(c, _)| *c == other)
+                    .map(|(_, n)| n)
+            });
             match name {
                 Some(n) => vec![n],
                 None => vec![],

@@ -221,7 +221,9 @@ fn hooks() -> NativeHooks {
         clone: Some(|vm, from, to| {
             match with_obj::<NumberFormat, NumberFormat>(from, |x| x.v.clone()) {
                 Some(f) => store(to, f),
-                None => super::timezone::clone_error(vm, "Cannot clone uninitialized NumberFormatter"),
+                None => {
+                    super::timezone::clone_error(vm, "Cannot clone uninitialized NumberFormatter")
+                }
             }
         }),
         ..Default::default()
@@ -382,7 +384,7 @@ fn n_format(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     match r {
         Ok(s) => Ok(Value::from(s.as_str())),
-        Err(()) => {
+        Err(_) => {
             fail_obj::<NumberFormat>(
                 vm,
                 a,
@@ -494,8 +496,14 @@ fn n_format_currency(vm: &mut Vm, a: &mut Args) -> R<Value> {
     f.set_text_attribute(nf::CURRENCY_CODE, &cur);
     match f.format_f64(amount) {
         Ok(s) => Ok(Value::from(s.as_str())),
-        Err(()) => {
-            fail_obj::<NumberFormat>(vm, a, &o, ue::U_ILLEGAL_ARGUMENT_ERROR, "Number formatting failed")?;
+        Err(_) => {
+            fail_obj::<NumberFormat>(
+                vm,
+                a,
+                &o,
+                ue::U_ILLEGAL_ARGUMENT_ERROR,
+                "Number formatting failed",
+            )?;
             Ok(Value::Bool(false))
         }
     }

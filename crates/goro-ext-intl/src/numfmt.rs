@@ -289,7 +289,11 @@ pub fn currency_name(chain: &[String], code: &str, count: Option<&str>) -> Strin
                 None => 0,
             };
             let s = v.get(i).copied().unwrap_or("");
-            if s.is_empty() { v[0].to_string() } else { s.to_string() }
+            if s.is_empty() {
+                v[0].to_string()
+            } else {
+                s.to_string()
+            }
         }
         None => code.to_string(),
     }
@@ -368,10 +372,18 @@ impl Pattern {
 #[derive(Debug)]
 pub struct PatternError;
 
+/// A rounding that ROUND_UNNECESSARY forbids (U_FORMAT_INEXACT_ERROR).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Inexact;
+
 /// `max_frac` of a pattern showing all fraction digits.
 pub const UNLIMITED_FRAC: i32 = 100_000;
 
-fn parse_affix(chars: &[char], i: &mut usize, stop_at_number: bool) -> Result<(Vec<AffixPart>, Option<char>), PatternError> {
+fn parse_affix(
+    chars: &[char],
+    i: &mut usize,
+    stop_at_number: bool,
+) -> Result<(Vec<AffixPart>, Option<char>), PatternError> {
     let mut parts = Vec::new();
     let mut lit = String::new();
     let mut pad = None;
@@ -470,7 +482,14 @@ pub fn parse_pattern(pat: &str) -> Result<Pattern, PatternError> {
     if let Some(c) = pad1 {
         // "*x" before or after the prefix
         let at_start = pat.starts_with('*');
-        pad_pos = Some((c, if at_start { PAD_BEFORE_PREFIX } else { PAD_AFTER_PREFIX }));
+        pad_pos = Some((
+            c,
+            if at_start {
+                PAD_BEFORE_PREFIX
+            } else {
+                PAD_AFTER_PREFIX
+            },
+        ));
     }
     p.pos_prefix = prefix;
     // number part
@@ -606,7 +625,6 @@ pub fn parse_pattern(pat: &str) -> Result<Pattern, PatternError> {
         if p.exp.is_some() {
             p.max_int = int_hash + int_zero;
         }
-
     }
     if inc_has {
         let v: f64 = inc_digits.parse().unwrap_or(0.0);
@@ -621,7 +639,14 @@ pub fn parse_pattern(pat: &str) -> Result<Pattern, PatternError> {
         let _ = at_end;
         // "*x" before the suffix when the suffix follows it, else after
         let before = suffix.is_empty() || !pat.trim_end_matches(|ch| ch != '*').is_empty();
-        pad_pos = Some((c, if before { PAD_BEFORE_SUFFIX } else { PAD_AFTER_SUFFIX }));
+        pad_pos = Some((
+            c,
+            if before {
+                PAD_BEFORE_SUFFIX
+            } else {
+                PAD_AFTER_SUFFIX
+            },
+        ));
     }
     p.pos_suffix = suffix;
     if i < chars.len() && chars[i] == ';' {
@@ -701,7 +726,11 @@ impl Dec {
         let s = format!("{x:e}");
         let (m, e) = s.split_once('e').unwrap_or((&s, "0"));
         let e: i64 = e.parse().unwrap_or(0);
-        let digits: Vec<u8> = m.bytes().filter(u8::is_ascii_digit).map(|b| b - b'0').collect();
+        let digits: Vec<u8> = m
+            .bytes()
+            .filter(u8::is_ascii_digit)
+            .map(|b| b - b'0')
+            .collect();
         let mut d = Dec {
             digits,
             point: e + 1,
@@ -721,14 +750,16 @@ impl Dec {
     }
 
     /// From a plain decimal string ("123.45", "1e5").
-    pub fn from_str(s: &str) -> Option<Dec> {
+    pub fn parse_str(s: &str) -> Option<Dec> {
         let s = s.trim().trim_start_matches(['-', '+']);
         let (mant, exp) = match s.find(['e', 'E']) {
             Some(i) => (&s[..i], s[i + 1..].parse::<i64>().ok()?),
             None => (s, 0),
         };
         let (ip, fp) = mant.split_once('.').unwrap_or((mant, ""));
-        if !ip.bytes().chain(fp.bytes()).all(|b| b.is_ascii_digit()) || (ip.is_empty() && fp.is_empty()) {
+        if !ip.bytes().chain(fp.bytes()).all(|b| b.is_ascii_digit())
+            || (ip.is_empty() && fp.is_empty())
+        {
             return None;
         }
         let mut d = Dec {
@@ -974,7 +1005,8 @@ impl NumberFormat {
         symbols[INFINITY_SYMBOL as usize] = sym(7, "∞");
         symbols[NAN_SYMBOL as usize] = sym(8, "NaN");
         symbols[SIGNIFICANT_DIGIT_SYMBOL as usize] = "@".into();
-        symbols[MONETARY_SEPARATOR_SYMBOL as usize] = symbol_data(&chain, 9).map_or(decimal, str::to_string);
+        symbols[MONETARY_SEPARATOR_SYMBOL as usize] =
+            symbol_data(&chain, 9).map_or(decimal, str::to_string);
         symbols[MONETARY_GROUPING_SEPARATOR_SYMBOL as usize] =
             symbol_data(&chain, 10).map_or(group, str::to_string);
         let currency = p
@@ -997,12 +1029,29 @@ impl NumberFormat {
         // minimumGroupingDigits (ext/intl/tests/gh11942_numfmt_locale_
         // canonicalization.phpt: pt_PT "1 234,56")
         let min_grouping = 1;
-        let spacing = format_data(&chain, "spacing").unwrap_or("\u{a0}").to_string();
+        let spacing = format_data(&chain, "spacing")
+            .unwrap_or("\u{a0}")
+            .to_string();
         let (pattern_text, ruleset) = match style {
             PATTERN_DECIMAL => (pattern.unwrap_or("#").to_string(), None),
-            DECIMAL => (format_data(&chain, "decimal").unwrap_or("#,##0.###").to_string(), None),
-            PERCENT => (format_data(&chain, "percent").unwrap_or("#,##0%").to_string(), None),
-            SCIENTIFIC => (format_data(&chain, "scientific").unwrap_or("#E0").to_string(), None),
+            DECIMAL => (
+                format_data(&chain, "decimal")
+                    .unwrap_or("#,##0.###")
+                    .to_string(),
+                None,
+            ),
+            PERCENT => (
+                format_data(&chain, "percent")
+                    .unwrap_or("#,##0%")
+                    .to_string(),
+                None,
+            ),
+            SCIENTIFIC => (
+                format_data(&chain, "scientific")
+                    .unwrap_or("#E0")
+                    .to_string(),
+                None,
+            ),
             CURRENCY | CURRENCY_STANDARD | CASH_CURRENCY => {
                 let alpha = symbols[CURRENCY_SYMBOL as usize]
                     .chars()
@@ -1022,7 +1071,11 @@ impl NumberFormat {
                     .chars()
                     .last()
                     .is_some_and(char::is_alphabetic);
-                let key = if alpha { "accounting-alpha" } else { "accounting" };
+                let key = if alpha {
+                    "accounting-alpha"
+                } else {
+                    "accounting"
+                };
                 (
                     format_data(&chain, key)
                         .or_else(|| format_data(&chain, "accounting"))
@@ -1043,9 +1096,12 @@ impl NumberFormat {
                 let int = dec.split('.').next().unwrap_or("#,##0");
                 (format!("{int}.00 ¤¤¤"), None)
             }
-            DECIMAL_COMPACT_SHORT | DECIMAL_COMPACT_LONG => {
-                (format_data(&chain, "decimal").unwrap_or("#,##0.###").to_string(), None)
-            }
+            DECIMAL_COMPACT_SHORT | DECIMAL_COMPACT_LONG => (
+                format_data(&chain, "decimal")
+                    .unwrap_or("#,##0.###")
+                    .to_string(),
+                None,
+            ),
             SPELLOUT => (String::new(), Some("%spellout-numbering".to_string())),
             ORDINAL => (String::new(), Some("%digits-ordinal".to_string())),
             DURATION => (String::new(), Some("%duration".to_string())),
@@ -1102,7 +1158,12 @@ impl NumberFormat {
     fn is_currency_style(&self) -> bool {
         matches!(
             self.style,
-            CURRENCY | CURRENCY_ISO | CURRENCY_PLURAL | CURRENCY_ACCOUNTING | CASH_CURRENCY | CURRENCY_STANDARD
+            CURRENCY
+                | CURRENCY_ISO
+                | CURRENCY_PLURAL
+                | CURRENCY_ACCOUNTING
+                | CASH_CURRENCY
+                | CURRENCY_STANDARD
         )
     }
 
@@ -1151,7 +1212,22 @@ impl NumberFormat {
                 match a {
                     AffixPart::Lit(l) => {
                         for c in l.chars() {
-                            if matches!(c, '#' | '0'..='9' | ',' | '.' | '@' | ';' | '%' | '‰' | '¤' | '-' | '+' | '*' | 'E') {
+                            if matches!(
+                                c,
+                                '#' | '0'
+                                    ..='9'
+                                        | ','
+                                        | '.'
+                                        | '@'
+                                        | ';'
+                                        | '%'
+                                        | '‰'
+                                        | '¤'
+                                        | '-'
+                                        | '+'
+                                        | '*'
+                                        | 'E'
+                            ) {
                                 o.push('\'');
                                 o.push(c);
                                 o.push('\'');
@@ -1259,7 +1335,11 @@ impl NumberFormat {
                 while int.len() < need {
                     int.insert(0, '#');
                 }
-                s.push_str(&group_pattern(&int, p.grouping as usize, p.grouping2 as usize));
+                s.push_str(&group_pattern(
+                    &int,
+                    p.grouping as usize,
+                    p.grouping2 as usize,
+                ));
             } else {
                 if int.is_empty() {
                     int.insert(0, '#');
@@ -1425,17 +1505,23 @@ impl NumberFormat {
     pub fn text_attribute(&self, attr: i64) -> Option<String> {
         let render = |v: &Vec<AffixPart>| self.render_affix(v, false);
         Some(match attr {
-            POSITIVE_PREFIX => self.text_affix[0].clone().unwrap_or_else(|| render(&self.pattern.pos_prefix)),
-            POSITIVE_SUFFIX => self.text_affix[1].clone().unwrap_or_else(|| render(&self.pattern.pos_suffix)),
-            NEGATIVE_PREFIX => self.text_affix[2].clone().unwrap_or_else(|| self.neg_affixes().0),
-            NEGATIVE_SUFFIX => self.text_affix[3].clone().unwrap_or_else(|| self.neg_affixes().1),
+            POSITIVE_PREFIX => self.text_affix[0]
+                .clone()
+                .unwrap_or_else(|| render(&self.pattern.pos_prefix)),
+            POSITIVE_SUFFIX => self.text_affix[1]
+                .clone()
+                .unwrap_or_else(|| render(&self.pattern.pos_suffix)),
+            NEGATIVE_PREFIX => self.text_affix[2]
+                .clone()
+                .unwrap_or_else(|| self.neg_affixes().0),
+            NEGATIVE_SUFFIX => self.text_affix[3]
+                .clone()
+                .unwrap_or_else(|| self.neg_affixes().1),
             PADDING_CHARACTER => self.pad_char.to_string(),
             CURRENCY_CODE => self.currency.clone(),
             DEFAULT_RULESET => self.ruleset.clone()?,
             PUBLIC_RULESETS => {
-                if self.ruleset.is_none() {
-                    return None;
-                }
+                self.ruleset.as_ref()?;
                 match self.style {
                     SPELLOUT => "%spellout-numbering-year;%spellout-numbering;%spellout-numbering-verbose;%spellout-cardinal;%spellout-ordinal;%spellout-ordinal-verbose;".into(),
                     ORDINAL => "%digits-ordinal;".into(),
@@ -1449,7 +1535,9 @@ impl NumberFormat {
 
     pub fn set_text_attribute(&mut self, attr: i64, v: &str) -> bool {
         match attr {
-            POSITIVE_PREFIX..=NEGATIVE_SUFFIX => self.text_affix[attr as usize] = Some(v.to_string()),
+            POSITIVE_PREFIX..=NEGATIVE_SUFFIX => {
+                self.text_affix[attr as usize] = Some(v.to_string())
+            }
             PADDING_CHARACTER => match v.chars().next() {
                 Some(c) => self.pad_char = c,
                 None => return false,
@@ -1459,7 +1547,8 @@ impl NumberFormat {
                     return false;
                 }
                 self.currency = v.to_ascii_uppercase();
-                self.symbols[CURRENCY_SYMBOL as usize] = currency_symbol(&self.chain, &self.currency);
+                self.symbols[CURRENCY_SYMBOL as usize] =
+                    currency_symbol(&self.chain, &self.currency);
                 self.symbols[INTL_CURRENCY_SYMBOL as usize] = self.currency.clone();
                 self.apply_currency_digits();
             }
@@ -1475,7 +1564,9 @@ impl NumberFormat {
     }
 
     pub fn symbol(&self, s: i64) -> Option<&str> {
-        self.symbols.get(usize::try_from(s).ok()?).map(String::as_str)
+        self.symbols
+            .get(usize::try_from(s).ok()?)
+            .map(String::as_str)
     }
 
     pub fn set_symbol(&mut self, s: i64, v: &str) -> bool {
@@ -1522,13 +1613,16 @@ impl NumberFormat {
                 let ps = self.text_affix[1]
                     .clone()
                     .unwrap_or_else(|| self.render_affix(&self.pattern.pos_suffix, false));
-                (format!("{}{}", self.symbols[MINUS_SIGN_SYMBOL as usize], pp), ps)
+                (
+                    format!("{}{}", self.symbols[MINUS_SIGN_SYMBOL as usize], pp),
+                    ps,
+                )
             }
         }
     }
 
     /// Formats a double (`format()` with TYPE_DEFAULT/TYPE_DOUBLE).
-    pub fn format_f64(&self, x: f64) -> Result<String, ()> {
+    pub fn format_f64(&self, x: f64) -> Result<String, Inexact> {
         if let Some(r) = &self.ruleset {
             return Ok(self.format_rbnf(r, x));
         }
@@ -1547,7 +1641,7 @@ impl NumberFormat {
     }
 
     /// Formats an integer exactly.
-    pub fn format_i64(&self, x: i64) -> Result<String, ()> {
+    pub fn format_i64(&self, x: i64) -> Result<String, Inexact> {
         if let Some(r) = &self.ruleset {
             return Ok(self.format_rbnf(r, x as f64));
         }
@@ -1558,7 +1652,7 @@ impl NumberFormat {
     }
 
     /// Formats a decimal (|value| with its sign).
-    pub fn format_dec(&self, mut d: Dec, neg: bool) -> Result<String, ()> {
+    pub fn format_dec(&self, mut d: Dec, neg: bool) -> Result<String, Inexact> {
         let p = &self.pattern;
         let mult = p.multiplier;
         if mult != 1 {
@@ -1582,7 +1676,13 @@ impl NumberFormat {
     /// Whether the formatted digits take CLDR's "one" plural form (for
     /// the currency plural names).
     fn plural_one(&self, body: &str) -> bool {
-        if !self.pattern.pos_suffix.iter().chain(self.pattern.pos_prefix.iter()).any(|a| *a == AffixPart::Currency(3)) {
+        if !self
+            .pattern
+            .pos_suffix
+            .iter()
+            .chain(self.pattern.pos_prefix.iter())
+            .any(|a| *a == AffixPart::Currency(3))
+        {
             return false;
         }
         let dsep = &self.symbols[MONETARY_SEPARATOR_SYMBOL as usize];
@@ -1678,36 +1778,43 @@ impl NumberFormat {
         let zero = &self.symbols[ZERO_DIGIT_SYMBOL as usize];
         let mut zc = zero.chars();
         match (zc.next(), zc.next()) {
-            (Some(z), None) => char::from_u32(z as u32 + d as u32).unwrap_or('0').to_string(),
+            (Some(z), None) => char::from_u32(z as u32 + d as u32)
+                .unwrap_or('0')
+                .to_string(),
             _ => ((b'0' + d) as char).to_string(),
         }
     }
 
-    fn format_fixed(&self, mut d: Dec, neg: bool) -> Result<(String, bool), ()> {
+    fn format_fixed(&self, mut d: Dec, neg: bool) -> Result<(String, bool), Inexact> {
         let p = &self.pattern;
         if let Some(inc) = p.increment {
             // round to a multiple of the increment
             let v = d.to_f64() / inc;
             let mut q = Dec::from_f64(v);
             if !q.round_frac(0, self.rounding_mode, neg) {
-                return Err(());
+                return Err(Inexact);
             }
             let r = q.to_f64() * inc;
             d = Dec::from_f64(r);
-            let frac = Dec::from_f64(inc).plain().split_once('.').map_or(0, |(_, f)| f.len() as i64);
+            let frac = Dec::from_f64(inc)
+                .plain()
+                .split_once('.')
+                .map_or(0, |(_, f)| f.len() as i64);
             d.round_frac(frac.max(p.max_frac as i64), ROUND_HALFEVEN, neg);
         }
         let (min_frac, max_frac) = if p.sig_used {
             if !d.round_sig(p.max_sig as i64, self.rounding_mode, neg) {
-                return Err(());
+                return Err(Inexact);
             }
             let sig_digits = d.digits.len() as i64;
-            let min_frac = (p.min_sig as i64 - d.point.max(if d.digits.is_empty() { 1 } else { d.point })).max(0);
+            let min_frac = (p.min_sig as i64
+                - d.point.max(if d.digits.is_empty() { 1 } else { d.point }))
+            .max(0);
             let _ = sig_digits;
             (min_frac, i64::MAX)
         } else {
             if !d.round_frac(p.max_frac as i64, self.rounding_mode, neg) {
-                return Err(());
+                return Err(Inexact);
             }
             (p.min_frac as i64, p.max_frac as i64)
         };
@@ -1737,12 +1844,19 @@ impl NumberFormat {
         };
         let n = int_digits.len();
         let g1 = p.grouping.max(0) as usize;
-        let g2 = if p.grouping2 > 0 { p.grouping2 as usize } else { g1 };
+        let g2 = if p.grouping2 > 0 {
+            p.grouping2 as usize
+        } else {
+            g1
+        };
         let use_group = p.grouping_used && g1 > 0 && n >= g1 + self.min_grouping.max(1) as usize;
         for (i, dg) in int_digits.iter().enumerate() {
             s.push_str(&self.digit_char(*dg));
             let left = n - i - 1;
-            if use_group && left > 0 && (left == g1 || (left > g1 && (left - g1) % g2 == 0)) {
+            if use_group
+                && left > 0
+                && (left == g1 || (left > g1 && (left - g1).is_multiple_of(g2)))
+            {
                 s.push_str(grouping);
             }
         }
@@ -1772,7 +1886,13 @@ impl NumberFormat {
         Ok((s, zero))
     }
 
-    fn format_scientific(&self, mut d: Dec, neg: bool, min_exp: i32, exp_sign: bool) -> Result<(String, bool), ()> {
+    fn format_scientific(
+        &self,
+        mut d: Dec,
+        neg: bool,
+        min_exp: i32,
+        exp_sign: bool,
+    ) -> Result<(String, bool), Inexact> {
         let p = &self.pattern;
         let max_int = p.max_int.max(1) as i64;
         let min_int = p.min_int as i64;
@@ -1785,7 +1905,7 @@ impl NumberFormat {
         };
         let all = !p.sig_used && min_int == 0 && p.max_frac == 0;
         if !all && !d.round_sig(sig.max(1), self.rounding_mode, neg) {
-            return Err(());
+            return Err(Inexact);
         }
         let zero = d.is_zero();
         let mut exp = if zero { 0 } else { d.point - 1 };
@@ -1880,11 +2000,7 @@ impl NumberFormat {
                 } else {
                     out.push_str(rest);
                 }
-                if neg {
-                    format!("-{out}")
-                } else {
-                    out
-                }
+                if neg { format!("-{out}") } else { out }
             }
             DURATION => {
                 if lang != "en" {
@@ -1984,7 +2100,12 @@ impl NumberFormat {
         let first = rest.find(|c: char| c.is_ascii_digit() || c == '-')?;
         let before = &rest[..first];
         let mut plain = self.clone();
-        plain.text_affix = [Some(String::new()), Some(String::new()), None, Some(String::new())];
+        plain.text_affix = [
+            Some(String::new()),
+            Some(String::new()),
+            None,
+            Some(String::new()),
+        ];
         let tail: String = rest[first..].to_string();
         let (v, _, end) = plain.parse(&tail, 0)?;
         let after: String = tail.chars().skip(end).collect();
@@ -1992,9 +2113,9 @@ impl NumberFormat {
             (c, 0)
         } else {
             let a = after.trim_matches(is_space).to_string();
-            match ident(&a) {
-                Some(c) => (c, after.chars().count()),
-                None => return None,
+            {
+                let c = ident(&a)?;
+                (c, after.chars().count())
             }
         };
         let total = start + before.chars().count() + end + used;
@@ -2010,12 +2131,20 @@ impl NumberFormat {
         let minus = &self.symbols[MINUS_SIGN_SYMBOL as usize];
         let plus = &self.symbols[PLUS_SIGN_SYMBOL as usize];
         let dsep: Vec<char> = if self.is_currency_style() {
-            self.symbols[MONETARY_SEPARATOR_SYMBOL as usize].chars().collect()
+            self.symbols[MONETARY_SEPARATOR_SYMBOL as usize]
+                .chars()
+                .collect()
         } else {
-            self.symbols[DECIMAL_SEPARATOR_SYMBOL as usize].chars().collect()
+            self.symbols[DECIMAL_SEPARATOR_SYMBOL as usize]
+                .chars()
+                .collect()
         };
-        let gsep: Vec<char> = self.symbols[GROUPING_SEPARATOR_SYMBOL as usize].chars().collect();
-        let starts = |i: usize, s: &[char]| !s.is_empty() && chars.len() >= i + s.len() && chars[i..i + s.len()] == *s;
+        let gsep: Vec<char> = self.symbols[GROUPING_SEPARATOR_SYMBOL as usize]
+            .chars()
+            .collect();
+        let starts = |i: usize, s: &[char]| {
+            !s.is_empty() && chars.len() >= i + s.len() && chars[i..i + s.len()] == *s
+        };
         let mut neg = false;
         // prefixes
         let pp: Vec<char> = self.text_affix[0]
@@ -2086,7 +2215,11 @@ impl NumberFormat {
         if !seen_digit {
             let inf: Vec<char> = self.symbols[INFINITY_SYMBOL as usize].chars().collect();
             if starts(begin, &inf) {
-                let v = if neg { f64::NEG_INFINITY } else { f64::INFINITY };
+                let v = if neg {
+                    f64::NEG_INFINITY
+                } else {
+                    f64::INFINITY
+                };
                 return Some((v, false, begin + inf.len()));
             }
             return None;
@@ -2125,7 +2258,7 @@ fn group_pattern(int: &str, g1: usize, g2: usize) -> String {
     for (i, c) in chars.iter().enumerate() {
         s.push(*c);
         let left = n - i - 1;
-        if left > 0 && (left == g1 || (left > g1 && (left - g1) % g2 == 0)) {
+        if left > 0 && (left == g1 || (left > g1 && (left - g1).is_multiple_of(g2))) {
             s.push(',');
         }
     }

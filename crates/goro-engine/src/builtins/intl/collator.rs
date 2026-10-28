@@ -18,7 +18,10 @@ use crate::vm::{R, Vm};
 pub static MODULE: Module = Module {
     name: "intl",
     functions: &[
-        ("function collator_create(string $locale): ?Collator", c_create),
+        (
+            "function collator_create(string $locale): ?Collator",
+            c_create,
+        ),
         (
             "function collator_compare(Collator $object, string $string1, string $string2): int|false",
             c_compare,
@@ -133,10 +136,12 @@ const COLLATOR_CLASS: &str = r#"<?php class Collator {
 fn hooks() -> crate::class::NativeHooks {
     crate::class::NativeHooks {
         create: Some(super::numfmt::on_create),
-        clone: Some(|vm, from, to| match with_obj::<Collator, Collator>(from, |x| x.v.clone()) {
-            Some(c) => store(to, c),
-            None => super::timezone::clone_error(vm, "Cannot clone uninitialized Collator"),
-        }),
+        clone: Some(
+            |vm, from, to| match with_obj::<Collator, Collator>(from, |x| x.v.clone()) {
+                Some(c) => store(to, c),
+                None => super::timezone::clone_error(vm, "Cannot clone uninitialized Collator"),
+            },
+        ),
         ..Default::default()
     }
 }
@@ -283,7 +288,8 @@ fn c_set_strength(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (o, off, _) = coll(vm, a)?;
     reset_obj::<Collator>(vm, &o);
     let s = a.int(off);
-    let ok = with_obj::<Collator, bool>(&o, |x| x.v.set_attribute(co::STRENGTH, s)).unwrap_or(false);
+    let ok =
+        with_obj::<Collator, bool>(&o, |x| x.v.set_attribute(co::STRENGTH, s)).unwrap_or(false);
     if !ok {
         fail_obj::<Collator>(
             vm,

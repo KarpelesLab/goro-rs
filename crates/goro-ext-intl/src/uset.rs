@@ -106,9 +106,20 @@ const P: &[G] = &[
     G::FinalPunctuation,
     G::OtherPunctuation,
 ];
-const S: &[G] = &[G::MathSymbol, G::CurrencySymbol, G::ModifierSymbol, G::OtherSymbol];
+const S: &[G] = &[
+    G::MathSymbol,
+    G::CurrencySymbol,
+    G::ModifierSymbol,
+    G::OtherSymbol,
+];
 const Z: &[G] = &[G::SpaceSeparator, G::LineSeparator, G::ParagraphSeparator];
-const C: &[G] = &[G::Control, G::Format, G::Unassigned, G::PrivateUse, G::Surrogate];
+const C: &[G] = &[
+    G::Control,
+    G::Format,
+    G::Unassigned,
+    G::PrivateUse,
+    G::Surrogate,
+];
 
 fn gc_value(n: &str) -> Option<&'static [G]> {
     Some(match n {
@@ -235,7 +246,11 @@ pub fn parse(c: &[char], i: &mut usize) -> Result<USet, SetError> {
             return Err(SetError(*i));
         }
         let start = *i + 1;
-        let end = c[start..].iter().position(|x| *x == '}').ok_or(SetError(*i))? + start;
+        let end = c[start..]
+            .iter()
+            .position(|x| *x == '}')
+            .ok_or(SetError(*i))?
+            + start;
         let name: String = c[start..end].iter().collect();
         *i = end + 1;
         let (neg2, name) = match name.strip_prefix('^') {
@@ -243,7 +258,11 @@ pub fn parse(c: &[char], i: &mut usize) -> Result<USet, SetError> {
             None => (false, name),
         };
         let p = property(&name).ok_or(SetError(start))?;
-        return Ok(if neg ^ neg2 { USet::Not(Box::new(p)) } else { p });
+        return Ok(if neg ^ neg2 {
+            USet::Not(Box::new(p))
+        } else {
+            p
+        });
     }
     if c.get(*i) != Some(&'[') {
         return Err(SetError(*i));
@@ -251,7 +270,10 @@ pub fn parse(c: &[char], i: &mut usize) -> Result<USet, SetError> {
     // [:Name:]
     if c.get(*i + 1) == Some(&':') {
         let start = *i + 2;
-        let rel = c[start..].windows(2).position(|w| w == [':', ']']).ok_or(SetError(*i))?;
+        let rel = c[start..]
+            .windows(2)
+            .position(|w| w == [':', ']'])
+            .ok_or(SetError(*i))?;
         let name: String = c[start..start + rel].iter().collect();
         *i = start + rel + 2;
         let (neg, name) = match name.strip_prefix('^') {
@@ -288,14 +310,14 @@ pub fn parse(c: &[char], i: &mut usize) -> Result<USet, SetError> {
             ' ' | '\t' | '\n' | '\r' => {
                 *i += 1;
             }
-            '[' | '\\'
-                if ch == '[' || matches!(c.get(*i + 1), Some('p') | Some('P')) =>
-            {
+            '[' | '\\' if ch == '[' || matches!(c.get(*i + 1), Some('p') | Some('P')) => {
                 let s = parse(c, i)?;
                 match pending_op.take() {
                     Some(op) => {
                         flush(&mut items, &mut ranges);
-                        let left = acc.take().unwrap_or_else(|| USet::Union(std::mem::take(&mut items)));
+                        let left = acc
+                            .take()
+                            .unwrap_or_else(|| USet::Union(std::mem::take(&mut items)));
                         acc = Some(if op == '&' {
                             USet::Inter(Box::new(left), Box::new(s))
                         } else {
@@ -310,14 +332,19 @@ pub fn parse(c: &[char], i: &mut usize) -> Result<USet, SetError> {
                     }
                 }
             }
-            '&' | '-' if matches!(c.get(*i + 1), Some('[') | Some('\\')) && (!items.is_empty() || !ranges.is_empty() || acc.is_some()) && (ch == '&' || c.get(*i + 1) == Some(&'[')) => {
+            '&' | '-'
+                if matches!(c.get(*i + 1), Some('[') | Some('\\'))
+                    && (!items.is_empty() || !ranges.is_empty() || acc.is_some())
+                    && (ch == '&' || c.get(*i + 1) == Some(&'[')) =>
+            {
                 pending_op = Some(ch);
                 *i += 1;
             }
             _ => {
                 let a = literal(c, i)?;
                 // a range a-b
-                if c.get(*i) == Some(&'-') && c.get(*i + 1).is_some_and(|x| *x != ']' && *x != '[') {
+                if c.get(*i) == Some(&'-') && c.get(*i + 1).is_some_and(|x| *x != ']' && *x != '[')
+                {
                     *i += 1;
                     let b = literal(c, i)?;
                     if b < a {

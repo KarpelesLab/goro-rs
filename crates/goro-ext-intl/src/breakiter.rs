@@ -58,7 +58,9 @@ pub fn boundaries(kind: &Kind, text: &str) -> Vec<(usize, Vec<i32>)> {
         Kind::Sentence => {
             for s in intl::unicode::sentences(text) {
                 pos += s.len();
-                let sep = s.trim_end_matches([' ', '\t']).ends_with(['\n', '\r', '\u{2029}', '\u{85}']);
+                let sep = s
+                    .trim_end_matches([' ', '\t'])
+                    .ends_with(['\n', '\r', '\u{2029}', '\u{85}']);
                 out.push((pos, vec![if sep { SENTENCE_SEP } else { SENTENCE_TERM }]));
             }
         }
@@ -225,7 +227,11 @@ impl RuleSet {
             i += 1;
         }
         let err_at = |pos: usize| {
-            let line = chars[..pos.min(chars.len())].iter().filter(|c| **c == '\n').count() + 1;
+            let line = chars[..pos.min(chars.len())]
+                .iter()
+                .filter(|c| **c == '\n')
+                .count()
+                + 1;
             let line_start = chars[..pos.min(chars.len())]
                 .iter()
                 .rposition(|c| *c == '\n')
@@ -249,14 +255,20 @@ impl RuleSet {
             }
             if let Some(s) = t.strip_prefix("!!") {
                 let s = s.trim().to_ascii_lowercase();
-                if matches!(s.as_str(), "forward" | "reverse" | "safe_forward" | "safe_reverse") {
+                if matches!(
+                    s.as_str(),
+                    "forward" | "reverse" | "safe_forward" | "safe_reverse"
+                ) {
                     section = s;
                 }
                 continue;
             }
             if t.starts_with('$')
                 && let Some(eq) = t.find('=')
-                && t[1..eq].trim().chars().all(|c| c.is_alphanumeric() || c == '_')
+                && t[1..eq]
+                    .trim()
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_')
             {
                 let name = t[..eq].trim().to_string();
                 let mut body = t[eq + 1..].trim().to_string();
@@ -274,7 +286,10 @@ impl RuleSet {
             if let Some(open) = body.rfind('{')
                 && body.ends_with('}')
             {
-                status = body[open + 1..body.len() - 1].trim().parse().map_err(|_| err_at(pos))?;
+                status = body[open + 1..body.len() - 1]
+                    .trim()
+                    .parse()
+                    .map_err(|_| err_at(pos))?;
                 body.truncate(open);
             }
             for (n, v) in vars.iter().rev() {
@@ -336,7 +351,11 @@ fn substitute(body: &str, name: &str, value: &str) -> String {
     while let Some(p) = rest.find(name) {
         let after = &rest[p + name.len()..];
         out.push_str(&rest[..p]);
-        if after.chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+        if after
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        {
             out.push_str(name);
         } else {
             out.push_str(value);
@@ -359,7 +378,11 @@ fn parse_alt(c: &[char], i: &mut usize) -> Result<Node, ()> {
         *i += 1;
         alts.push(parse_seq(c, i)?);
     }
-    Ok(if alts.len() == 1 { alts.pop().unwrap() } else { Node::Alt(alts) })
+    Ok(if alts.len() == 1 {
+        alts.pop().unwrap()
+    } else {
+        Node::Alt(alts)
+    })
 }
 
 fn parse_seq(c: &[char], i: &mut usize) -> Result<Node, ()> {
@@ -432,7 +455,11 @@ fn parse_seq(c: &[char], i: &mut usize) -> Result<Node, ()> {
     if items.is_empty() {
         return Err(());
     }
-    Ok(if items.len() == 1 { items.pop().unwrap() } else { Node::Seq(items) })
+    Ok(if items.len() == 1 {
+        items.pop().unwrap()
+    } else {
+        Node::Seq(items)
+    })
 }
 
 /// The end positions (char indices) of the matches of `n` at `at`.
@@ -485,7 +512,11 @@ fn match_node(n: &Node, s: &[(usize, char)], at: usize) -> Vec<usize> {
             v
         }
         Node::Star(inner) | Node::Plus(inner) => {
-            let mut all: Vec<usize> = if matches!(n, Node::Star(_)) { vec![at] } else { vec![] };
+            let mut all: Vec<usize> = if matches!(n, Node::Star(_)) {
+                vec![at]
+            } else {
+                vec![]
+            };
             let mut frontier = vec![at];
             let mut seen = vec![at];
             while !frontier.is_empty() {

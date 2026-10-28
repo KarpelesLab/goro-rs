@@ -264,7 +264,11 @@ fn check_bidi(label: &[char]) -> bool {
         return true;
     };
     let fc = bidi_class(first);
-    let last = label.iter().rev().map(|&c| bidi_class(c)).find(|b| *b != B::NSM);
+    let last = label
+        .iter()
+        .rev()
+        .map(|&c| bidi_class(c))
+        .find(|b| *b != B::NSM);
     if fc == B::R || fc == B::AL {
         // B2, B3, B4
         if !label.iter().all(|&c| {
@@ -316,19 +320,31 @@ fn is_mark(c: char) -> bool {
 
 /// Maps and normalizes (UTS #46 section 4 steps 1-2), recording
 /// disallowed characters and deviations.
-fn map(input: &str, transitional: bool, std3: bool, errors: &mut i64, deviation: &mut bool) -> String {
+fn map(
+    input: &str,
+    transitional: bool,
+    std3: bool,
+    errors: &mut i64,
+    deviation: &mut bool,
+) -> String {
     let mut out = String::new();
     for c in input.chars() {
         match status(c) {
             St::Valid => {
-                if std3 && c.is_ascii() && !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.') {
+                if std3
+                    && c.is_ascii()
+                    && !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+                {
                     *errors |= ERROR_DISALLOWED;
                 }
                 out.push(c);
             }
             St::Mapped(o, l) => {
                 for &m in mapping(o, l) {
-                    if std3 && m.is_ascii() && !(m.is_ascii_lowercase() || m.is_ascii_digit() || m == '-' || m == '.') {
+                    if std3
+                        && m.is_ascii()
+                        && !(m.is_ascii_lowercase() || m.is_ascii_digit() || m == '-' || m == '.')
+                    {
                         *errors |= ERROR_DISALLOWED;
                     }
                     out.push(m);
@@ -425,7 +441,9 @@ fn process(domain: &str, opts: i64, to_ascii: bool) -> IdnaResult {
             labels.push((l.chars().collect(), false));
         }
     }
-    let bidi_domain = labels.iter().any(|(l, _)| l.iter().any(|&c| is_bidi_rtl(c)));
+    let bidi_domain = labels
+        .iter()
+        .any(|(l, _)| l.iter().any(|&c| is_bidi_rtl(c)));
     let n = labels.len();
     for (i, (l, ace)) in labels.iter().enumerate() {
         if l.is_empty() {

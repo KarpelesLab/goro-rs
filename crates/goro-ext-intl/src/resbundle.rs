@@ -92,7 +92,7 @@ impl Reader<'_> {
                 let n = self.u16(at)? as usize;
                 let keys_at = at + 2;
                 let mut vals_at = keys_at + 2 * n;
-                if vals_at % 4 != 0 {
+                if !vals_at.is_multiple_of(4) {
                     vals_at += 2;
                 }
                 let mut t = Vec::with_capacity(n);
@@ -128,7 +128,11 @@ impl Reader<'_> {
             6 => self.res16(off as u32 | 0x6000_0000)?,
             7 => {
                 let v = (word & 0x0FFF_FFFF) as i64;
-                Res::Int(if v & 0x0800_0000 != 0 { v - 0x1000_0000 } else { v })
+                Res::Int(if v & 0x0800_0000 != 0 {
+                    v - 0x1000_0000
+                } else {
+                    v
+                })
             }
             8 => {
                 if off == 0 {
@@ -201,7 +205,11 @@ impl Bundle {
         }
         let format = file[16];
         let data = file.get(hsize..)?;
-        let mut r = Reader { data, be, pool16: 0 };
+        let mut r = Reader {
+            data,
+            be,
+            pool16: 0,
+        };
         let root = r.u32(0)?;
         if format >= 2 {
             let n = (r.u32(4)? & 0xFF) as usize;

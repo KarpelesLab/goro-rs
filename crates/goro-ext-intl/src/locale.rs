@@ -107,7 +107,11 @@ fn parse_main(tags: &[&str]) -> (String, String, String, String) {
     let mut lang = String::new();
     if let Some(first) = tags.first() {
         if (first.eq_ignore_ascii_case("i") || first.eq_ignore_ascii_case("x")) && tags.len() > 1 {
-            lang = format!("{}-{}", first.to_ascii_lowercase(), tags[1].to_ascii_lowercase());
+            lang = format!(
+                "{}-{}",
+                first.to_ascii_lowercase(),
+                tags[1].to_ascii_lowercase()
+            );
             i = 2;
         } else {
             lang = first.to_ascii_lowercase();
@@ -139,10 +143,9 @@ fn parse_main(tags: &[&str]) -> (String, String, String, String) {
 /// Whether `id` is read as a BCP 47 tag with extensions: hyphens only, no
 /// keywords, and a singleton subtag.
 fn is_extended_tag(id: &str) -> bool {
-    let first_ok = id
-        .split('-')
-        .next()
-        .is_some_and(|t| t.len() != 1 || t.eq_ignore_ascii_case("x") || t.eq_ignore_ascii_case("i"));
+    let first_ok = id.split('-').next().is_some_and(|t| {
+        t.len() != 1 || t.eq_ignore_ascii_case("x") || t.eq_ignore_ascii_case("i")
+    });
     first_ok
         && !id.contains('_')
         && !id.contains('@')
@@ -250,7 +253,10 @@ fn tag_keywords(id: &str) -> Option<BTreeMap<String, String>> {
         while j < tags.len() && tags[j].len() != 1 {
             j += 1;
         }
-        let parts: Vec<String> = tags[start..j].iter().map(|t| t.to_ascii_lowercase()).collect();
+        let parts: Vec<String> = tags[start..j]
+            .iter()
+            .map(|t| t.to_ascii_lowercase())
+            .collect();
         if c == 'u' {
             let mut k = 0;
             let mut attrs = Vec::new();
@@ -325,7 +331,9 @@ fn parse_with(id: &str, mixed: bool) -> Parsed {
         // prefix as part of the language)
         let mut end = tags.len();
         for (k, t) in tags.iter().enumerate() {
-            if t.len() == 1 && !(k == 0 && (t.eq_ignore_ascii_case("x") || t.eq_ignore_ascii_case("i"))) {
+            if t.len() == 1
+                && !(k == 0 && (t.eq_ignore_ascii_case("x") || t.eq_ignore_ascii_case("i")))
+            {
                 end = k;
                 break;
             }
@@ -381,7 +389,11 @@ impl Parsed {
         }
         if !self.keywords.is_empty() {
             s.push('@');
-            let kw: Vec<String> = self.keywords.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            let kw: Vec<String> = self
+                .keywords
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
             s.push_str(&kw.join(";"));
         }
         s
@@ -412,7 +424,15 @@ pub fn canonicalize(id: &str) -> String {
         // regular grandfathered tags without an i- prefix read as ICU IDs
         let is_irregular = g.starts_with("i-") || g == "en-GB-oed" || g.starts_with("sgn-");
         match pref {
-            Some(p) if is_irregular || g == "art-lojban" || g.starts_with("no-") || g == "zh-guoyu" || g == "zh-hakka" || g == "zh-xiang" || g == "zh-min-nan" => {
+            Some(p)
+                if is_irregular
+                    || g == "art-lojban"
+                    || g.starts_with("no-")
+                    || g == "zh-guoyu"
+                    || g == "zh-hakka"
+                    || g == "zh-xiang"
+                    || g == "zh-min-nan" =>
+            {
                 if !g.starts_with("sgn-") {
                     return parse(p).to_id();
                 }
@@ -424,10 +444,8 @@ pub fn canonicalize(id: &str) -> String {
         }
     }
     let mut p = parse_with(id, true);
-    if is_extended_tag(main) && !id.contains('@') {
-        if p.language.starts_with("x-") {
-            p.language.clear();
-        }
+    if is_extended_tag(main) && !id.contains('@') && p.language.starts_with("x-") {
+        p.language.clear();
     }
     if let Some(l) = language_alias(&p.language) {
         p.language = l.to_string();
@@ -545,7 +563,7 @@ pub fn lookup(tags: &[String], range: &str) -> Option<usize> {
         if let Some(i) = cands.iter().position(|c| *c == r) {
             return Some(i);
         }
-        let Some(cut) = r.rfind('_') else { return None };
+        let cut = r.rfind('_')?;
         r.truncate(cut);
         // drop a trailing singleton too (RFC 4647 section 3.4)
         if let Some(c2) = r.rfind('_')
@@ -585,7 +603,9 @@ fn valid_shape(p: &Parsed) -> bool {
     let l = &p.language;
     (l.is_empty() || (2..=8).contains(&l.len()) && l.bytes().all(|b| b.is_ascii_alphabetic()))
         && p.region.bytes().all(|b| b.is_ascii_alphanumeric())
-        && p.variant.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        && p.variant
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 fn to_bcp47_core(p: &Parsed) -> String {
@@ -646,7 +666,14 @@ pub fn to_bcp47(id: &str) -> String {
             ("collation", v) => ("co", v.to_string()),
             ("currency", v) => ("cu", v.to_ascii_lowercase()),
             ("numbers", v) => ("nu", v.to_string()),
-            ("colnumeric", v) => ("kn", if v == "yes" { "true".into() } else { v.to_string() }),
+            ("colnumeric", v) => (
+                "kn",
+                if v == "yes" {
+                    "true".into()
+                } else {
+                    v.to_string()
+                },
+            ),
             _ => continue,
         };
         u.push(format!("{bk}-{bv}"));
@@ -717,7 +744,11 @@ fn display_data() -> &'static DisplayData {
 fn display_chain(display: &str) -> Vec<String> {
     let p = parse(display);
     let mut out = Vec::new();
-    let lang = if p.language.is_empty() { "en".to_string() } else { p.language.clone() };
+    let lang = if p.language.is_empty() {
+        "en".to_string()
+    } else {
+        p.language.clone()
+    };
     if !p.script.is_empty() && !p.region.is_empty() {
         out.push(format!("{lang}-{}-{}", p.script, p.region));
     }
@@ -801,7 +832,9 @@ pub fn display_language(code: &str, display: &str) -> String {
     if code == "root" {
         // ICU 68+ shows root as the unknown language (CLDR "und"):
         // ext/intl/tests/locale_get_display_name8.phpt
-        return display_lookup(b'L', display, "und").unwrap_or("und").to_string();
+        return display_lookup(b'L', display, "und")
+            .unwrap_or("und")
+            .to_string();
     }
     display_lookup(b'L', display, code).map_or_else(|| code.to_string(), str::to_string)
 }
@@ -852,7 +885,8 @@ fn region_alias(code: &str) -> &str {
 }
 
 pub fn display_region(code: &str, display: &str) -> String {
-    display_lookup(b'R', display, region_alias(code)).map_or_else(|| code.to_string(), str::to_string)
+    display_lookup(b'R', display, region_alias(code))
+        .map_or_else(|| code.to_string(), str::to_string)
 }
 
 pub fn display_variant(code: &str, display: &str) -> String {
@@ -924,7 +958,12 @@ pub fn display_name(id: &str, display: &str) -> Option<String> {
 /// The locales ICU has data for (CLDR's), ICU-style.
 pub fn available_locales() -> &'static [&'static str] {
     static L: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
-    L.get_or_init(|| include_str!("data/locales.txt").lines().filter(|l| !l.is_empty()).collect())
+    L.get_or_init(|| {
+        include_str!("data/locales.txt")
+            .lines()
+            .filter(|l| !l.is_empty())
+            .collect()
+    })
 }
 
 /// `Locale::acceptFromHttp()`: the best available locale for an
@@ -947,7 +986,11 @@ pub fn accept_from_http(header: &str) -> Option<String> {
         }
         items.push((q, i, tag.to_string()));
     }
-    items.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+    items.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
     let avail = available_locales();
     for (q, _, tag) in items {
         if q <= 0.0 {

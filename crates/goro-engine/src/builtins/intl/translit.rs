@@ -22,7 +22,10 @@ pub static MODULE: Module = Module {
             "function transliterator_create_from_rules(string $rules, int $direction = Transliterator::FORWARD): ?Transliterator",
             t_create_from_rules,
         ),
-        ("function transliterator_list_ids(): array|false", t_list_ids),
+        (
+            "function transliterator_list_ids(): array|false",
+            t_list_ids,
+        ),
         (
             "function transliterator_create_inverse(Transliterator $transliterator): ?Transliterator",
             t_create_inverse,
@@ -134,7 +137,7 @@ fn t_create(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(rev) = direction(vm, a, 1)? else {
         return Ok(Value::Null);
     };
-    match create_by_id(vm, a, &a.bytes(0).to_vec(), rev)? {
+    match create_by_id(vm, a, a.bytes(0), rev)? {
         Some(t) => new_tr(vm, t),
         None => Ok(Value::Null),
     }

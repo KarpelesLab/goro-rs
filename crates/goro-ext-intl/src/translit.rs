@@ -86,7 +86,9 @@ fn builtin(id: &str) -> Option<(Builtin, &'static str)> {
         ("latin", "ascii") => (Builtin::LatinAscii, "Any-Null"),
         ("greek", "latin") | ("el", "latin") => (Builtin::GreekLatin, "Latin-Greek"),
         ("latin", "greek") => (Builtin::LatinGreek, "Greek-Latin"),
-        ("cyrillic", "latin") | ("russian", "latin") | ("ru", "latin") => (Builtin::CyrillicLatin, "Latin-Cyrillic"),
+        ("cyrillic", "latin") | ("russian", "latin") | ("ru", "latin") => {
+            (Builtin::CyrillicLatin, "Latin-Cyrillic")
+        }
         ("katakana", "latin") => (Builtin::KatakanaLatin, "Latin-Katakana"),
         ("latin", "katakana") => (Builtin::LatinKatakana, "Katakana-Latin"),
         ("hiragana", "latin") => (Builtin::HiraganaLatin, "Latin-Hiragana"),
@@ -105,42 +107,171 @@ fn builtin(id: &str) -> Option<(Builtin, &'static str)> {
 /// The IDs `listIDs()` gives.
 pub fn list_ids() -> Vec<String> {
     let mut v: Vec<String> = [
-        "ASCII-Latin", "Accents-Any", "Amharic-Latin/BGN", "Any-Accents", "Any-Publishing",
-        "Arabic-Latin", "Arabic-Latin/BGN", "Armenian-Latin", "Armenian-Latin/BGN",
-        "Azerbaijani-Latin/BGN", "Belarusian-Latin/BGN", "Bengali-Devanagari", "Bengali-Gujarati",
-        "Bengali-Gurmukhi", "Bengali-Kannada", "Bengali-Latin", "Bengali-Malayalam",
-        "Bengali-Oriya", "Bengali-Tamil", "Bengali-Telugu", "Bopomofo-Latin",
-        "Bulgarian-Latin/BGN", "Cyrillic-Latin", "Devanagari-Bengali", "Devanagari-Gujarati",
-        "Devanagari-Gurmukhi", "Devanagari-Kannada", "Devanagari-Latin", "Devanagari-Malayalam",
-        "Devanagari-Oriya", "Devanagari-Tamil", "Devanagari-Telugu", "Georgian-Latin",
-        "Georgian-Latin/BGN", "Greek-Latin", "Greek-Latin/BGN", "Greek-Latin/UNGEGN",
-        "Gujarati-Bengali", "Gujarati-Devanagari", "Gujarati-Gurmukhi", "Gujarati-Kannada",
-        "Gujarati-Latin", "Gujarati-Malayalam", "Gujarati-Oriya", "Gujarati-Tamil",
-        "Gujarati-Telugu", "Gurmukhi-Bengali", "Gurmukhi-Devanagari", "Gurmukhi-Gujarati",
-        "Gurmukhi-Kannada", "Gurmukhi-Latin", "Gurmukhi-Malayalam", "Gurmukhi-Oriya",
-        "Gurmukhi-Tamil", "Gurmukhi-Telugu", "Han-Latin", "Hangul-Latin", "Hebrew-Latin",
-        "Hebrew-Latin/BGN", "Hiragana-Katakana", "Hiragana-Latin", "Jamo-Latin",
-        "Kannada-Bengali", "Kannada-Devanagari", "Kannada-Gujarati", "Kannada-Gurmukhi",
-        "Kannada-Latin", "Kannada-Malayalam", "Kannada-Oriya", "Kannada-Tamil",
-        "Kannada-Telugu", "Katakana-Hiragana", "Katakana-Latin", "Kazakh-Latin/BGN",
-        "Kirghiz-Latin/BGN", "Korean-Latin/BGN", "Latin-ASCII", "Latin-Arabic", "Latin-Armenian",
-        "Latin-Bengali", "Latin-Bopomofo", "Latin-Cyrillic", "Latin-Devanagari", "Latin-Georgian",
-        "Latin-Greek", "Latin-Greek/UNGEGN", "Latin-Gujarati", "Latin-Gurmukhi", "Latin-Hangul",
-        "Latin-Hebrew", "Latin-Hiragana", "Latin-Jamo", "Latin-Kannada", "Latin-Katakana",
-        "Latin-Malayalam", "Latin-Oriya", "Latin-Russian/BGN", "Latin-Syriac", "Latin-Tamil",
-        "Latin-Telugu", "Latin-Thaana", "Latin-Thai", "Macedonian-Latin/BGN", "Malayalam-Bengali",
-        "Malayalam-Devanagari", "Malayalam-Gujarati", "Malayalam-Gurmukhi", "Malayalam-Kannada",
-        "Malayalam-Latin", "Malayalam-Oriya", "Malayalam-Tamil", "Malayalam-Telugu",
-        "Maldivian-Latin/BGN", "Mongolian-Latin/BGN", "Oriya-Bengali", "Oriya-Devanagari",
-        "Oriya-Gujarati", "Oriya-Gurmukhi", "Oriya-Kannada", "Oriya-Latin", "Oriya-Malayalam",
-        "Oriya-Tamil", "Oriya-Telugu", "Pashto-Latin/BGN", "Persian-Latin/BGN", "Russian-Latin/BGN",
-        "Serbian-Latin/BGN", "Syriac-Latin", "Tamil-Bengali", "Tamil-Devanagari", "Tamil-Gujarati",
-        "Tamil-Gurmukhi", "Tamil-Kannada", "Tamil-Latin", "Tamil-Malayalam", "Tamil-Oriya",
-        "Tamil-Telugu", "Telugu-Bengali", "Telugu-Devanagari", "Telugu-Gujarati", "Telugu-Gurmukhi",
-        "Telugu-Kannada", "Telugu-Latin", "Telugu-Malayalam", "Telugu-Oriya", "Telugu-Tamil",
-        "Thaana-Latin", "Thai-Latin", "Turkmen-Latin/BGN", "Ukrainian-Latin/BGN", "Uzbek-Latin/BGN",
-        "Any-NFC", "Any-NFD", "Any-NFKC", "Any-NFKD", "Any-Null", "Any-Remove", "Any-Upper",
-        "Any-Lower", "Any-Title", "Any-Hex", "Hex-Any", "Any-Latin", "Any-Name", "Name-Any",
+        "ASCII-Latin",
+        "Accents-Any",
+        "Amharic-Latin/BGN",
+        "Any-Accents",
+        "Any-Publishing",
+        "Arabic-Latin",
+        "Arabic-Latin/BGN",
+        "Armenian-Latin",
+        "Armenian-Latin/BGN",
+        "Azerbaijani-Latin/BGN",
+        "Belarusian-Latin/BGN",
+        "Bengali-Devanagari",
+        "Bengali-Gujarati",
+        "Bengali-Gurmukhi",
+        "Bengali-Kannada",
+        "Bengali-Latin",
+        "Bengali-Malayalam",
+        "Bengali-Oriya",
+        "Bengali-Tamil",
+        "Bengali-Telugu",
+        "Bopomofo-Latin",
+        "Bulgarian-Latin/BGN",
+        "Cyrillic-Latin",
+        "Devanagari-Bengali",
+        "Devanagari-Gujarati",
+        "Devanagari-Gurmukhi",
+        "Devanagari-Kannada",
+        "Devanagari-Latin",
+        "Devanagari-Malayalam",
+        "Devanagari-Oriya",
+        "Devanagari-Tamil",
+        "Devanagari-Telugu",
+        "Georgian-Latin",
+        "Georgian-Latin/BGN",
+        "Greek-Latin",
+        "Greek-Latin/BGN",
+        "Greek-Latin/UNGEGN",
+        "Gujarati-Bengali",
+        "Gujarati-Devanagari",
+        "Gujarati-Gurmukhi",
+        "Gujarati-Kannada",
+        "Gujarati-Latin",
+        "Gujarati-Malayalam",
+        "Gujarati-Oriya",
+        "Gujarati-Tamil",
+        "Gujarati-Telugu",
+        "Gurmukhi-Bengali",
+        "Gurmukhi-Devanagari",
+        "Gurmukhi-Gujarati",
+        "Gurmukhi-Kannada",
+        "Gurmukhi-Latin",
+        "Gurmukhi-Malayalam",
+        "Gurmukhi-Oriya",
+        "Gurmukhi-Tamil",
+        "Gurmukhi-Telugu",
+        "Han-Latin",
+        "Hangul-Latin",
+        "Hebrew-Latin",
+        "Hebrew-Latin/BGN",
+        "Hiragana-Katakana",
+        "Hiragana-Latin",
+        "Jamo-Latin",
+        "Kannada-Bengali",
+        "Kannada-Devanagari",
+        "Kannada-Gujarati",
+        "Kannada-Gurmukhi",
+        "Kannada-Latin",
+        "Kannada-Malayalam",
+        "Kannada-Oriya",
+        "Kannada-Tamil",
+        "Kannada-Telugu",
+        "Katakana-Hiragana",
+        "Katakana-Latin",
+        "Kazakh-Latin/BGN",
+        "Kirghiz-Latin/BGN",
+        "Korean-Latin/BGN",
+        "Latin-ASCII",
+        "Latin-Arabic",
+        "Latin-Armenian",
+        "Latin-Bengali",
+        "Latin-Bopomofo",
+        "Latin-Cyrillic",
+        "Latin-Devanagari",
+        "Latin-Georgian",
+        "Latin-Greek",
+        "Latin-Greek/UNGEGN",
+        "Latin-Gujarati",
+        "Latin-Gurmukhi",
+        "Latin-Hangul",
+        "Latin-Hebrew",
+        "Latin-Hiragana",
+        "Latin-Jamo",
+        "Latin-Kannada",
+        "Latin-Katakana",
+        "Latin-Malayalam",
+        "Latin-Oriya",
+        "Latin-Russian/BGN",
+        "Latin-Syriac",
+        "Latin-Tamil",
+        "Latin-Telugu",
+        "Latin-Thaana",
+        "Latin-Thai",
+        "Macedonian-Latin/BGN",
+        "Malayalam-Bengali",
+        "Malayalam-Devanagari",
+        "Malayalam-Gujarati",
+        "Malayalam-Gurmukhi",
+        "Malayalam-Kannada",
+        "Malayalam-Latin",
+        "Malayalam-Oriya",
+        "Malayalam-Tamil",
+        "Malayalam-Telugu",
+        "Maldivian-Latin/BGN",
+        "Mongolian-Latin/BGN",
+        "Oriya-Bengali",
+        "Oriya-Devanagari",
+        "Oriya-Gujarati",
+        "Oriya-Gurmukhi",
+        "Oriya-Kannada",
+        "Oriya-Latin",
+        "Oriya-Malayalam",
+        "Oriya-Tamil",
+        "Oriya-Telugu",
+        "Pashto-Latin/BGN",
+        "Persian-Latin/BGN",
+        "Russian-Latin/BGN",
+        "Serbian-Latin/BGN",
+        "Syriac-Latin",
+        "Tamil-Bengali",
+        "Tamil-Devanagari",
+        "Tamil-Gujarati",
+        "Tamil-Gurmukhi",
+        "Tamil-Kannada",
+        "Tamil-Latin",
+        "Tamil-Malayalam",
+        "Tamil-Oriya",
+        "Tamil-Telugu",
+        "Telugu-Bengali",
+        "Telugu-Devanagari",
+        "Telugu-Gujarati",
+        "Telugu-Gurmukhi",
+        "Telugu-Kannada",
+        "Telugu-Latin",
+        "Telugu-Malayalam",
+        "Telugu-Oriya",
+        "Telugu-Tamil",
+        "Thaana-Latin",
+        "Thai-Latin",
+        "Turkmen-Latin/BGN",
+        "Ukrainian-Latin/BGN",
+        "Uzbek-Latin/BGN",
+        "Any-NFC",
+        "Any-NFD",
+        "Any-NFKC",
+        "Any-NFKD",
+        "Any-Null",
+        "Any-Remove",
+        "Any-Upper",
+        "Any-Lower",
+        "Any-Title",
+        "Any-Hex",
+        "Hex-Any",
+        "Any-Latin",
+        "Any-Name",
+        "Name-Any",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -163,21 +294,26 @@ impl Translit {
     pub fn create(id: &str, reverse: bool) -> Result<Translit, TranslitError> {
         let mut steps = Vec::new();
         let mut inverses = Vec::new();
-        let parts: Vec<&str> = id.split(';').map(str::trim).filter(|p| !p.is_empty()).collect();
+        let parts: Vec<&str> = id
+            .split(';')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect();
         if parts.is_empty() {
             return Err(TranslitError::InvalidId);
         }
         let mut global_filter: Option<USet> = None;
         for (k, p) in parts.iter().enumerate() {
-            let (filter, rest) = if p.starts_with('[') || p.starts_with("\\p") || p.starts_with("\\P") {
-                let c: Vec<char> = p.chars().collect();
-                let mut i = 0;
-                let f = uset::parse(&c, &mut i).map_err(|_| TranslitError::InvalidId)?;
-                let rest: String = c[i..].iter().collect();
-                (Some(f), rest.trim().to_string())
-            } else {
-                (None, p.to_string())
-            };
+            let (filter, rest) =
+                if p.starts_with('[') || p.starts_with("\\p") || p.starts_with("\\P") {
+                    let c: Vec<char> = p.chars().collect();
+                    let mut i = 0;
+                    let f = uset::parse(&c, &mut i).map_err(|_| TranslitError::InvalidId)?;
+                    let rest: String = c[i..].iter().collect();
+                    (Some(f), rest.trim().to_string())
+                } else {
+                    (None, p.to_string())
+                };
             if rest.is_empty() {
                 if k == 0 {
                     global_filter = filter;
@@ -194,7 +330,10 @@ impl Translit {
             inverses.push(inv);
         }
         if let Some(f) = global_filter {
-            steps = vec![Step::Filtered(f, Box::new(Step::Rules(RuleSet::compound(steps))))];
+            steps = vec![Step::Filtered(
+                f,
+                Box::new(Step::Rules(RuleSet::compound(steps))),
+            )];
         }
         let inverse_id = if parts.len() == 1 {
             Some(inverses.first().map_or("Any-Null", |s| *s).to_string())
@@ -342,7 +481,9 @@ fn title(s: &str) -> String {
     let mut out = String::new();
     let mut in_word = false;
     for c in s.chars() {
-        let cased = u::is_uppercase(c) || u::is_lowercase(c) || u::general_category(c) == u::GeneralCategory::TitlecaseLetter;
+        let cased = u::is_uppercase(c)
+            || u::is_lowercase(c)
+            || u::general_category(c) == u::GeneralCategory::TitlecaseLetter;
         if cased {
             if in_word {
                 out.extend(u::to_lowercase(c));
@@ -388,7 +529,12 @@ fn hex_any(s: &str) -> String {
             if max > 0 {
                 let brace = c.get(i + 2) == Some(&'{');
                 let from = i + 2 + brace as usize;
-                if let Some((v, n)) = hexrun(&c, from, if brace { 1 } else { min }, if brace { 8 } else { max }) {
+                if let Some((v, n)) = hexrun(
+                    &c,
+                    from,
+                    if brace { 1 } else { min },
+                    if brace { 8 } else { max },
+                ) {
                     let end = from + n + brace as usize;
                     if (!brace || c.get(from + n) == Some(&'}'))
                         && let Some(ch) = char::from_u32(v)
@@ -407,7 +553,9 @@ fn hex_any(s: &str) -> String {
                 i += 2 + n;
                 done = true;
             }
-        } else if c[i] == '&' && c.get(i + 1) == Some(&'#') && matches!(c.get(i + 2), Some('x') | Some('X'))
+        } else if c[i] == '&'
+            && c.get(i + 1) == Some(&'#')
+            && matches!(c.get(i + 2), Some('x') | Some('X'))
             && let Some((v, n)) = hexrun(&c, i + 3, 1, 6)
             && c.get(i + 3 + n) == Some(&';')
             && let Some(ch) = char::from_u32(v)
@@ -505,31 +653,137 @@ fn greek_latin(s: &str) -> String {
 /// Kana syllables and their romanization (modified Hepburn as in ICU's
 /// Katakana-Latin, long vowels with macrons).
 const KANA: &[(&str, &str)] = &[
-    ("キャ", "kya"), ("キュ", "kyu"), ("キョ", "kyo"), ("シャ", "sha"), ("シュ", "shu"), ("ショ", "sho"),
-    ("チャ", "cha"), ("チュ", "chu"), ("チョ", "cho"), ("ニャ", "nya"), ("ニュ", "nyu"), ("ニョ", "nyo"),
-    ("ヒャ", "hya"), ("ヒュ", "hyu"), ("ヒョ", "hyo"), ("ミャ", "mya"), ("ミュ", "myu"), ("ミョ", "myo"),
-    ("リャ", "rya"), ("リュ", "ryu"), ("リョ", "ryo"), ("ギャ", "gya"), ("ギュ", "gyu"), ("ギョ", "gyo"),
-    ("ジャ", "ja"), ("ジュ", "ju"), ("ジョ", "jo"), ("ビャ", "bya"), ("ビュ", "byu"), ("ビョ", "byo"),
-    ("ピャ", "pya"), ("ピュ", "pyu"), ("ピョ", "pyo"), ("ティ", "ti"), ("ディ", "di"), ("ファ", "fa"),
-    ("フィ", "fi"), ("フェ", "fe"), ("フォ", "fo"), ("ウィ", "wi"), ("ウェ", "we"), ("ウォ", "wo"),
-    ("シェ", "she"), ("チェ", "che"), ("ジェ", "je"), ("ヴァ", "va"), ("ヴィ", "vi"), ("ヴェ", "ve"), ("ヴォ", "vo"),
-    ("ア", "a"), ("イ", "i"), ("ウ", "u"), ("エ", "e"), ("オ", "o"),
-    ("カ", "ka"), ("キ", "ki"), ("ク", "ku"), ("ケ", "ke"), ("コ", "ko"),
-    ("サ", "sa"), ("シ", "shi"), ("ス", "su"), ("セ", "se"), ("ソ", "so"),
-    ("タ", "ta"), ("チ", "chi"), ("ツ", "tsu"), ("テ", "te"), ("ト", "to"),
-    ("ナ", "na"), ("ニ", "ni"), ("ヌ", "nu"), ("ネ", "ne"), ("ノ", "no"),
-    ("ハ", "ha"), ("ヒ", "hi"), ("フ", "fu"), ("ヘ", "he"), ("ホ", "ho"),
-    ("マ", "ma"), ("ミ", "mi"), ("ム", "mu"), ("メ", "me"), ("モ", "mo"),
-    ("ヤ", "ya"), ("ユ", "yu"), ("ヨ", "yo"),
-    ("ラ", "ra"), ("リ", "ri"), ("ル", "ru"), ("レ", "re"), ("ロ", "ro"),
-    ("ワ", "wa"), ("ヰ", "wi"), ("ヱ", "we"), ("ヲ", "wo"), ("ン", "n"),
-    ("ガ", "ga"), ("ギ", "gi"), ("グ", "gu"), ("ゲ", "ge"), ("ゴ", "go"),
-    ("ザ", "za"), ("ジ", "ji"), ("ズ", "zu"), ("ゼ", "ze"), ("ゾ", "zo"),
-    ("ダ", "da"), ("ヂ", "di"), ("ヅ", "du"), ("デ", "de"), ("ド", "do"),
-    ("バ", "ba"), ("ビ", "bi"), ("ブ", "bu"), ("ベ", "be"), ("ボ", "bo"),
-    ("パ", "pa"), ("ピ", "pi"), ("プ", "pu"), ("ペ", "pe"), ("ポ", "po"),
-    ("ヴ", "vu"), ("ァ", "~a"), ("ィ", "~i"), ("ゥ", "~u"), ("ェ", "~e"), ("ォ", "~o"),
-    ("ャ", "~ya"), ("ュ", "~yu"), ("ョ", "~yo"),
+    ("キャ", "kya"),
+    ("キュ", "kyu"),
+    ("キョ", "kyo"),
+    ("シャ", "sha"),
+    ("シュ", "shu"),
+    ("ショ", "sho"),
+    ("チャ", "cha"),
+    ("チュ", "chu"),
+    ("チョ", "cho"),
+    ("ニャ", "nya"),
+    ("ニュ", "nyu"),
+    ("ニョ", "nyo"),
+    ("ヒャ", "hya"),
+    ("ヒュ", "hyu"),
+    ("ヒョ", "hyo"),
+    ("ミャ", "mya"),
+    ("ミュ", "myu"),
+    ("ミョ", "myo"),
+    ("リャ", "rya"),
+    ("リュ", "ryu"),
+    ("リョ", "ryo"),
+    ("ギャ", "gya"),
+    ("ギュ", "gyu"),
+    ("ギョ", "gyo"),
+    ("ジャ", "ja"),
+    ("ジュ", "ju"),
+    ("ジョ", "jo"),
+    ("ビャ", "bya"),
+    ("ビュ", "byu"),
+    ("ビョ", "byo"),
+    ("ピャ", "pya"),
+    ("ピュ", "pyu"),
+    ("ピョ", "pyo"),
+    ("ティ", "ti"),
+    ("ディ", "di"),
+    ("ファ", "fa"),
+    ("フィ", "fi"),
+    ("フェ", "fe"),
+    ("フォ", "fo"),
+    ("ウィ", "wi"),
+    ("ウェ", "we"),
+    ("ウォ", "wo"),
+    ("シェ", "she"),
+    ("チェ", "che"),
+    ("ジェ", "je"),
+    ("ヴァ", "va"),
+    ("ヴィ", "vi"),
+    ("ヴェ", "ve"),
+    ("ヴォ", "vo"),
+    ("ア", "a"),
+    ("イ", "i"),
+    ("ウ", "u"),
+    ("エ", "e"),
+    ("オ", "o"),
+    ("カ", "ka"),
+    ("キ", "ki"),
+    ("ク", "ku"),
+    ("ケ", "ke"),
+    ("コ", "ko"),
+    ("サ", "sa"),
+    ("シ", "shi"),
+    ("ス", "su"),
+    ("セ", "se"),
+    ("ソ", "so"),
+    ("タ", "ta"),
+    ("チ", "chi"),
+    ("ツ", "tsu"),
+    ("テ", "te"),
+    ("ト", "to"),
+    ("ナ", "na"),
+    ("ニ", "ni"),
+    ("ヌ", "nu"),
+    ("ネ", "ne"),
+    ("ノ", "no"),
+    ("ハ", "ha"),
+    ("ヒ", "hi"),
+    ("フ", "fu"),
+    ("ヘ", "he"),
+    ("ホ", "ho"),
+    ("マ", "ma"),
+    ("ミ", "mi"),
+    ("ム", "mu"),
+    ("メ", "me"),
+    ("モ", "mo"),
+    ("ヤ", "ya"),
+    ("ユ", "yu"),
+    ("ヨ", "yo"),
+    ("ラ", "ra"),
+    ("リ", "ri"),
+    ("ル", "ru"),
+    ("レ", "re"),
+    ("ロ", "ro"),
+    ("ワ", "wa"),
+    ("ヰ", "wi"),
+    ("ヱ", "we"),
+    ("ヲ", "wo"),
+    ("ン", "n"),
+    ("ガ", "ga"),
+    ("ギ", "gi"),
+    ("グ", "gu"),
+    ("ゲ", "ge"),
+    ("ゴ", "go"),
+    ("ザ", "za"),
+    ("ジ", "ji"),
+    ("ズ", "zu"),
+    ("ゼ", "ze"),
+    ("ゾ", "zo"),
+    ("ダ", "da"),
+    ("ヂ", "di"),
+    ("ヅ", "du"),
+    ("デ", "de"),
+    ("ド", "do"),
+    ("バ", "ba"),
+    ("ビ", "bi"),
+    ("ブ", "bu"),
+    ("ベ", "be"),
+    ("ボ", "bo"),
+    ("パ", "pa"),
+    ("ピ", "pi"),
+    ("プ", "pu"),
+    ("ペ", "pe"),
+    ("ポ", "po"),
+    ("ヴ", "vu"),
+    ("ァ", "~a"),
+    ("ィ", "~i"),
+    ("ゥ", "~u"),
+    ("ェ", "~e"),
+    ("ォ", "~o"),
+    ("ャ", "~ya"),
+    ("ュ", "~yu"),
+    ("ョ", "~yo"),
 ];
 
 fn macron(v: char) -> char {
@@ -737,7 +991,10 @@ fn unquote(s: &str) -> Vec<char> {
 }
 
 /// Splits outside quotes at the first of `seps`.
-fn split_unquoted<'a>(s: &'a str, seps: &[&'static str]) -> Option<(&'a str, &'static str, &'a str)> {
+fn split_unquoted<'a>(
+    s: &'a str,
+    seps: &[&'static str],
+) -> Option<(&'a str, &'static str, &'a str)> {
     let mut quote = false;
     let mut escaped = false;
     for (i, c) in s.char_indices() {
@@ -779,7 +1036,8 @@ impl RuleSet {
             if t.is_empty() || t.starts_with('#') {
                 continue;
             }
-            let Some((lhs, op, rhs)) = split_unquoted(t, &["<>", "→", "←", "↔", ">", "<"]) else {
+            let Some((lhs, op, rhs)) = split_unquoted(t, &["<>", "→", "←", "↔", ">", "<"])
+            else {
                 let at = start + (stmt.len() - stmt.trim_start().len());
                 let _ = at;
                 return Err(TranslitError::Rule(
@@ -803,7 +1061,10 @@ impl RuleSet {
                 None => (unquote(rest), Vec::new()),
             };
             // the output side's context marks are dropped
-            let out_chars: Vec<char> = unquote(to).into_iter().filter(|c| *c != '{' && *c != '}' && *c != '|').collect();
+            let out_chars: Vec<char> = unquote(to)
+                .into_iter()
+                .filter(|c| *c != '{' && *c != '}' && *c != '|')
+                .collect();
             let rule = Rule {
                 ante,
                 key,
@@ -833,7 +1094,10 @@ impl RuleSet {
             // a rule matching whatever an earlier one matches is masked
             // (U_RULE_MASK_ERROR)
             if let Some(i) = rules.iter().position(|r| {
-                r.ante.ends_with(&rule.ante) && rule.key.starts_with(&r.key) && r.post.is_empty() && rule.post.is_empty()
+                r.ante.ends_with(&rule.ante)
+                    && rule.key.starts_with(&r.key)
+                    && r.post.is_empty()
+                    && rule.post.is_empty()
                     || (r.ante == rule.ante && r.key == rule.key && r.post == rule.post)
             }) {
                 return Err(TranslitError::Rule(
@@ -870,11 +1134,13 @@ impl RuleSet {
                 if k == 0 || i + k > c.len() || c[i..i + k] != r.key[..] {
                     continue;
                 }
-                if !r.ante.is_empty() && (i < r.ante.len() || c[i - r.ante.len()..i] != r.ante[..]) {
+                if !r.ante.is_empty() && (i < r.ante.len() || c[i - r.ante.len()..i] != r.ante[..])
+                {
                     continue;
                 }
                 if !r.post.is_empty()
-                    && (i + k + r.post.len() > c.len() || c[i + k..i + k + r.post.len()] != r.post[..])
+                    && (i + k + r.post.len() > c.len()
+                        || c[i + k..i + k + r.post.len()] != r.post[..])
                 {
                     continue;
                 }

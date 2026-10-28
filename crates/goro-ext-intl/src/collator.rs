@@ -5,7 +5,9 @@
 use std::cmp::Ordering;
 use std::rc::Rc;
 
-use intl::unicode::collate::{AlternateHandling, Collator as Root, Strength as RootStrength, Tailoring};
+use intl::unicode::collate::{
+    AlternateHandling, Collator as Root, Strength as RootStrength, Tailoring,
+};
 
 use crate::locale;
 
@@ -170,11 +172,17 @@ impl Collator {
             value = DEFAULT_ATTRS[i];
         }
         let ok = match attr {
-            FRENCH_COLLATION | CASE_LEVEL | NORMALIZATION_MODE | HIRAGANA_QUATERNARY_MODE
+            FRENCH_COLLATION
+            | CASE_LEVEL
+            | NORMALIZATION_MODE
+            | HIRAGANA_QUATERNARY_MODE
             | NUMERIC_COLLATION => value == ON || value == OFF,
             ALTERNATE_HANDLING => value == SHIFTED || value == NON_IGNORABLE,
             CASE_FIRST => value == OFF || value == LOWER_FIRST || value == UPPER_FIRST,
-            STRENGTH => matches!(value, PRIMARY | SECONDARY | TERTIARY | QUATERNARY | IDENTICAL),
+            STRENGTH => matches!(
+                value,
+                PRIMARY | SECONDARY | TERTIARY | QUATERNARY | IDENTICAL
+            ),
             _ => false,
         };
         if ok {

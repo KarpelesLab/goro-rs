@@ -71,7 +71,12 @@ fn matches_with(h: &str, b: &[usize], n: &str, i: usize, eq: Eq<'_>) -> bool {
 }
 
 /// First match at or after grapheme `offset` with `eq`.
-pub fn strpos_with(h: &str, n: &str, offset: i64, eq: Eq<'_>) -> Result<Option<usize>, OffsetError> {
+pub fn strpos_with(
+    h: &str,
+    n: &str,
+    offset: i64,
+    eq: Eq<'_>,
+) -> Result<Option<usize>, OffsetError> {
     let b = boundaries(h);
     let count = b.len() - 1;
     let start = resolve_offset(count, offset)?;
@@ -79,7 +84,12 @@ pub fn strpos_with(h: &str, n: &str, offset: i64, eq: Eq<'_>) -> Result<Option<u
 }
 
 /// Last match with `eq` (offsets as [`strrpos`]).
-pub fn strrpos_with(h: &str, n: &str, offset: i64, eq: Eq<'_>) -> Result<Option<usize>, OffsetError> {
+pub fn strrpos_with(
+    h: &str,
+    n: &str,
+    offset: i64,
+    eq: Eq<'_>,
+) -> Result<Option<usize>, OffsetError> {
     let b = boundaries(h);
     let count = b.len() - 1;
     let at = resolve_offset(count, offset)?;

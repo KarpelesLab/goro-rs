@@ -62,6 +62,10 @@ pub enum ArgClass {
     String,
 }
 
+/// An argument used with two type classes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InconsistentTypes;
+
 /// A pattern error.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MsgError {
@@ -506,9 +510,12 @@ impl MessagePattern {
     }
 
     /// The arguments with their type classes, in order of appearance;
-    /// Err(()) for an argument declared with two classes.
-    pub fn arg_types(&self) -> Result<Vec<(ArgName, ArgClass)>, ()> {
-        fn walk(nodes: &[Node], out: &mut Vec<(ArgName, ArgClass)>) -> Result<(), ()> {
+    /// an error for an argument declared with two classes.
+    pub fn arg_types(&self) -> Result<Vec<(ArgName, ArgClass)>, InconsistentTypes> {
+        fn walk(
+            nodes: &[Node],
+            out: &mut Vec<(ArgName, ArgClass)>,
+        ) -> Result<(), InconsistentTypes> {
             for n in nodes {
                 if let Node::Arg(name, kind) = n {
                     let class = match kind {
@@ -521,7 +528,7 @@ impl MessagePattern {
                         ArgKind::Select(_) => ArgClass::String,
                     };
                     match out.iter().find(|(n, _)| n == name) {
-                        Some((_, c)) if *c != class => return Err(()),
+                        Some((_, c)) if *c != class => return Err(InconsistentTypes),
                         Some(_) => {}
                         None => out.push((name.clone(), class)),
                     }
@@ -644,10 +651,10 @@ fn skeleton_format(locale: &str, sk: &str) -> Option<NumberFormat> {
             let max = min + stem.chars().filter(|c| *c == '#').count() as f64;
             f.set_attribute(nf::MIN_SIGNIFICANT_DIGITS, min);
             f.set_attribute(nf::MAX_SIGNIFICANT_DIGITS, max);
-        } else if let Some(m) = stem.strip_prefix("scale/") {
-            if let Ok(v) = m.parse::<f64>() {
-                f.set_attribute(nf::MULTIPLIER, v);
-            }
+        } else if let Some(m) = stem.strip_prefix("scale/")
+            && let Ok(v) = m.parse::<f64>()
+        {
+            f.set_attribute(nf::MULTIPLIER, v);
         }
     }
     Some(f)
@@ -656,7 +663,9 @@ fn skeleton_format(locale: &str, sk: &str) -> Option<NumberFormat> {
 fn format_number(f: &NumberFormat, v: &MsgValue) -> String {
     match v {
         MsgValue::Int(i) => f.format_i64(*i).unwrap_or_default(),
-        other => f.format_f64(other.as_f64().unwrap_or(0.0)).unwrap_or_default(),
+        other => f
+            .format_f64(other.as_f64().unwrap_or(0.0))
+            .unwrap_or_default(),
     }
 }
 
@@ -703,7 +712,9 @@ fn format_nodes(
                             // (ext/intl/tests/msgfmt_format_simple_types_
                             // numeric_strings_icu72-1.phpt: 965.5 is 965)
                             let v = match (&v, style.as_deref()) {
-                                (MsgValue::Double(d), Some("integer")) => MsgValue::Int(d.trunc() as i64),
+                                (MsgValue::Double(d), Some("integer")) => {
+                                    MsgValue::Int(d.trunc() as i64)
+                                }
                                 _ => v.clone(),
                             };
                             if let Some(f) = number_format(locale, style.as_deref()) {
@@ -736,9 +747,9 @@ fn format_nodes(
                                     .find(|(s, _)| matches!(s, Selector::Keyword(k) if *k == cat))
                             })
                             .or_else(|| {
-                                cases
-                                    .iter()
-                                    .find(|(s, _)| matches!(s, Selector::Keyword(k) if k == "other"))
+                                cases.iter().find(
+                                    |(s, _)| matches!(s, Selector::Keyword(k) if k == "other"),
+                                )
                             });
                         if let Some((_, m)) = chosen {
                             let y = x - offset;
@@ -840,7 +851,12 @@ pub fn date_pattern(locale: &str, ty: &str, style: Option<&str>) -> String {
 /// Parses `text` against `pat` (`MessageFormatter::parse()`): the
 /// values of the number, date and string arguments in order of their
 /// names (dates read in the time zone `tz_id`).
-pub fn parse(locale: &str, pat: &MessagePattern, text: &str, tz_id: &str) -> Option<Vec<(ArgName, MsgValue)>> {
+pub fn parse(
+    locale: &str,
+    pat: &MessagePattern,
+    text: &str,
+    tz_id: &str,
+) -> Option<Vec<(ArgName, MsgValue)>> {
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
     let mut out: Vec<(ArgName, MsgValue)> = Vec::new();

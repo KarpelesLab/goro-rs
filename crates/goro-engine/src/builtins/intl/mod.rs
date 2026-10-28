@@ -14,8 +14,6 @@
 //! ": U_ERROR_NAME" (expected output of ext/intl/tests/formatter_fail.phpt
 //! and ini_use_exceptions_basic.phpt).
 
-#![allow(dead_code)]
-
 use std::rc::Rc;
 
 use goro_ext_intl::error as ue;
@@ -36,9 +34,9 @@ mod iter;
 mod locale;
 mod msgfmt;
 mod numfmt;
-mod text;
 mod resbundle;
 mod spoof;
+mod text;
 mod timezone;
 mod translit;
 mod uchar;
@@ -268,17 +266,6 @@ pub(crate) fn default_locale(vm: &mut Vm) -> String {
     }
 }
 
-/// A locale argument: the default locale when empty (PHP manual: "If
-/// empty string or null, the default locale is used" for most
-/// constructors).
-pub(crate) fn locale_or_default(vm: &mut Vm, s: &PhpStr) -> String {
-    if s.as_bytes().is_empty() {
-        default_locale(vm)
-    } else {
-        s.to_string_lossy()
-    }
-}
-
 // ---------------------------------------------------------------- objects
 
 /// The native data of an intl object: the value and its own error.
@@ -308,11 +295,6 @@ pub(crate) fn has_obj<T: 'static>(o: &ObjRef) -> bool {
         let any: &dyn std::any::Any = &**b;
         any.is::<IntlObj<T>>()
     })
-}
-
-/// A clone of the native value of `o`.
-pub(crate) fn peek<T: Clone + 'static>(o: &ObjRef) -> Option<T> {
-    with_obj::<T, T>(o, |x| x.v.clone())
 }
 
 /// Stores `v` as the native value of `o`.
@@ -428,14 +410,4 @@ pub(crate) fn already_constructed<T>(vm: &mut Vm, cls: &str) -> R<T> {
 /// run or failed.
 pub(crate) fn not_constructed<T>(vm: &mut Vm, cls: &str) -> R<T> {
     vm.throw("Error", &format!("Found unconstructed {cls}"))
-}
-
-/// A value as a PHP string.
-pub(crate) fn sval(s: &str) -> Value {
-    Value::from(s)
-}
-
-/// Checks that `b` is UTF-8, giving the `str`.
-pub(crate) fn utf8(b: &[u8]) -> Option<&str> {
-    std::str::from_utf8(b).ok()
 }

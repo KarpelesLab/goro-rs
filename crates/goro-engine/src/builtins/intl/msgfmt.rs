@@ -102,10 +102,14 @@ pub(crate) struct Msg {
 fn hooks() -> NativeHooks {
     NativeHooks {
         create: Some(super::numfmt::on_create),
-        clone: Some(|vm, from, to| match with_obj::<Msg, Msg>(from, |x| x.v.clone()) {
-            Some(m) => store(to, m),
-            None => super::timezone::clone_error(vm, "Cannot clone uninitialized MessageFormatter"),
-        }),
+        clone: Some(
+            |vm, from, to| match with_obj::<Msg, Msg>(from, |x| x.v.clone()) {
+                Some(m) => store(to, m),
+                None => {
+                    super::timezone::clone_error(vm, "Cannot clone uninitialized MessageFormatter")
+                }
+            },
+        ),
         ..Default::default()
     }
 }
@@ -214,9 +218,9 @@ fn date_ms(vm: &mut Vm, v: &Value) -> R<Option<f64>> {
     Ok(match v {
         Value::Int(i) => Some(*i as f64 * 1000.0),
         Value::Float(f) => Some(f * 1000.0),
-        Value::Str(s) if goro_runtime::numeric::is_numeric_str(s.as_bytes()) => Some(
-            goro_runtime::convert::str_to_float(s.as_bytes()) * 1000.0,
-        ),
+        Value::Str(s) if goro_runtime::numeric::is_numeric_str(s.as_bytes()) => {
+            Some(goro_runtime::convert::str_to_float(s.as_bytes()) * 1000.0)
+        }
         Value::Object(o) => {
             if let Some(dt) = super::super::date::peek_dt(o) {
                 let (ts, us) = (dt.ts, dt.us);
@@ -248,7 +252,7 @@ fn convert_args(
 ) -> R<Result<Vec<(ArgName, MsgValue)>, Vec<u8>>> {
     let types = match m.pat.arg_types() {
         Ok(t) => t,
-        Err(()) => return Ok(Err("Inconsistent types declared for an argument".into())),
+        Err(_) => return Ok(Err("Inconsistent types declared for an argument".into())),
     };
     let mut out = Vec::new();
     for (k, v) in values.iter() {
@@ -263,7 +267,10 @@ fn convert_args(
             Key::Str(s) => match std::str::from_utf8(s.as_bytes()) {
                 Ok(t) => ArgName::Name(t.to_string()),
                 Err(_) => {
-                    return Ok(Err(quoted("Invalid UTF-8 data in argument key: ", s.as_bytes())));
+                    return Ok(Err(quoted(
+                        "Invalid UTF-8 data in argument key: ",
+                        s.as_bytes(),
+                    )));
                 }
             },
         };
@@ -278,7 +285,8 @@ fn convert_args(
                 None => {
                     return Ok(Err(format!(
                         "The argument for key '{key_text}' cannot be used as a date or time"
-                    ).into_bytes()));
+                    )
+                    .into_bytes()));
                 }
             },
             ArgClass::Number => match &v {
@@ -304,13 +312,18 @@ fn convert_args(
                 Value::Str(s) => match std::str::from_utf8(s.as_bytes()) {
                     Ok(t) => MsgValue::Str(t.to_string()),
                     Err(_) => {
-                        return Ok(Err(quoted("Invalid UTF-8 data in string argument: ", s.as_bytes())));
+                        return Ok(Err(quoted(
+                            "Invalid UTF-8 data in string argument: ",
+                            s.as_bytes(),
+                        )));
                     }
                 },
                 Value::Int(i) if class == ArgClass::Any => MsgValue::Int(*i),
                 Value::Float(f) if class == ArgClass::Any => MsgValue::Double(*f),
                 Value::Int(i) => MsgValue::Str(i.to_string()),
-                Value::Float(f) => MsgValue::Str(vm.to_php_str(&Value::Float(*f))?.to_string_lossy()),
+                Value::Float(f) => {
+                    MsgValue::Str(vm.to_php_str(&Value::Float(*f))?.to_string_lossy())
+                }
                 Value::Bool(b) => MsgValue::Int(*b as i64),
                 Value::Null => MsgValue::Str(String::new()),
                 Value::Object(o) => {
@@ -321,7 +334,10 @@ fn convert_args(
                         match std::str::from_utf8(s.as_bytes()) {
                             Ok(t) => MsgValue::Str(t.to_string()),
                             Err(_) => {
-                                return Ok(Err(quoted("Invalid UTF-8 data in string argument: ", s.as_bytes())));
+                                return Ok(Err(quoted(
+                                    "Invalid UTF-8 data in string argument: ",
+                                    s.as_bytes(),
+                                )));
                             }
                         }
                     } else {
@@ -355,7 +371,9 @@ fn quoted(prefix: &str, b: &[u8]) -> Vec<u8> {
 fn date_hook(vm: &mut Vm, locale: &str) -> impl Fn(&str, Option<&str>, f64) -> String + use<> {
     let tz = super::super::date::default_tz(vm);
     let locale = locale.to_string();
-    move |ty: &str, style: Option<&str>, ms: f64| super::datehook::format(&locale, &tz, ty, style, ms)
+    move |ty: &str, style: Option<&str>, ms: f64| {
+        super::datehook::format(&locale, &tz, ty, style, ms)
+    }
 }
 
 fn do_format(vm: &mut Vm, m: &Msg, values: &PhpArray) -> R<Result<String, Vec<u8>>> {
@@ -428,7 +446,12 @@ fn m_parse(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (o, off, m) = msg_of(vm, a)?;
     reset_obj::<Msg>(vm, &o);
     let text = String::from_utf8_lossy(a.bytes(off)).into_owned();
-    match mf::parse(&m.locale, &m.pat, &text, &super::super::date::default_tz(vm).name()) {
+    match mf::parse(
+        &m.locale,
+        &m.pat,
+        &text,
+        &super::super::date::default_tz(vm).name(),
+    ) {
         Some(v) => Ok(to_php(v)),
         None => {
             fail_obj::<Msg>(vm, a, &o, ue::U_PARSE_ERROR, "Parsing failed")?;
@@ -451,7 +474,12 @@ fn m_parse_message(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     };
     let text = String::from_utf8_lossy(a.bytes(2)).into_owned();
-    match mf::parse(&m.locale, &m.pat, &text, &super::super::date::default_tz(vm).name()) {
+    match mf::parse(
+        &m.locale,
+        &m.pat,
+        &text,
+        &super::super::date::default_tz(vm).name(),
+    ) {
         Some(v) => Ok(to_php(v)),
         None => {
             fail(vm, a, ue::U_PARSE_ERROR, "Parsing failed")?;

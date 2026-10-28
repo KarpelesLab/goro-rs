@@ -91,7 +91,13 @@ pub(crate) fn new_iterator(
 /// A parts iterator over the break iterator `bi` (PHP's parts iterators
 /// move their break iterator: ext/intl/tests/cpbi_parts_iterator.phpt).
 pub(crate) fn new_parts_iterator(vm: &mut Vm, bi: ObjRef, key_type: i64) -> R<ObjRef> {
-    let o = new_iterator(vm, "IntlPartsIterator", Vec::new(), Some(bi.clone()), Vec::new())?;
+    let o = new_iterator(
+        vm,
+        "IntlPartsIterator",
+        Vec::new(),
+        Some(bi.clone()),
+        Vec::new(),
+    )?;
     with_obj::<IterData, ()>(&o, |x| x.v.parts = Some((key_type, None)));
     Ok(o)
 }
@@ -113,7 +119,8 @@ fn parts_set(o: &ObjRef, cur: Option<(usize, usize, usize, i64)>) {
 }
 
 fn parts_cur(o: &ObjRef) -> Option<(usize, usize, usize, i64)> {
-    with_obj::<IterData, Option<(usize, usize, usize, i64)>>(o, |x| x.v.parts.and_then(|(_, c)| c)).flatten()
+    with_obj::<IterData, Option<(usize, usize, usize, i64)>>(o, |x| x.v.parts.and_then(|(_, c)| c))
+        .flatten()
 }
 
 fn state<U>(vm: &mut Vm, a: &Args, f: impl FnOnce(&mut IterData) -> U) -> R<U> {
@@ -132,7 +139,9 @@ fn it_current(vm: &mut Vm, a: &mut Args) -> R<Value> {
             None => Value::Null,
         });
     }
-    state(vm, a, |s| s.items.get(s.pos).map_or(Value::Null, |(_, v)| v.clone()))
+    state(vm, a, |s| {
+        s.items.get(s.pos).map_or(Value::Null, |(_, v)| v.clone())
+    })
 }
 
 fn it_key(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -147,11 +156,17 @@ fn it_key(vm: &mut Vm, a: &mut Args) -> R<Value> {
             None => Value::Null,
         });
     }
-    state(vm, a, |s| s.items.get(s.pos).map_or(Value::Null, |(k, _)| k.clone()))
+    state(vm, a, |s| {
+        s.items.get(s.pos).map_or(Value::Null, |(k, _)| k.clone())
+    })
 }
 
 fn parts_advance(o: &ObjRef, bi: &ObjRef, first: bool) {
-    let idx = if first { 0 } else { parts_cur(o).map_or(0, |c| c.0 + 1) };
+    let idx = if first {
+        0
+    } else {
+        parts_cur(o).map_or(0, |c| c.0 + 1)
+    };
     let next = super::breakiter::advance(bi, first).map(|(l, r, st)| (idx, l, r, st));
     parts_set(o, next);
 }
@@ -189,7 +204,9 @@ fn it_valid(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn it_break_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    state(vm, a, |s| s.source.clone().map_or(Value::Null, Value::Object))
+    state(vm, a, |s| {
+        s.source.clone().map_or(Value::Null, Value::Object)
+    })
 }
 
 fn it_rule_status(vm: &mut Vm, a: &mut Args) -> R<Value> {

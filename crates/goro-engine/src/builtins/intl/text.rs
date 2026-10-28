@@ -26,7 +26,10 @@ pub static MODULE: Module = Module {
             "function normalizer_get_raw_decomposition(string $string, int $form = Normalizer::FORM_C): ?string",
             n_raw_decomposition,
         ),
-        ("function grapheme_strlen(string $string): int|false|null", g_strlen),
+        (
+            "function grapheme_strlen(string $string): int|false|null",
+            g_strlen,
+        ),
         (
             "function grapheme_strpos(string $haystack, string $needle, int $offset = 0, string $locale = \"\"): int|false",
             g_strpos,
@@ -212,7 +215,12 @@ fn n_raw_decomposition(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let s = match std::str::from_utf8(b) {
         Ok(s) => s,
         Err(_) => {
-            fail(vm, a, ue::U_ILLEGAL_ARGUMENT_ERROR, "Code point out of range")?;
+            fail(
+                vm,
+                a,
+                ue::U_ILLEGAL_ARGUMENT_ERROR,
+                "Code point out of range",
+            )?;
             return Ok(Value::Null);
         }
     };
@@ -285,20 +293,37 @@ fn offset_error<T>(vm: &mut Vm, a: &Args) -> R<T> {
 /// The comparison of a search: exact bytes, or a collator's equality
 /// (at secondary strength for the case-insensitive functions, ICU's
 /// string search), None for an unusable locale.
-fn search_eq(vm: &mut Vm, a: &Args, li: usize, ci: bool) -> R<Option<Box<dyn Fn(&str, &str) -> bool>>> {
+fn search_eq(
+    vm: &mut Vm,
+    a: &Args,
+    li: usize,
+    ci: bool,
+) -> R<Option<Box<dyn Fn(&str, &str) -> bool>>> {
     let loc = a.str(li).to_string_lossy();
     if !ci && loc.is_empty() {
         return Ok(Some(Box::new(|x: &str, y: &str| x == y)));
     }
     let lang = goro_ext_intl::locale::parse(&loc).language;
     if lang.len() > 8 {
-        fail(vm, a, ue::U_ILLEGAL_ARGUMENT_ERROR, "Error creating search object")?;
+        fail(
+            vm,
+            a,
+            ue::U_ILLEGAL_ARGUMENT_ERROR,
+            "Error creating search object",
+        )?;
         return Ok(None);
     }
-    let id = if loc.is_empty() { super::default_locale(vm) } else { loc };
+    let id = if loc.is_empty() {
+        super::default_locale(vm)
+    } else {
+        loc
+    };
     let mut c = goro_ext_intl::collator::Collator::new(&id);
     if ci {
-        c.set_attribute(goro_ext_intl::collator::STRENGTH, goro_ext_intl::collator::SECONDARY);
+        c.set_attribute(
+            goro_ext_intl::collator::STRENGTH,
+            goro_ext_intl::collator::SECONDARY,
+        );
     }
     Ok(Some(Box::new(move |x: &str, y: &str| {
         x == y || c.compare(x, y) == std::cmp::Ordering::Equal
@@ -372,7 +397,11 @@ fn strstr(vm: &mut Vm, a: &Args, ci: bool) -> R<Value> {
     match gr::strpos_with(h, n, 0, &*eq) {
         Ok(Some(i)) => {
             let at = gr::boundaries(h)[i];
-            let r = if a.bool_or(2, false) { &h[..at] } else { &h[at..] };
+            let r = if a.bool_or(2, false) {
+                &h[..at]
+            } else {
+                &h[at..]
+            };
             Ok(Value::from(r))
         }
         _ => Ok(Value::Bool(false)),
