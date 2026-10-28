@@ -204,7 +204,10 @@ impl Vm {
             }
             b"zend.assertions" => self.ini.assertions = goro_runtime::convert::str_to_int(v),
             b"include_path" => self.ini.include_path = PhpStr::new(v),
-            b"memory_limit" => self.ini.memory_limit = parse_size(v),
+            b"memory_limit" => {
+                self.ini.memory_limit = parse_size(v);
+                self.apply_memory_limit();
+            }
             b"implicit_flush" => self.out.implicit_flush = ini_truthy(v),
             b"zend.enable_gc" => self.gc_enabled = ini_truthy(v),
             _ => {}
@@ -278,6 +281,7 @@ impl Vm {
     /// Runs a script with PHP's end-of-request sequence; returns the exit
     /// status.
     pub fn run_script(&mut self, src: &[u8], path: &[u8]) -> i32 {
+        self.arm_memory_limit();
         // PHP manual (php.ini directives): auto_prepend_file and
         // auto_append_file are parsed before/after the main file, as with
         // require.
@@ -460,6 +464,119 @@ fn ini_truthy(v: &[u8]) -> bool {
         b"1" | b"on" | b"yes" | b"true" => true,
         b"" | b"0" | b"off" | b"no" | b"false" | b"none" => false,
         _ => goro_runtime::convert::str_to_int(&l) != 0,
+    }
+}
+
+// ------------------------------------------------------------ memory_limit
+
+static MEM_VM: std::sync::atomic::AtomicPtr<Vm> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+/// Heap use when the script started: the limit counts from there.
+static MEM_BASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The allocation that crossed the limit.
+static MEM_TRIED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// `--unlimited-mem`: no backstop with memory_limit=-1.
+static MEM_UNLIMITED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The cap applied when memory_limit is -1 (unlimited): a backstop
+/// against runaway scripts, lifted by `--unlimited-mem`.
+pub const MEM_BACKSTOP: i64 = 4 << 30;
+
+/// `--unlimited-mem`: memory_limit=-1 really means unlimited.
+pub fn set_unlimited_memory(on: bool) {
+    MEM_UNLIMITED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The allocator hook: remembers the request; when the headroom is gone
+/// too, reports the fatal error and ends the process at once.
+fn memory_hook(size: usize, hard: bool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    MEM_TRIED.store(size, Relaxed);
+    if !hard {
+        return;
+    }
+    let p = MEM_VM.load(Relaxed);
+    if !p.is_null() {
+        // SAFETY: the VM outlives the script run that armed the hook; the
+        // process ends here, so nothing observes the state afterwards.
+        let vm = unsafe { &mut *p };
+        let msg = vm.memory_exhausted_msg(size);
+        let file = vm.cur_file();
+        let line = vm.cur_line();
+        vm.display_error(super::errors::E_ERROR, &msg, &file, line);
+        let pending: Vec<u8> = vm
+            .out
+            .buffers
+            .iter()
+            .flat_map(|b| b.data.iter().copied())
+            .collect();
+        vm.out.write_stdout(&pending);
+        vm.out.flush();
+    } else {
+        eprintln!("Fatal error: Allowed memory size exhausted (tried to allocate {size} bytes)");
+    }
+    std::process::exit(255);
+}
+
+impl Vm {
+    /// Starts enforcing memory_limit for this script (PHP manual:
+    /// memory_limit).
+    pub fn arm_memory_limit(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        MEM_VM.store(self as *mut Vm, Relaxed);
+        MEM_BASE.store(goro_runtime::mem::used(), Relaxed);
+        goro_runtime::mem::set_hook(memory_hook);
+        self.apply_memory_limit();
+    }
+
+    /// The effective limit in bytes (the backstop for -1, `None` when
+    /// really unlimited).
+    fn effective_memory_limit(&self) -> Option<i64> {
+        let l = self.ini.memory_limit;
+        if l >= 0 {
+            Some(l)
+        } else if MEM_UNLIMITED.load(std::sync::atomic::Ordering::Relaxed) {
+            None
+        } else {
+            Some(MEM_BACKSTOP)
+        }
+    }
+
+    /// Re-arms the allocator limit after a memory_limit change.
+    pub(crate) fn apply_memory_limit(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if MEM_VM.load(Relaxed).is_null() {
+            return;
+        }
+        let base = MEM_BASE.load(Relaxed);
+        let lim = self
+            .effective_memory_limit()
+            .map(|l| base.saturating_add(l as usize));
+        goro_runtime::mem::set_limit(lim);
+    }
+
+    /// Heap bytes the script uses (counted from its start).
+    pub fn memory_in_use(&self) -> usize {
+        goro_runtime::mem::used()
+            .saturating_sub(MEM_BASE.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    fn memory_exhausted_msg(&self, size: usize) -> String {
+        format!(
+            "Allowed memory size of {} bytes exhausted (tried to allocate {} bytes)",
+            self.effective_memory_limit().unwrap_or(MEM_BACKSTOP),
+            size
+        )
+    }
+
+    /// The fatal error for a crossed memory_limit, at a safe point.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn memory_exhausted(&mut self) -> super::Unwind {
+        goro_runtime::mem::take_pending();
+        let size = MEM_TRIED.load(std::sync::atomic::Ordering::Relaxed);
+        let msg = self.memory_exhausted_msg(size);
+        self.fatal(&msg)
     }
 }
 

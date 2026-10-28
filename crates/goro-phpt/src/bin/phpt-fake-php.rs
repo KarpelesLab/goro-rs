@@ -8,6 +8,8 @@
 //!   script path
 //! - `stdin`: copy standard input to standard output
 //! - `sleep SECS`, `exit CODE`, `crash` (abort)
+//! - `alloc MB`: allocates and touches MB megabytes, then prints
+//!   "allocated" (fails under the runner's address-space limit)
 //! - `touch PATH`, `rm PATH`, `exists PATH`: files relative to the script
 //! - `flaky PATH`: prints "first" and creates PATH, or "second" if it exists
 //!
@@ -96,6 +98,16 @@ fn main() {
             )),
             "exit" => std::process::exit(rest.parse().unwrap_or(0)),
             "crash" => std::process::abort(),
+            "alloc" => {
+                let n: usize = rest.parse::<usize>().unwrap_or(1) << 20;
+                let mut v: Vec<u8> = Vec::new();
+                if v.try_reserve_exact(n).is_err() {
+                    println!("allocation refused");
+                    std::process::exit(3);
+                }
+                v.resize(n, 1);
+                println!("allocated {}", v.iter().step_by(4096).count());
+            }
             "touch" => std::fs::write(dir.join(rest), b"").unwrap(),
             "rm" => {
                 let _ = std::fs::remove_file(dir.join(rest));

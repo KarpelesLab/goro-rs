@@ -1378,7 +1378,8 @@ impl<'a> Compiler<'a> {
                 Some(k) => self.expr(k)?,
                 None => NONE,
             };
-            if it.by_ref {
+            // `[&$this]` holds the object (test ext/xml/tests/bug76874).
+            if it.by_ref && !matches!(it.value.kind, ExprKind::Variable(b"this")) {
                 self.nullsafe_ref_check(&it.value)?;
                 let r = self.ref_of(&it.value)?;
                 self.free(k);
