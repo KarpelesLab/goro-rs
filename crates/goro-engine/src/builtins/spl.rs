@@ -2333,7 +2333,12 @@ pub fn new_ext_iter(
 fn ext_iter(vm: &mut Vm, a: &Args, op: u8) -> Option<R<Value>> {
     let o = a.this_obj();
     let (t, pos, step, mut state) = with(o, |d: &mut ExtIter| {
-        (d.target.clone(), d.pos, d.step, std::mem::take(&mut d.state))
+        (
+            d.target.clone(),
+            d.pos,
+            d.step,
+            std::mem::take(&mut d.state),
+        )
     })?;
     let r = match op {
         0 => step(vm, &t, pos, ExtIterOp::Valid, &mut state),

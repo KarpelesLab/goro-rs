@@ -153,12 +153,15 @@ pub fn compile_xsd(
             if already {
                 continue;
             }
-            let loaded = loader.load(None, &loc, base.as_deref()).ok().and_then(|bytes| {
-                parse_doc(&mut a, &bytes, Some(&full), loader, || {
-                    error(Domain::SchemasP, 1761, "")
-                })
+            let loaded = loader
+                .load(None, &loc, base.as_deref())
                 .ok()
-            });
+                .and_then(|bytes| {
+                    parse_doc(&mut a, &bytes, Some(&full), loader, || {
+                        error(Domain::SchemasP, 1761, "")
+                    })
+                    .ok()
+                });
             match loaded {
                 Some(nr) => roots.push(nr),
                 // A failed import is only a warning in libxml; a failed
@@ -178,11 +181,7 @@ pub fn compile_xsd(
     if !errors.is_empty() {
         return Err(errors);
     }
-    xsd::parse(&a, &roots).map_err(|v| {
-        v.iter()
-            .map(|m| error(Domain::SchemasP, 1761, m))
-            .collect()
-    })
+    xsd::parse(&a, &roots).map_err(|v| v.iter().map(|m| error(Domain::SchemasP, 1761, m)).collect())
 }
 
 /// Compiles a RELAX NG schema (`url`: its location, `None` for a string
@@ -201,11 +200,8 @@ pub fn compile_rng(
             &format!("xmlRelaxNGParse: could not parse {what}"),
         )
     })?;
-    relaxng::compile(&mut a, root, loader).map_err(|v| {
-        v.iter()
-            .map(|m| error(Domain::RelaxNgP, 1018, m))
-            .collect()
-    })
+    relaxng::compile(&mut a, root, loader)
+        .map_err(|v| v.iter().map(|m| error(Domain::RelaxNgP, 1018, m)).collect())
 }
 
 #[cfg(test)]
@@ -215,7 +211,12 @@ mod tests {
 
     struct NoLoad;
     impl EntityLoader for NoLoad {
-        fn load(&mut self, _: Option<&str>, _: &str, _: Option<&str>) -> Result<Vec<u8>, LoadError> {
+        fn load(
+            &mut self,
+            _: Option<&str>,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Vec<u8>, LoadError> {
             Err(LoadError::NotFound)
         }
     }

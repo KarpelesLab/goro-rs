@@ -181,11 +181,14 @@ struct Scope {
     start: Vec<(Option<String>, P)>,
 }
 
+/// One `define` or `start` body with its `combine` method.
+type Part = (Option<String>, P);
+
 struct Compiler<'a> {
     a: &'a mut Arena,
     loader: &'a mut dyn EntityLoader,
     /// Define bodies by index (combine method, patterns).
-    bodies: Vec<(String, Vec<(Option<String>, P)>)>,
+    bodies: Vec<(String, Vec<Part>)>,
     scopes: Vec<Scope>,
     errors: Vec<String>,
     depth: usize,
@@ -271,7 +274,9 @@ impl Compiler<'_> {
     fn name_class(&mut self, k: &str, n: NodeId, ctx: &Ctx, attribute: bool) -> Rc<NameClass> {
         let ctx = self.ctx_of(n, ctx);
         let except = |me: &mut Self| -> Option<Rc<NameClass>> {
-            let ex = rng_children(me.a, n).into_iter().find(|(k, _)| k == "except")?;
+            let ex = rng_children(me.a, n)
+                .into_iter()
+                .find(|(k, _)| k == "except")?;
             let mut out: Option<Rc<NameClass>> = None;
             for (k2, c2) in rng_children(me.a, ex.1) {
                 let nc = me.name_class(&k2, c2, &ctx, attribute);
@@ -307,7 +312,11 @@ impl Compiler<'_> {
     fn qname(&self, n: NodeId, t: &str, ctx: &Ctx, attribute: bool) -> Rc<NameClass> {
         match t.split_once(':') {
             Some((p, l)) => {
-                let ns = self.a.lookup_ns(n, Some(p)).map(|s| s.to_string()).unwrap_or_default();
+                let ns = self
+                    .a
+                    .lookup_ns(n, Some(p))
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
                 Rc::new(NameClass::Name(ns, l.to_string()))
             }
             // Unprefixed attribute names are in no namespace unless the
@@ -352,7 +361,7 @@ impl Compiler<'_> {
                     },
                 };
                 let mut content: Option<P> = None;
-                for (k2, c2) in rest.to_vec() {
+                for (k2, c2) in rest.iter().cloned() {
                     let p = self.pattern(&k2, c2, &ctx, scope);
                     content = Some(match content {
                         Some(o) => group(o, p),
@@ -426,7 +435,7 @@ impl Compiler<'_> {
                 let ex = rng_children(self.a, n)
                     .into_iter()
                     .find(|(k, _)| k == "except")
-                    .map(|(_, e)| self.fold(e, &ctx, scope, |a, b| choice(a, b)));
+                    .map(|(_, e)| self.fold(e, &ctx, scope, choice));
                 Rc::new(Pat::Data(dt, ex))
             }
             "value" => {
@@ -448,11 +457,16 @@ impl Compiler<'_> {
                     Some((root, url)) => {
                         let mut c2 = self.ctx_of(root, &ctx);
                         c2.base = url;
-                        let k2 = self.a.element(root).map(|e| e.name.local.to_string()).unwrap_or_default();
+                        let k2 = self
+                            .a
+                            .element(root)
+                            .map(|e| e.name.local.to_string())
+                            .unwrap_or_default();
                         self.pattern(&k2, root, &c2, scope)
                     }
                     None => {
-                        self.errors.push(format!("xmlRelaxNGParse: could not load {href}"));
+                        self.errors
+                            .push(format!("xmlRelaxNGParse: could not load {href}"));
                         not_allowed()
                     }
                 }
@@ -470,10 +484,13 @@ impl Compiler<'_> {
 
     fn combine(&mut self, parts: Vec<(Option<String>, P)>, what: &str) -> P {
         if parts.is_empty() {
-            self.errors.push(format!("xmlRelaxNGParse: {what} has no definition"));
+            self.errors
+                .push(format!("xmlRelaxNGParse: {what} has no definition"));
             return not_allowed();
         }
-        let interleaved = parts.iter().any(|(c, _)| c.as_deref() == Some("interleave"));
+        let interleaved = parts
+            .iter()
+            .any(|(c, _)| c.as_deref() == Some("interleave"));
         let mut out: Option<P> = None;
         for (_, p) in parts {
             out = Some(match out {
@@ -518,9 +535,7 @@ impl Compiler<'_> {
                         continue;
                     }
                     let comb = trimmed(self.a, c, "combine");
-                    let p = self.group_of(c, &cctx, scope).unwrap_or_else(|| {
-                        not_allowed()
-                    });
+                    let p = self.group_of(c, &cctx, scope).unwrap_or_else(not_allowed);
                     let i = self.index(scope, &name);
                     self.bodies[i].1.push((comb, p));
                 }
@@ -537,7 +552,8 @@ impl Compiler<'_> {
                             self.grammar(root, &ictx, scope, &names, start);
                         }
                         None => {
-                            self.errors.push(format!("xmlRelaxNGParse: could not load {href}"));
+                            self.errors
+                                .push(format!("xmlRelaxNGParse: could not load {href}"));
                         }
                     }
                     self.grammar(c, &cctx, scope, skip, skip_start);
@@ -655,7 +671,9 @@ impl V<'_> {
         }
         match &**p {
             Pat::Empty | Pat::Text => true,
-            Pat::Group(a, b) | Pat::Interleave(a, b) => self.nullable_d(a, d + 1) && self.nullable_d(b, d + 1),
+            Pat::Group(a, b) | Pat::Interleave(a, b) => {
+                self.nullable_d(a, d + 1) && self.nullable_d(b, d + 1)
+            }
             Pat::Choice(a, b) => self.nullable_d(a, d + 1) || self.nullable_d(b, d + 1),
             Pat::OneOrMore(a) => self.nullable_d(a, d + 1),
             Pat::Ref(i) => self.nullable_d(&self.deref(*i), d + 1),
@@ -673,7 +691,9 @@ impl V<'_> {
 
     fn start_open(&self, p: &P, ns: &str, local: &str) -> P {
         match &**p {
-            Pat::Choice(a, b) => choice(self.start_open(a, ns, local), self.start_open(b, ns, local)),
+            Pat::Choice(a, b) => {
+                choice(self.start_open(a, ns, local), self.start_open(b, ns, local))
+            }
             Pat::Element(nc, c) => {
                 if nc.contains(ns, local) {
                     after(c.clone(), empty())
@@ -684,8 +704,12 @@ impl V<'_> {
             Pat::Interleave(a, b) => {
                 let (a1, b1) = (a.clone(), b.clone());
                 choice(
-                    self.apply_after(&self.start_open(a, ns, local), &move |x| interleave(x, b1.clone())),
-                    self.apply_after(&self.start_open(b, ns, local), &move |x| interleave(a1.clone(), x)),
+                    self.apply_after(&self.start_open(a, ns, local), &move |x| {
+                        interleave(x, b1.clone())
+                    }),
+                    self.apply_after(&self.start_open(b, ns, local), &move |x| {
+                        interleave(a1.clone(), x)
+                    }),
                 )
             }
             Pat::OneOrMore(a) => {
@@ -696,7 +720,9 @@ impl V<'_> {
             }
             Pat::Group(a, b) => {
                 let b1 = b.clone();
-                let x = self.apply_after(&self.start_open(a, ns, local), &move |y| group(y, b1.clone()));
+                let x = self.apply_after(&self.start_open(a, ns, local), &move |y| {
+                    group(y, b1.clone())
+                });
                 if self.nullable(a) {
                     choice(x, self.start_open(b, ns, local))
                 } else {
@@ -705,7 +731,9 @@ impl V<'_> {
             }
             Pat::After(a, b) => {
                 let b1 = b.clone();
-                self.apply_after(&self.start_open(a, ns, local), &move |x| after(x, b1.clone()))
+                self.apply_after(&self.start_open(a, ns, local), &move |x| {
+                    after(x, b1.clone())
+                })
             }
             Pat::Ref(i) => self.start_open(&self.deref(*i), ns, local),
             _ => not_allowed(),
@@ -815,7 +843,11 @@ impl V<'_> {
                 for w in s.split_whitespace() {
                     q = self.text(&q, w);
                 }
-                if self.nullable(&q) { empty() } else { not_allowed() }
+                if self.nullable(&q) {
+                    empty()
+                } else {
+                    not_allowed()
+                }
             }
             Pat::Ref(i) => self.text(&self.deref(*i), s),
             _ => not_allowed(),
@@ -909,9 +941,17 @@ impl V<'_> {
                 let mut names = Vec::new();
                 self.element_names(p, &mut names, 0);
                 let exp = names.first().cloned().unwrap_or_default();
-                self.err(el, E_ELEMNAME, format!("Expecting element {exp}, got {local}"));
+                self.err(
+                    el,
+                    E_ELEMNAME,
+                    format!("Expecting element {exp}, got {local}"),
+                );
             } else {
-                self.err(el, E_ELEMWRONG, format!("Did not expect element {local} there"));
+                self.err(
+                    el,
+                    E_ELEMWRONG,
+                    format!("Did not expect element {local} there"),
+                );
             }
             return None;
         }
@@ -927,9 +967,17 @@ impl V<'_> {
                 match self.attr_dt(&cur, ans, &aq.local, 0) {
                     Some(dt) => {
                         if let Some(t) = dt {
-                            self.err(el, E_DATATYPE, format!("Type {t} doesn't allow value '{v}'"));
+                            self.err(
+                                el,
+                                E_DATATYPE,
+                                format!("Type {t} doesn't allow value '{v}'"),
+                            );
                         }
-                        self.err(el, E_ATTR, format!("Element {local} failed to validate attributes"));
+                        self.err(
+                            el,
+                            E_ATTR,
+                            format!("Element {local} failed to validate attributes"),
+                        );
                     }
                     None => self.err(
                         el,
@@ -943,7 +991,11 @@ impl V<'_> {
         }
         cur = self.start_close(&cur);
         if is_na(&cur) {
-            self.err(el, E_ATTR, format!("Element {local} failed to validate attributes"));
+            self.err(
+                el,
+                E_ATTR,
+                format!("Element {local} failed to validate attributes"),
+            );
             return None;
         }
         // Children: text runs merged, comments and PIs ignored.
@@ -979,11 +1031,23 @@ impl V<'_> {
             if is_na(&next) {
                 match self.datatype(&cur, 0) {
                     Some(t) => {
-                        self.err(el, E_DATATYPE, format!("Type {t} doesn't allow value '{s}'"));
+                        self.err(
+                            el,
+                            E_DATATYPE,
+                            format!("Type {t} doesn't allow value '{s}'"),
+                        );
                         self.err(el, E_DATATYPE, format!("Error validating datatype {t}"));
-                        self.err(el, E_CONTENT, format!("Element {local} failed to validate content"));
+                        self.err(
+                            el,
+                            E_CONTENT,
+                            format!("Element {local} failed to validate content"),
+                        );
                     }
-                    None => self.err(el, E_NOTEXT, format!("Did not expect text in element {local} content")),
+                    None => self.err(
+                        el,
+                        E_NOTEXT,
+                        format!("Did not expect text in element {local} content"),
+                    ),
                 }
                 return None;
             }
@@ -995,7 +1059,11 @@ impl V<'_> {
                     Child::Text(s) => {
                         let next = self.text(&cur, &s);
                         if is_na(&next) {
-                            self.err(el, E_NOTEXT, format!("Did not expect text in element {local} content"));
+                            self.err(
+                                el,
+                                E_NOTEXT,
+                                format!("Did not expect text in element {local} content"),
+                            );
                             return None;
                         }
                         cur = next;

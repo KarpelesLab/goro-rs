@@ -24,8 +24,14 @@ pub const METHODS: &[(&str, NativeFn)] = &[
     ("dom\\element::closest", closest),
     ("dom\\element::matches", matches),
     ("dom\\element::insertadjacenthtml", insert_adjacent_html),
-    ("dom\\element::getinscopenamespaces", get_in_scope_namespaces),
-    ("dom\\element::getdescendantnamespaces", get_descendant_namespaces),
+    (
+        "dom\\element::getinscopenamespaces",
+        get_in_scope_namespaces,
+    ),
+    (
+        "dom\\element::getdescendantnamespaces",
+        get_descendant_namespaces,
+    ),
     ("dom\\tokenlist::item", tl_item),
     ("dom\\tokenlist::contains", tl_contains),
     ("dom\\tokenlist::add", tl_add),
@@ -51,10 +57,7 @@ fn is_html_el(a: &Arena, n: NodeId, name: &str) -> bool {
 /// Serializes the children of `n` (HTML or XML rules by document).
 pub(crate) fn inner_html(a: &Arena, n: NodeId) -> Result<String, ()> {
     if is_html_doc(a, n) {
-        let target = a
-            .element(n)
-            .and_then(|e| e.template_contents)
-            .unwrap_or(n);
+        let target = a.element(n).and_then(|e| e.template_contents).unwrap_or(n);
         return Ok(goro_xml::html5::serialize::serialize_children(a, target));
     }
     goro_xml::modern::children_to_string(a, n, well_formed()).map_err(|_| ())
@@ -120,7 +123,9 @@ fn parse_in_context(vm: &mut Vm, ctx: NodeId, text: &str) -> R<NodeId> {
         }
         a.free_subtree(holder);
         a.free_document_if_unheld(tmp);
-        if ok { Ok(f) } else {
+        if ok {
+            Ok(f)
+        } else {
             a.free_subtree(f);
             Err(())
         }
@@ -198,7 +203,11 @@ pub(crate) fn set_outer_html(vm: &mut Vm, n: NodeId, text: &str) -> R<()> {
 fn insert_adjacent_html(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let el = this_node(vm, a)?;
     let w = match a.val(0) {
-        Value::Object(o) => s8(&vm.get_prop_raw(&o, b"value").as_str().cloned().unwrap_or_default()),
+        Value::Object(o) => s8(&vm
+            .get_prop_raw(&o, b"value")
+            .as_str()
+            .cloned()
+            .unwrap_or_default()),
         v => s8(&vm.to_php_str(&v)?),
     };
     let text = s8(&a.str(1));
@@ -277,7 +286,7 @@ pub(crate) fn title(a: &Arena, d: NodeId) -> String {
             s.push_str(x);
         }
     }
-    s.split(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c'))
+    s.split([' ', '\t', '\n', '\r', '\x0c'])
         .filter(|p| !p.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
@@ -341,18 +350,30 @@ pub(crate) fn set_body(vm: &mut Vm, d: NodeId, v: Value) -> R<()> {
         _ => None,
     };
     let Some(new) = new else {
-        return throw_dom_msg(vm, "The new body must either be a body or a frameset tag", 3);
+        return throw_dom_msg(
+            vm,
+            "The new body must either be a body or a frameset tag",
+            3,
+        );
     };
     let ok = with_arena(|a| is_html_el(a, new, "body") || is_html_el(a, new, "frameset"));
     if !ok {
-        return throw_dom_msg(vm, "The new body must either be a body or a frameset tag", 3);
+        return throw_dom_msg(
+            vm,
+            "The new body must either be a body or a frameset tag",
+            3,
+        );
     }
     let cur = with_arena(|a| body(a, d));
     if cur == Some(new) {
         return Ok(());
     }
     if with_arena(|a| a.document_element(d).is_none()) {
-        return throw_dom_msg(vm, "A body can only be set if there is a document element", 3);
+        return throw_dom_msg(
+            vm,
+            "A body can only be set if there is a document element",
+            3,
+        );
     }
     // Only documents with an html root get a body (DOM Standard note).
     if with_arena(|a| html_root(a, d).is_none()) {
@@ -370,7 +391,11 @@ pub(crate) fn set_body(vm: &mut Vm, d: NodeId, v: Value) -> R<()> {
     };
     match r {
         Ok(()) => Ok(()),
-        Err(_) => throw_dom_msg(vm, "A body can only be set if there is a document element", 3),
+        Err(_) => throw_dom_msg(
+            vm,
+            "A body can only be set if there is a document element",
+            3,
+        ),
     }
 }
 
@@ -400,7 +425,7 @@ pub(crate) fn elements_by_qname(a: &Arena, root: NodeId, name: &str) -> Vec<Node
 }
 
 fn split_ws(s: &str) -> Vec<String> {
-    s.split(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c'))
+    s.split([' ', '\t', '\n', '\r', '\x0c'])
         .filter(|p| !p.is_empty())
         .map(str::to_string)
         .collect()
@@ -475,7 +500,12 @@ fn matches(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 // ------------------------------------------------------ namespace info
 
-fn namespace_info(vm: &mut Vm, prefix: Option<String>, uri: Option<String>, el: NodeId) -> R<Value> {
+fn namespace_info(
+    vm: &mut Vm,
+    prefix: Option<String>,
+    uri: Option<String>,
+    el: NodeId,
+) -> R<Value> {
     let cls = vm.find_class(b"Dom\\NamespaceInfo", false)?.unwrap();
     let o = vm.instantiate_raw(&cls)?;
     vm.set_prop_raw(&o, b"prefix", sv_opt(prefix.as_deref()));
@@ -614,10 +644,11 @@ fn tl_el(vm: &mut Vm, a: &Args) -> R<NodeId> {
     let n = o.obj().native.borrow();
     let el = n.as_ref().and_then(|b| {
         let any: &dyn std::any::Any = &**b;
-        any.downcast_ref::<super::lists::ListObj>().and_then(|l| match l.kind {
-            ListKind::ClassList(e) => Some(e),
-            _ => None,
-        })
+        any.downcast_ref::<super::lists::ListObj>()
+            .and_then(|l| match l.kind {
+                ListKind::ClassList(e) => Some(e),
+                _ => None,
+            })
     });
     drop(n);
     match el {
@@ -643,7 +674,10 @@ fn named_token(vm: &mut Vm, a: &Args, i: usize, name: &str) -> R<String> {
         return vm.fthrow(
             a,
             "ValueError",
-            &format!("Argument #{} (${name}) must not contain any null bytes", i + 1),
+            &format!(
+                "Argument #{} (${name}) must not contain any null bytes",
+                i + 1
+            ),
         );
     }
     Ok(s8(&s))
@@ -677,7 +711,8 @@ pub(crate) fn token_dim(
         Value::Bool(b) => b as i64,
         Value::Null => 0,
         Value::Float(f) => {
-            if f.fract() != 0.0 && f.is_finite()
+            if f.fract() != 0.0
+                && f.is_finite()
                 && let Err(e) = vm.deprecated(&format!(
                     "Implicit conversion from float {} to int loses precision",
                     goro_runtime::convert::float_repr(f)
@@ -703,7 +738,11 @@ pub(crate) fn token_dim(
         other => return bad(vm, crate::class::TypeName::tname(&other)),
     };
     let t = with_arena(|ar| tokens(ar, el));
-    let found = if idx < 0 { None } else { t.get(idx as usize).cloned() };
+    let found = if idx < 0 {
+        None
+    } else {
+        t.get(idx as usize).cloned()
+    };
     Some(Ok(match op {
         ObjAccess::Isset => Value::Bool(found.is_some()),
         ObjAccess::Empty => Value::Bool(found.as_deref().is_none_or(|s| s.is_empty() || s == "0")),
@@ -841,16 +880,23 @@ fn tl_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
     )?))
 }
 
-pub(crate) fn token_iter_step(vm: &mut Vm, o: &ObjRef, pos: usize, op: ExtIterOp, state: &mut Value) -> R<Value> {
+pub(crate) fn token_iter_step(
+    vm: &mut Vm,
+    o: &ObjRef,
+    pos: usize,
+    op: ExtIterOp,
+    state: &mut Value,
+) -> R<Value> {
     let _ = vm;
     let el = {
         let n = o.obj().native.borrow();
         n.as_ref().and_then(|b| {
             let any: &dyn std::any::Any = &**b;
-            any.downcast_ref::<super::lists::ListObj>().and_then(|l| match l.kind {
-                ListKind::ClassList(e) => Some(e),
-                _ => None,
-            })
+            any.downcast_ref::<super::lists::ListObj>()
+                .and_then(|l| match l.kind {
+                    ListKind::ClassList(e) => Some(e),
+                    _ => None,
+                })
         })
     };
     let Some(el) = el else {
@@ -879,7 +925,13 @@ pub(crate) fn token_iter_step(vm: &mut Vm, o: &ObjRef, pos: usize, op: ExtIterOp
 }
 
 /// TokenList `length` / `value`.
-pub(crate) fn token_list_prop(vm: &mut Vm, el: NodeId, name: &str, is_set: bool, v: Value) -> R<Value> {
+pub(crate) fn token_list_prop(
+    vm: &mut Vm,
+    el: NodeId,
+    name: &str,
+    is_set: bool,
+    v: Value,
+) -> R<Value> {
     match (name, is_set) {
         ("length", false) => Ok(Value::Int(with_arena(|ar| tokens(ar, el)).len() as i64)),
         ("value", false) => Ok(sv(&with_arena(|ar| {

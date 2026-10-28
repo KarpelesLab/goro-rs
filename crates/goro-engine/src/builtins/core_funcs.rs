@@ -990,7 +990,9 @@ fn get_defined_constants(vm: &mut Vm, a: &mut Args) -> R<Value> {
                     groups.len() - 1
                 }
             };
-            groups[i].1.insert(Key::Str(k.clone()), vm.constants[k].clone());
+            groups[i]
+                .1
+                .insert(Key::Str(k.clone()), vm.constants[k].clone());
         }
         for (n, arr) in groups {
             out.insert(Key::from(n), Value::Array(arr));

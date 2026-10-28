@@ -1965,7 +1965,11 @@ fn declared_ns(a: &Arena, n: NodeId, recursive: bool, out: &mut Vec<(String, Str
             if let Some(q) = a.qname(at)
                 && q.ns.as_deref() == Some(goro_xml::tree::XMLNS_NS)
             {
-                let prefix = if q.prefix.is_some() { q.local.to_string() } else { String::new() };
+                let prefix = if q.prefix.is_some() {
+                    q.local.to_string()
+                } else {
+                    String::new()
+                };
                 out.push((prefix, a.attr_value(at)));
             }
         }

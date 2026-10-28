@@ -10,8 +10,8 @@ use goro_xml::tree::{DocKind, DomError, NodeData, XML_NS};
 
 use super::lists::{self, ListKind};
 use super::{
-    DocSettings, is_modern_node, node_of, node_type_num, settings, sv, sv_opt, throw_dom,
-    with_arena, with_settings,
+    DocSettings, is_modern_node, node_of, node_type_num, settings, sv, throw_dom, with_arena,
+    with_settings,
 };
 use crate::func::{Args, NativeFn};
 use crate::vm::{R, Vm};
@@ -228,7 +228,7 @@ pub(crate) fn resolve_uri(r: &str, base: Option<&str>) -> String {
         if let Some(i) = out.find("/../")
             && i > 0
         {
-            let start = out[..i].rfind('/').map_or(0, |j| j);
+            let start = out[..i].rfind('/').unwrap_or(0);
             out.replace_range(start..i + 3, "");
             continue;
         }
@@ -334,9 +334,11 @@ fn compute(a: &mut goro_xml::Arena, n: NodeId, name: &str, modern: bool) -> PV {
         "localName" => match a.data(n) {
             NodeData::Element(e) => PV::S(e.name.local.to_string()),
             NodeData::Attribute(at) => PV::S(at.name.local.to_string()),
-            NodeData::Namespace(d) => {
-                PV::S(d.prefix.as_ref().map_or("xmlns".to_string(), |p| p.to_string()))
-            }
+            NodeData::Namespace(d) => PV::S(
+                d.prefix
+                    .as_ref()
+                    .map_or("xmlns".to_string(), |p| p.to_string()),
+            ),
             _ => PV::Null,
         },
         "baseURI" => {
@@ -404,13 +406,7 @@ fn compute(a: &mut goro_xml::Arena, n: NodeId, name: &str, modern: bool) -> PV {
         "entities" => PV::List(ListKind::Entities(n)),
         "notations" => PV::List(ListKind::Notations(n)),
         "publicId" => match a.data(n) {
-            NodeData::Doctype(d) => {
-                if modern {
-                    PV::S(d.public_id.clone().unwrap_or_default())
-                } else {
-                    PV::S(d.public_id.clone().unwrap_or_default())
-                }
-            }
+            NodeData::Doctype(d) => PV::S(d.public_id.clone().unwrap_or_default()),
             NodeData::EntityDecl(e) => PV::from(e.public_id.clone()),
             NodeData::Notation(x) => PV::S(x.public_id.clone().unwrap_or_default()),
             _ => PV::Null,
@@ -429,9 +425,7 @@ fn compute(a: &mut goro_xml::Arena, n: NodeId, name: &str, modern: bool) -> PV {
             NodeData::EntityDecl(e) => PV::from(e.notation.clone()),
             _ => PV::Null,
         },
-        "actualEncoding" | "encoding" | "inputEncoding" | "characterSet" | "charset"
-            if is_doc =>
-        {
+        "actualEncoding" | "encoding" | "inputEncoding" | "characterSet" | "charset" if is_doc => {
             let e = a.doc(n).encoding.clone();
             if modern {
                 PV::S(e.unwrap_or_else(|| "UTF-8".into()))
@@ -644,15 +638,38 @@ pub(crate) fn set_prop(vm: &mut Vm, o: &ObjRef, name: &str, v: Value) -> R<()> {
     let Some(n) = node_of(o) else {
         // Read-only properties say so first (test property_write_errors).
         const WRITABLE: &[&str] = &[
-            "nodeValue", "textContent", "data", "value", "id", "className", "prefix",
-            "innerHTML", "outerHTML", "substitutedNodeValue", "formatOutput",
-            "validateOnParse", "resolveExternals", "preserveWhiteSpace", "recover",
-            "substituteEntities", "strictErrorChecking", "encoding", "version",
-            "xmlVersion", "standalone", "xmlStandalone", "documentURI", "title", "body",
-            "characterSet", "charset", "inputEncoding",
+            "nodeValue",
+            "textContent",
+            "data",
+            "value",
+            "id",
+            "className",
+            "prefix",
+            "innerHTML",
+            "outerHTML",
+            "substitutedNodeValue",
+            "formatOutput",
+            "validateOnParse",
+            "resolveExternals",
+            "preserveWhiteSpace",
+            "recover",
+            "substituteEntities",
+            "strictErrorChecking",
+            "encoding",
+            "version",
+            "xmlVersion",
+            "standalone",
+            "xmlStandalone",
+            "documentURI",
+            "title",
+            "body",
+            "characterSet",
+            "charset",
+            "inputEncoding",
         ];
         let cls = vm.class_of(o);
-        let entity = matches!(name, "encoding" | "version") && vm.instance_of_lname(&cls, b"domentity");
+        let entity =
+            matches!(name, "encoding" | "version") && vm.instance_of_lname(&cls, b"domentity");
         if !WRITABLE.contains(&name) || entity {
             return readonly(vm);
         }
@@ -662,7 +679,7 @@ pub(crate) fn set_prop(vm: &mut Vm, o: &ObjRef, name: &str, v: Value) -> R<()> {
     let is_doc = with_arena(|a| matches!(a.data(n), NodeData::Document(_)));
     if is_doc {
         let b = matches!(v, Value::Bool(true));
-        let done = match name {
+        match name {
             "formatOutput" => with_settings(n, |s| s.format_output = b),
             "validateOnParse" => with_settings(n, |s| s.validate_on_parse = b),
             "resolveExternals" => with_settings(n, |s| s.resolve_externals = b),
@@ -673,8 +690,7 @@ pub(crate) fn set_prop(vm: &mut Vm, o: &ObjRef, name: &str, v: Value) -> R<()> {
             _ => {
                 return super::document::set_doc_prop(vm, o, n, name, v, modern);
             }
-        };
-        let _ = done;
+        }
         return Ok(());
     }
     let s = match &v {
@@ -719,7 +735,10 @@ pub(crate) fn set_prop(vm: &mut Vm, o: &ObjRef, name: &str, v: Value) -> R<()> {
         }
         "prefix" => {
             let c = vm.class_of(o).name.to_string_lossy();
-            return vm.throw("Error", &format!("Cannot modify readonly property {c}::$prefix"));
+            return vm.throw(
+                "Error",
+                &format!("Cannot modify readonly property {c}::$prefix"),
+            );
         }
         _ => return readonly(vm),
     }
@@ -780,7 +799,8 @@ pub(crate) fn debug_props(vm: &mut Vm, o: &ObjRef) -> Option<PhpArray> {
 fn get_prop_quiet(vm: &mut Vm, o: &ObjRef, name: &str) -> R<Value> {
     if matches!(name, "config" | "actualEncoding")
         || (matches!(name, "encoding" | "version")
-            && node_of(o).is_some_and(|n| with_arena(|a| matches!(a.data(n), NodeData::EntityDecl(_)))))
+            && node_of(o)
+                .is_some_and(|n| with_arena(|a| matches!(a.data(n), NodeData::EntityDecl(_)))))
     {
         return Ok(Value::Null);
     }

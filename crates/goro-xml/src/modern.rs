@@ -417,7 +417,11 @@ impl W<'_> {
         let empty = arena.first_child(n).is_none() && e.template_contents.is_none();
         // LIBXML_NOEMPTYTAG applies to void HTML elements too (test
         // modern/spec/xml_serialize_LIBXML_NOEMPTYTAG.phpt).
-        if ns.as_deref() == Some(HTML_NS) && empty && is_void(&e.name.local) && !self.opts.no_empty_tags {
+        if ns.as_deref() == Some(HTML_NS)
+            && empty
+            && is_void(&e.name.local)
+            && !self.opts.no_empty_tags
+        {
             self.out.push_str(" />");
             return;
         }

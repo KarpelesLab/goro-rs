@@ -8,9 +8,9 @@ use goro_xml::NodeId;
 use goro_xml::tree::{DomError, NodeData, QName};
 
 use super::super::libxml::PhpLoader;
+use super::document::NameCheck as NC;
 use super::xmlstore;
 use super::{legacy_error, modern_fn, s8, sv, this_node, throw_dom, with_arena, wrap_node};
-use super::document::NameCheck as NC;
 use crate::func::{Args, NativeFn};
 use crate::vm::{R, Vm};
 
@@ -81,7 +81,11 @@ fn substring_data(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(off) = check_offset(vm, a, n, a.int(0), c.len())? else {
         return Ok(Value::Bool(false));
     };
-    let count = if modern_fn(a) { ulong(vm, a.int(1))? } else { a.int(1) };
+    let count = if modern_fn(a) {
+        ulong(vm, a.int(1))?
+    } else {
+        a.int(1)
+    };
     if count < 0 {
         legacy_error(vm, a, n, DomError::IndexSize)?;
         return Ok(Value::Bool(false));
@@ -111,7 +115,11 @@ fn edit(vm: &mut Vm, a: &Args, off: i64, count: i64, insert: &str) -> R<Value> {
     let Some(off) = check_offset(vm, a, n, off, c.len())? else {
         return Ok(Value::Bool(false));
     };
-    let count = if modern_fn(a) { ulong(vm, count)? } else { count };
+    let count = if modern_fn(a) {
+        ulong(vm, count)?
+    } else {
+        count
+    };
     if count < 0 && !modern_fn(a) {
         legacy_error(vm, a, n, DomError::IndexSize)?;
         return Ok(Value::Bool(false));
@@ -148,7 +156,11 @@ fn split_text(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = chars(&data_of(n));
     let off = a.int(0);
     if off < 0 && modern_fn(a) {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($offset) must be greater than or equal to 0");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #1 ($offset) must be greater than or equal to 0",
+        );
     }
     if off < 0 || off as usize > c.len() {
         if modern_fn(a) {
@@ -211,7 +223,9 @@ fn is_id(vm: &mut Vm, a: &mut Args) -> R<Value> {
         ar.attr(n).is_some_and(|d| d.is_id)
             || (ar.qname(n).is_some_and(|q| q.is("xml:id")))
             || (super::is_modern_node(ar, n)
-                && ar.qname(n).is_some_and(|q| q.ns.is_none() && &*q.local == "id"))
+                && ar
+                    .qname(n)
+                    .is_some_and(|q| q.ns.is_none() && &*q.local == "id"))
     })))
 }
 
@@ -231,7 +245,9 @@ fn attr_rename(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 && let Some(other) = ar.get_attr_node_ns(el, q.ns.as_deref(), &q.local)
                 && other != n
             {
-                return Err("An attribute with the given name in the given namespace already exists".into());
+                return Err(
+                    "An attribute with the given name in the given namespace already exists".into(),
+                );
             }
             ar.attr_mut(n).unwrap().name = q;
         } else {

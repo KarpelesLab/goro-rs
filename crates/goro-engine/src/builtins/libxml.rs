@@ -260,7 +260,9 @@ pub fn report(
     for e in errors {
         // The parse-time "no DTD found" error is only recorded (observed
         // on PHP 8.5).
-        if suppressed(e, flags) || (e.domain == Domain::Valid && e.code == 522 && !e.message.ends_with('\n')) {
+        if suppressed(e, flags)
+            || (e.domain == Domain::Valid && e.code == 522 && !e.message.ends_with('\n'))
+        {
             continue;
         }
         show(vm, fname, e, style, input)?;
@@ -410,7 +412,10 @@ fn callable_name(vm: &mut Vm, cb: &Value) -> String {
                 Some(Value::Str(s)) => s.to_string_lossy(),
                 _ => String::new(),
             };
-            format!("{c}::{}", m.map(|m| m.to_string_lossy()).unwrap_or_default())
+            format!(
+                "{c}::{}",
+                m.map(|m| m.to_string_lossy()).unwrap_or_default()
+            )
         }
         _ => "{closure}".to_string(),
     }

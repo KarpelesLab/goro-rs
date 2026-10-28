@@ -9,14 +9,13 @@ use goro_xml::tree::{DocKind, DomError, NodeData, NsDecl, QName, XMLNS_NS};
 use goro_xml::{Arena, NodeId};
 
 use super::NOT_ID;
+use super::document::NameCheck as NC;
 use super::lists::ListKind;
 use super::node::{LegacyInsertError, legacy_insert, modern_insert};
 use super::xmlstore;
 use super::{
-    arg_node, legacy_error, modern_fn, node_of, s8, sv, sv_opt, this_node, throw_dom,
-    throw_dom_msg, with_arena, wrap_node, wrap_opt,
+    arg_node, legacy_error, modern_fn, node_of, s8, sv, this_node, throw_dom, with_arena, wrap_node,
 };
-use super::document::NameCheck as NC;
 use crate::func::{Args, NativeFn};
 use crate::vm::{R, Vm};
 
@@ -40,7 +39,10 @@ pub const METHODS: &[(&str, NativeFn)] = &[
     ("domelement::setidattributenode", set_id_attribute_node),
     ("domelement::toggleattribute", toggle_attribute),
     ("domelement::getelementsbytagname", get_elements_by_tag_name),
-    ("domelement::getelementsbytagnamens", get_elements_by_tag_name_ns),
+    (
+        "domelement::getelementsbytagnamens",
+        get_elements_by_tag_name_ns,
+    ),
     ("domelement::insertadjacentelement", insert_adjacent_element),
     ("domelement::insertadjacenttext", insert_adjacent_text),
     ("domelement::append", append),
@@ -77,10 +79,22 @@ pub const METHODS: &[(&str, NativeFn)] = &[
     ("dom\\element::setidattributens", set_id_attribute_ns),
     ("dom\\element::setidattributenode", set_id_attribute_node),
     ("dom\\element::toggleattribute", toggle_attribute),
-    ("dom\\element::getelementsbytagname", get_elements_by_tag_name),
-    ("dom\\element::getelementsbytagnamens", get_elements_by_tag_name_ns),
-    ("dom\\element::getelementsbyclassname", super::modern::get_elements_by_class_name),
-    ("dom\\element::insertadjacentelement", insert_adjacent_element),
+    (
+        "dom\\element::getelementsbytagname",
+        get_elements_by_tag_name,
+    ),
+    (
+        "dom\\element::getelementsbytagnamens",
+        get_elements_by_tag_name_ns,
+    ),
+    (
+        "dom\\element::getelementsbyclassname",
+        super::modern::get_elements_by_class_name,
+    ),
+    (
+        "dom\\element::insertadjacentelement",
+        insert_adjacent_element,
+    ),
     ("dom\\element::insertadjacenttext", insert_adjacent_text),
     ("dom\\element::append", append),
     ("dom\\element::prepend", prepend),
@@ -93,8 +107,14 @@ pub const METHODS: &[(&str, NativeFn)] = &[
     ("dom\\documentfragment::append", append),
     ("dom\\documentfragment::prepend", prepend),
     ("dom\\documentfragment::replacechildren", replace_children),
-    ("dom\\documentfragment::queryselector", super::modern::query_selector),
-    ("dom\\documentfragment::queryselectorall", super::modern::query_selector_all),
+    (
+        "dom\\documentfragment::queryselector",
+        super::modern::query_selector,
+    ),
+    (
+        "dom\\documentfragment::queryselectorall",
+        super::modern::query_selector_all,
+    ),
     ("dom\\characterdata::before", before),
     ("dom\\characterdata::after", after),
     ("dom\\characterdata::replacewith", replace_with),
@@ -154,7 +174,9 @@ fn lower_names(ar: &Arena, el: NodeId) -> bool {
 fn find_attr(ar: &Arena, el: NodeId, name: &str, modern: bool) -> Option<NodeId> {
     if modern && lower_names(ar, el) {
         let l = name.to_ascii_lowercase();
-        return ar.attrs(el).find(|&at| ar.qname(at).is_some_and(|q| q.is(&l)));
+        return ar
+            .attrs(el)
+            .find(|&at| ar.qname(at).is_some_and(|q| q.is(&l)));
     }
     ar.get_attr_node(el, name)
 }
@@ -426,7 +448,8 @@ fn remove_attribute_node(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let el = this_node(vm, a)?;
     let at = arg_node(vm, a, 0)?;
     let modern = modern_fn(a);
-    let ok = with_arena(|ar| ar.parent(at) == Some(el) && matches!(ar.data(at), NodeData::Attribute(_)));
+    let ok =
+        with_arena(|ar| ar.parent(at) == Some(el) && matches!(ar.data(at), NodeData::Attribute(_)));
     if !ok {
         if modern {
             return throw_dom(vm, DomError::NotFound);
@@ -465,7 +488,10 @@ fn set_attribute(vm: &mut Vm, a: &mut Args) -> R<Value> {
             } else {
                 name.clone()
             };
-            match ar.attrs(el).find(|&at| ar.qname(at).is_some_and(|q| q.is(&n))) {
+            match ar
+                .attrs(el)
+                .find(|&at| ar.qname(at).is_some_and(|q| q.is(&n)))
+            {
                 Some(at) => ar.set_attr_value(at, &value),
                 None => {
                     let doc = ar.doc_of(el);
@@ -512,22 +538,26 @@ fn set_attribute_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let qn = s8(&a.str(1));
     let value = s8(&a.str(2));
     let modern = modern_fn(a);
-    let q = match super::document::validate_and_extract(ns.as_deref(), &qn, if modern { NC::Modern } else { NC::Legacy }) {
+    let q = match super::document::validate_and_extract(
+        ns.as_deref(),
+        &qn,
+        if modern { NC::Modern } else { NC::Legacy },
+    ) {
         Ok(q) => q,
         Err(e) if modern => return throw_dom(vm, e),
         Err(e) => return legacy_error(vm, a, el, e),
     };
     if modern {
-        with_arena(|ar| {
-            match ar.get_attr_node_ns(el, q.ns.as_deref(), &q.local) {
+        with_arena(
+            |ar| match ar.get_attr_node_ns(el, q.ns.as_deref(), &q.local) {
                 Some(at) => ar.set_attr_value(at, &value),
                 None => {
                     let doc = ar.doc_of(el);
                     let at = ar.new_attribute(doc, q.clone(), &value);
                     ar.raw_append_attr(el, at);
                 }
-            }
-        });
+            },
+        );
         return Ok(Value::Null);
     }
     let r = with_arena(|ar| -> Result<(), DomError> {
@@ -543,7 +573,11 @@ fn set_attribute_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 Some(q.local.to_string())
             };
             let e = ar.element_mut(el).ok_or(DomError::NotSupported)?;
-            match e.ns_decls.iter_mut().find(|d| d.prefix.as_deref() == p.as_deref()) {
+            match e
+                .ns_decls
+                .iter_mut()
+                .find(|d| d.prefix.as_deref() == p.as_deref())
+            {
                 Some(d) => {
                     if d.uri.is_empty() || p.is_none() {
                         d.uri = value.as_str().into();
@@ -692,7 +726,8 @@ pub(crate) fn set_attribute_node_raw(
         let old = if ns_variant || modern {
             ar.get_attr_node_ns(el, q.ns.as_deref(), &q.local)
         } else {
-            ar.attrs(el).find(|&x| ar.qname(x).is_some_and(|k| k.local == q.local))
+            ar.attrs(el)
+                .find(|&x| ar.qname(x).is_some_and(|k| k.local == q.local))
         };
         if let Some(o) = old {
             if o == at {
@@ -915,9 +950,8 @@ pub(crate) fn set_prefix(vm: &mut Vm, n: NodeId, prefix: &str) -> R<()> {
             match ar.parent(n) {
                 Some(p) => p,
                 None => {
-                    match ar.data_mut_qname(n) {
-                        Some(qq) => qq.prefix = new_p.map(Into::into),
-                        None => {}
+                    if let Some(qq) = ar.data_mut_qname(n) {
+                        qq.prefix = new_p.map(Into::into);
                     }
                     return Ok(());
                 }
@@ -1001,7 +1035,10 @@ pub(crate) fn reconcile_after_insert(ar: &mut Arena, n: NodeId) {
     if ctx_ok {
         for el in subtree_elements(ar, n) {
             let p = ar.parent(el).unwrap_or(parent);
-            let decls = ar.element(el).map(|e| e.ns_decls.clone()).unwrap_or_default();
+            let decls = ar
+                .element(el)
+                .map(|e| e.ns_decls.clone())
+                .unwrap_or_default();
             let mut keep: Vec<NsDecl> = Vec::new();
             for d in decls {
                 if ar.lookup_ns(p, d.prefix.as_deref()).as_deref() == Some(&*d.uri) {
@@ -1010,11 +1047,12 @@ pub(crate) fn reconcile_after_insert(ar: &mut Arena, n: NodeId) {
                 // The same namespace under another prefix in scope: names
                 // switch to it (an unprefixed binding only serves elements).
                 let other = search_by_href(ar, p, &d.uri, false);
-                let usable = d.prefix.is_none() && match &other {
-                    Some(Some(_)) => true,
-                    Some(None) => !subtree_attr_uses(ar, el, &d),
-                    None => false,
-                };
+                let usable = d.prefix.is_none()
+                    && match &other {
+                        Some(Some(_)) => true,
+                        Some(None) => !subtree_attr_uses(ar, el, &d),
+                        None => false,
+                    };
                 if usable {
                     let to = other.unwrap();
                     repoint(ar, el, &d, to);
@@ -1060,7 +1098,11 @@ fn repoint(ar: &mut Arena, el: NodeId, d: &NsDecl, to: Option<goro_xml::Str>) {
                 q.prefix = to.clone();
             }
         }
-        stack.extend(ar.children(x).filter(|&c| ar.is_element(c)).collect::<Vec<_>>());
+        stack.extend(
+            ar.children(x)
+                .filter(|&c| ar.is_element(c))
+                .collect::<Vec<_>>(),
+        );
     }
     ar.touch();
 }
@@ -1080,10 +1122,11 @@ pub(crate) fn declare_dangling(ar: &mut Arena, root: NodeId) {
             }
             let uri = q.ns.clone().unwrap();
             match q.prefix.as_deref() {
-                Some(p) if ar.lookup_ns(el, Some(p)).is_none()
-                    || !ar
-                        .element(el)
-                        .is_some_and(|e| e.ns_decls.iter().any(|d| d.prefix.as_deref() == Some(p))) =>
+                Some(p)
+                    if ar.lookup_ns(el, Some(p)).is_none()
+                        || !ar.element(el).is_some_and(|e| {
+                            e.ns_decls.iter().any(|d| d.prefix.as_deref() == Some(p))
+                        }) =>
                 {
                     let e = ar.element_mut(el).unwrap();
                     e.ns_decls.retain(|d| d.prefix.as_deref() != Some(p));
@@ -1136,7 +1179,10 @@ pub(crate) fn reconcile_tree(ar: &mut Arena, tree: NodeId) {
     if !ar.is_element(tree) || ar.is_modern(ar.doc_of(tree)) {
         return;
     }
-    let mut cache: Vec<((Option<goro_xml::Str>, goro_xml::Str), Option<goro_xml::Str>)> = Vec::new();
+    let mut cache: Vec<(
+        (Option<goro_xml::Str>, goro_xml::Str),
+        Option<goro_xml::Str>,
+    )> = Vec::new();
     for el in subtree_elements(ar, tree) {
         for x in ns_users(ar, el) {
             let q = ar.qname(x).unwrap().clone();
@@ -1209,7 +1255,10 @@ fn no_nul(vm: &mut Vm, a: &Args, i: usize, name: &str) -> R<()> {
         return vm.fthrow(
             a,
             "ValueError",
-            &format!("Argument #{} (${name}) must not contain any null bytes", i + 1),
+            &format!(
+                "Argument #{} (${name}) must not contain any null bytes",
+                i + 1
+            ),
         );
     }
     Ok(())
@@ -1220,7 +1269,12 @@ pub(crate) fn get_elements_by_tag_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = this_node(vm, a)?;
     let name = s8(&a.str(0));
     let modern = modern_fn(a);
-    super::lists::new_list_owned(vm, ListKind::TagName(n, name), modern, Some(a.this_obj().clone()))
+    super::lists::new_list_owned(
+        vm,
+        ListKind::TagName(n, name),
+        modern,
+        Some(a.this_obj().clone()),
+    )
 }
 
 pub(crate) fn get_elements_by_tag_name_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1230,7 +1284,12 @@ pub(crate) fn get_elements_by_tag_name_ns(vm: &mut Vm, a: &mut Args) -> R<Value>
     let ns = a.opt_str(0).map(|s| s8(&s));
     let local = s8(&a.str(1));
     let modern = modern_fn(a);
-    super::lists::new_list_owned(vm, ListKind::TagNameNS(n, ns, local), modern, Some(a.this_obj().clone()))
+    super::lists::new_list_owned(
+        vm,
+        ListKind::TagNameNS(n, ns, local),
+        modern,
+        Some(a.this_obj().clone()),
+    )
 }
 
 /// `insertAdjacent*` positions.
@@ -1270,10 +1329,12 @@ fn insert_adjacent(el: NodeId, node: NodeId, w: u8, modern: bool) -> Result<bool
     let r = if modern {
         modern_insert(p, node, before).map(|_| ())
     } else {
-        legacy_insert(p, node, before).map(|_| ()).map_err(|e| match e {
-            LegacyInsertError::Dom(d) => d,
-            _ => DomError::HierarchyRequest,
-        })
+        legacy_insert(p, node, before)
+            .map(|_| ())
+            .map_err(|e| match e {
+                LegacyInsertError::Dom(d) => d,
+                _ => DomError::HierarchyRequest,
+            })
     };
     r.map(|_| true)
 }
@@ -1317,7 +1378,11 @@ fn insert_adjacent_text(vm: &mut Vm, a: &mut Args) -> R<Value> {
 /// The nodes of a variadic `Node|string ...$nodes` argument: strings
 /// become text nodes. With `into_fragment`, several nodes are gathered in
 /// a fragment (DOM Standard "convert nodes into a node").
-fn convert_nodes(vm: &mut Vm, a: &Args, ctx: NodeId) -> R<(Vec<NodeId>, Vec<super::xmlstore::NodeHold>)> {
+fn convert_nodes(
+    vm: &mut Vm,
+    a: &Args,
+    ctx: NodeId,
+) -> R<(Vec<NodeId>, Vec<super::xmlstore::NodeHold>)> {
     let mut out = Vec::new();
     let mut holds = Vec::new();
     let doc = with_arena(|ar| ar.doc_of(ctx));
@@ -1342,7 +1407,9 @@ fn convert_nodes(vm: &mut Vm, a: &Args, ctx: NodeId) -> R<(Vec<NodeId>, Vec<supe
                         ),
                     );
                 };
-                let is_attr = with_arena(|ar| matches!(ar.data(n), NodeData::Attribute(_) | NodeData::Namespace(_)));
+                let is_attr = with_arena(|ar| {
+                    matches!(ar.data(n), NodeData::Attribute(_) | NodeData::Namespace(_))
+                });
                 if is_attr {
                     return throw_dom(vm, DomError::HierarchyRequest);
                 }
@@ -1377,8 +1444,7 @@ fn same_doc(n: NodeId, doc: NodeId) -> bool {
     xmlstore::with(|s| {
         let nd = s.arena.doc_of(n);
         nd == doc
-            || s
-                .docs
+            || s.docs
                 .get(&nd)
                 .and_then(|d| d.peek::<super::DocSettings>())
                 .is_some_and(|d| d.hidden)
@@ -1598,7 +1664,8 @@ fn append_xml(vm: &mut Vm, a: &mut Args) -> R<Value> {
             modern,
             ..Default::default()
         };
-        let (top, errs, ok) = goro_xml::xml::parse_fragment(&mut s.arena, f, data.as_bytes(), &opts);
+        let (top, errs, ok) =
+            goro_xml::xml::parse_fragment(&mut s.arena, f, data.as_bytes(), &opts);
         if !ok {
             // Nothing is added from content that is not well-formed.
             for n in top {
@@ -1620,24 +1687,4 @@ fn append_xml(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Some(data.as_bytes()),
     )?;
     Ok(Value::Bool(ok))
-}
-
-/// Kept for callers that expect namespace-free names.
-pub(crate) fn html_doc(ar: &Arena, n: NodeId) -> bool {
-    ar.doc(ar.doc_of(n)).kind == DocKind::Html5
-}
-
-/// Throws a DOMException message (used by the `Dom\` setters).
-pub(crate) fn dom_msg<T>(vm: &mut Vm, msg: &str, code: i64) -> R<T> {
-    throw_dom_msg(vm, msg, code)
-}
-
-/// The value of an optional string as a PHP value.
-pub(crate) fn opt_sv(v: Option<String>) -> Value {
-    sv_opt(v.as_deref())
-}
-
-/// Wraps an optional node.
-pub(crate) fn wrap_maybe(vm: &mut Vm, n: Option<NodeId>) -> R<Value> {
-    wrap_opt(vm, n)
 }

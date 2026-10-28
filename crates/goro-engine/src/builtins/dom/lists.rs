@@ -154,7 +154,12 @@ pub fn new_list(vm: &mut Vm, kind: ListKind, modern: bool) -> R<Value> {
 }
 
 /// A new collection object taken from node object `owner`.
-pub fn new_list_owned(vm: &mut Vm, kind: ListKind, modern: bool, owner: Option<ObjRef>) -> R<Value> {
+pub fn new_list_owned(
+    vm: &mut Vm,
+    kind: ListKind,
+    modern: bool,
+    owner: Option<ObjRef>,
+) -> R<Value> {
     let cls = vm
         .find_class(class_for(&kind, modern).as_bytes(), false)?
         .unwrap();
@@ -272,13 +277,7 @@ fn compute_items(s: &mut xmlstore::Store, kind: &ListKind, modern: bool) -> Vec<
             }
         }
         ListKind::ChildElements(n) => a.children(*n).filter(|&c| a.is_element(c)).collect(),
-        ListKind::Attrs(n) => {
-            if modern {
-                a.attrs(*n).collect()
-            } else {
-                a.attrs(*n).collect()
-            }
-        }
+        ListKind::Attrs(n) => a.attrs(*n).collect(),
         ListKind::TagName(root, name) => {
             if modern {
                 super::modern::elements_by_qname(a, *root, name)
@@ -345,7 +344,13 @@ fn iter_step(vm: &mut Vm, o: &ObjRef, pos: usize, op: ExtIterOp, state: &mut Val
     if let Some((ListKind::Children(parent), false)) = list_of(o) {
         let cur = match state {
             Value::Null => {
-                let f = with_arena(|a| if a.is_live(parent) { a.first_child(parent) } else { None });
+                let f = with_arena(|a| {
+                    if a.is_live(parent) {
+                        a.first_child(parent)
+                    } else {
+                        None
+                    }
+                });
                 *state = Value::Int(f.map_or(-1, |n| n.index() as i64));
                 f
             }
@@ -529,25 +534,32 @@ fn list_dim(
     );
     let is_collection = matches!(
         kind,
-        ListKind::TagName(..) | ListKind::TagNameNS(..) | ListKind::ClassName(..) | ListKind::ChildElements(_)
+        ListKind::TagName(..)
+            | ListKind::TagNameNS(..)
+            | ListKind::ClassName(..)
+            | ListKind::ChildElements(_)
     ) && modern;
     let named_ok = is_map || is_collection;
     let k = match key.deref() {
         Value::Int(i) => DimKey::Index(i),
         Value::Float(f) => {
-            if f.fract() != 0.0 && f.is_finite() {
-                if let Err(e) = vm.deprecated(&format!(
+            if f.fract() != 0.0
+                && f.is_finite()
+                && let Err(e) = vm.deprecated(&format!(
                     "Implicit conversion from float {} to int loses precision",
                     goro_runtime::convert::float_repr(f)
-                )) {
-                    return Some(Err(e));
-                }
+                ))
+            {
+                return Some(Err(e));
             }
             DimKey::Index(f as i64)
         }
         Value::Str(s) => match goro_runtime::array::canonical_int(s.as_bytes()).or_else(|| {
             let t = std::str::from_utf8(s.as_bytes()).ok()?;
-            let f: f64 = t.trim_start_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']).parse().ok()?;
+            let f: f64 = t
+                .trim_start_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c'])
+                .parse()
+                .ok()?;
             Some(f as i64)
         }) {
             Some(i) => DimKey::Index(i),
@@ -597,7 +609,8 @@ fn list_dim(
             with_arena(|ar| {
                 if let Some(el) = html_el.filter(|&el| super::props::html_upper(ar, el)) {
                     let lower = name.to_ascii_lowercase();
-                    ar.attrs(el).find(|&at| ar.qname(at).is_some_and(|q| q.is(&lower)))
+                    ar.attrs(el)
+                        .find(|&at| ar.qname(at).is_some_and(|q| q.is(&lower)))
                 } else if is_collection {
                     v.into_iter().find(|&n| {
                         ar.get_attribute(n, "id").as_deref() == Some(name.as_str())
@@ -627,8 +640,7 @@ pub fn list_hooks() -> NativeHooks {
         dim: Some(list_dim),
         count: Some(|vm, o| {
             if let Some((ListKind::ClassList(el), _)) = list_of(o) {
-                return match super::modern::token_list_prop(vm, el, "length", false, Value::Null)?
-                {
+                return match super::modern::token_list_prop(vm, el, "length", false, Value::Null)? {
                     Value::Int(n) => Ok(n),
                     _ => Ok(0),
                 };

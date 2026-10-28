@@ -5,7 +5,7 @@
 
 use goro_runtime::{ObjRef, PhpStr, Value};
 use goro_xml::NodeId;
-use goro_xml::tree::{DocKind, DomError, NodeData, QName, XMLNS_NS, XML_NS};
+use goro_xml::tree::{DocKind, DomError, NodeData, QName, XML_NS, XMLNS_NS};
 use goro_xml::xml::{ParseOptions, opt};
 
 use super::super::libxml::{self, PhpLoader, Style};
@@ -14,9 +14,9 @@ use super::{
     DocSettings, arg_node, legacy_error, modern_fn, node_of, opt_arg_node, s8, settings, sv,
     this_node, throw_dom, throw_dom_msg, with_arena, with_settings, wrap_node, wrap_opt,
 };
-use NameCheck as NC;
 use crate::func::{Args, NativeFn};
-use crate::vm::{R, Unwind, Vm};
+use crate::vm::{R, Vm};
+use NameCheck as NC;
 
 pub const METHODS: &[(&str, NativeFn)] = &[
     ("domdocument::__construct", construct),
@@ -31,8 +31,14 @@ pub const METHODS: &[(&str, NativeFn)] = &[
     ("domdocument::createdocumentfragment", create_fragment),
     ("domdocument::createentityreference", create_entity_ref),
     ("domdocument::getelementbyid", get_element_by_id),
-    ("domdocument::getelementsbytagname", super::element::get_elements_by_tag_name),
-    ("domdocument::getelementsbytagnamens", super::element::get_elements_by_tag_name_ns),
+    (
+        "domdocument::getelementsbytagname",
+        super::element::get_elements_by_tag_name,
+    ),
+    (
+        "domdocument::getelementsbytagnamens",
+        super::element::get_elements_by_tag_name_ns,
+    ),
     ("domdocument::importnode", import_node),
     ("domdocument::adoptnode", adopt_node),
     ("domdocument::load", load),
@@ -50,10 +56,16 @@ pub const METHODS: &[(&str, NativeFn)] = &[
     ("domdocument::schemavalidate", schema_validate),
     ("domdocument::schemavalidatesource", schema_validate_source),
     ("domdocument::relaxngvalidate", relaxng_validate),
-    ("domdocument::relaxngvalidatesource", relaxng_validate_source),
+    (
+        "domdocument::relaxngvalidatesource",
+        relaxng_validate_source,
+    ),
     ("domdocument::append", super::element::append),
     ("domdocument::prepend", super::element::prepend),
-    ("domdocument::replacechildren", super::element::replace_children),
+    (
+        "domdocument::replacechildren",
+        super::element::replace_children,
+    ),
     ("dom\\node::__construct", node_construct),
     ("dom\\document::createelement", create_element),
     ("dom\\document::createelementns", create_element_ns),
@@ -65,22 +77,46 @@ pub const METHODS: &[(&str, NativeFn)] = &[
     ("dom\\document::createattributens", create_attribute_ns),
     ("dom\\document::createdocumentfragment", create_fragment),
     ("dom\\document::getelementbyid", get_element_by_id),
-    ("dom\\document::getelementsbytagname", super::element::get_elements_by_tag_name),
-    ("dom\\document::getelementsbytagnamens", super::element::get_elements_by_tag_name_ns),
-    ("dom\\document::getelementsbyclassname", super::modern::get_elements_by_class_name),
+    (
+        "dom\\document::getelementsbytagname",
+        super::element::get_elements_by_tag_name,
+    ),
+    (
+        "dom\\document::getelementsbytagnamens",
+        super::element::get_elements_by_tag_name_ns,
+    ),
+    (
+        "dom\\document::getelementsbyclassname",
+        super::modern::get_elements_by_class_name,
+    ),
     ("dom\\document::importnode", import_node),
     ("dom\\document::adoptnode", adopt_node),
     ("dom\\document::registernodeclass", register_node_class),
     ("dom\\document::schemavalidate", schema_validate),
-    ("dom\\document::schemavalidatesource", schema_validate_source),
+    (
+        "dom\\document::schemavalidatesource",
+        schema_validate_source,
+    ),
     ("dom\\document::relaxngvalidate", relaxng_validate),
-    ("dom\\document::relaxngvalidatesource", relaxng_validate_source),
+    (
+        "dom\\document::relaxngvalidatesource",
+        relaxng_validate_source,
+    ),
     ("dom\\document::append", super::element::append),
     ("dom\\document::prepend", super::element::prepend),
-    ("dom\\document::replacechildren", super::element::replace_children),
+    (
+        "dom\\document::replacechildren",
+        super::element::replace_children,
+    ),
     ("dom\\document::importlegacynode", import_legacy_node),
-    ("dom\\document::queryselector", super::modern::query_selector),
-    ("dom\\document::queryselectorall", super::modern::query_selector_all),
+    (
+        "dom\\document::queryselector",
+        super::modern::query_selector,
+    ),
+    (
+        "dom\\document::queryselectorall",
+        super::modern::query_selector_all,
+    ),
     ("dom\\xmldocument::createempty", xml_create_empty),
     ("dom\\xmldocument::createfromstring", xml_create_from_string),
     ("dom\\xmldocument::createfromfile", xml_create_from_file),
@@ -90,7 +126,10 @@ pub const METHODS: &[(&str, NativeFn)] = &[
     ("dom\\xmldocument::savexml", modern_save_xml),
     ("dom\\xmldocument::savexmlfile", modern_save_xml_file),
     ("dom\\htmldocument::createempty", html_create_empty),
-    ("dom\\htmldocument::createfromstring", html_create_from_string),
+    (
+        "dom\\htmldocument::createfromstring",
+        html_create_from_string,
+    ),
     ("dom\\htmldocument::createfromfile", html_create_from_file),
     ("dom\\htmldocument::savexml", modern_save_xml),
     ("dom\\htmldocument::savexmlfile", modern_save_xml_file),
@@ -99,9 +138,15 @@ pub const METHODS: &[(&str, NativeFn)] = &[
     ("domimplementation::hasfeature", has_feature),
     ("domimplementation::createdocumenttype", impl_create_doctype),
     ("domimplementation::createdocument", impl_create_document),
-    ("dom\\implementation::createdocumenttype", impl_create_doctype),
+    (
+        "dom\\implementation::createdocumenttype",
+        impl_create_doctype,
+    ),
     ("dom\\implementation::createdocument", impl_create_document),
-    ("dom\\implementation::createhtmldocument", impl_create_html_document),
+    (
+        "dom\\implementation::createhtmldocument",
+        impl_create_html_document,
+    ),
     ("domelement::__construct", super::element::construct),
     ("domattr::__construct", attr_construct),
     ("domtext::__construct", text_construct),
@@ -182,7 +227,11 @@ pub(crate) fn replace_doc(o: &ObjRef, d: NodeId) {
             s.hidden = hidden;
         });
         xmlstore::with(|s| {
-            if s.dom_objs.get(&old).and_then(|w| w.upgrade()).is_some_and(|x| goro_runtime::ObjRef::ptr_eq(&x, o)) {
+            if s.dom_objs
+                .get(&old)
+                .and_then(|w| w.upgrade())
+                .is_some_and(|x| goro_runtime::ObjRef::ptr_eq(&x, o))
+            {
                 s.dom_objs.remove(&old);
             }
         });
@@ -308,7 +357,11 @@ fn create_element_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let ns = a.opt_str(0).map(|s| s8(&s));
     let qn = s8(&a.str(1));
     let modern = modern_fn(a);
-    let q = match validate_and_extract(ns.as_deref(), &qn, if modern { NC::Modern } else { NC::Legacy }) {
+    let q = match validate_and_extract(
+        ns.as_deref(),
+        &qn,
+        if modern { NC::Modern } else { NC::Legacy },
+    ) {
         Ok(q) => q,
         Err(e) if modern => return throw_dom(vm, e),
         Err(e) => return legacy_error(vm, a, d, e),
@@ -352,11 +405,7 @@ fn create_cdata(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if modern_fn(a) {
         let html = with_arena(|ar| ar.doc(d).kind == DocKind::Html5);
         if html {
-            return throw_dom_msg(
-                vm,
-                "This operation is not supported for HTML documents",
-                9,
-            );
+            return throw_dom_msg(vm, "This operation is not supported for HTML documents", 9);
         }
         if t.contains("]]>") {
             return throw_dom_msg(vm, "Invalid character sequence \"]]>\" in CDATA section", 5);
@@ -378,7 +427,11 @@ fn create_pi(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return legacy_error(vm, a, d, DomError::InvalidCharacter);
     }
     if modern && data.contains("?>") {
-        return throw_dom_msg(vm, "Invalid character sequence \"?>\" in processing instruction", 5);
+        return throw_dom_msg(
+            vm,
+            "Invalid character sequence \"?>\" in processing instruction",
+            5,
+        );
     }
     let n = with_arena(|ar| {
         ar.create(
@@ -416,7 +469,11 @@ fn create_attribute_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let ns = a.opt_str(0).map(|s| s8(&s));
     let qn = s8(&a.str(1));
     let modern = modern_fn(a);
-    let q = match validate_and_extract(ns.as_deref(), &qn, if modern { NC::Modern } else { NC::Legacy }) {
+    let q = match validate_and_extract(
+        ns.as_deref(),
+        &qn,
+        if modern { NC::Modern } else { NC::Legacy },
+    ) {
         Ok(q) => q,
         Err(e) if modern => return throw_dom(vm, e),
         Err(e) => return legacy_error(vm, a, d, e),
@@ -471,7 +528,11 @@ fn get_element_by_id(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let modern = modern_fn(a);
     let _ = modern;
     let r = xmlstore::with(|s| {
-        let els: Vec<NodeId> = s.arena.descendants(d).filter(|&e| s.arena.is_element(e)).collect();
+        let els: Vec<NodeId> = s
+            .arena
+            .descendants(d)
+            .filter(|&e| s.arena.is_element(e))
+            .collect();
         els.into_iter().find(|&e| {
             let attrs: Vec<NodeId> = s.arena.attrs(e).collect();
             attrs
@@ -633,10 +694,21 @@ fn register_node_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
         );
     };
     let root = vm
-        .find_class(if modern { b"Dom\\Node" as &[u8] } else { b"DOMNode" }, false)?
+        .find_class(
+            if modern {
+                b"Dom\\Node" as &[u8]
+            } else {
+                b"DOMNode"
+            },
+            false,
+        )?
         .unwrap();
     if modern && bc.has_flag(crate::class::cflags::ABSTRACT) && bc.is_subclass_of(&root) {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($baseClass) must not be an abstract class");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #1 ($baseClass) must not be an abstract class",
+        );
     }
     if !bc.is_subclass_of(&root) || !bc.has_flag(crate::class::cflags::INTERNAL) {
         return vm.fthrow(
@@ -878,7 +950,13 @@ pub(crate) fn parse_xml(
         let doc = xmlstore::with(|s| {
             let d = s.arena.new_document(DocKind::Xml);
             let src = tmp.doc(b.doc).clone();
-            *s.arena.doc_mut(d) = goro_xml::tree::DocData { holds: 0, doctype: None, ext_subset: None, ids: Default::default(), ..src };
+            *s.arena.doc_mut(d) = goro_xml::tree::DocData {
+                holds: 0,
+                doctype: None,
+                ext_subset: None,
+                ids: Default::default(),
+                ..src
+            };
             let kids: Vec<NodeId> = tmp.children(b.doc).collect();
             for k in kids {
                 let c = s.arena.import_from(&tmp, k, d);
@@ -951,7 +1029,10 @@ fn check_path(vm: &mut Vm, a: &Args, i: usize, what: &str) -> R<Option<String>> 
         return vm.fthrow(
             a,
             "ValueError",
-            &format!("Argument #{} (${what}) must not contain any null bytes", i + 1),
+            &format!(
+                "Argument #{} (${what}) must not contain any null bytes",
+                i + 1
+            ),
         );
     }
     Ok(Some(s8(&s)))
@@ -990,7 +1071,14 @@ fn check_options(vm: &mut Vm, a: &Args, i: usize) -> R<u32> {
     Ok(o as u32)
 }
 
-fn load_common(vm: &mut Vm, a: &Args, input: &[u8], flags: u32, url: String, from_string: bool) -> R<Value> {
+fn load_common(
+    vm: &mut Vm,
+    a: &Args,
+    input: &[u8],
+    flags: u32,
+    url: String,
+    from_string: bool,
+) -> R<Value> {
     let o = a.this_obj().clone();
     let cur = node_of(&o);
     let st = cur.map(settings).unwrap_or_default();
@@ -1033,7 +1121,13 @@ fn load(vm: &mut Vm, a: &mut Args) -> R<Value> {
     load_common(vm, a, &bytes, flags, url, false)
 }
 
-fn load_html_common(vm: &mut Vm, a: &Args, input: &[u8], flags: u32, url: Option<String>) -> R<Value> {
+fn load_html_common(
+    vm: &mut Vm,
+    a: &Args,
+    input: &[u8],
+    flags: u32,
+    url: Option<String>,
+) -> R<Value> {
     let o = a.this_obj().clone();
     let cur = node_of(&o);
     let fname = a.fname();
@@ -1139,9 +1233,7 @@ fn save(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 pub(crate) fn html_bytes(n: NodeId) -> Vec<u8> {
     let format = settings(n).format_output;
-    with_arena(|ar| {
-        goro_xml::html::save_html(ar, n, goro_xml::html::HtmlSaveOptions { format })
-    })
+    with_arena(|ar| goro_xml::html::save_html(ar, n, goro_xml::html::HtmlSaveOptions { format }))
 }
 
 fn save_html(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1187,7 +1279,14 @@ fn validate(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if let Some((public, system, base)) = need {
         let mut loader = PhpLoader::new(vm, &fname);
         loader.bare = true;
-        let r = super::chardata::load_external_subset(vm, d, public.as_deref(), &system, base.as_deref(), &mut loader);
+        let r = super::chardata::load_external_subset(
+            vm,
+            d,
+            public.as_deref(),
+            &system,
+            base.as_deref(),
+            &mut loader,
+        );
         loader.finish(vm)?;
         if !r {
             let msg = format!("Could not load the external subset \"{system}\"");
@@ -1213,10 +1312,19 @@ struct XiHost<'a> {
 }
 
 impl goro_xml::xinclude::XIncludeHost for XiHost<'_> {
-    fn load(&mut self, href: &str, base: Option<&str>) -> Result<Vec<u8>, goro_xml::xml::LoadError> {
+    fn load(
+        &mut self,
+        href: &str,
+        base: Option<&str>,
+    ) -> Result<Vec<u8>, goro_xml::xml::LoadError> {
         goro_xml::xml::EntityLoader::load(&mut self.loader, None, href, base)
     }
-    fn xpath(&mut self, arena: &mut goro_xml::Arena, doc: NodeId, expr: &str) -> Option<Vec<NodeId>> {
+    fn xpath(
+        &mut self,
+        arena: &mut goro_xml::Arena,
+        doc: NodeId,
+        expr: &str,
+    ) -> Option<Vec<NodeId>> {
         let _ = self.vm;
         let e = goro_xml::xpath::compile(expr).ok()?;
         let mut ctx = goro_xml::xpath::Context::new();
@@ -1234,7 +1342,8 @@ fn run_xinclude(vm: &mut Vm, fname: &str, d: NodeId, flags: u32) -> R<i64> {
         vm: vm as *mut Vm,
         _p: std::marker::PhantomData,
     };
-    let (n, errs) = xmlstore::with(|s| goro_xml::xinclude::process(&mut s.arena, d, flags, &mut host));
+    let (n, errs) =
+        xmlstore::with(|s| goro_xml::xinclude::process(&mut s.arena, d, flags, &mut host));
     host.loader.finish(vm)?;
     libxml::report(vm, fname, &errs, Style::Dom, flags, None)?;
     Ok(n as i64)
@@ -1274,7 +1383,11 @@ fn xml_create_empty(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let version = if a.has(0) { version } else { "1.0".into() };
     let enc = if a.has(1) { enc } else { "UTF-8".into() };
     if goro_xml::encoding::lookup(&enc).is_none() {
-        return vm.fthrow(a, "ValueError", "Argument #2 ($encoding) is not a valid document encoding");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #2 ($encoding) is not a valid document encoding",
+        );
     }
     let d = new_doc(DocKind::Xml, true);
     with_arena(|ar| {
@@ -1316,7 +1429,11 @@ fn modern_parse(vm: &mut Vm, a: &Args, input: &[u8], url: String, from_string: b
     if let Some(e) = &enc
         && goro_xml::encoding::lookup(e).is_none()
     {
-        return vm.fthrow(a, "ValueError", "Argument #3 ($overrideEncoding) must be a valid document encoding");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #3 ($overrideEncoding) must be a valid document encoding",
+        );
     }
     let fname = a.fname();
     let mut opts_flags = flags;
@@ -1329,7 +1446,8 @@ fn modern_parse(vm: &mut Vm, a: &Args, input: &[u8], url: String, from_string: b
         opts.modern = true;
         opts.encoding_override = enc.clone();
         let mut loader = PhpLoader::new(vm, &fname);
-        let built = xmlstore::with(|s| goro_xml::xml::build(&mut s.arena, input, &opts, Some(&mut loader)));
+        let built =
+            xmlstore::with(|s| goro_xml::xml::build(&mut s.arena, input, &opts, Some(&mut loader)));
         loader.finish(vm)?;
         libxml::report(vm, &fname, &built.errors, Style::Dom, flags, Some(input))?;
         if !built.ok {
@@ -1361,7 +1479,7 @@ fn xml_create_from_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.fthrow(a, "ValueError", "Argument #1 ($source) must not be empty");
     }
     let url = cwd_url(vm);
-    modern_parse(vm, a, &src.as_bytes().to_vec(), url, true)
+    modern_parse(vm, a, src.as_bytes(), url, true)
 }
 
 fn xml_create_from_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1369,7 +1487,11 @@ fn xml_create_from_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return Ok(Value::Null);
     };
     if path.to_ascii_lowercase().contains("%00") {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($path) must not contain percent-encoded NUL bytes");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #1 ($path) must not contain percent-encoded NUL bytes",
+        );
     }
     let fname = a.fname();
     let Some(bytes) = read_for_load(vm, &fname, &path)? else {
@@ -1384,9 +1506,17 @@ fn xml_create_from_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn html_create_empty(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let enc = if a.has(0) { s8(&a.str(0)) } else { "UTF-8".into() };
+    let enc = if a.has(0) {
+        s8(&a.str(0))
+    } else {
+        "UTF-8".into()
+    };
     let Some(e) = goro_xml::html5::encoding::encoding_for_label(&enc) else {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($encoding) must be a valid document encoding");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #1 ($encoding) must be a valid document encoding",
+        );
     };
     let d = new_doc(DocKind::Html5, true);
     with_arena(|ar| ar.doc_mut(d).encoding = Some(e.name().to_string()));
@@ -1448,7 +1578,7 @@ fn html_parse(vm: &mut Vm, a: &Args, input: &[u8], source: &str, url: Option<Str
 
 fn html_create_from_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let src = a.str(0);
-    html_parse(vm, a, &src.as_bytes().to_vec(), "Entity", None)
+    html_parse(vm, a, src.as_bytes(), "Entity", None)
 }
 
 fn html_create_from_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1459,10 +1589,21 @@ fn html_create_from_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.throw("ValueError", "Path must not be empty");
     }
     if p.as_bytes().contains(&0) {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($path) must not contain any null bytes");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #1 ($path) must not contain any null bytes",
+        );
     }
-    if p.as_bytes().windows(3).any(|w| w.eq_ignore_ascii_case(b"%00")) {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($path) must not contain percent-encoded NUL bytes");
+    if p.as_bytes()
+        .windows(3)
+        .any(|w| w.eq_ignore_ascii_case(b"%00"))
+    {
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #1 ($path) must not contain percent-encoded NUL bytes",
+        );
     }
     let path = s8(&p);
     modern_check_options(vm, a, 1, true)?;
@@ -1584,7 +1725,11 @@ fn impl_create_doctype(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let system = s8(&a.str(2));
     let modern = modern_fn(a);
     if name.is_empty() && !modern {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($qualifiedName) must not be empty");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #1 ($qualifiedName) must not be empty",
+        );
     }
     if !modern && name.to_ascii_lowercase().contains("%00") {
         vm.fwarn(a, "URI must not contain percent-encoded NUL bytes")?;
@@ -1646,7 +1791,11 @@ fn impl_create_document(vm: &mut Vm, a: &mut Args) -> R<Value> {
         });
     }
     if !qn.is_empty() {
-        let q = match validate_and_extract(ns.as_deref(), &qn, if modern { NC::Modern } else { NC::Legacy }) {
+        let q = match validate_and_extract(
+            ns.as_deref(),
+            &qn,
+            if modern { NC::Modern } else { NC::Legacy },
+        ) {
             Ok(q) => q,
             Err(e) => {
                 xmlstore::with(|s| s.free_doc_if_unheld(d));
@@ -1863,12 +2012,4 @@ pub(crate) fn dom_import_simplexml(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn simplexml_node(o: &ObjRef) -> Option<NodeId> {
     crate::builtins::simplexml::sxe_node_of(o)
-}
-
-/// Throws for a legacy operation's error in a context without `Args`.
-pub(crate) fn unwind_dom(vm: &mut Vm, e: DomError) -> Unwind {
-    match throw_dom::<()>(vm, e) {
-        Err(u) => u,
-        Ok(()) => Unwind::Fatal,
-    }
 }

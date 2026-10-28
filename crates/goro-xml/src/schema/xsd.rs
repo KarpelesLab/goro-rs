@@ -105,7 +105,9 @@ fn attr(a: &Arena, n: NodeId, name: &str) -> Option<String> {
 }
 
 fn occurs(a: &Arena, n: NodeId) -> (u32, Option<u32>) {
-    let min = attr(a, n, "minOccurs").and_then(|v| v.trim().parse().ok()).unwrap_or(1);
+    let min = attr(a, n, "minOccurs")
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(1);
     let max = match attr(a, n, "maxOccurs").as_deref().map(str::trim) {
         Some("unbounded") => None,
         Some(v) => Some(v.parse().unwrap_or(1)),
@@ -144,7 +146,11 @@ impl Parser<'_> {
     }
 
     fn element(&mut self, n: NodeId, global: bool) -> ElemDecl {
-        let (min, max) = if global { (1, Some(1)) } else { occurs(self.a, n) };
+        let (min, max) = if global {
+            (1, Some(1))
+        } else {
+            occurs(self.a, n)
+        };
         if let Some(r) = attr(self.a, n, "ref") {
             let name = self.qname(n, &r);
             return ElemDecl {
@@ -290,7 +296,9 @@ impl Parser<'_> {
                                 if matches!(k3.as_str(), "sequence" | "choice" | "all" | "group") {
                                     let p = self.particle(&k3, c3);
                                     ct.content = match (ct.content.take(), p) {
-                                        (Some(a), Some(b)) => Some(Particle::Seq(vec![a, b], 1, Some(1))),
+                                        (Some(a), Some(b)) => {
+                                            Some(Particle::Seq(vec![a, b], 1, Some(1)))
+                                        }
                                         (a, b) => a.or(b),
                                     };
                                 }
@@ -495,13 +503,20 @@ pub(crate) fn builtin_ok(t: &str, v: &str) -> bool {
                 && d.bytes().all(|b| b.is_ascii_digit() || b == b'.')
                 && d != "."
         }
-        "float" | "double" => matches!(s, "INF" | "-INF" | "NaN") || (num(s).is_some() && !s.contains(['i', 'I', 'n', 'N'])),
+        "float" | "double" => {
+            matches!(s, "INF" | "-INF" | "NaN")
+                || (num(s).is_some() && !s.contains(['i', 'I', 'n', 'N']))
+        }
         "date" => {
             let b = s.as_bytes();
             b.len() >= 10
                 && b[4] == b'-'
                 && b[7] == b'-'
-                && b[..4].iter().chain(&b[5..7]).chain(&b[8..10]).all(u8::is_ascii_digit)
+                && b[..4]
+                    .iter()
+                    .chain(&b[5..7])
+                    .chain(&b[8..10])
+                    .all(u8::is_ascii_digit)
         }
         "dateTime" => s.len() >= 19 && s.as_bytes()[10] == b'T' && builtin_ok("date", &s[..10]),
         "time" => {
@@ -645,7 +660,10 @@ impl V<'_> {
         {
             return;
         }
-        let ty = decl.ty.clone().unwrap_or(TypeRef::Builtin("anyType".into()));
+        let ty = decl
+            .ty
+            .clone()
+            .unwrap_or(TypeRef::Builtin("anyType".into()));
         let resolved = self.resolve(&ty).clone();
         match &resolved {
             TypeRef::Complex(ct) => self.complex(a, el, &ename, ct),
@@ -710,7 +728,11 @@ impl V<'_> {
                     if let Some(t) = &d.ty
                         && let Some(e) = self.simple_ok(t, &v)
                     {
-                        self.err(el, E_DATATYPE, format!("Element '{ename}', attribute '{an}': {e}"));
+                        self.err(
+                            el,
+                            E_DATATYPE,
+                            format!("Element '{ename}', attribute '{an}': {e}"),
+                        );
                     } else if let Some(f) = &d.fixed
                         && &v != f
                     {
@@ -725,7 +747,9 @@ impl V<'_> {
                 _ => self.err(
                     el,
                     E_ATTR_NOT_ALLOWED,
-                    format!("Element '{ename}', attribute '{an}': The attribute '{an}' is not allowed."),
+                    format!(
+                        "Element '{ename}', attribute '{an}': The attribute '{an}' is not allowed."
+                    ),
                 ),
             }
         }
@@ -741,7 +765,10 @@ impl V<'_> {
                 self.err(
                     el,
                     E_ATTR_MISSING,
-                    format!("Element '{ename}': The attribute '{}' is required but missing.", name_display(&d.name)),
+                    format!(
+                        "Element '{ename}': The attribute '{}' is required but missing.",
+                        name_display(&d.name)
+                    ),
                 );
             } else if self.create
                 && let Some(v) = d.default.clone().or_else(|| d.fixed.clone())
@@ -776,9 +803,13 @@ impl V<'_> {
                     if !ct.mixed && !t.chars().all(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r')) =>
                 {
                     let msg = if ct.content.is_none() {
-                        format!("Element '{ename}': Character content is not allowed, because the content type is empty.")
+                        format!(
+                            "Element '{ename}': Character content is not allowed, because the content type is empty."
+                        )
                     } else {
-                        format!("Element '{ename}': Character content other than whitespace is not allowed because the content type is 'element-only'.")
+                        format!(
+                            "Element '{ename}': Character content other than whitespace is not allowed because the content type is 'element-only'."
+                        )
                     };
                     self.err(el, E_CONTENT, msg);
                     return;
@@ -796,11 +827,18 @@ impl V<'_> {
         let Some(content) = &ct.content else {
             if let Some(&first) = elems.first() {
                 let n = qname_display(&a.element(first).unwrap().name);
-                self.err(first, E_CONTENT, format!("Element '{n}': This element is not expected."));
+                self.err(
+                    first,
+                    E_CONTENT,
+                    format!("Element '{n}': This element is not expected."),
+                );
             }
             return;
         };
-        if !self.matches(content, &names, 0, false).contains(&names.len()) {
+        if !self
+            .matches(content, &names, 0, false)
+            .contains(&names.len())
+        {
             // The first child that no longer fits, or the missing ones.
             let mut cands = Vec::new();
             self.candidates(content, &mut cands);
@@ -816,7 +854,11 @@ impl V<'_> {
                 }
                 out
             };
-            let bad = (0..names.len()).find(|&i| !self.matches(content, &names[..=i], 0, true).contains(&(i + 1)));
+            let bad = (0..names.len()).find(|&i| {
+                !self
+                    .matches(content, &names[..=i], 0, true)
+                    .contains(&(i + 1))
+            });
             match bad {
                 Some(i) => {
                     let exp = expected(self, &names[..i]);
@@ -824,7 +866,10 @@ impl V<'_> {
                     let msg = if exp.is_empty() {
                         format!("Element '{n}': This element is not expected.")
                     } else {
-                        format!("Element '{n}': This element is not expected. Expected is ( {} ).", exp.join(", "))
+                        format!(
+                            "Element '{n}': This element is not expected. Expected is ( {} ).",
+                            exp.join(", ")
+                        )
                     };
                     self.err(elems[i], E_CONTENT, msg);
                 }
@@ -833,7 +878,10 @@ impl V<'_> {
                     self.err(
                         el,
                         E_CONTENT,
-                        format!("Element '{ename}': Missing child element(s). Expected is ( {} ).", exp.join(", ")),
+                        format!(
+                            "Element '{ename}': Missing child element(s). Expected is ( {} ).",
+                            exp.join(", ")
+                        ),
                     );
                 }
             }

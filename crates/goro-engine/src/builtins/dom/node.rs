@@ -3,14 +3,14 @@
 //! comparisons, namespace lookups, node paths and canonicalization (PHP
 //! manual: DOMNode; WHATWG DOM; observed on PHP 8.5).
 
-use goro_runtime::{ObjRef, PhpArray, Value};
+use goro_runtime::{ObjRef, Value};
 use goro_xml::NodeId;
-use goro_xml::tree::{DomError, NodeData, QName};
+use goro_xml::tree::{DomError, NodeData};
 
 use super::xmlstore;
 use super::{
-    arg_node, is_modern_node, legacy_error, modern_fn, node_of, opt_arg_node, s8, settings, sv,
-    sv_opt, this_node, throw_dom, with_arena, with_settings, wrap_node, wrap_opt,
+    arg_node, is_modern_node, legacy_error, modern_fn, node_of, opt_arg_node, s8, sv, sv_opt,
+    this_node, throw_dom, with_arena, wrap_node,
 };
 use crate::func::{Args, NativeFn};
 use crate::vm::{R, Vm};
@@ -36,7 +36,10 @@ pub const METHODS: &[(&str, NativeFn)] = &[
     ("domnode::c14nfile", c14n_file),
     ("domnode::contains", contains),
     ("domnode::getrootnode", get_root_node),
-    ("domnode::comparedocumentposition", compare_document_position),
+    (
+        "domnode::comparedocumentposition",
+        compare_document_position,
+    ),
     ("domnode::__sleep", sleep),
     ("domnode::__wakeup", wakeup),
     ("domnamespacenode::__sleep", sleep),
@@ -59,7 +62,10 @@ pub const METHODS: &[(&str, NativeFn)] = &[
     ("dom\\node::c14nfile", c14n_file),
     ("dom\\node::contains", contains),
     ("dom\\node::getrootnode", get_root_node),
-    ("dom\\node::comparedocumentposition", compare_document_position),
+    (
+        "dom\\node::comparedocumentposition",
+        compare_document_position,
+    ),
     ("dom\\node::__sleep", sleep),
     ("dom\\node::__wakeup", wakeup),
 ];
@@ -752,7 +758,10 @@ fn c14n_run(vm: &mut Vm, a: &Args, first: usize) -> R<Option<String>> {
                     .iter()
                     .map(|(k, v)| {
                         (
-                            match k { goro_runtime::KeyRef::Str(s) => s8(s), goro_runtime::KeyRef::Int(i) => i.to_string() },
+                            match k {
+                                goro_runtime::KeyRef::Str(s) => s8(s),
+                                goro_runtime::KeyRef::Int(i) => i.to_string(),
+                            },
                             s8(&v.as_str().cloned().unwrap_or_default()),
                         )
                     })
@@ -839,8 +848,7 @@ fn decode_refs(ar: &goro_xml::Arena, doc: NodeId, s: &str) -> String {
                     num.parse::<u32>().ok()
                 };
                 v.and_then(char::from_u32).map(|c| c.to_string())
-            } else if !name.is_empty() && !name.contains(|c: char| c.is_whitespace() || c == '&')
-            {
+            } else if !name.is_empty() && !name.contains(|c: char| c.is_whitespace() || c == '&') {
                 ar.entity_value(doc, name)
             } else {
                 None
@@ -901,46 +909,4 @@ pub(crate) fn set_text_content(vm: &mut Vm, n: NodeId, text: &str) -> R<()> {
         }
     });
     Ok(())
-}
-
-/// Wraps a list of nodes as a PHP array of objects.
-pub(crate) fn wrap_all(vm: &mut Vm, ids: &[NodeId]) -> R<PhpArray> {
-    let mut arr = PhpArray::new();
-    for &id in ids {
-        let v = wrap_node(vm, id)?;
-        let _ = arr.push(v);
-    }
-    Ok(arr)
-}
-
-/// A new element name for `qualified` in namespace `ns` (no checks).
-pub(crate) fn qname(ns: Option<&str>, qualified: &str) -> QName {
-    match qualified.split_once(':') {
-        Some((p, l)) if ns.is_some() => QName {
-            prefix: Some(p.into()),
-            local: l.into(),
-            ns: ns.map(Into::into),
-        },
-        _ => QName {
-            prefix: None,
-            local: qualified.into(),
-            ns: ns.map(Into::into),
-        },
-    }
-}
-
-/// True when node `n`'s document is the hidden one made for a node created
-/// without a document.
-pub(crate) fn in_hidden_doc(n: NodeId) -> bool {
-    with_settings(n, |s| s.hidden)
-}
-
-/// Keeps `settings` linked (used by other modules).
-pub(crate) fn strict(n: NodeId) -> bool {
-    settings(n).strict_error_checking
-}
-
-/// The optional node argument as an object value.
-pub(crate) fn opt_wrap(vm: &mut Vm, n: Option<NodeId>) -> R<Value> {
-    wrap_opt(vm, n)
 }

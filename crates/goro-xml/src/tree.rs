@@ -2210,7 +2210,9 @@ impl Arena {
                     && x.system_id == y.system_id;
             }
             (NodeData::Notation(x), NodeData::Notation(y)) => {
-                return x.name == y.name && x.public_id == y.public_id && x.system_id == y.system_id;
+                return x.name == y.name
+                    && x.public_id == y.public_id
+                    && x.system_id == y.system_id;
             }
             (NodeData::Namespace(x), NodeData::Namespace(y)) => return x == y,
             _ => false,

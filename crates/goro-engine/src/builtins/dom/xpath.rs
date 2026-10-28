@@ -28,7 +28,10 @@ pub const METHODS: &[(&str, NativeFn)] = &[
     ("dom\\xpath::query", query),
     ("dom\\xpath::registernamespace", register_namespace),
     ("dom\\xpath::registerphpfunctions", register_php_functions),
-    ("dom\\xpath::registerphpfunctionns", register_php_function_ns),
+    (
+        "dom\\xpath::registerphpfunctionns",
+        register_php_function_ns,
+    ),
     ("dom\\xpath::quote", quote),
 ];
 
@@ -118,7 +121,11 @@ fn register_php_functions(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Value::Null => Allowed::All,
         Value::Str(s) => {
             if s.is_empty() {
-                return vm.fthrow(a, "ValueError", "Argument #1 ($restrict) must be a valid callback name");
+                return vm.fthrow(
+                    a,
+                    "ValueError",
+                    "Argument #1 ($restrict) must be a valid callback name",
+                );
             }
             if vm.resolve_callable(&Value::Str(s.clone()), false).is_err() {
                 let why = vm.callable_error(&Value::Str(s.clone()));
@@ -196,13 +203,25 @@ fn register_php_function_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     // Test registerPhpFunctionNS_errors.phpt.
     if name.contains('\0') {
-        return vm.fthrow(a, "ValueError", "Argument #2 ($name) must not contain any null bytes");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #2 ($name) must not contain any null bytes",
+        );
     }
     if ns.contains('\0') {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($namespaceURI) must not contain any null bytes");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #1 ($namespaceURI) must not contain any null bytes",
+        );
     }
     if name.is_empty() || name.contains(':') || !goro_xml::chars::is_ncname(&name) {
-        return vm.fthrow(a, "ValueError", "Argument #2 ($name) must be a valid callback name");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #2 ($name) must be a valid callback name",
+        );
     }
     let cb = a.val(2);
     with_xp(a.this_obj(), |x| {
@@ -214,7 +233,11 @@ fn register_php_function_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn quote(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if a.str(0).as_bytes().contains(&0) {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($str) must not contain any null bytes");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #1 ($str) must not contain any null bytes",
+        );
     }
     let s = s8(&a.str(0));
     let out = if !s.contains('\'') {
@@ -287,7 +310,8 @@ impl Handler {
                 xpath::Value::NodeSet(ns) => {
                     if as_string {
                         let s = with_arena(|ar| {
-                            ns.first().map_or(String::new(), |&n| xpath::string_value(ar, n))
+                            ns.first()
+                                .map_or(String::new(), |&n| xpath::string_value(ar, n))
                         });
                         sv(&s)
                     } else {
@@ -297,7 +321,12 @@ impl Handler {
                                 Ok(o) => {
                                     let _ = arr.push(o);
                                 }
-                                Err(u) => return Err(XPathError::callback("", Some(Box::new(Pending(u))))),
+                                Err(u) => {
+                                    return Err(XPathError::callback(
+                                        "",
+                                        Some(Box::new(Pending(u))),
+                                    ));
+                                }
                             }
                         }
                         Value::Array(arr)
@@ -523,7 +552,8 @@ fn run(vm: &mut Vm, a: &Args) -> R<Option<xpath::Value>> {
     // Nodes returned by callbacks stay alive until the next evaluation
     // (the results are wrapped after this returns; test
     // modern/xml/return_dom_node_from_xpath.phpt).
-    let old = KEPT.with(|k| std::mem::replace(&mut *k.borrow_mut(), std::mem::take(&mut handler.keep)));
+    let old =
+        KEPT.with(|k| std::mem::replace(&mut *k.borrow_mut(), std::mem::take(&mut handler.keep)));
     drop(old);
     match r {
         Ok(v) => {
