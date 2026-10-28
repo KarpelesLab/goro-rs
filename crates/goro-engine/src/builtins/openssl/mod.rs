@@ -797,30 +797,64 @@ pub(crate) fn key_from_value(
     let Some(data) = arg_data(vm, a, s.as_bytes())? else {
         return Ok(None);
     };
-    match want {
-        Want::Public => match ossl::key::load_public_pem(&data) {
-            Ok(k) => Ok(Some(Rc::new(k))),
-            Err(_) => {
-                push_decode_error(&data);
-                Ok(None)
-            }
-        },
-        Want::Private => match ossl::key::load_private_pem(&data, pass) {
-            Ok(k) => Ok(Some(Rc::new(k))),
-            Err(e) => {
-                match e {
-                    ossl::key::LoadError::BadDecrypt => {
-                        oerr::push(errs::EVP_BAD_DECRYPT);
-                        oerr::push(errs::PEM_BAD_DECRYPT);
-                    }
-                    ossl::key::LoadError::NoPassphrase => {
-                        oerr::push(errs::PEM_BAD_PASSWORD_READ);
-                    }
-                    _ => push_decode_error(&data),
-                }
-                Ok(None)
-            }
-        },
+    // Parsed keys are kept in a small cache keyed by a digest of the text
+    // and passphrase: loading (and validating) an RSA key costs far more
+    // than using it, and scripts pass the same PEM string or file again
+    // and again.
+    let ck = {
+        let mut h =
+            ossl::digest::Hasher::new(ossl::digest::Md::H(ossl::digest::HashAlgorithm::Sha256));
+        h.update(&[want as u8]);
+        h.update(&(data.len() as u64).to_le_bytes());
+        h.update(&data);
+        if let Some(p) = pass {
+            h.update(&[1]);
+            h.update(p);
+        }
+        h.finish()
+    };
+    if let Some(k) = vm
+        .ext::<KeyCache>()
+        .0
+        .iter()
+        .find(|(h, _)| *h == ck)
+        .map(|(_, k)| k.clone())
+    {
+        return Ok(Some(k));
+    }
+    let r = load_key_text(&data, want, pass);
+    if let Some(k) = &r {
+        let c = &mut vm.ext::<KeyCache>().0;
+        if c.len() >= 16 {
+            c.remove(0);
+        }
+        c.push((ck, k.clone()));
+    }
+    Ok(r)
+}
+
+/// Recently parsed keys (see [`key_from_value`]).
+#[derive(Default)]
+struct KeyCache(Vec<(Vec<u8>, Rc<ossl::key::Key>)>);
+
+fn load_key_text(data: &[u8], want: Want, pass: Option<&[u8]>) -> Option<Rc<ossl::key::Key>> {
+    let r = match want {
+        Want::Public => ossl::key::load_public_pem(data),
+        Want::Private => ossl::key::load_private_pem(data, pass),
+    };
+    match r {
+        Ok(k) => Some(Rc::new(k)),
+        Err(ossl::key::LoadError::BadDecrypt | ossl::key::LoadError::NoPassphrase) => {
+            // Observed on PHP 8.5: a wrong or missing passphrase queues
+            // both "bad decrypt" errors.
+            oerr::push(errs::EVP_BAD_DECRYPT);
+            oerr::push(errs::PEM_BAD_DECRYPT);
+            None
+        }
+        Err(_) => {
+            push_decode_error(data);
+            None
+        }
     }
 }
 

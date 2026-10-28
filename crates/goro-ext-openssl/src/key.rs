@@ -1685,7 +1685,31 @@ pub fn rsa_public_encrypt(key: &Key, data: &[u8], padding: i64, md: Md) -> Resul
             if data.len() + 11 > k {
                 return Err(errs::RSA_DATA_TOO_LARGE_FOR_KEY);
             }
-            pk.encrypt_pkcs1v15(data, &mut rng)
+            // EME-PKCS1-v1_5 (RFC 8017 §7.2.1): 00 02 PS 00 M with
+            // nonzero random PS, drawn in one batch.
+            let ps_len = k - data.len() - 3;
+            let mut em = Zeroizing::new(vec![0u8; k]);
+            em[1] = 2;
+            let mut ps = vec![0u8; ps_len + 64];
+            crate::random_bytes(&mut ps);
+            let mut j = 0;
+            for i in 0..ps_len {
+                loop {
+                    if j == ps.len() {
+                        crate::random_bytes(&mut ps);
+                        j = 0;
+                    }
+                    let b = ps[j];
+                    j += 1;
+                    if b != 0 {
+                        em[2 + i] = b;
+                        break;
+                    }
+                }
+            }
+            em[k - data.len()..].copy_from_slice(data);
+            let _ = &mut rng;
+            pk.raw_public(&em)
                 .map_err(|_| errs::RSA_DATA_TOO_LARGE_FOR_KEY)
         }
         PAD_OAEP => {
