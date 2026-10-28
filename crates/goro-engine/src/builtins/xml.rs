@@ -498,15 +498,13 @@ impl Bridge {
         let callable = match h {
             Handler::None => return None,
             Handler::Callable(v) => v,
-            Handler::Method(m) => match obj {
-                Some(o) => {
-                    let mut arr = PhpArray::new();
-                    let _ = arr.push(o);
-                    let _ = arr.push(Value::Str(m));
-                    Value::Array(arr)
-                }
-                None => return None,
-            },
+            Handler::Method(m) => {
+                let o = obj?;
+                let mut arr = PhpArray::new();
+                let _ = arr.push(o);
+                let _ = arr.push(Value::Str(m));
+                Value::Array(arr)
+            }
         };
         let mut full = Vec::with_capacity(args.len() + 1);
         full.push(Value::Object(self.parser.clone()));

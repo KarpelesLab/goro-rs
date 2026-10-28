@@ -98,7 +98,8 @@ impl XmlError {
         };
         let file = self.file.as_deref().unwrap_or("Entity");
         // Namespace errors have no location prefix (observed on PHP 8.5).
-        let mut v = vec![if self.domain == Domain::Namespace {
+        // Errors without a position (I/O) print none either.
+        let mut v = vec![if self.domain == Domain::Namespace || self.line == 0 {
             format!("{what} : {}", self.text())
         } else {
             format!("{file}: line {}: {what} : {}", self.line, self.text())

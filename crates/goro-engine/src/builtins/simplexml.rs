@@ -248,6 +248,7 @@ fn local_name(a: &Arena, n: NodeId) -> String {
     match a.data(n) {
         NodeData::Element(e) => e.name.local.to_string(),
         NodeData::Attribute(at) => at.name.local.to_string(),
+        NodeData::Comment(_) => "comment".into(),
         _ => a.node_name(n),
     }
 }
@@ -746,6 +747,28 @@ fn scalar_like(s: &Spec, other: &Value) -> Value {
 
 // ------------------------------------------------------------------ access
 
+/// Arrays and objects other than SimpleXML ones can't be assigned
+/// (observed on PHP 8.5; test bug38406).
+fn check_simple(vm: &mut Vm, v: &Value) -> R<()> {
+    let bad = match v {
+        Value::Array(_) => true,
+        Value::Object(o) => {
+            spec_of(o).is_none() && vm.class_of(o).magic.borrow().to_string.is_none()
+        }
+        _ => false,
+    };
+    if bad {
+        return vm.throw(
+            "TypeError",
+            &format!(
+                "It's not possible to assign a complex type to properties, {} given",
+                crate::class::TypeName::tname(v)
+            ),
+        );
+    }
+    Ok(())
+}
+
 fn value_text(vm: &mut Vm, v: &Value) -> R<String> {
     Ok(match v {
         Value::Null => String::new(),
@@ -863,7 +886,9 @@ fn remove_node(st: &mut xmlstore::Store, n: NodeId) {
 }
 
 fn prop_hook(vm: &mut Vm, o: &ObjRef, name: &PhpStr, op: ObjAccess) -> Option<R<Value>> {
-    let s = spec_of(o)?;
+    let Some(s) = spec_of(o) else {
+        return Some(vm.throw("Error", "SimpleXMLElement is not properly initialized"));
+    };
     let name = name.to_string_lossy();
     Some(prop_access(vm, o, s, &name, op))
 }
@@ -893,8 +918,23 @@ fn prop_access(vm: &mut Vm, o: &ObjRef, s: Spec, name: &str, op: ObjAccess) -> R
                     filter: s.filter.clone(),
                     pending: Vec::new(),
                 },
-                // Below a missing element: null (observed on PHP 8.5).
-                None => return Ok(Value::Null),
+                // Below a missing element: null, or for a nested write the
+                // path to create (observed on PHP 8.5; tests 000, bug35785).
+                None => {
+                    if !matches!(op, ObjAccess::Fetch) {
+                        return Ok(Value::Null);
+                    }
+                    let mut pending = s.pending.clone();
+                    if let Iter::Elem(n) = &s.iter {
+                        pending.push(n.clone());
+                    }
+                    Spec {
+                        node: s.node,
+                        iter: Iter::Elem(name.to_string()),
+                        filter: s.filter.clone(),
+                        pending,
+                    }
+                }
             };
             make(vm, &cls, spec)
         }
@@ -921,12 +961,10 @@ fn prop_access(vm: &mut Vm, o: &ObjRef, s: Spec, name: &str, op: ObjAccess) -> R
             }))
         }
         ObjAccess::Write(v) => {
-            if let Value::Array(_) = v {
-                return vm.throw(
-                    "Error",
-                    "It's not possible to assign a complex type to properties, array given",
-                );
+            if name.is_empty() {
+                return vm.throw("ValueError", "Cannot create element with an empty name");
             }
+            check_simple(vm, &v)?;
             let text = value_text(vm, &v)?;
             let warn = xmlstore::with(|st| {
                 let a = &mut st.arena;
@@ -1061,7 +1099,7 @@ fn dim_access(vm: &mut Vm, o: &ObjRef, s: Spec, k: Option<&Value>, op: ObjAccess
             }
             ObjAccess::Read
         }
-        (ObjAccess::Fetch, _) => ObjAccess::Read,
+        (ObjAccess::Fetch, Some(_)) => ObjAccess::Read,
         (op, _) => op,
     };
     match (key, op) {
@@ -1240,6 +1278,22 @@ fn dim_access(vm: &mut Vm, o: &ObjRef, s: Spec, k: Option<&Value>, op: ObjAccess
             Ok(Value::Null)
         }
         (Some(_), ObjAccess::Fetch) => Ok(Value::Null),
+        // `$x->list[]->child = ...`: a new member (test bug35785).
+        (None, ObjAccess::Fetch) => {
+            let Iter::Elem(nm) = s.iter.clone() else {
+                return vm.throw("ValueError", "Cannot append to an attribute list");
+            };
+            let el = xmlstore::with(|st| {
+                let a = &mut st.arena;
+                let mut sp = s.clone();
+                sp.iter = Iter::None;
+                vivify(a, &sp).map(|p| new_child(a, p, &nm, &s.filter, None))
+            });
+            match el {
+                Some(el) => make(vm, &cls, Spec::of(el, &s.filter)),
+                None => Ok(Value::Null),
+            }
+        }
         (None, _) => vm.throw("Error", "Cannot use [] for reading"),
     }
 }
@@ -1365,7 +1419,11 @@ fn load_common(vm: &mut Vm, a: &Args, input: &[u8], url: Option<String>) -> R<Va
     let Some(cls) = class_arg(vm, a, 1)? else {
         return Ok(Value::Bool(false));
     };
-    let flags = a.int(2) as u32;
+    let opts = a.int(2);
+    if opts > i32::MAX as i64 || opts < 0 {
+        return vm.fthrow(a, "ValueError", "Argument #3 ($options) is too large");
+    }
+    let flags = opts as u32;
     let filter = ns_arg(a, 3, 4);
     let fname = a.fname();
     let Some(root) = parse_doc(vm, &fname, input, flags, url)? else {
@@ -1384,9 +1442,27 @@ fn simplexml_load_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     load_common(vm, a, data.as_bytes(), None)
 }
 
+/// file: URIs with an encoded NUL are refused (observed on PHP 8.5; test
+/// bug79971_1).
+fn encoded_nul(vm: &mut Vm, a: &Args, path: &str) -> R<bool> {
+    if path.starts_with("file:") && path.contains("%00") {
+        vm.fwarn(a, "URI must not contain percent-encoded NUL bytes")?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 fn simplexml_load_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let path = a.str(0).to_string_lossy();
     let fname = a.fname();
+    if encoded_nul(vm, a, &path)? {
+        let e = goro_xml::error::XmlError {
+            message: format!("failed to load \"{path}\"\n"),
+            ..libxml::io_error(&path)
+        };
+        libxml::report(vm, &fname, &[e], Style::Generic, 0, None)?;
+        return Ok(Value::Bool(false));
+    }
     let url = libxml::resolve(vm, &path, None);
     match libxml::load_document(vm, &fname, &path)? {
         Ok(bytes) => load_common(vm, a, &bytes, Some(url)),
@@ -1441,7 +1517,14 @@ fn simplexml_import_dom(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn m_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let data = a.str(0);
-    let flags = a.int(1) as u32;
+    let opts = a.int(1);
+    if opts > i32::MAX as i64 || opts < 0 {
+        return vm.throw(
+            "Exception",
+            "SimpleXMLElement::__construct(): Argument #2 ($options) is invalid",
+        );
+    }
+    let flags = opts as u32;
     let is_url = a.bool(2);
     let filter = ns_arg(a, 3, 4);
     let (input, url) = if is_url {
@@ -1632,10 +1715,19 @@ fn m_add_child(vm: &mut Vm, a: &mut Args) -> R<Value> {
         match &ns {
             Some(u) if !u.is_empty() => {
                 q.ns = Some(u.as_str().into());
-                q.prefix = prefix.as_deref().map(Into::into);
-                let in_scope = ar.lookup_ns(parent, prefix.as_deref());
-                if in_scope.as_deref() != Some(u.as_str()) {
-                    declare = Some((prefix.clone(), u.clone()));
+                // A prefix already bound to the namespace is reused, else
+                // the given one is declared (observed on PHP 8.5; test 031).
+                match ar.lookup_prefix(parent, u) {
+                    Some(p) if prefix.is_some() => q.prefix = Some(p),
+                    _ => {
+                        if prefix.is_none()
+                            && ar.lookup_ns(parent, None).as_deref() == Some(u.as_str())
+                        {
+                        } else {
+                            declare = Some((prefix.clone(), u.clone()));
+                        }
+                        q.prefix = prefix.as_deref().map(Into::into);
+                    }
                 }
             }
             Some(_) => {
@@ -1646,14 +1738,11 @@ fn m_add_child(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 }
             }
             None => {
-                // Without a namespace the child takes its parent's
-                // (observed on PHP 8.5).
+                // Without a namespace the child takes its parent's, and a
+                // prefix given is dropped (observed on PHP 8.5; test 031).
                 if let Some(pq) = ar.element(parent).map(|e| e.name.clone()) {
                     q.ns = pq.ns.clone();
                     q.prefix = pq.prefix.clone();
-                }
-                if prefix.is_some() {
-                    q = QName::local(&qn);
                 }
             }
         }
@@ -1698,10 +1787,15 @@ fn m_add_attribute(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Some((p, l)) if !p.is_empty() && !l.is_empty() => (Some(p.to_string()), l.to_string()),
         _ => (None, qn.clone()),
     };
-    if prefix.is_some() && ns.as_deref().is_none_or(str::is_empty) {
+    if prefix.is_none() && ns.as_deref().is_some_and(|u| !u.is_empty()) {
         vm.fwarn(a, "Attribute requires prefix for namespace")?;
         return Ok(Value::Null);
     }
+    let (prefix, local) = if ns.as_deref().is_none_or(str::is_empty) {
+        (None, qn.clone())
+    } else {
+        (prefix, local)
+    };
     enum Out {
         Ok,
         Exists,
@@ -1780,6 +1874,9 @@ fn m_as_xml(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match a.opt_str(0) {
         None => Ok(Value::from(bytes.as_slice())),
         Some(path) => {
+            if encoded_nul(vm, a, &path.to_string_lossy())? {
+                return Ok(Value::Bool(false));
+            }
             let r = vm.call_value(
                 &Value::from(&b"file_put_contents"[..]),
                 vec![Value::Str(path), Value::from(bytes.as_slice())],
@@ -1912,6 +2009,11 @@ fn m_register_xpath_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn m_xpath(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (o, s) = this_spec(vm, a)?;
+    // A recovered document without an element (test
+    // SimpleXMLElement_xpath).
+    if xmlstore::with(|st| matches!(st.arena.data(s.node), NodeData::Document(_))) {
+        return vm.throw("Error", "SimpleXMLElement is not properly initialized");
+    }
     let expr = a.str(0).to_string_lossy();
     let compiled = match goro_xml::xpath::compile(&expr) {
         Ok(c) => c,
@@ -1953,7 +2055,7 @@ fn m_xpath(vm: &mut Vm, a: &mut Args) -> R<Value> {
         other => {
             let what = match other {
                 goro_xml::xpath::Value::Number(_) => "number",
-                goro_xml::xpath::Value::Boolean(_) => "boolean",
+                goro_xml::xpath::Value::Boolean(_) => "bool",
                 _ => "string",
             };
             vm.fwarn(
@@ -1984,6 +2086,7 @@ fn m_xpath(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 NodeData::Text(_) | NodeData::CData(_) => {
                     Some(Spec::of(ar.parent(n)?, &Filter::default()))
                 }
+                NodeData::Comment(_) | NodeData::Pi { .. } => Some(Spec::of(n, &Filter::default())),
                 _ => None,
             }
         });
