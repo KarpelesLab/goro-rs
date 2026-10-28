@@ -658,5 +658,119 @@ pub(super) fn openssl_get_curve_names(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Array(arr))
 }
 
+// ------------------------------------------------------------ seal / open
+
+/// openssl_seal() (PHP manual): a random key encrypts the data, and each
+/// public key gets that key RSA-encrypted (PKCS #1 v1.5).
+pub(super) fn openssl_seal(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let data = a.str(0);
+    let keys = a.array(3);
+    if keys.is_empty() {
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #4 ($public_key) must not be empty",
+        );
+    }
+    let name = a.str(4);
+    let Some(info) = ossl::cipher::lookup_bytes(name.as_bytes()) else {
+        vm.fwarn(a, "Unknown cipher algorithm")?;
+        return Ok(Value::Bool(false));
+    };
+    if info.iv_len() > 0 && !a.has(5) {
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #6 ($iv) cannot be null for the chosen cipher algorithm",
+        );
+    }
+    let mut pubs = Vec::new();
+    for (i, (_, v)) in keys.iter().enumerate() {
+        match key_from_value(vm, a, &v.deref(), Want::Public, None)? {
+            Some(k) => pubs.push(k),
+            None => {
+                kwarn(
+                    vm,
+                    a,
+                    &format!("Not a public key ({}th member of pubkeys)", i + 1),
+                )?;
+                return Ok(Value::Bool(false));
+            }
+        }
+    }
+    let mut key = vec![0u8; info.key_len()];
+    ossl::random_bytes(&mut key);
+    let mut iv = vec![0u8; info.iv_len()];
+    ossl::random_bytes(&mut iv);
+    let md = ossl::digest::Md::H(ossl::digest::HashAlgorithm::Sha1);
+    let mut ekeys = PhpArray::new();
+    for k in &pubs {
+        match ossl::key::rsa_public_encrypt(k, &key, ossl::key::PAD_PKCS1, md) {
+            Ok(ek) => {
+                let _ = ekeys.push(bin(ek));
+            }
+            Err(_) => return Ok(Value::Bool(false)),
+        }
+    }
+    let ct = match ossl::cipher::encrypt(info, &key, &iv, data.as_bytes(), true) {
+        Ok(c) => c,
+        Err(e) => {
+            e.push();
+            return Ok(Value::Bool(false));
+        }
+    };
+    let n = ct.len() as i64;
+    set_out(a, 1, bin(ct));
+    set_out(a, 2, Value::Array(ekeys));
+    if a.has(5) {
+        set_out(a, 5, bin(iv));
+    }
+    Ok(Value::Int(n))
+}
+
+/// openssl_open() (PHP manual).
+pub(super) fn openssl_open(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let data = a.str(0);
+    let ekey = a.str(2);
+    let Some(k) = key_from_value(vm, a, &a.val(3), Want::Private, None)? else {
+        kwarn(vm, a, "Unable to coerce parameter 4 into a private key")?;
+        return Ok(Value::Bool(false));
+    };
+    let name = a.str(4);
+    let Some(info) = ossl::cipher::lookup_bytes(name.as_bytes()) else {
+        vm.fwarn(a, "Unknown cipher algorithm")?;
+        return Ok(Value::Bool(false));
+    };
+    let iv = a.opt_str(5).map(|s| s.to_vec()).unwrap_or_default();
+    if info.iv_len() > 0 && a.opt_str(5).is_none() {
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #6 ($iv) cannot be null for the chosen cipher algorithm",
+        );
+    }
+    if iv.len() != info.iv_len() {
+        return Ok(Value::Bool(false));
+    }
+    let md = ossl::digest::Md::H(ossl::digest::HashAlgorithm::Sha1);
+    let Ok(key) = ossl::key::rsa_private_decrypt(&k, ekey.as_bytes(), ossl::key::PAD_PKCS1, md)
+    else {
+        return Ok(Value::Bool(false));
+    };
+    if key.len() != info.key_len() {
+        return Ok(Value::Bool(false));
+    }
+    match ossl::cipher::decrypt(info, &key, &iv, data.as_bytes(), true) {
+        Ok(p) => {
+            set_out(a, 1, bin(p));
+            Ok(Value::Bool(true))
+        }
+        Err(e) => {
+            e.push();
+            Ok(Value::Bool(false))
+        }
+    }
+}
+
 #[allow(dead_code)]
 fn unused(_: Rc<PKey>) {}

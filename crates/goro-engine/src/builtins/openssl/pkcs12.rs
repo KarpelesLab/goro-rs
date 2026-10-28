@@ -39,9 +39,9 @@ fn export_common(vm: &mut Vm, a: &Args) -> R<Option<Vec<u8>>> {
             for item in list {
                 match cert_from_value(vm, a, &item)? {
                     Some(c) => extra.push((*c).clone()),
-                    None => {
-                        vm.fwarn(a, "X.509 Certificate cannot be retrieved")?;
-                    }
+                    // Unreadable extra certificates are skipped silently
+                    // (test bug81713.phpt).
+                    None => {}
                 }
             }
         }

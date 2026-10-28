@@ -266,6 +266,14 @@ const FUNCTIONS: &[(&str, NativeFn)] = &[
         pkey::openssl_pkey_derive,
     ),
     (
+        "function openssl_seal(#[\\SensitiveParameter] string $data, &$sealed_data, &$encrypted_keys, array $public_key, string $cipher_algo, &$iv = null): int|false",
+        pkey::openssl_seal,
+    ),
+    (
+        "function openssl_open(string $data, #[\\SensitiveParameter] &$output, string $encrypted_key, #[\\SensitiveParameter] $private_key, string $cipher_algo, ?string $iv = null): bool",
+        pkey::openssl_open,
+    ),
+    (
         "function openssl_get_curve_names(): array|false",
         pkey::openssl_get_curve_names,
     ),
@@ -598,7 +606,12 @@ fn defer_nul_error(vm: &mut Vm, a: &Args, s: &[u8]) {
             _ => {}
         }
     }
-    let (i, sfx) = where_.unwrap_or((0, ""));
+    let (i, mut sfx) = where_.unwrap_or((0, ""));
+    // openssl_seal() names its key list without "array item" (test
+    // bug81713.phpt).
+    if a.fname() == "openssl_seal" {
+        sfx = "";
+    }
     let label = arg_label(vm, a, i);
     let msg = format!(
         "{}(): Argument {} {}must not contain any null bytes",

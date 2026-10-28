@@ -107,7 +107,9 @@ pub enum KeyData {
     Rsa {
         n: Vec<u8>,
         e: Vec<u8>,
-        public: BoxedRsaPublicKey,
+        /// None for an even modulus: such keys load, as on PHP 8.5 (test
+        /// bug74651.phpt), but can't be used.
+        public: Option<BoxedRsaPublicKey>,
         private: Option<Box<RsaPriv>>,
     },
     Dsa {
@@ -487,7 +489,11 @@ impl Key {
     pub fn rsa_public(n: &[u8], e: &[u8]) -> KResult<Key> {
         let n = strip(n);
         let e = strip(e);
-        let public = rsa_pub(&n, &e)?;
+        let public = if n.last().is_some_and(|b| b & 1 == 0) {
+            None
+        } else {
+            Some(rsa_pub(&n, &e)?)
+        };
         Ok(Key {
             data: KeyData::Rsa {
                 n,
@@ -517,7 +523,7 @@ impl Key {
         if !nb.is_odd() || nb.is_zero() {
             return Err(KeyError::Invalid);
         }
-        let public = rsa_pub(&n, &e)?;
+        let public = Some(rsa_pub(&n, &e)?);
         let key = match (p, q) {
             (Some(p), Some(q)) => match (dmp1, dmq1, iqmp) {
                 (Some(dp), Some(dq), Some(qi)) => BoxedRsaPrivateKey::from_crt_components(
@@ -1361,6 +1367,9 @@ impl Key {
     pub fn verify(&self, md: Option<Md>, data: &[u8], sig: &[u8], pss: bool) -> KResult<bool> {
         match &self.data {
             KeyData::Rsa { public, n, .. } => {
+                let Some(public) = public else {
+                    return Ok(false);
+                };
                 let md = md.ok_or(KeyError::Unsupported)?;
                 let h = md.digest(data);
                 let k = strip(n).len();
@@ -1479,7 +1488,7 @@ impl Key {
 
     pub fn rsa_public_key(&self) -> Option<&BoxedRsaPublicKey> {
         match &self.data {
-            KeyData::Rsa { public, .. } => Some(public),
+            KeyData::Rsa { public, .. } => public.as_ref(),
             _ => None,
         }
     }

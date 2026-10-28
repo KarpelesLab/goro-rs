@@ -1389,7 +1389,12 @@ pub fn verify_sig(
     }
     if scheme == SigScheme::RsaPss {
         let (hmd, slen) = pss_params(params?)?;
-        let crate::key::KeyData::Rsa { public, n, .. } = &key.data else {
+        let crate::key::KeyData::Rsa {
+            public: Some(public),
+            n,
+            ..
+        } = &key.data
+        else {
             return None;
         };
         let Ok(em) = public.raw_public(sig) else {
