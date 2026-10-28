@@ -1626,6 +1626,8 @@ pub(crate) fn copy_hooks(h: &NativeHooks) -> NativeHooks {
         props_for: h.props_for,
         dim_storage: h.dim_storage,
         get_iterator: h.get_iterator,
+        do_operation: h.do_operation,
+        do_unary: h.do_unary,
     }
 }
 

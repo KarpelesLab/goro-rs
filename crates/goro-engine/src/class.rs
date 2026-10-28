@@ -266,6 +266,41 @@ pub struct NativeHooks {
     pub get_iterator: Option<
         fn(&mut crate::vm::Vm, &goro_runtime::ObjRef, bool) -> crate::vm::R<goro_runtime::ObjRef>,
     >,
+    /// Operator overloading (GMP, BcMath\Number): `a op b` where either
+    /// operand is an object of the class (the left one's hook is asked
+    /// first). `None` when the class doesn't overload `op` (the engine's
+    /// usual rules apply: "Unsupported operand types" for objects).
+    /// For a non-object left operand of `% & | ^ << >>` the engine first
+    /// reads it as an int (diagnostics and TypeErrors of `int % int`,
+    /// "Unsupported operand types: string % GMP" for non-numeric values)
+    /// and then calls the hook with the original value (PHP 8.5). `+$a`
+    /// is `$a * 1`.
+    pub do_operation: Option<
+        fn(
+            &mut crate::vm::Vm,
+            goro_runtime::ops::BinOp,
+            &Value,
+            &Value,
+        ) -> Option<crate::vm::R<Value>>,
+    >,
+    /// Unary operators on an object of the class: `-$a`, `~$a`, `++`,
+    /// `--`. `None` when not overloaded.
+    pub do_unary: Option<
+        fn(&mut crate::vm::Vm, UnaryOp, &goro_runtime::ObjRef) -> Option<crate::vm::R<Value>>,
+    >,
+}
+
+/// The unary operators [`NativeHooks::do_unary`] receives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnaryOp {
+    /// `-$a`.
+    Neg,
+    /// `~$a`.
+    BitNot,
+    /// `++$a` / `$a++` (the new value).
+    Inc,
+    /// `--$a` / `$a--` (the new value).
+    Dec,
 }
 
 impl std::fmt::Debug for NativeHooks {

@@ -1080,7 +1080,101 @@ impl Vm {
     }
 
     fn arith(&mut self, op: goro_runtime::ops::BinOp, x: &Value, y: &Value) -> R<Value> {
+        if (matches!(x, Value::Object(_) | Value::Ref(_))
+            || matches!(y, Value::Object(_) | Value::Ref(_)))
+            && let Some(r) = self.overloaded_op(op, &x.deref(), &y.deref())
+        {
+            return r;
+        }
         goro_runtime::ops::binary_op(op, x, y, self).map_err(|e| self.php_error(e))
+    }
+
+    /// The `do_operation` hook of an internal class an operand belongs to.
+    fn op_hook(
+        &self,
+        v: &Value,
+    ) -> Option<fn(&mut Vm, goro_runtime::ops::BinOp, &Value, &Value) -> Option<R<Value>>> {
+        let Value::Object(o) = v else { return None };
+        let cls = self.class_of(o);
+        let mut c = Some(&*cls);
+        while let Some(k) = c {
+            if let Some(h) = k.native.do_operation {
+                return Some(h);
+            }
+            c = k.parent.as_deref();
+        }
+        None
+    }
+
+    /// `x op y` through an operand's operator overloading, if any.
+    fn overloaded_op(
+        &mut self,
+        op: goro_runtime::ops::BinOp,
+        x: &Value,
+        y: &Value,
+    ) -> Option<R<Value>> {
+        use goro_runtime::ops::BinOp;
+        if let Some(h) = self.op_hook(x)
+            && let Some(r) = h(self, op, x, y)
+        {
+            return Some(r);
+        }
+        let h = self.op_hook(y)?;
+        // PHP 8.5 reads a non-object left operand of these operators as an
+        // int before the handler runs (crates/goro-ext-gmp docs; observed
+        // on PHP 8.5).
+        if !matches!(x, Value::Object(_))
+            && matches!(
+                op,
+                BinOp::Mod | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr
+            )
+        {
+            let numeric = match x {
+                Value::Str(s) => {
+                    goro_runtime::numeric::parse_numeric(s).kind
+                        != goro_runtime::numeric::Numericness::NonNumeric
+                }
+                Value::Array(_) | Value::Resource(_) => false,
+                _ => true,
+            };
+            if !numeric {
+                let Value::Object(o) = y else { return None };
+                let msg = format!(
+                    "Unsupported operand types: {} {} {}",
+                    x.type_name_for_error(),
+                    op.symbol(),
+                    o.class_name().to_string_lossy()
+                );
+                return Some(self.type_error(&msg));
+            }
+            if let Err(e) = goro_runtime::ops::binary_op(op, x, &Value::Int(1), self) {
+                return Some(Err(self.php_error(e)));
+            }
+            if let Err(e) = self.check_deferred() {
+                return Some(Err(e));
+            }
+        }
+        h(self, op, x, y)
+    }
+
+    /// A unary operator through the `do_unary` hook of an object's class.
+    pub(crate) fn overloaded_unary(
+        &mut self,
+        op: crate::class::UnaryOp,
+        v: &Value,
+    ) -> Option<R<Value>> {
+        let Value::Object(o) = v.deref() else {
+            return None;
+        };
+        let cls = self.class_of(&o);
+        let mut c = Some(&*cls);
+        while let Some(k) = c {
+            if let Some(h) = k.native.do_unary {
+                return h(self, op, &o);
+            }
+            c = k.parent.as_deref();
+        }
+        None
     }
 
     fn op_concat(&mut self, dst: Reg, a: Reg, b: Reg) -> R<()> {
@@ -1152,12 +1246,29 @@ impl Vm {
                     && i != i64::MIN
                 {
                     Value::Int(-i)
+                } else if let Some(r) = self.overloaded_unary(crate::class::UnaryOp::Neg, &v) {
+                    r?
                 } else {
                     goro_runtime::ops::neg(&v, self).map_err(|e| self.php_error(e))?
                 }
             }
-            Un::Plus => goro_runtime::ops::plus(&v, self).map_err(|e| self.php_error(e))?,
-            Un::BitNot => goro_runtime::ops::bit_not(&v, self).map_err(|e| self.php_error(e))?,
+            Un::Plus => {
+                if matches!(v, Value::Object(_))
+                    && let Some(r) =
+                        self.overloaded_op(goro_runtime::ops::BinOp::Mul, &v, &Value::Int(1))
+                {
+                    r?
+                } else {
+                    goro_runtime::ops::plus(&v, self).map_err(|e| self.php_error(e))?
+                }
+            }
+            Un::BitNot => {
+                if let Some(r) = self.overloaded_unary(crate::class::UnaryOp::BitNot, &v) {
+                    r?
+                } else {
+                    goro_runtime::ops::bit_not(&v, self).map_err(|e| self.php_error(e))?
+                }
+            }
         };
         self.check_deferred()?;
         self.put(dst, r);
@@ -1288,6 +1399,16 @@ impl Vm {
 
     /// `++`/`--` on a value.
     pub(crate) fn incdec_value(&mut self, op: IncDec, v: &Value) -> R<Value> {
+        if matches!(v.deref(), Value::Object(_)) {
+            let u = if op.is_inc() {
+                crate::class::UnaryOp::Inc
+            } else {
+                crate::class::UnaryOp::Dec
+            };
+            if let Some(r) = self.overloaded_unary(u, v) {
+                return r;
+            }
+        }
         let r = if op.is_inc() {
             goro_runtime::ops::increment(v, self)
         } else {

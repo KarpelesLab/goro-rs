@@ -361,6 +361,8 @@ pub enum Backing {
     UserDir {
         obj: goro_runtime::ObjRef,
     },
+    /// A stream implemented by a Rust module (see builtins/streams.rs).
+    Native(Box<dyn super::streams::NativeStream>),
 }
 
 /// A stream resource's data.
@@ -378,6 +380,12 @@ pub struct Stream {
     pub pending: Vec<u8>,
     /// The position seen by the caller (user streams).
     pub upos: i64,
+    /// Filters on reads and writes (stream_filter_append()).
+    pub read_filters: Vec<super::streams::AttachedFilter>,
+    pub write_filters: Vec<super::streams::AttachedFilter>,
+    /// Filtered bytes not read yet; whether the read filters were closed.
+    pub filtered: Vec<u8>,
+    pub filters_closed: bool,
 }
 
 impl Stream {
@@ -403,6 +411,10 @@ impl Stream {
             stream_type,
             pending: Vec::new(),
             upos: 0,
+            read_filters: Vec::new(),
+            write_filters: Vec::new(),
+            filtered: Vec::new(),
+            filters_closed: false,
         }
     }
 
@@ -413,6 +425,43 @@ impl Stream {
     }
 
     pub fn read_some(&mut self, vm: &mut Vm, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.read_filters.is_empty() {
+            return self.read_raw(vm, buf);
+        }
+        // Filtered reads: raw chunks through the chain until output.
+        while self.filtered.is_empty() && !self.filters_closed {
+            let mut raw = vec![0u8; 8192];
+            let n = self.read_raw(vm, &mut raw)?;
+            raw.truncate(n);
+            let closing = n == 0;
+            let mut chain = std::mem::take(&mut self.read_filters);
+            let r = super::streams::run_chain(vm, &mut chain, &raw, closing);
+            // A filter may have been removed meanwhile; keep the chain.
+            if self.read_filters.is_empty() {
+                self.read_filters = chain;
+            }
+            match r {
+                Ok(Some(out)) => self.filtered.extend_from_slice(&out),
+                Ok(None) => return Err(std::io::Error::other("stream filter failed")),
+                Err(e) => {
+                    if vm.err.deferred.is_none() {
+                        vm.err.deferred = Some(e);
+                    }
+                    return Err(std::io::Error::other("stream filter error"));
+                }
+            }
+            if closing {
+                self.filters_closed = true;
+            }
+        }
+        let n = buf.len().min(self.filtered.len());
+        buf[..n].copy_from_slice(&self.filtered[..n]);
+        self.filtered.drain(..n);
+        Ok(n)
+    }
+
+    /// Reads from the backing, before the read filters.
+    pub fn read_raw(&mut self, vm: &mut Vm, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.pending.is_empty()
             && matches!(self.backing, Backing::User { .. })
             && let Err(e) = super::userstream::fill(vm, self)
@@ -444,11 +493,39 @@ impl Stream {
                 Ok(n)
             }
             Backing::Stdin => std::io::stdin().read(buf),
+            Backing::Native(n) => n.read(vm, buf),
             _ => Ok(0),
         }
     }
 
     pub fn write_all(&mut self, vm: &mut Vm, b: &[u8]) -> std::io::Result<usize> {
+        if self.write_filters.is_empty() {
+            return self.write_raw(vm, b);
+        }
+        let mut chain = std::mem::take(&mut self.write_filters);
+        let r = super::streams::run_chain(vm, &mut chain, b, false);
+        if self.write_filters.is_empty() {
+            self.write_filters = chain;
+        }
+        match r {
+            Ok(Some(out)) => {
+                if !out.is_empty() {
+                    self.write_raw(vm, &out)?;
+                }
+                Ok(b.len())
+            }
+            Ok(None) => Err(std::io::Error::other("stream filter failed")),
+            Err(e) => {
+                if vm.err.deferred.is_none() {
+                    vm.err.deferred = Some(e);
+                }
+                Err(std::io::Error::other("stream filter error"))
+            }
+        }
+    }
+
+    /// Writes to the backing, after the write filters.
+    pub fn write_raw(&mut self, vm: &mut Vm, b: &[u8]) -> std::io::Result<usize> {
         if matches!(self.backing, Backing::User { .. }) {
             return match super::userstream::write(vm, self, b) {
                 Ok(n) => {
@@ -499,6 +576,7 @@ impl Stream {
                 vm.echo(b);
                 Ok(b.len())
             }
+            Backing::Native(n) => n.write(vm, b),
             _ => Ok(0),
         }
     }
@@ -639,6 +717,9 @@ pub fn open_stream(
     let fname = a.fname();
     if let Some(cls) = super::userstream::wrapper_for(vm, filename) {
         return super::userstream::open(vm, a, &cls, filename, mode, quiet);
+    }
+    if let Some(w) = super::streams::wrapper_for(vm, filename) {
+        return (w.open)(vm, a, filename, mode, quiet);
     }
     if super::userstream::disabled(vm, filename) {
         if !quiet {
@@ -876,6 +957,17 @@ fn fclose(vm: &mut Vm, a: &mut Args) -> R<Value> {
         super::userstream::call(vm, &o, b"stream_flush", Vec::new())?;
         super::userstream::call(vm, &o, b"stream_close", Vec::new())?;
     }
+    let cell = {
+        let data = r.res().data.borrow();
+        data.as_ref()
+            .and_then(|d| d.downcast_ref::<std::cell::RefCell<Stream>>())
+            .map(|c| c as *const std::cell::RefCell<Stream>)
+    };
+    if let Some(cell) = cell {
+        // SAFETY: `v` holds the resource for the call.
+        let mut s = unsafe { (*cell).borrow_mut() };
+        super::streams::close_stream(vm, &mut s)?;
+    }
     r.close();
     Ok(Value::Bool(true))
 }
@@ -1021,8 +1113,14 @@ fn feof(vm: &mut Vm, a: &mut Args) -> R<Value> {
                     cur >= len && s.eof
                 }
             }
+            Backing::Native(n) => s.eof || n.eof(),
             _ => s.eof,
         };
+        if !s.read_filters.is_empty() {
+            return Ok(Value::Bool(
+                s.filtered.is_empty() && (s.filters_closed || s.eof),
+            ));
+        }
         Ok(Value::Bool(
             at_end && s.eof || matches!(s.backing, Backing::Memory { .. }) && at_end,
         ))
@@ -1036,6 +1134,9 @@ fn fflush(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 let _ = f.flush();
             }
             Backing::Stdout | Backing::Output => vm.out.flush(),
+            Backing::Native(n) => {
+                return Ok(Value::Bool(n.flush(vm).is_ok()));
+            }
             Backing::User { .. } => {
                 let r = super::userstream::simple(vm, s, b"stream_flush", Vec::new())?;
                 return Ok(Value::Bool(r.is_some_and(|v| vm.to_bool(&v))));
@@ -1052,6 +1153,10 @@ fn ftell(vm: &mut Vm, a: &mut Args) -> R<Value> {
             Backing::File(f) => Value::Int(f.stream_position().map(|p| p as i64).unwrap_or(0)),
             Backing::Memory { pos, .. } => Value::Int(*pos as i64),
             Backing::User { .. } => Value::Int(s.upos),
+            Backing::Native(n) => match n.tell() {
+                Some(p) => Value::Int(p as i64),
+                None => Value::Bool(false),
+            },
             _ => Value::Bool(false),
         })
     })
@@ -1097,6 +1202,19 @@ fn do_seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> bool {
             }
             *pos = np as usize;
             true
+        }
+        Backing::Native(n) => {
+            let w = match whence {
+                1 => SeekFrom::Current(off),
+                2 => SeekFrom::End(off),
+                _ => {
+                    if off < 0 {
+                        return false;
+                    }
+                    SeekFrom::Start(off as u64)
+                }
+            };
+            matches!(n.seek(vm, w), Some(Ok(_)))
         }
         _ => false,
     }
@@ -1390,6 +1508,9 @@ fn stream_get_wrappers(vm: &mut Vm, _a: &mut Args) -> R<Value> {
         })
         .map(|s| Value::from(*s))
         .collect();
+    for n in super::streams::wrapper_names(vm) {
+        out.push(Value::Str(PhpStr::from(n)));
+    }
     let mut users: Vec<&Vec<u8>> = vm.user_wrappers.keys().collect();
     users.sort();
     for u in users {

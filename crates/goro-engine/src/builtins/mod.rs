@@ -24,6 +24,7 @@ pub mod pcre;
 pub mod reflection;
 pub mod serialize;
 pub mod spl;
+pub mod streams;
 pub mod string;
 pub mod strmisc;
 pub mod userstream;
@@ -43,6 +44,7 @@ pub fn modules() -> Vec<&'static Module> {
         &info::MODULE,
         &fiber::MODULE,
         &file::MODULE,
+        &streams::MODULE,
         &serialize::MODULE,
         &json::MODULE,
         &reflection::MODULE,
