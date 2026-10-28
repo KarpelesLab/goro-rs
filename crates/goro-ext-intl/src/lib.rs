@@ -11,4 +11,5 @@
 //! them.
 
 pub mod error;
+pub mod locale;
 pub mod utf16;
