@@ -77,7 +77,7 @@ pub fn check_encoding(input: &[u8], enc: Encoding) -> bool {
     }
     buf.clear();
     d.finish(&mut buf);
-    !buf.contains(&ERR)
+    !buf.contains(&ERR) && !d.check_failed()
 }
 
 /// Replaces invalid sequences with the substitute character (`mb_scrub`).

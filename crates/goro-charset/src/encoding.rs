@@ -306,15 +306,24 @@ impl Encoding {
         if name.eq_ignore_ascii_case(b"UTF-8") {
             return Some(Encoding::Utf8);
         }
-        ALL.iter().copied().find(|e| {
-            let i = e.info();
-            i.name.as_bytes().eq_ignore_ascii_case(name)
-                || i.aliases
-                    .iter()
-                    .any(|a| a.as_bytes().eq_ignore_ascii_case(name))
-                || i.mime
-                    .is_some_and(|m| m.as_bytes().eq_ignore_ascii_case(name))
-        })
+        // Names and aliases first: several encodings share a MIME name
+        // ("ISO-2022-JP" is JIS's too).
+        ALL.iter()
+            .copied()
+            .find(|e| {
+                let i = e.info();
+                i.name.as_bytes().eq_ignore_ascii_case(name)
+                    || i.aliases
+                        .iter()
+                        .any(|a| a.as_bytes().eq_ignore_ascii_case(name))
+            })
+            .or_else(|| {
+                ALL.iter().copied().find(|e| {
+                    e.info()
+                        .mime
+                        .is_some_and(|m| m.as_bytes().eq_ignore_ascii_case(name))
+                })
+            })
     }
 
     /// Whether the encoding handles deprecated byte-level transforms

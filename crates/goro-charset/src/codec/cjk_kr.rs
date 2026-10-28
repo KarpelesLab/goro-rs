@@ -181,7 +181,9 @@ impl Decode for Iso2022KrDec {
                     }
                     let c = s[i + 1];
                     i += 2;
-                    let cp = if b < 0x7E && (0x21..=0x7E).contains(&c) {
+                    // ISO-2022-KR lacks the KS X 1001:1998 additions at
+                    // 0x2266/0x2267 (observed on PHP 8.5).
+                    let cp = if b < 0x7E && (0x21..=0x7E).contains(&c) && !(b == 0x22 && (c == 0x66 || c == 0x67)) {
                         t::KSX1001[(b - 0x21) as usize * 94 + (c - 0x21) as usize]
                     } else {
                         0
@@ -217,6 +219,8 @@ impl Encode for Iso2022KrEnc {
             out.push(cp as u8);
             return true;
         }
+        // (The encoder does write the euro and registered signs, which the
+        // decoder rejects; observed on PHP 8.5.)
         let i = rev(&t::KSX1001_REV_IDX, &t::KSX1001_REV_DATA, cp);
         // PHP 8.5 writes a code point KS X 1001 lacks in U+2121..U+8080 as
         // its own two bytes, shifted out (observed on PHP 8.5).

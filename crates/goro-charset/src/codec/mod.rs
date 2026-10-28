@@ -13,10 +13,10 @@ mod cjk_cn;
 mod cjk_kr;
 mod cjk_tw;
 // mod html;
-// mod iso2022jp;
+mod iso2022jp;
 mod japanese;
 mod macjapanese;
-// mod mobile;
+mod mobile;
 // mod qprint;
 mod single;
 mod unicode;
@@ -88,6 +88,13 @@ pub trait Decode {
 
     /// Called once after the input is exhausted.
     fn finish(&mut self, _out: &mut Vec<u32>) {}
+
+    /// Whether `mb_check_encoding` rejects the input even without invalid
+    /// sequences (ISO-2022-JP ending outside ASCII, say). Asked after
+    /// [`Decode::finish`].
+    fn check_failed(&self) -> bool {
+        false
+    }
 }
 
 /// A streaming encoder.
@@ -188,6 +195,12 @@ pub fn decoder(enc: Encoding) -> Box<dyn Decode> {
         Base64 | Uuencode | QuotedPrintable => Box::new(single::Latin1Dec),
         Gb18030 | Gb18030_2022 | EucCn | Cp936 => Box::new(cjk_cn::GbDec::new(enc)),
         Hz => Box::new(cjk_cn::HzDec::default()),
+        Jis | Iso2022Jp | Iso2022JpMs | Iso2022Jp2004 | Iso2022JpKddi | Cp50220 | Cp50221
+        | Cp50222 => Box::new(iso2022jp::Iso2022JpDec::new(enc)),
+        Utf8Docomo | Utf8KddiA | Utf8KddiB | Utf8Softbank => {
+            Box::new(mobile::Utf8MobileDec::new(enc))
+        }
+        SjisDocomo | SjisKddi | SjisSoftbank => Box::new(mobile::SjisMobileDec::new(enc)),
         EucTw => Box::new(cjk_tw::EucTwDec),
         Big5 | Cp950 => Box::new(cjk_tw::Big5Dec::new(enc)),
         EucKr | Uhc => Box::new(cjk_kr::KrDec::new(enc)),
@@ -218,6 +231,12 @@ pub fn encoder(enc: Encoding) -> Box<dyn Encode> {
         EightBit | Iso8859_1 | Base64 | Uuencode | QuotedPrintable => Box::new(single::Latin1Enc),
         Gb18030 | Gb18030_2022 | EucCn | Cp936 => Box::new(cjk_cn::GbEnc::new(enc)),
         Hz => Box::new(cjk_cn::HzEnc::default()),
+        Jis | Iso2022Jp | Iso2022JpMs | Iso2022Jp2004 | Iso2022JpKddi | Cp50220 | Cp50221
+        | Cp50222 => Box::new(iso2022jp::Iso2022JpEnc::new(enc)),
+        Utf8Docomo | Utf8KddiA | Utf8KddiB | Utf8Softbank => {
+            Box::new(mobile::Utf8MobileEnc::new(enc))
+        }
+        SjisDocomo | SjisKddi | SjisSoftbank => Box::new(mobile::SjisMobileEnc::new(enc)),
         EucTw => Box::new(cjk_tw::EucTwEnc),
         Big5 | Cp950 => Box::new(cjk_tw::Big5Enc::new(enc)),
         EucKr | Uhc => Box::new(cjk_kr::KrEnc::new(enc)),

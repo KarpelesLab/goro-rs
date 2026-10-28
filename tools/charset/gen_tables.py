@@ -336,6 +336,21 @@ def gen_japanese():
         c932_rev.setdefault(c932[i], i + 1)
     body += emit_rev("CP932_REV", c932_rev, 0xFFFF)
     body += emit_rev("CP51932_REV", rev_of({i: v for i, v in c932.items() if i < 94 * 94}), 0xFFFF)
+    # The SJIS-Mobile encodings prefer the NEC-selected codes (test
+    # ext/mbstring/tests/sjis_mobile_encodings.phpt): the lowest code wins.
+    body += emit_rev("CP932_LOW_REV", rev_of(c932), 0xFFFF)
+    # CP50220/1/2: CP932's 120 rows (lead bytes 0x21..0x97), with the JIS
+    # mappings of six cells (test ext/mbstring/tests/cp5022x_encoding.phpt);
+    # the encoder takes both forms and prefers the lowest code.
+    c5022x = dict(c932)
+    jis_cells = {0x2141: 0x301C, 0x2142: 0x2016, 0x215D: 0x2212, 0x2171: 0xA2, 0x2172: 0xA3, 0x224C: 0xAC}
+    for code, u in jis_cells.items():
+        c5022x[jis_index(code)] = u
+    body += emit_fwd("CP5022X", c5022x, 120 * 94)
+    r5 = rev_of(c5022x)
+    for code in jis_cells:
+        r5[c932[jis_index(code)]] = jis_index(code) + 1
+    body += emit_rev("CP5022X_REV", r5, 0xFFFF)
 
     # eucJP-win (eucJP-ms): JIS X 0208 plus the NEC row 13 of CP932, the
     # user-defined rows 85..94 (U+E000..U+E3AB); with 0x8F, JIS X 0212 plus
@@ -621,8 +636,116 @@ def gen_korean():
     write("kr.rs", body)
 
 
+def gen_kana():
+    """Halfwidth katakana -> fullwidth (UnicodeData <narrow> decompositions)
+    and the kana with voiced/semi-voiced sound marks (canonical
+    decompositions into base + U+3099/U+309A)."""
+    hw = {}
+    voiced = []
+    with open(os.path.join(DATA, "ucd", "UnicodeData.txt"), encoding="utf-8") as f:
+        for line in f:
+            p = line.split(";")
+            cp = int(p[0], 16)
+            d = p[5].split()
+            if 0xFF61 <= cp <= 0xFF9F and d and d[0] == "<narrow>":
+                hw[cp - 0xFF61] = int(d[1], 16)
+            if len(d) == 2 and not d[0].startswith("<") and int(d[1], 16) in (0x3099, 0x309A):
+                b = int(d[0], 16)
+                if 0x3040 <= b <= 0x30FF:
+                    voiced.append((b, int(d[1], 16), cp))
+    body = fmt_array("HW_TO_FW", "u16", [hw[i] for i in range(63)])
+    voiced.sort()
+    body += "/// (base kana, U+3099 or U+309A, composed kana).\n"
+    body += "pub(crate) static VOICED: [(u16, u16, u16); %d] = [\n" % len(voiced)
+    for b, m, c in voiced:
+        body += "    (0x%X, 0x%X, 0x%X),\n" % (b, m, c)
+    body += "];\n\n"
+    write("kana.rs", body)
+
+
+# ---------------------------------------------------------------------------
+# Japanese mobile emoji. Unicode's EmojiSources.txt gives each carrier's
+# Shift_JIS code; the carrier-specific emoji Unicode lacks map to the
+# Supplementary PUA-A code points of test
+# ext/mbstring/tests/sjis_mobile_encodings.phpt.
+
+MOBILE_EXTRA = {
+    "DOCOMO": dict([(0xF94A + i, 0xFEE16 + i) for i in range(6)] + [
+        (0xF953, 0xFEE1C), (0xF954, 0xFEE1D), (0xF958, 0xFEE1E), (0xF959, 0xFEE1F),
+        (0xF95A, 0xFEE20)] + [(0xF95F + i, 0xFEE21 + i) for i in range(5)] + [
+        (0xF964, 0x25EA), (0xF965, 0x25A0), (0xF966, 0x25BF)] + [
+        (0xF967 + i, 0xFEE29 + i) for i in range(3)] + [(0xF96A, 0x2020)] + [
+        (0xF96B + i, 0xFEE2D + i) for i in range(7)] + [
+        (0xF975, 0xFEE10), (0xF976, 0xFEE11), (0xF978, 0xFEE12), (0xF979, 0xFEE13),
+        (0xF984, 0x27BF), (0xF986, 0xFE82D), (0xF9B1, 0xFEE14), (0xF9B2, 0xFEE15)]),
+    "KDDI": dict([(0xF794, 0xFEE40), (0xF7CF, 0xFEE41), (0xF370, 0xFEE42), (0xF478, 0xFEE43),
+                  (0xF486, 0xFEE44)] + [(0xF48E + i, 0xFEE45 + i) for i in range(6)] + [
+                  (0xF748, 0xFE82D), (0xF7A3, 0xFE83C), (0xF7D2, 0xFEB89)]),
+    "SOFTBANK": dict([(0xF7B1, 0x27BF)] + [(0xF7F4 + i, 0xFEE77 + i) for i in range(7)] + [
+        (0xFBD8 + i, 0xFEE70 + i) for i in range(7)] + [(0xFBAA, 0xFE4C5)]),
+}
+
+# The carriers' UTF-8 Private Use Area layouts: (first PUA code point, last,
+# first Shift_JIS code), runs in Shift_JIS code order (checked against PHP 8.5).
+MOBILE_PUA = {
+    "DOCOMO": [(0xE63E, 0xE757, 0xF89F)],
+    "KDDI_A": [(0xE468, 0xE5B4, 0xF640), (0xE5B5, 0xE5CC, 0xF7E5), (0xE5CD, 0xE5DF, 0xF340),
+               (0xEA80, 0xEAFA, 0xF353), (0xEAFB, 0xEB0D, 0xF7D2), (0xEB0E, 0xEB8E, 0xF3CF)],
+    "KDDI_B": [(0xEC40, 0xEC7E, 0xF340), (0xEC80, 0xECFC, 0xF380), (0xED40, 0xED7E, 0xF440),
+               (0xED80, 0xED93, 0xF480), (0xEF40, 0xEF7E, 0xF640), (0xEF80, 0xEFFC, 0xF680),
+               (0xF040, 0xF07E, 0xF740), (0xF080, 0xF0FC, 0xF780)],
+    "SOFTBANK": [(0xE001, 0xE05A, 0xF941), (0xE101, 0xE15A, 0xF741), (0xE201, 0xE25A, 0xF7A1),
+                 (0xE301, 0xE34D, 0xF9A1), (0xE401, 0xE44C, 0xFB41), (0xE501, 0xE53E, 0xFBA1)],
+}
+
+
+def gen_mobile():
+    carriers = {"DOCOMO": {}, "KDDI": {}, "SOFTBANK": {}}
+    with open(os.path.join(DATA, "ucd", "EmojiSources.txt"), encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("#") or not line.strip():
+                continue
+            fields = line.rstrip("\n").split(";")
+            cps = [int(x, 16) for x in fields[0].split()]
+            for name, col in (("DOCOMO", 1), ("KDDI", 2), ("SOFTBANK", 3)):
+                if fields[col]:
+                    carriers[name][int(fields[col], 16)] = cps
+    body = ""
+    for name, m in carriers.items():
+        for code, cp in MOBILE_EXTRA[name].items():
+            m[code] = [cp]
+        rows = sorted(m.items())
+        body += "/// (Shift_JIS code, code point, second code point or 0).\n"
+        body += "pub(crate) static %s: [(u16, u32, u32); %d] = [\n" % (name, len(rows))
+        for code, cps in rows:
+            body += "    (0x%X, 0x%X, 0x%X),\n" % (code, cps[0], cps[1] if len(cps) > 1 else 0)
+        body += "];\n\n"
+        # The encoder's view: the DoCoMo emoji decoded to existing symbols
+        # are written from the PUA code points they had instead (test
+        # ext/mbstring/tests/sjis_mobile_encodings.phpt, observed on PHP 8.5).
+        enc = {}
+        for code, cps in rows:
+            key = (cps[0], cps[1] if len(cps) > 1 else 0)
+            if name == "DOCOMO" and code in (0xF964, 0xF965, 0xF966, 0xF96A):
+                key = ({0xF964: 0xFEE26, 0xF965: 0xFEE27, 0xF966: 0xFEE28, 0xF96A: 0xFEE2C}[code], 0)
+            enc.setdefault(key, code)
+        body += "/// (code point, second code point or 0, Shift_JIS code), sorted.\n"
+        body += "pub(crate) static %s_ENC: [(u32, u32, u16); %d] = [\n" % (name, len(enc))
+        for (a, b), code in sorted(enc.items()):
+            body += "    (0x%X, 0x%X, 0x%X),\n" % (a, b, code)
+        body += "];\n\n"
+    for name, runs in MOBILE_PUA.items():
+        body += "pub(crate) static PUA_%s: [(u32, u32, u16); %d] = [\n" % (name, len(runs))
+        for a, b, c in runs:
+            body += "    (0x%X, 0x%X, 0x%X),\n" % (a, b, c)
+        body += "];\n\n"
+    write("mobile.rs", body)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
+    gen_kana()
+    gen_mobile()
     gen_single()
     gen_japanese()
     gen_chinese()

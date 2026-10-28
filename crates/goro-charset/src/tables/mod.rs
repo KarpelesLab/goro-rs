@@ -2,7 +2,9 @@
 
 pub(crate) mod big5;
 pub(crate) mod gb;
+pub(crate) mod kana;
 pub(crate) mod kr;
+pub(crate) mod mobile;
 pub(crate) mod jis;
 pub(crate) mod single;
 

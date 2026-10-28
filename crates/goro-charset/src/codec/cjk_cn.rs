@@ -310,8 +310,11 @@ impl Decode for HzDec {
                 i += 1;
                 continue;
             }
-            if !(0x21..=0x7E).contains(&b) {
-                out.push(b as u32);
+            // In GB mode, control characters and the lead bytes of the
+            // empty GB 2312 rows (10..15, 88..94) are errors by themselves
+            // (observed on PHP 8.5).
+            if !((0x21..=0x29).contains(&b) || (0x30..=0x77).contains(&b)) {
+                out.push(ERR);
                 i += 1;
                 continue;
             }

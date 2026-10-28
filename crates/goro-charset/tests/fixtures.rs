@@ -169,6 +169,181 @@ fn dec_record(s: &[u8], e: Encoding, sub: &Subst, r: &mut String) {
     );
 }
 
+/// The prefixes of tools/charset/fixtures/mb_stateful.php.
+fn stateful_prefixes(name: &str) -> Vec<&'static [u8]> {
+    let jis: Vec<&[u8]> = vec![
+        b"",
+        b"\x1B$B",
+        b"\x1B$@",
+        b"\x1B$(D",
+        b"\x1B(I",
+        b"\x1B(J",
+        b"\x0E",
+        b"\x1B",
+        b"\x1B$",
+        b"\x1B$(",
+        b"\x1B(",
+        b"\x1B$B\x21",
+        b"\x1B$(Q",
+        b"\x1B$(P",
+        b"\x1B$(O",
+        b"\x1B$B\x1B(B",
+    ];
+    match name {
+        "JIS" | "ISO-2022-JP" | "ISO-2022-JP-MS" | "CP50220" | "CP50221" | "CP50222"
+        | "ISO-2022-JP-2004" | "ISO-2022-JP-MOBILE#KDDI" => jis,
+        "UTF-7" => vec![
+            b"", b"+", b"+A", b"+AA", b"+AAA", b"+AAAA", b"+AAAAA", b"+AGE", b"+2D3", b"+2D3e",
+            b"+2D3eA", b"+2D3eAA", b"+AGEA", b"a+AGE-",
+        ],
+        "UTF7-IMAP" => vec![
+            b"", b"&", b"&A", b"&AA", b"&AAA", b"&AAAA", b"&AAAAA", b"&AGE", b"&2D3", b"&2D3e",
+            b"&2D3eA", b"&AGEA", b"a&AGE-",
+        ],
+        "HZ" => vec![b"", b"~{", b"~{\x21", b"~{\x30\x21", b"~"],
+        "ISO-2022-KR" => vec![
+            b"",
+            b"\x1B$)C",
+            b"\x1B$)C\x0E",
+            b"\x0E",
+            b"\x1B$)C\x0E\x30",
+        ],
+        "SJIS-Mobile#SOFTBANK" => vec![
+            b"\x1B$G", b"\x1B$E", b"\x1B$F", b"\x1B$O", b"\x1B$P", b"\x1B$Q", b"\x1B$",
+        ],
+        _ => vec![],
+    }
+}
+
+/// The sample code points of the pair section of mb_stateful.php.
+const PAIR_CPS: [u32; 62] = [
+    0x00, 0x0A, 0x0E, 0x0F, 0x1B, 0x20, 0x41, 0x5C, 0x7E, 0x7F, 0x80, 0xA5, 0xA6, 0xA7, 0xAF,
+    0x203E, 0x2015, 0x2016, 0x2116, 0x2160, 0x2170, 0x2225, 0x3000, 0x3042, 0x304B, 0x309A,
+    0x30AB, 0x31F7, 0x4E00, 0x4E02, 0x4E28, 0x7E8A, 0x9ED1, 0xE000, 0xE3AC, 0xE757, 0xE63E,
+    0xEE70, 0xF8F0, 0xFF01, 0xFF5E, 0xFF61, 0xFF71, 0xFF9F, 0xFFE2, 0xFFE4, 0x1F600, 0x20089,
+    0x2B, 0x2D, 0x26, 0x2F, 0x3D, 0x7A, 0xD800, 0x10FFFF, 0x00E6, 0x0300, 0x02E9, 0x02E5, 0xD55C,
+    0x4E2D,
+];
+
+/// Lines of mb_stateful.php for one encoding: section 0 is the prefixed
+/// decode probes, section 1 the code point pairs.
+fn stateful_lines(name: &str, section: usize, dump: Option<&std::path::Path>) -> Vec<String> {
+    let e = enc_by_name(name);
+    let sub = Subst::char(0x25);
+    let mut out = Vec::new();
+    let file = dump.map(|d| {
+        std::fs::File::create(d.join(format!(
+            "{}.{}",
+            name.replace('#', "_"),
+            if section == 0 { "st" } else { "pairs" }
+        )))
+        .unwrap()
+    });
+    let mut file = file.map(std::io::BufWriter::new);
+    if section == 0 {
+        for p in stateful_prefixes(name) {
+            let ph = if p.is_empty() { "-".to_string() } else { hex(p) };
+            let mut r = String::new();
+            for b in 0..=255u8 {
+                let mut s = p.to_vec();
+                s.push(b);
+                dec_record(&s, e, &sub, &mut r);
+            }
+            out.push(format!("{ph}/1 {:08x}", crc32(r.as_bytes())));
+            if let Some(f) = file.as_mut() {
+                writeln!(f, "{ph}/1 {r}").unwrap();
+            }
+            for b1 in 0..=255u8 {
+                let mut r = String::new();
+                for b2 in 0..=255u8 {
+                    let mut s = p.to_vec();
+                    s.extend_from_slice(&[b1, b2]);
+                    dec_record(&s, e, &sub, &mut r);
+                }
+                out.push(format!("{ph}/{b1:02x} {:08x}", crc32(r.as_bytes())));
+                if let Some(f) = file.as_mut() {
+                    writeln!(f, "{ph}/{b1:02x} {r}").unwrap();
+                }
+            }
+        }
+    } else {
+        for &a in &PAIR_CPS {
+            let mut r = String::new();
+            for &b in &PAIR_CPS {
+                let mut s = a.to_be_bytes().to_vec();
+                s.extend_from_slice(&b.to_be_bytes());
+                let c = convert(&s, e, Encoding::Utf32Be, &sub);
+                let _ = write!(r, "{}:{},", c.illegal, hex(&c.bytes));
+            }
+            out.push(format!("pair{a:x} {:08x}", crc32(r.as_bytes())));
+            if let Some(f) = file.as_mut() {
+                writeln!(f, "pair{a:x} {r}").unwrap();
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn stateful_matches_php() {
+    let fixture = include_str!("fixtures/mb_stateful.txt");
+    let mut expected: Vec<(String, Vec<String>)> = Vec::new();
+    for line in fixture.lines() {
+        let (enc, rest) = line.split_once(' ').unwrap();
+        match expected.last_mut() {
+            Some((e, v)) if e == enc => v.push(rest.to_string()),
+            _ => expected.push((enc.to_string(), vec![rest.to_string()])),
+        }
+    }
+    let only: Option<Vec<String>> = std::env::var("GORO_CHARSET_ENC")
+        .ok()
+        .map(|s| s.split(',').map(str::to_string).collect());
+    let dump = std::env::var("GORO_CHARSET_DUMP").ok();
+    let dump = dump.as_deref().map(std::path::Path::new);
+    let full: Option<Vec<String>> = std::env::var("GORO_CHARSET_FULL").ok().map(|d| {
+        std::fs::read_to_string(std::path::Path::new(&d).join("st.txt"))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    });
+    let mut failed = Vec::new();
+    for (enc, exp) in &expected {
+        let section = usize::from(exp[0].starts_with("pair"));
+        if let Some(o) = &only
+            && !o.contains(enc)
+        {
+            continue;
+        }
+        let got = stateful_lines(enc, section, dump);
+        let got_c = compact(&got);
+        let bad = got_c.iter().zip(exp).filter(|(a, b)| a != b).count()
+            + got_c.len().abs_diff(exp.len());
+        if bad > 0 {
+            let mut msg = format!("{enc} (section {section}): {bad} of {} groups differ", exp.len());
+            if let Some(full) = &full {
+                let mine: std::collections::HashSet<String> =
+                    got.iter().map(|l| format!("{enc} {l}")).collect();
+                let keys: Vec<String> = full
+                    .iter()
+                    .filter(|l| l.starts_with(&format!("{enc} ")))
+                    .filter(|l| {
+                        let k = l.split(' ').nth(1).unwrap();
+                        (section == 0) != k.starts_with("pair") && !mine.contains(*l)
+                    })
+                    .take(30)
+                    .map(|l| l.split(' ').nth(1).unwrap().to_string())
+                    .collect();
+                msg += &format!(" ({})", keys.join(" "));
+            }
+            failed.push(msg);
+        }
+    }
+    if !failed.is_empty() {
+        panic!("{} sections differ from PHP 8.5:\n{}", failed.len(), failed.join("\n"));
+    }
+}
+
 /// Per-encoding probe lines ("KEY CRC") for one direction.
 fn lines(name: &str, encode: bool, dump: Option<&std::path::Path>) -> Vec<String> {
     let e = enc_by_name(name);
