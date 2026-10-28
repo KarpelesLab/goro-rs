@@ -117,9 +117,36 @@ impl DateTime {
     }
 }
 
-/// `date()` / `gmdate()`: formats Unix time `ts` in `zone`.
+/// `date()`: formats Unix time `ts` in `zone`.
 pub fn date(fmt: &[u8], ts: i64, zone: &TimeZone) -> Vec<u8> {
     crate::format::format(fmt, &LocalTime::new(ts, 0, zone), zone)
+}
+
+/// `gmdate()`: formats Unix time `ts` (and microseconds `us`) in UTC,
+/// with "GMT" as the `T` abbreviation (observed on PHP 8.5: `gmdate("e
+/// T")` is "UTC GMT", while `date("e T")` in UTC is "UTC UTC").
+pub fn gmdate(fmt: &[u8], ts: i64, us: u32) -> Vec<u8> {
+    let zone = TimeZone::utc();
+    let t = LocalTime::new(ts, us, &zone);
+    let mut out = Vec::with_capacity(fmt.len() * 2);
+    let mut start = 0;
+    let mut i = 0;
+    while i < fmt.len() {
+        match fmt[i] {
+            b'\\' => i += 2,
+            b'T' => {
+                crate::format::format_into(&mut out, &fmt[start..i], &t, &zone);
+                out.extend_from_slice(b"GMT");
+                i += 1;
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    if start < fmt.len() {
+        crate::format::format_into(&mut out, &fmt[start..], &t, &zone);
+    }
+    out
 }
 
 impl DateTime {
@@ -180,9 +207,48 @@ impl DateTime {
     }
 
     /// The "date" member of `var_dump()`, `serialize()` and `json_encode()`
-    /// output: "Y-m-d H:i:s.u" (observed on PHP 8.5).
+    /// output: "Y-m-d H:i:s.u", with a '+' before years beyond four digits
+    /// (observed on PHP 8.5; test bug80483.phpt).
     pub fn dump_date(&self) -> String {
-        String::from_utf8(self.format(b"Y-m-d H:i:s.u")).unwrap_or_default()
+        String::from_utf8(self.format(b"x-m-d H:i:s.u")).unwrap_or_default()
+    }
+
+    /// Reads the [`DateTime::dump_date`] form ("[+-]Y-m-d H:i:s.uuuuuu",
+    /// any number of year digits) as a wall clock time in `zone`.
+    fn from_dump_date(s: &[u8], zone: &TimeZone) -> Option<DateTime> {
+        let t = std::str::from_utf8(s).ok()?;
+        let (neg, t) = match t.strip_prefix('-') {
+            Some(r) => (true, r),
+            None => (false, t.strip_prefix('+').unwrap_or(t)),
+        };
+        let num = |p: &str| -> Option<i64> {
+            if p.is_empty() || !p.bytes().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            p.parse().ok()
+        };
+        let (date, time) = t.split_once(' ')?;
+        let mut d = date.split('-');
+        let y = num(d.next()?)?;
+        let m = num(d.next()?)?;
+        let dd = num(d.next()?)?;
+        if d.next().is_some() {
+            return None;
+        }
+        let (hms, us) = time.split_once('.')?;
+        if us.len() != 6 {
+            return None;
+        }
+        let us = num(us)?;
+        let mut h = hms.split(':');
+        let hh = num(h.next()?)?;
+        let mi = num(h.next()?)?;
+        let ss = num(h.next()?)?;
+        if h.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&dd) {
+            return None;
+        }
+        let y = if neg { -y } else { y };
+        Some(DateTime::from_local(y, m, dd, hh, mi, ss, us, zone.clone()))
     }
 
     /// The zone of serialized/`__set_state` data: `timezone_type` 1, 2 or
@@ -198,9 +264,14 @@ impl DateTime {
 
     /// `__unserialize()` / `__set_state()`: the "date" string read in the
     /// zone given by `timezone_type`/`timezone`. `None` means "Invalid
-    /// serialization data for DateTime object".
+    /// serialization data for DateTime object". The [`DateTime::dump_date`]
+    /// form is read directly, so that years beyond four digits round-trip
+    /// (test bug75035.phpt); other strings go through the date parser.
     pub fn from_parts(date: &[u8], ty: i64, name: &str) -> Option<DateTime> {
         let zone = DateTime::zone_from_parts(ty, name)?;
+        if let Some(d) = DateTime::from_dump_date(date, &zone) {
+            return Some(d);
+        }
         let p = crate::parse::parse(date);
         if !p.errors.is_empty() {
             return None;

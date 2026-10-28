@@ -145,9 +145,17 @@ impl TimeZone {
     /// win over identifiers ("EST", "CET" are type 2); identifiers match
     /// case-insensitively.
     pub fn parse(name: &str) -> Option<TimeZone> {
+        TimeZone::parse_checked(name).ok()
+    }
+
+    /// [`TimeZone::parse`] with the reason for a refusal: an offset of a
+    /// valid form beyond ±99:59:59 is [`ZoneError::OutOfRange`] ("Timezone
+    /// offset is out of range"), anything else [`ZoneError::Unknown`]
+    /// ("Unknown or bad timezone"; observed on PHP 8.5).
+    pub fn parse_checked(name: &str) -> Result<TimeZone, ZoneError> {
         let s = name.trim_start_matches([' ', '\t']);
         if s == "UTC" {
-            return TimeZone::from_id("UTC");
+            return TimeZone::from_id("UTC").ok_or(ZoneError::Unknown);
         }
         if s.starts_with(['+', '-']) {
             return parse_offset_zone(s).map(TimeZone::Offset);
@@ -158,9 +166,9 @@ impl TimeZone {
             return parse_offset_zone(rest).map(TimeZone::Offset);
         }
         if let Some(e) = abbr::find(s) {
-            return Some(TimeZone::from_abbr(e));
+            return Ok(TimeZone::from_abbr(e));
         }
-        TimeZone::from_id(s)
+        TimeZone::from_id(s).ok_or(ZoneError::Unknown)
     }
 
     /// PHP's zone type number: 1 offset, 2 abbreviation, 3 identifier.
@@ -327,44 +335,81 @@ pub fn format_offset_name(o: i32) -> String {
 /// "+HH:MM:SS" (`s` starts with the sign) as a `DateTimeZone` offset.
 /// Minutes and seconds are not range checked: "+01:99" is 02:39
 /// (observed on PHP 8.5).
-fn parse_offset_zone(s: &str) -> Option<i32> {
-    let neg = s.starts_with('-');
-    let body = &s[1..];
-    if body.is_empty() || !body.bytes().all(|c| c.is_ascii_digit() || c == b':') {
-        return None;
+/// Why [`TimeZone::parse_checked`] refused a name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZoneError {
+    /// "Unknown or bad timezone (NAME)".
+    Unknown,
+    /// "Timezone offset is out of range (NAME)".
+    OutOfRange,
+}
+
+impl ZoneError {
+    /// The message for the constructor argument `name` (the
+    /// DateInvalidTimeZoneException text, also the warning of
+    /// timezone_open()).
+    pub fn message(self, name: &str) -> String {
+        match self {
+            ZoneError::Unknown => format!("Unknown or bad timezone ({name})"),
+            ZoneError::OutOfRange => format!("Timezone offset is out of range ({name})"),
+        }
     }
-    let num = |t: &str| -> i64 { t.bytes().fold(0i64, |a, c| a * 10 + (c - b'0') as i64) };
-    let b = body.as_bytes();
-    let colons = b.iter().filter(|&&c| c == b':').count();
-    let (h, m, sec) = if colons == 0 {
-        match b.len() {
-            1 | 2 => (num(body), 0, 0),
-            3 => (num(&body[..1]), num(&body[1..]), 0),
-            4 => (num(&body[..2]), num(&body[2..]), 0),
-            6 => (num(&body[..2]), num(&body[2..4]), num(&body[4..])),
-            _ => return None,
-        }
-    } else {
-        let parts: Vec<&str> = body.split(':').collect();
-        match parts.as_slice() {
-            // "+:30" is +00:00 on PHP 8.5
-            ["", _] => (0, 0, 0),
-            [h, m] if h.len() <= 2 && m.len() <= 2 => (num(h), num(m), 0),
-            // "+100:00" is one minute on PHP 8.5 (an approximation of
-            // that quirk: the leading digit counts as minutes)
-            [h, m] if h.len() == 3 && m.len() == 2 => (0, num(&h[..1]), 0),
-            [h, m, sec] if h.len() == 2 && m.len() == 2 && sec.len() == 2 => {
-                (num(h), num(m), num(sec))
+}
+
+/// "+hh", "+hmm", "+hh:mm", "+hhmmss", "+hh:mm:ss" and the looser forms
+/// PHP 8.5 accepts. What is read depends on the length of the part after
+/// the sign, which may hold only digits and colons; each field is read as
+/// its leading number (":5" is 0, "5:" is 5), as observed on PHP 8.5:
+///
+/// * 1-2 characters: hours ("+5", "+1:"; "+:" is +00:00);
+/// * 3-4: "h:mm" when the second character is a colon ("+1:99" is
+///   +02:39), "hh:mm" when the third is ("+12:" is +12:00), else the
+///   leading number as hmm/hhmm ("+999" is +10:39, "+123:" is +01:23);
+/// * 5: "hh:mm" (the third character must be a colon);
+/// * 6: the leading number as hhmmss ("+123456"; "+1234:5" is +00:12:34);
+/// * 8: "hh:mm:ss" (colons third and sixth);
+/// * other lengths are refused.
+///
+/// The total must be at most 99:59:59, else "Timezone offset is out of
+/// range" ("+99:60", "+9999").
+fn parse_offset_zone(s: &str) -> Result<i32, ZoneError> {
+    let neg = s.starts_with('-');
+    let b = &s.as_bytes()[1..];
+    if b.is_empty() || !b.iter().all(|&c| c.is_ascii_digit() || c == b':') {
+        return Err(ZoneError::Unknown);
+    }
+    // the leading number of a field
+    let lead = |t: &[u8]| -> i64 {
+        t.iter()
+            .take_while(|c| c.is_ascii_digit())
+            .fold(0i64, |a, &c| a * 10 + (c - b'0') as i64)
+    };
+    let (h, m, sec) = match b.len() {
+        1 | 2 => (lead(b), 0, 0),
+        3 | 4 => {
+            if b[1] == b':' {
+                (lead(&b[..1]), lead(&b[2..]), 0)
+            } else if b[2] == b':' {
+                (lead(&b[..2]), lead(&b[3..]), 0)
+            } else {
+                let n = lead(b);
+                (n / 100, n % 100, 0)
             }
-            _ => return None,
         }
+        5 if b[2] == b':' => (lead(&b[..2]), lead(&b[3..]), 0),
+        6 => {
+            let n = lead(b);
+            (n / 10_000, n / 100 % 100, n % 100)
+        }
+        8 if b[2] == b':' && b[5] == b':' => (lead(&b[..2]), lead(&b[3..5]), lead(&b[6..])),
+        _ => return Err(ZoneError::Unknown),
     };
     let total = h * 3600 + m * 60 + sec;
     if total > 99 * 3600 + 59 * 60 + 59 {
-        return None;
+        return Err(ZoneError::OutOfRange);
     }
     let total = total as i32;
-    Some(if neg { -total } else { total })
+    Ok(if neg { -total } else { total })
 }
 
 #[cfg(test)]
@@ -398,6 +443,24 @@ mod tests {
         assert_eq!(name_of("+5:"), Some((1, "+05:00".into())));
         assert_eq!(name_of("+:30"), Some((1, "+00:00".into())));
         assert_eq!(name_of("+1:0:0"), None);
+        assert_eq!(name_of("+12:345"), Some((1, "+00:00:12".into())));
+        assert_eq!(name_of("+123:45"), Some((1, "+00:01:23".into())));
+        assert_eq!(name_of("+1234:5"), Some((1, "+00:12:34".into())));
+        assert_eq!(name_of("+::"), Some((1, "+00:00".into())));
+        assert_eq!(name_of("+12::4:56"), Some((1, "+12:00:56".into())));
+        assert_eq!(name_of("+:1:2"), Some((1, "+00:02".into())));
+        let err = |s: &str| TimeZone::parse_checked(s).err();
+        assert_eq!(err("+99:60"), Some(ZoneError::OutOfRange));
+        assert_eq!(err("+9999"), Some(ZoneError::OutOfRange));
+        assert_eq!(err("+99:59:60"), Some(ZoneError::OutOfRange));
+        assert_eq!(err("+999999"), Some(ZoneError::OutOfRange));
+        assert_eq!(err("GMT+9999"), Some(ZoneError::OutOfRange));
+        assert_eq!(err("+12345"), Some(ZoneError::Unknown));
+        assert_eq!(err("+1:2:3"), Some(ZoneError::Unknown));
+        assert_eq!(err("+12:34:567"), Some(ZoneError::Unknown));
+        assert_eq!(err("+1a"), Some(ZoneError::Unknown));
+        assert_eq!(err("+"), Some(ZoneError::Unknown));
+        assert_eq!(err("Mars/Base"), Some(ZoneError::Unknown));
         assert_eq!(name_of("GMT+5"), Some((1, "+05:00".into())));
         assert_eq!(name_of("GMT-5"), Some((1, "-05:00".into())));
         assert_eq!(name_of("gmt+5"), None);

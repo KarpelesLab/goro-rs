@@ -93,9 +93,10 @@ impl Vm {
         }
         let msg_s = PhpStr::from(msg);
         self.err.last = Some((level, msg_s.clone(), file.clone(), line as i64));
-        // User error handler (called regardless of error_reporting).
-        if !self.err.in_handler
-            && let Some((h, mask)) = self.err.handlers.last().cloned()
+        // User error handler (called regardless of error_reporting). While
+        // it runs it is not the handler: errors it raises go to a handler
+        // it installs, or to the standard one (test Zend/tests/bug63206.phpt).
+        if let Some((h, mask)) = self.err.handlers.last().cloned()
             && mask & level != 0
             && !h.is_null()
             && level
@@ -107,6 +108,10 @@ impl Vm {
                     | E_COMPILE_WARNING)
                 == 0
         {
+            let depth = self.err.handlers.len();
+            if let Some(top) = self.err.handlers.last_mut() {
+                top.0 = Value::Null;
+            }
             self.err.in_handler = true;
             let args = vec![
                 Value::Int(level),
@@ -116,6 +121,12 @@ impl Vm {
             ];
             let r = self.call_value(&h, args);
             self.err.in_handler = false;
+            if self.err.handlers.len() == depth
+                && let Some(top) = self.err.handlers.last_mut()
+                && top.0.is_null()
+            {
+                top.0 = h.clone();
+            }
             match r {
                 Ok(Value::Bool(false)) => {}
                 Ok(_) => return Ok(()),
@@ -130,6 +141,18 @@ impl Vm {
     }
 
     pub fn display_error(&mut self, level: i64, msg: &str, file: &[u8], line: u32) {
+        // ignore_repeated_errors / ignore_repeated_source (PHP manual:
+        // Error Handling and Logging Configuration Options).
+        if self.ini_bool(b"ignore_repeated_errors", false) {
+            let same_src = self.ini_bool(b"ignore_repeated_source", false);
+            if let Some((m, f, l)) = &self.err.last_shown
+                && m == msg
+                && (same_src || (f.as_slice() == file && *l == line))
+            {
+                return;
+            }
+            self.err.last_shown = Some((msg.to_string(), file.to_vec(), line));
+        }
         let label = level_label(level);
         let file = String::from_utf8_lossy(file);
         if self.ini.log_errors {
@@ -386,6 +409,14 @@ impl Vm {
             }
             if depth == entry {
                 self.pop_frame();
+                // Destructors of the frame's objects may throw too (test
+                // Zend/tests/ex_func_null_during_property_write.phpt).
+                if goro_runtime::object::has_pending_destructors()
+                    && let Err(Unwind::Throw(e2)) = self.run_pending_destructors()
+                {
+                    self.chain_previous(&e2, ex);
+                    return Err(Unwind::Throw(e2));
+                }
                 return Err(Unwind::Throw(ex));
             }
             self.pop_frame();
@@ -1072,7 +1103,18 @@ pub fn trace_arg(v: &Value) -> String {
             format!("'{}{}'", trace_escape(head), more)
         }
         Value::Array(_) => "Array".into(),
-        Value::Object(o) => format!("Object({})", o.class_name().to_string_lossy()),
+        Value::Object(o) => {
+            // Enum cases show as Foo::Bar (test Zend/tests/enum/enum_in_stack_trace.phpt).
+            let c: &Rc<dyn goro_runtime::ClassInfo> = o.class();
+            let any: &dyn std::any::Any = &**c;
+            if let Some(cls) = any.downcast_ref::<crate::class::Class>()
+                && cls.kind == crate::class::ClassKind::Enum
+                && let Some(Value::Str(n)) = o.obj().slots.borrow().first().map(|v| v.deref())
+            {
+                return format!("{}::{}", cls.name.dname(), n.to_string_lossy());
+            }
+            format!("Object({})", o.class_name().to_string_lossy())
+        }
         Value::Resource(r) => format!("Resource id #{}", r.id()),
         Value::Ref(r) => trace_arg(&r.get()),
     }

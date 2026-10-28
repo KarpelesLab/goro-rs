@@ -319,3 +319,50 @@ fn transitions_get() {
         237
     );
 }
+
+#[test]
+fn gmdate_abbreviation() {
+    // observed on PHP 8.5: gmdate("e T") is "UTC GMT", date() in UTC
+    // gives "UTC UTC"
+    assert_eq!(goro_ext_date::time::gmdate(b"e T", 0, 0), b"UTC GMT");
+    assert_eq!(
+        goro_ext_date::time::gmdate(b"\\T T Y-m-d", 86400, 0),
+        b"T GMT 1970-01-02"
+    );
+    let utc = TimeZone::from_id("UTC").unwrap();
+    assert_eq!(goro_ext_date::time::date(b"e T", 0, &utc), b"UTC UTC");
+}
+
+#[test]
+fn serialized_dates_beyond_four_digits() {
+    // tests bug75035.phpt, bug80483.phpt: '+' before five-digit years,
+    // and the form reads back
+    let utc = TimeZone::from_id("UTC").unwrap();
+    let d = DateTime::from_local(12345, 6, 7, 8, 9, 10, 11, utc);
+    assert_eq!(d.dump_date(), "+12345-06-07 08:09:10.000011");
+    let back = DateTime::from_parts(d.dump_date().as_bytes(), 3, "UTC").unwrap();
+    assert_eq!((back.ts, back.us), (d.ts, d.us));
+    let neg = DateTime::from_parts(b"-12345-06-07 08:09:10.000000", 3, "UTC").unwrap();
+    assert_eq!(neg.dump_date(), "-12345-06-07 08:09:10.000000");
+    let plain = DateTime::from_parts(b"2021-06-15 13:45:56.654321", 1, "+02:00").unwrap();
+    assert_eq!(plain.dump_date(), "2021-06-15 13:45:56.654321");
+}
+
+#[test]
+fn zone_errors() {
+    use goro_ext_date::tz::ZoneError;
+    // observed on PHP 8.5
+    let e = |s: &str| TimeZone::parse_checked(s).err().map(|e| e.message(s));
+    assert_eq!(
+        e("+99:60").as_deref(),
+        Some("Timezone offset is out of range (+99:60)")
+    );
+    assert_eq!(
+        e("+12345").as_deref(),
+        Some("Unknown or bad timezone (+12345)")
+    );
+    assert_eq!(
+        TimeZone::parse_checked("Nowhere").err(),
+        Some(ZoneError::Unknown)
+    );
+}

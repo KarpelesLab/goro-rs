@@ -44,6 +44,14 @@ pub static MODULE: Module = Module {
             register_shutdown_function,
         ),
         (
+            "function register_tick_function($callback, mixed ...$args): bool",
+            register_tick_function,
+        ),
+        (
+            "function unregister_tick_function($callback): void",
+            unregister_tick_function,
+        ),
+        (
             "function get_defined_functions(bool $exclude_disabled = true): array",
             get_defined_functions,
         ),
@@ -2429,4 +2437,78 @@ fn core_init(vm: &mut Vm) {
         PhpStr::intern(b"PHP_BUILD_DATE"),
         Value::Str(PhpStr::from(s)),
     );
+}
+
+impl Vm {
+    /// Op::Tick: every `every` statements the tick functions run (PHP
+    /// manual: declare, ticks).
+    pub(crate) fn tick(&mut self, every: u32) -> R<()> {
+        self.tick_count += 1;
+        if self.tick_funcs.is_empty()
+            || self.in_tick
+            || !self.tick_count.is_multiple_of(every.max(1) as u64)
+        {
+            return Ok(());
+        }
+        self.in_tick = true;
+        let funcs = self.tick_funcs.clone();
+        let mut r = Ok(());
+        for (f, args) in funcs {
+            self.tick_running = Some(f.clone());
+            let x = self.call_value(&f, args);
+            self.tick_running = None;
+            if let Err(e) = x {
+                r = Err(e);
+                break;
+            }
+        }
+        self.in_tick = false;
+        r
+    }
+}
+
+fn register_tick_function(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let f = a.val(0);
+    if !vm.is_callable_value(&f, false) {
+        let why = vm.callable_error(&f);
+        return vm.fthrow(
+            a,
+            "TypeError",
+            &format!("Argument #1 ($callback) must be a valid callback, {}", why),
+        );
+    }
+    let args: Vec<Value> = (1..a.len()).map(|i| a.val(i)).collect();
+    vm.tick_funcs.push((f, args));
+    Ok(Value::Bool(true))
+}
+
+fn unregister_tick_function(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let f = a.val(0);
+    if !vm.is_callable_value(&f, false) {
+        let why = vm.callable_error(&f);
+        return vm.fthrow(
+            a,
+            "TypeError",
+            &format!("Argument #1 ($callback) must be a valid callback, {}", why),
+        );
+    }
+    if vm
+        .tick_running
+        .as_ref()
+        .is_some_and(|r| goro_runtime::compare::strict_eq(r, &f))
+    {
+        return vm.throw(
+            "Error",
+            "Registered tick function cannot be unregistered while it is being executed",
+        );
+    }
+    let mut out = Vec::new();
+    for (g, args) in std::mem::take(&mut vm.tick_funcs) {
+        if goro_runtime::compare::strict_eq(&g, &f) {
+            continue;
+        }
+        out.push((g, args));
+    }
+    vm.tick_funcs = out;
+    Ok(Value::Null)
 }

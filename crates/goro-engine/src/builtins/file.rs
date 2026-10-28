@@ -53,6 +53,14 @@ pub static MODULE: Module = Module {
         ),
         ("function fpassthru($stream): int", fpassthru),
         (
+            "function stream_copy_to_stream($from, $to, ?int $length = null, int $offset = 0): int|false",
+            stream_copy_to_stream,
+        ),
+        (
+            "function stream_get_line($stream, int $length, string $ending = \"\"): string|false",
+            stream_get_line,
+        ),
+        (
             "function stream_get_contents($stream, ?int $length = null, int $offset = -1): string|false",
             stream_get_contents,
         ),
@@ -740,7 +748,13 @@ pub fn open_stream(
         }
         return Ok(None);
     }
+    if filename.len() >= 5 && filename[..5].eq_ignore_ascii_case(b"data:") {
+        return open_data_url(vm, a, filename, mode, quiet);
+    }
     if let Some(rest) = filename.strip_prefix(b"php://") {
+        if rest.len() >= 7 && rest[..7].eq_ignore_ascii_case(b"filter/") {
+            return super::streams::open_php_filter(vm, a, &rest[7..], mode, quiet);
+        }
         let lower = rest.to_ascii_lowercase();
         let s = match &lower[..] {
             b"stdin" => Stream::new(Backing::Stdin, mode, filename, "PHP", "STDIO"),
@@ -948,8 +962,8 @@ fn fclose(vm: &mut Vm, a: &mut Args) -> R<Value> {
         let data = r.res().data.borrow();
         data.as_ref()
             .and_then(|d| d.downcast_ref::<std::cell::RefCell<Stream>>())
-            .and_then(|c| match &c.borrow().backing {
-                Backing::User { obj } => Some(obj.clone()),
+            .and_then(|c| match c.try_borrow().ok()?.backing {
+                Backing::User { ref obj } => Some(obj.clone()),
                 _ => None,
             })
     };
@@ -965,7 +979,15 @@ fn fclose(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     if let Some(cell) = cell {
         // SAFETY: `v` holds the resource for the call.
-        let mut s = unsafe { (*cell).borrow_mut() };
+        let Ok(mut s) = (unsafe { (*cell).try_borrow_mut() }) else {
+            // In use (a filter of the stream closing it, test
+            // ext/standard/tests/filters/bug54350.phpt).
+            vm.fwarn(
+                a,
+                "cannot close the provided stream, as it must not be manually closed",
+            )?;
+            return Ok(Value::Bool(false));
+        };
         super::streams::close_stream(vm, &mut s)?;
     }
     r.close();
@@ -985,7 +1007,7 @@ fn fread(vm: &mut Vm, a: &mut Args) -> R<Value> {
         if !s.readable {
             vm.notice_msg(&format!(
                 "fread(): Read of {} bytes failed with errno=9 Bad file descriptor",
-                n.min(8192)
+                8192
             ))?;
             return Ok(Value::Bool(false));
         }
@@ -3255,4 +3277,139 @@ impl Vm {
         }
         out
     }
+}
+
+/// `data:` URLs (RFC 2397; PHP manual: data://): the decoded data as a
+/// read-only memory stream. Messages observed on PHP 8.5.
+fn open_data_url(vm: &mut Vm, a: &Args, url: &[u8], mode: &[u8], quiet: bool) -> R<Option<Stream>> {
+    let mut rest = &url[5..];
+    if let Some(r) = rest.strip_prefix(b"//") {
+        rest = r;
+    }
+    let fail = |vm: &mut Vm, why: &str| -> R<Option<Stream>> {
+        if !quiet {
+            vm.warn(&format!(
+                "{}({}): Failed to open stream: rfc2397: {}",
+                a.fname(),
+                String::from_utf8_lossy(url),
+                why
+            ))?;
+        }
+        Ok(None)
+    };
+    let Some(comma) = rest.iter().position(|&c| c == b',') else {
+        return fail(vm, "no comma in URL");
+    };
+    let meta = &rest[..comma];
+    let payload = &rest[comma + 1..];
+    let base64 = meta
+        .split(|&c| c == b';')
+        .any(|p| p.eq_ignore_ascii_case(b"base64"));
+    let data = if base64 {
+        match goro_ext_standard::url::base64_decode(payload, true) {
+            Some(d) => d,
+            None => return fail(vm, "unable to decode"),
+        }
+    } else {
+        goro_ext_standard::url::urldecode(payload)
+    };
+    let mut s = Stream::new(
+        Backing::Memory { data, pos: 0 },
+        mode,
+        url,
+        "RFC2397",
+        "RFC2397",
+    );
+    s.writable = false;
+    s.readable = true;
+    Ok(Some(s))
+}
+
+/// stream_copy_to_stream() (PHP manual): what is read from `$from` (from
+/// `$offset`, at most `$length` bytes) is written to `$to`.
+fn stream_copy_to_stream(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let len = a.opt_int(2);
+    let off = a.int_or(3, 0);
+    let data = with_stream(vm, a, 0, |vm, s| {
+        if off > 0 && !do_seek(vm, s, off, 0) {
+            vm.warn(&format!(
+                "stream_copy_to_stream(): Failed to seek to position {} in the stream",
+                off
+            ))?;
+            return Ok(None);
+        }
+        let mut out = Vec::new();
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let want = match len {
+                Some(l) if l >= 0 => (l as usize - out.len()).min(buf.len()),
+                _ => buf.len(),
+            };
+            if want == 0 {
+                break;
+            }
+            match s.read_some(vm, &mut buf[..want]) {
+                Ok(0) | Err(_) => {
+                    s.eof = true;
+                    break;
+                }
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+            }
+        }
+        Ok(Some(out))
+    })?;
+    vm.check_deferred()?;
+    let Some(data) = data else {
+        return Ok(Value::Bool(false));
+    };
+    with_stream(vm, a, 1, |vm, s| match s.write_all(vm, &data) {
+        Ok(n) => Ok(Value::Int(n as i64)),
+        Err(_) => Ok(Value::Bool(false)),
+    })
+}
+
+/// stream_get_line() (PHP manual): up to `$length` bytes, stopping
+/// before `$ending` (which is consumed).
+fn stream_get_line(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let len = a.int(1);
+    if len < 0 {
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #2 ($length) must be greater than or equal to 0",
+        );
+    }
+    let max = if len == 0 { 8192 } else { len as usize };
+    let ending = a.str(2).to_vec();
+    let r = with_stream(vm, a, 0, |vm, s| {
+        let mut out = Vec::new();
+        let mut b = [0u8; 1];
+        while out.len() < max + ending.len().saturating_sub(1) {
+            match s.read_some(vm, &mut b) {
+                Ok(1) => {
+                    out.push(b[0]);
+                    if !ending.is_empty() && out.ends_with(&ending) {
+                        out.truncate(out.len() - ending.len());
+                        return Ok(Some(out));
+                    }
+                    if ending.is_empty() && out.len() >= max {
+                        break;
+                    }
+                }
+                _ => {
+                    s.eof = true;
+                    break;
+                }
+            }
+            if !ending.is_empty() && out.len() >= max {
+                break;
+            }
+        }
+        Ok(if out.is_empty() { None } else { Some(out) })
+    })?;
+    vm.check_deferred()?;
+    Ok(match r {
+        Some(v) => Value::Str(PhpStr::from(v)),
+        None => Value::Bool(false),
+    })
 }

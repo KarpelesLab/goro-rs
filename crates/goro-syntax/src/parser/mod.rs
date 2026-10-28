@@ -93,6 +93,9 @@ pub struct ParseOptions {
     /// roughly 1-4 KiB per nesting level; PHP accepts up to about 10000
     /// levels, so a caller on a large stack can raise this to match.
     pub stack_limit: usize,
+    /// Check `declare(encoding=...)` while parsing, as token_get_all()
+    /// with TOKEN_PARSE does; an engine checks it when compiling instead.
+    pub encoding_checks: bool,
 }
 
 impl Default for ParseOptions {
@@ -101,6 +104,7 @@ impl Default for ParseOptions {
             short_open_tag: true,
             in_scripting: false,
             stack_limit: DEFAULT_STACK_LIMIT,
+            encoding_checks: true,
         }
     }
 }
@@ -165,6 +169,7 @@ pub(crate) struct Parser<'a> {
     doc_consumed: u32,
     stack_base: usize,
     stack_limit: usize,
+    encoding_checks: bool,
     pub(crate) reserved_identifiers: Vec<u32>,
 }
 
@@ -246,6 +251,7 @@ impl<'a> Parser<'a> {
             doc_consumed: 0,
             stack_base: 0,
             stack_limit: opts.stack_limit,
+            encoding_checks: opts.encoding_checks,
             reserved_identifiers: Vec::new(),
         }
     }
@@ -821,4 +827,10 @@ fn expected_rank(k: T) -> u32 {
         return 2000 + i as u32;
     }
     1000 + k.id() as u32
+}
+
+impl Parser<'_> {
+    pub(crate) fn opts_encoding_checks(&self) -> bool {
+        self.encoding_checks
+    }
 }

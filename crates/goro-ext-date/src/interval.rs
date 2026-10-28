@@ -53,8 +53,14 @@ impl Interval {
     /// `new DateInterval($spec)`: an ISO 8601 duration ("P1Y2M3DT4H5M6S",
     /// "P2W", "P1Y2M3W4D") or the "P0001-02-03T04:05:06" form; a leading
     /// "Rn/" recurrence count is ignored and surrounding blanks are allowed
-    /// (observed on PHP 8.5). Errors give the exception message.
+    /// (observed on PHP 8.5). Two ISO dates "start/end" give their
+    /// difference (test bug52808.phpt). Errors give the exception message.
     pub fn parse_iso(spec: &[u8]) -> Result<Interval, String> {
+        Interval::parse_duration(spec).or_else(|e| two_dates(spec).unwrap_or(Err(e)))
+    }
+
+    /// The duration forms of [`Interval::parse_iso`].
+    pub(crate) fn parse_duration(spec: &[u8]) -> Result<Interval, String> {
         let err = || bad_format(spec);
         let s = trim(spec);
         let mut s = s;
@@ -240,6 +246,82 @@ impl Interval {
     }
 }
 
+/// "YYYY-MM-DDTHH:MM:SSZ" or "YYYYMMDDTHHMMSSZ" (the ISO 8601 dates of
+/// an interval written as two dates).
+fn iso_utc_date(s: &[u8]) -> Option<DateTime> {
+    let num = |r: &[u8]| -> Option<i64> {
+        if r.is_empty() || !r.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        std::str::from_utf8(r).ok()?.parse().ok()
+    };
+    let f = match s.len() {
+        20 if s[4] == b'-'
+            && s[7] == b'-'
+            && s[10] == b'T'
+            && s[13] == b':'
+            && s[16] == b':'
+            && s[19] == b'Z' =>
+        {
+            [
+                &s[0..4],
+                &s[5..7],
+                &s[8..10],
+                &s[11..13],
+                &s[14..16],
+                &s[17..19],
+            ]
+        }
+        16 if s[8] == b'T' && s[15] == b'Z' => [
+            &s[0..4],
+            &s[4..6],
+            &s[6..8],
+            &s[9..11],
+            &s[11..13],
+            &s[13..15],
+        ],
+        _ => return None,
+    };
+    let v: Option<Vec<i64>> = f.iter().map(|p| num(p)).collect();
+    let v = v?;
+    Some(DateTime::from_local(
+        v[0],
+        v[1],
+        v[2],
+        v[3],
+        v[4],
+        v[5],
+        0,
+        TimeZone::Offset(0),
+    ))
+}
+
+/// `new DateInterval("start/end")`: the difference between two ISO
+/// dates (test bug52808.phpt: a missing end is "Failed to parse interval
+/// (S)", a bad one "Unknown or bad format (S)"); `None` when the spec
+/// does not start with a date.
+fn two_dates(spec: &[u8]) -> Option<Result<Interval, String>> {
+    let cut = spec.iter().position(|&c| c == b'/' || c == b' ');
+    let (first, rest) = match cut {
+        Some(p) => (&spec[..p], Some(&spec[p + 1..])),
+        None => (spec, None),
+    };
+    let a = iso_utc_date(first)?;
+    let failed = || {
+        Err(format!(
+            "Failed to parse interval ({})",
+            String::from_utf8_lossy(spec)
+        ))
+    };
+    match rest {
+        None | Some([]) => Some(failed()),
+        Some(r) => match iso_utc_date(r) {
+            Some(b) => Some(Ok(diff(&a, &b, false))),
+            None => Some(Err(bad_format(spec))),
+        },
+    }
+}
+
 fn trim(s: &[u8]) -> &[u8] {
     let ws = |c: &u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
     let a = s.iter().position(|c| !ws(c)).unwrap_or(s.len());
@@ -418,10 +500,76 @@ pub fn diff(a: &DateTime, b: &DateTime, absolute: bool) -> Interval {
     iv = wall_diff(&l1, &l2, invert);
     if iv.y == 0 && iv.m == 0 && iv.d == 0 {
         elapsed(&mut iv);
+    } else if same_zone && matches!(hi.zone, TimeZone::Id(_)) {
+        dst_adjust(&mut iv, lo, hi, &l2);
     }
     iv.invert = invert && !absolute;
     iv.days = Some(full_days(&l1, &l2));
     iv
+}
+
+/// The DST corrections of a same-zone `diff()` spanning a day or more,
+/// whose wall clock difference is `iv` (observed on PHP 8.5):
+///
+/// * across a spring-forward transition, when `hi`'s date at the start's
+///   time of day (the wall time `iv`'s hours, minutes and seconds before
+///   `hi`) is not after the gap's start, the time part is the time elapsed
+///   from that moment, read with the offset before the gap, to `hi`
+///   (Amman, 2017-03-01 to 2017-03-31, whose midnight starts DST, is 30
+///   days: test bug52480.phpt; New York 2010-03-13 00:00 to 03-14 03:00
+///   EDT is 1 day 2 hours, 02:30 to 03:00 EDT is 1 day 30 minutes);
+/// * when `hi` falls in the first pass of a fall-back overlap (New York
+///   2010-11-07 01:00-01:59 EDT), a day goes into the hours, which read
+///   24 (2010-11-06 01:30 EDT to 11-07 01:30 EDT is 0 days 24 hours:
+///   tests rfc-datetime_and_daylight_saving_time-type3-bd1/bd2.phpt;
+///   10-07 01:30 is 1 month, -1 day, 24 hours).
+fn dst_adjust(iv: &mut Interval, lo: &DateTime, hi: &DateTime, l2: &LocalTime) {
+    let zone = &hi.zone;
+    let off_hi = zone.offset_at(hi.ts);
+    // both corrections go by the DST flags: Dublin, whose winter GMT is
+    // the DST time, has neither (observed on PHP 8.5)
+    let hi_dst = zone.state_at(hi.ts).is_dst;
+    // fall-back overlap, first pass: the offset drops within the
+    // difference after `hi` (only from a start at the same offset: from
+    // EST in March to 01:30 EDT in November is the wall clock difference)
+    let later = zone.offset_at(hi.ts.saturating_add(3 * 3600));
+    if later < off_hi
+        && zone.offset_at(hi.ts.saturating_add((off_hi - later) as i64)) == later
+        && zone.offset_at(lo.ts) == off_hi
+        && zone.local_to_ts(l2.local_secs()) == hi.ts
+        && hi_dst
+    {
+        iv.d -= 1;
+        iv.h = 24;
+        return;
+    }
+    const US: i64 = 1_000_000;
+    let part = ((iv.h * 60 + iv.i) * 60 + iv.s) * US + iv.us;
+    let mid_wall = l2.local_secs() as i128 * US as i128 + l2.us as i128 - part as i128;
+    let mid_secs = mid_wall.div_euclid(US as i128) as i64;
+    // the offset before the gap, and whether the moment read with it is
+    // not after the gap's start
+    let off_mid = zone.offset_at(mid_secs.saturating_sub(off_hi as i64).saturating_sub(1));
+    if off_mid >= off_hi
+        || zone.offset_at(mid_secs.saturating_sub(off_mid as i64).saturating_sub(1)) != off_mid
+    {
+        return;
+    }
+    let mid_ts = mid_wall - off_mid as i128 * US as i128;
+    let mid_secs = mid_ts.div_euclid(US as i128) as i64;
+    if !hi_dst || zone.state_at(mid_secs.saturating_sub(1)).is_dst {
+        return;
+    }
+    let e = hi.ts as i128 * US as i128 + hi.us as i128 - mid_ts;
+    if !(0..86_400 * US as i128).contains(&e) {
+        return;
+    }
+    let e = e as i64;
+    iv.us = e % US;
+    let secs = e / US;
+    iv.s = secs % 60;
+    iv.i = secs / 60 % 60;
+    iv.h = secs / 3600;
 }
 
 /// Field-wise wall clock difference `b - a` (b not earlier), borrowing.

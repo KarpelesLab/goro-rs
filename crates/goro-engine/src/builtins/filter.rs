@@ -7,7 +7,7 @@
 //! ext/filter/tests/*.phpt.
 
 use goro_ext_filter as f;
-use goro_ext_filter::{FilterHost, InputType, Options};
+use goro_ext_filter::{FilterHost, InputType, Options, UriParser, UriParts};
 use goro_runtime::{ObjRef, PhpArray, PhpError, PhpStr, Value};
 
 use crate::func::Args;
@@ -152,6 +152,21 @@ impl FilterHost for Vm {
 
     fn pcre_limits(&self) -> goro_regex::Limits {
         super::pcre::limits(self)
+    }
+
+    /// The `uri_parser_class` option of FILTER_VALIDATE_URL, served by
+    /// ext/uri's parsers (test ext/filter/tests/062.phpt).
+    fn parse_uri(&mut self, p: UriParser, uri: &[u8]) -> Option<Option<UriParts>> {
+        let parser = match p {
+            UriParser::Rfc3986 => goro_ext_uri::FilterParser::Rfc3986,
+            UriParser::WhatWg => goro_ext_uri::FilterParser::WhatWg,
+        };
+        Some(goro_ext_uri::filter_parts(parser, uri).map(|v| UriParts {
+            scheme: v.scheme,
+            host: v.host,
+            has_path: v.has_path,
+            has_query: v.has_query,
+        }))
     }
 }
 

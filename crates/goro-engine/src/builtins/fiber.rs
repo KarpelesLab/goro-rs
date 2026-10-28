@@ -344,6 +344,10 @@ fn fiber_suspend(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if vm.dtor_depth > 0 && false {
         return fiber_error(vm, "Cannot switch fibers in current execution state");
     }
+    // Not from a tick function (test Zend/tests/fibers/ticks.phpt).
+    if vm.in_tick {
+        return fiber_error(vm, "Cannot switch fibers in current execution context");
+    }
     let v = a.val(0);
     // SAFETY: the yielder lives on this fiber's stack, which is running.
     let input = unsafe { (*y).suspend(FiberOut::Suspend(v)) };

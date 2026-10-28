@@ -679,7 +679,7 @@ impl Vm {
                     cache,
                 } => self.op_assign_prop(obj, name, val, cache)?,
                 Op::FetchStaticProp { dst, class, name } => {
-                    let (r, _) = self.static_prop_ref(class, name)?;
+                    let (r, _) = self.static_prop_ref(class, name, false)?;
                     let v = r.get();
                     self.put(dst, v);
                 }
@@ -798,6 +798,7 @@ impl Vm {
                         self.declare_class(&decl)?;
                     }
                 }
+                Op::Tick { every } => self.tick(every)?,
                 Op::DeclareConst { name, val } => {
                     let n = self.get(name)?;
                     let v = self.get(val)?;

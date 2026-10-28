@@ -51,8 +51,8 @@ Fresh start. The previous code base is kept on the `old` branch for the
 record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
 
-php-src test suite (8.5.4), share of the tests that run: **76.1%** overall
-(9,390 tests), as of 2026-10-28. Several
+php-src test suite (8.5.4), share of the tests that run: **77.5%** overall
+(9,559 tests), as of 2026-10-28. Several
 extension libraries below are finished but not yet wired into the engine.
 
 - `goro-engine` and the `goro` binary: compiler and VM running PHP 8.5
@@ -149,3 +149,14 @@ extension libraries below are finished but not yet wired into the engine.
   fixture; faster than PHP 8.5 (libsodium 1.0.18) on secretbox, the
   AEADs, generichash, sign/verify, box and Argon2/scrypt
   (`examples/bench.rs` against `tests/fixtures/bench.php`).
+- `goro-ext-uri`: ext/uri as plain values: `Uri\Rfc3986\Uri` (strict
+  RFC 3986 parsing, raw and normalized getters, withers, resolution,
+  equality) and `Uri\WhatWg\Url` (the WHATWG URL parser with UTS #46 16.0
+  IDNA, PHP's validation-error list and contexts, withers sharing the
+  error list as PHP does, ASCII/Unicode serializations), the exception
+  messages, `__serialize`/`__unserialize`/`__debugInfo` shapes and a
+  FILTER_VALIDATE_URL hook. Checked against PHP 8.5 fixtures (13.6k
+  RFC 3986 cases, 8.7k WHATWG parses, 5.4k withers, every code point
+  through IDNA) and the WPT url, toascii, IdnaTestV2 and setters data.
+  Parsing typical URLs takes 25-50 ns (RFC 3986) and 60-145 ns (WHATWG),
+  below PHP 8.5's 105-215 ns (`examples/uri_bench.rs`).

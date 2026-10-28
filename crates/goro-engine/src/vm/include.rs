@@ -32,6 +32,7 @@ impl Vm {
             short_open_tag: self.ini_bool(b"short_open_tag", true),
             in_scripting: eval,
             stack_limit: PARSER_STACK,
+            encoding_checks: false,
         };
         let prog = goro_syntax::parse_with(&arena, src, opts).map_err(|e| {
             crate::compiler::CompileError {
@@ -45,6 +46,7 @@ impl Vm {
                     e.message
                 ),
                 line: e.line,
+                notices: Vec::new(),
             }
         })?;
         let consts = &self.constants;
@@ -68,6 +70,8 @@ impl Vm {
         } else {
             None
         };
+        let mb = self.ini_bool(b"zend.multibyte", false);
+        crate::compiler::ZEND_MULTIBYTE.with(|c| c.set(mb));
         let unit = crate::compiler::compile_program(&prog, src, file, kc_opt, None)?;
         // Development aid: GORO_DUMP_OPS=1 prints the bytecode of user code.
         if !file.is_empty() && std::env::var_os("GORO_DUMP_OPS").is_some() {
@@ -126,10 +130,15 @@ impl Vm {
     /// eval/include, fatal errors otherwise.
     pub(crate) fn compile_error(
         &mut self,
-        e: crate::compiler::CompileError,
+        mut e: crate::compiler::CompileError,
         file: &[u8],
         throw: bool,
     ) -> Unwind {
+        for n in std::mem::take(&mut e.notices) {
+            if let Err(u) = self.raise_at(n.level.errno(), &n.message, PhpStr::new(file), n.line) {
+                return u;
+            }
+        }
         let (is_parse, msg) = match e.message.strip_prefix('\u{1}') {
             Some(m) => (true, m.to_string()),
             None => (false, e.message),

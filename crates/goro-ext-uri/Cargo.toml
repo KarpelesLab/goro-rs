@@ -6,3 +6,12 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+goro-runtime = { path = "../goro-runtime" }
+# The maintainer's Unicode crate: NFC, Bidi classes, joining types and
+# general categories for UTS #46 (the IDNA mapping table itself is generated
+# from unicode.org's IdnaMappingTable.txt, see src/whatwg/idna_table.rs).
+intl = { version = "0.6.5", default-features = false, features = ["full", "normalization"] }
+
+[dev-dependencies]
+# SHA-256 of the vendored WPT data files.
+purecrypto = { version = "0.10", default-features = false, features = ["hash"] }

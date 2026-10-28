@@ -33,6 +33,7 @@ pub mod spl;
 pub mod streams;
 pub mod string;
 pub mod strmisc;
+pub mod uri;
 pub mod userstream;
 pub mod var;
 pub mod weakmap;
@@ -75,5 +76,6 @@ pub fn modules() -> Vec<&'static Module> {
         &gmp::MODULE,
         &filter::MODULE,
         &sodium::MODULE,
+        &uri::MODULE,
     ]
 }
