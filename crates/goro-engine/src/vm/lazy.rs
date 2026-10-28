@@ -85,6 +85,11 @@ impl Vm {
         }
         let old = std::mem::take(&mut *o.obj().props.borrow_mut());
         drop(old);
+        // No property to initialize: the object is initialized already
+        // (tests Zend/tests/lazy_objects/realize_no_props, support_stdClass).
+        if !lazy_slots.iter().any(|&b| b) {
+            return;
+        }
         *o.obj().native.borrow_mut() = Some(Box::new(LazyData {
             proxy,
             init,

@@ -1902,11 +1902,26 @@ fn copy(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(mut s) = open_stream(vm, a, &from, b"rb", false)? else {
         return Ok(Value::Bool(false));
     };
-    let data = read_rest(vm, &mut s);
     let Some(mut d) = open_stream(vm, a, &to, b"wb", false)? else {
         return Ok(Value::Bool(false));
     };
-    let ok = d.write_all(vm, &data).is_ok();
+    // In chunks: files may be larger than memory (test
+    // ext/standard/tests/file/bug81145).
+    let mut ok = true;
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        match s.read_some(vm, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if d.write_all(vm, &buf[..n]).is_err() {
+                    ok = false;
+                    break;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
     super::streams::close_stream(vm, &mut s)?;
     super::streams::close_stream(vm, &mut d)?;
     Ok(Value::Bool(ok))

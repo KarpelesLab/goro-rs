@@ -34,6 +34,9 @@ options:
   --results FILE      write a result file (one STATUS<TAB>test line per test)
   --guard BASELINE    compare with a baseline result file and exit 1 if a test
                       that passed there does not pass now
+  --mem-limit MB      address-space limit of each test process (default 6144;
+                      0: none)
+  --heavy             also run tests needing several GB of memory or disk
 
 usage: goro --test-compare [--fixed] BASELINE NEW
   lists tests that went from PASS to anything else; exits 1 if any did
@@ -51,6 +54,8 @@ struct Options {
     keep: bool,
     results: Option<PathBuf>,
     guard: Option<PathBuf>,
+    mem_limit_mb: u64,
+    heavy: bool,
     paths: Vec<PathBuf>,
 }
 
@@ -72,6 +77,8 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
         keep: false,
         results: None,
         guard: None,
+        mem_limit_mb: 6144,
+        heavy: false,
         paths: Vec::new(),
     };
     let mut it = args.iter();
@@ -86,6 +93,14 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
             "-v" | "--verbose" => o.verbose = true,
             "-q" | "--quiet" => o.quiet = true,
             "--keep" => o.keep = true,
+            "--heavy" => o.heavy = true,
+            "--mem-limit" => {
+                let v = value(&mut it, "--mem-limit")?;
+                o.mem_limit_mb = v
+                    .to_string_lossy()
+                    .parse()
+                    .map_err(|_| "bad --mem-limit value".to_string())?;
+            }
             "-h" | "--help" => return Err(String::new()),
             "-j" => {
                 let v = value(&mut it, "-j")?;
@@ -334,6 +349,8 @@ fn run_and_report(o: &Options, php: PathBuf, root: PathBuf, paths: &[PathBuf]) -
         extensions,
         keep: o.keep,
         tmp: std::env::temp_dir(),
+        mem_limit: (o.mem_limit_mb > 0).then_some(o.mem_limit_mb << 20),
+        heavy: o.heavy,
     };
     let jobs = schedule::jobs(&files);
     let all: Mutex<(Vec<TestResult>, Counts)> =
