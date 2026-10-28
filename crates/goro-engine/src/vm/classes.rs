@@ -377,10 +377,11 @@ impl Vm {
                 };
                 let shown: Vec<String> = missing.iter().take(3).cloned().collect();
                 let msg = format!(
-                    "{} {} contains {} abstract method{} and must therefore be declared abstract or implement the remaining methods ({}{})",
+                    "{} {} contains {} abstract method{} and must therefore be declared abstract or implement the remaining method{} ({}{})",
                     what,
                     cname,
                     n,
+                    if n == 1 { "" } else { "s" },
                     if n == 1 { "" } else { "s" },
                     shown.join(", "),
                     if n > 3 { ", ..." } else { "" }

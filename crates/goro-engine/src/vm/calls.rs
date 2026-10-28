@@ -2012,7 +2012,11 @@ impl Vm {
                                 Vm::type_name_given(&v),
                                 called_in(&call_loc)
                             );
-                            return self.throw("TypeError", &msg);
+                            let r = self.throw("TypeError", &msg);
+                            if call_loc.is_some() {
+                                self.mark_defined_in(&r);
+                            }
+                            return r;
                         }
                     }
                 }
@@ -2141,8 +2145,21 @@ impl Vm {
                         None => String::new(),
                     }
                 );
-                self.throw("TypeError", &msg)
+                let r = self.throw("TypeError", &msg);
+                if call_loc.is_some() {
+                    self.mark_defined_in(&r);
+                }
+                r
             }
+        }
+    }
+
+    /// Argument TypeErrors naming their call site print as "... called
+    /// in F on line L and defined in F2:L2" (observed on PHP 8.5).
+    pub(crate) fn mark_defined_in<T>(&mut self, r: &R<T>) {
+        if let Err(super::Unwind::Throw(e)) = r {
+            self.defined_in_errors.retain(|w| w.upgrade().is_some());
+            self.defined_in_errors.push(e.downgrade());
         }
     }
 
@@ -2550,6 +2567,31 @@ impl Vm {
         let cls = self.class_of(&o);
         let d = cls.magic.borrow().destruct.clone();
         if let Some(d) = d {
+            // A non-public destructor runs only where it is visible (PHP
+            // manual: Constructors and Destructors; tests/classes/
+            // destructor_visibility_*.phpt).
+            if d.flags & mflags::PUBLIC == 0 {
+                let scope = self.scope_ptr();
+                if !self.method_visible(&d, scope) {
+                    let vis = if d.flags & mflags::PRIVATE != 0 { "private" } else { "protected" };
+                    let msg = format!(
+                        "Call to {} {}::__destruct() from {}",
+                        vis,
+                        cls.name.dname(),
+                        self.scope_desc(scope)
+                    );
+                    if self.shutting_down {
+                        self.raise_at(
+                            super::errors::E_WARNING,
+                            &format!("{} during shutdown ignored", msg),
+                            PhpStr::from("Unknown"),
+                            0,
+                        )?;
+                        return Ok(());
+                    }
+                    return self.throw("Error", &msg);
+                }
+            }
             self.dtor_depth += 1;
             let r = self.call_func_this(&d, Some(o.clone()), Vec::new());
             self.dtor_depth -= 1;

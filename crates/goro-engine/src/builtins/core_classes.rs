@@ -415,10 +415,15 @@ fn exc_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
             _ => PhpArray::new(),
         };
         let ts = vm.trace_string(&trace);
+        let defined_in = vm
+            .defined_in_errors
+            .iter()
+            .any(|w| w.upgrade().is_some_and(|x| ObjRef::ptr_eq(&x, o)));
+        let sep = if defined_in { "and defined in" } else { "in" };
         let head = if msg.is_empty() {
-            format!("{} in {}:{}", cls.name.dname(), file, line)
+            format!("{} {} {}:{}", cls.name.dname(), sep, file, line)
         } else {
-            format!("{}: {} in {}:{}", cls.name.dname(), msg, file, line)
+            format!("{}: {} {} {}:{}", cls.name.dname(), msg, sep, file, line)
         };
         if i == 0 {
             out = format!("{}\nStack trace:\n{}", head, ts);

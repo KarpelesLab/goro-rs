@@ -415,6 +415,9 @@ pub struct Vm {
     pub err: ErrorState,
     pub core: CoreClasses,
     pub autoloaders: Vec<Value>,
+    /// Exceptions whose string form says "and defined in" (see
+    /// `mark_defined_in`).
+    pub defined_in_errors: Vec<goro_runtime::WeakObj>,
     /// Typed references: the properties each one is bound to (by
     /// reference address; valid while the reference's typed flag is set).
     pub typed_refs: HashMap<usize, Vec<TypedRefSource>>,

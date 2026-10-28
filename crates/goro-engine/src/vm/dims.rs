@@ -1276,12 +1276,35 @@ impl Vm {
                 Ok(new)
             }
             PathAction::IncDec(op) => {
-                let old = self
-                    .call_method(o, b"offsetget", vec![k.clone()])?
-                    .into_deref();
-                let new = self.incdec_value(op, &old)?;
-                self.call_method(o, b"offsetset", vec![k, new.clone()])?;
-                Ok(if op.is_post() { old } else { new })
+                // Internal ArrayAccess (ArrayObject...) updates its storage.
+                let internal = cls.native.dim_storage.is_some()
+                    && cls.find_method(b"offsetget").is_some_and(|f| f.is_native());
+                let got = self.call_method_raw(o, b"offsetget", vec![k.clone()])?;
+                if internal {
+                    let old = got.into_deref();
+                    let new = self.incdec_value(op, &old)?;
+                    self.call_method(o, b"offsetset", vec![k, new.clone()])?;
+                    return Ok(if op.is_post() { old } else { new });
+                }
+                // A user offsetGet: only a returned reference is modified
+                // (test tests/classes/array_access_003.phpt).
+                match got {
+                    Value::Ref(r) => {
+                        let old = r.get();
+                        let new = self.incdec_value(op, &old)?;
+                        let prev = r.set(new.clone());
+                        drop(prev);
+                        Ok(if op.is_post() { old } else { new })
+                    }
+                    old => {
+                        self.notice_msg(&format!(
+                            "Indirect modification of overloaded element of {} has no effect",
+                            cls.name.dname()
+                        ))?;
+                        let new = self.incdec_value(op, &old)?;
+                        Ok(if op.is_post() { old } else { new })
+                    }
+                }
             }
             PathAction::MakeRef | PathAction::FetchW => {
                 let v = self.call_method(o, b"offsetget", vec![k])?;

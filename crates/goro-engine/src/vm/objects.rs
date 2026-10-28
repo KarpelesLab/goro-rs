@@ -2064,7 +2064,7 @@ impl Vm {
                 return self.throw(
                     "Error",
                     &format!(
-                        "Call to {} {}::__clone() from {}",
+                        "Call to {} method {}::__clone() from {}",
                         vis,
                         cls.name.dname(),
                         self.scope_desc(scope)
