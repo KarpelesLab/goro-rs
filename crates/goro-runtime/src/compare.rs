@@ -240,7 +240,10 @@ pub fn default_object_compare(a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpRes
             num_notice(o, true, ctx);
             Ok(cmp_f64(*f, 1.0))
         }
-        _ => Ok(1),
+        // An object is greater than an uncomparable non-object (observed
+        // on PHP 8.5: [] <=> new stdClass is -1, "s" <=> new stdClass -1).
+        (Object(_), _) => Ok(1),
+        _ => Ok(-1),
     }
 }
 
