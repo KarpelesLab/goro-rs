@@ -22,6 +22,7 @@ pub mod misc;
 pub mod output;
 pub mod password;
 pub mod pcre;
+pub mod random;
 pub mod reflection;
 pub mod serialize;
 pub mod spl;
@@ -65,5 +66,6 @@ pub fn modules() -> Vec<&'static Module> {
         &date::MODULE,
         &array::MODULE,
         &math::MODULE,
+        &random::MODULE,
     ]
 }

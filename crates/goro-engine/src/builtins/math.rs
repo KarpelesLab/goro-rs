@@ -8,9 +8,8 @@
 
 use goro_ext_standard as std_ext;
 use goro_ext_standard::math::{Number, RoundMode};
-use goro_ext_standard::mt_rand::{Mt19937, MtMode};
+use goro_runtime::Value;
 use goro_runtime::compare::compare;
-use goro_runtime::{PhpStr, Value};
 
 use super::string::{sr, sv};
 use crate::func::Args;
@@ -73,27 +72,6 @@ pub static MODULE: Module = Module {
         ("function decbin(int $num): string", decbin),
         ("function dechex(int $num): string", dechex),
         ("function decoct(int $num): string", decoct),
-        (
-            "function mt_rand(int $min = UNKNOWN, int $max = UNKNOWN): int",
-            mt_rand,
-        ),
-        (
-            "function mt_srand(?int $seed = null, int $mode = MT_RAND_MT19937): void",
-            mt_srand,
-        ),
-        ("function mt_getrandmax(): int", mt_getrandmax),
-        (
-            "function rand(int $min = UNKNOWN, int $max = UNKNOWN): int",
-            rand,
-        ),
-        (
-            "function srand(?int $seed = null, int $mode = MT_RAND_MT19937): void",
-            mt_srand,
-        ),
-        ("function getrandmax(): int", mt_getrandmax),
-        ("function random_int(int $min, int $max): int", random_int),
-        ("function random_bytes(int $length): string", random_bytes),
-        ("function lcg_value(): float", lcg_value),
     ],
     classes: &[(
         "roundingmode",
@@ -129,22 +107,12 @@ pub static MODULE: Module = Module {
         ("PHP_ROUND_HALF_DOWN", ConstVal::Int(2)),
         ("PHP_ROUND_HALF_EVEN", ConstVal::Int(3)),
         ("PHP_ROUND_HALF_ODD", ConstVal::Int(4)),
-        ("MT_RAND_MT19937", ConstVal::Int(0)),
-        ("MT_RAND_PHP", ConstVal::Int(1)),
     ],
     listed: false,
     ..Module::EMPTY
 };
 
-// ---------------------------------------------------------------- random state
-
-/// The global Mt19937 state shared by `mt_rand()`, `rand()`, `shuffle()`,
-/// `str_shuffle()` and `array_rand()` (PHP manual: mt_srand, "seeds the
-/// random number generator" used by these functions).
-#[derive(Default)]
-pub struct MtState {
-    pub generator: Option<Mt19937>,
-}
+// ---------------------------------------------------------------- OS randomness
 
 /// Fills `buf` from the operating system's CSPRNG.
 pub fn os_random(buf: &mut [u8]) -> bool {
@@ -167,36 +135,6 @@ pub fn os_random(buf: &mut [u8]) -> bool {
         done += r as usize;
     }
     true
-}
-
-fn os_u64() -> u64 {
-    let mut b = [0u8; 8];
-    os_random(&mut b);
-    u64::from_le_bytes(b)
-}
-
-/// The global generator, seeded randomly on first use.
-pub fn mt(vm: &mut Vm) -> &mut Mt19937 {
-    let st = vm.ext::<MtState>();
-    st.generator
-        .get_or_insert_with(|| Mt19937::new(os_u64() as u32 as i64, MtMode::Mt19937))
-}
-
-/// A uniform value in `min..=max` from the CSPRNG (`random_int()`).
-pub fn os_range(min: i64, max: i64) -> i64 {
-    let umax = (max as u64).wrapping_sub(min as u64);
-    if umax == u64::MAX {
-        return os_u64() as i64;
-    }
-    let n = umax + 1;
-    // Rejection sampling for uniformity.
-    let limit = u64::MAX - (u64::MAX % n) - 1;
-    loop {
-        let r = os_u64();
-        if r <= limit || n.is_power_of_two() {
-            return (min as u64).wrapping_add(r % n) as i64;
-        }
-    }
 }
 
 // ---------------------------------------------------------------- basics
@@ -480,115 +418,4 @@ fn dechex(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn decoct(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(sv(std_ext::math::dec_to_base(a.int(0), 8)))
-}
-
-// ---------------------------------------------------------------- random
-
-fn mt_rand(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    match a.len() {
-        0 => Ok(Value::Int(mt(vm).next_int())),
-        1 => Err(vm.throw_error_msg(
-            "ArgumentCountError",
-            &format!("{}() expects exactly 2 arguments, 1 given", a.fname()),
-        )),
-        _ => {
-            let (lo, hi) = (a.int(0), a.int(1));
-            let r = mt(vm).mt_rand_range(lo, hi);
-            match r {
-                Ok(v) => Ok(Value::Int(v)),
-                Err(e) => Err(random_err(vm, e)),
-            }
-        }
-    }
-}
-
-fn rand(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    match a.len() {
-        0 => Ok(Value::Int(mt(vm).next_int())),
-        1 => Err(vm.throw_error_msg(
-            "ArgumentCountError",
-            &format!("{}() expects exactly 2 arguments, 1 given", a.fname()),
-        )),
-        _ => {
-            let (lo, hi) = (a.int(0), a.int(1));
-            Ok(Value::Int(mt(vm).rand_range(lo, hi)))
-        }
-    }
-}
-
-fn mt_srand(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let seed = match a.opt_int(0) {
-        Some(s) => s,
-        None => os_u64() as u32 as i64,
-    };
-    let mode = MtMode::from_int(a.int_or(1, 0));
-    if mode == MtMode::Php {
-        vm.deprecated("The MT_RAND_PHP variant of Mt19937 is deprecated")?;
-    }
-    vm.ext::<MtState>().generator = Some(Mt19937::new(seed, mode));
-    Ok(Value::Null)
-}
-
-fn mt_getrandmax(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Int(std_ext::mt_rand::MT_RAND_MAX))
-}
-
-fn random_int(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let (lo, hi) = (a.int(0), a.int(1));
-    if lo > hi {
-        return vm.fthrow(
-            a,
-            "ValueError",
-            "Argument #1 ($min) must be less than or equal to argument #2 ($max)",
-        );
-    }
-    Ok(Value::Int(os_range(lo, hi)))
-}
-
-fn random_bytes(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let n = a.int(0);
-    if n < 1 {
-        return vm.fthrow(
-            a,
-            "ValueError",
-            "Argument #1 ($length) must be greater than 0",
-        );
-    }
-    let mut buf = vec![0u8; n as usize];
-    if !os_random(&mut buf) {
-        return vm.throw("Random\\RandomException", "Failed to generate random bytes");
-    }
-    Ok(Value::Str(PhpStr::from(buf)))
-}
-
-fn lcg_value(vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    vm.deprecated(
-        "Function lcg_value() is deprecated since 8.4, use \\Random\\Randomizer::getFloat() instead",
-    )?;
-    // A uniform float in (0, 1).
-    loop {
-        let r = (os_u64() >> 11) as f64 / (1u64 << 53) as f64;
-        if r > 0.0 {
-            return Ok(Value::Float(r));
-        }
-    }
-}
-
-/// A goro-ext-random error as the PHP exception it names.
-pub(crate) fn random_err(vm: &mut Vm, e: goro_ext_random::RandomError) -> crate::vm::Unwind {
-    use goro_ext_random::RandomError as E;
-    let (cls, m) = match e {
-        E::ValueError(m) => ("ValueError", m),
-        E::BrokenEngine(m) => ("Random\\BrokenRandomEngineError", m.to_string()),
-        E::RandomException(m) => ("Random\\RandomException", m),
-        E::Exception(m) => ("Exception", m),
-        E::Propagate => {
-            return vm
-                .err
-                .deferred
-                .take()
-                .unwrap_or_else(|| vm.throw_error_msg("Error", "random engine failure"));
-        }
-    };
-    vm.throw_error_msg(cls, &m)
 }

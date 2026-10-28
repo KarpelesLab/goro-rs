@@ -13,7 +13,7 @@ use goro_ext_standard as std_ext;
 use goro_runtime::compare::{loose_eq, strict_eq};
 use goro_runtime::{Key, KeyRef, PhpArray, PhpRef, PhpStr, Value};
 
-use super::math::{mt, php_compare};
+use super::math::php_compare;
 use crate::func::Args;
 use crate::registry::{ConstVal, Module};
 use crate::vm::{R, Unwind, Vm};
@@ -2704,26 +2704,10 @@ fn array_reverse(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn array_rand(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let arr = a.array(0);
     let num = a.int_or(1, 1);
-    let n = arr.len();
-    // Picks as Random\\Randomizer::pickArrayKeys() does, from the global
+    // Picks as Random\Randomizer::pickArrayKeys() does, from the global
     // Mt19937 whatever its mode (test ext/random/tests/01_functions/
     // array_rand_mt_rand_php.phpt).
-    struct Count(usize);
-    impl goro_ext_random::randomizer::PickSource for Count {
-        fn count(&self) -> usize {
-            self.0
-        }
-    }
-    let r = goro_ext_random::randomizer::pick_keys(
-        mt(vm),
-        goro_ext_random::randomizer::PickCaller::ArrayRand,
-        &Count(n),
-        num,
-    );
-    let picked = match r {
-        Ok(p) => p,
-        Err(e) => return Err(super::math::random_err(vm, e)),
-    };
+    let picked = super::random::array_rand_positions(vm, &arr, num)?;
     let keys: Vec<Value> = arr.iter().map(|(k, _)| key_value(k)).collect();
     if num == 1 {
         return Ok(keys[picked[0]].clone());
@@ -2737,16 +2721,7 @@ fn shuffle(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (r, arr) = ref_array(vm, a, 0, "array")?;
     let mut vals: Vec<Value> = arr.iter().map(|(_, v)| v.clone()).collect();
     drop(arr);
-    let n = vals.len();
-    if n > 1 {
-        let g = mt(vm);
-        let mut left = n - 1;
-        while left > 0 {
-            let j = g.range(0, left as i64) as usize;
-            vals.swap(left, j);
-            left -= 1;
-        }
-    }
+    super::random::legacy_shuffle(vm, &mut vals);
     r.set(Value::Array(list_of(vals)));
     Ok(Value::Bool(true))
 }

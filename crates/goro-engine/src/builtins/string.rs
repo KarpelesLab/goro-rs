@@ -1443,16 +1443,7 @@ fn str_decrement(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn str_shuffle(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut s = a.bytes(0).to_vec();
-    let n = s.len();
-    if n > 1 {
-        let g = super::math::mt(vm);
-        let mut left = n - 1;
-        while left > 0 {
-            let j = g.range(0, left as i64) as usize;
-            s.swap(left, j);
-            left -= 1;
-        }
-    }
+    super::random::legacy_shuffle(vm, &mut s);
     Ok(sv(s))
 }
 
