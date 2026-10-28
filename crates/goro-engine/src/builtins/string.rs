@@ -126,11 +126,11 @@ pub static MODULE: Module = Module {
             explode,
         ),
         (
-            "function implode(array|string $separator, array|string|null $array = null): string",
+            "function implode(array|string $separator, ?array $array = null): string",
             implode,
         ),
         (
-            "function join(array|string $separator, array|string|null $array = null): string",
+            "function join(array|string $separator, ?array $array = null): string",
             implode,
         ),
         (

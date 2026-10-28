@@ -304,8 +304,9 @@ impl<E: Env> P<'_, E> {
                     }
                     let mut t = self.s[start..self.i].to_vec();
                     // Trailing blanks go, unless a single-quoted string
-                    // follows (observed on PHP 8.5: `y 'z'` is "y z").
-                    if self.peek() != Some(b'\'') {
+                    // follows (observed on PHP 8.5: `y 'z'` is "y z") or
+                    // the input ends there ("a=b " keeps "b ": bug51899).
+                    if self.peek() != Some(b'\'') && self.peek().is_some() {
                         while t.last().copied().is_some_and(is_blank) {
                             t.pop();
                         }
