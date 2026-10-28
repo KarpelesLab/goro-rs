@@ -170,7 +170,7 @@ impl Vm {
                     if by_ref && !self.gen_by_ref(&o) {
                         return self.throw("Exception", "You can only iterate a generator by-reference if it declared that it yields by-reference");
                     }
-                    self.gen_rewind(&o)?;
+                    self.gen_rewind_traverse(&o)?;
                     unsafe {
                         *sa = Some(Value::Object(o));
                         *sb = Some(enc(M_GEN_FIRST, 0));
@@ -186,7 +186,7 @@ impl Vm {
                     }
                     let it = self.get_iterator_of(&o)?;
                     if self.is_generator_obj(&it) {
-                        self.gen_rewind(&it)?;
+                        self.gen_rewind_traverse(&it)?;
                         unsafe {
                             *sa = Some(Value::Object(it));
                             *sb = Some(enc(M_GEN_FIRST, 0));
@@ -468,7 +468,7 @@ impl Vm {
             Value::Object(o) => {
                 let mut out = Vec::new();
                 if self.is_generator_obj(o) {
-                    self.gen_rewind(o)?;
+                    self.gen_rewind_traverse(o)?;
                     while self.gen_valid(o)? {
                         let (k, v) = self.gen_current(o)?;
                         out.push((k, v.into_deref()));
@@ -1096,6 +1096,19 @@ impl Vm {
             );
         }
         Ok(())
+    }
+
+    /// foreach over a generator: a finished one can't be traversed again
+    /// (observed on PHP 8.5: "Cannot traverse an already closed
+    /// generator"), then the rewind rules apply.
+    pub fn gen_rewind_traverse(&mut self, g: &ObjRef) -> R<()> {
+        if self
+            .with_gen(g, |d| d.state == GenState::Done)
+            .unwrap_or(false)
+        {
+            return self.throw("Exception", "Cannot traverse an already closed generator");
+        }
+        self.gen_rewind(g)
     }
 
     pub fn gen_valid(&mut self, g: &ObjRef) -> R<bool> {

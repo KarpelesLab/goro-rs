@@ -340,6 +340,9 @@ impl Vm {
                         Some(v) => !v.is_null(),
                     });
                 }
+                if let Some(r) = crate::builtins::spl::fa_isset(self, o, k, empty)? {
+                    return Ok(r);
+                }
                 let e = self.call_method(o, b"offsetexists", vec![k.clone()])?;
                 let exists = self.to_bool(&e);
                 if !empty {

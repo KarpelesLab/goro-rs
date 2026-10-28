@@ -72,7 +72,8 @@ class CallbackFilterIterator extends FilterIterator {
     }
     public function accept(): bool {
         $this->__h_chk();
-        return (bool) ($this->__cb)($this->__cur, $this->__key, $this->__it);
+        /* Values, not references, as from internal code (test bug72051). */
+        return (bool) call_user_func($this->__cb, $this->__cur, $this->__key, $this->__it);
     }
 }
 
@@ -315,8 +316,17 @@ class NoRewindIterator extends IteratorIterator {
     public function rewind(): void { $this->__h_chk(); }
     public function valid(): bool { $this->__h_chk(); return $this->__it->valid(); }
     public function key(): mixed { $this->__h_chk(); return $this->__it->key(); }
-    public function current(): mixed { $this->__h_chk(); return $this->__it->current(); }
-    public function next(): void { $this->__h_chk(); $this->__it->next(); }
+    /* The inner current() is asked once per element (test iterator_007). */
+    protected $__cv = false;
+    public function current(): mixed {
+        $this->__h_chk();
+        if (!$this->__cv) {
+            $this->__cur = $this->__it->current();
+            $this->__cv = true;
+        }
+        return $this->__cur;
+    }
+    public function next(): void { $this->__h_chk(); $this->__cv = false; $this->__it->next(); }
 }
 
 class InfiniteIterator extends IteratorIterator {
@@ -346,7 +356,16 @@ class AppendIterator extends IteratorIterator {
         $this->__key = null;
         if ($this->__its->valid()) {
             $this->__it = $this->__its->current();
-            $this->__it->rewind();
+            try {
+                $this->__it->rewind();
+            } catch (Exception $e) {
+                /* A finished generator is traversed internally (test
+                 * bug72684). */
+                if ($this->__it instanceof Generator && !$this->__it->valid()) {
+                    throw new Exception('Cannot traverse an already closed generator');
+                }
+                throw $e;
+            }
             return true;
         }
         return false;
@@ -486,6 +505,12 @@ class RecursiveIteratorIterator implements OuterIterator {
                     }
                     if ($has && ($this->__max == -1 || $this->__max > $l)) {
                         $this->__st[$l] = $this->__mode == 1 ? 2 : 3;
+                        continue;
+                    }
+                    if ($has && $this->__mode == 0) {
+                        /* Below the maximum depth, LEAVES_ONLY skips what is
+                         * not a leaf (test iterator_028). */
+                        $this->__st[$l] = 0;
                         continue;
                     }
                     $this->__st[$l] = 0;

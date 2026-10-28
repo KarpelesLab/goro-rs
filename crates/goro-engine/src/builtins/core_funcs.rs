@@ -1384,9 +1384,15 @@ fn iterator_to_array(vm: &mut Vm, a: &mut Args) -> R<Value> {
             let key = match &k {
                 Value::Int(i) => Key::Int(*i),
                 Value::Str(s) => Key::from_php_str(s),
-                Value::Null => Key::Str(PhpStr::empty()),
+                // As array keys (test ext/spl/tests/iterator_to_array_nonscalar_keys).
+                Value::Null => {
+                    vm.deprecated(
+                        "Using null as an array offset is deprecated, use an empty string instead",
+                    )?;
+                    Key::Str(PhpStr::empty())
+                }
                 Value::Bool(b) => Key::Int(*b as i64),
-                Value::Float(f) => Key::Int(*f as i64),
+                Value::Float(_) => vm.to_key(&k, "array")?,
                 _ => {
                     return vm.type_error("Cannot access offset of type array on array");
                 }

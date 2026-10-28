@@ -1080,6 +1080,10 @@ pub(crate) fn ao_isset(vm: &mut Vm, o: &ObjRef, k: &Value) -> R<Option<Value>> {
 
 fn ao_offset_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
+    if a.val(0).is_null() {
+        // test bug70852
+        vm.deprecated("Using null as an array offset is deprecated, use an empty string instead")?;
+    }
     let k = ao_key(vm, a, &a.val(0))?;
     let arr = ao_array(vm, &o);
     match arr.get(k.as_ref()) {
@@ -1386,6 +1390,8 @@ fn ao_serialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn ao_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
+    // test bug67539
+    ao_modifiable(vm, &o)?;
     let s = a.str(0);
     if s.is_empty() {
         return Ok(Value::Null);
@@ -1902,7 +1908,7 @@ fn fa_set_size(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 /// The index of an SplFixedArray offset.
-fn fa_index(vm: &mut Vm, _a: &Args, k: &Value) -> R<i64> {
+fn fa_index(vm: &mut Vm, k: &Value) -> R<i64> {
     match k {
         Value::Int(i) => Ok(*i),
         Value::Bool(b) => Ok(*b as i64),
@@ -1936,8 +1942,39 @@ fn fa_index(vm: &mut Vm, _a: &Args, k: &Value) -> R<i64> {
     }
 }
 
+/// isset()/empty() on an SplFixedArray whose offsetExists()/offsetGet()
+/// are the internal ones: the index is converted once (test
+/// fixedarray_003). `None` when the class overrides them.
+pub(crate) fn fa_isset(vm: &mut Vm, o: &ObjRef, k: &Value, empty: bool) -> R<Option<bool>> {
+    if with(o, |_: &mut FaData| ()).is_none() {
+        return Ok(None);
+    }
+    let cls = vm.class_of(o);
+    // A user offsetExists() decides; empty() then looks at the element
+    // itself, without offsetGet() (test fixedarray_002).
+    if cls
+        .find_method(b"offsetexists")
+        .is_some_and(|f| !f.is_native())
+    {
+        let r = vm.call_method(o, b"offsetexists", vec![k.clone()])?;
+        let exists = vm.to_bool(&r);
+        if !empty || !exists {
+            return Ok(Some(if empty { !exists } else { exists }));
+        }
+    }
+    let i = fa_index(vm, k)?;
+    let v = fa_items(o)
+        .get(usize::try_from(i).unwrap_or(usize::MAX))
+        .cloned();
+    Ok(Some(match v {
+        None | Some(Value::Null) => empty,
+        Some(v) if empty => !vm.to_bool(&v),
+        Some(_) => true,
+    }))
+}
+
 fn fa_offset_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let i = fa_index(vm, a, &a.val(0))?;
+    let i = fa_index(vm, &a.val(0))?;
     let items = fa_items(a.this_obj());
     Ok(Value::Bool(
         i >= 0 && (i as usize) < items.len() && !items[i as usize].is_null(),
@@ -1949,7 +1986,7 @@ fn fa_offset_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if k.is_null() && a.has(0) {
         return vm.throw("Error", "[] operator not supported for SplFixedArray");
     }
-    let i = fa_index(vm, a, &k)?;
+    let i = fa_index(vm, &k)?;
     let v = with(a.this_obj(), |d: &mut FaData| {
         if i >= 0 && (i as usize) < d.items.len() {
             Some(d.items[i as usize].clone())
@@ -1969,7 +2006,7 @@ fn fa_offset_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if k.is_null() {
         return vm.throw("Error", "[] operator not supported for SplFixedArray");
     }
-    let i = fa_index(vm, a, &k)?;
+    let i = fa_index(vm, &k)?;
     let v = a.val(1);
     let old = with(a.this_obj(), |d: &mut FaData| {
         if i >= 0 && (i as usize) < d.items.len() {
@@ -1989,7 +2026,7 @@ fn fa_offset_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn fa_offset_unset(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let i = fa_index(vm, a, &a.val(0))?;
+    let i = fa_index(vm, &a.val(0))?;
     let old = with(a.this_obj(), |d: &mut FaData| {
         if i >= 0 && (i as usize) < d.items.len() {
             Ok(std::mem::replace(&mut d.items[i as usize], Value::Null))
@@ -2444,9 +2481,12 @@ fn dll_prev(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Null)
 }
 fn dll_serialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let (flags, items) = dll(a, |d| (d.flags, d.items.clone()));
+    let flags = dll(a, |d| d.flags);
     let mut out = format!("i:{};", flags).into_bytes();
-    for v in items {
+    // The live list: serializing an element may change it (test gh16589).
+    let mut i = 0;
+    while let Some(v) = dll(a, |d| d.items.get(i).cloned()) {
+        i += 1;
         out.push(b':');
         out.extend_from_slice(&vm.serialize_value(&v)?);
     }

@@ -110,17 +110,35 @@ class SplFileInfo implements Stringable {
         $p = $this->getPathname();
         return realpath($p === '' ? '.' : $p);
     }
+    /* The class given must derive from SplFileInfo (observed on PHP 8.5;
+     * test gh17516). */
+    protected function __h_infoClass($m, $class) {
+        if ($class === null) {
+            return $this->__infoClass;
+        }
+        if (!is_a($class, 'SplFileInfo', true)) {
+            throw new TypeError("SplFileInfo::$m(): Argument #1 (\$class) must be a class name derived from SplFileInfo or null, $class given");
+        }
+        return $class;
+    }
     public function getFileInfo(?string $class = null): SplFileInfo {
         $this->__h_chk();
-        $c = $class ?? $this->__infoClass;
+        $c = $this->__h_infoClass('getFileInfo', $class);
         return new $c($this->getPathname());
     }
     public function getPathInfo(?string $class = null): ?SplFileInfo {
         $this->__h_chk();
-        $c = $class ?? $this->__infoClass;
+        $c = $this->__h_infoClass('getPathInfo', $class);
         $p = $this->getPath();
         if ($p === '') {
-            $p = $this->getPathname() === '' ? '' : '.';
+            $pn = $this->getPathname();
+            $i = strrpos($pn, '/');
+            if ($i !== false && $i > 0) {
+                /* A stream URL keeps its scheme ("php:" for php://temp). */
+                $p = rtrim(substr($pn, 0, $i), '/');
+            } else {
+                $p = $pn === '' ? '' : '.';
+            }
             if ($p === '') {
                 return null;
             }
@@ -129,6 +147,10 @@ class SplFileInfo implements Stringable {
     }
     public function openFile(string $mode = "r", bool $useIncludePath = false, $context = null): SplFileObject {
         $this->__h_chk();
+        if ($context !== null && !is_resource($context)) {
+            // test bug46051
+            throw new TypeError('SplFileInfo::openFile(): Argument #3 ($context) must be of type resource or null, ' . get_debug_type($context) . ' given');
+        }
         $c = $this->__fileClass;
         return new $c($this->getPathname(), $mode, $useIncludePath, $context);
     }
@@ -173,6 +195,10 @@ class SplFileObject extends SplFileInfo implements RecursiveIterator, SeekableIt
     protected $__esc = '\\';
     protected $__escSet = false;
     public function __construct(string $filename, string $mode = "r", bool $useIncludePath = false, $context = null) {
+        if ($this->__fp !== null) {
+            // test gh16604_2
+            throw new Error('Cannot call constructor twice');
+        }
         if (is_dir($filename)) {
             throw new LogicException("Cannot use SplFileObject with directories");
         }
@@ -231,7 +257,7 @@ class SplFileObject extends SplFileInfo implements RecursiveIterator, SeekableIt
     protected function __h_readCsv($sep, $enc, $esc, $silent) {
         do {
             $ok = $this->__h_readRaw($silent, true);
-        } while ($ok && $this->__line === '' && ($this->__flags & 4));
+        } while ($ok && in_array($this->__line, ['', "\n", "\r\n"], true) && ($this->__flags & 4));
         if (!$ok) {
             return false;
         }
@@ -517,7 +543,9 @@ class SplFileObject extends SplFileInfo implements RecursiveIterator, SeekableIt
     public function __toString(): string {
         $this->__h_fchk();
         if ($this->__line === null && $this->__csv === null) {
-            $this->__h_readRaw(true, false);
+            /* An empty stream reads as "" (gh9883-extra); past the end it
+             * throws (gh13685). */
+            $this->__h_readRaw(ftell($this->__fp) === 0, false);
         }
         return (string) $this->__line;
     }
@@ -532,6 +560,10 @@ class SplFileObject extends SplFileInfo implements RecursiveIterator, SeekableIt
 
 class SplTempFileObject extends SplFileObject {
     public function __construct(int $maxMemory = 2 * 1024 * 1024) {
+        if ($this->__fp !== null) {
+            // test gh16477-2
+            throw new Error('Cannot call constructor twice');
+        }
         if ($maxMemory < 0) {
             $name = 'php://memory';
         } elseif (func_num_args() > 0) {
