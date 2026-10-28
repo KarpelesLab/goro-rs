@@ -65,3 +65,9 @@ bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
   Checked against the specifications' vectors, the ext/hash test cases and
   a 10.8k-line PHP 8.5 fixture; at or above PHP's throughput for the
   common digests (SHA extensions, PCLMULQDQ CRC folding, SIMD XXH3).
+- `goro-ext-json`: `json_encode`/`json_decode`/`json_validate` over
+  runtime values with every `JSON_*` flag, PHP's error codes and their
+  precedence, recursion guards across nested calls, `JsonSerializable`
+  and enums through an engine hook trait. Checked against a 33.7k-line
+  PHP 8.5 fixture; 1.25-7.6x PHP's throughput on multi-MB documents
+  (iterative, so nesting depth is bounded by `$depth` only).
