@@ -6,3 +6,11 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+goro-syntax = { path = "../goro-syntax" }
+goro-runtime = { path = "../goro-runtime" }
+goro-ext-standard = { path = "../goro-ext-standard" }
+goro-regex = { path = "../goro-regex" }
+goro-ext-hash = { path = "../goro-ext-hash" }
+goro-ext-random = { path = "../goro-ext-random" }
+libc = "0.2"
+corosensei = "0.2"

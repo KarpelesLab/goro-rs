@@ -288,6 +288,10 @@ const ARGNUM_ERROR: &str =
 /// number.
 fn parse_argnum(fmt: &[u8], pos: &mut usize) -> Result<Option<usize>, StdError> {
     let mut p = *pos;
+    // Test bug69751.phpt: "%$s" is an invalid argument number.
+    if p < fmt.len() && fmt[p] == b'$' {
+        return Err(value_error(ARGNUM_ERROR));
+    }
     if p >= fmt.len() || !fmt[p].is_ascii_digit() {
         return Ok(None);
     }
@@ -564,7 +568,7 @@ pub fn format<A: FormatArgs + ?Sized>(
                 let v = args.float(idx);
                 let mut prec = spec.precision.unwrap_or(6);
                 if prec > MAX_FLOAT_PRECISION {
-                    diags.push(Diag::Warning(format!(
+                    diags.push(Diag::Notice(format!(
                         "Requested precision of {prec} digits was truncated to PHP maximum of {MAX_FLOAT_PRECISION} digits"
                     )));
                     prec = MAX_FLOAT_PRECISION;

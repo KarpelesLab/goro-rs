@@ -41,7 +41,11 @@ fn printf_fixture() {
             Ok((out, diags)) => {
                 let mut s = format!("R:{}", hex(&out));
                 for d in diags {
-                    let Diag::Warning(m) = d else { panic!() };
+                    // The fixture records every diagnostic as W: (its
+                    // error handler collects notices too).
+                    let (Diag::Warning(m) | Diag::Notice(m)) = d else {
+                        panic!()
+                    };
                     s.push_str(&format!("\tW:sprintf(): {m}"));
                 }
                 s

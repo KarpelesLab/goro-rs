@@ -64,12 +64,25 @@ pub trait NativeData: Any {
     /// Drop every PHP value this data holds (the collector breaks garbage
     /// cycles this way).
     fn clear(&mut self) {}
+    /// Weak-keyed maps (WeakMap): the values stored for `key`. The
+    /// collector treats them as referenced by the key (ephemerons), not by
+    /// the map; `trace` must not report them.
+    fn ephemerons(&self, _key: &ObjRef, _visit: &mut dyn FnMut(&Value)) {}
+    /// A key object (by address) of this weak map went away: its entries
+    /// are removed (their values returned, to be dropped by the caller).
+    fn weak_key_dropped(&mut self, _key_addr: usize) -> Vec<Value> {
+        Vec::new()
+    }
 }
 
 pub(crate) const F_HAS_DTOR: u32 = 1;
 pub(crate) const F_DTOR_CALLED: u32 = 2;
 pub(crate) const F_GC_BUFFERED: u32 = 4;
 pub(crate) const F_GC_CLEARED: u32 = 8;
+/// A lazy object (uninitialized, or an initialized lazy proxy).
+pub(crate) const F_LAZY: u32 = 16;
+/// The object is (or was) a key of a weak map (see [`crate::gc`]).
+pub(crate) const F_WEAK_KEY: u32 = 32;
 
 /// An object's storage.
 pub struct Object {
@@ -97,6 +110,11 @@ impl WeakObj {
     pub fn upgrade(&self) -> Option<ObjRef> {
         self.0.upgrade().map(ObjRef)
     }
+
+    /// The object's address (stable while any handle exists).
+    pub fn addr(&self) -> usize {
+        self.0.as_ptr() as usize
+    }
 }
 
 struct ObjectStore {
@@ -113,6 +131,10 @@ thread_local! {
     static PENDING: RefCell<VecDeque<ObjRef>> = const { RefCell::new(VecDeque::new()) };
     static PENDING_LEN: Cell<usize> = const { Cell::new(0) };
 }
+
+/// Pending destructors on any thread: the per-instruction check is one
+/// relaxed load (the thread-local queue is only looked at when non-zero).
+static PENDING_ANY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 impl ObjRef {
     /// Creates an object of `class` with `slots` as its declared properties.
@@ -196,6 +218,24 @@ impl ObjRef {
         f & F_DTOR_CALLED == 0
     }
 
+    /// Allows the destructor to run again (a lazy object that got
+    /// initialized).
+    pub fn clear_destructor_called(&self) {
+        let f = self.0.flags.get();
+        self.0.flags.set(f & !F_DTOR_CALLED);
+    }
+
+    /// Whether the object is lazy (the engine keeps its state).
+    #[inline]
+    pub fn is_lazy(&self) -> bool {
+        self.0.flags.get() & F_LAZY != 0
+    }
+
+    pub fn set_lazy(&self, on: bool) {
+        let f = self.0.flags.get();
+        self.0.flags.set(if on { f | F_LAZY } else { f & !F_LAZY });
+    }
+
     /// Whether the class has a destructor that has not been called yet.
     pub fn needs_destructor(&self) -> bool {
         self.0.flags.get() & (F_HAS_DTOR | F_DTOR_CALLED) == F_HAS_DTOR
@@ -225,6 +265,7 @@ impl Drop for ObjRef {
                 let _ = PENDING.try_with(|q| {
                     q.borrow_mut().push_back(keep);
                     PENDING_LEN.with(|n| n.set(n.get() + 1));
+                    PENDING_ANY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 });
             }
         } else {
@@ -235,6 +276,16 @@ impl Drop for ObjRef {
 
 impl Drop for Object {
     fn drop(&mut self) {
+        // The contents go first, then the handle is reused first (PHP's
+        // object store frees properties before putting the handle on its
+        // free list; observed on php85: `$c = new C; unset($c);` with C
+        // holding a B, the next object gets C's handle).
+        drop(std::mem::take(self.slots.get_mut()));
+        drop(std::mem::take(self.props.get_mut()));
+        drop(self.native.get_mut().take());
+        if self.flags.get() & F_WEAK_KEY != 0 {
+            crate::gc::forget_weak_key(self as *const Object as usize);
+        }
         let h = self.handle as usize;
         let _ = STORE.try_with(|s| {
             if let Ok(mut s) = s.try_borrow_mut() {
@@ -261,7 +312,8 @@ impl fmt::Debug for ObjRef {
 /// Whether objects are waiting for their destructor to run.
 #[inline]
 pub fn has_pending_destructors() -> bool {
-    PENDING_LEN.with(|n| n.get() != 0)
+    PENDING_ANY.load(std::sync::atomic::Ordering::Relaxed) != 0
+        && PENDING_LEN.with(|n| n.get() != 0)
 }
 
 /// Takes the next object whose destructor must run now (oldest first). The
@@ -271,6 +323,7 @@ pub fn pop_pending_destructor() -> Option<ObjRef> {
         let o = q.borrow_mut().pop_front();
         if o.is_some() {
             PENDING_LEN.with(|n| n.set(n.get() - 1));
+            PENDING_ANY.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
         o
     })

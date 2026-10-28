@@ -375,7 +375,8 @@ pub fn number_format(num: f64, decimals: i64, dec_point: &[u8], thousands_sep: &
         return b"inf".to_vec();
     }
     let r = round(num, decimals, RoundMode::HalfAwayFromZero);
-    let dec = decimals.clamp(0, 1000) as usize;
+    // Test bug54332.phpt: 2006 decimals are all printed.
+    let dec = decimals.clamp(0, i32::MAX as i64) as usize;
     let digits = crate::float::fixed_abs(r, dec);
     let neg = r < 0.0 && digits.bytes().any(|b| (b'1'..=b'9').contains(&b));
     assemble(neg, &digits, dec_point, thousands_sep)
@@ -407,7 +408,10 @@ pub fn number_format_int(
     let mut digits = v.unsigned_abs().to_string();
     if decimals > 0 {
         digits.push('.');
-        digits.extend(std::iter::repeat_n('0', decimals.min(1000) as usize));
+        digits.extend(std::iter::repeat_n(
+            '0',
+            decimals.min(i32::MAX as i64) as usize,
+        ));
     }
     assemble(v < 0, &digits, dec_point, thousands_sep)
 }

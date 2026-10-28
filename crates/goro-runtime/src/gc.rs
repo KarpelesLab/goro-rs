@@ -34,7 +34,9 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 use crate::array::{ARRAY_GC_BUFFERED, ArrayData};
-use crate::object::{F_DTOR_CALLED, F_GC_BUFFERED, F_GC_CLEARED, F_HAS_DTOR, ObjRef, Object};
+use crate::object::{
+    F_DTOR_CALLED, F_GC_BUFFERED, F_GC_CLEARED, F_HAS_DTOR, F_WEAK_KEY, ObjRef, Object, WeakObj,
+};
 use crate::reference::{PhpRef, RefInner};
 use crate::value::Value;
 
@@ -51,6 +53,8 @@ enum Root {
 }
 
 thread_local! {
+    /// Weak maps holding entries per key object (by address).
+    static WEAK_KEYS: RefCell<HashMap<usize, Vec<WeakObj>>> = RefCell::new(HashMap::new());
     static ROOTS: RefCell<Vec<Root>> = const { RefCell::new(Vec::new()) };
     static STATS: Cell<GcStats> = const { Cell::new(GcStats { runs: 0, collected: 0 }) };
 }
@@ -96,6 +100,45 @@ pub(crate) fn possible_root_obj(o: &ObjRef) {
         o.0.flags.set(f | F_GC_BUFFERED);
         push_root(Root::Obj(Rc::downgrade(&o.0)));
     }
+}
+
+/// Records that `map` (a weak map) holds an entry for `key`: the
+/// collector then sees the entry's value as referenced by the key.
+pub fn register_weak_key(key: &ObjRef, map: &ObjRef) {
+    key.0.flags.set(key.0.flags.get() | F_WEAK_KEY);
+    let addr = Rc::as_ptr(&key.0) as usize;
+    let _ = WEAK_KEYS.try_with(|w| {
+        let mut w = w.borrow_mut();
+        let v = w.entry(addr).or_default();
+        if !v
+            .iter()
+            .any(|m| m.upgrade().is_some_and(|m| ObjRef::ptr_eq(&m, map)))
+        {
+            v.retain(|m| m.upgrade().is_some());
+            v.push(map.downgrade());
+        }
+    });
+}
+
+pub(crate) fn forget_weak_key(addr: usize) {
+    let maps = WEAK_KEYS
+        .try_with(|w| match w.try_borrow_mut() {
+            Ok(mut w) => w.remove(&addr).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        })
+        .unwrap_or_default();
+    // The maps drop their entries for the key (values may run
+    // destructors: dropped after the borrows end).
+    let mut dead: Vec<Value> = Vec::new();
+    for m in maps {
+        if let Some(m) = m.upgrade()
+            && let Ok(mut n) = m.0.native.try_borrow_mut()
+            && let Some(n) = n.as_mut()
+        {
+            dead.extend(n.weak_key_dropped(addr));
+        }
+    }
+    drop(dead);
 }
 
 /// Number of buffered possible roots.
@@ -228,6 +271,27 @@ impl Graph {
                             }
                         }
                         Err(_) => opaque = true,
+                    }
+                    // Values weak maps keep for this key.
+                    if o.flags.get() & F_WEAK_KEY != 0 {
+                        let addr = Rc::as_ptr(o) as usize;
+                        let maps: Vec<WeakObj> =
+                            WEAK_KEYS.with(|w| w.borrow().get(&addr).cloned().unwrap_or_default());
+                        let key = ObjRef(o.clone());
+                        for m in maps {
+                            if let Some(m) = m.upgrade() {
+                                match m.0.native.try_borrow() {
+                                    Ok(n) => {
+                                        if let Some(n) = &*n {
+                                            n.ephemerons(&key, &mut |v| {
+                                                children.extend(node_of(v).map(|n| (n, false)))
+                                            });
+                                        }
+                                    }
+                                    Err(_) => opaque = true,
+                                }
+                            }
+                        }
                     }
                 }
             }

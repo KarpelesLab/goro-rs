@@ -1267,6 +1267,14 @@ impl PhpArray {
         self.0.as_ref().map_or(0, Rc::strong_count)
     }
 
+    /// The address of the shared data (0 for the empty array): an
+    /// identity for recursion guards.
+    pub fn data_addr(&self) -> usize {
+        self.0
+            .as_ref()
+            .map_or(0, |d| Rc::as_ptr(d) as *const u8 as usize)
+    }
+
     /// Whether two handles share the same data.
     pub fn ptr_eq(a: &PhpArray, b: &PhpArray) -> bool {
         match (&a.0, &b.0) {
