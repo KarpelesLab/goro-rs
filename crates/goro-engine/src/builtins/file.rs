@@ -1495,7 +1495,7 @@ fn flock(vm: &mut Vm, a: &mut Args) -> R<Value> {
     })
 }
 
-fn read_rest(vm: &mut Vm, s: &mut Stream) -> Vec<u8> {
+pub(crate) fn read_rest(vm: &mut Vm, s: &mut Stream) -> Vec<u8> {
     let mut out = Vec::new();
     let mut buf = [0u8; 8192];
     loop {
@@ -1592,6 +1592,11 @@ pub(crate) fn stream_get_meta_data(vm: &mut Vm, a: &mut Args) -> R<Value> {
         m.insert(Key::from("eof"), Value::Bool(eof));
         if let Backing::User { obj } = &s.backing {
             m.insert(Key::from("wrapper_data"), Value::Object(obj.clone()));
+        }
+        if let Backing::Native(n) = &s.backing
+            && let Some(w) = n.wrapper_data()
+        {
+            m.insert(Key::from("wrapper_data"), w);
         }
         let pipe = s.is_pipe();
         // no wrapper: gzopen() streams (test zlib_wrapper_meta_data_basic.phpt)

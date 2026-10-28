@@ -14,7 +14,7 @@ use crate::serialize::{SaveOptions, to_string};
 use crate::tree::EntityDecl;
 use crate::tree::{Arena, DocKind, NodeData, NodeId, XMLNS_NS};
 use crate::tree::{DtdData, QName};
-use crate::xml::{ParseOptions, Parser, Sink, StartTag, Status, TreeBuilder, opt};
+use crate::xml::{EntityLoader, ParseOptions, Parser, Sink, StartTag, Status, TreeBuilder, opt};
 
 /// `XMLReader` node types.
 pub mod node_type {
@@ -71,6 +71,9 @@ pub struct XmlReader {
     input: Vec<u8>,
     fed: usize,
     parser: Option<Parser<'static>>,
+    /// The loader of external resources the parser uses (declared after
+    /// `parser`, which borrows it, so it is dropped after it).
+    loader: Option<Box<dyn EntityLoader>>,
     /// Parser options (from `XMLReader::XML($source, $encoding, $flags)`).
     pub flags: u32,
     /// Parser properties (set before the first `read`).
@@ -163,6 +166,7 @@ impl XmlReader {
             input,
             fed: 0,
             parser: None,
+            loader: None,
             flags,
             props: ReaderProps::default(),
             url: url.map(str::to_string),
@@ -177,6 +181,14 @@ impl XmlReader {
             at_end: false,
             attr: None,
             started: false,
+        }
+    }
+
+    /// Sets the loader of external resources (DTDs, entities); must be
+    /// called before the first `read`.
+    pub fn set_loader(&mut self, l: Box<dyn EntityLoader>) {
+        if self.parser.is_none() {
+            self.loader = Some(l);
         }
     }
 
@@ -206,7 +218,13 @@ impl XmlReader {
             let mut po = ParseOptions::with_flags(flags);
             po.url = self.url.clone();
             po.encoding_override = self.encoding.clone();
-            self.parser = Some(Parser::new(po.clone(), None));
+            // SAFETY: the box lives as long as the parser (see the field
+            // order) and is not otherwise used while it exists.
+            let loader = self.loader.as_mut().map(|b| {
+                let p: *mut dyn EntityLoader = b.as_mut();
+                unsafe { &mut *p }
+            });
+            self.parser = Some(Parser::new(po.clone(), loader));
         }
         let end = (self.fed + CHUNK).min(self.input.len());
         let is_final = end == self.input.len();
@@ -214,7 +232,9 @@ impl XmlReader {
         self.fed = end;
         let po = self.parser.as_ref().unwrap().opts.clone();
         let parser = self.parser.as_mut().unwrap();
-        let tb = TreeBuilder::new(&mut self.arena, self.doc, &po);
+        // Later chunks continue in the element still open.
+        let parent = self.stack.last().copied().unwrap_or(self.doc);
+        let tb = TreeBuilder::new(&mut self.arena, parent, &po);
         let mut sink = ReaderSink {
             tb,
             closed: &mut self.closed,
@@ -233,6 +253,11 @@ impl XmlReader {
             Status::NeedMore => {}
         }
         true
+    }
+
+    /// True once node `n` has been parsed to its end.
+    pub fn is_node_complete(&self, n: NodeId) -> bool {
+        self.is_closed(n)
     }
 
     fn is_closed(&self, n: NodeId) -> bool {
@@ -672,31 +697,70 @@ impl XmlReader {
         self.attr.take().is_some()
     }
 
+    /// The current element's attributes as `getAttribute*()` see them:
+    /// `(qualified name, local name, namespace, value)`, namespace
+    /// declarations first; available on end tags too, not while
+    /// positioned on an attribute (observed on PHP 8.5; tests
+    /// ext/xmlreader 003, 010).
+    fn element_attrs(&self) -> Vec<(String, String, String, String)> {
+        let mut v = Vec::new();
+        let Some(n) = self.cur else { return v };
+        if self.attr.is_some() {
+            return v;
+        }
+        let Some(e) = self.arena.element(n) else {
+            return v;
+        };
+        for d in &e.ns_decls {
+            match &d.prefix {
+                Some(p) => v.push((
+                    format!("xmlns:{p}"),
+                    p.to_string(),
+                    XMLNS_NS.to_string(),
+                    d.uri.to_string(),
+                )),
+                None => v.push((
+                    "xmlns".into(),
+                    "xmlns".into(),
+                    XMLNS_NS.to_string(),
+                    d.uri.to_string(),
+                )),
+            }
+        }
+        for a in self.arena.attrs(n) {
+            if let Some(ad) = self.arena.attr(a) {
+                v.push((
+                    ad.name.qualified(),
+                    ad.name.local.to_string(),
+                    ad.name.ns.as_deref().unwrap_or("").to_string(),
+                    self.arena.attr_value(a),
+                ));
+            }
+        }
+        v
+    }
+
     /// `getAttribute($name)`.
     pub fn get_attribute(&self, name: &str) -> Option<String> {
-        let saved_attr = self.attr;
-        let me = XmlReaderView {
-            r: self,
-            attr: None,
-        };
-        let _ = saved_attr;
-        me.find(|t| t.0 == name)
+        self.element_attrs()
+            .into_iter()
+            .find(|t| t.0 == name)
+            .map(|t| t.3)
     }
 
     /// `getAttributeNs($localName, $namespace)`.
     pub fn get_attribute_ns(&self, local: &str, ns: &str) -> Option<String> {
-        XmlReaderView {
-            r: self,
-            attr: None,
-        }
-        .find(|t| t.1 == local && t.3 == ns)
+        self.element_attrs()
+            .into_iter()
+            .find(|t| t.1 == local && t.2 == ns)
+            .map(|t| t.3)
     }
 
     /// `getAttributeNo($index)`: counts attributes only, not namespace
     /// declarations (observed on PHP 8.5).
     pub fn get_attribute_no(&self, i: usize) -> Option<String> {
         let n = self.cur?;
-        if self.at_end {
+        if self.attr.is_some() {
             return None;
         }
         let a = self.arena.attrs(n).nth(i)?;
@@ -834,24 +898,5 @@ impl XmlReader {
             });
         }
         Some(n)
-    }
-}
-
-struct XmlReaderView<'a> {
-    r: &'a XmlReader,
-    attr: Option<usize>,
-}
-
-impl XmlReaderView<'_> {
-    fn find(
-        &self,
-        f: impl Fn(&(String, String, String, String, String)) -> bool,
-    ) -> Option<String> {
-        let _ = self.attr;
-        let n = self.r.attr_list().len();
-        (0..n)
-            .filter_map(|i| self.r.attr_names(i))
-            .find(|t| f(t))
-            .map(|t| t.4)
     }
 }

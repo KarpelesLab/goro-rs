@@ -181,6 +181,29 @@ impl<'a> Compiler<'a> {
         Ok(self.f.children.len() as u32 - 1)
     }
 
+    /// The PHP 8.5 deprecation of reading `$http_response_header` in
+    /// this body (see hrh.rs).
+    fn http_response_header_notices(&mut self, spec: &FnSpec<'a>) {
+        let text = self
+            .src
+            .get(spec.span.start as usize..spec.span.end as usize)
+            .unwrap_or(&[]);
+        if !super::hrh::mentioned(text) {
+            return;
+        }
+        let name: &[u8] = b"http_response_header";
+        let defined = spec.params.iter().any(|p| p.name.name == name)
+            || spec.uses.iter().any(|u| u.name.name == name);
+        let lines = match &spec.body {
+            FnBody::Block(b) => super::hrh::lines_stmts(b, defined),
+            FnBody::Expr(e) => super::hrh::lines_expr(e, defined),
+            FnBody::None => Vec::new(),
+        };
+        for l in lines {
+            self.notice(goro_runtime::Level::Deprecated, super::hrh::MESSAGE, l);
+        }
+    }
+
     /// Compiles a function body into its own [`FuncCode`].
     pub(crate) fn compile_fn(&mut self, spec: FnSpec<'a>) -> CResult<FuncCode> {
         // Variables: parameters first, then closure uses, then the body.
@@ -222,6 +245,7 @@ impl<'a> Compiler<'a> {
         let is_generator = sc.generator;
         let uses_this = sc.uses_this;
         let dynamic = sc.dynamic;
+        self.http_response_header_notices(&spec);
         let parent_f = std::mem::replace(&mut self.f, FState::new(sc.vars));
         self.f.line = spec.span.line;
         self.f.func_name = spec.func_name.clone();
@@ -1264,6 +1288,7 @@ impl<'a> Compiler<'a> {
             line_start: cd.span.line,
             line_end: cd.span.end_line,
             declared: std::cell::Cell::new(false),
+            run_declared: std::cell::Cell::new(false),
         };
         self.f.classes.push(Rc::new(decl));
         Ok(self.f.classes.len() as u32 - 1)
@@ -2939,11 +2964,15 @@ pub fn parse_native_sig(
     known_const: Option<&dyn Fn(&[u8]) -> Option<Value>>,
 ) -> Result<crate::func::NativeSig, String> {
     let mut src = Vec::from(&b"<?php "[..]);
-    // Reserved words (PHP 8.5's clone()) cannot be parsed as function
-    // names: the name is not needed here.
+    // Reserved words (PHP 8.5's clone()) and namespaced names (ext/dom's
+    // Dom\import_simplexml()) cannot be parsed as function names: the
+    // name is not needed here.
     let sig_text = match (sig.find("function "), sig.find('(')) {
         (Some(f), Some(p))
-            if f < p && crate::registry::sig_name(sig).eq_ignore_ascii_case("clone") =>
+            if f < p && {
+                let n = crate::registry::sig_name(sig);
+                n.eq_ignore_ascii_case("clone") || n.contains('\\')
+            } =>
         {
             format!("{}function __clone_fn{}", &sig[..f], &sig[p..])
         }
@@ -2981,6 +3010,7 @@ pub fn parse_native_sig(
         zend_multibyte: false,
         in_const_expr: false,
         in_chain: false,
+        in_const_stmt: false,
         nullsafe_jumps: Vec::new(),
     };
     c.f.method_name = PhpStr::new(fd.name.name);

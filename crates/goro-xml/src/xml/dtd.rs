@@ -4,6 +4,55 @@
 
 use super::Sink;
 use super::parser::{Halt, Parser, R, collapse_spaces};
+
+/// Parses `text` as the external subset of document `doc` and attaches it
+/// (`DOMDocument::validate()` on a document parsed without loading it).
+/// Returns false when the subset is not well-formed.
+pub fn attach_external_subset(
+    arena: &mut crate::tree::Arena,
+    doc: crate::tree::NodeId,
+    text: &[u8],
+    public: Option<&str>,
+    system: &str,
+) -> bool {
+    struct Fixed(Vec<u8>);
+    impl super::EntityLoader for Fixed {
+        fn load(
+            &mut self,
+            _public_id: Option<&str>,
+            _system_id: &str,
+            _base: Option<&str>,
+        ) -> Result<Vec<u8>, super::LoadError> {
+            Ok(std::mem::take(&mut self.0))
+        }
+    }
+    struct Null;
+    impl Sink for Null {
+        fn start_element(&mut self, _tag: &mut super::StartTag<'_>) {}
+        fn end_element(&mut self, _name: &crate::tree::QName) {}
+        fn text(&mut self, _text: &str) {}
+    }
+    let mut fixed = Fixed(text.to_vec());
+    let opts = super::ParseOptions::with_flags(super::opt::DTDLOAD);
+    let mut internal = arena
+        .doc(doc)
+        .doctype
+        .and_then(|d| arena.dtd(d).cloned())
+        .unwrap_or_default();
+    internal.public_id = public.map(str::to_string);
+    internal.system_id = Some(system.to_string());
+    let mut p = Parser::new(opts, Some(&mut fixed));
+    p.dtd = Some(internal);
+    if p.load_external_subset(&mut Null).is_err() || p.stopped {
+        return false;
+    }
+    let Some(ext) = p.ext.take() else {
+        return false;
+    };
+    let x = arena.create(doc, crate::tree::NodeData::Doctype(Box::new(ext)));
+    arena.doc_mut(doc).ext_subset = Some(x);
+    true
+}
 use crate::chars::{is_pubid_char, is_space};
 use crate::error::Domain;
 use crate::tree::{
@@ -80,8 +129,9 @@ impl Parser<'_> {
             return Ok(());
         };
         let base = self.opts.url.clone();
+        let ctx = self.load_context();
         let res = match self.loader.as_mut() {
-            Some(l) => l.load(public.as_deref(), &system, base.as_deref()),
+            Some(l) => l.load_with(public.as_deref(), &system, base.as_deref(), &ctx),
             None => Err(super::LoadError::NotFound),
         };
         let bytes = match res {
@@ -101,7 +151,11 @@ impl Parser<'_> {
         let text = self.decode_external(&bytes)?;
         // Internal declarations take precedence (XML 1.0 2.8): the external
         // subset is parsed into the same maps, where first declarations win.
+        let saved_base = self
+            .ext_base
+            .replace(super::parser::resolve_system_id(&system, base.as_deref()));
         let r = self.with_buffer(text, |p| p.parse_subset(sink, true));
+        self.ext_base = saved_base;
         let combined = self.dtd.take().unwrap();
         let mut ext = DtdData {
             name: internal.name.clone(),
@@ -295,9 +349,10 @@ impl Parser<'_> {
     }
 
     fn load_text(&mut self, public: Option<&str>, system: &str) -> R<Option<String>> {
-        let base = self.opts.url.clone();
+        let base = self.ext_base.clone().or_else(|| self.opts.url.clone());
+        let ctx = self.load_context();
         let res = match self.loader.as_mut() {
-            Some(l) => l.load(public, system, base.as_deref()),
+            Some(l) => l.load_with(public, system, base.as_deref(), &ctx),
             None => Err(super::LoadError::NotFound),
         };
         match res {
@@ -884,9 +939,16 @@ impl Parser<'_> {
                     }
                     self.pos += 5;
                     self.require_space("'NDATA'")?;
-                    let n = self.name_or(68, "NDATA: no notation name")?;
-                    ent.notation = Some(n.to_string());
-                    ent.kind = EntityKind::ExternalGeneralUnparsed;
+                    // A missing notation name is accepted (observed on PHP
+                    // 8.5, test ext/dom/tests/DOMEntity_fields.phpt).
+                    if self.cur() == b'>' {
+                        ent.notation = Some(String::new());
+                        ent.kind = EntityKind::ExternalGeneralUnparsed;
+                    } else {
+                        let n = self.name_or(68, "NDATA: no notation name")?;
+                        ent.notation = Some(n.to_string());
+                        ent.kind = EntityKind::ExternalGeneralUnparsed;
+                    }
                 }
             }
             self.end_decl()?;

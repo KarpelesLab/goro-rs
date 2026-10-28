@@ -35,17 +35,82 @@ impl<'a> Compiler<'a> {
                 ClassSpec::Named(self.name_pair(&full))
             }
             ClassRef::Expr(e) => {
+                self.illegal_class_check(e)?;
                 let r = self.expr(e)?;
                 ClassSpec::Dynamic(r)
             }
         })
     }
 
+    /// A constant class operand must be a string (observed on PHP 8.5:
+    /// `(1)::$p`; test Zend/tests/bug70782).
+    fn illegal_class_check(&mut self, e: &'a Expr<'a>) -> CResult<()> {
+        let bad = matches!(e.kind, ExprKind::Array { .. })
+            || self
+                .const_value(e)
+                .is_some_and(|v| !matches!(v, Value::Str(_)));
+        if bad {
+            return self.err("Illegal class name", e.span.line);
+        }
+        Ok(())
+    }
+
+    /// `self`/`parent` (and `static` when `with_static`) in a function
+    /// outside a class are compile-time errors; in the main script and in
+    /// closures they fail at run time (observed on PHP 8.5).
+    pub(crate) fn no_class_scope_check(
+        &mut self,
+        c: &ClassRef<'a>,
+        with_static: bool,
+        line: u32,
+    ) -> CResult<()> {
+        let word = match c {
+            ClassRef::Static(_) if with_static => "static",
+            ClassRef::Name(n) if n.kind == NameKind::Unqualified => {
+                if n.name.eq_ignore_ascii_case(b"self") {
+                    "self"
+                } else if n.name.eq_ignore_ascii_case(b"parent") {
+                    "parent"
+                } else if with_static && n.name.eq_ignore_ascii_case(b"static") {
+                    "static"
+                } else {
+                    return Ok(());
+                }
+            }
+            _ => return Ok(()),
+        };
+        if self.class.is_none()
+            && self.f.flags & (fflags::CLOSURE | fflags::CONST_EXPR | fflags::PSEUDO_MAIN) == 0
+        {
+            return self.err(
+                format!("Cannot use \"{word}\" when no class scope is active"),
+                line,
+            );
+        }
+        // Test Zend/tests/class_name/class_name_as_scalar_error_002.
+        if word == "parent"
+            && self.f.flags & fflags::CLOSURE == 0
+            && self
+                .class
+                .as_ref()
+                .is_some_and(|c| !c.is_trait && c.parent.is_none())
+        {
+            return self.err(
+                "Cannot use \"parent\" when current class scope has no parent",
+                line,
+            );
+        }
+        Ok(())
+    }
+
     /// A class operand that is part of an access chain: `?->` in it
     /// short-circuits the whole chain (test Zend/tests/nullsafe_operator/001).
     fn class_spec_chain(&mut self, c: &ClassRef<'a>) -> CResult<ClassSpec> {
         match c {
-            ClassRef::Expr(e) => Ok(ClassSpec::Dynamic(self.chain_base(e)?)),
+            ClassRef::Expr(e) => {
+                self.illegal_class_check(e)?;
+                Ok(ClassSpec::Dynamic(self.chain_base(e)?))
+            }
             _ => self.class_spec(c),
         }
     }
@@ -353,9 +418,7 @@ impl<'a> Compiler<'a> {
                 }
                 self.array_literal(items, line)
             }
-            ExprKind::List { .. } => {
-                self.err("Cannot use list() outside of an assignment context", line)
-            }
+            ExprKind::List { .. } => self.err("Cannot use list() as standalone expression", line),
             ExprKind::MagicConst(m) => match self.magic_value(*m, line) {
                 Some(v) => Ok(self.add_const(v)),
                 None => {
@@ -511,6 +574,50 @@ impl<'a> Compiler<'a> {
                         let v = self.f.consts[k as usize].clone();
                         return Ok(self.add_const(v));
                     }
+                    self.no_class_scope_check(&cc.class, true, line)?;
+                    // In a `const` statement outside a class (test Zend/tests/
+                    // class_name/self_class_const_in_unknown_scope).
+                    if self.in_const_stmt
+                        && self.class.is_none()
+                        && let ClassRef::Name(n) = &cc.class
+                        && n.kind == NameKind::Unqualified
+                        && n.is_special_class()
+                    {
+                        let msg = format!(
+                            "Cannot use \"{}\" when no class scope is active",
+                            String::from_utf8_lossy(&n.name.to_ascii_lowercase())
+                        );
+                        let msg = self.add_const(Value::Str(PhpStr::from(msg)));
+                        self.f.line = line;
+                        // Kind 2: only without a class scope at run time
+                        // (eval() in a method has one).
+                        self.emit(Op::Error {
+                            msg: msg & !CONST,
+                            kind: 2,
+                        });
+                    }
+                    // A constant operand: a literal is an illegal class
+                    // name, a string is the name itself, another constant
+                    // value an error (observed on PHP 8.5; test Zend/tests/
+                    // class_name/class_on_constant_evaluated_expression).
+                    if let ClassRef::Expr(x) = &cc.class
+                        && !matches!(
+                            x.kind,
+                            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Array { .. }
+                        )
+                        && let Some(v) = self.const_value(x)
+                    {
+                        if let Value::Str(_) = v {
+                            return Ok(self.add_const(v));
+                        }
+                        return self.err(
+                            format!(
+                                "Cannot use \"::class\" on {}",
+                                crate::vm::Vm::type_name_given(&v)
+                            ),
+                            line,
+                        );
+                    }
                     let class = self.class_spec(&cc.class)?;
                     self.free_spec(class);
                     let d = self.dst(hint);
@@ -519,22 +626,7 @@ impl<'a> Compiler<'a> {
                 }
                 // self::X / parent::X outside a class (test
                 // Zend/tests/self_class_const_outside_class).
-                if let ClassRef::Name(n) = &cc.class
-                    && n.kind == NameKind::Unqualified
-                    && (n.name.eq_ignore_ascii_case(b"self")
-                        || n.name.eq_ignore_ascii_case(b"parent"))
-                    && self.class.is_none()
-                    && self.f.flags & (fflags::CLOSURE | fflags::CONST_EXPR | fflags::PSEUDO_MAIN)
-                        == 0
-                {
-                    return self.err(
-                        format!(
-                            "Cannot use \"{}\" when no class scope is active",
-                            String::from_utf8_lossy(&n.name.to_ascii_lowercase())
-                        ),
-                        line,
-                    );
-                }
+                self.no_class_scope_check(&cc.class, false, line)?;
                 let class = self.class_spec(&cc.class)?;
                 let n = self.member_name(&cc.name)?;
                 self.free_spec(class);
@@ -997,7 +1089,18 @@ impl<'a> Compiler<'a> {
     /// short-circuit chain).
     fn chain_base(&mut self, e: &'a Expr<'a>) -> CResult<Reg> {
         let saved = self.in_chain;
-        self.in_chain = true;
+        // Only access expressions continue the chain: `${$a?->b}->c` has
+        // its own (test Zend/tests/nullsafe_operator/025).
+        self.in_chain = matches!(
+            e.kind,
+            ExprKind::Prop { .. }
+                | ExprKind::MethodCall { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::StaticProp(_)
+                | ExprKind::StaticCall(_)
+                | ExprKind::Call { .. }
+                | ExprKind::CallExpr { .. }
+        );
         let r = self.expr(e);
         self.in_chain = saved;
         r
@@ -1893,6 +1996,13 @@ impl<'a> Compiler<'a> {
                     let var = self.cv(v);
                     self.emit(Op::SendVar { var, arg: i });
                 }
+                // $GLOBALS is passed by value only (test Zend/tests/
+                // restrict_globals/invalid_pass_by_ref).
+                ExprKind::Variable(b"GLOBALS") => {
+                    let v = self.expr(&a.value)?;
+                    self.free(v);
+                    self.emit(Op::Send { src: v, arg: i });
+                }
                 ExprKind::Index { index: None, .. } => {
                     // `f($a[])`: only valid for by-reference parameters.
                     let j = self.emit(Op::JmpArgByRef { arg: i, t: 0 });
@@ -1952,6 +2062,13 @@ impl<'a> Compiler<'a> {
                     && n.name.eq_ignore_ascii_case(b"static")
                 {
                     // `new static`
+                }
+                // `new parent` in a class without parent is allowed in
+                // parameter defaults (test ext/reflection/tests/gh9447).
+                if !(self.class.is_some()
+                    && matches!(c, ClassRef::Name(n) if n.name.eq_ignore_ascii_case(b"parent")))
+                {
+                    self.no_class_scope_check(c, true, line)?;
                 }
                 let spec = self.class_spec(c)?;
                 self.free_spec(spec);
@@ -2019,6 +2136,16 @@ impl<'a> Compiler<'a> {
                     base: PathBase::Global(name),
                     elems: Vec::new(),
                 })
+            }
+            // Tests Zend/tests/restrict_globals/invalid_append*.
+            ExprKind::Index { base, index: None }
+                if matches!(base.kind, ExprKind::Variable(b"GLOBALS")) =>
+            {
+                if for_unset {
+                    self.err("Cannot use [] for unsetting", line)
+                } else {
+                    self.err("Cannot append to $GLOBALS", line)
+                }
             }
             ExprKind::Variable(n) => {
                 if *n == b"this" {
@@ -2339,14 +2466,28 @@ impl<'a> Compiler<'a> {
                 self.f.line = line;
                 self.assign_to(target, v, res)
             }
-            ExprKind::List { items, .. } | ExprKind::Array { items, .. } => {
+            ExprKind::List { items, short } | ExprKind::Array { items, short } => {
+                self.list_targets_check(items, Some(*short))?;
                 if items.iter().flatten().any(|i| i.by_ref) {
                     // [&$a, $b] = $arr: destructure by reference.
                     self.nullsafe_ref_check(value)?;
                     let r = if is_ref_capable(value) {
                         self.ref_of(value)?
+                    } else if matches!(
+                        value.kind,
+                        ExprKind::Call { .. }
+                            | ExprKind::MethodCall { .. }
+                            | ExprKind::StaticCall(_)
+                            | ExprKind::CallExpr { .. }
+                    ) {
+                        // Tests Zend/tests/list/list_reference_003, 005.
+                        let r = self.expr(value)?;
+                        self.emit(Op::RefCheck { src: r });
+                        r
                     } else {
-                        self.expr(value)?
+                        // Test Zend/tests/list/list_reference_010, 011.
+                        return self
+                            .err("Cannot assign reference to non referenceable value", line);
                     };
                     let h = self.hidden();
                     self.free(r);
@@ -2425,12 +2566,64 @@ impl<'a> Compiler<'a> {
     }
 
     /// `[$a, 'k' => $b] = $h`: assigns elements of the array in slot `h`.
+    /// The targets of a destructuring assignment must be writable (observed
+    /// on PHP 8.5; tests Zend/tests/list/list_008, nullsafe_operator/021).
+    fn list_targets_check(
+        &mut self,
+        items: &'a [Option<ArrayItem<'a>>],
+        outer: Option<bool>,
+    ) -> CResult<()> {
+        if items.iter().any(|i| i.is_none()) && items.iter().flatten().any(|i| i.key.is_some()) {
+            let line = items
+                .iter()
+                .flatten()
+                .next()
+                .map_or(0, |i| i.value.span.line);
+            return self.err(
+                "Cannot use empty array entries in keyed array assignment",
+                line,
+            );
+        }
+        for it in items.iter().flatten() {
+            let v = &it.value;
+            let line = v.span.line;
+            match &v.kind {
+                ExprKind::Array { short: false, .. } => {
+                    return self.err("Cannot assign to array(), use [] instead", line);
+                }
+                ExprKind::List { items, short } | ExprKind::Array { items, short } => {
+                    if outer.is_some_and(|s| s != *short) {
+                        return self.err("Cannot mix [] and list()", line);
+                    }
+                    self.list_targets_check(items, Some(*short))?
+                }
+                _ if contains_nullsafe(v) => {
+                    return self.err("Assignments can only happen to writable values", line);
+                }
+                ExprKind::Variable(_)
+                | ExprKind::VariableVariable(_)
+                | ExprKind::Index { .. }
+                | ExprKind::Prop { .. }
+                | ExprKind::StaticProp(_) => {}
+                ExprKind::Call { .. } | ExprKind::CallExpr { .. } => {
+                    return self.err("Can't use function return value in write context", line);
+                }
+                ExprKind::MethodCall { .. } | ExprKind::StaticCall(_) => {
+                    return self.err("Can't use method return value in write context", line);
+                }
+                _ => return self.err("Assignments can only happen to writable values", line),
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn destructure(
         &mut self,
         items: &'a [Option<ArrayItem<'a>>],
         h: Reg,
         line: u32,
     ) -> CResult<()> {
+        self.list_targets_check(items, None)?;
         let keyed = items.iter().flatten().any(|i| i.key.is_some());
         let positional = items.iter().flatten().any(|i| i.key.is_none());
         if keyed && positional {
@@ -2499,6 +2692,7 @@ impl<'a> Compiler<'a> {
         h: Reg,
         _line: u32,
     ) -> CResult<()> {
+        self.list_targets_check(items, None)?;
         let mut idx = 0i64;
         for it in items {
             let Some(it) = it else {
@@ -2566,6 +2760,16 @@ impl<'a> Compiler<'a> {
     fn assign_ref(&mut self, target: &'a Expr<'a>, value: &'a Expr<'a>, res: Reg) -> CResult<()> {
         let line = target.span.line;
         self.nullsafe_ref_check(value)?;
+        // Tests Zend/tests/restrict_globals/invalid_assign_ref_*.
+        if matches!(target.kind, ExprKind::Variable(b"GLOBALS")) {
+            return self.err(
+                "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax",
+                line,
+            );
+        }
+        if matches!(value.kind, ExprKind::Variable(b"GLOBALS")) {
+            return self.err("Cannot acquire reference to $GLOBALS", line);
+        }
         if let ExprKind::New { .. } = &value.kind {
             return self.err("Cannot assign reference to non referenceable value", line);
         }
@@ -2648,6 +2852,13 @@ impl<'a> Compiler<'a> {
         res: Reg,
     ) -> CResult<Reg> {
         let line = target.span.line;
+        // Test Zend/tests/restrict_globals/invalid_assign_op.
+        if matches!(target.kind, ExprKind::Variable(b"GLOBALS")) {
+            return self.err(
+                "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax",
+                line,
+            );
+        }
         let bin = match op {
             AssignOp::Add => Bin::Add,
             AssignOp::Sub => Bin::Sub,

@@ -964,15 +964,39 @@ fn constant(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn get_defined_constants(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut out = PhpArray::new();
     if a.bool_or(0, false) {
-        let mut core = PhpArray::new();
+        // Grouped by the extension declaring them (listed modules by name,
+        // the rest under "Core"; PHP manual: get_defined_constants).
+        let mut owner: std::collections::HashMap<&[u8], &'static str> =
+            std::collections::HashMap::new();
+        for m in vm.modules.iter() {
+            if m.listed && !m.name.is_empty() {
+                for (k, _) in m.constants {
+                    owner.insert(k.as_bytes(), m.name);
+                }
+            }
+        }
+        let mut groups: Vec<(&str, PhpArray)> = vec![("Core", PhpArray::new())];
         let mut keys: Vec<&PhpStr> = vm.constants.keys().collect();
         keys.sort();
         for k in keys {
-            if !vm.user_constants.contains(k) {
-                core.insert(Key::Str(k.clone()), vm.constants[k].clone());
+            if vm.user_constants.contains(k) {
+                continue;
             }
+            let g = owner.get(k.as_bytes()).copied().unwrap_or("Core");
+            let i = match groups.iter().position(|(n, _)| *n == g) {
+                Some(i) => i,
+                None => {
+                    groups.push((g, PhpArray::new()));
+                    groups.len() - 1
+                }
+            };
+            groups[i]
+                .1
+                .insert(Key::Str(k.clone()), vm.constants[k].clone());
         }
-        out.insert(Key::from("Core"), Value::Array(core));
+        for (n, arr) in groups {
+            out.insert(Key::from(n), Value::Array(arr));
+        }
         let mut user = PhpArray::new();
         for k in &vm.user_constants {
             if let Some(v) = vm.constants.get(k) {
@@ -1169,6 +1193,15 @@ fn get_object_vars(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(o) = a.obj(0) else {
         return Ok(Value::Null);
     };
+    // Classes overloading their properties report their computed table
+    // (SimpleXMLElement; observed on PHP 8.5).
+    let cls = vm.class_of(&o);
+    if cls.native.prop.is_some()
+        && let Some(h) = cls.native.props_for
+        && let Some(arr) = h(vm, &o)
+    {
+        return Ok(Value::Array(arr));
+    }
     let mut out = PhpArray::new();
     for (k, v) in vm.visible_props(&o) {
         let key = match k {
@@ -1260,7 +1293,13 @@ fn is_a_impl(vm: &mut Vm, a: &mut Args, allow_string_default: bool, strict_sub: 
         _ => return Ok(Value::Bool(false)),
     };
     let lname = lower(cn.strip_prefix(b"\\").unwrap_or(&cn));
-    if strict_sub && c.lname == lname {
+    if strict_sub
+        && (c.lname == lname
+            || vm
+                .classes
+                .get(&lname)
+                .is_some_and(|t| std::ptr::eq(&**t, &*c)))
+    {
         return Ok(Value::Bool(false));
     }
     Ok(Value::Bool(vm.instance_of_lname(&c, &lname)))
@@ -1346,9 +1385,6 @@ fn class_alias(vm: &mut Vm, a: &mut Args) -> R<Value> {
         vm.warn(&format!("Class \"{}\" not found", orig.to_string_lossy()))?;
         return Ok(Value::Bool(false));
     };
-    if c.has_flag(cflags::INTERNAL) {
-        return vm.value_error("class_alias(): Argument #1 ($class) must be a user-defined class name, internal class name given");
-    }
     let la = lower(alias.strip_prefix(b"\\").unwrap_or(&alias));
     // tests Zend/tests/type_declarations/scalar_reserved*_class_alias
     if crate::compiler::is_reserved_class_alias(&la) {
@@ -1357,14 +1393,24 @@ fn class_alias(vm: &mut Vm, a: &mut Args) -> R<Value> {
             alias.to_string_lossy()
         )));
     }
-    if vm.classes.contains_key(&la) {
-        vm.warn(&format!(
-            "Cannot declare class {}, because the name is already in use",
-            alias.to_string_lossy()
-        ))?;
+    if let Some(prev) = vm.classes.get(&la).cloned() {
+        // The kind named is the aliased class's (test Zend/tests/
+        // class_alias/class_alias_004).
+        let kind = |k: &Class| match k.kind {
+            crate::class::ClassKind::Interface => "interface",
+            crate::class::ClassKind::Trait => "trait",
+            crate::class::ClassKind::Enum => "enum",
+            crate::class::ClassKind::Class => "class",
+        };
+        let msg =
+            crate::vm::classes::redeclare_msg(&prev, &alias).replacen(kind(&prev), kind(&c), 1);
+        vm.warn(&msg)?;
         return Ok(Value::Bool(false));
     }
-    vm.classes.insert(la, c);
+    vm.classes.insert(la.clone(), c);
+    // Aliases are listed by get_declared_classes() (test Zend/tests/
+    // class_alias/bug62343).
+    vm.class_order.push(la);
     Ok(Value::Bool(true))
 }
 
@@ -1374,13 +1420,22 @@ fn declared(vm: &mut Vm, pred: fn(&Class) -> bool) -> PhpArray {
     for l in lazy {
         let _ = vm.find_class(&l, false);
     }
+    // Internal classes first, then user classes and aliases (by their
+    // lowercased names) in declaration order (observed on PHP 8.5).
     let mut out = PhpArray::new();
-    for n in vm.class_order.clone() {
-        if let Some(c) = vm.classes.get(&n)
-            && pred(c)
-            && c.lname == n
-        {
-            let _ = out.push(Value::Str(c.name.clone()));
+    for internal in [true, false] {
+        for n in &vm.class_order {
+            if let Some(c) = vm.classes.get(n)
+                && pred(c)
+                && (c.has_flag(cflags::INTERNAL) && c.lname == *n) == internal
+            {
+                let shown = if c.lname == *n {
+                    c.name.clone()
+                } else {
+                    n.clone()
+                };
+                let _ = out.push(Value::Str(shown));
+            }
         }
     }
     out

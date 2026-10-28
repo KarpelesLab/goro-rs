@@ -13,7 +13,8 @@ mod dtd;
 mod parser;
 pub mod validate;
 
-pub use builder::{TreeBuilder, build, build_into, parse_fragment};
+pub use builder::{Built, TreeBuilder, build, build_into, parse_fragment};
+pub use dtd::attach_external_subset;
 pub use parser::{AttrPiece, Attribute, Parser, StartTag, Status, resolve_system_id};
 
 use crate::error::XmlError;
@@ -72,6 +73,29 @@ pub trait EntityLoader {
         system_id: &str,
         base: Option<&str>,
     ) -> Result<Vec<u8>, LoadError>;
+    /// [`EntityLoader::load`] with the document's DOCTYPE details (what
+    /// PHP passes as the user loader's `$context`).
+    fn load_with(
+        &mut self,
+        public_id: Option<&str>,
+        system_id: &str,
+        base: Option<&str>,
+        ctx: &LoadContext,
+    ) -> Result<Vec<u8>, LoadError> {
+        let _ = ctx;
+        self.load(public_id, system_id, base)
+    }
+}
+
+/// The DOCTYPE of the document an external resource is loaded for.
+#[derive(Clone, Debug, Default)]
+pub struct LoadContext {
+    /// The DOCTYPE name.
+    pub int_sub_name: Option<String>,
+    /// The external subset's system ID.
+    pub ext_sub_uri: Option<String>,
+    /// The external subset's public ID.
+    pub ext_sub_system: Option<String>,
 }
 
 /// Why an external resource could not be loaded.
@@ -203,4 +227,9 @@ pub trait Sink {
     }
     /// SAX mode: a reference to an undeclared entity, before the error.
     fn undefined_entity(&mut self, _name: &str) {}
+    /// True when the receiver asked the parse to stop (checked after
+    /// [`Sink::entity_start`]); the parse then fails.
+    fn abort(&self) -> bool {
+        false
+    }
 }

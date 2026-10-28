@@ -100,21 +100,8 @@ impl Vm {
                     decl.line_start,
                 ));
             }
-            let what = match decl.kind {
-                ClassKind::Interface => "interface",
-                ClassKind::Trait => "trait",
-                ClassKind::Enum => "enum",
-                ClassKind::Class => "class",
-            };
-            return Err(self.fatal_at(
-                &format!(
-                    "Cannot declare {} {}, because the name is already in use",
-                    what,
-                    decl.name.dname()
-                ),
-                &decl.file,
-                decl.line_start,
-            ));
+            let msg = redeclare_msg(prev, &decl.name);
+            return Err(self.fatal_at(&msg, &decl.file, decl.line_start));
         }
         let Some(cls) = self.link_class(decl)? else {
             return Ok(None);
@@ -366,6 +353,22 @@ impl Vm {
             if decl.enum_backing.is_some() {
                 let be = self.find_class(b"BackedEnum", false)?.unwrap();
                 ifaces.insert(1, be);
+            }
+        }
+        // An interface listed twice, also through an alias (test
+        // Zend/tests/class_alias/class_alias_009).
+        if decl.kind == ClassKind::Interface {
+            for (i, ic) in ifaces.iter().enumerate() {
+                if ifaces[..i].iter().any(|p| Rc::ptr_eq(p, ic)) {
+                    return self.link_err(
+                        decl,
+                        &format!(
+                            "Interface {} cannot implement previously implemented interface {}",
+                            cname,
+                            ic.name.dname()
+                        ),
+                    );
+                }
             }
         }
         // Interfaces (and their parents).
@@ -2645,7 +2648,15 @@ impl Vm {
     /// Declares an internal class from a module's PHP stub.
     pub(crate) fn declare_internal_class(&mut self, m: usize, i: usize) -> R<()> {
         let module = self.modules[m];
-        let (_, src) = module.classes[i];
+        let (lname, src) = module.classes[i];
+        // `"alias:Target"`: another name of an internal class (PHP's
+        // internal class aliases, such as Dom\DOMException).
+        if let Some(target) = src.strip_prefix("alias:") {
+            if let Some(c) = self.find_class(target.as_bytes(), false)? {
+                self.classes.insert(PhpStr::intern(lname.as_bytes()), c);
+            }
+            return Ok(());
+        }
         let unit = match self.compile_source(src.as_bytes(), b"", false) {
             Ok(u) => u,
             Err(e) => panic!(
@@ -2684,6 +2695,13 @@ impl Vm {
             {
                 cls.flags
                     .set(cls.flags.get() | cflags::NOT_SERIALIZABLE | cflags::NO_DYNAMIC);
+            }
+            if cls
+                .attrs
+                .iter()
+                .any(|a| a.name.as_bytes() == b"NotCloneable")
+            {
+                cls.flags.set(cls.flags.get() | cflags::NOT_CLONEABLE);
             }
             self.bind_natives(&cls);
         }
@@ -2738,6 +2756,24 @@ impl Vm {
             });
             cls.methods.borrow_mut().insert(ln, nf);
         }
+        // Native property hooks: a `"class::$"` handler runs the get and
+        // set hooks of every hooked property the class declares (internal
+        // classes computing their properties, such as ext/dom's; the
+        // handler tells them apart by the hook's name, `C::$prop::get`).
+        let mut key = cls.lname.to_vec();
+        key.extend_from_slice(b"::$");
+        if let Some(h) = self.native_methods.get(&PhpStr::from(key)).copied() {
+            let mut props = cls.props.borrow_mut();
+            for p in props.iter_mut() {
+                if !std::ptr::eq(p.class, cp) || (p.get.is_none() && p.set.is_none()) {
+                    continue;
+                }
+                let mut np = (**p).clone();
+                np.get = p.get.as_ref().map(|f| native_twin(f, h, cp));
+                np.set = p.set.as_ref().map(|f| native_twin(f, h, cp));
+                *p = Rc::new(np);
+            }
+        }
         // Native hooks.
         if let Some(h) = self.native_hooks.get(&cls.lname).copied() {
             let hooks = h();
@@ -2755,6 +2791,35 @@ impl Vm {
     }
 }
 
+/// A native function standing for the user function `f` (same name,
+/// signature and flags), run by `h`.
+fn native_twin(f: &Rc<Func>, h: crate::func::NativeFn, cp: *const Class) -> Rc<Func> {
+    let code = f.code().unwrap().clone();
+    let info = std::cell::OnceCell::new();
+    let _ = info.set(Rc::new(crate::func::NativeSig {
+        params: code.params.clone(),
+        ret: code.ret_type.clone(),
+        num_required: code.num_required,
+        by_ref_return: code.flags & fflags::BY_REF != 0,
+        variadic: code.flags & fflags::VARIADIC != 0,
+        ret_text: code.ret_type.as_ref().map(|t| t.display()),
+    }));
+    Rc::new(Func {
+        name: f.name.clone(),
+        lname: f.lname.clone(),
+        kind: FuncKind::Native {
+            handler: h,
+            sig: "",
+            info,
+        },
+        flags: f.flags & !mflags::ABSTRACT,
+        scope: Cell::new(cp),
+        from_trait: Cell::new(std::ptr::null()),
+        statics: RefCell::new(Vec::new()),
+        proto: RefCell::new(None),
+    })
+}
+
 pub(crate) fn copy_hooks(h: &NativeHooks) -> NativeHooks {
     NativeHooks {
         create: h.create,
@@ -2770,6 +2835,10 @@ pub(crate) fn copy_hooks(h: &NativeHooks) -> NativeHooks {
         do_operation: h.do_operation,
         do_unary: h.do_unary,
         unserialize_legacy: h.unserialize_legacy,
+        prop: h.prop,
+        dim: h.dim,
+        destroy: h.destroy,
+        static_this: h.static_this,
     }
 }
 
@@ -2818,5 +2887,27 @@ fn const_code_same(a: &ConstExpr, b: &ConstExpr) -> bool {
                 && format!("{:?}", x.consts) == format!("{:?}", y.consts)
         }
         _ => false,
+    }
+}
+
+/// "Cannot redeclare class A (previously declared in f.php:3)": the kind
+/// is the existing declaration's (tests Zend/tests/name_collision/*,
+/// class_alias/*).
+pub(crate) fn redeclare_msg(prev: &Class, name: &PhpStr) -> String {
+    let what = match prev.kind {
+        ClassKind::Interface => "interface",
+        ClassKind::Trait => "trait",
+        ClassKind::Enum => "enum",
+        ClassKind::Class => "class",
+    };
+    match &prev.file {
+        Some(f) if !prev.has_flag(cflags::INTERNAL) => format!(
+            "Cannot redeclare {} {} (previously declared in {}:{})",
+            what,
+            name.dname(),
+            f.to_string_lossy(),
+            prev.line_start
+        ),
+        _ => format!("Cannot redeclare {} {}", what, name.dname()),
     }
 }

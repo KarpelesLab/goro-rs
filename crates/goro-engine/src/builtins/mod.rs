@@ -7,6 +7,7 @@ pub mod core_classes;
 pub mod core_funcs;
 pub mod ctype;
 pub mod date;
+pub mod dom;
 pub mod enums;
 pub mod exec;
 pub mod fiber;
@@ -15,22 +16,26 @@ pub mod filter;
 pub mod gmp;
 pub mod hash;
 pub mod highlight;
+pub mod http;
 pub mod iconv;
 pub mod info;
 mod info_text;
 pub mod ini;
 mod intl;
 pub mod json;
+pub mod libxml;
 pub mod math;
 pub mod mbstring;
 pub mod misc;
 pub mod openssl;
 pub mod output;
 pub mod password;
+pub mod pcntl;
 pub mod pcre;
 pub mod random;
 pub mod reflection;
 pub mod serialize;
+pub mod simplexml;
 pub mod sockets;
 pub mod sodium;
 pub mod spl;
@@ -42,6 +47,10 @@ pub mod uri;
 pub mod userstream;
 pub mod var;
 pub mod weakmap;
+pub mod xml;
+pub mod xmlreader;
+pub mod xmlstore;
+pub mod xmlwriter;
 pub mod zlib;
 
 use crate::registry::Module;
@@ -58,6 +67,8 @@ pub fn modules() -> Vec<&'static Module> {
         &fiber::MODULE,
         &file::MODULE,
         &sockets::MODULE,
+        &http::MODULE,
+        &pcntl::MODULE,
         &streams::MODULE,
         &serialize::MODULE,
         &json::MODULE,
@@ -86,6 +97,12 @@ pub fn modules() -> Vec<&'static Module> {
         &filter::MODULE,
         &sodium::MODULE,
         &uri::MODULE,
+        &libxml::MODULE,
+        &dom::MODULE,
+        &xml::MODULE,
+        &xmlwriter::MODULE,
+        &xmlreader::MODULE,
+        &simplexml::MODULE,
         &openssl::MODULE,
     ];
     v.extend_from_slice(intl::MODULES);
