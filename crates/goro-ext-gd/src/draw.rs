@@ -29,7 +29,9 @@ impl Image {
         }
         let (mut x1, mut y1, mut x2, mut y2) = (x1 as i64, y1 as i64, x2 as i64, y2 as i64);
         // Clip to the image plus the thickness margin.
-        let m = (thick as i64 / 2) + 1;
+        // Clipped to the image first, which moves the endpoints
+        // (bug77943).
+        let m = 0;
         if !clip_line(
             &mut x1,
             &mut y1,
@@ -125,6 +127,8 @@ impl Image {
             self.set_pixel(x, y, color);
             return;
         }
+        // Styled thick lines take one style entry per pixel of each
+        // run (bug43475).
         let w = y - wid / 2;
         for yy in w..w + wid {
             self.set_pixel(x, yy, color);
@@ -145,7 +149,11 @@ impl Image {
     /// Horizontal line with thickness.
     fn hline(&mut self, y: i32, x1: i32, x2: i32, color: i32) {
         let (x1, x2) = if x1 > x2 { (x2, x1) } else { (x1, x2) };
-        if self.thick > 1 {
+        if self.thick > 1 && color == STYLED {
+            for x in x1..=x2 {
+                self.vrun(x, y, self.thick, color);
+            }
+        } else if self.thick > 1 {
             let t = self.thick;
             let y1 = y - t / 2;
             self.filled_rectangle(x1, y1, x2, y1 + t - 1, color);
@@ -158,7 +166,11 @@ impl Image {
 
     fn vline(&mut self, x: i32, y1: i32, y2: i32, color: i32) {
         let (y1, y2) = if y1 > y2 { (y2, y1) } else { (y1, y2) };
-        if self.thick > 1 {
+        if self.thick > 1 && color == STYLED {
+            for y in y1..=y2 {
+                self.hrun(x, y, self.thick, color);
+            }
+        } else if self.thick > 1 {
             let t = self.thick;
             let x1 = x - t / 2;
             self.filled_rectangle(x1, y1, x1 + t - 1, y2, color);
