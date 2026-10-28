@@ -24,7 +24,7 @@
 //! - [`from_format`]: createFromFormat and date_parse_from_format.
 //! - [`interval`]: DateInterval (ISO durations, createFromDateString,
 //!   format) and diff/add/sub.
-//! - [`period`]: DatePeriod.
+//! - [`period`]: DatePeriod iteration.
 //! - [`api`]: mktime, checkdate, idate, getdate, localtime, strftime,
 //!   listIdentifiers, getTransitions, date_default_timezone_set rules.
 //! - [`sun`]: date_sun_info, date_sunrise, date_sunset.
