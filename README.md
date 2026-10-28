@@ -51,10 +51,11 @@ Fresh start. The previous code base is kept on the `old` branch for the
 record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
 
-php-src test suite (8.5.4), share of the tests that run: **88.6%** overall
-(11,913 tests), as of 2026-10-28. The extension libraries below are wired
-into the engine (ext/random, mbstring, iconv, zlib, bcmath, gmp, filter,
-sodium and uri each pass 90-100% of their tests that run).
+php-src test suite (8.5.4), share of the tests that run: **89.8%** overall
+(13,546 passing, 1,541 failing, 6,363 skipped of 21,453), as of 2026-10-29.
+The extension libraries below are wired into the engine; ext/random,
+mbstring, iconv, zlib, bcmath, gmp, filter, sodium, uri, openssl, intl and
+the XML extensions each pass 87-100% of their tests that run.
 
 - `goro-engine` and the `goro` binary: compiler and VM running PHP 8.5
   scripts (classes, enums, closures, generators, fibers, attributes,
