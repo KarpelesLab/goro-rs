@@ -367,7 +367,6 @@ impl T {
                 | T::Match
                 | T::Enum
                 | T::PropertyC
-                | T::HaltCompiler
         )
     }
 }

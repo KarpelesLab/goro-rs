@@ -1114,3 +1114,9 @@ $a = $b(...);
 $a = 'strlen'(...);
 $a = [$b, 'c'](...);
 $a = (function() {})(...);
+class A { public static function __halt_compiler() { return 1; } } echo A::__halt_compiler(); echo 2;
+echo 1; __halt_compiler(); 'unterminated /* \" 
+A::__halt_compiler();
+$x->__halt_compiler();
+f(__halt_compiler: 1);
+class A { const __HALT_COMPILER = 1; }

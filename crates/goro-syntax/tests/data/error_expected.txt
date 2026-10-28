@@ -1114,3 +1114,9 @@ OK
 OK
 OK
 OK
+1	syntax error, unexpected token "__halt_compiler"
+OK
+1	syntax error, unexpected token "__halt_compiler"
+OK
+1	syntax error, unexpected token "__halt_compiler"
+1	syntax error, unexpected token "__halt_compiler"
