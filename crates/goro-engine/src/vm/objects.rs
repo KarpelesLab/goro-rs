@@ -396,6 +396,19 @@ impl Vm {
             }
             PropLookup::Dynamic => {
                 self.static_as_instance(&cls, name)?;
+                if let Some(h) = cls.native.prop {
+                    // `??` reads only what isset() finds (PHP manual: null
+                    // coalescing operator; test ext/simplexml bug72957).
+                    if quiet
+                        && let Some(r) = h(self, o, name, crate::class::ObjAccess::Isset)
+                        && !self.to_bool(&r?)
+                    {
+                        return Ok(Value::Null);
+                    }
+                    if let Some(r) = h(self, o, name, crate::class::ObjAccess::Read) {
+                        return r;
+                    }
+                }
                 let v = o.obj().props.borrow().get_str(name).cloned();
                 match v {
                     Some(v) => Ok(v.into_deref()),
@@ -479,6 +492,20 @@ impl Vm {
             }));
         }
         if objects_ok {
+            let v = self.read_prop(o, name, false, None)?;
+            if let Value::Object(_) = v {
+                return Ok(Some(v));
+            }
+            // Internal computed properties read as plain values: a null
+            // one gives "Attempt to assign property on null" (ext/dom,
+            // test bug47430.phpt).
+            if v.is_null() && p.get.as_ref().is_some_and(|g| g.is_native()) {
+                return Ok(Some(v));
+            }
+        } else if p.get.as_ref().is_some_and(|g| g.is_native()) {
+            // ... and objects as themselves (`foreach ($o->list as &$x)`
+            // reaches the object's iterator; test
+            // ext/dom/tests/modern/token_list/foreach_by_ref.phpt).
             let v = self.read_prop(o, name, false, None)?;
             if let Value::Object(_) = v {
                 return Ok(Some(v));
@@ -647,6 +674,17 @@ impl Vm {
             }
             PropLookup::Hidden(_) => return self.magic_isset(o, &cls, name, empty),
             PropLookup::Dynamic => {
+                if let Some(h) = cls.native.prop {
+                    let op = if empty {
+                        crate::class::ObjAccess::Empty
+                    } else {
+                        crate::class::ObjAccess::Isset
+                    };
+                    if let Some(r) = h(self, o, name, op) {
+                        let v = r?;
+                        return Ok(self.to_bool(&v));
+                    }
+                }
                 let v = o.obj().props.borrow().get_str(name).cloned();
                 match v {
                     Some(v) => Some(v.into_deref()),
@@ -903,6 +941,14 @@ impl Vm {
                     && !self.in_hook(o, &p)
                 {
                     let h = h.clone();
+                    // Internal classes' computed properties take values as
+                    // plain typed properties do ("Cannot assign X to
+                    // property C::$p of type T"; ext/dom, test
+                    // Document_body_setter_errors.phpt).
+                    let v = match &p.ty {
+                        Some(t) if h.is_native() => self.coerce_prop(&p, t, v, &cls)?,
+                        _ => v,
+                    };
                     self.call_hook(o, &p, h, vec![v])?;
                     return Ok(());
                 }
@@ -944,6 +990,16 @@ impl Vm {
                 self.check_set_visibility(&p, scope, o, name, "modify")?;
                 let v = match &p.ty {
                     Some(t) => self.coerce_prop(&p, t, v, &cls)?,
+                    None => v,
+                };
+                // A property holding a typed reference (test Zend/tests/
+                // type_declarations/typed_properties_062).
+                let tref = match &o.obj().slots.borrow()[p.slot as usize] {
+                    Value::Ref(r) if r.is_typed() => Some(r.clone()),
+                    _ => None,
+                };
+                let v = match tref {
+                    Some(r) => self.typed_ref_value(&r, v)?,
                     None => v,
                 };
                 let slots_ptr = o.obj().slots.as_ptr();
@@ -1004,6 +1060,11 @@ impl Vm {
             }
             PropLookup::Dynamic => {
                 self.static_as_instance(&cls, name)?;
+                if let Some(h) = cls.native.prop
+                    && let Some(r) = h(self, o, name, crate::class::ObjAccess::Write(v.clone()))
+                {
+                    return r.map(|_| ());
+                }
                 if let Some(h) = cls.native.dyn_prop
                     && let Some(r) = h(self, o, name, crate::class::DynPropOp::Write)
                 {
@@ -1176,6 +1237,16 @@ impl Vm {
             PathAction::Assign(_) => {
                 let v = value.unwrap();
                 self.write_prop(o, name, v.clone(), None)?;
+                // The assignment's value is the coerced one (test Zend/tests/
+                // type_declarations/typed_properties_077).
+                if !o.is_lazy()
+                    && let Some(pi) = self.typed_prop_info(o, name)
+                    && pi.get.is_none()
+                    && pi.set.is_none()
+                    && let Some(cur) = o.obj().slots.borrow().get(pi.slot as usize)
+                {
+                    return Ok(cur.clone().into_deref());
+                }
                 Ok(v)
             }
             PathAction::Unset => {
@@ -1213,14 +1284,43 @@ impl Vm {
                     && t.mask & (tmask::FLOAT | tmask::MIXED) == 0
                 {
                     let inc = op.is_inc();
+                    // Through a reference (test Zend/tests/type_declarations/
+                    // typed_properties_097).
+                    let is_ref = matches!(
+                        o.obj().slots.borrow().get(p.slot as usize),
+                        Some(Value::Ref(_))
+                    );
                     return self.type_error(&format!(
-                        "Cannot {} property {}::${} of type {} past its {} value",
+                        "Cannot {} {}property {}::${} of type {} past its {} value",
                         if inc { "increment" } else { "decrement" },
+                        if is_ref { "a reference held by " } else { "" },
                         Self::prop_class_name(&p),
                         name.to_string_lossy(),
                         t.display(),
                         if inc { "maximal" } else { "minimal" }
                     ));
+                }
+                // An untyped property bound to a typed reference (test
+                // Zend/tests/type_declarations/typed_properties_062).
+                if let (Value::Int(_), Value::Float(_)) = (&old, &new)
+                    && let Some(r) = self.prop_typed_ref(o, name)
+                {
+                    for p in self.typed_ref_props(&r) {
+                        if let Some(t) = &p.ty
+                            && t.mask & tmask::INT != 0
+                            && t.mask & (tmask::FLOAT | tmask::MIXED) == 0
+                        {
+                            let inc = op.is_inc();
+                            return self.type_error(&format!(
+                                "Cannot {} a reference held by property {}::${} of type {} past its {} value",
+                                if inc { "increment" } else { "decrement" },
+                                Self::prop_class_name(&p),
+                                p.name.to_string_lossy(),
+                                t.display(),
+                                if inc { "maximal" } else { "minimal" }
+                            ));
+                        }
+                    }
                 }
                 self.write_prop(o, name, new.clone(), None)?;
                 Ok(if op.is_post() { old } else { new })
@@ -1249,11 +1349,16 @@ impl Vm {
                 None => {
                     let v = self.read_prop(o, name, true, None)?;
                     let cls = self.class_of(o);
-                    self.notice_msg(&format!(
-                        "Indirect modification of overloaded property {}::${} has no effect",
-                        cls.name.dname(),
-                        name.to_string_lossy()
-                    ))?;
+                    // Natively overloaded properties hand out a detached
+                    // reference silently (observed on PHP 8.5; test
+                    // ext/simplexml gh17736).
+                    if cls.native.prop.is_none() {
+                        self.notice_msg(&format!(
+                            "Indirect modification of overloaded property {}::${} has no effect",
+                            cls.name.dname(),
+                            name.to_string_lossy()
+                        ))?;
+                    }
                     Ok(Value::Ref(PhpRef::new(v)))
                 }
             },
@@ -1281,33 +1386,45 @@ impl Vm {
                     }
                     Err(e) => return Err(e),
                 }
+                // Binding a typed property: the referenced value must fit
+                // its type, checked before the property is touched (tests
+                // Zend/tests/type_declarations/typed_properties_093, 096).
+                let typed = self.typed_prop_info(o, name);
+                // A readonly one fails its write fetch first (test
+                // Zend/tests/readonly_props/readonly_modification).
+                if typed
+                    .as_ref()
+                    .is_some_and(|p| p.flags & mflags::READONLY != 0)
+                {
+                    self.prop_ptr(o, name, false)?;
+                }
+                if let Some(pi) = &typed {
+                    let cur = r.get();
+                    let t = pi.ty.as_ref().unwrap();
+                    let strict = self.caller_strict();
+                    match self.check_type(&cur, t, strict, pi.class, pi.class)? {
+                        crate::vm::types::Check::Ok => {}
+                        crate::vm::types::Check::Coerced(c) => {
+                            let old = r.set(c);
+                            drop(old);
+                        }
+                        crate::vm::types::Check::Fail => {
+                            return self.type_error(&format!(
+                                "Cannot assign {} to property {}::${} of type {}",
+                                Vm::type_name_given(&cur),
+                                unsafe { (*pi.class).name.dname() },
+                                name.dname(),
+                                t.display()
+                            ));
+                        }
+                    }
+                    let cur = r.get();
+                    let _ = self.typed_ref_value(&r, cur)?;
+                }
                 match self.prop_ptr(o, name, false)? {
                     Some(p) => {
-                        // Binding a typed property: the referenced value
-                        // must fit its type.
-                        if let Some(pi) = self.typed_prop_info(o, name) {
-                            let cur = r.get();
-                            let t = pi.ty.as_ref().unwrap();
-                            let strict = self.caller_strict();
-                            match self.check_type(&cur, t, strict, pi.class, pi.class)? {
-                                crate::vm::types::Check::Ok => {}
-                                crate::vm::types::Check::Coerced(c) => {
-                                    let old = r.set(c);
-                                    drop(old);
-                                }
-                                crate::vm::types::Check::Fail => {
-                                    return self.type_error(&format!(
-                                        "Cannot assign {} to property {}::${} of type {}",
-                                        Vm::type_name_given(&cur),
-                                        unsafe { (*pi.class).name.dname() },
-                                        name.dname(),
-                                        t.display()
-                                    ));
-                                }
-                            }
-                            let cur = r.get();
-                            let _ = self.typed_ref_value(&r, cur)?;
-                            self.type_ref(&r, &pi, Some(o));
+                        if let Some(pi) = &typed {
+                            self.type_ref(&r, pi, Some(o));
                         }
                         let old = unsafe { std::mem::replace(&mut *p, Value::Ref(r.clone())) };
                         drop(old);
@@ -1324,6 +1441,21 @@ impl Vm {
 
     /// Pointer to an initialized, accessible property without hooks, type
     /// or readonly constraints (in-place updates).
+    /// The typed reference a declared property of `o` holds, if any.
+    fn prop_typed_ref(&mut self, o: &ObjRef, name: &PhpStr) -> Option<PhpRef> {
+        if o.is_lazy() {
+            return None;
+        }
+        let cls = self.class_of(o);
+        match self.lookup_prop(&cls, name, self.scope_ptr()) {
+            PropLookup::Found(p) => match o.obj().slots.borrow().get(p.slot as usize) {
+                Some(Value::Ref(r)) if r.is_typed() => Some(r.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn existing_plain_prop(&mut self, o: &ObjRef, name: &PhpStr) -> Option<*mut Value> {
         if o.is_lazy() {
             return None;
@@ -1341,7 +1473,7 @@ impl Vm {
                 }
                 let slots = o.obj().slots.as_ptr();
                 let slot = unsafe { &mut (&mut *slots)[p.slot as usize] };
-                if self.is_uninit(slot) {
+                if self.is_uninit(slot) || matches!(slot, Value::Ref(r) if r.is_typed()) {
                     return None;
                 }
                 Some(slot as *mut Value)
@@ -1443,6 +1575,9 @@ impl Vm {
                 )
             }
             PropLookup::Dynamic => {
+                if cls.native.prop.is_some() {
+                    return Ok(None);
+                }
                 if let Some(h) = cls.native.dyn_prop
                     && let Some(r) = h(self, o, name, crate::class::DynPropOp::Write)
                 {
@@ -1491,6 +1626,7 @@ impl Vm {
             if let PropLookup::Found(p) = self.lookup_prop(&cls, name, scope)
                 && let Some(t) = &p.ty
                 && p.flags & mflags::READONLY == 0
+                && p.flags & mflags::VIRTUAL == 0
             {
                 let cur = o.obj().slots.borrow()[p.slot as usize].clone();
                 let cur_null = cur.is_null() || self.is_uninit(&cur);
@@ -1547,8 +1683,22 @@ impl Vm {
             Some(p) => Ok(Some(super::dims::Place::Ptr(p))),
             None => {
                 // Through __get or a hook: a temporary (objects are handles,
-                // so nested property writes still reach them).
-                let v = self.read_prop(o, name, false, None)?;
+                // so nested property writes still reach them). Overloaded
+                // properties are fetched as such (they may be created).
+                let v = match cls.native.prop {
+                    Some(h)
+                        if matches!(
+                            self.lookup_prop(&cls, name, self.scope_ptr()),
+                            PropLookup::Dynamic
+                        ) =>
+                    {
+                        match h(self, o, name, crate::class::ObjAccess::Fetch) {
+                            Some(r) => r?,
+                            None => self.read_prop(o, name, false, None)?,
+                        }
+                    }
+                    _ => self.read_prop(o, name, false, None)?,
+                };
                 if !matches!(v, Value::Object(_)) && !next_is_prop {
                     self.notice_msg(&format!(
                         "Indirect modification of overloaded property {}::${} has no effect",
@@ -1572,10 +1722,15 @@ impl Vm {
         match self.lookup_prop(&cls, name, scope) {
             PropLookup::Found(p) => {
                 if p.get.is_some() || p.set.is_some() || p.flags & mflags::VIRTUAL != 0 {
+                    // Internal classes' computed properties (ext/dom):
+                    // "Cannot unset DOMElement::$nodeValue" (observed on
+                    // PHP 8.5).
+                    let internal = p.get.as_ref().is_some_and(|g| g.is_native());
                     return self.throw(
                         "Error",
                         &format!(
-                            "Cannot unset hooked property {}::${}",
+                            "Cannot unset {}{}::${}",
+                            if internal { "" } else { "hooked property " },
                             cls.name.dname(),
                             name.to_string_lossy()
                         ),
@@ -1644,6 +1799,11 @@ impl Vm {
                 )
             }
             PropLookup::Dynamic => {
+                if let Some(h) = cls.native.prop
+                    && let Some(r) = h(self, o, name, crate::class::ObjAccess::Unset)
+                {
+                    return r.map(|_| ());
+                }
                 if let Some(h) = cls.native.dyn_prop
                     && let Some(r) = h(self, o, name, crate::class::DynPropOp::Unset)
                 {

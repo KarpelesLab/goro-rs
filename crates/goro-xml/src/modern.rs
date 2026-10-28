@@ -169,10 +169,16 @@ impl W<'_> {
                 }
                 let kids: Vec<NodeId> = arena.children(n).collect();
                 for (i, c) in kids.iter().enumerate() {
-                    if i > 0 {
+                    let doctype = matches!(arena.data(*c), NodeData::Doctype(_));
+                    if i > 0 && !matches!(arena.data(kids[i - 1]), NodeData::Doctype(_)) {
                         self.out.push('\n');
                     }
                     self.node(*c, None, map, index, 0, format);
+                    // A doctype is always followed by a newline (tests
+                    // ext/dom/tests/modern/spec/Document_implementation_*).
+                    if doctype {
+                        self.out.push('\n');
+                    }
                 }
             }
             NodeData::Fragment => {
@@ -212,12 +218,9 @@ impl W<'_> {
                     (Some(p), s) if !p.is_empty() => {
                         self.out.push_str(" PUBLIC \"");
                         self.out.push_str(p);
+                        self.out.push_str("\" \"");
+                        self.out.push_str(s.as_deref().unwrap_or(""));
                         self.out.push('"');
-                        if let Some(s) = s.as_ref().filter(|s| !s.is_empty()) {
-                            self.out.push_str(" \"");
-                            self.out.push_str(s);
-                            self.out.push('"');
-                        }
                     }
                     (_, Some(s)) if !s.is_empty() => {
                         self.out.push_str(" SYSTEM \"");
@@ -358,6 +361,12 @@ impl W<'_> {
                     if ad.name.prefix.is_none() && ignore_default_attr {
                         continue;
                     }
+                    // DOM Parsing: an empty prefixed namespace declaration
+                    // is not well-formed (test
+                    // ext/dom/tests/modern/xml/serialize_empty_xmlns.phpt).
+                    if ad.name.prefix.is_some() && v.is_empty() && self.opts.require_well_formed {
+                        self.err = Some(NotWellFormed("empty namespace declaration"));
+                    }
                     if ad.name.prefix.is_some() {
                         let lp = local_prefixes.iter().find(|(p, _)| *p == ad.name.local);
                         let matches = lp.is_some_and(|(_, u)| u.as_deref().unwrap_or("") == v);
@@ -369,7 +378,23 @@ impl W<'_> {
                 } else if &**ans_v == XML_NS {
                     candidate = Some("xml".into());
                 } else if candidate.is_none() {
-                    let p = generate_prefix(&mut map, &local_prefixes, ans.clone(), index);
+                    // The attribute's own prefix when nothing binds it here
+                    // (PHP keeps it; tests ext/dom/tests/modern/
+                    // css_selectors/namespaces.phpt,
+                    // modern/extensions/node_renaming.phpt), else a
+                    // generated one.
+                    let own = ad.name.prefix.clone().filter(|p| {
+                        &**p != "xmlns"
+                            && !local_prefixes.iter().any(|(lp, _)| lp == p)
+                            && !map.binding.iter().any(|(bp, _)| bp == p)
+                    });
+                    let p = match own {
+                        Some(p) => {
+                            map.add(ans.clone(), p.clone());
+                            p
+                        }
+                        None => generate_prefix(&mut map, &local_prefixes, ans.clone(), index),
+                    };
                     self.out.push_str(&format!(" xmlns:{p}=\""));
                     esc_attr(ans_v, &mut self.out);
                     self.out.push('"');
@@ -390,11 +415,17 @@ impl W<'_> {
             self.out.push('"');
         }
         let empty = arena.first_child(n).is_none() && e.template_contents.is_none();
-        if ns.as_deref() == Some(HTML_NS) && empty && is_void(&e.name.local) {
+        // LIBXML_NOEMPTYTAG applies to void HTML elements too (test
+        // modern/spec/xml_serialize_LIBXML_NOEMPTYTAG.phpt).
+        if ns.as_deref() == Some(HTML_NS)
+            && empty
+            && is_void(&e.name.local)
+            && !self.opts.no_empty_tags
+        {
             self.out.push_str(" />");
             return;
         }
-        if ns.as_deref() != Some(HTML_NS) && empty {
+        if (ns.as_deref() != Some(HTML_NS) || self.opts.no_empty_tags) && empty {
             if self.opts.no_empty_tags {
                 self.out.push_str("></");
                 self.out.push_str(&qname);
@@ -448,6 +479,46 @@ fn generate_prefix(
         }
         map.add(ns, p.clone());
         return p;
+    }
+}
+
+/// Serializes the children of element `n` with its prefixes in scope
+/// (`Dom\Element::$innerHTML` on XML documents).
+pub fn children_to_string(
+    arena: &Arena,
+    n: NodeId,
+    opts: ModernOptions,
+) -> Result<String, NotWellFormed> {
+    let mut w = W {
+        arena,
+        out: String::new(),
+        opts,
+        err: None,
+    };
+    let mut map = PrefixMap::default();
+    map.add(Some(XML_NS.into()), "xml".into());
+    // The context namespace stays null: a default namespace is declared
+    // again (test ext/dom/tests/modern/xml/Element_innerHTML_writing.phpt).
+    let ctx_ns = None;
+    if let Some(e) = arena.element(n) {
+        if let (Some(p), Some(ns)) = (&e.name.prefix, &e.name.ns) {
+            map.add(Some(ns.clone()), p.clone());
+        }
+        for a in arena.attrs(n) {
+            let ad = arena.attr(a).unwrap();
+            if ad.name.ns.as_deref() == Some(XMLNS_NS) && ad.name.prefix.is_some() {
+                let v = arena.attr_value(a);
+                map.add(Some(v.as_str().into()), ad.name.local.clone());
+            }
+        }
+    }
+    let mut index = 1;
+    for c in arena.children(n).collect::<Vec<_>>() {
+        w.node(c, ctx_ns.clone(), &mut map, &mut index, 0, opts.format);
+    }
+    match w.err {
+        Some(e) => Err(e),
+        None => Ok(w.out),
     }
 }
 

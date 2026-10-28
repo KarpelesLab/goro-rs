@@ -2964,11 +2964,15 @@ pub fn parse_native_sig(
     known_const: Option<&dyn Fn(&[u8]) -> Option<Value>>,
 ) -> Result<crate::func::NativeSig, String> {
     let mut src = Vec::from(&b"<?php "[..]);
-    // Reserved words (PHP 8.5's clone()) cannot be parsed as function
-    // names: the name is not needed here.
+    // Reserved words (PHP 8.5's clone()) and namespaced names (ext/dom's
+    // Dom\import_simplexml()) cannot be parsed as function names: the
+    // name is not needed here.
     let sig_text = match (sig.find("function "), sig.find('(')) {
         (Some(f), Some(p))
-            if f < p && crate::registry::sig_name(sig).eq_ignore_ascii_case("clone") =>
+            if f < p && {
+                let n = crate::registry::sig_name(sig);
+                n.eq_ignore_ascii_case("clone") || n.contains('\\')
+            } =>
         {
             format!("{}function __clone_fn{}", &sig[..f], &sig[p..])
         }

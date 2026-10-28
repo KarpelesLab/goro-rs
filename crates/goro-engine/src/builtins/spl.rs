@@ -2282,6 +2282,93 @@ fn fa_get_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Object(o))
 }
 
+/// An InternalIterator over another extension's collection (ext/dom's
+/// node lists): `step` answers valid/current/key for a position.
+pub struct ExtIter {
+    pub target: ObjRef,
+    pub pos: usize,
+    pub step: fn(&mut Vm, &ObjRef, usize, ExtIterOp, &mut Value) -> R<Value>,
+    /// Whatever the collection keeps between steps.
+    pub state: Value,
+}
+
+/// What [`ExtIter::step`] is asked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExtIterOp {
+    Valid,
+    Current,
+    Key,
+    /// Moving on: an `Int` result is the new position (else +1).
+    Next,
+}
+
+impl goro_runtime::NativeData for ExtIter {
+    fn trace(&self, visit: &mut dyn FnMut(&Value)) {
+        visit(&Value::Object(self.target.clone()));
+        visit(&self.state);
+    }
+}
+
+/// A new InternalIterator over `target`.
+pub fn new_ext_iter(
+    vm: &mut Vm,
+    target: &ObjRef,
+    step: fn(&mut Vm, &ObjRef, usize, ExtIterOp, &mut Value) -> R<Value>,
+) -> R<ObjRef> {
+    let cls = vm.find_class(b"InternalIterator", false)?.unwrap();
+    let o = vm.instantiate_raw(&cls)?;
+    set_native(
+        &o,
+        ExtIter {
+            target: target.clone(),
+            pos: 0,
+            step,
+            state: Value::Null,
+        },
+    );
+    Ok(o)
+}
+
+/// The InternalIterator methods for an [`ExtIter`] (None: not one).
+fn ext_iter(vm: &mut Vm, a: &Args, op: u8) -> Option<R<Value>> {
+    let o = a.this_obj();
+    let (t, pos, step, mut state) = with(o, |d: &mut ExtIter| {
+        (
+            d.target.clone(),
+            d.pos,
+            d.step,
+            std::mem::take(&mut d.state),
+        )
+    })?;
+    let r = match op {
+        0 => step(vm, &t, pos, ExtIterOp::Valid, &mut state),
+        1 => step(vm, &t, pos, ExtIterOp::Current, &mut state),
+        2 => step(vm, &t, pos, ExtIterOp::Key, &mut state),
+        3 => match step(vm, &t, pos, ExtIterOp::Next, &mut state) {
+            Ok(Value::Int(n)) => {
+                with(o, |d: &mut ExtIter| d.pos = n as usize);
+                Ok(Value::Null)
+            }
+            Ok(_) => {
+                with(o, |d: &mut ExtIter| d.pos += 1);
+                Ok(Value::Null)
+            }
+            Err(e) => Err(e),
+        },
+        _ => Ok(Value::Null),
+    };
+    with(o, |d: &mut ExtIter| d.state = state);
+    Some(match op {
+        0..=3 => r,
+        _ => {
+            if pos > 0 {
+                return Some(vm.throw("Error", "Iterator does not support rewinding"));
+            }
+            Ok(Value::Null)
+        }
+    })
+}
+
 fn ii(o: &ObjRef) -> Option<(ObjRef, usize, bool)> {
     with(o, |d: &mut IiData| (d.target.clone(), d.pos, d.dll))
 }
@@ -2292,7 +2379,11 @@ fn ii_dll(it: &ObjRef, t: &ObjRef) -> (i64, usize) {
     (mode, with(t, |d: &mut DllData| d.items.len()).unwrap_or(0))
 }
 
-fn ii_valid(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+fn ii_valid(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if let Some(r) = ext_iter(vm, a, 0) {
+        return r;
+    }
+    let _vm = vm;
     let Some((t, p, dll)) = ii(a.this_obj()) else {
         return Ok(Value::Bool(false));
     };
@@ -2301,7 +2392,11 @@ fn ii_valid(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     Ok(Value::Bool(p < fa_items(&t).len()))
 }
-fn ii_current(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+fn ii_current(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if let Some(r) = ext_iter(vm, a, 1) {
+        return r;
+    }
+    let _vm = vm;
     let Some((t, p, dll)) = ii(a.this_obj()) else {
         return Ok(Value::Null);
     };
@@ -2312,7 +2407,11 @@ fn ii_current(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     Ok(fa_items(&t).get(p).cloned().unwrap_or_default())
 }
-fn ii_key(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+fn ii_key(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if let Some(r) = ext_iter(vm, a, 2) {
+        return r;
+    }
+    let _vm = vm;
     let Some((t, p, dll)) = ii(a.this_obj()) else {
         return Ok(Value::Null);
     };
@@ -2324,7 +2423,11 @@ fn ii_key(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     Ok(Value::Null)
 }
-fn ii_next(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+fn ii_next(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if let Some(r) = ext_iter(vm, a, 3) {
+        return r;
+    }
+    let _vm = vm;
     let Some((t, p, dll)) = ii(a.this_obj()) else {
         return Ok(Value::Null);
     };
@@ -2356,7 +2459,11 @@ fn ii_next(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     with(a.this_obj(), |d: &mut IiData| d.pos += 1);
     Ok(Value::Null)
 }
-fn ii_rewind(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+fn ii_rewind(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if let Some(r) = ext_iter(vm, a, 4) {
+        return r;
+    }
+    let _vm = vm;
     let Some((t, _, dll)) = ii(a.this_obj()) else {
         return Ok(Value::Null);
     };

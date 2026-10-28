@@ -226,7 +226,21 @@ impl Vm {
         }))
     }
 
+    /// The class's [`crate::class::NativeHooks::dim`] answer, if any.
+    pub(crate) fn native_dim(
+        &mut self,
+        o: &ObjRef,
+        k: Option<&Value>,
+        op: crate::class::ObjAccess,
+    ) -> Option<R<Value>> {
+        let h = self.class_of(o).native.dim?;
+        h(self, o, k, op)
+    }
+
     fn array_access_get(&mut self, o: &ObjRef, k: &Value, mode: DimMode) -> R<Value> {
+        if let Some(r) = self.native_dim(o, Some(k), crate::class::ObjAccess::Read) {
+            return r;
+        }
         let cls = self.class_of(o);
         if !self.implements_array_access(&cls) {
             return self.throw(
@@ -308,6 +322,15 @@ impl Vm {
                 }
             }
             Value::Object(o) => {
+                let op = if empty {
+                    crate::class::ObjAccess::Empty
+                } else {
+                    crate::class::ObjAccess::Isset
+                };
+                if let Some(r) = self.native_dim(o, Some(k), op) {
+                    let v = r?;
+                    return Ok(self.to_bool(&v));
+                }
                 let cls = self.class_of(o);
                 if !self.implements_array_access(&cls) {
                     return self.throw(
@@ -1075,6 +1098,19 @@ impl Vm {
             Value::Object(o) => {
                 let o = o.clone();
                 let cls = self.class_of(&o);
+                if cls.native.dim.is_some()
+                    && let Some(r) =
+                        self.native_dim(&o, key.as_ref(), crate::class::ObjAccess::Fetch)
+                {
+                    let v = r?;
+                    if !matches!(v, Value::Object(_)) {
+                        self.notice_msg(&format!(
+                            "Indirect modification of overloaded element of {} has no effect",
+                            cls.name.dname()
+                        ))?;
+                    }
+                    return Ok(Some(Place::Temp(Box::new(v))));
+                }
                 if !self.implements_array_access(&cls) {
                     return self.throw(
                         "Error",
@@ -1401,6 +1437,11 @@ impl Vm {
         value: Option<Value>,
     ) -> R<Value> {
         let cls = self.class_of(o);
+        if cls.native.dim.is_some()
+            && let Some(r) = self.native_dim_write(o, key.as_ref(), action, value.clone())
+        {
+            return r;
+        }
         if !self.implements_array_access(&cls) {
             return self.throw(
                 "Error",
@@ -1492,6 +1533,77 @@ impl Vm {
                 )
             }
         }
+    }
+
+    /// A write-path step on an object with a native `dim` hook.
+    fn native_dim_write(
+        &mut self,
+        o: &ObjRef,
+        key: Option<&Value>,
+        action: PathAction,
+        value: Option<Value>,
+    ) -> Option<R<Value>> {
+        use crate::class::ObjAccess;
+        Some(match action {
+            PathAction::Assign(_) => {
+                let v = value.unwrap_or_default();
+                match self.native_dim(o, key, ObjAccess::Write(v.clone()))? {
+                    Ok(_) => Ok(v),
+                    Err(e) => Err(e),
+                }
+            }
+            PathAction::Unset => self
+                .native_dim(o, key, ObjAccess::Unset)?
+                .map(|_| Value::Null),
+            PathAction::AssignOp(op, _) => {
+                let old = match self.native_dim(o, key, ObjAccess::Read)? {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                let new = match self.binary_op(op, &old, &value.unwrap_or_default()) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                match self.native_dim(o, key, ObjAccess::Write(new.clone()))? {
+                    Ok(_) => Ok(new),
+                    Err(e) => Err(e),
+                }
+            }
+            PathAction::IncDec(op) => {
+                let old = match self.native_dim(o, key, ObjAccess::Read)? {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                let new = match self.incdec_value(op, &old) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                match self.native_dim(o, key, ObjAccess::Write(new.clone()))? {
+                    Ok(_) => Ok(if op.is_post() { old } else { new }),
+                    Err(e) => Err(e),
+                }
+            }
+            PathAction::MakeRef | PathAction::FetchW => {
+                let v = match self.native_dim(o, key, ObjAccess::Fetch)? {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                if !matches!(v, Value::Object(_)) {
+                    let cls = self.class_of(o);
+                    if let Err(e) = self.notice_msg(&format!(
+                        "Indirect modification of overloaded element of {} has no effect",
+                        cls.name.dname()
+                    )) {
+                        return Some(Err(e));
+                    }
+                }
+                Ok(Value::Ref(PhpRef::new(v)))
+            }
+            PathAction::BindRef(_) => self.throw(
+                "Error",
+                "Cannot assign by reference to an array dimension of an object",
+            ),
+        })
     }
 
     // ------------------------------------------------------------ whole-variable actions
