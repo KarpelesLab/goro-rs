@@ -9,6 +9,7 @@
 
 mod decl;
 mod expr;
+mod hrh;
 mod scan;
 
 use std::collections::HashMap;
@@ -299,6 +300,11 @@ pub fn compile_program<'a>(
             line: n.line,
         });
     }
+    if hrh::mentioned(src) {
+        for l in hrh::lines_stmts(prog.stmts, false) {
+            c.notice(goro_runtime::Level::Deprecated, hrh::MESSAGE, l);
+        }
+    }
     c.f.flags |= fflags::PSEUDO_MAIN;
     c.f.line = 1;
     let mut hoisted = Vec::new();
@@ -308,6 +314,7 @@ pub fn compile_program<'a>(
         c.check_namespaces(prog.stmts)?;
         c.top_stmts(prog.stmts, &mut hoisted, &mut classes)
     })();
+    hrh::order(&mut c.notices);
     if let Err(mut e) = r {
         e.notices = std::mem::take(&mut c.notices);
         return Err(e);

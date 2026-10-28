@@ -15,6 +15,7 @@ pub mod filter;
 pub mod gmp;
 pub mod hash;
 pub mod highlight;
+pub mod http;
 pub mod iconv;
 pub mod info;
 mod info_text;
@@ -26,6 +27,7 @@ pub mod misc;
 pub mod openssl;
 pub mod output;
 pub mod password;
+pub mod pcntl;
 pub mod pcre;
 pub mod random;
 pub mod reflection;
@@ -57,6 +59,8 @@ pub fn modules() -> Vec<&'static Module> {
         &fiber::MODULE,
         &file::MODULE,
         &sockets::MODULE,
+        &http::MODULE,
+        &pcntl::MODULE,
         &streams::MODULE,
         &serialize::MODULE,
         &json::MODULE,

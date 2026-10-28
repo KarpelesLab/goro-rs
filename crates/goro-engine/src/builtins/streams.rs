@@ -153,6 +153,11 @@ pub trait NativeStream {
     fn context(&self) -> Option<Value> {
         None
     }
+    /// stream_get_meta_data()'s "wrapper_data" (http://: the response
+    /// headers).
+    fn wrapper_data(&self) -> Option<Value> {
+        None
+    }
 }
 
 /// A stream wrapper implemented in Rust.

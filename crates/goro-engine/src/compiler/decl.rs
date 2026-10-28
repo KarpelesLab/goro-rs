@@ -181,6 +181,29 @@ impl<'a> Compiler<'a> {
         Ok(self.f.children.len() as u32 - 1)
     }
 
+    /// The PHP 8.5 deprecation of reading `$http_response_header` in
+    /// this body (see hrh.rs).
+    fn http_response_header_notices(&mut self, spec: &FnSpec<'a>) {
+        let text = self
+            .src
+            .get(spec.span.start as usize..spec.span.end as usize)
+            .unwrap_or(&[]);
+        if !super::hrh::mentioned(text) {
+            return;
+        }
+        let name: &[u8] = b"http_response_header";
+        let defined = spec.params.iter().any(|p| p.name.name == name)
+            || spec.uses.iter().any(|u| u.name.name == name);
+        let lines = match &spec.body {
+            FnBody::Block(b) => super::hrh::lines_stmts(b, defined),
+            FnBody::Expr(e) => super::hrh::lines_expr(e, defined),
+            FnBody::None => Vec::new(),
+        };
+        for l in lines {
+            self.notice(goro_runtime::Level::Deprecated, super::hrh::MESSAGE, l);
+        }
+    }
+
     /// Compiles a function body into its own [`FuncCode`].
     pub(crate) fn compile_fn(&mut self, spec: FnSpec<'a>) -> CResult<FuncCode> {
         // Variables: parameters first, then closure uses, then the body.
@@ -222,6 +245,7 @@ impl<'a> Compiler<'a> {
         let is_generator = sc.generator;
         let uses_this = sc.uses_this;
         let dynamic = sc.dynamic;
+        self.http_response_header_notices(&spec);
         let parent_f = std::mem::replace(&mut self.f, FState::new(sc.vars));
         self.f.line = spec.span.line;
         self.f.func_name = spec.func_name.clone();
