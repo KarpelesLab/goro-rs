@@ -1287,22 +1287,8 @@ impl<'a> Compiler<'a> {
                                 );
                             }
                             let ce = self.const_expr(v)?;
-                            if let ConstExpr::Value(val) = &ce {
-                                let backing = cd.enum_backing.as_ref().map(|t| matches!(t, Type::Named(n) if n.name.eq_ignore_ascii_case(b"int")));
-                                match (val, backing) {
-                                    (Value::Int(_), Some(true)) | (Value::Str(_), Some(false)) => {}
-                                    _ => {
-                                        return self.err(
-                                            format!(
-                                                "Enum case type {} does not match enum backing type {}",
-                                                type_word_short(val),
-                                                if backing == Some(true) { "int" } else { "string" }
-                                            ),
-                                            ec.span.line,
-                                        );
-                                    }
-                                }
-                            }
+                            // Checked when the enum is first used (test
+                            // Zend/tests/enum/backed-mismatch).
                             Some(ce)
                         }
                         None => {
@@ -2786,10 +2772,6 @@ fn type_word(v: &Value) -> &'static str {
         Value::Array(_) => "array",
         _ => "object",
     }
-}
-
-fn type_word_short(v: &Value) -> &'static str {
-    type_word(v)
 }
 
 /// Parses a native function signature (`function name(int $a = 1): int`)

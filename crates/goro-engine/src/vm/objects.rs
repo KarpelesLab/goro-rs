@@ -2768,6 +2768,11 @@ impl Vm {
             {
                 return r.map(Some);
             }
+            // Distinct enum cases are uncomparable (test Zend/tests/enum/
+            // comparison).
+            if cx.is_enum() || cy.is_enum() {
+                return Ok(Some(1));
+            }
             if !Rc::ptr_eq(&cx, &cy) {
                 return Ok(Some(1));
             }

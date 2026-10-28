@@ -24,6 +24,7 @@ impl Vm {
             trace_const_expr: false,
             deprecating: Vec::new(),
             early_binding: false,
+            enums_checked: Default::default(),
             linking_early: false,
             link_deferred: false,
             obligations: Vec::new(),

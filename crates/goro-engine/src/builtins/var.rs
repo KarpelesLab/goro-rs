@@ -366,7 +366,17 @@ impl Vm {
                 }
                 let pad = " ".repeat(indent);
                 out.extend_from_slice(cls.name.dname().as_bytes());
-                out.extend_from_slice(format!(" Object\n{}(\n", pad).as_bytes());
+                // test Zend/tests/enum/print_r
+                let kind = if cls.is_enum() {
+                    match cls.enum_backing {
+                        Some(m) if m == crate::bytecode::tmask::INT => " Enum:int",
+                        Some(_) => " Enum:string",
+                        None => " Enum",
+                    }
+                } else {
+                    " Object"
+                };
+                out.extend_from_slice(format!("{}\n{}(\n", kind, pad).as_bytes());
                 let entries = if cls.is_enum() {
                     let mut e = vec![(b"name".to_vec(), Some(self.get_prop_raw(o, b"name")))];
                     if cls.enum_backing.is_some() {
