@@ -138,3 +138,14 @@ extension libraries below are finished but not yet wired into the engine.
   IP range boundaries, every Unicode letter and number for
   FILTER_FLAG_EMAIL_UNICODE); common validators take 7-80 ns, 1.2-5.7x
   faster than PHP 8.5's filter_var() (`examples/filter_bench.rs`).
+- `goro-ext-sodium`: ext/sodium: all 110 `sodium_*()` functions (AEGIS
+  included) and the `SODIUM_*` constants, with PHP's argument checks,
+  messages, warnings and state strings (BLAKE2b and secretstream states
+  byte-compatible with PHP's). purecrypto for ChaCha20/Poly1305, the AEADs,
+  SHA-512, SipHash, scrypt and Ristretto255; Salsa20/XSalsa20 (AVX2 and
+  AVX-512), BLAKE2b, Argon2 (AVX2, prefetching, huge pages), X25519 and
+  variable-time Ed25519 verification written here. Checked against the
+  specifications' vectors, the ext/sodium tests and a 4.7k-case PHP 8.5
+  fixture; faster than PHP 8.5 (libsodium 1.0.18) on secretbox, the
+  AEADs, generichash, sign/verify, box and Argon2/scrypt
+  (`examples/bench.rs` against `tests/fixtures/bench.php`).

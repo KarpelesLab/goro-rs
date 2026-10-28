@@ -6,3 +6,12 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+goro-runtime = { path = "../goro-runtime" }
+# OS entropy for keygen, nonces and salts.
+goro-ext-random = { path = "../goro-ext-random" }
+# mmap/madvise for the Argon2 memory (transparent huge pages).
+libc = "0.2"
+# The maintainer's pure-Rust crypto crate: ChaCha20, Poly1305, the AEADs,
+# BLAKE2b, SHA-512/HMAC, SipHash, Argon2, scrypt, X25519, Ed25519 and
+# Ristretto255.
+purecrypto = { version = "0.10", default-features = false, features = ["std", "cipher", "hash", "kdf", "mac", "ec", "ed25519-table", "ristretto255", "hazmat-edwards25519"] }
