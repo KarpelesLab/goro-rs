@@ -809,6 +809,19 @@ impl Vm {
     /// RFC: Redacting parameters in back traces).
     pub fn backtrace_sealed(&mut self, with_args: bool) -> Vec<TraceFrame> {
         let mut frames = self.backtrace(with_args);
+        // Exceptions thrown by sodium functions carry no argument values
+        // (test ext/sodium/tests/sodium_error_001: "TypeErrors will not
+        // contain param values in backtrace").
+        if frames
+            .first()
+            .is_some_and(|f| f.class.is_none() && f.function.starts_with(b"sodium_"))
+        {
+            for f in frames.iter_mut() {
+                f.args = None;
+                f.sensitive.clear();
+            }
+            return frames;
+        }
         if frames.iter().all(|f| f.sensitive.is_empty()) {
             return frames;
         }

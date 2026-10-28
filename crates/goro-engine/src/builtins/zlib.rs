@@ -949,6 +949,10 @@ impl StreamFilter for DeflateF {
         out.extend(self.0.filter(input, fl));
         Ok(true)
     }
+    fn flush(&mut self, _vm: &mut Vm, out: &mut Vec<u8>) -> R<bool> {
+        out.extend(self.0.filter(&[], goro_ext_zlib::filter::FilterFlush::Inc));
+        Ok(true)
+    }
 }
 
 impl StreamFilter for InflateF {

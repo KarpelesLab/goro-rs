@@ -922,10 +922,16 @@ impl Vm {
                     self.err.defer_depth = saved;
                     return r;
                 }
-                let mut next = match self.prop_fetch_w(&obj, &name, cache, elems.get(i + 1))? {
-                    Some(p) => p,
-                    None => return Ok(Value::Null),
+                let kind = match action {
+                    PathAction::AssignOp(..) | PathAction::IncDec(_) => 1,
+                    PathAction::Unset => 2,
+                    _ => 0,
                 };
+                let mut next =
+                    match self.prop_fetch_w(&obj, &name, cache, elems.get(i + 1), kind)? {
+                        Some(p) => p,
+                        None => return Ok(Value::Null),
+                    };
                 self.walk(&mut next, elems, ctx, i + 1)
             }
         }
