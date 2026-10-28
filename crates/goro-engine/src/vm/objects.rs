@@ -1883,18 +1883,30 @@ impl Vm {
     /// `mangle`, or visible ones from the current scope otherwise.
     pub fn object_props_array(&mut self, o: &ObjRef, mangle: bool) -> PhpArray {
         let cls = self.class_of(o);
+        if mangle && let Some(h) = cls.native.props_for
+            && let Some(a) = h(self, o)
+        {
+            return a;
+        }
         if let Some(h) = cls.native.debug_props
             && mangle
             && let Some(a) = h(self, o)
         {
             return a;
         }
+        self.plain_props_array(o, mangle)
+    }
+
+    /// The declared and dynamic properties, ignoring the class's
+    /// property-table hooks.
+    pub fn plain_props_array(&mut self, o: &ObjRef, mangle: bool) -> PhpArray {
+        let cls = self.class_of(o);
         let mut out = PhpArray::new();
         let props: Vec<Rc<PropInfo>> = cls.props.borrow().clone();
         let slots = o.obj().slots.borrow();
         for p in &props {
             let v = &slots[p.slot as usize];
-            if self.is_uninit(v) || p.flags & mflags::VIRTUAL != 0 {
+            if self.is_uninit(v) || p.flags & (mflags::VIRTUAL | mflags::HIDDEN) != 0 {
                 continue;
             }
             let key = if !mangle || p.flags & mflags::PUBLIC != 0 {
@@ -1932,7 +1944,7 @@ impl Vm {
         let props: Vec<Rc<PropInfo>> = cls.props.borrow().clone();
         for p in &props {
             let v = o.obj().slots.borrow()[p.slot as usize].clone();
-            if self.is_uninit(&v) || p.flags & mflags::VIRTUAL != 0 {
+            if self.is_uninit(&v) || p.flags & (mflags::VIRTUAL | mflags::HIDDEN) != 0 {
                 continue;
             }
             match self.lookup_prop(&cls, &p.name, scope) {

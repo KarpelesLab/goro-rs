@@ -1827,7 +1827,7 @@ fn c_props(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut out = PhpArray::new();
     let mut seen: Vec<PhpStr> = Vec::new();
     // Own properties first, then inherited (PHP's order).
-    let props = c.props.borrow().clone();
+    let props: Vec<_> = c.props.borrow().iter().filter(|p| p.flags & mflags::HIDDEN == 0).cloned().collect();
     let cp = Rc::as_ptr(&c);
     let mut ordered: Vec<_> = props.iter().filter(|p| std::ptr::eq(p.class, cp)).cloned().collect();
     ordered.extend(props.iter().filter(|p| !std::ptr::eq(p.class, cp) && p.flags & mflags::PRIVATE == 0).cloned());
@@ -2196,7 +2196,7 @@ fn c_default_props(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let defaults = vm.class_defaults(&c)?;
     for p in c.props.borrow().iter() {
         let v = &defaults[p.slot as usize];
-        if vm.is_uninit(v) {
+        if vm.is_uninit(v) || p.flags & mflags::HIDDEN != 0 {
             continue;
         }
         out.insert(Key::Str(p.name.clone()), v.clone());

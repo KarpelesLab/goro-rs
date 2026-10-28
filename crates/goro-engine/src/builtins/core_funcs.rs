@@ -1117,6 +1117,9 @@ fn get_class_vars(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let defaults = vm.class_defaults(&c)?;
     let mut out = PhpArray::new();
     for p in c.props.borrow().iter() {
+        if p.flags & crate::class::mflags::HIDDEN != 0 {
+            continue;
+        }
         if let crate::vm::objects::PropLookup::Found(f) = vm.lookup_prop(&c, &p.name, scope)
             && Rc::ptr_eq(&f, p)
         {

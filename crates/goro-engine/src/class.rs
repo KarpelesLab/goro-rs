@@ -66,6 +66,9 @@ pub mod mflags {
     pub const HAS_DEFAULT: u32 = 65536;
     /// Method from a trait.
     pub const TRAIT_METHOD: u32 = 131072;
+    /// Internal state of a class written in PHP (stub property named
+    /// `__*`): invisible to var_dump, casts, serialization, reflection.
+    pub const HIDDEN: u32 = 262144;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -250,6 +253,14 @@ pub struct NativeHooks {
     /// Properties shown by var_dump / (array) / get_object_vars.
     pub debug_props:
         Option<fn(&mut crate::vm::Vm, &goro_runtime::ObjRef) -> Option<goro_runtime::PhpArray>>,
+    /// The property table for `(array)` casts and var_export (ArrayObject
+    /// shows its storage).
+    pub props_for:
+        Option<fn(&mut crate::vm::Vm, &goro_runtime::ObjRef) -> Option<goro_runtime::PhpArray>>,
+    /// Nested writes (`$o[k][] = v`, `$o[k]->p = v`) through an internal
+    /// ArrayAccess: the array value the element lives in, when the
+    /// object's offsetGet is the internal one.
+    pub dim_storage: Option<fn(&mut crate::vm::Vm, &goro_runtime::ObjRef) -> Option<*mut Value>>,
     /// Native iteration for foreach (internal iterators).
     pub get_iterator: Option<
         fn(&mut crate::vm::Vm, &goro_runtime::ObjRef, bool) -> crate::vm::R<goro_runtime::ObjRef>,

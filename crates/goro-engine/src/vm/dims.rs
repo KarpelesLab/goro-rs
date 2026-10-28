@@ -315,6 +315,18 @@ impl Vm {
                         &format!("Cannot use object of type {} as array", cls.name.dname()),
                     );
                 }
+                // ArrayObject/ArrayIterator: isset() is false for null
+                // elements (php85: `isset(new ArrayObject(['n' => null])['n'])`).
+                if cls.native.dim_storage.is_some()
+                    && cls.find_method(b"offsetexists").is_some_and(|f| f.is_native())
+                {
+                    let v = crate::builtins::spl::ao_isset(self, o, k)?;
+                    return Ok(match v {
+                        None => empty,
+                        Some(v) if empty => !self.to_bool(&v),
+                        Some(v) => !v.is_null(),
+                    });
+                }
                 let e = self.call_method(o, b"offsetexists", vec![k.clone()])?;
                 let exists = self.to_bool(&e);
                 if !empty {
@@ -833,6 +845,12 @@ impl Vm {
                         "Error",
                         &format!("Cannot use object of type {} as array", cls.name.dname()),
                     );
+                }
+                if let Some(h) = cls.native.dim_storage
+                    && cls.find_method(b"offsetget").is_some_and(|f| f.is_native())
+                    && let Some(p) = h(self, &o)
+                {
+                    return self.dim_fetch_w(&mut Place::Ptr(p), key, for_unset, rmw);
                 }
                 let k = key.unwrap_or(Value::Null);
                 let v = self.call_method_raw(&o, b"offsetget", vec![k])?;

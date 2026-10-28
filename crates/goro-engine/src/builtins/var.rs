@@ -247,7 +247,11 @@ impl Vm {
             match r {
                 Value::Array(a) => {
                     for (k, v) in a.iter() {
-                        out.push((dump_key(k), String::new(), Some(v.clone())));
+                        let key = match k {
+                            KeyRef::Str(s) => mangled_label(s),
+                            k => dump_key(k),
+                        };
+                        out.push((key, String::new(), Some(v.clone())));
                     }
                     return Ok(out);
                 }
@@ -272,7 +276,7 @@ impl Vm {
         let props = cls.props.borrow().clone();
         let slots = o.obj().slots.borrow().clone();
         for p in props.iter() {
-            if p.flags & crate::class::mflags::VIRTUAL != 0 {
+            if p.flags & (crate::class::mflags::VIRTUAL | crate::class::mflags::HIDDEN) != 0 {
                 continue;
             }
             let v = &slots[p.slot as usize];

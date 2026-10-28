@@ -476,12 +476,22 @@ impl Vm {
             return *l;
         }
         match self.ex.frames.last() {
-            Some(f) => {
+            Some(f) if !f.code().file.is_empty() => {
                 let ip = self.ex.ip.saturating_sub(1);
                 f.code().line_of(ip)
             }
+            Some(_) => match self.user_frame() {
+                Some(f) => f.code().line_of(f.ip.saturating_sub(1) as usize),
+                None => 0,
+            },
             None => 0,
         }
+    }
+
+    /// Inside internal (stub) code: the innermost frame running user code,
+    /// whose current instruction is the call into the internal code.
+    fn user_frame(&self) -> Option<&Frame> {
+        self.ex.frames.iter().rev().skip(1).find(|f| !f.code().file.is_empty())
     }
 
     pub fn cur_file(&self) -> PhpStr {
@@ -489,7 +499,11 @@ impl Vm {
             return f.clone();
         }
         match self.ex.frames.last() {
-            Some(f) => f.code().file.clone(),
+            Some(f) if !f.code().file.is_empty() => f.code().file.clone(),
+            Some(_) => match self.user_frame() {
+                Some(f) => f.code().file.clone(),
+                None => self.script_path.clone(),
+            },
             None if self.shutting_down => PhpStr::from("[no active file]"),
             None => self.script_path.clone(),
         }

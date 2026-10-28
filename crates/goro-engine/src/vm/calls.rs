@@ -1451,6 +1451,25 @@ impl Vm {
     ) -> R<()> {
         let np = code.params.len();
         let base = self.frame().base;
+        // Methods of internal classes written in PHP check their arguments
+        // the way internal functions do.
+        let internal = code.file.is_empty();
+        let call_loc = if internal { None } else { call_loc };
+        if internal && !has_named && code.flags & fflags::VARIADIC == 0 && argc as usize > np {
+            let exact = code.num_required as usize == np;
+            let fname = self.func_display_name(func);
+            return self.throw(
+                "ArgumentCountError",
+                &format!(
+                    "{}() expects {} {} argument{}, {} given",
+                    fname,
+                    if exact { "exactly" } else { "at most" },
+                    np,
+                    if np == 1 { "" } else { "s" },
+                    argc
+                ),
+            );
+        }
         let called_in = |loc: &Option<(PhpStr, u32)>| match loc {
             Some((f, l)) => format!(", called in {} on line {}", f.to_string_lossy(), l),
             None => String::new(),
@@ -1494,6 +1513,18 @@ impl Vm {
                                 i + 1,
                                 param.name.dname()
                             )
+                        } else if internal {
+                            let exact = code.num_required as usize == np
+                                && code.flags & fflags::VARIADIC == 0;
+                            let n = code.num_required;
+                            format!(
+                                "{}() expects {} {} argument{}, {} given",
+                                fname,
+                                if exact { "exactly" } else { "at least" },
+                                n,
+                                if n == 1 { "" } else { "s" },
+                                argc
+                            )
                         } else {
                             let exact = code.num_required as usize == np
                                 && code.flags & fflags::VARIADIC == 0;
@@ -1517,6 +1548,35 @@ impl Vm {
                         return self.throw("ArgumentCountError", &msg);
                     }
                 }
+            }
+            if internal
+                && let Some(ty) = &param.ty
+                && !param.by_ref
+                && matches!(unsafe { &*base.add(i) }, Some(Value::Null))
+                && !ty.allows_null()
+                && ty.classes.is_empty()
+                && ty.mask & (tmask::BOOL | tmask::INT | tmask::FLOAT | tmask::STRING) != 0
+                && !strict
+            {
+                let fname = self.func_display_name(func);
+                self.deprecated(&format!(
+                    "{}(): Passing null to parameter #{} (${}) of type {} is deprecated",
+                    fname,
+                    i + 1,
+                    param.name.dname(),
+                    ty.display()
+                ))?;
+                let v = if ty.mask & tmask::STRING != 0 {
+                    Value::Str(PhpStr::empty())
+                } else if ty.mask & tmask::INT != 0 {
+                    Value::Int(0)
+                } else if ty.mask & tmask::FLOAT != 0 {
+                    Value::Float(0.0)
+                } else {
+                    Value::Bool(false)
+                };
+                unsafe { *base.add(i) = Some(v) };
+                continue;
             }
             if let Some(ty) = &param.ty {
                 self.check_param(

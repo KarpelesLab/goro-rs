@@ -606,7 +606,7 @@ impl Vm {
 
     /// Sets an unserialized property (mangled names select private and
     /// protected properties).
-    fn unser_set_prop(&mut self, o: &ObjRef, key: Key, v: Value) -> R<()> {
+    pub(crate) fn unser_set_prop(&mut self, o: &ObjRef, key: Key, v: Value) -> R<()> {
         let cls = self.class_of(o);
         let name = match &key {
             Key::Str(s) => s.clone(),
@@ -808,6 +808,42 @@ impl Vm {
                 Ok(Value::Bool(false))
             }
             Err(UErr::Php(e)) => Err(e),
+        }
+    }
+}
+
+impl Vm {
+    /// Unserializes the value at the start of `data`: the value and the
+    /// number of bytes it took (no warnings; `None` on errors).
+    pub fn unserialize_prefix(&mut self, data: &[u8]) -> Option<(Value, usize)> {
+        let mut u = Unser {
+            d: data,
+            pos: 0,
+            vals: Vec::new(),
+            allowed: None,
+            max_depth: 4096,
+            depth: 0,
+            wakeups: Vec::new(),
+            unserializes: Vec::new(),
+        };
+        let r = self.unser_value(&mut u, false);
+        let unserializes = std::mem::take(&mut u.unserializes);
+        let wakeups = std::mem::take(&mut u.wakeups);
+        let v = r.ok()?;
+        for (o, d) in unserializes {
+            self.call_method(&o, b"__unserialize", vec![Value::Array(d)]).ok()?;
+        }
+        for o in wakeups {
+            self.call_method(&o, b"__wakeup", Vec::new()).ok()?;
+        }
+        Some((v.into_deref(), u.pos))
+    }
+
+    /// The whole of `data` as one serialized value.
+    pub fn unserialize_quiet(&mut self, data: &[u8]) -> Result<Value, ()> {
+        match self.unserialize_prefix(data) {
+            Some((v, n)) if n == data.len() => Ok(v),
+            _ => Err(()),
         }
     }
 }

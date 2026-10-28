@@ -526,7 +526,7 @@ impl Vm {
         i: usize,
         with_args: bool,
     ) -> TraceFrame {
-        let (file, line) = if i == 0 {
+        let (file, line) = if i == 0 || ex.frames[i - 1].code().file.is_empty() {
             (None, 0)
         } else {
             let f = &ex.frames[i - 1];
@@ -577,7 +577,7 @@ impl Vm {
             // (or from the engine itself: shutdown functions, fibers).
             let called_from_native =
                 natives > 0 && ex.native_calls[natives - 1].depth as usize == i;
-            let (file, line) = if called_from_native || i == 0 {
+            let (file, line) = if called_from_native || i == 0 || ex.frames[i - 1].code().file.is_empty() {
                 (None, 0)
             } else {
                 let caller = &ex.frames[i - 1];
@@ -617,6 +617,10 @@ impl Vm {
                 continue;
             }
             if code.flags & crate::bytecode::fflags::CONST_EXPR != 0 {
+                continue;
+            }
+            // Helpers of internal classes written in PHP are not shown.
+            if code.file.is_empty() && f.func.name.starts_with(b"__h_") {
                 continue;
             }
             let scope = f.func.scope();

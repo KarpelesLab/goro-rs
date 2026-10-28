@@ -1,0 +1,3036 @@
+//! SPL (PHP manual: Standard PHP Library): exceptions, interfaces, data
+//! structures (ArrayObject/ArrayIterator, SplFixedArray, doubly linked
+//! lists, heaps, SplObjectStorage, MultipleIterator) and the iterators
+//! (written in PHP, spl_iterators.php). Debug and serialization layouts
+//! follow php85's output.
+
+use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
+
+use goro_runtime::{Key, KeyRef, ObjRef, PhpArray, PhpRef, PhpStr, Value};
+
+use crate::class::{Class, DisplayName, NativeHooks, TypeName, lower};
+use crate::func::Args;
+use crate::registry::Module;
+use crate::vm::calls::Callee;
+use crate::vm::{R, Vm};
+
+const DECLS: &str = r#"<?php
+class LogicException extends Exception {}
+class BadFunctionCallException extends LogicException {}
+class BadMethodCallException extends BadFunctionCallException {}
+class DomainException extends LogicException {}
+class InvalidArgumentException extends LogicException {}
+class LengthException extends LogicException {}
+class OutOfRangeException extends LogicException {}
+class RuntimeException extends Exception {}
+class OutOfBoundsException extends RuntimeException {}
+class OverflowException extends RuntimeException {}
+class RangeException extends RuntimeException {}
+class UnderflowException extends RuntimeException {}
+class UnexpectedValueException extends RuntimeException {}
+interface OuterIterator extends Iterator { public function getInnerIterator(): ?Iterator; }
+interface RecursiveIterator extends Iterator { public function hasChildren(): bool; public function getChildren(): ?RecursiveIterator; }
+interface SeekableIterator extends Iterator { public function seek(int $offset): void; }
+interface SplObserver { public function update(SplSubject $subject): void; }
+interface SplSubject { public function attach(SplObserver $observer): void; public function detach(SplObserver $observer): void; public function notify(): void; }
+class ArrayObject implements IteratorAggregate, ArrayAccess, Serializable, Countable {
+    const STD_PROP_LIST = 1;
+    const ARRAY_AS_PROPS = 2;
+    public function __construct(array|object $array = [], int $flags = 0, string $iteratorClass = ArrayIterator::class) {}
+    public function offsetExists(mixed $key): bool {}
+    public function offsetGet(mixed $key): mixed {}
+    public function offsetSet(mixed $key, mixed $value): void {}
+    public function offsetUnset(mixed $key): void {}
+    public function append(mixed $value): void {}
+    public function getArrayCopy(): array {}
+    public function count(): int {}
+    public function getFlags(): int {}
+    public function setFlags(int $flags): void {}
+    public function asort(int $flags = SORT_REGULAR): true {}
+    public function ksort(int $flags = SORT_REGULAR): true {}
+    public function uasort(callable $callback): true {}
+    public function uksort(callable $callback): true {}
+    public function natsort(): true {}
+    public function natcasesort(): true {}
+    public function unserialize(string $data): void {}
+    public function serialize(): string {}
+    public function __serialize(): array {}
+    public function __unserialize(array $data): void {}
+    public function getIterator(): Iterator {}
+    public function exchangeArray(array|object $array): array {}
+    public function setIteratorClass(string $iteratorClass): void {}
+    public function getIteratorClass(): string {}
+    public function __debugInfo(): array {}
+    public function __get($name) {}
+    public function __set($name, $value) {}
+    public function __isset($name) {}
+    public function __unset($name) {}
+}
+class ArrayIterator implements SeekableIterator, ArrayAccess, Serializable, Countable {
+    const STD_PROP_LIST = 1;
+    const ARRAY_AS_PROPS = 2;
+    public function __construct(array|object $array = [], int $flags = 0) {}
+    public function offsetExists(mixed $key): bool {}
+    public function offsetGet(mixed $key): mixed {}
+    public function offsetSet(mixed $key, mixed $value): void {}
+    public function offsetUnset(mixed $key): void {}
+    public function append(mixed $value): void {}
+    public function getArrayCopy(): array {}
+    public function count(): int {}
+    public function getFlags(): int {}
+    public function setFlags(int $flags): void {}
+    public function asort(int $flags = SORT_REGULAR): true {}
+    public function ksort(int $flags = SORT_REGULAR): true {}
+    public function uasort(callable $callback): true {}
+    public function uksort(callable $callback): true {}
+    public function natsort(): true {}
+    public function natcasesort(): true {}
+    public function unserialize(string $data): void {}
+    public function serialize(): string {}
+    public function __serialize(): array {}
+    public function __unserialize(array $data): void {}
+    public function rewind(): void {}
+    public function current(): mixed {}
+    public function key(): string|int|null {}
+    public function next(): void {}
+    public function valid(): bool {}
+    public function seek(int $offset): void {}
+    public function __debugInfo(): array {}
+    public function __get($name) {}
+    public function __set($name, $value) {}
+    public function __isset($name) {}
+    public function __unset($name) {}
+}
+class RecursiveArrayIterator extends ArrayIterator implements RecursiveIterator {
+    const CHILD_ARRAYS_ONLY = 4;
+    public function hasChildren(): bool {}
+    public function getChildren(): ?RecursiveArrayIterator {}
+}
+class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable, JsonSerializable {
+    public function __construct(int $size = 0) {}
+    public function __wakeup(): void {}
+    public function __serialize(): array {}
+    public function __unserialize(array $data): void {}
+    public function count(): int {}
+    public function toArray(): array {}
+    public static function fromArray(array $array, bool $preserveKeys = true): SplFixedArray {}
+    public function getSize(): int {}
+    public function setSize(int $size): true {}
+    public function offsetExists($index): bool {}
+    public function offsetGet($index): mixed {}
+    public function offsetSet($index, mixed $value): void {}
+    public function offsetUnset($index): void {}
+    public function getIterator(): Iterator {}
+    public function jsonSerialize(): array {}
+}
+final class InternalIterator implements Iterator {
+    private function __construct() {}
+    public function current(): mixed {}
+    public function key(): mixed {}
+    public function next(): void {}
+    public function valid(): bool {}
+    public function rewind(): void {}
+}
+class SplDoublyLinkedList implements Iterator, Countable, ArrayAccess, Serializable {
+    const IT_MODE_LIFO = 2;
+    const IT_MODE_FIFO = 0;
+    const IT_MODE_DELETE = 1;
+    const IT_MODE_KEEP = 0;
+    public function add(int $index, mixed $value): void {}
+    public function pop(): mixed {}
+    public function shift(): mixed {}
+    public function push(mixed $value): void {}
+    public function unshift(mixed $value): void {}
+    public function top(): mixed {}
+    public function bottom(): mixed {}
+    public function __debugInfo(): array {}
+    public function count(): int {}
+    public function isEmpty(): bool {}
+    public function setIteratorMode(int $mode): int {}
+    public function getIteratorMode(): int {}
+    public function offsetExists($index): bool {}
+    public function offsetGet($index): mixed {}
+    public function offsetSet($index, mixed $value): void {}
+    public function offsetUnset($index): void {}
+    public function rewind(): void {}
+    public function current(): mixed {}
+    public function key(): int {}
+    public function prev(): void {}
+    public function next(): void {}
+    public function valid(): bool {}
+    public function unserialize(string $data): void {}
+    public function serialize(): string {}
+    public function __serialize(): array {}
+    public function __unserialize(array $data): void {}
+}
+class SplQueue extends SplDoublyLinkedList {
+    public function enqueue(mixed $value): void {}
+    public function dequeue(): mixed {}
+}
+class SplStack extends SplDoublyLinkedList {}
+abstract class SplHeap implements Iterator, Countable {
+    public function extract(): mixed {}
+    public function insert(mixed $value): true {}
+    public function top(): mixed {}
+    public function count(): int {}
+    public function isEmpty(): bool {}
+    public function rewind(): void {}
+    public function current(): mixed {}
+    public function key(): int {}
+    public function next(): void {}
+    public function valid(): bool {}
+    public function recoverFromCorruption(): true {}
+    abstract protected function compare(mixed $value1, mixed $value2): int;
+    public function isCorrupted(): bool {}
+    public function __debugInfo(): array {}
+    public function __serialize(): array {}
+    public function __unserialize(array $data): void {}
+}
+class SplMinHeap extends SplHeap { protected function compare(mixed $value1, mixed $value2): int {} }
+class SplMaxHeap extends SplHeap { protected function compare(mixed $value1, mixed $value2): int {} }
+class SplPriorityQueue implements Iterator, Countable {
+    const EXTR_BOTH = 3;
+    const EXTR_PRIORITY = 2;
+    const EXTR_DATA = 1;
+    public function compare(mixed $priority1, mixed $priority2): int {}
+    public function insert(mixed $value, mixed $priority) {}
+    public function setExtractFlags(int $flags): int {}
+    public function top(): mixed {}
+    public function extract(): mixed {}
+    public function count(): int {}
+    public function isEmpty(): bool {}
+    public function rewind(): void {}
+    public function current(): mixed {}
+    public function key(): int {}
+    public function next(): void {}
+    public function valid(): bool {}
+    public function recoverFromCorruption(): true {}
+    public function isCorrupted(): bool {}
+    public function getExtractFlags(): int {}
+    public function __debugInfo(): array {}
+    public function __serialize(): array {}
+    public function __unserialize(array $data): void {}
+}
+class SplObjectStorage implements Countable, SeekableIterator, Serializable, ArrayAccess {
+    public function attach(object $object, mixed $info = null): void {}
+    public function detach(object $object): void {}
+    public function contains(object $object): bool {}
+    public function addAll(SplObjectStorage $storage): int {}
+    public function removeAll(SplObjectStorage $storage): int {}
+    public function removeAllExcept(SplObjectStorage $storage): int {}
+    public function getInfo(): mixed {}
+    public function setInfo(mixed $info): void {}
+    public function count(int $mode = COUNT_NORMAL): int {}
+    public function rewind(): void {}
+    public function valid(): bool {}
+    public function key(): int {}
+    public function current(): object {}
+    public function next(): void {}
+    public function seek(int $offset): void {}
+    public function unserialize(string $data): void {}
+    public function serialize(): string {}
+    public function offsetExists($object): bool {}
+    public function offsetGet($object): mixed {}
+    public function offsetSet($object, mixed $info = null): void {}
+    public function offsetUnset($object): void {}
+    public function getHash(object $object): string {}
+    public function __serialize(): array {}
+    public function __unserialize(array $data): void {}
+    public function __debugInfo(): array {}
+}
+class MultipleIterator implements Iterator {
+    const MIT_NEED_ANY = 0;
+    const MIT_NEED_ALL = 1;
+    const MIT_KEYS_NUMERIC = 0;
+    const MIT_KEYS_ASSOC = 2;
+    public function __construct(int $flags = MultipleIterator::MIT_NEED_ALL | MultipleIterator::MIT_KEYS_NUMERIC) {}
+    public function getFlags(): int {}
+    public function setFlags(int $flags): void {}
+    public function attachIterator(Iterator $iterator, string|int|null $info = null): void {}
+    public function detachIterator(Iterator $iterator): void {}
+    public function containsIterator(Iterator $iterator): bool {}
+    public function countIterators(): int {}
+    public function rewind(): void {}
+    public function valid(): bool {}
+    public function key(): array {}
+    public function current(): array {}
+    public function next(): void {}
+    public function __debugInfo(): array {}
+}
+"#;
+
+const ITERATORS: &str = include_str!("spl_iterators.php");
+const FILES: &str = include_str!("spl_files.php");
+
+macro_rules! c {
+    ($l:literal) => {
+        ($l, DECLS)
+    };
+}
+macro_rules! fl {
+    ($l:literal) => {
+        ($l, FILES)
+    };
+}
+macro_rules! it {
+    ($l:literal) => {
+        ($l, ITERATORS)
+    };
+}
+
+pub static MODULE: Module = Module {
+    name: "SPL",
+    classes: &[
+        c!("logicexception"),
+        c!("badfunctioncallexception"),
+        c!("badmethodcallexception"),
+        c!("domainexception"),
+        c!("invalidargumentexception"),
+        c!("lengthexception"),
+        c!("outofrangeexception"),
+        c!("runtimeexception"),
+        c!("outofboundsexception"),
+        c!("overflowexception"),
+        c!("rangeexception"),
+        c!("underflowexception"),
+        c!("unexpectedvalueexception"),
+        c!("outeriterator"),
+        c!("recursiveiterator"),
+        c!("seekableiterator"),
+        c!("splobserver"),
+        c!("splsubject"),
+        c!("arrayobject"),
+        c!("arrayiterator"),
+        c!("recursivearrayiterator"),
+        c!("splfixedarray"),
+        c!("internaliterator"),
+        c!("spldoublylinkedlist"),
+        c!("splqueue"),
+        c!("splstack"),
+        c!("splheap"),
+        c!("splminheap"),
+        c!("splmaxheap"),
+        c!("splpriorityqueue"),
+        c!("splobjectstorage"),
+        c!("multipleiterator"),
+        it!("iteratoriterator"),
+        it!("filteriterator"),
+        it!("callbackfilteriterator"),
+        it!("recursivefilteriterator"),
+        it!("parentiterator"),
+        it!("recursivecallbackfilteriterator"),
+        it!("limititerator"),
+        it!("cachingiterator"),
+        it!("recursivecachingiterator"),
+        it!("norewinditerator"),
+        it!("infiniteiterator"),
+        it!("appenditerator"),
+        it!("recursiveiteratoriterator"),
+        it!("recursivetreeiterator"),
+        it!("emptyiterator"),
+        fl!("splfileinfo"),
+        fl!("splfileobject"),
+        fl!("spltempfileobject"),
+        fl!("directoryiterator"),
+        fl!("filesystemiterator"),
+        fl!("recursivedirectoryiterator"),
+        fl!("globiterator"),
+    ],
+    methods: &[
+        // ArrayObject / ArrayIterator
+        ("arrayobject::__construct", ao_construct),
+        ("arrayobject::offsetexists", ao_offset_exists),
+        ("arrayobject::offsetget", ao_offset_get),
+        ("arrayobject::offsetset", ao_offset_set),
+        ("arrayobject::offsetunset", ao_offset_unset),
+        ("arrayobject::append", ao_append),
+        ("arrayobject::getarraycopy", ao_copy),
+        ("arrayobject::count", ao_count),
+        ("arrayobject::getflags", ao_get_flags),
+        ("arrayobject::setflags", ao_set_flags),
+        ("arrayobject::asort", ao_asort),
+        ("arrayobject::ksort", ao_ksort),
+        ("arrayobject::uasort", ao_uasort),
+        ("arrayobject::uksort", ao_uksort),
+        ("arrayobject::natsort", ao_natsort),
+        ("arrayobject::natcasesort", ao_natcasesort),
+        ("arrayobject::unserialize", ao_unserialize_str),
+        ("arrayobject::serialize", ao_serialize_str),
+        ("arrayobject::__serialize", ao_serialize),
+        ("arrayobject::__unserialize", ao_unserialize),
+        ("arrayobject::getiterator", ao_get_iterator),
+        ("arrayobject::exchangearray", ao_exchange),
+        ("arrayobject::setiteratorclass", ao_set_iter_class),
+        ("arrayobject::getiteratorclass", ao_get_iter_class),
+        ("arrayobject::__debuginfo", ao_debug_info),
+        ("arrayobject::__get", ao_magic_get),
+        ("arrayobject::__set", ao_magic_set),
+        ("arrayobject::__isset", ao_magic_isset),
+        ("arrayobject::__unset", ao_magic_unset),
+        ("arrayiterator::__construct", ai_construct),
+        ("arrayiterator::offsetexists", ao_offset_exists),
+        ("arrayiterator::offsetget", ao_offset_get),
+        ("arrayiterator::offsetset", ao_offset_set),
+        ("arrayiterator::offsetunset", ao_offset_unset),
+        ("arrayiterator::append", ao_append),
+        ("arrayiterator::getarraycopy", ao_copy),
+        ("arrayiterator::count", ao_count),
+        ("arrayiterator::getflags", ao_get_flags),
+        ("arrayiterator::setflags", ao_set_flags),
+        ("arrayiterator::asort", ao_asort),
+        ("arrayiterator::ksort", ao_ksort),
+        ("arrayiterator::uasort", ao_uasort),
+        ("arrayiterator::uksort", ao_uksort),
+        ("arrayiterator::natsort", ao_natsort),
+        ("arrayiterator::natcasesort", ao_natcasesort),
+        ("arrayiterator::unserialize", ao_unserialize_str),
+        ("arrayiterator::serialize", ao_serialize_str),
+        ("arrayiterator::__serialize", ao_serialize),
+        ("arrayiterator::__unserialize", ao_unserialize),
+        ("arrayiterator::rewind", ai_rewind),
+        ("arrayiterator::current", ai_current),
+        ("arrayiterator::key", ai_key),
+        ("arrayiterator::next", ai_next),
+        ("arrayiterator::valid", ai_valid),
+        ("arrayiterator::seek", ai_seek),
+        ("arrayiterator::__debuginfo", ao_debug_info),
+        ("arrayiterator::__get", ao_magic_get),
+        ("arrayiterator::__set", ao_magic_set),
+        ("arrayiterator::__isset", ao_magic_isset),
+        ("arrayiterator::__unset", ao_magic_unset),
+        ("recursivearrayiterator::haschildren", rai_has_children),
+        ("recursivearrayiterator::getchildren", rai_get_children),
+        // SplFixedArray
+        ("splfixedarray::__construct", fa_construct),
+        ("splfixedarray::__wakeup", fa_wakeup),
+        ("splfixedarray::__serialize", fa_serialize),
+        ("splfixedarray::__unserialize", fa_unserialize),
+        ("splfixedarray::count", fa_count),
+        ("splfixedarray::toarray", fa_to_array),
+        ("splfixedarray::fromarray", fa_from_array),
+        ("splfixedarray::getsize", fa_count),
+        ("splfixedarray::setsize", fa_set_size),
+        ("splfixedarray::offsetexists", fa_offset_exists),
+        ("splfixedarray::offsetget", fa_offset_get),
+        ("splfixedarray::offsetset", fa_offset_set),
+        ("splfixedarray::offsetunset", fa_offset_unset),
+        ("splfixedarray::getiterator", fa_get_iterator),
+        ("splfixedarray::jsonserialize", fa_to_array),
+        ("internaliterator::current", ii_current),
+        ("internaliterator::key", ii_key),
+        ("internaliterator::next", ii_next),
+        ("internaliterator::valid", ii_valid),
+        ("internaliterator::rewind", ii_rewind),
+        // SplDoublyLinkedList
+        ("spldoublylinkedlist::add", dll_add),
+        ("spldoublylinkedlist::pop", dll_pop),
+        ("spldoublylinkedlist::shift", dll_shift),
+        ("spldoublylinkedlist::push", dll_push),
+        ("spldoublylinkedlist::unshift", dll_unshift),
+        ("spldoublylinkedlist::top", dll_top),
+        ("spldoublylinkedlist::bottom", dll_bottom),
+        ("spldoublylinkedlist::__debuginfo", dll_debug_info),
+        ("spldoublylinkedlist::count", dll_count),
+        ("spldoublylinkedlist::isempty", dll_is_empty),
+        ("spldoublylinkedlist::setiteratormode", dll_set_mode),
+        ("spldoublylinkedlist::getiteratormode", dll_get_mode),
+        ("spldoublylinkedlist::offsetexists", dll_offset_exists),
+        ("spldoublylinkedlist::offsetget", dll_offset_get),
+        ("spldoublylinkedlist::offsetset", dll_offset_set),
+        ("spldoublylinkedlist::offsetunset", dll_offset_unset),
+        ("spldoublylinkedlist::rewind", dll_rewind),
+        ("spldoublylinkedlist::current", dll_current),
+        ("spldoublylinkedlist::key", dll_key),
+        ("spldoublylinkedlist::prev", dll_prev),
+        ("spldoublylinkedlist::next", dll_next),
+        ("spldoublylinkedlist::valid", dll_valid),
+        ("spldoublylinkedlist::unserialize", dll_unserialize_str),
+        ("spldoublylinkedlist::serialize", dll_serialize_str),
+        ("spldoublylinkedlist::__serialize", dll_serialize),
+        ("spldoublylinkedlist::__unserialize", dll_unserialize),
+        ("splqueue::enqueue", dll_push),
+        ("splqueue::dequeue", dll_shift),
+        // heaps
+        ("splheap::extract", heap_extract),
+        ("splheap::insert", heap_insert),
+        ("splheap::top", heap_top),
+        ("splheap::count", heap_count),
+        ("splheap::isempty", heap_is_empty),
+        ("splheap::rewind", noop),
+        ("splheap::current", heap_current),
+        ("splheap::key", heap_key),
+        ("splheap::next", heap_next),
+        ("splheap::valid", heap_valid),
+        ("splheap::recoverfromcorruption", heap_recover),
+        ("splheap::iscorrupted", heap_is_corrupted),
+        ("splheap::__debuginfo", heap_debug_info),
+        ("splheap::__serialize", heap_serialize),
+        ("splheap::__unserialize", heap_unserialize),
+        ("splminheap::compare", minheap_compare),
+        ("splmaxheap::compare", maxheap_compare),
+        ("splpriorityqueue::compare", pq_compare),
+        ("splpriorityqueue::insert", pq_insert),
+        ("splpriorityqueue::setextractflags", pq_set_flags),
+        ("splpriorityqueue::top", heap_top),
+        ("splpriorityqueue::extract", heap_extract),
+        ("splpriorityqueue::count", heap_count),
+        ("splpriorityqueue::isempty", heap_is_empty),
+        ("splpriorityqueue::rewind", noop),
+        ("splpriorityqueue::current", heap_current),
+        ("splpriorityqueue::key", heap_key),
+        ("splpriorityqueue::next", heap_next),
+        ("splpriorityqueue::valid", heap_valid),
+        ("splpriorityqueue::recoverfromcorruption", heap_recover),
+        ("splpriorityqueue::iscorrupted", heap_is_corrupted),
+        ("splpriorityqueue::getextractflags", pq_get_flags),
+        ("splpriorityqueue::__debuginfo", heap_debug_info),
+        ("splpriorityqueue::__serialize", heap_serialize),
+        ("splpriorityqueue::__unserialize", heap_unserialize),
+        // SplObjectStorage
+        ("splobjectstorage::attach", os_attach),
+        ("splobjectstorage::detach", os_detach),
+        ("splobjectstorage::contains", os_contains),
+        ("splobjectstorage::addall", os_add_all),
+        ("splobjectstorage::removeall", os_remove_all),
+        ("splobjectstorage::removeallexcept", os_remove_all_except),
+        ("splobjectstorage::getinfo", os_get_info),
+        ("splobjectstorage::setinfo", os_set_info),
+        ("splobjectstorage::count", os_count),
+        ("splobjectstorage::rewind", os_rewind),
+        ("splobjectstorage::valid", os_valid),
+        ("splobjectstorage::key", os_key_m),
+        ("splobjectstorage::current", os_current),
+        ("splobjectstorage::next", os_next),
+        ("splobjectstorage::seek", os_seek),
+        ("splobjectstorage::unserialize", os_unserialize_str),
+        ("splobjectstorage::serialize", os_serialize_str),
+        ("splobjectstorage::offsetexists", os_offset_exists),
+        ("splobjectstorage::offsetget", os_offset_get),
+        ("splobjectstorage::offsetset", os_offset_set),
+        ("splobjectstorage::offsetunset", os_offset_unset),
+        ("splobjectstorage::gethash", os_get_hash),
+        ("splobjectstorage::__serialize", os_serialize),
+        ("splobjectstorage::__unserialize", os_unserialize),
+        ("splobjectstorage::__debuginfo", os_debug_info),
+        // MultipleIterator
+        ("multipleiterator::__construct", mi_construct),
+        ("multipleiterator::getflags", mi_get_flags),
+        ("multipleiterator::setflags", mi_set_flags),
+        ("multipleiterator::attachiterator", mi_attach),
+        ("multipleiterator::detachiterator", mi_detach),
+        ("multipleiterator::containsiterator", mi_contains),
+        ("multipleiterator::countiterators", mi_count),
+        ("multipleiterator::rewind", mi_rewind),
+        ("multipleiterator::valid", mi_valid),
+        ("multipleiterator::key", mi_key),
+        ("multipleiterator::current", mi_current),
+        ("multipleiterator::next", mi_next),
+        ("multipleiterator::__debuginfo", os_debug_info),
+    ],
+    hooks: &[
+        ("arrayobject", ao_hooks),
+        ("arrayiterator", ao_hooks),
+        ("splfixedarray", fa_hooks),
+        ("spldoublylinkedlist", dll_hooks),
+        ("splheap", heap_hooks),
+        ("splpriorityqueue", heap_hooks),
+        ("splobjectstorage", os_hooks),
+        ("multipleiterator", os_hooks),
+    ],
+    listed: true,
+    ..Module::EMPTY
+};
+
+fn noop(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    Ok(Value::Null)
+}
+
+/// Runs `f` on the native data of type `T` of `o`.
+fn with<T: 'static, X>(o: &ObjRef, f: impl FnOnce(&mut T) -> X) -> Option<X> {
+    let mut n = o.obj().native.borrow_mut();
+    let any: &mut dyn std::any::Any = &mut **n.as_mut()?;
+    any.downcast_mut::<T>().map(f)
+}
+
+fn set_native<T: goro_runtime::NativeData>(o: &ObjRef, d: T) {
+    *o.obj().native.borrow_mut() = Some(Box::new(d));
+}
+
+/// Properties of the object as `(array)` would give them without the
+/// class's own table hook (for __debugInfo / __serialize members).
+fn members(vm: &mut Vm, o: &ObjRef) -> PhpArray {
+    vm.plain_props_array(o, true)
+}
+
+/// A mangled private name "\0Class\0name".
+fn private_key(class: &str, name: &str) -> Key {
+    let mut v = vec![0u8];
+    v.extend_from_slice(class.as_bytes());
+    v.push(0);
+    v.extend_from_slice(name.as_bytes());
+    Key::Str(PhpStr::from(v))
+}
+
+/// Restores serialized members (mangled names select private and protected
+/// properties).
+fn restore_members(vm: &mut Vm, o: &ObjRef, m: &PhpArray) -> R<()> {
+    for (k, v) in m.iter() {
+        vm.unser_set_prop(o, k.to_owned(), v.deref())?;
+    }
+    Ok(())
+}
+
+fn key_desc(k: &Key) -> String {
+    match k {
+        Key::Int(i) => i.to_string(),
+        Key::Str(s) => format!("\"{}\"", s.to_string_lossy()),
+    }
+}
+
+fn call_fn(vm: &mut Vm, name: &str, args: Vec<Value>) -> R<Value> {
+    let f = vm.functions.get(&PhpStr::from(name)).cloned().expect("function");
+    vm.call_callee(Callee::func(f), args)
+}
+
+/// The method `lname` of the object's class, if a user class overrides the
+/// internal one.
+fn user_override(vm: &Vm, o: &ObjRef, lname: &[u8]) -> Option<Rc<crate::func::Func>> {
+    let cls = vm.class_of(o);
+    cls.find_method(lname).filter(|f| !f.is_native())
+}
+
+// ================================================================ ArrayObject
+
+pub struct AoData {
+    /// An array, or the object whose properties are used (an ArrayObject
+    /// or ArrayIterator: its storage).
+    storage: Value,
+    flags: i64,
+    iter_class: PhpStr,
+    /// Iteration position (hash position) for ArrayIterator.
+    pos: u32,
+}
+
+impl goro_runtime::NativeData for AoData {
+    fn trace(&self, visit: &mut dyn FnMut(&Value)) {
+        visit(&self.storage);
+    }
+    fn clear(&mut self) {
+        self.storage = Value::Array(PhpArray::new());
+    }
+}
+
+fn ao_hooks() -> NativeHooks {
+    NativeHooks {
+        create: Some(|_, o| {
+            set_native(
+                o,
+                AoData {
+                    storage: Value::Array(PhpArray::new()),
+                    flags: 0,
+                    iter_class: PhpStr::from("ArrayIterator"),
+                    pos: 0,
+                },
+            )
+        }),
+        clone: Some(|vm, from, to| {
+            let shares = is_subclass_named(&vm.class_of(from), b"arrayiterator");
+            let d = with(from, |d: &mut AoData| AoData {
+                storage: if shares && matches!(d.storage, Value::Array(_)) {
+                    Value::Object(from.clone())
+                } else {
+                    d.storage.clone()
+                },
+                flags: d.flags,
+                iter_class: d.iter_class.clone(),
+                pos: d.pos,
+            });
+            if let Some(d) = d {
+                set_native(to, d);
+            }
+        }),
+        props_for: Some(|vm, o| Some(ao_array(vm, o))),
+        dim_storage: Some(|_, o| ao_storage_ptr(o)),
+        count: Some(|vm, o| Ok(ao_array(vm, o).len() as i64)),
+        ..Default::default()
+    }
+}
+
+fn is_ao(o: &ObjRef) -> bool {
+    with(o, |_: &mut AoData| ()).is_some()
+}
+
+/// The innermost ArrayObject/ArrayIterator holding the data (storage
+/// chains through wrapped ArrayObjects).
+fn ao_owner(o: &ObjRef) -> ObjRef {
+    let mut cur = o.clone();
+    for _ in 0..1000 {
+        let next = with(&cur, |d: &mut AoData| match &d.storage {
+            Value::Object(x) => Some(x.clone()),
+            _ => None,
+        })
+        .flatten();
+        match next {
+            Some(x) if is_ao(&x) => cur = x,
+            _ => break,
+        }
+    }
+    cur
+}
+
+/// The storage array's slot, when the data is an array.
+fn ao_storage_ptr(o: &ObjRef) -> Option<*mut Value> {
+    let owner = ao_owner(o);
+    with(&owner, |d: &mut AoData| {
+        if matches!(d.storage, Value::Array(_)) {
+            Some(&mut d.storage as *mut Value)
+        } else {
+            None
+        }
+    })
+    .flatten()
+}
+
+/// The wrapped plain object, when the data is an object's properties.
+fn ao_wrapped(o: &ObjRef) -> Option<ObjRef> {
+    let owner = ao_owner(o);
+    with(&owner, |d: &mut AoData| match &d.storage {
+        Value::Object(x) => Some(x.clone()),
+        _ => None,
+    })
+    .flatten()
+}
+
+/// The data as an array (a copy of the wrapped object's properties).
+fn ao_array(vm: &mut Vm, o: &ObjRef) -> PhpArray {
+    if let Some(p) = ao_storage_ptr(o)
+        && let Value::Array(a) = unsafe { &*p }
+    {
+        return a.clone();
+    }
+    match ao_wrapped(o) {
+        Some(w) => {
+            let mut out = PhpArray::new();
+            for (k, v) in vm.visible_props(&w) {
+                if let Ok(k) = vm.to_key(&k, "array") {
+                    out.insert(k, v);
+                }
+            }
+            out
+        }
+        None => PhpArray::new(),
+    }
+}
+
+fn ao_flags(o: &ObjRef) -> i64 {
+    with(o, |d: &mut AoData| d.flags).unwrap_or(0)
+}
+
+fn ao_class_name(vm: &Vm, a: &Args) -> &'static str {
+    let cls = vm.class_of(a.this_obj());
+    let mut c: Option<&Class> = Some(&cls);
+    while let Some(k) = c {
+        match k.lname.as_bytes() {
+            b"arrayobject" => return "ArrayObject",
+            b"arrayiterator" => return "ArrayIterator",
+            _ => c = k.parent.as_deref(),
+        }
+    }
+    "ArrayObject"
+}
+
+/// The new data of an ArrayObject from a constructor/exchangeArray
+/// argument.
+fn ao_input(vm: &mut Vm, a: &Args, v: Value, fname: &str) -> R<Value> {
+    match v {
+        Value::Array(_) => Ok(v),
+        Value::Object(ref x) => {
+            if is_ao(x) {
+                return Ok(v);
+            }
+            let cls = vm.class_of(x);
+            if cls.is_enum() {
+                return vm.type_error(&format!(
+                    "{}::{}(): Argument #1 ($array) must not be an enum",
+                    ao_class_name(vm, a),
+                    fname
+                ));
+            }
+            vm.deprecated(&format!(
+                "{}::{}(): Using an object as a backing array for {} is deprecated, as it allows violating class constraints and invariants",
+                ao_class_name(vm, a),
+                fname,
+                ao_class_name(vm, a)
+            ))?;
+            Ok(v)
+        }
+        _ => Ok(Value::Array(PhpArray::new())),
+    }
+}
+
+fn ao_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let v = if a.has(0) { a.val(0) } else { Value::Array(PhpArray::new()) };
+    let storage = ao_input(vm, a, v, "__construct")?;
+    let flags = a.int_or(1, 0);
+    let ic = if a.has(2) { a.str(2) } else { PhpStr::from("ArrayIterator") };
+    let ic = check_iter_class(vm, &ic, "__construct(): Argument #3 ($iteratorClass)")?;
+    with(&o, |d: &mut AoData| {
+        d.storage = storage;
+        d.flags = flags;
+        d.iter_class = ic;
+        d.pos = 0;
+    });
+    Ok(Value::Null)
+}
+
+fn check_iter_class(vm: &mut Vm, name: &PhpStr, what: &str) -> R<PhpStr> {
+    let c = vm.find_class(name, true)?;
+    match c {
+        Some(c) if is_subclass_named(&c, b"arrayiterator") => Ok(c.name.clone()),
+        _ => vm.type_error(&format!(
+            "ArrayObject::{} must be a class name derived from ArrayIterator, {} given",
+            what,
+            name.to_string_lossy()
+        )),
+    }
+}
+
+fn is_subclass_named(c: &Class, lname: &[u8]) -> bool {
+    let mut k: Option<&Class> = Some(c);
+    while let Some(x) = k {
+        if x.lname.as_bytes() == lname {
+            return true;
+        }
+        k = x.parent.as_deref();
+    }
+    false
+}
+
+fn ai_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let v = if a.has(0) { a.val(0) } else { Value::Array(PhpArray::new()) };
+    let storage = ao_input(vm, a, v, "__construct")?;
+    let flags = a.int_or(1, 0);
+    with(&o, |d: &mut AoData| {
+        d.storage = storage;
+        d.flags = flags;
+        d.pos = 0;
+    });
+    Ok(Value::Null)
+}
+
+fn ao_key(vm: &mut Vm, a: &Args, k: &Value) -> R<Key> {
+    match k {
+        Value::Int(i) => Ok(Key::Int(*i)),
+        Value::Str(s) => Ok(Key::from_php_str(s)),
+        Value::Null => Ok(Key::Str(PhpStr::empty())),
+        Value::Bool(b) => Ok(Key::Int(*b as i64)),
+        Value::Array(_) | Value::Object(_) => vm.type_error(&format!(
+            "Cannot access offset of type {} on {}",
+            k.tname(),
+            vm.class_of(a.this_obj()).name.dname()
+        )),
+        _ => vm.to_key(k, "array"),
+    }
+}
+
+fn key_value(k: &Key) -> PhpStr {
+    match k {
+        Key::Int(i) => PhpStr::from(i.to_string()),
+        Key::Str(s) => s.clone(),
+    }
+}
+
+fn ao_offset_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let k = ao_key(vm, a, &a.val(0))?;
+    if let Some(p) = ao_storage_ptr(&o)
+        && let Value::Array(arr) = unsafe { &*p }
+    {
+        return Ok(Value::Bool(arr.get(k.as_ref()).is_some()));
+    }
+    let arr = ao_array(vm, &o);
+    Ok(Value::Bool(arr.get(k.as_ref()).is_some()))
+}
+
+/// isset($o[$k]) on an internal ArrayObject: exists and is not null.
+pub(crate) fn ao_isset(vm: &mut Vm, o: &ObjRef, k: &Value) -> R<Option<Value>> {
+    let key = match k {
+        Value::Int(i) => Key::Int(*i),
+        Value::Str(s) => Key::from_php_str(s),
+        Value::Null => Key::Str(PhpStr::empty()),
+        Value::Bool(b) => Key::Int(*b as i64),
+        _ => vm.to_key(k, "array")?,
+    };
+    let arr = ao_array(vm, o);
+    Ok(arr.get(key.as_ref()).map(|v| v.deref()))
+}
+
+fn ao_offset_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let k = ao_key(vm, a, &a.val(0))?;
+    let arr = ao_array(vm, &o);
+    match arr.get(k.as_ref()) {
+        Some(v) => Ok(v.deref()),
+        None => {
+            vm.warn(&format!("Undefined array key {}", key_desc(&k)))?;
+            Ok(Value::Null)
+        }
+    }
+}
+
+fn ao_offset_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let kv = a.val(0);
+    let v = a.val(1);
+    if kv.is_null() && a.has(0) {
+        return ao_push(vm, &o, v);
+    }
+    let k = ao_key(vm, a, &kv)?;
+    if let Some(p) = ao_storage_ptr(&o) {
+        if let Value::Array(arr) = unsafe { &mut *p } {
+            let old = arr.assign(k, v);
+            drop(old);
+        }
+        return Ok(Value::Null);
+    }
+    if let Some(w) = ao_wrapped(&o) {
+        vm.write_prop(&w, &key_value(&k), v, None)?;
+    }
+    Ok(Value::Null)
+}
+
+fn ao_push(vm: &mut Vm, o: &ObjRef, v: Value) -> R<Value> {
+    if let Some(p) = ao_storage_ptr(o) {
+        if let Value::Array(arr) = unsafe { &mut *p }
+            && arr.push(v).is_err()
+        {
+            return vm.warn("Cannot add element to the array as the next element is already occupied").map(|_| Value::Null);
+        }
+        return Ok(Value::Null);
+    }
+    let cn = vm.class_of(o).name.dname();
+    vm.throw("Error", &format!("Cannot append properties to objects, use {}::offsetSet() instead", cn))
+}
+
+fn ao_offset_unset(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let k = ao_key(vm, a, &a.val(0))?;
+    if let Some(p) = ao_storage_ptr(&o) {
+        let old = if let Value::Array(arr) = unsafe { &mut *p } { arr.remove(k.as_ref()) } else { None };
+        drop(old);
+        return Ok(Value::Null);
+    }
+    if let Some(w) = ao_wrapped(&o) {
+        vm.unset_prop(&w, &key_value(&k))?;
+    }
+    Ok(Value::Null)
+}
+
+fn ao_append(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    ao_push(vm, &o, a.val(0))
+}
+
+fn ao_copy(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let mut arr = ao_array(vm, &o);
+    // A copy without the references' sharing of the internal array.
+    arr.make_mut();
+    Ok(Value::Array(arr))
+}
+
+fn ao_count(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    Ok(Value::Int(ao_array(vm, &o).len() as i64))
+}
+
+fn ao_get_flags(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Int(ao_flags(a.this_obj())))
+}
+
+fn ao_set_flags(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let f = a.int(0);
+    with(a.this_obj(), |d: &mut AoData| d.flags = f);
+    Ok(Value::Null)
+}
+
+/// Runs an array sorting function on the data.
+fn ao_sort(vm: &mut Vm, a: &mut Args, fname: &str, extra: Option<Value>) -> R<Value> {
+    let o = a.this_obj().clone();
+    let arr = ao_array(vm, &o);
+    let r = PhpRef::new(Value::Array(arr));
+    let mut args = vec![Value::Ref(r.clone())];
+    if let Some(e) = extra {
+        args.push(e);
+    }
+    call_fn(vm, fname, args)?;
+    let sorted = r.get();
+    if let Some(p) = ao_storage_ptr(&o) {
+        let old = unsafe { std::mem::replace(&mut *p, sorted) };
+        drop(old);
+    } else if let Some(w) = ao_wrapped(&o)
+        && let Value::Array(sa) = sorted
+    {
+        // Reorder the wrapped object's properties.
+        for (k, _) in sa.iter() {
+            let name = match k {
+                KeyRef::Int(i) => PhpStr::from(i.to_string()),
+                KeyRef::Str(s) => s.clone(),
+            };
+            vm.unset_prop(&w, &name)?;
+        }
+        for (k, v) in sa.iter() {
+            let name = match k {
+                KeyRef::Int(i) => PhpStr::from(i.to_string()),
+                KeyRef::Str(s) => s.clone(),
+            };
+            vm.write_prop(&w, &name, v.deref(), None)?;
+        }
+    }
+    Ok(Value::Bool(true))
+}
+
+fn ao_asort(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let f = a.has(0).then(|| a.val(0));
+    ao_sort(vm, a, "asort", f)
+}
+fn ao_ksort(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let f = a.has(0).then(|| a.val(0));
+    ao_sort(vm, a, "ksort", f)
+}
+fn ao_uasort(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let f = a.val(0);
+    ao_sort(vm, a, "uasort", Some(f))
+}
+fn ao_uksort(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let f = a.val(0);
+    ao_sort(vm, a, "uksort", Some(f))
+}
+fn ao_natsort(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    ao_sort(vm, a, "natsort", None)
+}
+fn ao_natcasesort(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    ao_sort(vm, a, "natcasesort", None)
+}
+
+fn is_iterator_class(vm: &Vm, a: &Args) -> bool {
+    ao_class_name(vm, a) == "ArrayIterator"
+}
+
+fn ao_serialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let (flags, storage, ic) = with(&o, |d: &mut AoData| (d.flags, d.storage.clone(), d.iter_class.clone())).unwrap();
+    let mut out = PhpArray::new();
+    let _ = out.push(Value::Int(flags));
+    let _ = out.push(storage);
+    let _ = out.push(Value::Array(members(vm, &o)));
+    if is_iterator_class(vm, a) {
+        let _ = out.push(Value::Null);
+    } else if ic.as_bytes() == b"ArrayIterator" {
+        let _ = out.push(Value::Null);
+    } else {
+        let _ = out.push(Value::Str(ic));
+    }
+    Ok(Value::Array(out))
+}
+
+fn ao_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let data = a.array(0);
+    let flags = data.get_int(0).map(|v| v.deref());
+    let storage = data.get_int(1).map(|v| v.deref());
+    let members_v = data.get_int(2).map(|v| v.deref());
+    let (Some(Value::Int(flags)), Some(storage), Some(Value::Array(m))) = (flags, storage, members_v) else {
+        return vm.throw("UnexpectedValueException", "Incomplete or ill-typed serialization data");
+    };
+    if !matches!(storage, Value::Array(_) | Value::Object(_)) {
+        return vm.throw("UnexpectedValueException", "Incomplete or ill-typed serialization data");
+    }
+    with(&o, |d: &mut AoData| {
+        d.flags = flags;
+        d.storage = storage;
+    });
+    restore_members(vm, &o, &m)?;
+    if let Some(Value::Str(ic)) = data.get_int(3).map(|v| v.deref()) {
+        let ic = check_iter_class(vm, &ic, "__unserialize(): Argument #1 ($data)")?;
+        with(&o, |d: &mut AoData| d.iter_class = ic);
+    }
+    Ok(Value::Null)
+}
+
+fn ao_serialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let (flags, storage) = with(&o, |d: &mut AoData| (d.flags, d.storage.clone())).unwrap();
+    let mut out = format!("x:i:{};", flags).into_bytes();
+    out.extend_from_slice(&vm.serialize_value(&storage)?);
+    out.extend_from_slice(b";m:");
+    let m = Value::Array(members(vm, &o));
+    out.extend_from_slice(&vm.serialize_value(&m)?);
+    Ok(Value::Str(PhpStr::from(out)))
+}
+
+fn ao_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let s = a.str(0);
+    if s.is_empty() {
+        return Ok(Value::Null);
+    }
+    let bad = |vm: &mut Vm, pos: usize, len: usize| -> R<Value> {
+        vm.throw(
+            "UnexpectedValueException",
+            &format!("Error at offset {} of {} bytes", pos, len),
+        )
+    };
+    let b = s.as_bytes();
+    if !b.starts_with(b"x:i:") {
+        return bad(vm, 0, b.len());
+    }
+    let Some(semi) = b.iter().position(|&c| c == b';') else { return bad(vm, 0, b.len()) };
+    let Ok(flags) = std::str::from_utf8(&b[4..semi]).unwrap_or("x").parse::<i64>() else {
+        return bad(vm, 0, b.len());
+    };
+    let rest = &b[semi + 1..];
+    let Some(mpos) = rfind(rest, b";m:") else { return bad(vm, semi + 1, b.len()) };
+    let storage = vm.unserialize_bytes(&rest[..mpos], &PhpArray::new())?;
+    let m = vm.unserialize_bytes(&rest[mpos + 3..], &PhpArray::new())?;
+    if !matches!(storage, Value::Array(_) | Value::Object(_)) {
+        return bad(vm, semi + 1, b.len());
+    }
+    with(&o, |d: &mut AoData| {
+        d.flags = flags;
+        d.storage = storage;
+    });
+    if let Value::Array(m) = m {
+        restore_members(vm, &o, &m)?;
+    }
+    Ok(Value::Null)
+}
+
+fn rfind(h: &[u8], n: &[u8]) -> Option<usize> {
+    if h.len() < n.len() {
+        return None;
+    }
+    (0..=h.len() - n.len()).rev().find(|&i| &h[i..i + n.len()] == n)
+}
+
+fn ao_get_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let (ic, flags) = with(&o, |d: &mut AoData| (d.iter_class.clone(), d.flags)).unwrap();
+    let Some(cls) = vm.find_class(&ic, true)? else {
+        return vm.throw("Error", &format!("Class \"{}\" not found", ic.to_string_lossy()));
+    };
+    let it = vm.instantiate(&cls)?;
+    with(&it, |d: &mut AoData| {
+        d.storage = Value::Object(o.clone());
+        d.flags = flags;
+        d.pos = 0;
+    });
+    Ok(Value::Object(it))
+}
+
+fn ao_exchange(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let old = ao_array(vm, &o);
+    let v = a.val(0);
+    let storage = ao_input(vm, a, v, "exchangeArray")?;
+    with(&o, |d: &mut AoData| d.storage = storage);
+    Ok(Value::Array(old))
+}
+
+fn ao_set_iter_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let n = a.str(0);
+    let ic = check_iter_class(vm, &n, "setIteratorClass(): Argument #1 ($iteratorClass)")?;
+    with(a.this_obj(), |d: &mut AoData| d.iter_class = ic);
+    Ok(Value::Null)
+}
+
+fn ao_get_iter_class(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Str(with(a.this_obj(), |d: &mut AoData| d.iter_class.clone()).unwrap_or_default()))
+}
+
+fn ao_debug_info(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let mut out = members(vm, &o);
+    let storage = with(&o, |d: &mut AoData| d.storage.clone()).unwrap_or_default();
+    let cn = ao_class_name(vm, a);
+    out.insert(private_key(cn, "storage"), storage);
+    Ok(Value::Array(out))
+}
+
+fn ao_magic_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let n = a.str(0);
+    if ao_flags(&o) & 2 != 0 {
+        let arr = ao_array(vm, &o);
+        return match arr.get(Key::from_php_str(&n).as_ref()) {
+            Some(v) => Ok(v.deref()),
+            None => {
+                vm.warn(&format!("Undefined array key {}", key_desc(&Key::from_php_str(&n))))?;
+                Ok(Value::Null)
+            }
+        };
+    }
+    vm.read_prop(&o, &n, false, None)
+}
+
+fn ao_magic_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let n = a.str(0);
+    let v = a.val(1);
+    if ao_flags(&o) & 2 != 0 {
+        if let Some(p) = ao_storage_ptr(&o) {
+            if let Value::Array(arr) = unsafe { &mut *p } {
+                let old = arr.assign(Key::from_php_str(&n), v);
+                drop(old);
+            }
+            return Ok(Value::Null);
+        }
+        if let Some(w) = ao_wrapped(&o) {
+            vm.write_prop(&w, &n, v, None)?;
+        }
+        return Ok(Value::Null);
+    }
+    vm.write_prop(&o, &n, v, None)?;
+    Ok(Value::Null)
+}
+
+fn ao_magic_isset(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let n = a.str(0);
+    if ao_flags(&o) & 2 != 0 {
+        let arr = ao_array(vm, &o);
+        return Ok(Value::Bool(arr.get(Key::from_php_str(&n).as_ref()).is_some_and(|v| !v.deref().is_null())));
+    }
+    Ok(Value::Bool(vm.prop_isset(&o, &n, false)?))
+}
+
+fn ao_magic_unset(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let n = a.str(0);
+    if ao_flags(&o) & 2 != 0 {
+        if let Some(p) = ao_storage_ptr(&o) {
+            let old = if let Value::Array(arr) = unsafe { &mut *p } { arr.remove(Key::from_php_str(&n).as_ref()) } else { None };
+            drop(old);
+            return Ok(Value::Null);
+        }
+        if let Some(w) = ao_wrapped(&o) {
+            vm.unset_prop(&w, &n)?;
+        }
+        return Ok(Value::Null);
+    }
+    vm.unset_prop(&o, &n)?;
+    Ok(Value::Null)
+}
+
+// ---------------------------------------------------------------- ArrayIterator iteration
+
+fn ai_pos(o: &ObjRef) -> u32 {
+    with(o, |d: &mut AoData| d.pos).unwrap_or(0)
+}
+
+fn ai_set_pos(o: &ObjRef, p: u32) {
+    with(o, |d: &mut AoData| d.pos = p);
+}
+
+/// The element at or after the iteration position: (position, key, value).
+fn ai_entry(vm: &mut Vm, o: &ObjRef) -> Option<(u32, Value, Value)> {
+    let pos = ai_pos(o);
+    let arr = ao_array(vm, o);
+    arr.data().next_from(pos).map(|(p, k, v)| (p, k.to_value(), v.deref()))
+}
+
+fn ai_rewind(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    ai_set_pos(a.this_obj(), 0);
+    Ok(Value::Null)
+}
+fn ai_valid(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    Ok(Value::Bool(ai_entry(vm, &o).is_some()))
+}
+fn ai_current(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    Ok(ai_entry(vm, &o).map(|e| e.2).unwrap_or_default())
+}
+fn ai_key(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    Ok(ai_entry(vm, &o).map(|e| e.1).unwrap_or_default())
+}
+fn ai_next(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    if let Some((p, _, _)) = ai_entry(vm, &o) {
+        ai_set_pos(&o, p + 1);
+    }
+    Ok(Value::Null)
+}
+fn ai_seek(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let n = a.int(0);
+    let arr = ao_array(vm, &o);
+    if n >= 0 {
+        let mut pos = 0u32;
+        let mut i = 0i64;
+        while let Some((p, _, _)) = arr.data().next_from(pos) {
+            if i == n {
+                ai_set_pos(&o, p);
+                return Ok(Value::Null);
+            }
+            i += 1;
+            pos = p + 1;
+        }
+    }
+    vm.throw("OutOfBoundsException", &format!("Seek position {} is out of range", n))
+}
+
+fn rai_has_children(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let flags = ao_flags(&o);
+    Ok(Value::Bool(match ai_entry(vm, &o).map(|e| e.2) {
+        Some(Value::Array(_)) => true,
+        Some(Value::Object(_)) => flags & 4 == 0,
+        _ => false,
+    }))
+}
+
+fn rai_get_children(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let flags = ao_flags(&o);
+    let cur = ai_entry(vm, &o).map(|e| e.2);
+    let Some(cur) = cur else { return Ok(Value::Null) };
+    match &cur {
+        Value::Array(_) => {}
+        Value::Object(x) if flags & 4 == 0 => {
+            // An ArrayIterator child is returned as is.
+            if is_subclass_named(&vm.class_of(x), b"recursivearrayiterator") {
+                return Ok(cur);
+            }
+        }
+        _ => {
+            return vm.throw(
+                "InvalidArgumentException",
+                "Passed variable is not an array or object",
+            );
+        }
+    }
+    let cls = vm.class_of(&o);
+    let child = vm.instantiate(&cls)?;
+    if let Some(f) = user_override(vm, &child, b"__construct") {
+        let c = Callee {
+            func: f.clone(),
+            this: Some(child.clone()),
+            static_class: Rc::as_ptr(&cls),
+            scope: f.scope.get(),
+            closure: None,
+            magic_name: None,
+        };
+        vm.call_callee(c, vec![cur, Value::Int(flags)])?;
+    } else {
+        with(&child, |d: &mut AoData| {
+            d.storage = cur;
+            d.flags = flags;
+            d.pos = 0;
+        });
+    }
+    Ok(Value::Object(child))
+}
+
+// ================================================================ SplFixedArray
+
+pub struct FaData {
+    items: Vec<Value>,
+}
+
+impl goro_runtime::NativeData for FaData {
+    fn trace(&self, visit: &mut dyn FnMut(&Value)) {
+        for v in &self.items {
+            visit(v);
+        }
+    }
+    fn clear(&mut self) {
+        self.items.clear();
+    }
+}
+
+fn fa_hooks() -> NativeHooks {
+    fn table(vm: &mut Vm, o: &ObjRef) -> Option<PhpArray> {
+        let mut out = vm.plain_props_array(o, true);
+        let items = with(o, |d: &mut FaData| d.items.clone()).unwrap_or_default();
+        for (i, v) in items.into_iter().enumerate() {
+            out.insert(Key::Int(i as i64), v);
+        }
+        Some(out)
+    }
+    NativeHooks {
+        create: Some(|_, o| set_native(o, FaData { items: Vec::new() })),
+        clone: Some(|_, from, to| {
+            let items = with(from, |d: &mut FaData| d.items.clone()).unwrap_or_default();
+            set_native(to, FaData { items });
+        }),
+        debug_props: Some(table),
+        props_for: Some(table),
+        count: Some(|_, o| Ok(with(o, |d: &mut FaData| d.items.len() as i64).unwrap_or(0))),
+        ..Default::default()
+    }
+}
+
+fn fa_items(o: &ObjRef) -> Vec<Value> {
+    with(o, |d: &mut FaData| d.items.clone()).unwrap_or_default()
+}
+
+fn fa_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let n = a.int_or(0, 0);
+    if n < 0 {
+        return vm.value_error("SplFixedArray::__construct(): Argument #1 ($size) must be greater than or equal to 0");
+    }
+    let o = a.this_obj().clone();
+    with(&o, |d: &mut FaData| {
+        if d.items.is_empty() {
+            d.items = vec![Value::Null; n as usize];
+        }
+    });
+    Ok(Value::Null)
+}
+
+fn fa_wakeup(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    // Properties holding the elements (old serialization format) become
+    // the elements.
+    let o = a.this_obj().clone();
+    let props: Vec<(Value, Value)> = vm.visible_props(&o);
+    if fa_items(&o).is_empty() && !props.is_empty() {
+        let mut items = Vec::new();
+        for (k, v) in props {
+            items.push(v);
+            if let Value::Str(s) = &k {
+                vm.unset_prop(&o, s)?;
+            } else if let Value::Int(i) = &k {
+                vm.unset_prop(&o, &PhpStr::from(i.to_string()))?;
+            }
+        }
+        with(&o, |d: &mut FaData| d.items = items);
+    }
+    Ok(Value::Null)
+}
+
+fn fa_serialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let mut out = PhpArray::new();
+    for v in fa_items(&o) {
+        let _ = out.push(v);
+    }
+    let m = vm.plain_props_array(&o, true);
+    for (k, v) in m.iter() {
+        out.insert(k.to_owned(), v.clone());
+    }
+    Ok(Value::Array(out))
+}
+
+fn fa_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let data = a.array(0);
+    let mut items = Vec::new();
+    for (k, v) in data.iter() {
+        match k {
+            KeyRef::Int(_) => items.push(v.deref()),
+            KeyRef::Str(s) => vm.write_prop(&o, s, v.deref(), None)?,
+        }
+    }
+    with(&o, |d: &mut FaData| d.items = items);
+    Ok(Value::Null)
+}
+
+fn fa_count(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Int(with(a.this_obj(), |d: &mut FaData| d.items.len() as i64).unwrap_or(0)))
+}
+
+fn fa_to_array(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Array(PhpArray::from_values(fa_items(a.this_obj()))))
+}
+
+fn fa_from_array(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let arr = a.array(0);
+    let keep = a.bool_or(1, true);
+    let items = if keep && !arr.is_empty() {
+        let mut max: i64 = -1;
+        for (k, _) in arr.iter() {
+            match k {
+                KeyRef::Int(i) if i >= 0 => max = max.max(i),
+                _ => return vm.value_error("array must contain only positive integer keys"),
+            }
+        }
+        let mut items = vec![Value::Null; (max + 1) as usize];
+        for (k, v) in arr.iter() {
+            if let KeyRef::Int(i) = k {
+                items[i as usize] = v.deref();
+            }
+        }
+        items
+    } else {
+        arr.iter().map(|(_, v)| v.deref()).collect()
+    };
+    let cls = vm.find_class(b"SplFixedArray", false)?.unwrap();
+    let o = vm.instantiate(&cls)?;
+    with(&o, |d: &mut FaData| d.items = items);
+    Ok(Value::Object(o))
+}
+
+fn fa_set_size(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let n = a.int(0);
+    if n < 0 {
+        return vm.value_error("SplFixedArray::setSize(): Argument #1 ($size) must be greater than or equal to 0");
+    }
+    let removed = with(a.this_obj(), |d: &mut FaData| {
+        if (n as usize) < d.items.len() {
+            d.items.split_off(n as usize)
+        } else {
+            d.items.resize(n as usize, Value::Null);
+            Vec::new()
+        }
+    });
+    drop(removed);
+    Ok(Value::Bool(true))
+}
+
+/// The index of an SplFixedArray offset.
+fn fa_index(vm: &mut Vm, a: &Args, k: &Value) -> R<i64> {
+    match k {
+        Value::Int(i) => Ok(*i),
+        Value::Bool(b) => Ok(*b as i64),
+        Value::Float(f) => {
+            let i = *f as i64;
+            if i as f64 != *f {
+                vm.deprecated(&format!(
+                    "Implicit conversion from float {} to int loses precision",
+                    goro_runtime::float_fmt::to_php_string(*f, 17)
+                ))?;
+            }
+            Ok(i)
+        }
+        Value::Str(s) => match goro_runtime::numeric::numeric_value(s) {
+            Some(goro_runtime::numeric::Number::Int(i)) => Ok(i),
+            Some(goro_runtime::numeric::Number::Float(f)) => Ok(f as i64),
+            None => vm.type_error(&format!(
+                "Cannot access offset of type string on {}",
+                vm.class_of(a.this_obj()).name.dname()
+            )),
+        },
+        Value::Resource(r) => {
+            vm.warn(&format!("Resource ID#{} used as offset, casting to integer ({})", r.id(), r.id()))?;
+            Ok(r.id() as i64)
+        }
+        other => vm.type_error(&format!(
+            "Cannot access offset of type {} on {}",
+            other.tname(),
+            vm.class_of(a.this_obj()).name.dname()
+        )),
+    }
+}
+
+fn fa_offset_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let i = fa_index(vm, a, &a.val(0))?;
+    let items = fa_items(a.this_obj());
+    Ok(Value::Bool(i >= 0 && (i as usize) < items.len() && !items[i as usize].is_null()))
+}
+
+fn fa_offset_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let k = a.val(0);
+    if k.is_null() && a.has(0) {
+        return vm.throw("Error", "[] operator not supported for SplFixedArray");
+    }
+    let i = fa_index(vm, a, &k)?;
+    let v = with(a.this_obj(), |d: &mut FaData| {
+        if i >= 0 && (i as usize) < d.items.len() { Some(d.items[i as usize].clone()) } else { None }
+    })
+    .flatten();
+    match v {
+        Some(v) => Ok(v),
+        None => vm.throw("OutOfBoundsException", "Index invalid or out of range"),
+    }
+}
+
+fn fa_offset_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let k = a.val(0);
+    if k.is_null() {
+        return vm.throw("Error", "[] operator not supported for SplFixedArray");
+    }
+    let i = fa_index(vm, a, &k)?;
+    let v = a.val(1);
+    let old = with(a.this_obj(), |d: &mut FaData| {
+        if i >= 0 && (i as usize) < d.items.len() {
+            Ok(std::mem::replace(&mut d.items[i as usize], v))
+        } else {
+            Err(())
+        }
+    })
+    .unwrap_or(Err(()));
+    match old {
+        Ok(old) => {
+            drop(old);
+            Ok(Value::Null)
+        }
+        Err(()) => vm.throw("OutOfBoundsException", "Index invalid or out of range"),
+    }
+}
+
+fn fa_offset_unset(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let i = fa_index(vm, a, &a.val(0))?;
+    let old = with(a.this_obj(), |d: &mut FaData| {
+        if i >= 0 && (i as usize) < d.items.len() {
+            Ok(std::mem::replace(&mut d.items[i as usize], Value::Null))
+        } else {
+            Err(())
+        }
+    })
+    .unwrap_or(Err(()));
+    match old {
+        Ok(old) => {
+            drop(old);
+            Ok(Value::Null)
+        }
+        Err(()) => vm.throw("OutOfBoundsException", "Index invalid or out of range"),
+    }
+}
+
+/// InternalIterator: iteration over an SplFixedArray.
+pub struct IiData {
+    target: ObjRef,
+    pos: usize,
+    /// Over an SplDoublyLinkedList (else an SplFixedArray).
+    dll: bool,
+}
+
+impl goro_runtime::NativeData for IiData {
+    fn trace(&self, visit: &mut dyn FnMut(&Value)) {
+        visit(&Value::Object(self.target.clone()));
+    }
+}
+
+fn fa_get_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let cls = vm.find_class(b"InternalIterator", false)?.unwrap();
+    let o = vm.instantiate_raw(&cls)?;
+    set_native(
+        &o,
+        IiData {
+            target: a.this_obj().clone(),
+            pos: 0,
+            dll: false,
+        },
+    );
+    Ok(Value::Object(o))
+}
+
+fn ii(o: &ObjRef) -> Option<(ObjRef, usize, bool)> {
+    with(o, |d: &mut IiData| (d.target.clone(), d.pos, d.dll))
+}
+
+/// (mode flags, length) of the linked list an internal iterator walks.
+fn ii_dll(t: &ObjRef) -> (i64, usize) {
+    with(t, |d: &mut DllData| (d.flags, d.items.len())).unwrap_or((0, 0))
+}
+
+fn ii_valid(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let Some((t, p, dll)) = ii(a.this_obj()) else { return Ok(Value::Bool(false)) };
+    if dll {
+        return Ok(Value::Bool(p < ii_dll(&t).1));
+    }
+    Ok(Value::Bool(p < fa_items(&t).len()))
+}
+fn ii_current(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let Some((t, p, dll)) = ii(a.this_obj()) else { return Ok(Value::Null) };
+    if dll {
+        return Ok(with(&t, |d: &mut DllData| d.items.get(p).cloned()).flatten().unwrap_or_default());
+    }
+    Ok(fa_items(&t).get(p).cloned().unwrap_or_default())
+}
+fn ii_key(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let Some((t, p, dll)) = ii(a.this_obj()) else { return Ok(Value::Null) };
+    if dll {
+        return Ok(Value::Int(if p == usize::MAX { -1 } else { p as i64 }));
+    }
+    if p < fa_items(&t).len() {
+        return Ok(Value::Int(p as i64));
+    }
+    Ok(Value::Null)
+}
+fn ii_next(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let Some((t, p, dll)) = ii(a.this_obj()) else { return Ok(Value::Null) };
+    if dll {
+        let (flags, len) = ii_dll(&t);
+        let lifo = flags & 2 != 0;
+        if flags & 1 != 0 {
+            // IT_MODE_DELETE: the current element goes away.
+            let old = with(&t, |d: &mut DllData| if lifo { d.items.pop_back() } else { d.items.pop_front() });
+            drop(old);
+            let np = if lifo { len.saturating_sub(1).wrapping_sub(1) } else { 0 };
+            with(a.this_obj(), |d: &mut IiData| d.pos = np);
+        } else {
+            let np = if lifo { p.wrapping_sub(1) } else { p + 1 };
+            with(a.this_obj(), |d: &mut IiData| d.pos = np);
+        }
+        return Ok(Value::Null);
+    }
+    with(a.this_obj(), |d: &mut IiData| d.pos += 1);
+    Ok(Value::Null)
+}
+fn ii_rewind(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let Some((t, _, dll)) = ii(a.this_obj()) else { return Ok(Value::Null) };
+    let p = if dll {
+        let (flags, len) = ii_dll(&t);
+        if flags & 2 != 0 { len.wrapping_sub(1) } else { 0 }
+    } else {
+        0
+    };
+    with(a.this_obj(), |d: &mut IiData| d.pos = p);
+    Ok(Value::Null)
+}
+
+// ================================================================ SplDoublyLinkedList
+
+pub struct DllData {
+    items: VecDeque<Value>,
+    flags: i64,
+    /// Iteration index (-1 or len: invalid).
+    pos: i64,
+}
+
+impl goro_runtime::NativeData for DllData {
+    fn trace(&self, visit: &mut dyn FnMut(&Value)) {
+        for v in &self.items {
+            visit(v);
+        }
+    }
+    fn clear(&mut self) {
+        self.items.clear();
+    }
+}
+
+/// Mode bit of SplQueue/SplStack: the LIFO/FIFO direction is fixed.
+const DLL_FIX: i64 = 4;
+
+fn dll_hooks() -> NativeHooks {
+    NativeHooks {
+        create: Some(|vm, o| {
+            let cls = vm.class_of(o);
+            let flags = if is_subclass_named(&cls, b"splstack") {
+                2 | DLL_FIX
+            } else if is_subclass_named(&cls, b"splqueue") {
+                DLL_FIX
+            } else {
+                0
+            };
+            set_native(
+                o,
+                DllData {
+                    items: VecDeque::new(),
+                    flags,
+                    pos: 0,
+                },
+            )
+        }),
+        clone: Some(|_, from, to| {
+            let d = with(from, |d: &mut DllData| DllData {
+                items: d.items.clone(),
+                flags: d.flags,
+                pos: d.pos,
+            });
+            if let Some(d) = d {
+                set_native(to, d);
+            }
+        }),
+        count: Some(|_, o| Ok(with(o, |d: &mut DllData| d.items.len() as i64).unwrap_or(0))),
+        get_iterator: Some(|vm, o, by_ref| {
+            if by_ref {
+                return vm.throw("Error", "An iterator cannot be used with foreach by reference");
+            }
+            let cls = vm.find_class(b"InternalIterator", false)?.unwrap();
+            let it = vm.instantiate_raw(&cls)?;
+            set_native(
+                &it,
+                IiData {
+                    target: o.clone(),
+                    pos: 0,
+                    dll: true,
+                },
+            );
+            Ok(it)
+        }),
+        ..Default::default()
+    }
+}
+
+fn dll<X>(a: &Args, f: impl FnOnce(&mut DllData) -> X) -> X {
+    with(a.this_obj(), f).expect("SplDoublyLinkedList data")
+}
+
+fn dll_index(vm: &mut Vm, a: &Args, v: &Value, method: &str) -> R<i64> {
+    match v {
+        Value::Int(i) => Ok(*i),
+        Value::Str(s) => match goro_runtime::numeric::numeric_value(s) {
+            Some(goro_runtime::numeric::Number::Int(i)) => Ok(i),
+            Some(goro_runtime::numeric::Number::Float(f)) => Ok(f as i64),
+            None => vm.type_error(&format!(
+                "SplDoublyLinkedList::{}(): Argument #1 ($index) must be of type int, string given",
+                method
+            )),
+        },
+        Value::Bool(b) => Ok(*b as i64),
+        Value::Float(f) => Ok(*f as i64),
+        Value::Null => Ok(0),
+        other => {
+            let _ = a;
+            vm.type_error(&format!(
+                "SplDoublyLinkedList::{}(): Argument #1 ($index) must be of type int, {} given",
+                method,
+                other.tname()
+            ))
+        }
+    }
+}
+
+fn out_of_range<T>(vm: &mut Vm, method: &str) -> R<T> {
+    vm.throw(
+        "OutOfRangeException",
+        &format!("SplDoublyLinkedList::{}(): Argument #1 ($index) is out of range", method),
+    )
+}
+
+fn dll_add(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let i = dll_index(vm, a, &a.val(0), "add")?;
+    let v = a.val(1);
+    let len = dll(a, |d| d.items.len() as i64);
+    if i < 0 || i > len {
+        return out_of_range(vm, "add");
+    }
+    dll(a, |d| d.items.insert(i as usize, v));
+    Ok(Value::Null)
+}
+fn dll_pop(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    match dll(a, |d| d.items.pop_back()) {
+        Some(v) => Ok(v),
+        None => vm.throw("RuntimeException", "Can't pop from an empty datastructure"),
+    }
+}
+fn dll_shift(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    match dll(a, |d| d.items.pop_front()) {
+        Some(v) => Ok(v),
+        None => vm.throw("RuntimeException", "Can't shift from an empty datastructure"),
+    }
+}
+fn dll_push(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let v = a.val(0);
+    dll(a, |d| d.items.push_back(v));
+    Ok(Value::Null)
+}
+fn dll_unshift(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let v = a.val(0);
+    dll(a, |d| d.items.push_front(v));
+    Ok(Value::Null)
+}
+fn dll_top(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    match dll(a, |d| d.items.back().cloned()) {
+        Some(v) => Ok(v),
+        None => vm.throw("RuntimeException", "Can't peek at an empty datastructure"),
+    }
+}
+fn dll_bottom(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    match dll(a, |d| d.items.front().cloned()) {
+        Some(v) => Ok(v),
+        None => vm.throw("RuntimeException", "Can't peek at an empty datastructure"),
+    }
+}
+fn dll_debug_info(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let mut out = members(vm, &o);
+    let (flags, items) = dll(a, |d| (d.flags, d.items.clone()));
+    out.insert(private_key("SplDoublyLinkedList", "flags"), Value::Int(flags));
+    out.insert(
+        private_key("SplDoublyLinkedList", "dllist"),
+        Value::Array(PhpArray::from_values(items)),
+    );
+    Ok(Value::Array(out))
+}
+fn dll_count(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Int(dll(a, |d| d.items.len() as i64)))
+}
+fn dll_is_empty(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Bool(dll(a, |d| d.items.is_empty())))
+}
+fn dll_set_mode(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let m = a.int(0);
+    let flags = dll(a, |d| d.flags);
+    if flags & DLL_FIX != 0 && (flags & 2) != (m & 2) {
+        return vm.throw(
+            "RuntimeException",
+            "Iterators' LIFO/FIFO modes for SplStack/SplQueue objects are frozen",
+        );
+    }
+    let nf = (m & 3) | (flags & DLL_FIX);
+    dll(a, |d| d.flags = nf);
+    Ok(Value::Int(nf))
+}
+fn dll_get_mode(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Int(dll(a, |d| d.flags)))
+}
+fn dll_offset_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let i = dll_index(vm, a, &a.val(0), "offsetExists")?;
+    Ok(Value::Bool(dll(a, |d| i >= 0 && (i as usize) < d.items.len())))
+}
+fn dll_offset_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let i = dll_index(vm, a, &a.val(0), "offsetGet")?;
+    match dll(a, |d| if i >= 0 { d.items.get(i as usize).cloned() } else { None }) {
+        Some(v) => Ok(v),
+        None => out_of_range(vm, "offsetGet"),
+    }
+}
+fn dll_offset_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let k = a.val(0);
+    let v = a.val(1);
+    if k.is_null() {
+        dll(a, |d| d.items.push_back(v));
+        return Ok(Value::Null);
+    }
+    let i = dll_index(vm, a, &k, "offsetSet")?;
+    let r = dll(a, |d| {
+        if i >= 0 && (i as usize) < d.items.len() {
+            Some(std::mem::replace(&mut d.items[i as usize], v))
+        } else {
+            None
+        }
+    });
+    match r {
+        Some(old) => {
+            drop(old);
+            Ok(Value::Null)
+        }
+        None => out_of_range(vm, "offsetSet"),
+    }
+}
+fn dll_offset_unset(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let i = dll_index(vm, a, &a.val(0), "offsetUnset")?;
+    let r = dll(a, |d| if i >= 0 { d.items.remove(i as usize) } else { None });
+    match r {
+        Some(old) => {
+            drop(old);
+            Ok(Value::Null)
+        }
+        None => out_of_range(vm, "offsetUnset"),
+    }
+}
+fn dll_rewind(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    dll(a, |d| d.pos = if d.flags & 2 != 0 { d.items.len() as i64 - 1 } else { 0 });
+    Ok(Value::Null)
+}
+fn dll_valid(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Bool(dll(a, |d| d.pos >= 0 && (d.pos as usize) < d.items.len())))
+}
+fn dll_current(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(dll(a, |d| if d.pos >= 0 { d.items.get(d.pos as usize).cloned() } else { None }).unwrap_or_default())
+}
+fn dll_key(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Int(dll(a, |d| d.pos)))
+}
+fn dll_next(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let old = dll(a, |d| {
+        let lifo = d.flags & 2 != 0;
+        if d.flags & 1 != 0 {
+            // IT_MODE_DELETE: the current element goes away.
+            if d.pos >= 0 && (d.pos as usize) < d.items.len() {
+                let v = d.items.remove(d.pos as usize);
+                if lifo {
+                    d.pos = d.items.len() as i64 - 1;
+                }
+                return v;
+            }
+            return None;
+        }
+        d.pos += if lifo { -1 } else { 1 };
+        None
+    });
+    drop(old);
+    Ok(Value::Null)
+}
+fn dll_prev(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    dll(a, |d| d.pos += if d.flags & 2 != 0 { 1 } else { -1 });
+    Ok(Value::Null)
+}
+fn dll_serialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (flags, items) = dll(a, |d| (d.flags, d.items.clone()));
+    let mut out = format!("i:{};", flags).into_bytes();
+    for v in items {
+        out.push(b':');
+        out.extend_from_slice(&vm.serialize_value(&v)?);
+    }
+    Ok(Value::Str(PhpStr::from(out)))
+}
+fn dll_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.str(0);
+    let b = s.as_bytes();
+    if b.is_empty() {
+        return Ok(Value::Null);
+    }
+    let fail = |vm: &mut Vm| -> R<Value> {
+        vm.throw("UnexpectedValueException", &format!("Error at offset 0 of {} bytes", b.len()))
+    };
+    if !b.starts_with(b"i:") {
+        return fail(vm);
+    }
+    let Some(semi) = b.iter().position(|&c| c == b';') else { return fail(vm) };
+    let Ok(flags) = std::str::from_utf8(&b[2..semi]).unwrap_or("x").parse::<i64>() else { return fail(vm) };
+    let mut items = VecDeque::new();
+    // Elements follow, each prefixed with ':' and serialized.
+    let rest = &b[semi + 1..];
+    let mut chunks: Vec<&[u8]> = Vec::new();
+    let mut start = None;
+    let mut i = 0;
+    while i < rest.len() {
+        if rest[i] == b':' && start.is_none() {
+            start = Some(i + 1);
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+    if let Some(st) = start {
+        // Split greedily by trying successive prefixes.
+        let mut cur = st;
+        while cur <= rest.len() {
+            let mut end = cur + 1;
+            let mut found = None;
+            while end <= rest.len() {
+                if (end == rest.len() || rest[end] == b':')
+                    && let Ok(v) = vm.unserialize_quiet(&rest[cur..end])
+                {
+                    found = Some((end, v));
+                    break;
+                }
+                end += 1;
+            }
+            match found {
+                Some((e, v)) => {
+                    items.push_back(v);
+                    cur = e + 1;
+                }
+                None => return fail(vm),
+            }
+        }
+    }
+    let _ = chunks.drain(..);
+    dll(a, |d| {
+        d.flags = flags;
+        d.items = items;
+    });
+    Ok(Value::Null)
+}
+fn dll_serialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let (flags, items) = dll(a, |d| (d.flags, d.items.clone()));
+    let mut out = PhpArray::new();
+    let _ = out.push(Value::Int(flags));
+    let _ = out.push(Value::Array(PhpArray::from_values(items)));
+    let _ = out.push(Value::Array(members(vm, &o)));
+    Ok(Value::Array(out))
+}
+fn dll_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let data = a.array(0);
+    let f = data.get_int(0).map(|v| v.deref());
+    let it = data.get_int(1).map(|v| v.deref());
+    let m = data.get_int(2).map(|v| v.deref());
+    let (Some(Value::Int(f)), Some(Value::Array(it)), Some(Value::Array(m))) = (f, it, m) else {
+        return vm.throw("UnexpectedValueException", "Incomplete or ill-typed serialization data");
+    };
+    dll(a, |d| {
+        d.flags = f;
+        d.items = it.iter().map(|(_, v)| v.deref()).collect();
+    });
+    restore_members(vm, &o, &m)?;
+    Ok(Value::Null)
+}
+
+// ================================================================ heaps
+
+pub struct HeapData {
+    /// Elements; for SplPriorityQueue `[data, priority]` pairs.
+    heap: Vec<Value>,
+    flags: i64,
+    corrupted: bool,
+    pq: bool,
+    /// The heap is being modified (a user compare() is running).
+    busy: bool,
+}
+
+impl goro_runtime::NativeData for HeapData {
+    fn trace(&self, visit: &mut dyn FnMut(&Value)) {
+        for v in &self.heap {
+            visit(v);
+        }
+    }
+    fn clear(&mut self) {
+        self.heap.clear();
+    }
+}
+
+fn heap_hooks() -> NativeHooks {
+    NativeHooks {
+        create: Some(|vm, o| {
+            let pq = is_subclass_named(&vm.class_of(o), b"splpriorityqueue");
+            set_native(
+                o,
+                HeapData {
+                    heap: Vec::new(),
+                    flags: if pq { 1 } else { 0 },
+                    corrupted: false,
+                    pq,
+                    busy: false,
+                },
+            )
+        }),
+        clone: Some(|_, from, to| {
+            let d = with(from, |d: &mut HeapData| HeapData {
+                heap: d.heap.clone(),
+                flags: d.flags,
+                corrupted: d.corrupted,
+                pq: d.pq,
+                busy: false,
+            });
+            if let Some(d) = d {
+                set_native(to, d);
+            }
+        }),
+        count: Some(|_, o| Ok(with(o, |d: &mut HeapData| d.heap.len() as i64).unwrap_or(0))),
+        ..Default::default()
+    }
+}
+
+fn heap<X>(o: &ObjRef, f: impl FnOnce(&mut HeapData) -> X) -> X {
+    with(o, f).expect("SplHeap data")
+}
+
+fn php_cmp(vm: &mut Vm, x: &Value, y: &Value) -> R<i64> {
+    goro_runtime::compare::compare(x, y, vm)
+        .map(|c| c as i64)
+        .map_err(|e| vm.php_error(e))
+}
+
+/// Whether `x` goes above `y` (positive), per the class's compare().
+fn heap_cmp(vm: &mut Vm, o: &ObjRef, user: &Option<Rc<crate::func::Func>>, pq: bool, x: &Value, y: &Value) -> R<i64> {
+    let (x, y) = if pq {
+        (pq_priority(x), pq_priority(y))
+    } else {
+        (x.clone(), y.clone())
+    };
+    match user {
+        Some(f) => {
+            let cls = vm.class_of(o);
+            let c = Callee {
+                func: f.clone(),
+                this: Some(o.clone()),
+                static_class: Rc::as_ptr(&cls),
+                scope: f.scope.get(),
+                closure: None,
+                magic_name: None,
+            };
+            let r = vm.call_callee(c, vec![x, y])?;
+            vm.to_int(&r)
+        }
+        None => {
+            let min = !pq && is_subclass_named(&vm.class_of(o), b"splminheap");
+            if min { php_cmp(vm, &y, &x) } else { php_cmp(vm, &x, &y) }
+        }
+    }
+}
+
+fn pq_priority(v: &Value) -> Value {
+    match v {
+        Value::Array(a) => a.get_int(1).cloned().unwrap_or_default(),
+        _ => Value::Null,
+    }
+}
+
+fn heap_check(vm: &mut Vm, o: &ObjRef) -> R<()> {
+    let (c, busy) = heap(o, |d| (d.corrupted, d.busy));
+    if busy {
+        return vm.throw("RuntimeException", "Heap cannot be changed when it is already being modified.");
+    }
+    if c {
+        return vm.throw("RuntimeException", "Heap is corrupted, heap properties are no longer ensured.");
+    }
+    Ok(())
+}
+
+fn compare_override(vm: &Vm, o: &ObjRef) -> Option<Rc<crate::func::Func>> {
+    user_override(vm, o, b"compare")
+}
+
+/// Runs a heap operation that compares elements, marking the heap
+/// corrupted when compare() throws.
+fn heap_op<X>(vm: &mut Vm, o: &ObjRef, f: impl FnOnce(&mut Vm, &mut Vec<Value>) -> R<X>) -> R<X> {
+    heap_check(vm, o)?;
+    let mut h = heap(o, |d| {
+        d.busy = true;
+        std::mem::take(&mut d.heap)
+    });
+    let r = f(vm, &mut h);
+    heap(o, |d| {
+        d.heap = h;
+        d.busy = false;
+        if r.is_err() {
+            d.corrupted = true;
+        }
+    });
+    r
+}
+
+fn sift_up(vm: &mut Vm, o: &ObjRef, h: &mut [Value], mut i: usize) -> R<()> {
+    let user = compare_override(vm, o);
+    let pq = heap(o, |d| d.pq);
+    while i > 0 {
+        let parent = (i - 1) / 2;
+        if heap_cmp(vm, o, &user, pq, &h[parent], &h[i])? < 0 {
+            h.swap(parent, i);
+            i = parent;
+        } else {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn delete_top(vm: &mut Vm, o: &ObjRef, h: &mut Vec<Value>) -> R<Value> {
+    let user = compare_override(vm, o);
+    let pq = heap(o, |d| d.pq);
+    let top = h.swap_remove(0);
+    let n = h.len();
+    if n > 1 {
+        let mut i = 0;
+        loop {
+            let mut j = 2 * i + 1;
+            if j >= n {
+                break;
+            }
+            if j + 1 < n && heap_cmp(vm, o, &user, pq, &h[j + 1], &h[j])? > 0 {
+                j += 1;
+            }
+            if heap_cmp(vm, o, &user, pq, &h[i], &h[j])? < 0 {
+                h.swap(i, j);
+                i = j;
+            } else {
+                break;
+            }
+        }
+    }
+    Ok(top)
+}
+
+fn heap_insert(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let v = a.val(0);
+    heap_op(vm, &o, |vm, h| {
+        h.push(v);
+        let n = h.len() - 1;
+        sift_up(vm, &o, h, n)
+    })?;
+    Ok(Value::Bool(true))
+}
+
+fn pq_insert(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let v = Value::Array(PhpArray::from_values([a.val(0), a.val(1)]));
+    heap_op(vm, &o, |vm, h| {
+        h.push(v);
+        let n = h.len() - 1;
+        sift_up(vm, &o, h, n)
+    })?;
+    Ok(Value::Bool(true))
+}
+
+/// An element as returned to PHP (SplPriorityQueue: per extract flags).
+fn heap_out(o: &ObjRef, v: Value) -> Value {
+    let (pq, flags) = heap(o, |d| (d.pq, d.flags));
+    if !pq {
+        return v;
+    }
+    let Value::Array(a) = &v else { return v };
+    let data = a.get_int(0).cloned().unwrap_or_default();
+    let prio = a.get_int(1).cloned().unwrap_or_default();
+    match flags & 3 {
+        1 => data,
+        2 => prio,
+        _ => {
+            let mut out = PhpArray::new();
+            out.insert(Key::from("data"), data);
+            out.insert(Key::from("priority"), prio);
+            Value::Array(out)
+        }
+    }
+}
+
+fn heap_extract(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    heap_check(vm, &o)?;
+    if heap(&o, |d| d.heap.is_empty()) {
+        return vm.throw("RuntimeException", "Can't extract from an empty heap");
+    }
+    let v = heap_op(vm, &o, |vm, h| delete_top(vm, &o, h))?;
+    Ok(heap_out(&o, v))
+}
+
+fn heap_top(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    heap_check(vm, &o)?;
+    match heap(&o, |d| d.heap.first().cloned()) {
+        Some(v) => Ok(heap_out(&o, v)),
+        None => vm.throw("RuntimeException", "Can't peek at an empty heap"),
+    }
+}
+
+fn heap_count(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Int(heap(a.this_obj(), |d| d.heap.len() as i64)))
+}
+fn heap_is_empty(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Bool(heap(a.this_obj(), |d| d.heap.is_empty())))
+}
+fn heap_current(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    match heap(&o, |d| d.heap.first().cloned()) {
+        Some(v) => Ok(heap_out(&o, v)),
+        None => Ok(Value::Null),
+    }
+}
+fn heap_key(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Int(heap(a.this_obj(), |d| d.heap.len() as i64 - 1)))
+}
+fn heap_next(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    if heap(&o, |d| d.heap.is_empty()) {
+        return Ok(Value::Null);
+    }
+    let v = heap_op(vm, &o, |vm, h| delete_top(vm, &o, h))?;
+    drop(v);
+    Ok(Value::Null)
+}
+fn heap_valid(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Bool(heap(a.this_obj(), |d| !d.heap.is_empty())))
+}
+fn heap_recover(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    heap(a.this_obj(), |d| d.corrupted = false);
+    Ok(Value::Bool(true))
+}
+fn heap_is_corrupted(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Bool(heap(a.this_obj(), |d| d.corrupted)))
+}
+fn heap_elements(o: &ObjRef) -> Vec<Value> {
+    let (pq, h) = heap(o, |d| (d.pq, d.heap.clone()));
+    h.into_iter()
+        .map(|v| {
+            if pq && let Value::Array(a) = &v {
+                let mut out = PhpArray::new();
+                out.insert(Key::from("data"), a.get_int(0).cloned().unwrap_or_default());
+                out.insert(Key::from("priority"), a.get_int(1).cloned().unwrap_or_default());
+                return Value::Array(out);
+            }
+            v
+        })
+        .collect()
+}
+fn heap_debug_info(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let mut out = members(vm, &o);
+    let (pq, flags, c) = heap(&o, |d| (d.pq, d.flags, d.corrupted));
+    let cn = if pq { "SplPriorityQueue" } else { "SplHeap" };
+    out.insert(private_key(cn, "flags"), Value::Int(flags));
+    out.insert(private_key(cn, "isCorrupted"), Value::Bool(c));
+    out.insert(
+        private_key(cn, "heap"),
+        Value::Array(PhpArray::from_values(heap_elements(&o))),
+    );
+    Ok(Value::Array(out))
+}
+fn heap_serialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let flags = heap(&o, |d| d.flags);
+    let mut out = PhpArray::new();
+    let _ = out.push(Value::Array(members(vm, &o)));
+    let mut st = PhpArray::new();
+    st.insert(Key::from("flags"), Value::Int(flags));
+    st.insert(
+        Key::from("heap_elements"),
+        Value::Array(PhpArray::from_values(heap_elements(&o))),
+    );
+    let _ = out.push(Value::Array(st));
+    Ok(Value::Array(out))
+}
+fn heap_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    let data = a.array(0);
+    let (Some(Value::Array(m)), Some(Value::Array(st))) = (
+        data.get_int(0).map(|v| v.deref()),
+        data.get_int(1).map(|v| v.deref()),
+    ) else {
+        return vm.throw("UnexpectedValueException", "Invalid serialization data for SplHeap object");
+    };
+    restore_members(vm, &o, &m)?;
+    let flags = match st.get_str(&PhpStr::from("flags")).map(|v| v.deref()) {
+        Some(Value::Int(f)) => f,
+        _ => 0,
+    };
+    let pq = heap(&o, |d| d.pq);
+    let mut elems = Vec::new();
+    if let Some(Value::Array(h)) = st.get_str(&PhpStr::from("heap_elements")).map(|v| v.deref()) {
+        for (_, v) in h.iter() {
+            let v = v.deref();
+            if pq {
+                let Value::Array(p) = &v else { continue };
+                let d = p.get_str(&PhpStr::from("data")).cloned().unwrap_or_default();
+                let pr = p.get_str(&PhpStr::from("priority")).cloned().unwrap_or_default();
+                elems.push(Value::Array(PhpArray::from_values([d, pr])));
+            } else {
+                elems.push(v);
+            }
+        }
+    }
+    heap(&o, |d| {
+        d.flags = flags;
+        d.heap = elems;
+    });
+    Ok(Value::Null)
+}
+fn minheap_compare(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (x, y) = (a.val(0), a.val(1));
+    Ok(Value::Int(php_cmp(vm, &y, &x)?))
+}
+fn maxheap_compare(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (x, y) = (a.val(0), a.val(1));
+    Ok(Value::Int(php_cmp(vm, &x, &y)?))
+}
+fn pq_compare(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (x, y) = (a.val(0), a.val(1));
+    Ok(Value::Int(php_cmp(vm, &x, &y)?))
+}
+fn pq_set_flags(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let f = a.int(0) & 3;
+    if f == 0 {
+        return vm.throw("RuntimeException", "Must specify at least one extract flag");
+    }
+    heap(a.this_obj(), |d| d.flags = f);
+    Ok(Value::Int(f))
+}
+fn pq_get_flags(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Int(heap(a.this_obj(), |d| d.flags)))
+}
+
+// ================================================================ SplObjectStorage
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum OsKey {
+    Handle(u32),
+    Hash(PhpStr),
+}
+
+pub struct OsData {
+    entries: Vec<Option<(ObjRef, Value)>>,
+    index: HashMap<OsKey, usize>,
+    live: usize,
+    /// Iteration: index into entries, and the ordinal (key()).
+    pos: usize,
+    ord: i64,
+    /// MultipleIterator flags.
+    flags: i64,
+}
+
+impl goro_runtime::NativeData for OsData {
+    fn trace(&self, visit: &mut dyn FnMut(&Value)) {
+        for (o, v) in self.entries.iter().flatten() {
+            visit(&Value::Object(o.clone()));
+            visit(v);
+        }
+    }
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.index.clear();
+        self.live = 0;
+    }
+}
+
+impl OsData {
+    fn new() -> OsData {
+        OsData {
+            entries: Vec::new(),
+            index: HashMap::new(),
+            live: 0,
+            pos: 0,
+            ord: 0,
+            flags: 1,
+        }
+    }
+    fn live_entries(&self) -> Vec<(ObjRef, Value)> {
+        self.entries.iter().flatten().cloned().collect()
+    }
+    fn compact(&mut self) {
+        if self.entries.len() > 16 && self.live * 2 < self.entries.len() {
+            let cur = self.pos;
+            let mut new_pos = 0;
+            let mut out = Vec::with_capacity(self.live);
+            for (i, e) in self.entries.drain(..).enumerate() {
+                if i == cur {
+                    new_pos = out.len();
+                }
+                if e.is_some() {
+                    out.push(e);
+                }
+            }
+            if cur >= out.len() + 1 {
+                new_pos = out.len();
+            }
+            self.entries = out;
+            self.pos = new_pos;
+            self.index.clear();
+            // Keys are rebuilt by the caller (needs the VM for getHash).
+        }
+    }
+}
+
+fn os_hooks() -> NativeHooks {
+    NativeHooks {
+        create: Some(|vm, o| {
+            let mut d = OsData::new();
+            if !is_subclass_named(&vm.class_of(o), b"multipleiterator") {
+                d.flags = 0;
+            }
+            set_native(o, d)
+        }),
+        clone: Some(|_, from, to| {
+            let d = with(from, |d: &mut OsData| OsData {
+                entries: d.entries.clone(),
+                index: d.index.clone(),
+                live: d.live,
+                pos: d.pos,
+                ord: d.ord,
+                flags: d.flags,
+            });
+            if let Some(d) = d {
+                set_native(to, d);
+            }
+        }),
+        count: Some(|_, o| Ok(with(o, |d: &mut OsData| d.live as i64).unwrap_or(0))),
+        ..Default::default()
+    }
+}
+
+fn os<X>(o: &ObjRef, f: impl FnOnce(&mut OsData) -> X) -> X {
+    with(o, f).expect("SplObjectStorage data")
+}
+
+/// The key of `obj` in storage `s` (user getHash() when overridden).
+fn os_key(vm: &mut Vm, s: &ObjRef, obj: &ObjRef) -> R<OsKey> {
+    if let Some(f) = user_override(vm, s, b"gethash") {
+        let cls = vm.class_of(s);
+        let c = Callee {
+            func: f.clone(),
+            this: Some(s.clone()),
+            static_class: Rc::as_ptr(&cls),
+            scope: f.scope.get(),
+            closure: None,
+            magic_name: None,
+        };
+        let r = vm.call_callee(c, vec![Value::Object(obj.clone())])?;
+        return match r {
+            Value::Str(h) => Ok(OsKey::Hash(h)),
+            _ => vm.throw("RuntimeException", "Hash needs to be a string"),
+        };
+    }
+    Ok(OsKey::Handle(obj.handle()))
+}
+
+fn os_reindex(vm: &mut Vm, s: &ObjRef) -> R<()> {
+    let entries: Vec<(usize, ObjRef)> = os(s, |d| {
+        d.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| e.as_ref().map(|(o, _)| (i, o.clone())))
+            .collect()
+    });
+    let mut idx = HashMap::new();
+    for (i, o) in entries {
+        idx.insert(os_key(vm, s, &o)?, i);
+    }
+    os(s, |d| d.index = idx);
+    Ok(())
+}
+
+fn os_put(vm: &mut Vm, s: &ObjRef, obj: ObjRef, inf: Value) -> R<()> {
+    let k = os_key(vm, s, &obj)?;
+    let old = os(s, |d| match d.index.get(&k) {
+        Some(&i) => d.entries[i].as_mut().map(|e| std::mem::replace(&mut e.1, inf)),
+        None => {
+            d.entries.push(Some((obj, inf)));
+            d.index.insert(k, d.entries.len() - 1);
+            d.live += 1;
+            None
+        }
+    });
+    drop(old);
+    Ok(())
+}
+
+fn os_remove(vm: &mut Vm, s: &ObjRef, obj: &ObjRef) -> R<bool> {
+    let k = os_key(vm, s, obj)?;
+    let (removed, needs_compact) = os(s, |d| match d.index.remove(&k) {
+        Some(i) => {
+            let e = d.entries[i].take();
+            d.live -= 1;
+            (e, d.entries.len() > 16 && d.live * 2 < d.entries.len())
+        }
+        None => (None, false),
+    });
+    let found = removed.is_some();
+    drop(removed);
+    if needs_compact {
+        os(s, |d| d.compact());
+        os_reindex(vm, s)?;
+    }
+    Ok(found)
+}
+
+fn os_find(vm: &mut Vm, s: &ObjRef, obj: &ObjRef) -> R<Option<Value>> {
+    let k = os_key(vm, s, obj)?;
+    Ok(os(s, |d| d.index.get(&k).and_then(|&i| d.entries[i].as_ref().map(|e| e.1.clone()))))
+}
+
+fn os_deprecated(vm: &mut Vm, m: &str, instead: &str) -> R<()> {
+    vm.deprecated(&format!(
+        "Method SplObjectStorage::{}() is deprecated since 8.5, use method SplObjectStorage::{}() instead",
+        m, instead
+    ))
+}
+
+fn obj_arg(vm: &mut Vm, a: &Args, i: usize, method: &str) -> R<ObjRef> {
+    match a.val(i) {
+        Value::Object(o) => Ok(o),
+        other => vm.type_error(&format!(
+            "SplObjectStorage::{}(): Argument #{} ($object) must be of type object, {} given",
+            method,
+            i + 1,
+            other.tname()
+        )),
+    }
+}
+
+fn os_attach(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    os_deprecated(vm, "attach", "offsetSet")?;
+    let s = a.this_obj().clone();
+    let o = obj_arg(vm, a, 0, "attach")?;
+    let inf = if a.has(1) { a.val(1) } else { Value::Null };
+    os_put(vm, &s, o, inf)?;
+    Ok(Value::Null)
+}
+fn os_detach(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    os_deprecated(vm, "detach", "offsetUnset")?;
+    let s = a.this_obj().clone();
+    let o = obj_arg(vm, a, 0, "detach")?;
+    os_remove(vm, &s, &o)?;
+    Ok(Value::Null)
+}
+fn os_contains(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    os_deprecated(vm, "contains", "offsetExists")?;
+    let s = a.this_obj().clone();
+    let o = obj_arg(vm, a, 0, "contains")?;
+    Ok(Value::Bool(os_find(vm, &s, &o)?.is_some()))
+}
+fn other_storage(vm: &mut Vm, a: &Args, method: &str) -> R<ObjRef> {
+    match a.obj(0) {
+        Some(o) if with(&o, |_: &mut OsData| ()).is_some() => Ok(o),
+        _ => vm.type_error(&format!(
+            "SplObjectStorage::{}(): Argument #1 ($storage) must be of type SplObjectStorage, {} given",
+            method,
+            a.val(0).tname()
+        )),
+    }
+}
+fn os_add_all(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.this_obj().clone();
+    let other = other_storage(vm, a, "addAll")?;
+    for (o, inf) in os(&other, |d| d.live_entries()) {
+        os_put(vm, &s, o, inf)?;
+    }
+    Ok(Value::Int(os(&s, |d| d.live as i64)))
+}
+fn os_remove_all(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.this_obj().clone();
+    let other = other_storage(vm, a, "removeAll")?;
+    for (o, _) in os(&other, |d| d.live_entries()) {
+        os_remove(vm, &s, &o)?;
+    }
+    Ok(Value::Int(os(&s, |d| d.live as i64)))
+}
+fn os_remove_all_except(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.this_obj().clone();
+    let other = other_storage(vm, a, "removeAllExcept")?;
+    for (o, _) in os(&s, |d| d.live_entries()) {
+        if os_find(vm, &other, &o)?.is_none() {
+            os_remove(vm, &s, &o)?;
+        }
+    }
+    Ok(Value::Int(os(&s, |d| d.live as i64)))
+}
+/// Moves the iteration index to the next live entry at or after it.
+fn os_settle(d: &mut OsData) {
+    while d.pos < d.entries.len() && d.entries[d.pos].is_none() {
+        d.pos += 1;
+    }
+}
+fn os_get_info(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(os(a.this_obj(), |d| {
+        os_settle(d);
+        d.entries.get(d.pos).and_then(|e| e.as_ref().map(|e| e.1.clone()))
+    })
+    .unwrap_or_default())
+}
+fn os_set_info(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let v = a.val(0);
+    let old = os(a.this_obj(), |d| {
+        os_settle(d);
+        let pos = d.pos;
+        d.entries.get_mut(pos).and_then(|e| e.as_mut().map(|e| std::mem::replace(&mut e.1, v)))
+    });
+    drop(old);
+    Ok(Value::Null)
+}
+fn os_count(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.this_obj().clone();
+    let mode = a.int_or(0, 0);
+    let n = os(&s, |d| d.live as i64);
+    if mode == 1 {
+        let mut total = n;
+        for (_, inf) in os(&s, |d| d.live_entries()) {
+            total += vm.count_value(&inf, true)?;
+        }
+        return Ok(Value::Int(total));
+    }
+    Ok(Value::Int(n))
+}
+fn os_rewind(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    os(a.this_obj(), |d| {
+        d.pos = 0;
+        d.ord = 0;
+        os_settle(d);
+    });
+    Ok(Value::Null)
+}
+fn os_valid(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Bool(os(a.this_obj(), |d| {
+        os_settle(d);
+        d.pos < d.entries.len()
+    })))
+}
+fn os_key_m(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Int(os(a.this_obj(), |d| d.ord)))
+}
+fn os_current(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let c = os(a.this_obj(), |d| {
+        os_settle(d);
+        d.entries.get(d.pos).and_then(|e| e.as_ref().map(|e| e.0.clone()))
+    });
+    match c {
+        Some(o) => Ok(Value::Object(o)),
+        None => vm.throw("RuntimeException", "Called current() on invalid iterator"),
+    }
+}
+fn os_next(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    os(a.this_obj(), |d| {
+        os_settle(d);
+        if d.pos < d.entries.len() {
+            d.pos += 1;
+            d.ord += 1;
+        }
+        os_settle(d);
+    });
+    Ok(Value::Null)
+}
+fn os_seek(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let n = a.int(0);
+    let ok = os(a.this_obj(), |d| {
+        if n < 0 || n as usize >= d.live {
+            return false;
+        }
+        d.pos = 0;
+        d.ord = 0;
+        os_settle(d);
+        while d.ord < n {
+            d.pos += 1;
+            d.ord += 1;
+            os_settle(d);
+        }
+        true
+    });
+    if !ok {
+        return vm.throw("OutOfBoundsException", &format!("Seek position {} is out of range", n));
+    }
+    Ok(Value::Null)
+}
+fn os_offset_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.this_obj().clone();
+    let Some(o) = a.obj(0) else { return Ok(Value::Bool(false)) };
+    Ok(Value::Bool(os_find(vm, &s, &o)?.is_some()))
+}
+fn os_offset_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.this_obj().clone();
+    let o = obj_arg(vm, a, 0, "offsetGet")?;
+    match os_find(vm, &s, &o)? {
+        Some(v) => Ok(v),
+        None => vm.throw("UnexpectedValueException", "Object not found"),
+    }
+}
+fn os_offset_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.this_obj().clone();
+    let o = obj_arg(vm, a, 0, "offsetSet")?;
+    let inf = if a.has(1) { a.val(1) } else { Value::Null };
+    os_put(vm, &s, o, inf)?;
+    Ok(Value::Null)
+}
+fn os_offset_unset(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.this_obj().clone();
+    let o = obj_arg(vm, a, 0, "offsetUnset")?;
+    os_remove(vm, &s, &o)?;
+    Ok(Value::Null)
+}
+fn os_get_hash(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let h = a.obj(0).map(|o| o.handle()).unwrap_or(0);
+    Ok(Value::Str(PhpStr::from(format!("{:032x}", h))))
+}
+fn os_serialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.this_obj().clone();
+    let mut flat = PhpArray::new();
+    for (o, inf) in os(&s, |d| d.live_entries()) {
+        let _ = flat.push(Value::Object(o));
+        let _ = flat.push(inf);
+    }
+    let mut out = PhpArray::new();
+    let _ = out.push(Value::Array(flat));
+    let _ = out.push(Value::Array(members(vm, &s)));
+    Ok(Value::Array(out))
+}
+fn os_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.this_obj().clone();
+    let data = a.array(0);
+    let (Some(Value::Array(flat)), Some(Value::Array(m))) = (
+        data.get_int(0).map(|v| v.deref()),
+        data.get_int(1).map(|v| v.deref()),
+    ) else {
+        return vm.throw("UnexpectedValueException", "Incomplete or ill-typed serialization data");
+    };
+    if flat.len() % 2 != 0 {
+        return vm.throw("UnexpectedValueException", "Odd number of elements");
+    }
+    let vals: Vec<Value> = flat.iter().map(|(_, v)| v.deref()).collect();
+    for pair in vals.chunks(2) {
+        let Value::Object(o) = &pair[0] else {
+            return vm.throw("UnexpectedValueException", "Non-object key");
+        };
+        os_put(vm, &s, o.clone(), pair[1].clone())?;
+    }
+    restore_members(vm, &s, &m)?;
+    Ok(Value::Null)
+}
+fn os_serialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.this_obj().clone();
+    let entries = os(&s, |d| d.live_entries());
+    let mut out = format!("x:i:{};", entries.len()).into_bytes();
+    for (i, (o, inf)) in entries.into_iter().enumerate() {
+        if i > 0 {
+            out.push(b';');
+        }
+        out.extend_from_slice(&vm.serialize_value(&Value::Object(o))?);
+        out.push(b',');
+        out.extend_from_slice(&vm.serialize_value(&inf)?);
+    }
+    out.extend_from_slice(b";m:");
+    let m = Value::Array(members(vm, &s));
+    out.extend_from_slice(&vm.serialize_value(&m)?);
+    Ok(Value::Str(PhpStr::from(out)))
+}
+fn os_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.this_obj().clone();
+    let data = a.str(0);
+    let b = data.as_bytes();
+    if b.is_empty() {
+        return Ok(Value::Null);
+    }
+    let fail = |vm: &mut Vm, at: usize| -> R<Value> {
+        vm.throw("UnexpectedValueException", &format!("Error at offset {} of {} bytes", at, b.len()))
+    };
+    if !b.starts_with(b"x:i:") {
+        return fail(vm, 0);
+    }
+    let Some(semi) = b.iter().position(|&c| c == b';') else { return fail(vm, 0) };
+    let Ok(n) = std::str::from_utf8(&b[4..semi]).unwrap_or("x").parse::<i64>() else { return fail(vm, 0) };
+    let mut cur = semi + 1;
+    for i in 0..n {
+        // [';'] object ',' info
+        if i > 0 {
+            if b.get(cur) != Some(&b';') {
+                return fail(vm, cur);
+            }
+            cur += 1;
+        }
+        let Some((obj, next)) = vm.unserialize_prefix(&b[cur..]) else { return fail(vm, cur) };
+        cur += next;
+        if b.get(cur) != Some(&b',') {
+            return fail(vm, cur);
+        }
+        cur += 1;
+        let Some((inf, next)) = vm.unserialize_prefix(&b[cur..]) else { return fail(vm, cur) };
+        cur += next;
+        let Value::Object(o) = obj else { return fail(vm, cur) };
+        os_put(vm, &s, o, inf)?;
+    }
+    if !b[cur..].starts_with(b";m:") {
+        return fail(vm, cur);
+    }
+    let m = vm.unserialize_bytes(&b[cur + 3..], &PhpArray::new())?;
+    if let Value::Array(m) = m {
+        restore_members(vm, &s, &m)?;
+    }
+    Ok(Value::Null)
+}
+fn os_debug_info(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.this_obj().clone();
+    let mut out = members(vm, &s);
+    let mut st = PhpArray::new();
+    for (o, inf) in os(&s, |d| d.live_entries()) {
+        let mut e = PhpArray::new();
+        e.insert(Key::from("obj"), Value::Object(o));
+        e.insert(Key::from("inf"), inf);
+        let _ = st.push(Value::Array(e));
+    }
+    out.insert(private_key("SplObjectStorage", "storage"), Value::Array(st));
+    Ok(Value::Array(out))
+}
+
+// ================================================================ MultipleIterator
+
+fn mi_construct(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let f = a.int_or(0, 1);
+    os(a.this_obj(), |d| d.flags = f);
+    Ok(Value::Null)
+}
+fn mi_get_flags(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Int(os(a.this_obj(), |d| d.flags)))
+}
+fn mi_set_flags(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let f = a.int(0);
+    os(a.this_obj(), |d| d.flags = f);
+    Ok(Value::Null)
+}
+fn mi_attach(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.this_obj().clone();
+    let it = a.obj(0).unwrap();
+    let inf = if a.has(1) { a.val(1) } else { Value::Null };
+    if os(&s, |d| d.flags) & 2 != 0 {
+        match &inf {
+            Value::Int(_) | Value::Str(_) => {}
+            Value::Null => {
+                return vm.type_error("MultipleIterator::attachIterator(): Argument #2 ($info) must be of type string|int, null given");
+            }
+            _ => {}
+        }
+        // The info must be unique.
+        for (_, other) in os(&s, |d| d.live_entries()) {
+            if goro_runtime::compare::strict_eq(&other, &inf) {
+                return vm.throw("InvalidArgumentException", "Key duplication error");
+            }
+        }
+    }
+    os_put(vm, &s, it, inf)?;
+    Ok(Value::Null)
+}
+fn mi_detach(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.this_obj().clone();
+    let it = a.obj(0).unwrap();
+    os_remove(vm, &s, &it)?;
+    Ok(Value::Null)
+}
+fn mi_contains(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.this_obj().clone();
+    let it = a.obj(0).unwrap();
+    Ok(Value::Bool(os_find(vm, &s, &it)?.is_some()))
+}
+fn mi_count(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Int(os(a.this_obj(), |d| d.live as i64)))
+}
+fn mi_rewind(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    for (it, _) in os(a.this_obj(), |d| d.live_entries()) {
+        vm.call_method(&it, b"rewind", Vec::new())?;
+    }
+    Ok(Value::Null)
+}
+fn mi_next(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    for (it, _) in os(a.this_obj(), |d| d.live_entries()) {
+        vm.call_method(&it, b"next", Vec::new())?;
+    }
+    Ok(Value::Null)
+}
+fn mi_valid(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (entries, flags) = os(a.this_obj(), |d| (d.live_entries(), d.flags));
+    if entries.is_empty() {
+        return Ok(Value::Bool(false));
+    }
+    let all = flags & 1 != 0;
+    for (it, _) in entries {
+        let v = vm.call_method(&it, b"valid", Vec::new())?;
+        let v = vm.to_bool(&v);
+        if all && !v {
+            return Ok(Value::Bool(false));
+        }
+        if !all && v {
+            return Ok(Value::Bool(true));
+        }
+    }
+    Ok(Value::Bool(all))
+}
+fn mi_values(vm: &mut Vm, a: &Args, current: bool) -> R<Value> {
+    let (entries, flags) = os(a.this_obj(), |d| (d.live_entries(), d.flags));
+    let mut out = PhpArray::new();
+    for (it, inf) in entries {
+        let valid = vm.call_method(&it, b"valid", Vec::new())?;
+        let v = if vm.to_bool(&valid) {
+            vm.call_method(&it, if current { b"current" } else { b"key" }, Vec::new())?
+        } else {
+            if flags & 1 != 0 {
+                let what = if current { "value" } else { "key" };
+                return vm.throw(
+                    "RuntimeException",
+                    &format!("Called {}() with non valid sub iterator", if current { "current" } else { "key" }),
+                )
+                .map(|_: Value| {
+                    let _ = what;
+                    Value::Null
+                });
+            }
+            Value::Null
+        };
+        if flags & 2 != 0 {
+            let k = match &inf {
+                Value::Int(i) => Key::Int(*i),
+                Value::Str(s) => Key::from_php_str(s),
+                _ => return vm.throw("InvalidArgumentException", "Sub-Iterator is associated with NULL"),
+            };
+            out.insert(k, v);
+        } else {
+            let _ = out.push(v);
+        }
+    }
+    Ok(Value::Array(out))
+}
+fn mi_key(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    mi_values(vm, a, false)
+}
+fn mi_current(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    mi_values(vm, a, true)
+}
+
+#[allow(dead_code)]
+fn unused_lower(s: &[u8]) -> PhpStr {
+    lower(s)
+}

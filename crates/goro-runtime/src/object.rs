@@ -235,6 +235,13 @@ impl Drop for ObjRef {
 
 impl Drop for Object {
     fn drop(&mut self) {
+        // The contents go first, then the handle is reused first (PHP's
+        // object store frees properties before putting the handle on its
+        // free list; observed on php85: `$c = new C; unset($c);` with C
+        // holding a B, the next object gets C's handle).
+        drop(std::mem::take(self.slots.get_mut()));
+        drop(std::mem::take(self.props.get_mut()));
+        drop(self.native.get_mut().take());
         let h = self.handle as usize;
         let _ = STORE.try_with(|s| {
             if let Ok(mut s) = s.try_borrow_mut() {

@@ -12,6 +12,7 @@ pub mod math;
 pub mod output;
 pub mod reflection;
 pub mod serialize;
+pub mod spl;
 pub mod string;
 pub mod var;
 
@@ -29,6 +30,7 @@ pub fn modules() -> Vec<&'static Module> {
         &serialize::MODULE,
         &json::MODULE,
         &reflection::MODULE,
+        &spl::MODULE,
         &string::MODULE,
         &array::MODULE,
         &math::MODULE,

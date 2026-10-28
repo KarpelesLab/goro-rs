@@ -1279,6 +1279,9 @@ impl<'a> Compiler<'a> {
                                 f |= mflags::VIRTUAL;
                             }
                         }
+                        if self.file.is_empty() && pname.starts_with(b"__") {
+                            f |= mflags::HIDDEN;
+                        }
                         props.push(PropDecl {
                             name: pname,
                             default,
