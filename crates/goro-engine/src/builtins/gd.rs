@@ -1136,7 +1136,7 @@ fn imagepalettetotruecolor(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn imagegammacorrect(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let im = img(vm, a, 0)?;
     let (i, o) = (a.float(1), a.float(2));
-    if !i.is_finite() {
+    if i.is_nan() || i == f64::INFINITY {
         return vm.fthrow(a, "ValueError", "Argument #2 ($input_gamma) must be finite");
     }
     if i <= 0.0 {
@@ -1146,7 +1146,7 @@ fn imagegammacorrect(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "Argument #2 ($input_gamma) must be greater than 0",
         );
     }
-    if !o.is_finite() {
+    if o.is_nan() || o == f64::INFINITY {
         return vm.fthrow(a, "ValueError", "Argument #3 ($output_gamma) must be finite");
     }
     if o <= 0.0 {
@@ -2111,7 +2111,17 @@ fn imagecropauto(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "Argument #2 ($mode) must be a valid mode",
         );
     }
-    if mode == tr::CROP_THRESHOLD as i64 && color < 0 {
+    let palette_total = {
+        let i = im.borrow();
+        if i.truecolor {
+            None
+        } else {
+            Some(i.colors_total as i64)
+        }
+    };
+    if mode == tr::CROP_THRESHOLD as i64
+        && (color < 0 || palette_total.is_some_and(|n| color >= n))
+    {
         return vm.fthrow(
             a,
             "ValueError",

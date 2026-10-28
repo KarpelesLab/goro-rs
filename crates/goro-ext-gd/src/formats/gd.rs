@@ -235,9 +235,9 @@ pub fn decode_gd2(d: &[u8], part: Option<(i32, i32, i32, i32)>) -> DecodeResult 
     let sy = r.u16().ok_or_else(bad)? as i32;
     let cs = r.u16().ok_or_else(bad)? as i32;
     let fmt = r.u16().ok_or_else(bad)?;
-    let ncx = r.u16().ok_or_else(bad)? as i16 as i32;
-    let ncy = r.u16().ok_or_else(bad)? as i16 as i32;
-    if !(64..=4096).contains(&cs) || !(1..=4).contains(&fmt) || ncx <= 0 || ncy <= 0 {
+    let ncx = r.u16().ok_or_else(bad)? as i32;
+    let ncy = r.u16().ok_or_else(bad)? as i32;
+    if !(64..=4096).contains(&cs) || !(1..=4).contains(&fmt) {
         return Err(bad());
     }
     if fmt >= 3 && version < 2 {
@@ -247,8 +247,12 @@ pub fn decode_gd2(d: &[u8], part: Option<(i32, i32, i32, i32)>) -> DecodeResult 
     let compressed = fmt == 2 || fmt == 4;
     let mut index = Vec::new();
     if compressed {
+        // The chunk index allocation (tests bug72339, bug73869).
         let n = ncx as i64 * ncy as i64;
-        if n > i32::MAX as i64 / 8 {
+        if n == 0 {
+            return Err(DecodeError::with(super::NEGATIVE_MSG));
+        }
+        if n * 8 > i32::MAX as i64 {
             return Err(DecodeError::with(OVERFLOW_MSG));
         }
         for _ in 0..n {

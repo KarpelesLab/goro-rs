@@ -612,7 +612,8 @@ impl Image {
             return;
         }
         let oc = self.get_pixel(x, y);
-        if nc < 0 {
+        if nc < 0 || (!self.truecolor && nc >= self.colors_total) {
+            // An unallocated palette index fills nothing (imagefill_1).
             return;
         }
         if oc == nc {
@@ -653,8 +654,10 @@ impl Image {
                 }
             }
         }
+        // The fill color replaces the region's pixels, without alpha
+        // blending (bug61221: a transparent fill stays transparent).
         let saved = self.alpha_blending;
-        let _ = saved;
+        self.alpha_blending = EFFECT_REPLACE;
         for yy in 0..h {
             for xx in 0..w {
                 if seen[yy as usize * w as usize + xx as usize] {
@@ -662,6 +665,7 @@ impl Image {
                 }
             }
         }
+        self.alpha_blending = saved;
     }
 
     fn fill_tiled(&mut self, x: i32, y: i32) {

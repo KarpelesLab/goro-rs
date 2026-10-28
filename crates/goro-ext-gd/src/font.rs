@@ -73,28 +73,33 @@ pub fn load_gdf(b: &[u8]) -> Result<Font, FontError> {
     if b.len() < 16 {
         return Err(FontError::HeaderEof);
     }
+    // Little-endian header; when its body is not all there, the header
+    // is read again big-endian (tests imageloadfont_invalid, bug81739,
+    // gh13082).
     let le = |i: usize| i32::from_le_bytes(b[i..i + 4].try_into().unwrap());
     let be = |i: usize| i32::from_be_bytes(b[i..i + 4].try_into().unwrap());
-    let (mut nchars, mut offset, mut w, mut h) = (le(0), le(4), le(8), le(12));
     let ok = |n: i32, w: i32, h: i32| n > 0 && w > 0 && h > 0;
-    if !ok(nchars, w, h) || overflow3(nchars, w, h) {
-        let (bn, bo, bw, bh) = (be(0), be(4), be(8), be(12));
-        if ok(bn, bw, bh) && !overflow3(bn, bw, bh) {
-            nchars = bn;
-            offset = bo;
-            w = bw;
-            h = bh;
+    let check = |n: i32, w: i32, h: i32| -> Result<usize, FontError> {
+        if overflow3(n, w, h) {
+            return Err(FontError::Overflow);
         }
-    }
-    if overflow3(nchars, w, h) {
-        return Err(FontError::Overflow);
-    }
-    if !ok(nchars, w, h) {
-        return Err(FontError::BadHeader);
-    }
-    let size = nchars as usize * w as usize * h as usize;
+        if !ok(n, w, h) {
+            return Err(FontError::BadHeader);
+        }
+        Ok(n as usize * w as usize * h as usize)
+    };
+    let (mut nchars, mut offset, mut w, mut h) = (le(0), le(4), le(8), le(12));
+    let mut size = check(nchars, w, h)?;
     if b.len() - 16 < size {
-        return Err(FontError::DataEof);
+        let (bn, bo, bw, bh) = (be(0), be(4), be(8), be(12));
+        size = check(bn, bw, bh)?;
+        if b.len() - 16 < size {
+            return Err(FontError::DataEof);
+        }
+        nchars = bn;
+        offset = bo;
+        w = bw;
+        h = bh;
     }
     Ok(Font {
         nchars,

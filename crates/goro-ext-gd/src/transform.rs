@@ -146,14 +146,16 @@ impl Image {
                     Box::new(move |p| t >= 0 && p == t)
                 }
             }
-            CROP_BLACK => Box::new(|p| {
-                let c = self.get_truecolor_pixel_of(p);
-                c & 0xffffff == 0
-            }),
-            CROP_WHITE => Box::new(|p| {
-                let c = self.get_truecolor_pixel_of(p);
-                c & 0xffffff == 0xffffff
-            }),
+            // Pixels of the image's color closest to black / white
+            // (imagecrop_auto: an unallocated palette index is not black).
+            CROP_BLACK => {
+                let c = self.color_closest(0, 0, 0, 0);
+                Box::new(move |p| p == c)
+            }
+            CROP_WHITE => {
+                let c = self.color_closest(255, 255, 255, 0);
+                Box::new(move |p| p == c)
+            }
             CROP_SIDES => {
                 let bg = self.guess_background()?;
                 Box::new(move |p| p == bg)
@@ -345,6 +347,22 @@ impl Image {
         check_size(nw as i64, nh as i64)?;
         if overflow(self.sx, self.sy, 4) {
             return Err(SizeError::Overflow);
+        }
+        if !matches!(
+            method,
+            IMG_NEAREST_NEIGHBOUR | IMG_BILINEAR_FIXED | IMG_BICUBIC_FIXED | IMG_BICUBIC
+        ) {
+            // The filter weights of each output pixel span the source
+            // pixels under the kernel (bug77272: 2^28 pixels down to 1).
+            let (support, _) = kernel(method);
+            for (n_in, n_out) in [(self.sx, nw), (self.sy, nh)] {
+                let scale = n_out as f64 / n_in as f64;
+                let width = if scale < 1.0 { support / scale } else { support };
+                let window = 2.0 * width.ceil() + 1.0;
+                if window * n_out as f64 * 8.0 > i32::MAX as f64 {
+                    return Err(SizeError::Overflow);
+                }
+            }
         }
         let src = if self.truecolor {
             std::borrow::Cow::Borrowed(self)
