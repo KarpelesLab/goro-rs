@@ -52,10 +52,40 @@ enum Root {
     Obj(Weak<Object>),
 }
 
+impl Root {
+    fn addr(&self) -> usize {
+        match self {
+            Root::Arr(w) => w.as_ptr() as *const u8 as usize,
+            Root::Ref(w) => w.as_ptr() as *const u8 as usize,
+            Root::Obj(w) => w.as_ptr() as *const u8 as usize,
+        }
+    }
+}
+
+/// The possible-root buffer. A container freed while buffered takes its
+/// entry out (PHP manual, Garbage Collection: a value whose refcount drops
+/// to zero is freed and removed from the root buffer), so the buffer holds
+/// live containers only and its free entries are reused.
+struct RootBuf {
+    entries: Vec<Option<Root>>,
+    free: Vec<u32>,
+    live: usize,
+}
+
+impl RootBuf {
+    const fn new() -> RootBuf {
+        RootBuf {
+            entries: Vec::new(),
+            free: Vec::new(),
+            live: 0,
+        }
+    }
+}
+
 thread_local! {
     /// Weak maps holding entries per key object (by address).
     static WEAK_KEYS: RefCell<HashMap<usize, Vec<WeakObj>>> = RefCell::new(HashMap::new());
-    static ROOTS: RefCell<Vec<Root>> = const { RefCell::new(Vec::new()) };
+    static ROOTS: RefCell<RootBuf> = const { RefCell::new(RootBuf::new()) };
     static STATS: Cell<GcStats> = const { Cell::new(GcStats { runs: 0, collected: 0 }) };
 }
 
@@ -66,11 +96,43 @@ pub struct GcStats {
     pub collected: usize,
 }
 
+/// Buffers a root; its entry index, or `None` when the buffer is not
+/// available (thread exit, re-entrant use).
 #[inline]
-fn push_root(r: Root) {
+fn push_root(r: Root) -> Option<u32> {
+    ROOTS
+        .try_with(|roots| {
+            let mut roots = roots.try_borrow_mut().ok()?;
+            roots.live += 1;
+            Some(match roots.free.pop() {
+                Some(i) => {
+                    roots.entries[i as usize] = Some(r);
+                    i
+                }
+                None => {
+                    roots.entries.push(Some(r));
+                    (roots.entries.len() - 1) as u32
+                }
+            })
+        })
+        .ok()
+        .flatten()
+}
+
+/// Takes the entry `idx` of a buffered container at `addr` that is being
+/// freed out of the buffer.
+#[inline(never)]
+pub(crate) fn remove_root(idx: u32, addr: usize) {
     let _ = ROOTS.try_with(|roots| {
-        if let Ok(mut roots) = roots.try_borrow_mut() {
-            roots.push(r);
+        if let Ok(mut roots) = roots.try_borrow_mut()
+            && let Some(e) = roots.entries.get_mut(idx as usize)
+            && e.as_ref().is_some_and(|r| r.addr() == addr)
+        {
+            let old = e.take();
+            roots.free.push(idx);
+            roots.live -= 1;
+            drop(roots);
+            drop(old);
         }
     });
 }
@@ -78,27 +140,41 @@ fn push_root(r: Root) {
 #[inline]
 pub(crate) fn possible_root_array(rc: &Rc<ArrayData>) {
     let f = rc.flags.get();
-    if f & ARRAY_GC_BUFFERED == 0 {
+    if f & ARRAY_GC_BUFFERED == 0
+        && let Some(i) = push_root(Root::Arr(Rc::downgrade(rc)))
+    {
         rc.flags.set(f | ARRAY_GC_BUFFERED);
-        push_root(Root::Arr(Rc::downgrade(rc)));
+        rc.gc_idx.set(i);
     }
 }
 
 #[inline]
 pub(crate) fn possible_root_ref(r: &PhpRef) {
     let f = r.0.flags.get();
-    if f & R_GC_BUFFERED == 0 {
+    if f & R_GC_BUFFERED == 0
+        && let Some(i) = push_root(Root::Ref(r.downgrade()))
+    {
         r.0.flags.set(f | R_GC_BUFFERED);
-        push_root(Root::Ref(r.downgrade()));
+        r.0.gc_idx.set(i);
     }
 }
 
 #[inline]
 pub(crate) fn possible_root_obj(o: &ObjRef) {
     let f = o.0.flags.get();
-    if f & F_GC_BUFFERED == 0 {
+    if f & F_GC_BUFFERED == 0
+        && let Some(i) = push_root(Root::Obj(Rc::downgrade(&o.0)))
+    {
         o.0.flags.set(f | F_GC_BUFFERED);
-        push_root(Root::Obj(Rc::downgrade(&o.0)));
+        o.0.gc_idx.set(i);
+    }
+}
+
+/// Drop hook of reference cells: a buffered one leaves the buffer.
+#[inline]
+pub(crate) fn ref_freed(r: &RefInner) {
+    if r.flags.get() & R_GC_BUFFERED != 0 {
+        remove_root(r.gc_idx.get(), r as *const RefInner as usize);
     }
 }
 
@@ -143,7 +219,7 @@ pub(crate) fn forget_weak_key(addr: usize) {
 
 /// Number of buffered possible roots.
 pub fn root_count() -> usize {
-    ROOTS.with(|r| r.borrow().len())
+    ROOTS.with(|r| r.borrow().live)
 }
 
 /// Whether the root buffer reached `threshold` (the engine then runs
@@ -334,9 +410,9 @@ impl Graph {
 }
 
 fn take_roots() -> Vec<Node> {
-    let roots = ROOTS.with(|r| std::mem::take(&mut *r.borrow_mut()));
-    let mut out = Vec::with_capacity(roots.len());
-    for r in roots {
+    let roots = ROOTS.with(|r| std::mem::replace(&mut *r.borrow_mut(), RootBuf::new()));
+    let mut out = Vec::with_capacity(roots.live);
+    for r in roots.entries.into_iter().flatten() {
         match r {
             Root::Arr(w) => {
                 if let Some(rc) = w.upgrade() {

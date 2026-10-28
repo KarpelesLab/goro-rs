@@ -42,6 +42,137 @@ impl Callee {
     }
 }
 
+/// The statics of a callee: closures have their own, and their `use`
+/// variables go into the callee's fresh slots at `base` (when not null).
+#[inline]
+fn closure_statics(c: &Callee, base: *mut Slot) -> *const RefCell<Vec<Option<PhpRef>>> {
+    let Some(cl) = &c.closure else {
+        return &c.func.statics;
+    };
+    let n = cl.obj().native.borrow();
+    let Some(n) = n.as_ref() else {
+        return &c.func.statics;
+    };
+    let any: &dyn std::any::Any = &**n;
+    let Some(cd) = any.downcast_ref::<ClosureData>() else {
+        return &c.func.statics;
+    };
+    if !base.is_null()
+        && let FuncKind::User(code) = &c.func.kind
+    {
+        for (k, (inner, _, _)) in code.uses.iter().enumerate() {
+            if let Some(Some(v)) = cd.captured.get(k) {
+                // SAFETY: the callee's fresh slots.
+                unsafe { *base.add(*inner as usize) = Some(v.clone()) };
+            }
+        }
+    }
+    &cd.statics
+}
+
+/// Code flags that need the general activation path.
+const SLOW_ACTIVATION: u32 = fflags::DEPRECATED
+    | fflags::ABSTRACT
+    | fflags::NODISCARD
+    | fflags::GENERATOR
+    | fflags::VARIADIC;
+
+/// Pushes and starts the frame of a user function whose arguments are
+/// bound simply (see `args_bind_simply`): fills the constant defaults of
+/// parameters not passed (the others are computed by the prologue), then
+/// writes the frame in place, field by field (built whole, the large
+/// struct would be copied). A macro so that each caller reads its sources
+/// where they are written. Unsafe: `base` must be the callee's slots.
+macro_rules! enter_simple_frame {
+    ($vm:expr, $code:expr, $base:expr, $argc:expr,
+     pending_base: $pb:expr, func: $func:expr, this: $this:expr,
+     static_class: $sc:expr, scope: $scope:expr, ret: $ret:expr,
+     closure: $closure:expr, flags: $flags:expr, mark: $mark:expr,
+     statics: $statics:expr) => {{
+        let code: &FuncCode = $code;
+        let base: *mut Slot = $base;
+        let argc: u32 = $argc;
+        for i in argc as usize..code.params.len() {
+            let param = &code.params[i];
+            if let ParamDefault::Const(v) = &param.default {
+                let mut v = v.clone();
+                if let Some(ty) = &param.ty
+                    && let Value::Int(n) = v
+                    && ty.mask & tmask::FLOAT != 0
+                    && ty.mask & tmask::INT == 0
+                {
+                    v = Value::Float(n as f64);
+                }
+                *base.add(i) = Some(v);
+            }
+        }
+        if let Some(top) = $vm.ex.frames.last_mut() {
+            top.ip = $vm.ex.ip as u32;
+        }
+        let native_base = $vm.ex.native_calls.len() as u32;
+        let frames = &mut $vm.ex.frames;
+        frames.reserve(1);
+        {
+            use std::ptr::addr_of_mut as at;
+            let d = frames.as_mut_ptr().add(frames.len());
+            at!((*d).code).write(code as *const FuncCode);
+            at!((*d).func).write($func);
+            at!((*d).ip).write(0);
+            at!((*d).base).write(base);
+            at!((*d).this).write($this);
+            at!((*d).static_class).write($sc);
+            at!((*d).scope).write($scope);
+            at!((*d).ret).write($ret);
+            at!((*d).argc).write(argc);
+            at!((*d).extra_args).write(Vec::new());
+            at!((*d).dyn_vars).write(None);
+            at!((*d).closure).write($closure);
+            at!((*d).generator).write(None);
+            at!((*d).flags).write($flags);
+            at!((*d).mark).write($mark);
+            at!((*d).statics).write($statics);
+            at!((*d).owner).write(0);
+            at!((*d).pending_base).write($pb);
+            at!((*d).native_base).write(native_base);
+            at!((*d).line_hint).write(0);
+            frames.set_len(frames.len() + 1);
+        }
+        $vm.ex.top = super::TopFrame::of(base, code);
+        $vm.ex.ip = 0;
+    }};
+}
+
+/// A callable that natives call repeatedly (array_map, usort,
+/// preg_replace_callback...), resolved on the first call only: PHP
+/// resolves the callable argument of an internal function once, when the
+/// parameter is parsed (PHP manual, Callables).
+pub struct PreparedCall {
+    value: Value,
+    callee: Option<Callee>,
+    /// A user function or closure that can be entered directly (no
+    /// trampoline, nothing the general activation must handle).
+    direct: bool,
+    /// The closure's data (direct closures): the closure object, which
+    /// `callee` holds, keeps it in place.
+    cd: *const ClosureData,
+}
+
+impl PreparedCall {
+    pub fn new(value: Value) -> PreparedCall {
+        PreparedCall {
+            value,
+            callee: None,
+            direct: false,
+            cd: std::ptr::null(),
+        }
+    }
+
+    /// The callable value.
+    pub fn value(&self) -> &Value {
+        &self.value
+    }
+}
+
 /// Native data of `Closure` objects.
 pub struct ClosureData {
     pub func: Rc<Func>,
@@ -181,33 +312,7 @@ impl Vm {
                 )
             }
         };
-        // Closures have their own statics, and their `use` variables go
-        // into the callee's slots now.
-        let statics: *const RefCell<Vec<Option<PhpRef>>> = match &c.closure {
-            Some(cl) => match cl.obj().native.borrow().as_ref() {
-                Some(n) => {
-                    let any: &dyn std::any::Any = &**n;
-                    match any.downcast_ref::<ClosureData>() {
-                        Some(cd) => {
-                            if !base.is_null()
-                                && let FuncKind::User(code) = &c.func.kind
-                            {
-                                for (k, (inner, _, _)) in code.uses.iter().enumerate() {
-                                    if let Some(Some(v)) = cd.captured.get(k) {
-                                        // SAFETY: the callee's fresh slots.
-                                        unsafe { *base.add(*inner as usize) = Some(v.clone()) };
-                                    }
-                                }
-                            }
-                            &cd.statics as *const _
-                        }
-                        None => &c.func.statics as *const _,
-                    }
-                }
-                None => &c.func.statics as *const _,
-            },
-            None => &c.func.statics as *const _,
-        };
+        let statics = closure_statics(&c, base);
         if c.magic_name.is_some() {
             fl |= pending_flags::MAGIC_CALL;
         }
@@ -253,21 +358,68 @@ impl Vm {
         scope: *const Class,
         flags: u32,
     ) {
+        let statics = &func.statics as *const RefCell<Vec<Option<PhpRef>>>;
+        self.push_user_ex(func, this, static_class, scope, flags, None, statics);
+    }
+
+    /// Pushes a call of closure object `o` when it runs user code (one
+    /// look at its data, which [`push_callee`](Self::push_callee) would
+    /// take twice); false for other closures.
+    pub(crate) fn push_user_closure(&mut self, o: &ObjRef) -> bool {
+        let n = o.obj().native.borrow();
+        let Some(nd) = n.as_ref() else {
+            return false;
+        };
+        let any: &dyn std::any::Any = &**nd;
+        let Some(cd) = any.downcast_ref::<ClosureData>() else {
+            return false;
+        };
+        if cd.magic_name.is_some() {
+            return false;
+        }
+        let FuncKind::User(code) = &cd.func.kind else {
+            return false;
+        };
+        let base = self.push_user_ex(
+            cd.func.clone(),
+            cd.this.clone(),
+            cd.called_scope,
+            cd.scope,
+            0,
+            Some(o.clone()),
+            &cd.statics,
+        );
+        for (k, (inner, _, _)) in code.uses.iter().enumerate() {
+            if let Some(Some(v)) = cd.captured.get(k) {
+                // SAFETY: the callee's fresh slots.
+                unsafe { *base.add(*inner as usize) = Some(v.clone()) };
+            }
+        }
+        true
+    }
+
+    /// Pushes a pending call of a user function; its slots.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn push_user_ex(
+        &mut self,
+        func: Rc<Func>,
+        this: Option<ObjRef>,
+        static_class: *const Class,
+        scope: *const Class,
+        flags: u32,
+        closure: Option<ObjRef>,
+        statics: *const RefCell<Vec<Option<PhpRef>>>,
+    ) -> *mut Slot {
         let FuncKind::User(code) = &func.kind else {
             unreachable!()
         };
-        const SLOW: u32 = fflags::DEPRECATED
-            | fflags::ABSTRACT
-            | fflags::NODISCARD
-            | fflags::GENERATOR
-            | fflags::VARIADIC;
         let mut fl = flags;
-        if code.flags & SLOW != 0 || code.file.is_empty() {
+        if code.flags & SLOW_ACTIVATION != 0 || code.file.is_empty() {
             fl |= pending_flags::SLOW;
         }
         let (base, mark) = self.ex.stack.alloc(code.num_slots as usize);
         let (byref, np) = (code.byref_mask, code.direct_params);
-        let statics = &func.statics as *const RefCell<Vec<Option<PhpRef>>>;
         let v = &mut self.ex.pending;
         v.reserve(1);
         // SAFETY: as in push_callee.
@@ -284,7 +436,7 @@ impl Vm {
             at!((*d).this).write(this);
             at!((*d).static_class).write(static_class);
             at!((*d).scope).write(scope);
-            at!((*d).closure).write(None);
+            at!((*d).closure).write(closure);
             at!((*d).flags).write(fl);
             at!((*d).magic_name).write(None);
             at!((*d).statics).write(statics);
@@ -294,6 +446,7 @@ impl Vm {
             at!((*d).np).write(np);
             v.set_len(v.len() + 1);
         }
+        base
     }
 
     /// Drops a pending call that won't be made.
@@ -441,7 +594,12 @@ impl Vm {
                 }
             }
         };
-        self.push_callee(Callee::func(func), 0);
+        if func.is_native() {
+            self.push_callee(Callee::func(func), 0);
+        } else {
+            let scope = func.scope.get();
+            self.push_user(func, None, scope, scope, 0);
+        }
         Ok(())
     }
 
@@ -450,6 +608,11 @@ impl Vm {
         // Closures, without copying the value.
         if let Some(Value::Object(o)) = self.peek(r) {
             let o = o.clone();
+            if self.push_user_closure(&o) {
+                drop(o);
+                self.drop_tmp(r);
+                return Ok(());
+            }
             if let Some(c) = self.closure_data(&o) {
                 drop(o);
                 self.drop_tmp(r);
@@ -1165,9 +1328,9 @@ impl Vm {
         Ok(())
     }
 
+    #[inline]
     pub(crate) fn class_ptr_of(&self, o: &ObjRef) -> *const Class {
-        let c: &Rc<dyn goro_runtime::ClassInfo> = o.class();
-        Rc::as_ptr(c) as *const Class
+        o.class_addr() as *const Class
     }
 
     /// `parent::$prop::get()` / `parent::$prop::set()`: calls the parent
@@ -1596,7 +1759,7 @@ impl Vm {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn send_val(&mut self, arg: u32, v: Value, from_call: bool) -> R<()> {
         if let Some(s) = self.direct_arg_slot(arg) {
             let old = unsafe { (*s).replace(v) };
@@ -2365,23 +2528,6 @@ impl Vm {
             let p = self.ex.pending.pop().unwrap();
             return self.activate_slow(p, ret, ret_var, entry);
         }
-        let base = p.base;
-        // Defaults of parameters not passed (constants: the others are
-        // computed by the prologue).
-        for i in p.argc as usize..code.params.len() {
-            let param = &code.params[i];
-            if let ParamDefault::Const(v) = &param.default {
-                let mut v = v.clone();
-                if let Some(ty) = &param.ty
-                    && let Value::Int(n) = v
-                    && ty.mask & tmask::FLOAT != 0
-                    && ty.mask & tmask::INT == 0
-                {
-                    v = Value::Float(n as f64);
-                }
-                unsafe { *base.add(i) = Some(v) };
-            }
-        }
         let mut flags = 0;
         if entry {
             flags |= frame_flags::ENTRY;
@@ -2397,53 +2543,36 @@ impl Vm {
         } else {
             p.func.scope.get()
         };
-        if let Some(top) = self.ex.frames.last_mut() {
-            top.ip = self.ex.ip as u32;
-        }
-        let native_base = self.ex.native_calls.len() as u32;
-        let frames = &mut self.ex.frames;
-        frames.reserve(1);
-        // SAFETY: capacity reserved; the frame is written in place field by
-        // field (built whole, the large struct would be copied). The
-        // pending call's handles move into it; its other owning fields are
-        // empty (checked above), so it is popped without a drop.
+        // The pending call's handles move into the frame; its other owning
+        // fields are empty (checked above), so it is popped without a drop.
         debug_assert!(
             p.extra.is_empty()
                 && p.args.capacity() == 0
                 && p.named_extra.is_none()
                 && p.magic_name.is_none()
         );
+        let base = p.base;
+        // SAFETY: the handles are moved out of the pending entry, which
+        // set_len then forgets.
         unsafe {
-            use std::ptr::addr_of_mut as at;
-            let d = frames.as_mut_ptr().add(frames.len());
-            at!((*d).code).write(code as *const FuncCode);
-            at!((*d).func).write(std::ptr::read(&p.func));
-            at!((*d).ip).write(0);
-            at!((*d).base).write(base);
-            at!((*d).this).write(std::ptr::read(&p.this));
-            at!((*d).static_class).write(p.static_class);
-            at!((*d).scope).write(scope);
-            at!((*d).ret).write(ret);
-            at!((*d).argc).write(p.argc);
-            at!((*d).extra_args).write(Vec::new());
-            at!((*d).dyn_vars).write(None);
-            at!((*d).closure).write(std::ptr::read(&p.closure));
-            at!((*d).generator).write(None);
-            at!((*d).flags).write(flags);
-            at!((*d).mark).write(p.mark);
-            at!((*d).statics).write(p.statics);
-            at!((*d).owner).write(0);
-            at!((*d).pending_base).write((len - 1) as u32);
-            at!((*d).native_base).write(native_base);
-            at!((*d).line_hint).write(0);
-            frames.set_len(frames.len() + 1);
+            enter_simple_frame!(
+                self,
+                code,
+                base,
+                p.argc,
+                pending_base: (len - 1) as u32,
+                func: std::ptr::read(&p.func),
+                this: std::ptr::read(&p.this),
+                static_class: p.static_class,
+                scope: scope,
+                ret: ret,
+                closure: std::ptr::read(&p.closure),
+                flags: flags,
+                mark: p.mark,
+                statics: p.statics
+            );
             self.ex.pending.set_len(len - 1);
         }
-        self.ex.top = super::TopFrame {
-            base,
-            code: code as *const FuncCode,
-        };
-        self.ex.ip = 0;
         Ok(())
     }
 
@@ -3025,10 +3154,7 @@ impl Vm {
             self.ex.frames.truncate(len - 1);
             match self.ex.frames.last() {
                 Some(top) => {
-                    self.ex.top = super::TopFrame {
-                        base: top.base,
-                        code: top.code,
-                    };
+                    self.ex.top = super::TopFrame::of(top.base, top.code);
                     self.ex.ip = top.ip as usize;
                 }
                 None => self.ex.top = super::TopFrame::default(),
@@ -3115,6 +3241,9 @@ impl Vm {
                 (Some(Value::Bool(_)), m) => m & tmask::BOOL == tmask::BOOL,
                 (Some(Value::Float(_)), m) => m & tmask::FLOAT != 0,
                 (Some(Value::Null), m) => m & tmask::NULL != 0,
+                (Some(Value::Object(o)), m) => {
+                    m & tmask::OBJECT != 0 || names_class_of(self, ty, o)
+                }
                 _ => false,
             };
             if ok {
@@ -3258,7 +3387,168 @@ impl Vm {
     pub fn call_callee_raw(&mut self, c: Callee, args: Vec<Value>) -> R<Value> {
         let magic = c.magic_name.is_some();
         self.push_callee(c, 0);
-        let mut named: Vec<(PhpStr, Value)> = Vec::new();
+        self.send_rust_args(args, magic)?;
+        self.finish_rust_call()
+    }
+
+    /// Calls a prepared callable (see [`PreparedCall`]) with positional
+    /// arguments, as [`call_callee`](Self::call_callee) does.
+    #[inline]
+    pub fn call_prepared<I>(&mut self, pc: &mut PreparedCall, args: I) -> R<Value>
+    where
+        I: IntoIterator<Item = Value>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        self.call_prepared_raw(pc, args).map(|v| v.into_deref())
+    }
+
+    /// [`call_prepared`](Self::call_prepared), keeping a reference returned
+    /// by a by-reference function.
+    pub fn call_prepared_raw<I>(&mut self, pc: &mut PreparedCall, args: I) -> R<Value>
+    where
+        I: IntoIterator<Item = Value>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        if pc.callee.is_none() {
+            let c = self.resolve_callable(&pc.value, true)?;
+            pc.direct = c.magic_name.is_none()
+                && match &c.func.kind {
+                    FuncKind::User(code) => {
+                        code.flags & SLOW_ACTIVATION == 0 && !code.file.is_empty()
+                    }
+                    FuncKind::Native { .. } => false,
+                };
+            if pc.direct
+                && let Some(cl) = &c.closure
+            {
+                let n = cl.obj().native.borrow();
+                let any: Option<&dyn std::any::Any> = n.as_ref().map(|b| &**b as _);
+                match any.and_then(|a| a.downcast_ref::<ClosureData>()) {
+                    Some(cd) => pc.cd = cd,
+                    None => pc.direct = false,
+                }
+            }
+            pc.callee = Some(c);
+        }
+        let args = args.into_iter();
+        let c = pc.callee.as_ref().unwrap();
+        if pc.direct
+            && let FuncKind::User(code) = &c.func.kind
+        {
+            // By-value parameters only (references go through the general
+            // path, which also warns for values).
+            let n = args.len();
+            if n < 64 && n as u32 <= code.direct_params && code.byref_mask & ((1u64 << n) - 1) == 0
+            {
+                let c = c.clone();
+                return self.call_direct(c, pc.cd, args);
+            }
+        }
+        let c = c.clone();
+        let magic = c.magic_name.is_some();
+        self.push_callee(c, 0);
+        self.send_rust_args(args, magic)?;
+        self.finish_rust_call()
+    }
+
+    /// Enters a user function from Rust without a pending call: the
+    /// arguments go straight into the callee's slots. Arguments needing
+    /// coercion or checks take the general path.
+    fn call_direct<I: Iterator<Item = Value>>(
+        &mut self,
+        c: Callee,
+        cd: *const ClosureData,
+        args: I,
+    ) -> R<Value> {
+        // Diagnostics queued by a write path come out before user code runs.
+        if !self.err.queued.is_empty() {
+            self.flush_deferred()?;
+        }
+        let FuncKind::User(code) = &c.func.kind else {
+            unreachable!()
+        };
+        // SAFETY: `c.func` keeps the code alive until the frame (which
+        // takes it over) starts.
+        let code: &FuncCode = unsafe { &*Rc::as_ptr(code) };
+        let n = code.num_slots as usize;
+        let (base, mark) = self.ex.stack.alloc(n);
+        let mut argc = 0u32;
+        for a in args {
+            // SAFETY: fresh (empty) parameter slots of the callee.
+            unsafe { std::ptr::write(base.add(argc as usize), Some(a.into_deref())) };
+            argc += 1;
+        }
+        let statics = if cd.is_null() {
+            closure_statics(&c, base)
+        } else {
+            // SAFETY: see `PreparedCall::cd`.
+            let cd = unsafe { &*cd };
+            for (k, (inner, _, _)) in code.uses.iter().enumerate() {
+                if let Some(Some(v)) = cd.captured.get(k) {
+                    // SAFETY: the callee's fresh slots.
+                    unsafe { *base.add(*inner as usize) = Some(v.clone()) };
+                }
+            }
+            &cd.statics
+        };
+        if !args_bind_simply(self, code, base, argc) {
+            let mut v = Vec::with_capacity(argc as usize);
+            for i in 0..n {
+                // SAFETY: the slots allocated above.
+                let s = unsafe { (*base.add(i)).take() };
+                if i < argc as usize {
+                    v.push(s.unwrap_or_default());
+                }
+            }
+            self.ex.stack.release(mark);
+            return self.call_callee_raw(c, v);
+        }
+        let saved = std::mem::replace(&mut self.err.defer_depth, 0);
+        let saved_loc = self.loc_override.take();
+        let mut result: Slot = None;
+        let scope = if c.closure.is_some() {
+            c.scope
+        } else {
+            c.func.scope.get()
+        };
+        let Callee {
+            func,
+            this,
+            static_class,
+            closure,
+            ..
+        } = c;
+        let pending_base = self.ex.pending.len() as u32;
+        // SAFETY: the slots allocated above.
+        unsafe {
+            enter_simple_frame!(
+                self,
+                code,
+                base,
+                argc,
+                pending_base: pending_base,
+                func: func,
+                this: this,
+                static_class: static_class,
+                scope: scope,
+                ret: &mut result,
+                closure: closure,
+                flags: frame_flags::ENTRY,
+                mark: mark,
+                statics: statics
+            );
+        }
+        let r = self.run();
+        self.loc_override = saved_loc;
+        self.err.defer_depth = saved;
+        r
+    }
+
+    /// Passes the arguments of a call made from Rust to the pending call
+    /// on top (discarding it on error). By-reference parameters get the
+    /// given references, or a warning for values.
+    #[inline]
+    fn send_rust_args<I: IntoIterator<Item = Value>>(&mut self, args: I, magic: bool) -> R<()> {
         for (i, a) in args.into_iter().enumerate() {
             let i = i as u32;
             // Plain values to by-value parameters.
@@ -3274,38 +3564,43 @@ impl Vm {
                     Err(a) => a,
                 }
             };
-            if !magic && self.pending_arg_by_ref(i) {
-                let v = match a {
-                    Value::Ref(_) => a,
-                    other if self.pending_prefers_ref() => other,
-                    other => {
-                        let f = self.ex.pending.last().unwrap().func.clone();
-                        let pname = self
-                            .params_of(&f)
-                            .get(i as usize)
-                            .map(|p| p.name.dname())
-                            .unwrap_or_default();
-                        let msg = format!(
-                            "{}(): Argument #{} (${}) must be passed by reference, value given",
-                            self.func_display_name(&f),
-                            i + 1,
-                            pname
-                        );
-                        if let Err(e) = self.warn(&msg) {
-                            let p = self.ex.pending.pop().unwrap();
-                            self.discard_pending(p);
-                            return Err(e);
-                        }
-                        Value::Ref(PhpRef::new(other))
-                    }
-                };
-                self.put_arg(i, v);
-            } else {
-                self.put_arg(i, a.into_deref());
+            if let Err(e) = self.send_rust_arg_slow(i, a, magic) {
+                let p = self.ex.pending.pop().unwrap();
+                self.discard_pending(p);
+                return Err(e);
             }
         }
-        let _ = &mut named;
-        self.finish_rust_call()
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn send_rust_arg_slow(&mut self, i: u32, a: Value, magic: bool) -> R<()> {
+        if !magic && self.pending_arg_by_ref(i) {
+            let v = match a {
+                Value::Ref(_) => a,
+                other if self.pending_prefers_ref() => other,
+                other => {
+                    let f = self.ex.pending.last().unwrap().func.clone();
+                    let pname = self
+                        .params_of(&f)
+                        .get(i as usize)
+                        .map(|p| p.name.dname())
+                        .unwrap_or_default();
+                    let msg = format!(
+                        "{}(): Argument #{} (${}) must be passed by reference, value given",
+                        self.func_display_name(&f),
+                        i + 1,
+                        pname
+                    );
+                    self.warn(&msg)?;
+                    Value::Ref(PhpRef::new(other))
+                }
+            };
+            self.put_arg(i, v);
+        } else {
+            self.put_arg(i, a.into_deref());
+        }
+        Ok(())
     }
 
     /// Calls with named arguments too (`call_user_func_array` with string
@@ -3818,7 +4113,25 @@ struct NativeParts {
 /// code), and each value matches its parameter's type exactly. Pure (no
 /// diagnostics, no autoloading): anything else is left to the general
 /// path.
+/// Whether type `ty` names the class of `o` itself (one of its plain
+/// class alternatives); other matches are left to the general check.
 #[inline]
+fn names_class_of(vm: &Vm, ty: &TypeHint, o: &ObjRef) -> bool {
+    // SAFETY: an object's class outlives it.
+    let name = unsafe { &*vm.class_ptr_of(o) }.name.as_bytes();
+    for t in &ty.classes {
+        if let [n] = &t[..] {
+            let n = n.as_bytes();
+            let n = n.strip_prefix(b"\\").unwrap_or(n);
+            if n.len() == name.len() && (n == name || n.eq_ignore_ascii_case(name)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[inline(always)]
 fn args_bind_simply(vm: &Vm, code: &FuncCode, base: *mut Slot, argc: u32) -> bool {
     for (i, param) in code.params.iter().enumerate() {
         if (i as u32) >= argc {
@@ -3840,19 +4153,7 @@ fn args_bind_simply(vm: &Vm, code: &FuncCode, base: *mut Slot, argc: u32) -> boo
             Some(Value::Bool(true)) => m & tmask::TRUE != 0,
             Some(Value::Bool(false)) => m & tmask::FALSE != 0,
             Some(Value::Null) => m & tmask::NULL != 0,
-            Some(Value::Object(o)) => {
-                m & tmask::OBJECT != 0 || {
-                    // SAFETY: an object's class outlives it.
-                    let cls = unsafe { &*vm.class_ptr_of(o) };
-                    ty.classes.iter().any(|t| {
-                        t.len() == 1 && {
-                            let n = t[0].as_bytes();
-                            let n = n.strip_prefix(b"\\").unwrap_or(n);
-                            cls.name.as_bytes().eq_ignore_ascii_case(n)
-                        }
-                    })
-                }
-            }
+            Some(Value::Object(o)) => m & tmask::OBJECT != 0 || names_class_of(vm, ty, o),
             _ => false,
         };
         if !ok {

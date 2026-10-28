@@ -2,6 +2,7 @@
 //! functions, Pattern Modifiers; results and messages observed on PHP 8.5
 //! and in tests ext/pcre/tests/*.phpt).
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -12,6 +13,7 @@ use goro_runtime::{Key, PhpArray, PhpStr, Value};
 use super::string::sv;
 use crate::func::Args;
 use crate::registry::{ConstVal, Module};
+use crate::vm::calls::PreparedCall;
 use crate::vm::{R, Vm};
 
 pub static MODULE: Module = Module {
@@ -453,7 +455,7 @@ fn preg_match_all(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 enum Repl<'a> {
     Str(&'a [u8]),
-    Callback(&'a Value, i64),
+    Callback(&'a RefCell<PreparedCall>, i64),
 }
 
 /// Replaces matches of `re` in `subj`; None on a match error.
@@ -483,7 +485,7 @@ fn replace_one(
                     Repl::Str(r) => expand_replacement(r, subj, &gm.caps, &mut out),
                     Repl::Callback(cb, flags) => {
                         let arr = match_array(re, &names, subj, &gm.caps, *flags);
-                        let r = vm.call_value(cb, vec![Value::Array(arr)])?;
+                        let r = vm.call_prepared(&mut cb.borrow_mut(), [Value::Array(arr)])?;
                         vm.append_to_string(&mut out, &r)?;
                     }
                 }
@@ -543,7 +545,7 @@ fn replace_subject(
 
 enum ReplSpec {
     Str(PhpStr),
-    Callback(Value, i64),
+    Callback(RefCell<PreparedCall>, i64),
 }
 
 fn run_replace(
@@ -640,9 +642,17 @@ fn preg_replace_callback(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let pats = match a.val(0) {
         Value::Array(ps) => to_strs(vm, &ps)?
             .into_iter()
-            .map(|p| (p, ReplSpec::Callback(cb.clone(), flags)))
+            .map(|p| {
+                (
+                    p,
+                    ReplSpec::Callback(RefCell::new(PreparedCall::new(cb.clone())), flags),
+                )
+            })
             .collect(),
-        Value::Str(p) => vec![(p, ReplSpec::Callback(cb.clone(), flags))],
+        Value::Str(p) => vec![(
+            p,
+            ReplSpec::Callback(RefCell::new(PreparedCall::new(cb.clone())), flags),
+        )],
         _ => unreachable!(),
     };
     let limit = a.int_or(3, -1);
@@ -672,7 +682,10 @@ fn preg_replace_callback_array(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 "Argument #1 ($pattern) must contain only valid callbacks",
             );
         }
-        pats.push((p, ReplSpec::Callback(cb, flags)));
+        pats.push((
+            p,
+            ReplSpec::Callback(RefCell::new(PreparedCall::new(cb)), flags),
+        ));
     }
     let limit = a.int_or(2, -1);
     let subject = a.val(1);

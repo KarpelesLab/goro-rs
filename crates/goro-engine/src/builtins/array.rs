@@ -16,6 +16,7 @@ use goro_runtime::{Key, KeyRef, PhpArray, PhpRef, PhpStr, Value};
 use super::math::php_compare;
 use crate::func::Args;
 use crate::registry::{ConstVal, Module};
+use crate::vm::calls::PreparedCall;
 use crate::vm::{R, Unwind, Vm};
 
 pub static MODULE: Module = Module {
@@ -377,8 +378,12 @@ fn key_value(k: KeyRef<'_>) -> Value {
 }
 
 /// Calls a callback, returning its result.
-fn call(vm: &mut Vm, cb: &Value, args: Vec<Value>) -> R<Value> {
-    vm.call_value(cb, args)
+fn call<I>(vm: &mut Vm, cb: &mut PreparedCall, args: I) -> R<Value>
+where
+    I: IntoIterator<Item = Value>,
+    I::IntoIter: ExactSizeIterator,
+{
+    vm.call_prepared(cb, args)
 }
 
 /// The array's elements as (key, value) pairs; shared references are kept.
@@ -1316,6 +1321,7 @@ fn array_splice(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn array_map(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let cb = a.val(0);
+    let mut pc = PreparedCall::new(cb.clone());
     let arrays = arrays_from(vm, a, 1)?;
     if arrays.len() == 1 {
         let arr = &arrays[0];
@@ -1324,7 +1330,7 @@ fn array_map(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
         let mut out = PhpArray::with_capacity(arr.len());
         for (k, v) in entries(arr) {
-            let r = call(vm, &cb, vec![v.deref()])?;
+            let r = call(vm, &mut pc, [v.deref()])?;
             out.insert(k, r);
         }
         return Ok(Value::Array(out));
@@ -1355,7 +1361,7 @@ fn array_map(vm: &mut Vm, a: &mut Args) -> R<Value> {
         let v = if cb.is_null() {
             Value::Array(list_of(args))
         } else {
-            call(vm, &cb, args)?
+            call(vm, &mut pc, args)?
         };
         let _ = out.push(v);
     }
@@ -1366,6 +1372,7 @@ fn array_filter(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let arr = a.array(0);
     let cb = if a.has(1) { a.val(1) } else { Value::Null };
     let mode = a.int_or(2, 0);
+    let mut pc = PreparedCall::new(cb.clone());
     let mut out = PhpArray::new();
     for (k, v) in entries(&arr) {
         let keep = if cb.is_null() {
@@ -1376,7 +1383,7 @@ fn array_filter(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 1 => vec![v.deref(), k.to_value()],
                 _ => vec![v.deref()],
             };
-            let r = call(vm, &cb, args)?;
+            let r = call(vm, &mut pc, args)?;
             vm.to_bool(&r)
         };
         if keep {
@@ -1388,20 +1395,20 @@ fn array_filter(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn array_reduce(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let arr = a.array(0);
-    let cb = a.val(1);
+    let mut pc = PreparedCall::new(a.val(1));
     let mut acc = if a.has(2) { a.val(2) } else { Value::Null };
     for (_, v) in entries(&arr) {
-        acc = call(vm, &cb, vec![acc, v.deref()])?;
+        acc = call(vm, &mut pc, [acc, v.deref()])?;
     }
     Ok(acc)
 }
 
 fn find_common(vm: &mut Vm, a: &Args) -> R<Option<(Key, Value)>> {
     let arr = a.array(0);
-    let cb = a.val(1);
+    let mut pc = PreparedCall::new(a.val(1));
     for (k, v) in entries(&arr) {
         let v = v.deref();
-        let r = call(vm, &cb, vec![v.clone(), k.to_value()])?;
+        let r = call(vm, &mut pc, [v.clone(), k.to_value()])?;
         if vm.to_bool(&r) {
             return Ok(Some((k, v)));
         }
@@ -1422,9 +1429,9 @@ fn array_any(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn array_all(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let arr = a.array(0);
-    let cb = a.val(1);
+    let mut pc = PreparedCall::new(a.val(1));
     for (k, v) in entries(&arr) {
-        let r = call(vm, &cb, vec![v.deref(), k.to_value()])?;
+        let r = call(vm, &mut pc, [v.deref(), k.to_value()])?;
         if !vm.to_bool(&r) {
             return Ok(Value::Bool(false));
         }
@@ -1476,7 +1483,7 @@ fn array_identity(r: &PhpRef) -> Option<*const goro_runtime::ArrayData> {
 fn walk_ref(
     vm: &mut Vm,
     r: &PhpRef,
-    cb: &Value,
+    cb: &mut PreparedCall,
     extra: Option<&Value>,
     recursive: bool,
     depth: usize,
@@ -1500,18 +1507,16 @@ fn walk_ref(
                 vm.warn("array_walk_recursive(): Recursion detected")?;
                 continue;
             }
-            walk_ref(vm, &er, cb, extra, recursive, depth + 1)?;
+            walk_ref(vm, &er, &mut *cb, extra, recursive, depth + 1)?;
             drop(er);
             unref_element(r, &k);
             continue;
         }
-        let mut args = vec![Value::Ref(er.clone()), k.to_value()];
-        if let Some(x) = extra {
-            args.push(x.clone());
-        }
-        drop(er);
         let ident = array_identity(r);
-        let res = call(vm, cb, args);
+        let res = match extra {
+            Some(x) => call(vm, cb, [Value::Ref(er), k.to_value(), x.clone()]),
+            None => call(vm, cb, [Value::Ref(er), k.to_value()]),
+        };
         res?;
         // Test bug70713.phpt: the callback replaced the walked variable.
         let now = array_identity(r);
@@ -1539,7 +1544,7 @@ fn walk_ref(
 }
 
 fn array_walk_common(vm: &mut Vm, a: &mut Args, recursive: bool) -> R<Value> {
-    let cb = a.val(1);
+    let mut cb = PreparedCall::new(a.val(1));
     let extra = if a.has(2) { Some(a.val(2)) } else { None };
     let r = match a.ref_at(0) {
         Some(r) => r,
@@ -1547,7 +1552,7 @@ fn array_walk_common(vm: &mut Vm, a: &mut Args, recursive: bool) -> R<Value> {
     };
     let target = r.get();
     match target {
-        Value::Array(_) => walk_ref(vm, &r, &cb, extra.as_ref(), recursive, 0)?,
+        Value::Array(_) => walk_ref(vm, &r, &mut cb, extra.as_ref(), recursive, 0)?,
         Value::Object(o) => {
             // The property table, with mangled names for private and
             // protected properties (test array_walk/array_walk_objects
@@ -1560,7 +1565,7 @@ fn array_walk_common(vm: &mut Vm, a: &mut Args, recursive: bool) -> R<Value> {
                 if let Some(x) = &extra {
                     args.push(x.clone());
                 }
-                call(vm, &cb, args)?;
+                call(vm, &mut cb, args)?;
                 let nv = pr.get();
                 if let Key::Str(name) = &k
                     && !name.starts_with(b"\0")
@@ -1761,12 +1766,12 @@ fn sort_items<T>(
 fn user_cmp(
     vm: &mut Vm,
     a: &Args,
-    cb: &Value,
+    cb: &mut PreparedCall,
     x: Value,
     y: Value,
     warned: &mut bool,
 ) -> R<Ordering> {
-    let r = call(vm, cb, vec![x.clone(), y.clone()])?;
+    let r = call(vm, cb, [x.clone(), y.clone()])?;
     if let Value::Bool(b) = r {
         if !*warned {
             *warned = true;
@@ -1778,7 +1783,7 @@ fn user_cmp(
         if b {
             return Ok(Ordering::Greater);
         }
-        let r2 = call(vm, cb, vec![y, x])?;
+        let r2 = call(vm, cb, [y, x])?;
         return Ok(if vm.to_bool(&r2) {
             Ordering::Less
         } else {
@@ -1816,7 +1821,7 @@ fn do_sort(
     flags: i64,
 ) -> R<Value> {
     let (r, arr) = ref_array(vm, a, 0, "array")?;
-    let cb = if user { a.val(1) } else { Value::Null };
+    let mut cb = PreparedCall::new(if user { a.val(1) } else { Value::Null });
     let mut items = entries(&arr);
     drop(arr);
     let mut warned = false;
@@ -1826,7 +1831,7 @@ fn do_sort(
             SortBy::Key => (x.0.to_value(), y.0.to_value()),
         };
         let o = if user {
-            user_cmp(vm, a, &cb, pv, qv, &mut warned)?
+            user_cmp(vm, a, &mut cb, pv, qv, &mut warned)?
         } else {
             flag_compare(vm, flags, &pv, &qv)?
         };
@@ -2255,7 +2260,14 @@ fn set_cmp(
     warned: &mut bool,
 ) -> R<Ordering> {
     match cb {
-        Some(cb) => user_cmp(vm, a, cb, x.deref(), y.deref(), warned),
+        Some(cb) => user_cmp(
+            vm,
+            a,
+            &mut PreparedCall::new(cb.clone()),
+            x.deref(),
+            y.deref(),
+            warned,
+        ),
         None => flag_compare(vm, SORT_STRING, &x.deref(), &y.deref()),
     }
 }
