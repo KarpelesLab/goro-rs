@@ -11,6 +11,7 @@ pub mod enums;
 pub mod exec;
 pub mod fiber;
 pub mod file;
+pub mod filter;
 pub mod gmp;
 pub mod hash;
 pub mod highlight;
@@ -71,5 +72,6 @@ pub fn modules() -> Vec<&'static Module> {
         &random::MODULE,
         &bcmath::MODULE,
         &gmp::MODULE,
+        &filter::MODULE,
     ]
 }

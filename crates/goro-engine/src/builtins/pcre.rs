@@ -152,7 +152,7 @@ fn limits_for(vm: &Vm, pat: &[u8]) -> Limits {
     l
 }
 
-fn limits(vm: &Vm) -> Limits {
+pub(crate) fn limits(vm: &Vm) -> Limits {
     let mut l = Limits::new(
         ini_u32(vm, b"pcre.backtrack_limit", 1_000_000),
         ini_u32(vm, b"pcre.recursion_limit", 100_000),
