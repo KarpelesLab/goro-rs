@@ -118,6 +118,11 @@ pub(crate) fn new_doc(kind: DocKind, modern: bool) -> NodeId {
     with_arena(|a| {
         let d = a.new_document(kind);
         a.doc_mut(d).modern = modern;
+        if kind == DocKind::Html5 {
+            // HTML documents serialize as standalone XML (observed on PHP
+            // 8.5).
+            a.doc_mut(d).standalone = 1;
+        }
         d
     })
 }
@@ -1187,14 +1192,28 @@ fn html_parse(vm: &mut Vm, a: &Args, input: &[u8], source: &str, url: Option<Str
     let r = xmlstore::with(|s| goro_xml::html5::parse_document(&mut s.arena, input, &opts));
     let fname = a.fname();
     let text = String::from_utf8_lossy(input);
+    // Parse errors are libxml errors of level 2, code 1 (observed on PHP
+    // 8.5, test HTMLDocument_fromString_parser_warning_internal_error).
+    let _ = &text;
     for e in &r.errors {
         let m = e.message(source);
-        let _ = &text;
-        vm.warn(&format!("{fname}(): {m}"))?;
+        let err = goro_xml::error::XmlError {
+            domain: goro_xml::error::Domain::Html,
+            code: 1,
+            level: goro_xml::error::LEVEL_ERROR,
+            message: m.clone(),
+            file: Some(source.to_string()),
+            line: e.line,
+            column: e.column,
+        };
+        if !libxml::record(vm, err) {
+            vm.warn(&format!("{fname}(): {m}"))?;
+        }
     }
     with_arena(|ar| {
         let dd = ar.doc_mut(r.doc);
         dd.modern = true;
+        dd.standalone = 1;
         dd.url = url.clone();
     });
     wrap_node(vm, r.doc)
@@ -1206,14 +1225,30 @@ fn html_create_from_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn html_create_from_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some(path) = check_path(vm, a, 0, "path")? else {
-        return Ok(Value::Null);
+    // Read through PHP's streams (observed on PHP 8.5, tests
+    // modern/html/parser/HTMLDocument_fromFile_*.phpt).
+    let p = a.str(0);
+    if p.is_empty() {
+        return vm.throw("ValueError", "Path must not be empty");
+    }
+    if p.as_bytes().contains(&0) {
+        return vm.fthrow(a, "ValueError", "Argument #1 ($path) must not contain any null bytes");
+    }
+    if p.as_bytes().windows(3).any(|w| w.eq_ignore_ascii_case(b"%00")) {
+        return vm.fthrow(a, "ValueError", "Argument #1 ($path) must not contain percent-encoded NUL bytes");
+    }
+    let path = s8(&p);
+    let bytes = match super::super::file::open_stream(vm, a, p.as_bytes(), b"rb", false)? {
+        Some(mut st) => super::super::file::read_rest(vm, &mut st),
+        None => return vm.throw("Exception", &format!("Cannot open file '{path}'")),
     };
-    let fname = a.fname();
-    let Some(bytes) = read_for_load(vm, &fname, &path)? else {
-        return vm.throw("Exception", &format!("Cannot open file '{path}'"));
+    vm.check_deferred()?;
+    let url = if path.contains("://") {
+        path.clone()
+    } else {
+        let abs = file_url(vm, &path);
+        format!("file://{}", abs.replace(' ', "%20"))
     };
-    let url = file_url(vm, &path);
     html_parse(vm, a, &bytes, &path, Some(url))
 }
 

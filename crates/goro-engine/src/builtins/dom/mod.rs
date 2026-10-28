@@ -492,7 +492,7 @@ pub(crate) fn is_id_attr(s: &xmlstore::Store, at: NodeId) -> bool {
 /// The node type number PHP reports.
 pub(crate) fn node_type_num(a: &Arena, n: NodeId) -> i64 {
     let t = a.node_type(n);
-    if t == NodeType::Document && a.doc(n).kind == DocKind::Html && !a.doc(n).modern {
+    if t == NodeType::Document && matches!(a.doc(n).kind, DocKind::Html | DocKind::Html5) {
         return 13;
     }
     t as i64

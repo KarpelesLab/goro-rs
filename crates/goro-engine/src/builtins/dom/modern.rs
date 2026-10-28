@@ -331,6 +331,10 @@ pub(crate) fn set_body(vm: &mut Vm, d: NodeId, v: Value) -> R<()> {
     if cur == Some(new) {
         return Ok(());
     }
+    // Only documents with an html root get a body (DOM Standard note).
+    if with_arena(|a| html_root(a, d).is_none()) {
+        return Ok(());
+    }
     let r = match cur {
         Some(old) => {
             let p = with_arena(|a| a.parent(old)).unwrap();

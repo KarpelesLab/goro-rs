@@ -242,10 +242,6 @@ class DocumentFragment extends \Dom\Node implements \Dom\ParentNode {
         "dom\\document",
         r#"<?php namespace Dom;
 abstract class Document extends \Dom\Node implements \Dom\ParentNode {
-    public \Dom\HTMLCollection $children { get {} set {} }
-    public ?\Dom\Element $firstElementChild { get {} set {} }
-    public ?\Dom\Element $lastElementChild { get {} set {} }
-    public int $childElementCount { get {} set {} }
     public \Dom\Implementation $implementation { get {} set {} }
     public string $URL { get {} set {} }
     public string $documentURI { get {} set {} }
@@ -254,6 +250,10 @@ abstract class Document extends \Dom\Node implements \Dom\ParentNode {
     public string $inputEncoding { get {} set {} }
     public ?\Dom\DocumentType $doctype { get {} set {} }
     public ?\Dom\Element $documentElement { get {} set {} }
+    public \Dom\HTMLCollection $children { get {} set {} }
+    public ?\Dom\Element $firstElementChild { get {} set {} }
+    public ?\Dom\Element $lastElementChild { get {} set {} }
+    public int $childElementCount { get {} set {} }
     public ?\Dom\HTMLElement $body { get {} set {} }
     public ?\Dom\HTMLElement $head { get {} set {} }
     public string $title { get {} set {} }

@@ -369,7 +369,23 @@ impl W<'_> {
                 } else if &**ans_v == XML_NS {
                     candidate = Some("xml".into());
                 } else if candidate.is_none() {
-                    let p = generate_prefix(&mut map, &local_prefixes, ans.clone(), index);
+                    // The attribute's own prefix when nothing binds it here
+                    // (PHP keeps it; tests ext/dom/tests/modern/
+                    // css_selectors/namespaces.phpt,
+                    // modern/extensions/node_renaming.phpt), else a
+                    // generated one.
+                    let own = ad.name.prefix.clone().filter(|p| {
+                        &**p != "xmlns"
+                            && !local_prefixes.iter().any(|(lp, _)| lp == p)
+                            && !map.binding.iter().any(|(bp, _)| bp == p)
+                    });
+                    let p = match own {
+                        Some(p) => {
+                            map.add(ans.clone(), p.clone());
+                            p
+                        }
+                        None => generate_prefix(&mut map, &local_prefixes, ans.clone(), index),
+                    };
                     self.out.push_str(&format!(" xmlns:{p}=\""));
                     esc_attr(ans_v, &mut self.out);
                     self.out.push('"');

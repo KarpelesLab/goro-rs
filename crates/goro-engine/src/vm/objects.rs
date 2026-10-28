@@ -800,6 +800,14 @@ impl Vm {
                     && !self.in_hook(o, &p)
                 {
                     let h = h.clone();
+                    // Internal classes' computed properties take values as
+                    // plain typed properties do ("Cannot assign X to
+                    // property C::$p of type T"; ext/dom, test
+                    // Document_body_setter_errors.phpt).
+                    let v = match &p.ty {
+                        Some(t) if h.is_native() => self.coerce_prop(&p, t, v, &cls)?,
+                        _ => v,
+                    };
                     self.call_hook(o, &p, h, vec![v])?;
                     return Ok(());
                 }
