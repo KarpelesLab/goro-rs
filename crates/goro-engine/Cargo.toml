@@ -16,5 +16,6 @@ goro-ext-date = { path = "../goro-ext-date" }
 goro-ext-bcmath = { path = "../goro-ext-bcmath" }
 goro-ext-gmp = { path = "../goro-ext-gmp" }
 goro-ext-filter = { path = "../goro-ext-filter" }
+goro-ext-sodium = { path = "../goro-ext-sodium" }
 libc = "0.2"
 corosensei = "0.2"

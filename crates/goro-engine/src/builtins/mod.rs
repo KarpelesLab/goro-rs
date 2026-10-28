@@ -28,6 +28,7 @@ pub mod pcre;
 pub mod random;
 pub mod reflection;
 pub mod serialize;
+pub mod sodium;
 pub mod spl;
 pub mod streams;
 pub mod string;
@@ -73,5 +74,6 @@ pub fn modules() -> Vec<&'static Module> {
         &bcmath::MODULE,
         &gmp::MODULE,
         &filter::MODULE,
+        &sodium::MODULE,
     ]
 }
