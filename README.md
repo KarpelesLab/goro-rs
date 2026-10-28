@@ -51,8 +51,8 @@ Fresh start. The previous code base is kept on the `old` branch for the
 record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
 
-php-src test suite (8.5.4), share of the tests that run: **84.1%** overall
-(11,112 of 13,220 tests), as of 2026-10-28. The extension libraries below are wired
+php-src test suite (8.5.4), share of the tests that run: **85.4%** overall
+(11,294 tests), as of 2026-10-28. The extension libraries below are wired
 into the engine (ext/random, mbstring, iconv, zlib, bcmath, gmp, filter,
 sodium and uri each pass 90-100% of their tests that run).
 
