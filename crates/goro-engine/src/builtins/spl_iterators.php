@@ -221,6 +221,9 @@ class CachingIterator extends IteratorIterator implements ArrayAccess, Countable
             }
             if ($this->__flags & 1) {
                 $this->__str = (string) $this->__cur;
+            } elseif ($this->__flags & 8) {
+                /* The inner iterator's string as it fetched (test iterator_037). */
+                $this->__str = (string) $this->__it;
             }
             $this->__it->next();
         } else {
@@ -246,9 +249,6 @@ class CachingIterator extends IteratorIterator implements ArrayAccess, Countable
         }
         if ($f & 4) {
             return (string) $this->__cur;
-        }
-        if ($f & 8) {
-            return (string) $this->__it;
         }
         return (string) $this->__str;
     }

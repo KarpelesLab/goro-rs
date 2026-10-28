@@ -613,6 +613,7 @@ impl<'a> Compiler<'a> {
         let byref_mask = crate::bytecode::byref_mask(&params);
         let direct_params = params.iter().filter(|p| !p.variadic).count() as u32;
         Ok(FuncCode {
+            in_namespace: !self.ns.is_empty(),
             byref_mask,
             direct_params,
             name,
@@ -1083,6 +1084,9 @@ impl<'a> Compiler<'a> {
                         .push((PhpStr::from(full), s.span.line, a));
                 }
                 for c in *items {
+                    // A constant expression (PHP manual: Constants; tests
+                    // Zend/tests/first_class_callable/constexpr/error_*).
+                    self.check_const_expr(&c.value)?;
                     let full = self.qualify(c.name.name);
                     let name = self.str_const(&full);
                     let v = self.expr(&c.value)?;

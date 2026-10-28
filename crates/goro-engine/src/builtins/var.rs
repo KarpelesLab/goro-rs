@@ -228,7 +228,13 @@ impl Vm {
         };
         let count = entries.iter().filter(|e| e.2.is_some()).count();
         out.extend_from_slice(format!("{}{}{}object(", pad, amp, lazy_prefix).as_bytes());
-        out.extend_from_slice(cls.name.dname().as_bytes());
+        // The name's bytes as they are (test serialize/006: Latin-1);
+        // anonymous classes show their display name.
+        if cls.name.contains(&0) {
+            out.extend_from_slice(cls.name.dname().as_bytes());
+        } else {
+            out.extend_from_slice(&cls.name);
+        }
         out.extend_from_slice(format!(")#{} ({}) {{\n", o.handle(), count).as_bytes());
         self.dump_stack.push(id);
         for (label, ty, val) in entries {
@@ -242,6 +248,21 @@ impl Vm {
                         Value::Ref(rf) => (rf.get(), rf.refcount() > 2),
                         v => (v.clone(), false),
                     };
+                    // An array being dumped, seen again through an object
+                    // (an ArrayObject's storage: test bug45826).
+                    if let Value::Array(a) = &val
+                        && self.dump_stack.contains(&(a.data() as *const _ as usize))
+                    {
+                        out.extend_from_slice(
+                            format!(
+                                "{}  *RECURSION*
+",
+                                pad
+                            )
+                            .as_bytes(),
+                        );
+                        continue;
+                    }
                     if let Err(e) = self.var_dump_into(out, &val, indent + 2, r) {
                         self.dump_stack.pop();
                         return Err(e);
@@ -320,8 +341,14 @@ impl Vm {
             }
             out.push((label, String::new(), Some(v.clone())));
         }
+        // Dynamic properties may keep mangled names (from unserialize():
+        // test unserialize_overwrite_undeclared_protected).
         for (k, v) in o.obj().props.borrow().iter() {
-            out.push((dump_key(k), String::new(), Some(v.clone())));
+            let key = match k {
+                KeyRef::Str(s) => mangled_label(s),
+                k => dump_key(k),
+            };
+            out.push((key, String::new(), Some(v.clone())));
         }
         Ok(out)
     }
@@ -366,7 +393,17 @@ impl Vm {
                 }
                 let pad = " ".repeat(indent);
                 out.extend_from_slice(cls.name.dname().as_bytes());
-                out.extend_from_slice(format!(" Object\n{}(\n", pad).as_bytes());
+                // test Zend/tests/enum/print_r
+                let kind = if cls.is_enum() {
+                    match cls.enum_backing {
+                        Some(m) if m == crate::bytecode::tmask::INT => " Enum:int",
+                        Some(_) => " Enum:string",
+                        None => " Enum",
+                    }
+                } else {
+                    " Object"
+                };
+                out.extend_from_slice(format!("{}\n{}(\n", kind, pad).as_bytes());
                 let entries = if cls.is_enum() {
                     let mut e = vec![(b"name".to_vec(), Some(self.get_prop_raw(o, b"name")))];
                     if cls.enum_backing.is_some() {

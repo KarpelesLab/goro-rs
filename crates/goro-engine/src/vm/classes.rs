@@ -220,11 +220,7 @@ impl Vm {
                 if pc.is_enum() {
                     return self.link_err(
                         decl,
-                        &format!(
-                            "Class {} cannot extend final class {}",
-                            cname,
-                            pc.name.dname()
-                        ),
+                        &format!("Class {} cannot extend enum {}", cname, pc.name.dname()),
                     );
                 }
                 if pc.has_flag(cflags::FINAL) {
@@ -372,6 +368,88 @@ impl Vm {
                     .iter()
                     .any(|i| i.lname.as_bytes() == n)
             };
+            let is_enum = decl.kind == ClassKind::Enum;
+            let what = if is_enum { "Enum" } else { "Class" };
+            // tests Zend/tests/enum/gh7792_*, no-*-implements-*
+            let mut seen: Vec<PhpStr> = Vec::new();
+            for n in &decl.interfaces {
+                let l = lower(n);
+                let implied = is_enum
+                    && (l.as_bytes() == b"unitenum"
+                        || (l.as_bytes() == b"backedenum" && decl.enum_backing.is_some()));
+                if seen.contains(&l) || implied {
+                    let shown = cls
+                        .interfaces
+                        .borrow()
+                        .iter()
+                        .find(|i| i.lname == l)
+                        .map(|i| i.name.dname())
+                        .unwrap_or_else(|| n.dname());
+                    return self.link_err(
+                        decl,
+                        &format!(
+                            "{} {} cannot implement previously implemented interface {}",
+                            what, cname, shown
+                        ),
+                    );
+                }
+                seen.push(l);
+            }
+            if !is_enum && !decl.file.is_empty() {
+                for (l, n) in [
+                    (&b"unitenum"[..], "UnitEnum"),
+                    (b"backedenum", "BackedEnum"),
+                ] {
+                    if has(l) {
+                        return self.link_err(
+                            decl,
+                            &format!("Non-enum class {} cannot implement interface {}", cname, n),
+                        );
+                    }
+                }
+            }
+            if is_enum && decl.enum_backing.is_none() && has(b"backedenum") {
+                return self.link_err(
+                    decl,
+                    &format!(
+                        "Non-backed enum {} cannot implement interface BackedEnum",
+                        cname
+                    ),
+                );
+            }
+            if is_enum && has(b"throwable") {
+                return self.link_err(
+                    decl,
+                    &format!("Enum {} cannot implement interface Throwable", cname),
+                );
+            }
+            if is_enum && has(b"serializable") {
+                return self.link_err(
+                    decl,
+                    &format!("Enum {} cannot implement the Serializable interface", cname),
+                );
+            }
+            if has(b"traversable")
+                && !has(b"iterator")
+                && !has(b"iteratoraggregate")
+                && !decl.file.is_empty()
+                && decl.kind != ClassKind::Interface
+                && decl.flags & cflags::ABSTRACT == 0
+                && cls
+                    .parent
+                    .as_ref()
+                    .is_none_or(|p| !p.has_flag(cflags::INTERNAL))
+            {
+                // tests Zend/tests/inheritance/bug62609, enum/gh7792_5
+                return Err(self.fatal_at(
+                    &format!(
+                        "{} {} must implement interface Traversable as part of either Iterator or IteratorAggregate",
+                        what, cname
+                    ),
+                    &PhpStr::new(b"Unknown"),
+                    0,
+                ));
+            }
             // test Zend/tests/throwable_003
             if has(b"throwable")
                 && !decl.file.is_empty()
@@ -507,6 +585,18 @@ impl Vm {
                     "Class"
                 };
                 let shown: Vec<String> = missing.iter().take(3).cloned().collect();
+                if decl.kind == ClassKind::Enum {
+                    // test Zend/tests/enum/gh7792_1
+                    let msg = format!(
+                        "Enum {} must implement {} abstract method{} ({}{})",
+                        cname,
+                        n,
+                        if n == 1 { "" } else { "s" },
+                        shown.join(", "),
+                        if n > 3 { ", ..." } else { "" }
+                    );
+                    return self.link_err(decl, &msg);
+                }
                 let msg = format!(
                     "{} {} contains {} abstract method{} and must therefore be declared abstract or implement the remaining method{} ({}{})",
                     what,
@@ -591,21 +681,40 @@ impl Vm {
         Ok(Some(cls))
     }
 
+    /// #[\Override] on methods and properties: something above must
+    /// declare them (RFC: Marking overridden methods; PHP 8.5 for
+    /// properties; tests Zend/tests/attributes/override/*). Trait members
+    /// are checked in the classes using them.
     fn check_override_attrs(&mut self, cls: &Rc<Class>, decl: &ClassDecl) -> R<()> {
-        for m in &decl.methods {
-            if !m
-                .code
-                .attrs
-                .iter()
-                .any(|a| a.name.eq_ignore_ascii_case(b"Override"))
-            {
-                continue;
-            }
-            let ln = lower(&m.code.name);
+        if decl.kind == ClassKind::Trait {
+            return Ok(());
+        }
+        let cp = Rc::as_ptr(cls);
+        let has_override = |attrs: &[AttrInfo]| {
+            attrs.iter().any(|a| {
+                a.name
+                    .strip_prefix(b"\\")
+                    .unwrap_or(&a.name)
+                    .eq_ignore_ascii_case(b"Override")
+            })
+        };
+        let mut methods: Vec<Rc<Func>> = cls
+            .methods
+            .borrow()
+            .values()
+            .filter(|m| std::ptr::eq(m.scope.get(), cp))
+            .filter(|m| m.code().is_some_and(|c| has_override(&c.attrs)))
+            .cloned()
+            .collect();
+        methods.sort_by_key(|m| m.code().map(|c| c.line_start).unwrap_or(0));
+        for m in methods {
+            let ln = m.lname.clone();
+            let is_ctor = ln.as_bytes() == b"__construct";
             let mut found = false;
             if let Some(p) = &cls.parent
                 && let Some(pm) = p.find_method_str(&ln)
                 && pm.flags & mflags::PRIVATE == 0
+                && (!is_ctor || pm.flags & mflags::ABSTRACT != 0)
             {
                 found = true;
             }
@@ -614,13 +723,79 @@ impl Vm {
                     found = true;
                 }
             }
+            // An abstract method of a used trait (test override/016).
+            for t in cls.traits.borrow().iter() {
+                if t.find_method_str(&ln)
+                    .is_some_and(|tm| tm.flags & mflags::ABSTRACT != 0)
+                {
+                    found = true;
+                }
+            }
             if !found {
                 let msg = format!(
                     "{}::{}() has #[\\Override] attribute, but no matching parent method exists",
                     cls.name.dname(),
-                    m.code.name.dname()
+                    m.name.dname()
                 );
-                return Err(self.fatal_at(&msg, &decl.file, m.code.line_start));
+                let line = m.code().map(|c| c.line_start).unwrap_or(decl.line_start);
+                return Err(self.fatal_at(&msg, &decl.file, line));
+            }
+        }
+        let statics: Vec<PhpStr> = cls
+            .static_props
+            .borrow()
+            .iter()
+            .filter(|p| std::ptr::eq(p.class, cp) && has_override(&p.attrs))
+            .map(|p| p.name.clone())
+            .collect();
+        for n in statics {
+            let found = cls.parent.as_ref().is_some_and(|par| {
+                par.find_static(&n)
+                    .is_some_and(|sp| sp.flags & mflags::PRIVATE == 0)
+            });
+            if !found {
+                let msg = format!(
+                    "{}::${} has #[\\Override] attribute, but no matching parent property exists",
+                    cls.name.dname(),
+                    n.dname()
+                );
+                return Err(self.fatal_at(&msg, &decl.file, decl.line_start));
+            }
+        }
+        let props: Vec<Rc<PropInfo>> = cls
+            .props
+            .borrow()
+            .iter()
+            .filter(|p| std::ptr::eq(p.class, cp) && has_override(&p.attrs))
+            .cloned()
+            .collect();
+        for p in props {
+            let mut found = false;
+            if let Some(par) = &cls.parent
+                && let Some(idx) = par.prop_map.borrow().get(&p.name).map(|v| v[0])
+                && par.props.borrow()[idx as usize].flags & mflags::PRIVATE == 0
+            {
+                found = true;
+            }
+            if let Some(par) = &cls.parent
+                && par
+                    .find_static(&p.name)
+                    .is_some_and(|sp| sp.flags & mflags::PRIVATE == 0)
+            {
+                found = true;
+            }
+            for i in cls.interfaces.borrow().iter() {
+                if i.prop_map.borrow().contains_key(&p.name) {
+                    found = true;
+                }
+            }
+            if !found {
+                let msg = format!(
+                    "{}::${} has #[\\Override] attribute, but no matching parent property exists",
+                    cls.name.dname(),
+                    p.name.dname()
+                );
+                return Err(self.fatal_at(&msg, &decl.file, decl.line_start));
             }
         }
         Ok(())
@@ -1394,10 +1569,15 @@ impl Vm {
         let fs = self.variance_sig(f);
         let ps = self.variance_sig(prev);
         let _ = cls;
-        self.link_err(
-            decl,
-            &format!("Declaration of {} must be compatible with {}", fs, ps),
-        )
+        let msg = format!("Declaration of {} must be compatible with {}", fs, ps);
+        // At the method's line (test Zend/tests/inheritance/
+        // constructor_abstract_grantparent).
+        if let Some(c) = f.code()
+            && *c.file == *decl.file
+        {
+            return Err(self.fatal_at(&msg, &decl.file, c.line_start));
+        }
+        self.link_err(decl, &msg)
     }
 
     pub fn signature_string(&mut self, f: &Func, params: &[ParamInfo]) -> String {
@@ -2020,6 +2200,13 @@ impl Vm {
 
     fn setup_enum(&mut self, cls: &Rc<Class>, decl: &ClassDecl) -> R<()> {
         let cp = Rc::as_ptr(cls);
+        // Properties from traits (test Zend/tests/enum/traits-no-properties).
+        if !cls.props.borrow().is_empty() || !cls.static_props.borrow().is_empty() {
+            return self.link_err(
+                decl,
+                &format!("Enum {} cannot include properties", cls.name.dname()),
+            );
+        }
         // name / value properties (readonly).
         let mk = |name: &str, slot: u32, ty: TypeHint| PropInfo {
             name: PhpStr::intern(name.as_bytes()),
@@ -2103,9 +2290,17 @@ impl Vm {
             cls.methods.borrow_mut().insert(ln.clone(), f);
             cls.method_order.borrow_mut().push(ln);
         }
-        // Magic methods are not allowed on enums.
-        for m in &decl.methods {
-            let l = lower(&m.code.name);
+        // Magic methods are not allowed on enums, from traits either (test
+        // Zend/tests/enum/traits-no-__construct).
+        let own: Vec<Rc<Func>> = cls
+            .methods
+            .borrow()
+            .values()
+            .filter(|m| std::ptr::eq(m.scope.get(), cp))
+            .cloned()
+            .collect();
+        for m in &own {
+            let l = m.lname.clone();
             if matches!(
                 l.as_bytes(),
                 b"__construct"
@@ -2128,7 +2323,7 @@ impl Vm {
                     &format!(
                         "Enum {} cannot include magic method {}",
                         cls.name.dname(),
-                        m.code.name.dname()
+                        m.name.dname()
                     ),
                 );
             }
@@ -2137,10 +2332,73 @@ impl Vm {
     }
 
     /// The singleton object of an enum case.
+    /// The case values of a backed enum: each of the backing type, no two
+    /// alike (tests Zend/tests/enum/backed-duplicate-*, backed-mismatch).
+    pub fn enum_check_cases(&mut self, cls: &Rc<Class>) -> R<()> {
+        let key = Rc::as_ptr(cls) as usize;
+        if cls.enum_backing.is_none() || self.enums_checked.contains(&key) {
+            return Ok(());
+        }
+        let cases: Vec<Rc<ClassConst>> = cls
+            .consts
+            .borrow()
+            .iter()
+            .filter(|c| c.flags & mflags::CASE != 0)
+            .cloned()
+            .collect();
+        let mut seen: Vec<(Value, PhpStr)> = Vec::new();
+        for c in cases {
+            let state = c.value.borrow().clone();
+            let v = match state {
+                ConstState::Value(v) => v,
+                ConstState::Pending(ce) => {
+                    let v = self.eval_const_expr(&ce, Rc::as_ptr(cls))?;
+                    *c.value.borrow_mut() = ConstState::Value(v.clone());
+                    v
+                }
+                ConstState::Evaluating => continue,
+            };
+            let ok = match (&v, cls.enum_backing) {
+                (Value::Int(_), Some(m)) => m == tmask::INT,
+                (Value::Str(_), Some(m)) => m == tmask::STRING,
+                _ => false,
+            };
+            if !ok {
+                return self.type_error(&format!(
+                    "Enum case type {} does not match enum backing type {}",
+                    v.tname(),
+                    if cls.enum_backing == Some(tmask::INT) {
+                        "int"
+                    } else {
+                        "string"
+                    }
+                ));
+            }
+            if let Some((_, first)) = seen
+                .iter()
+                .find(|(x, _)| goro_runtime::compare::strict_eq(x, &v))
+            {
+                return self.throw(
+                    "Error",
+                    &format!(
+                        "Duplicate value in enum {} for cases {} and {}",
+                        cls.name.dname(),
+                        first.to_string_lossy(),
+                        c.name.to_string_lossy()
+                    ),
+                );
+            }
+            seen.push((v, c.name.clone()));
+        }
+        self.enums_checked.insert(key);
+        Ok(())
+    }
+
     pub fn enum_case(&mut self, cls: &Rc<Class>, name: &PhpStr) -> R<Value> {
         if let Some((_, o)) = cls.enum_cases.borrow().iter().find(|(n, _)| n == name) {
             return Ok(Value::Object(o.clone()));
         }
+        self.enum_check_cases(cls)?;
         let Some(c) = cls.find_const(name) else {
             return self.throw(
                 "Error",
@@ -2152,7 +2410,8 @@ impl Vm {
             );
         };
         let value = if cls.enum_backing.is_some() {
-            let v = match c.value.borrow().clone() {
+            let state = c.value.borrow().clone();
+            let v = match state {
                 ConstState::Value(v) => v,
                 ConstState::Pending(ce) => {
                     let v = self.eval_const_expr(&ce, Rc::as_ptr(cls))?;
@@ -2306,6 +2565,21 @@ impl Vm {
             }
             let cls = self.declare_class(decl)?;
             cls.flags.set(cls.flags.get() | cflags::INTERNAL);
+            // Closures take no dynamic properties (test Zend/tests/closures/
+            // closure_write_prop).
+            if cls.lname.as_bytes() == b"closure" {
+                cls.flags.set(cls.flags.get() | cflags::NO_DYNAMIC);
+            }
+            // tests Zend/tests/generators/clone, dynamic_properties,
+            // errors/serialize_unserialize_error
+            if cls.lname.as_bytes() == b"generator" {
+                cls.flags.set(
+                    cls.flags.get()
+                        | cflags::NO_DYNAMIC
+                        | cflags::NOT_CLONEABLE
+                        | cflags::NOT_SERIALIZABLE,
+                );
+            }
             // Stub-only markers (php-src stubs' @not-serializable).
             if cls
                 .attrs

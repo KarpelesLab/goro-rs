@@ -299,6 +299,18 @@ impl<'a> Compiler<'a> {
 
     fn expr_inner(&mut self, e: &'a Expr<'a>, hint: Reg) -> CResult<Reg> {
         let line = e.span.line;
+        // test Zend/tests/first_class_callable/first_class_callable_012
+        if let ExprKind::MethodCall {
+            nullsafe: true,
+            args: Args::FirstClassCallable,
+            ..
+        } = &e.kind
+        {
+            return self.err(
+                "Cannot combine nullsafe operator with Closure creation",
+                line,
+            );
+        }
         match &e.kind {
             ExprKind::Int(i) => Ok(self.int_const(*i)),
             ExprKind::Float(f) => Ok(self.add_const(Value::Float(*f))),
@@ -852,6 +864,12 @@ impl<'a> Compiler<'a> {
                 if self.in_const_expr {
                     return self.err("Cannot use yield in a constant expression", line);
                 }
+                if self.f.flags & fflags::PSEUDO_MAIN != 0 {
+                    return self.err(
+                        "The \"yield\" expression can only be used inside a function",
+                        line,
+                    );
+                }
                 let k = match key {
                     Some(k) => self.expr(k)?,
                     None => NONE,
@@ -861,6 +879,26 @@ impl<'a> Compiler<'a> {
                         if self.f.flags & fflags::BY_REF != 0 && is_ref_capable(v) {
                             self.ref_of(v)?
                         } else {
+                            if self.f.flags & fflags::BY_REF != 0
+                                && !matches!(
+                                    v.kind,
+                                    ExprKind::Call { .. }
+                                        | ExprKind::MethodCall { .. }
+                                        | ExprKind::StaticCall(_)
+                                        | ExprKind::CallExpr { .. }
+                                )
+                            {
+                                // tests Zend/tests/generators/errors/
+                                // yield_const_by_ref_error
+                                let msg = self.add_const(Value::Str(PhpStr::intern(
+                                    b"Only variable references should be yielded by reference",
+                                )));
+                                self.f.line = line;
+                                self.emit(Op::Error {
+                                    msg: msg & !CONST,
+                                    kind: 1,
+                                });
+                            }
                             self.expr(v)?
                         }
                     }
@@ -878,6 +916,18 @@ impl<'a> Compiler<'a> {
                 Ok(d)
             }
             ExprKind::YieldFrom(x) => {
+                if self.f.flags & fflags::PSEUDO_MAIN != 0 {
+                    return self.err(
+                        "The \"yield from\" expression can only be used inside a function",
+                        line,
+                    );
+                }
+                if self.f.flags & fflags::BY_REF != 0 {
+                    return self.err(
+                        "Cannot use \"yield from\" inside a by-reference generator",
+                        line,
+                    );
+                }
                 let s = self.expr(x)?;
                 self.free(s);
                 let d = self.tmp();
@@ -2496,8 +2546,13 @@ impl<'a> Compiler<'a> {
         }
         // `$a = &$b` between plain variables.
         if let (ExprKind::Variable(a), ExprKind::Variable(b)) = (&target.kind, &value.kind) {
-            if *a == b"this" || *b == b"this" {
+            if *a == b"this" {
                 return self.err("Cannot re-assign $this", line);
+            }
+            if *b == b"this" {
+                // `$a = &$this` takes the object (tests Zend/tests/closures/
+                // closure_020, closure_026).
+                return self.assign(target, value, res);
             }
             let dst = self.cv(a);
             let src = self.cv(b);

@@ -1136,7 +1136,11 @@ impl Vm {
         };
         let cls = self.class_of(&o);
         let cb = self.resolve_method(&o, &cls, &n, true)?;
-        if is_const(name) && cb.magic_name.is_none() && cb.closure.is_none() {
+        let check_init = cls.has_flag(crate::class::cflags::CHECK_INIT);
+        if check_init {
+            crate::builtins::spl::check_init(self, &o, &cb.func)?;
+        }
+        if is_const(name) && cb.magic_name.is_none() && cb.closure.is_none() && !check_init {
             self.code_ref().caches[cache as usize].set(Cache {
                 key: cls_ptr as usize,
                 a: Rc::as_ptr(&cb.func) as usize,
@@ -1966,11 +1970,23 @@ impl Vm {
             Some(s) => s.clone(),
             None => self.native_sig(&func),
         };
+        // The call is on the stack while its arguments are checked: their
+        // errors show it in traces (observed on PHP 8.5; tests
+        // Zend/tests/exceptions/exception_018 and others).
+        self.ex.native_calls.push(super::NativeCall {
+            func: func.clone(),
+            args: &args as *const Vec<Value>,
+            this: this.clone(),
+            depth: self.ex.frames.len() as u32,
+            line: self.cur_line(),
+        });
         if let Err(e) = self.prepare_native_args(&func, &sig, &mut args, passed, has_named) {
+            self.ex.native_calls.pop();
             self.give_args_vec(args);
             return Err(e);
         }
         if dynamic && is_scope_introspecting(&func.lname) {
+            self.ex.native_calls.pop();
             self.give_args_vec(args);
             return self.throw(
                 "Error",
@@ -1987,22 +2003,21 @@ impl Vm {
                 b"call_user_func" | b"forward_static_call"
             )
         {
-            self.give_args_vec(args);
-            return self.throw(
+            let r = self.throw(
                 "ArgumentCountError",
                 &format!(
                     "{}() does not accept unknown named parameters",
                     func.display_name()
                 ),
             );
+            self.ex.native_calls.pop();
+            self.give_args_vec(args);
+            return r;
         }
-        self.ex.native_calls.push(super::NativeCall {
-            func: func.clone(),
-            args: &args as *const Vec<Value>,
-            this: this.clone(),
-            depth: self.ex.frames.len() as u32,
-            line: self.cur_line(),
-        });
+        // (the arguments may have moved while being checked)
+        if let Some(nc) = self.ex.native_calls.last_mut() {
+            nc.args = &args as *const Vec<Value>;
+        }
         let mut a = Args {
             this,
             vals: &mut args,

@@ -443,6 +443,11 @@ pub struct Vm {
     /// Classes are being bound early (when a file is loaded): variance
     /// checks needing unknown classes defer the class to run time.
     pub early_binding: bool,
+    /// (generator, the generator delegating to it with `yield from`)
+    /// while the inner one runs.
+    pub(crate) gen_delegators: Vec<(ObjRef, ObjRef)>,
+    /// Backed enums whose case values were checked.
+    pub(crate) enums_checked: std::collections::HashSet<usize>,
     /// The class being linked is bound early.
     pub(crate) linking_early: bool,
     /// Its binding waits for run time (a check needed an unknown class).

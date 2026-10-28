@@ -1749,6 +1749,13 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if k.as_bytes() == b"date.timezone" && !super::date::ini_timezone_check(vm, a, &v, &old)? {
         return Ok(Value::Bool(false));
     }
+    // 0 to 1000000 (test Zend/tests/exceptions/exception_025).
+    if k.as_bytes() == b"zend.exception_string_param_max_len" {
+        let n = goro_runtime::convert::str_to_int(&v);
+        if !(0..=1_000_000).contains(&n) {
+            return Ok(Value::Bool(false));
+        }
+    }
     if super::misc::assert_ini_deprecated(&k, &v) {
         vm.fdeprecated(
             a,

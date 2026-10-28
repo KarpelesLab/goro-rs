@@ -2239,6 +2239,18 @@ impl Vm {
             Some(f) => {
                 let scope = self.scope_ptr();
                 if !self.method_visible(&f, scope) {
+                    // tests Zend/tests/closures/closure_instantiate,
+                    // generators/errors/generator_instantiate_error
+                    match cls.lname.as_bytes() {
+                        b"closure" => {
+                            return self
+                                .throw("Error", "Instantiation of class Closure is not allowed");
+                        }
+                        b"generator" => {
+                            return self.throw("Error", "The \"Generator\" class is reserved for internal use and cannot be manually instantiated");
+                        }
+                        _ => {}
+                    }
                     let vis = if f.flags & mflags::PRIVATE != 0 {
                         "private"
                     } else {
@@ -2767,6 +2779,11 @@ impl Vm {
                 && let Some(r) = h(self, a, b)
             {
                 return r.map(Some);
+            }
+            // Distinct enum cases are uncomparable (test Zend/tests/enum/
+            // comparison).
+            if cx.is_enum() || cy.is_enum() {
+                return Ok(Some(1));
             }
             if !Rc::ptr_eq(&cx, &cy) {
                 return Ok(Some(1));
