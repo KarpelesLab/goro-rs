@@ -1786,6 +1786,9 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
     {
         return Ok(Value::Bool(false));
     }
+    if k.as_bytes() == b"date.timezone" && !super::date::ini_timezone_check(vm, a, &v, &old)? {
+        return Ok(Value::Bool(false));
+    }
     if super::misc::assert_ini_deprecated(&k, &v) {
         vm.fdeprecated(
             a,

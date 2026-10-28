@@ -12,5 +12,6 @@ goro-ext-standard = { path = "../goro-ext-standard" }
 goro-regex = { path = "../goro-regex" }
 goro-ext-hash = { path = "../goro-ext-hash" }
 goro-ext-random = { path = "../goro-ext-random" }
+goro-ext-date = { path = "../goro-ext-date" }
 libc = "0.2"
 corosensei = "0.2"

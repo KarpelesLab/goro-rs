@@ -350,7 +350,19 @@ impl Vm {
         if e.depth >= e.max_depth {
             e.error = 1;
         }
-        let props = self.visible_props(o);
+        // internal classes with a property view (DateTime, ArrayObject)
+        // encode it, public members only (observed on PHP 8.5)
+        let props = match cls.native.props_for {
+            Some(h) => match h(self, o) {
+                Some(a) => a
+                    .iter()
+                    .filter(|(k, _)| !matches!(k, goro_runtime::KeyRef::Str(s) if s.as_bytes().first() == Some(&0)))
+                    .map(|(k, v)| (k.to_value(), v.deref()))
+                    .collect(),
+                None => self.visible_props(o),
+            },
+            None => self.visible_props(o),
+        };
         e.stack.push(id);
         e.depth += 1;
         let r = self.json_object_pairs(e, props);

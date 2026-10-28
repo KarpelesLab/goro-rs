@@ -337,6 +337,11 @@ impl Vm {
                         if self.has_magic_get(&cls) && !self.guarded(o, name, 0) {
                             return self.magic_get(o, &cls, name);
                         }
+                        if let Some(h) = cls.native.dyn_prop
+                            && let Some(r) = h(self, o, name, crate::class::DynPropOp::Read)
+                        {
+                            return r;
+                        }
                         if let Some(h) = cls.native.debug_props
                             && let Some(arr) = h(self, o)
                             && let Some(v) = arr.get_str(name)
@@ -818,6 +823,11 @@ impl Vm {
                 )
             }
             PropLookup::Dynamic => {
+                if let Some(h) = cls.native.dyn_prop
+                    && let Some(r) = h(self, o, name, crate::class::DynPropOp::Write)
+                {
+                    return r.map(|_| ());
+                }
                 if o.obj().props.borrow().get_str(name).is_some() {
                     let mut props = o.obj().props.borrow_mut();
                     let old = props.assign(Key::Str(name.clone()), v);
@@ -1182,6 +1192,11 @@ impl Vm {
                 )
             }
             PropLookup::Dynamic => {
+                if let Some(h) = cls.native.dyn_prop
+                    && let Some(r) = h(self, o, name, crate::class::DynPropOp::Write)
+                {
+                    r?;
+                }
                 let exists = o.obj().props.borrow().get_str(name).is_some();
                 if !exists {
                     if self.has_magic_get(&cls) {
@@ -1328,6 +1343,11 @@ impl Vm {
                 )
             }
             PropLookup::Dynamic => {
+                if let Some(h) = cls.native.dyn_prop
+                    && let Some(r) = h(self, o, name, crate::class::DynPropOp::Unset)
+                {
+                    return r.map(|_| ());
+                }
                 let exists = o.obj().props.borrow().get_str(name).is_some();
                 if exists {
                     let old = o.obj().props.borrow_mut().remove(KeyRef::Str(name));
