@@ -51,6 +51,21 @@ Fresh start. The previous code base is kept on the `old` branch for the
 record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
 
+- `goro-runtime`: PHP values (16-byte `Value`, byte strings, copy-on-write
+  ordered arrays, references, objects, destructor queue, cycle collector),
+  conversions, comparisons and arithmetic, checked against PHP 8.5 output.
+- `goro-phpt`: the `.phpt` runner behind `goro --test` (all test sections).
+- `goro-ext-standard`: printf family, string, math, sorting, HTML
+  entities (WHATWG table), URL and encoding functions.
+- `goro-ext-date`: date/time library with tzdata 2026e compiled from the
+  IANA database: parsing (`strtotime`, `DateTime::createFromFormat`),
+  formatting, intervals, periods and sunrise/sunset, checked on ~33k PHP 8.5
+  cases.
+- `goro-charset`: mbstring's 79 encodings (tables generated from Unicode,
+  WHATWG and UCD 17 data), the `mb_*` string operations, case conversion,
+  kana conversion, MIME headers and `mb_detect_encoding` scoring; iconv
+  with 247 charsets, `//TRANSLIT` and `//IGNORE`. Checked against PHP 8.5
+  fixtures for every 1–2 byte input and all of Unicode.
 - `goro-syntax`: lexer, parser and AST for PHP 8.5. The token stream
   matches `token_get_all()`; every `--FILE--` section of the php-src
   tests that PHP accepts parses, and the in-file parse errors the tests
@@ -65,3 +80,33 @@ bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
   Checked against the specifications' vectors, the ext/hash test cases and
   a 10.8k-line PHP 8.5 fixture; at or above PHP's throughput for the
   common digests (SHA extensions, PCLMULQDQ CRC folding, SIMD XXH3).
+- `goro-ext-json`: `json_encode`/`json_decode`/`json_validate` over
+  runtime values with every `JSON_*` flag, PHP's error codes and their
+  precedence, recursion guards across nested calls, `JsonSerializable`
+  and enums through an engine hook trait. Checked against a 33.7k-line
+  PHP 8.5 fixture; 1.25-7.6x PHP's throughput on multi-MB documents
+  (iterative, so nesting depth is bounded by `$depth` only).
+- `goro-ext-bcmath`: ext/bcmath on byte strings: every `bc*()` function
+  (all `RoundingMode`s, `bcdivmod`), `BcMath\Number` (scale rules,
+  operators, comparison, serialization), PHP's error messages and their
+  order, and the `bcmath.scale` ini quantity parsing. Checked against a
+  25.8k-case PHP 8.5 fixture. SWAR digit arithmetic on the ASCII strings,
+  base-10⁸ limbs (Karatsuba, Knuth division) and puremp for large
+  divisions and roots: faster than PHP on 20-digit operands and 4-500x
+  faster at 10k-100k digits.
+- `goro-ext-random`: ext/random on plain values: the Mt19937 (both
+  modes), PcgOneseq128XslRr64, Xoshiro256StarStar and Secure engines with
+  their seeding, jumps and serialized states, user engines through a trait,
+  every `Random\Randomizer` method (γ-section `getFloat()` included), and
+  `mt_rand`/`rand`/`shuffle`/`str_shuffle`/`array_rand`/`random_int`/
+  `random_bytes`/`lcg_value`. Seeded sequences, randomness consumption and
+  error messages match PHP 8.5 on ~6.5k fixture cases; library-level
+  times are below PHP 8.5's (`examples/random_bench.rs`).
+- `goro-ext-zlib`: the zlib extension on bytes: `gz*`/`zlib_*` one-shot
+  functions with PHP's buffer rounds and warnings, `deflate_*`/`inflate_*`
+  contexts (flush modes, dictionaries, statuses), the gzip file layer under
+  `gzopen()` and the `zlib.*` filters. Its deflate encoder produces the same
+  bytes as PHP 8.5 for every level, strategy, memory level, window and flush
+  pattern tried (~3.6k compressed outputs, ~3.6k behaviour cases recorded
+  from PHP 8.5); compression at 1.0-1.3x and decompression at 1.3-1.5x
+  PHP's throughput.

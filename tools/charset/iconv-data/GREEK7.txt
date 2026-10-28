@@ -1,0 +1,62 @@
+# iconv charset GREEK7: differences from the public base table, observed
+# on PHP 8.5 (glibc 2.43 iconv) with tools/charset/iconv_obs_tables.php.
+# D <bytes> <code points|e (no output)|- (illegal)>: decoding
+# I <prefix> <bytes>: prefix+byte is incomplete (needs more input)
+# S <prefix> <n> <bytes>: //IGNORE skips n bytes of prefix+byte (default 1)
+# R <prefix> <n> <bytes>: illegal, but //IGNORE writes U+FFFD for the n bytes
+# E <code point> <bytes|x>: encoding, when not the shortest/lowest sequence
+base ascii
+D 24 A4
+D 41 391
+D 42 392
+D 43 393
+D 44 394
+D 45 395
+D 46 396
+D 47 397
+D 48 398
+D 49 399
+D 4a -
+D 4b 39A
+D 4c 39B
+D 4d 39C
+D 4e 39D
+D 4f 39E
+D 50 39F
+D 51 3A0
+D 52 3A1
+D 53 3A3
+D 54 3A4
+D 55 3A5
+D 56 3A6
+D 57 -
+D 58 3A7
+D 59 3A8
+D 5a 3A9
+D 61 3B1
+D 62 3B2
+D 63 3B3
+D 64 3B4
+D 65 3B5
+D 66 3B6
+D 67 3B7
+D 68 3B8
+D 69 3B9
+D 6a -
+D 6b 3BA
+D 6c 3BB
+D 6d 3BC
+D 6e 3BD
+D 6f 3BE
+D 70 3BF
+D 71 3C0
+D 72 3C1
+D 73 3C3
+D 74 3C4
+D 75 3C5
+D 76 3C6
+D 77 3C2
+D 78 3C7
+D 79 3C8
+D 7a 3C9
+D 7e 203E

@@ -1,0 +1,9 @@
+[package]
+name = "goro-ext-zlib"
+description = "PHP zlib extension: deflate, gzip and zlib formats, incremental contexts"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+goro-ext-hash = { path = "../goro-ext-hash" }

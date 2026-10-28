@@ -1,0 +1,44 @@
+# iconv charset CP1255: differences from the public base table, observed
+# on PHP 8.5 (glibc 2.43 iconv) with tools/charset/iconv_obs_tables.php.
+# D <bytes> <code points|e (no output)|- (illegal)>: decoding
+# I <prefix> <bytes>: prefix+byte is incomplete (needs more input)
+# S <prefix> <n> <bytes>: //IGNORE skips n bytes of prefix+byte (default 1)
+# R <prefix> <n> <bytes>: illegal, but //IGNORE writes U+FFFD for the n bytes
+# E <code point> <bytes|x>: encoding, when not the shortest/lowest sequence
+base yes
+E FB1D e9c4
+E FB1F d6c7
+E FB2A f9d1
+E FB2B f9d2
+E FB2C f9ccd1
+E FB2D f9ccd2
+E FB2E e0c7
+E FB2F e0c8
+E FB30 e0cc
+E FB31 e1cc
+E FB32 e2cc
+E FB33 e3cc
+E FB34 e4cc
+E FB35 e5cc
+E FB36 e6cc
+E FB38 e8cc
+E FB39 e9cc
+E FB3A eacc
+E FB3B ebcc
+E FB3C eccc
+E FB3E eecc
+E FB40 f0cc
+E FB41 f1cc
+E FB43 f3cc
+E FB44 f4cc
+E FB46 f6cc
+E FB47 f7cc
+E FB48 f8cc
+E FB49 f9cc
+E FB4A facc
+E FB4B e5c9
+E FB4C e1cf
+E FB4D ebcf
+E FB4E f4cf
+# C <base> <mark> <composed|->: decoding composes base+mark (differences from
+# the canonical pairs of UnicodeData.txt)

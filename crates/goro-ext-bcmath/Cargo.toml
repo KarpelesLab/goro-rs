@@ -1,0 +1,11 @@
+[package]
+name = "goro-ext-bcmath"
+description = "PHP bcmath extension: arbitrary precision decimal arithmetic and BcMath\\Number"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The maintainer's pure-Rust bignum crate: sub-quadratic multiplication,
+# division, square root and decimal conversion for large operands.
+puremp = { version = "0.3.2", default-features = false, features = ["int"] }

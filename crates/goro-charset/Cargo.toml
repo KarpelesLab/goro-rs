@@ -6,3 +6,6 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+intl = { version = "0.6.5", default-features = false, features = ["full", "case"] }
+memchr = "2.7"
+simdutf8 = "0.1.5"

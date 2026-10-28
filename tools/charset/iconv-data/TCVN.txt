@@ -1,0 +1,218 @@
+# iconv charset TCVN: differences from the public base table, observed
+# on PHP 8.5 (glibc 2.43 iconv) with tools/charset/iconv_obs_tables.php.
+# D <bytes> <code points|e (no output)|- (illegal)>: decoding
+# I <prefix> <bytes>: prefix+byte is incomplete (needs more input)
+# S <prefix> <n> <bytes>: //IGNORE skips n bytes of prefix+byte (default 1)
+# R <prefix> <n> <bytes>: illegal, but //IGNORE writes U+FFFD for the n bytes
+# E <code point> <bytes|x>: encoding, when not the shortest/lowest sequence
+base ascii
+D 01 DA
+D 02 1EE4
+D 04 1EEA
+D 05 1EEC
+D 06 1EEE
+D 11 1EE8
+D 12 1EF0
+D 13 1EF2
+D 14 1EF6
+D 15 1EF8
+D 16 DD
+D 17 1EF4
+D 80 C0
+D 81 1EA2
+D 82 C3
+D 83 C1
+D 84 1EA0
+D 85 1EB6
+D 86 1EAC
+D 87 C8
+D 88 1EBA
+D 89 1EBC
+D 8a C9
+D 8b 1EB8
+D 8c 1EC6
+D 8d CC
+D 8e 1EC8
+D 8f 128
+D 90 CD
+D 91 1ECA
+D 92 D2
+D 93 1ECE
+D 94 D5
+D 95 D3
+D 96 1ECC
+D 97 1ED8
+D 98 1EDC
+D 99 1EDE
+D 9a 1EE0
+D 9b 1EDA
+D 9c 1EE2
+D 9d D9
+D 9e 1EE6
+D 9f 168
+D a0 A0
+D a1 102
+D a2 C2
+D a3 CA
+D a4 D4
+D a5 1A0
+D a6 1AF
+D a7 110
+D a8 103
+D a9 E2
+D aa EA
+D ab F4
+D ac 1A1
+D ad 1B0
+D ae 111
+D af 1EB0
+D b0 300
+D b1 309
+D b2 303
+D b3 301
+D b4 323
+D b5 E0
+D b6 1EA3
+D b7 E3
+D b8 E1
+D b9 1EA1
+D ba 1EB2
+D bb 1EB1
+D bc 1EB3
+D bd 1EB5
+D be 1EAF
+D bf 1EB4
+D c0 1EAE
+D c1 1EA6
+D c2 1EA8
+D c3 1EAA
+D c4 1EA4
+D c5 1EC0
+D c6 1EB7
+D c7 1EA7
+D c8 1EA9
+D c9 1EAB
+D ca 1EA5
+D cb 1EAD
+D cc E8
+D cd 1EC2
+D ce 1EBB
+D cf 1EBD
+D d0 E9
+D d1 1EB9
+D d2 1EC1
+D d3 1EC3
+D d4 1EC5
+D d5 1EBF
+D d6 1EC7
+D d7 EC
+D d8 1EC9
+D d9 1EC4
+D da 1EBE
+D db 1ED2
+D dc 129
+D dd ED
+D de 1ECB
+D df F2
+D e0 1ED4
+D e1 1ECF
+D e2 F5
+D e3 F3
+D e4 1ECD
+D e5 1ED3
+D e6 1ED5
+D e7 1ED7
+D e8 1ED1
+D e9 1ED9
+D ea 1EDD
+D eb 1EDF
+D ec 1EE1
+D ed 1EDB
+D ee 1EE3
+D ef F9
+D f0 1ED6
+D f1 1EE7
+D f2 169
+D f3 FA
+D f4 1EE5
+D f5 1EEB
+D f6 1EED
+D f7 1EEF
+D f8 1EE9
+D f9 1EF1
+D fa 1EF3
+D fb 1EF7
+D fc 1EF9
+D fd FD
+D fe 1EF5
+D ff 1ED0
+E D1 4eb2
+E F1 6eb2
+E 106 43b3
+E 107 63b3
+E 139 4cb3
+E 13A 6cb3
+E 143 4eb3
+E 144 6eb3
+E 154 52b3
+E 155 72b3
+E 15A 53b3
+E 15B 73b3
+E 179 5ab3
+E 17A 7ab3
+E 1F4 47b3
+E 1F5 67b3
+E 1F8 4eb0
+E 1F9 6eb0
+E 1E04 42b4
+E 1E05 62b4
+E 1E0C 44b4
+E 1E0D 64b4
+E 1E24 48b4
+E 1E25 68b4
+E 1E30 4bb3
+E 1E31 6bb3
+E 1E32 4bb4
+E 1E33 6bb4
+E 1E36 4cb4
+E 1E37 6cb4
+E 1E3E 4db3
+E 1E3F 6db3
+E 1E42 4db4
+E 1E43 6db4
+E 1E46 4eb4
+E 1E47 6eb4
+E 1E54 50b3
+E 1E55 70b3
+E 1E5A 52b4
+E 1E5B 72b4
+E 1E62 53b4
+E 1E63 73b4
+E 1E6C 54b4
+E 1E6D 74b4
+E 1E7C 56b2
+E 1E7D 76b2
+E 1E7E 56b4
+E 1E7F 76b4
+E 1E80 57b0
+E 1E81 77b0
+E 1E82 57b3
+E 1E83 77b3
+E 1E88 57b4
+E 1E89 77b4
+E 1E92 5ab4
+E 1E93 7ab4
+# C <base> <mark> <composed|->: decoding composes base+mark (differences from
+# the canonical pairs of UnicodeData.txt)
+C C2 323 1EAC
+C CA 323 1EC6
+C D3 303 1E4C
+C D4 323 1ED8
+C DA 303 1E78
+C E2 323 1EAD
+C EA 323 1EC7
+C F3 303 1E4D
+C F4 323 1ED9
+C FA 303 1E79
+C 102 323 1EB6
+C 103 323 1EB7

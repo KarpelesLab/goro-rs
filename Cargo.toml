@@ -11,6 +11,11 @@ members = [
     "crates/goro-charset",
     "crates/goro-ext-hash",
     "crates/goro-ext-json",
+    "crates/goro-ext-zlib",
+    "crates/goro-ext-bcmath",
+    "crates/goro-ext-random",
+    "crates/goro-ext-filter",
+    "crates/goro-ext-gmp",
 ]
 
 [workspace.package]

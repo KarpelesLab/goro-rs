@@ -1,7 +1,7 @@
 //! Checks the MT19937 generator against `fixtures/mt_rand.txt`, the output
 //! of `fixtures/mt_rand.php` on PHP 8.5.
 
-use goro_ext_standard::mt_rand::{Mt19937, MtMode};
+use goro_ext_random::{Mt19937, MtMode};
 
 fn range(label: &str) -> Option<(i64, i64)> {
     Some(match label {

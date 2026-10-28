@@ -1,0 +1,49 @@
+# iconv charset IBM856: differences from the public base table, observed
+# on PHP 8.5 (glibc 2.43 iconv) with tools/charset/iconv_obs_tables.php.
+# D <bytes> <code points|e (no output)|- (illegal)>: decoding
+# I <prefix> <bytes>: prefix+byte is incomplete (needs more input)
+# S <prefix> <n> <bytes>: //IGNORE skips n bytes of prefix+byte (default 1)
+# R <prefix> <n> <bytes>: illegal, but //IGNORE writes U+FFFD for the n bytes
+# E <code point> <bytes|x>: encoding, when not the shortest/lowest sequence
+base yes
+D 1a 1C
+D 1c 7F
+D 7f 1A
+D ee 203E
+D fa 2022
+E 203C 13
+E 2190 1b
+E 2191 18
+E 2192 1a
+E 2193 19
+E 2194 1d
+E 2195 12
+E 21A8 17
+E 221F 1c
+E 2302 7f
+E 25AC 16
+E 25B2 1e
+E 25BA 10
+E 25BC 1f
+E 25C4 11
+E 25CB 09
+E 25D8 08
+E 25D9 0a
+E 263A 01
+E 263B 02
+E 263C 0f
+E 2640 0c
+E 2642 0b
+E 2660 06
+E 2663 05
+E 2665 03
+E 2666 04
+E 266A 0d
+E 266B 0e
+E FFE8 b3
+E FFE9 1b
+E FFEA 18
+E FFEB 1a
+E FFEC 19
+E FFED fe
+E FFEE 09

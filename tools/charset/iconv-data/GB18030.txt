@@ -1,0 +1,282 @@
+# iconv charset GB18030: differences from the public base table, observed
+# on PHP 8.5 (glibc 2.43 iconv) with tools/charset/iconv_obs_tables.php.
+# D <bytes> <code points|e (no output)|- (illegal)>: decoding
+# I <prefix> <bytes>: prefix+byte is incomplete (needs more input)
+# S <prefix> <n> <bytes>: //IGNORE skips n bytes of prefix+byte (default 1)
+# R <prefix> <n> <bytes>: illegal, but //IGNORE writes U+FFFD for the n bytes
+# E <code point> <bytes|x>: encoding, when not the shortest/lowest sequence
+base yes
+D 80 -
+D a3a0 E5E5
+I 81 30-39
+I 82 30-39
+I 83 30-39
+I 84 30-39
+I 85 30-39
+I 86 30-39
+I 87 30-39
+I 88 30-39
+I 89 30-39
+I 8a 30-39
+I 8b 30-39
+I 8c 30-39
+I 8d 30-39
+I 8e 30-39
+I 8f 30-39
+I 90 30-39
+I 91 30-39
+I 92 30-39
+I 93 30-39
+I 94 30-39
+I 95 30-39
+I 96 30-39
+I 97 30-39
+I 98 30-39
+I 99 30-39
+I 9a 30-39
+I 9b 30-39
+I 9c 30-39
+I 9d 30-39
+I 9e 30-39
+I 9f 30-39
+I a0 30-39
+I a1 30-39
+I a2 30-39
+I a3 30-39
+I a4 30-39
+I a5 30-39
+I a6 30-39
+I a7 30-39
+I a8 30-39
+I a9 30-39
+I aa 30-39
+I ab 30-39
+I ac 30-39
+I ad 30-39
+I ae 30-39
+I af 30-39
+I b0 30-39
+I b1 30-39
+I b2 30-39
+I b3 30-39
+I b4 30-39
+I b5 30-39
+I b6 30-39
+I b7 30-39
+I b8 30-39
+I b9 30-39
+I ba 30-39
+I bb 30-39
+I bc 30-39
+I bd 30-39
+I be 30-39
+I bf 30-39
+I c0 30-39
+I c1 30-39
+I c2 30-39
+I c3 30-39
+I c4 30-39
+I c5 30-39
+I c6 30-39
+I c7 30-39
+I c8 30-39
+I c9 30-39
+I ca 30-39
+I cb 30-39
+I cc 30-39
+I cd 30-39
+I ce 30-39
+I cf 30-39
+I d0 30-39
+I d1 30-39
+I d2 30-39
+I d3 30-39
+I d4 30-39
+I d5 30-39
+I d6 30-39
+I d7 30-39
+I d8 30-39
+I d9 30-39
+I da 30-39
+I db 30-39
+I dc 30-39
+I dd 30-39
+I de 30-39
+I df 30-39
+I e0 30-39
+I e1 30-39
+I e2 30-39
+I e3 30-39
+I e4 30-39
+I e5 30-39
+I e6 30-39
+I e7 30-39
+I e8 30-39
+I e9 30-39
+I ea 30-39
+I eb 30-39
+I ec 30-39
+I ed 30-39
+I ee 30-39
+I ef 30-39
+I f0 30-39
+I f1 30-39
+I f2 30-39
+I f3 30-39
+I f4 30-39
+I f5 30-39
+I f6 30-39
+I f7 30-39
+I f8 30-39
+I f9 30-39
+I fa 30-39
+I fb 30-39
+I fc 30-39
+I fd 30-39
+I fe 30-39
+S 81 2 00-2f,3a-3f,7f
+S 82 2 00-2f,3a-3f,7f
+S 83 2 00-2f,3a-3f,7f
+S 84 2 00-2f,3a-3f,7f
+S 85 2 00-2f,3a-3f,7f
+S 86 2 00-2f,3a-3f,7f
+S 87 2 00-2f,3a-3f,7f
+S 88 2 00-2f,3a-3f,7f
+S 89 2 00-2f,3a-3f,7f
+S 8a 2 00-2f,3a-3f,7f
+S 8b 2 00-2f,3a-3f,7f
+S 8c 2 00-2f,3a-3f,7f
+S 8d 2 00-2f,3a-3f,7f
+S 8e 2 00-2f,3a-3f,7f
+S 8f 2 00-2f,3a-3f,7f
+S 90 2 00-2f,3a-3f,7f
+S 91 2 00-2f,3a-3f,7f
+S 92 2 00-2f,3a-3f,7f
+S 93 2 00-2f,3a-3f,7f
+S 94 2 00-2f,3a-3f,7f
+S 95 2 00-2f,3a-3f,7f
+S 96 2 00-2f,3a-3f,7f
+S 97 2 00-2f,3a-3f,7f
+S 98 2 00-2f,3a-3f,7f
+S 99 2 00-2f,3a-3f,7f
+S 9a 2 00-2f,3a-3f,7f
+S 9b 2 00-2f,3a-3f,7f
+S 9c 2 00-2f,3a-3f,7f
+S 9d 2 00-2f,3a-3f,7f
+S 9e 2 00-2f,3a-3f,7f
+S 9f 2 00-2f,3a-3f,7f
+S a0 2 00-2f,3a-3f,7f
+S a1 2 00-2f,3a-3f,7f
+S a2 2 00-2f,3a-3f,7f
+S a3 2 00-2f,3a-3f,7f
+S a4 2 00-2f,3a-3f,7f
+S a5 2 00-2f,3a-3f,7f
+S a6 2 00-2f,3a-3f,7f
+S a7 2 00-2f,3a-3f,7f
+S a8 2 00-2f,3a-3f,7f
+S a9 2 00-2f,3a-3f,7f
+S aa 2 00-2f,3a-3f,7f
+S ab 2 00-2f,3a-3f,7f
+S ac 2 00-2f,3a-3f,7f
+S ad 2 00-2f,3a-3f,7f
+S ae 2 00-2f,3a-3f,7f
+S af 2 00-2f,3a-3f,7f
+S b0 2 00-2f,3a-3f,7f
+S b1 2 00-2f,3a-3f,7f
+S b2 2 00-2f,3a-3f,7f
+S b3 2 00-2f,3a-3f,7f
+S b4 2 00-2f,3a-3f,7f
+S b5 2 00-2f,3a-3f,7f
+S b6 2 00-2f,3a-3f,7f
+S b7 2 00-2f,3a-3f,7f
+S b8 2 00-2f,3a-3f,7f
+S b9 2 00-2f,3a-3f,7f
+S ba 2 00-2f,3a-3f,7f
+S bb 2 00-2f,3a-3f,7f
+S bc 2 00-2f,3a-3f,7f
+S bd 2 00-2f,3a-3f,7f
+S be 2 00-2f,3a-3f,7f
+S bf 2 00-2f,3a-3f,7f
+S c0 2 00-2f,3a-3f,7f
+S c1 2 00-2f,3a-3f,7f
+S c2 2 00-2f,3a-3f,7f
+S c3 2 00-2f,3a-3f,7f
+S c4 2 00-2f,3a-3f,7f
+S c5 2 00-2f,3a-3f,7f
+S c6 2 00-2f,3a-3f,7f
+S c7 2 00-2f,3a-3f,7f
+S c8 2 00-2f,3a-3f,7f
+S c9 2 00-2f,3a-3f,7f
+S ca 2 00-2f,3a-3f,7f
+S cb 2 00-2f,3a-3f,7f
+S cc 2 00-2f,3a-3f,7f
+S cd 2 00-2f,3a-3f,7f
+S ce 2 00-2f,3a-3f,7f
+S cf 2 00-2f,3a-3f,7f
+S d0 2 00-2f,3a-3f,7f
+S d1 2 00-2f,3a-3f,7f
+S d2 2 00-2f,3a-3f,7f
+S d3 2 00-2f,3a-3f,7f
+S d4 2 00-2f,3a-3f,7f
+S d5 2 00-2f,3a-3f,7f
+S d6 2 00-2f,3a-3f,7f
+S d7 2 00-2f,3a-3f,7f
+S d8 2 00-2f,3a-3f,7f
+S d9 2 00-2f,3a-3f,7f
+S da 2 00-2f,3a-3f,7f
+S db 2 00-2f,3a-3f,7f
+S dc 2 00-2f,3a-3f,7f
+S dd 2 00-2f,3a-3f,7f
+S de 2 00-2f,3a-3f,7f
+S df 2 00-2f,3a-3f,7f
+S e0 2 00-2f,3a-3f,7f
+S e1 2 00-2f,3a-3f,7f
+S e2 2 00-2f,3a-3f,7f
+S e3 2 00-2f,3a-3f,7f
+S e4 2 00-2f,3a-3f,7f
+S e5 2 00-2f,3a-3f,7f
+S e6 2 00-2f,3a-3f,7f
+S e7 2 00-2f,3a-3f,7f
+S e8 2 00-2f,3a-3f,7f
+S e9 2 00-2f,3a-3f,7f
+S ea 2 00-2f,3a-3f,7f
+S eb 2 00-2f,3a-3f,7f
+S ec 2 00-2f,3a-3f,7f
+S ed 2 00-2f,3a-3f,7f
+S ee 2 00-2f,3a-3f,7f
+S ef 2 00-2f,3a-3f,7f
+S f0 2 00-2f,3a-3f,7f
+S f1 2 00-2f,3a-3f,7f
+S f2 2 00-2f,3a-3f,7f
+S f3 2 00-2f,3a-3f,7f
+S f4 2 00-2f,3a-3f,7f
+S f5 2 00-2f,3a-3f,7f
+S f6 2 00-2f,3a-3f,7f
+S f7 2 00-2f,3a-3f,7f
+S f8 2 00-2f,3a-3f,7f
+S f9 2 00-2f,3a-3f,7f
+S fa 2 00-2f,3a-3f,7f
+S fb 2 00-2f,3a-3f,7f
+S fc 2 00-2f,3a-3f,7f
+S fd 2 00-2f,3a-3f,7f
+S fe 2 00-2f,3a-3f,7f
+# G <four-byte linear index> <code point|->: differences from WHATWG index-gb18030-ranges
+G 7457 E7C7
+G 19057 E81E
+G 19058 E826
+G 19059 E82B
+G 19060 E82C
+G 19061 E832
+G 19062 E843
+G 19063 E854
+G 19064 E864
+G 39076 E78D
+G 39077 E78F
+G 39078 E78E
+G 39079 E790
+G 39080 E791
+G 39081 E792
+G 39082 E793
+G 39083 E794
+G 39084 E795
+G 39085 E796

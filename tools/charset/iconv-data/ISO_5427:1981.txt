@@ -1,0 +1,84 @@
+# iconv charset ISO_5427:1981: differences from the public base table, observed
+# on PHP 8.5 (glibc 2.43 iconv) with tools/charset/iconv_obs_tables.php.
+# D <bytes> <code points|e (no output)|- (illegal)>: decoding
+# I <prefix> <bytes>: prefix+byte is incomplete (needs more input)
+# S <prefix> <n> <bytes>: //IGNORE skips n bytes of prefix+byte (default 1)
+# R <prefix> <n> <bytes>: illegal, but //IGNORE writes U+FFFD for the n bytes
+# E <code point> <bytes|x>: encoding, when not the shortest/lowest sequence
+base none
+D 00 0
+D 01 1
+D 02 2
+D 03 3
+D 04 4
+D 05 5
+D 06 6
+D 07 7
+D 08 8
+D 09 9
+D 0a A
+D 0b B
+D 0c C
+D 0d D
+D 0e E
+D 0f F
+D 10 10
+D 11 11
+D 12 12
+D 13 13
+D 14 14
+D 15 15
+D 16 16
+D 17 17
+D 18 18
+D 19 19
+D 1a 1A
+D 1b 1B
+D 1c 1C
+D 1d 1D
+D 1e 1E
+D 1f 1F
+D 20 20
+D 40 491
+D 41 452
+D 42 453
+D 43 454
+D 44 451
+D 45 455
+D 46 456
+D 47 457
+D 48 458
+D 49 459
+D 4a 45A
+D 4b 45B
+D 4c 45C
+D 4d 45E
+D 4e 45F
+D 50 463
+D 51 473
+D 52 475
+D 53 46B
+D 5b 5B
+D 5d 5D
+D 5f 5F
+D 60 490
+D 61 402
+D 62 403
+D 63 404
+D 64 401
+D 65 405
+D 66 406
+D 67 407
+D 68 408
+D 69 409
+D 6a 40A
+D 6b 40B
+D 6c 40C
+D 6d 40E
+D 6e 40F
+D 6f 42A
+D 70 462
+D 71 472
+D 72 474
+D 73 46A
+D 7f 7F

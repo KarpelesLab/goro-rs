@@ -1,0 +1,8 @@
+[package]
+name = "goro-ext-gmp"
+description = "PHP gmp extension: arbitrary precision integers"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
