@@ -262,10 +262,31 @@ pub struct NativeHooks {
     /// ArrayAccess: the array value the element lives in, when the
     /// object's offsetGet is the internal one.
     pub dim_storage: Option<fn(&mut crate::vm::Vm, &goro_runtime::ObjRef) -> Option<*mut Value>>,
+    /// Dynamic properties of internal classes that compute them (the date
+    /// classes): `Read` of a property the object lacks gives its value
+    /// instead of the "Undefined property" warning; `Write` and `Unset`
+    /// run before a dynamic property is written or removed, and an error
+    /// refuses the operation. `None` means "no opinion".
+    pub dyn_prop: Option<
+        fn(
+            &mut crate::vm::Vm,
+            &goro_runtime::ObjRef,
+            &PhpStr,
+            DynPropOp,
+        ) -> Option<crate::vm::R<Value>>,
+    >,
     /// Native iteration for foreach (internal iterators).
     pub get_iterator: Option<
         fn(&mut crate::vm::Vm, &goro_runtime::ObjRef, bool) -> crate::vm::R<goro_runtime::ObjRef>,
     >,
+}
+
+/// The access [`NativeHooks::dyn_prop`] is asked about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DynPropOp {
+    Read,
+    Write,
+    Unset,
 }
 
 impl std::fmt::Debug for NativeHooks {

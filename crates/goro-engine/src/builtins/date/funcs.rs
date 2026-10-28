@@ -47,6 +47,10 @@ pub(super) const FUNCTIONS: &[(&str, crate::func::NativeFn)] = &[
     ),
     ("function time(): int", time),
     (
+        "function gettimeofday(bool $as_float = false): array|float",
+        gettimeofday,
+    ),
+    (
         "function localtime(?int $timestamp = null, bool $associative = false): array",
         localtime,
     ),
@@ -310,6 +314,22 @@ fn gmstrftime(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn time(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Int(now().0))
+}
+
+/// gettimeofday() (PHP manual): minuteswest and dsttime come from the
+/// default zone.
+fn gettimeofday(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (sec, us) = now();
+    if a.bool_or(0, false) {
+        return Ok(Value::Float(sec as f64 + us as f64 / 1_000_000.0));
+    }
+    let st = default_tz(vm).state_at(sec);
+    let mut out = PhpArray::new();
+    out.insert(key("sec"), Value::Int(sec));
+    out.insert(key("usec"), Value::Int(us as i64));
+    out.insert(key("minuteswest"), Value::Int(-(st.offset as i64) / 60));
+    out.insert(key("dsttime"), Value::Int(st.is_dst as i64));
+    Ok(Value::Array(out))
 }
 
 fn localtime(vm: &mut Vm, a: &mut Args) -> R<Value> {

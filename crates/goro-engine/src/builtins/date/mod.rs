@@ -482,7 +482,14 @@ pub(crate) fn new_tz(vm: &mut Vm, tz: TimeZone) -> R<ObjRef> {
 /// The zone of an optional `?DateTimeZone` argument, else the default.
 pub(crate) fn zone_arg(vm: &mut Vm, a: &Args, i: usize) -> R<TimeZone> {
     match a.obj(i) {
-        Some(o) => get_tz(vm, &o),
+        Some(o) => match peek_tz(&o) {
+            Some(z) => Ok(z),
+            // test bug-gh15582.phpt
+            None => vm.throw(
+                "Error",
+                "The DateTimeZone object has not been correctly initialized by its constructor",
+            ),
+        },
         None => Ok(default_tz(vm)),
     }
 }
@@ -640,6 +647,21 @@ fn interval_hooks() -> NativeHooks {
             with_native::<IvObj, _>(b, |_| ())?;
             Some(vm.warn("Cannot compare DateInterval objects").map(|_| 1))
         }),
+        // an interval from createFromDateString() reads its numbers as
+        // zero and `days` as false (test bug70153.phpt)
+        dyn_prop: Some(|_, o, name, op| {
+            if op != crate::class::DynPropOp::Read
+                || with_native::<IvObj, _>(o, |d| d.from_string.is_some()) != Some(true)
+            {
+                return None;
+            }
+            Some(Ok(match name.as_bytes() {
+                b"y" | b"m" | b"d" | b"h" | b"i" | b"s" | b"invert" => Value::Int(0),
+                b"f" => Value::Float(0.0),
+                b"days" => Value::Bool(false),
+                _ => return None,
+            }))
+        }),
         ..Default::default()
     }
 }
@@ -703,6 +725,25 @@ pub(crate) fn set_iv(vm: &mut Vm, o: &ObjRef, iv: &Interval) {
         d.init = true;
         d.from_string = iv.from_string.clone();
     });
+    {
+        let mut props = o.obj().props.borrow_mut();
+        for k in [
+            "y",
+            "m",
+            "d",
+            "h",
+            "i",
+            "s",
+            "f",
+            "invert",
+            "days",
+            "from_string",
+            "date_string",
+        ] {
+            let old = props.remove(Key::from(k).as_ref());
+            drop(old);
+        }
+    }
     if let Some(fs) = &iv.from_string {
         vm.set_prop_raw(o, b"from_string", Value::Bool(true));
         vm.set_prop_raw(o, b"date_string", s(&fs.date_string));

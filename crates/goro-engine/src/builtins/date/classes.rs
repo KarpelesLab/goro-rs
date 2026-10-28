@@ -128,6 +128,8 @@ pub(super) static METHODS: &[(&str, crate::func::NativeFn)] = &[
 /// Parses a constructor / date_create() string, recording its warnings
 /// and errors; the error is the DateMalformedStringException message.
 pub(crate) fn parse_create(vm: &mut Vm, input: &[u8], zone: &TimeZone) -> Result<DateTime, String> {
+    // an empty string means "now" here (test DateTime_construct_basic1.phpt)
+    let input: &[u8] = if input.is_empty() { b"now" } else { input };
     let p = parse::parse(input);
     set_last_errors(
         vm,
@@ -700,12 +702,90 @@ fn tz_set_state(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn iv_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
-    match Interval::parse_iso(&a.str(0)) {
+    let spec = a.str(0);
+    let r = Interval::parse_iso(&spec).or_else(|e| two_dates(&spec).unwrap_or(Err(e)));
+    match r {
         Ok(iv) => {
             set_iv(vm, &o, &iv);
             Ok(Value::Null)
         }
         Err(msg) => vm.throw("DateMalformedIntervalStringException", &msg),
+    }
+}
+
+/// "YYYY-MM-DDTHH:MM:SSZ" or "YYYYMMDDTHHMMSSZ" (the ISO 8601 dates of
+/// an interval written as two dates).
+fn iso_utc_date(s: &[u8]) -> Option<DateTime> {
+    let num = |r: &[u8]| -> Option<i64> {
+        if r.is_empty() || !r.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        std::str::from_utf8(r).ok()?.parse().ok()
+    };
+    let f = match s.len() {
+        20 if s[4] == b'-'
+            && s[7] == b'-'
+            && s[10] == b'T'
+            && s[13] == b':'
+            && s[16] == b':'
+            && s[19] == b'Z' =>
+        {
+            [
+                &s[0..4],
+                &s[5..7],
+                &s[8..10],
+                &s[11..13],
+                &s[14..16],
+                &s[17..19],
+            ]
+        }
+        16 if s[8] == b'T' && s[15] == b'Z' => [
+            &s[0..4],
+            &s[4..6],
+            &s[6..8],
+            &s[9..11],
+            &s[11..13],
+            &s[13..15],
+        ],
+        _ => return None,
+    };
+    let v: Option<Vec<i64>> = f.iter().map(|p| num(p)).collect();
+    let v = v?;
+    Some(DateTime::from_local(
+        v[0],
+        v[1],
+        v[2],
+        v[3],
+        v[4],
+        v[5],
+        0,
+        TimeZone::Offset(0),
+    ))
+}
+
+/// `new DateInterval("start/end")`: the difference between two ISO
+/// dates (test bug52808.phpt); `None` when the spec does not start with
+/// a date.
+fn two_dates(spec: &[u8]) -> Option<Result<Interval, String>> {
+    let cut = spec.iter().position(|&c| c == b'/' || c == b' ');
+    let (first, rest) = match cut {
+        Some(p) => (&spec[..p], Some(&spec[p + 1..])),
+        None => (spec, None),
+    };
+    let a = iso_utc_date(first)?;
+    let failed = || {
+        Err(format!(
+            "Failed to parse interval ({})",
+            String::from_utf8_lossy(spec)
+        ))
+    };
+    match rest {
+        None => Some(failed()),
+        Some(r) if r.is_empty() => Some(failed()),
+        Some(r) => match iso_utc_date(r) {
+            Some(b) => Some(Ok(interval::diff(&a, &b, false))),
+            None => Some(Err(interval::bad_format(spec))),
+        },
     }
 }
 
@@ -759,14 +839,46 @@ const IV_KEYS: &[&str] = &[
 
 /// The interval described by serialized / __set_state data.
 fn iv_from_data(vm: &mut Vm, data: &PhpArray) -> R<Interval> {
-    let from_string = data
-        .get_bytes(b"from_string")
-        .is_some_and(|v| goro_runtime::convert::to_bool_quiet(&v.deref()));
-    if from_string
-        && let Some(Value::Str(ds)) = data.get_bytes(b"date_string").map(|v| v.deref())
-        && let Ok(iv) = Interval::from_date_string(&ds)
-    {
-        return Ok(iv);
+    let date_string = match data.get_bytes(b"date_string").map(|v| v.deref()) {
+        Some(Value::Str(ds)) => Some(ds),
+        _ => None,
+    };
+    let from_string = match data.get_bytes(b"from_string") {
+        Some(v) => goro_runtime::convert::to_bool_quiet(&v.deref()),
+        None => date_string.is_some(),
+    };
+    if from_string && let Some(ds) = date_string {
+        // the relative part of the string, absolute parts ignored (test
+        // DateInterval_set_state_exception.phpt)
+        let p = parse::parse(&ds);
+        if let Some((pos, msg)) = p.errors.first() {
+            let c = ds.as_bytes().get(*pos).copied().unwrap_or(b' ');
+            return vm.throw(
+                "Error",
+                &format!(
+                    "Unknown or bad format ({}) at position {} ({}) while unserializing: {}",
+                    ds.to_string_lossy(),
+                    pos,
+                    String::from_utf8_lossy(&[c]),
+                    msg
+                ),
+            );
+        }
+        let r = p.relative.unwrap_or_default();
+        return Ok(Interval {
+            y: r.y,
+            m: r.m,
+            d: r.d,
+            h: r.h,
+            i: r.i,
+            s: r.s,
+            us: r.us,
+            from_string: Some(goro_ext_date::interval::FromString {
+                date_string: ds.as_bytes().to_vec(),
+                relative: r,
+            }),
+            ..Default::default()
+        });
     }
     let int = |vm: &mut Vm, k: &str| -> R<i64> {
         match data.get_bytes(k.as_bytes()) {

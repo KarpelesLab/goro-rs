@@ -57,13 +57,35 @@ fn get(vm: &mut Vm, o: &ObjRef) -> R<Got> {
     }
 }
 
-fn store(o: &ObjRef, p: Period, sc: Rc<Class>, ec: Option<Rc<Class>>) {
+fn store(
+    vm: &mut Vm,
+    o: &ObjRef,
+    p: Period,
+    sc: Rc<Class>,
+    ec: Option<Rc<Class>>,
+    cur: Option<DateTime>,
+) -> R<()> {
     *o.obj().native.borrow_mut() = Some(Box::new(PeriodObj {
         p: Some(p),
         start_cls: Some(sc),
         end_cls: ec,
-        cur: None,
+        cur,
     }));
+    sync_props(vm, o)
+}
+
+/// Writes the seven properties (PHP 8.2+ keeps them as properties: they
+/// show in get_object_vars() and json_encode(), test
+/// date_period_properties.phpt).
+fn sync_props(vm: &mut Vm, o: &ObjRef) -> R<()> {
+    let mut parts = PhpArray::new();
+    period_parts(vm, o, &mut parts)?;
+    for (k, v) in parts.iter() {
+        if let goro_runtime::KeyRef::Str(n) = k {
+            vm.set_prop_raw(o, n.as_bytes(), v.clone());
+        }
+    }
+    Ok(())
 }
 
 /// The seven properties, in PHP's order.
@@ -96,12 +118,6 @@ fn period_parts(vm: &mut Vm, o: &ObjRef, out: &mut PhpArray) -> R<()> {
     Ok(())
 }
 
-fn period_props(vm: &mut Vm, o: &ObjRef) -> Option<PhpArray> {
-    let mut out = vm.plain_props_array(o, true);
-    let _ = period_parts(vm, o, &mut out);
-    Some(out)
-}
-
 pub(super) fn period_hooks() -> NativeHooks {
     NativeHooks {
         create: Some(|_, o| {
@@ -123,10 +139,49 @@ pub(super) fn period_hooks() -> NativeHooks {
                 *to.obj().native.borrow_mut() = Some(Box::new(d));
             }
         }),
-        debug_props: Some(period_props),
-        props_for: Some(period_props),
+        dyn_prop: Some(|vm, o, name, op| {
+            if !PERIOD_KEYS.iter().any(|k| k.as_bytes() == name.as_bytes()) {
+                return None;
+            }
+            let n = name.to_string_lossy();
+            match op {
+                crate::class::DynPropOp::Read => None,
+                crate::class::DynPropOp::Write => Some(vm.throw(
+                    "Error",
+                    &format!("Cannot modify readonly property DatePeriod::${n}"),
+                )),
+                crate::class::DynPropOp::Unset => {
+                    let cls = vm.class_of(o).name.to_string_lossy();
+                    Some(vm.throw("Error", &format!("Cannot unset {cls}::${n}")))
+                }
+            }
+        }),
         ..Default::default()
     }
+}
+
+/// The date of a constructor argument; uninitialized ones are reported
+/// as "DateTimeInterface" (test bug-gh11416.phpt).
+fn get_dt_iface(vm: &mut Vm, o: &ObjRef) -> R<DateTime> {
+    match peek_dt(o) {
+        Some(d) => Ok(d),
+        None => vm.throw(
+            "DateObjectError",
+            "Object of type DateTimeInterface has not been correctly initialized by calling parent::__construct() in its constructor",
+        ),
+    }
+}
+
+/// Period::from_iso, with an empty specification refused as a bad
+/// format (test bug54283.phpt).
+fn from_iso(spec: &[u8], options: i64, func: &str) -> Result<Period, PeriodError> {
+    if spec.iter().all(|c| c.is_ascii_whitespace()) {
+        return Err(PeriodError::MalformedPeriod(format!(
+            "Unknown or bad format ({})",
+            String::from_utf8_lossy(spec)
+        )));
+    }
+    Period::from_iso(spec, options, func)
 }
 
 fn period_error<T>(vm: &mut Vm, e: PeriodError) -> R<T> {
@@ -153,36 +208,36 @@ pub(super) fn dp_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 Value::Null => 0,
                 v => vm.to_int(&v)?,
             };
-            let start = get_dt(vm, &st)?;
+            let start = get_dt_iface(vm, &st)?;
             let iv = get_iv(vm, &ivo)?;
             let sc = vm.class_of(&st);
             let (end, rec, ec) = match a.val(2) {
                 Value::Int(r) => (None, Some(r), None),
                 Value::Object(e) if is_date(&e) => {
-                    let d = get_dt(vm, &e)?;
+                    let d = get_dt_iface(vm, &e)?;
                     (Some(d), None, Some(vm.class_of(&e)))
                 }
                 _ => return vm.type_error(BAD_ARGS),
             };
             match Period::new(start, iv, end, rec, options, func) {
-                Ok(p) => store(&o, p, sc, ec),
+                Ok(p) => store(vm, &o, p, sc, ec, None)?,
                 Err(e) => return period_error(vm, e),
             }
         }
         v @ (Value::Str(_) | Value::Null) if a.len() <= 2 => {
-            vm.deprecated("Calling DatePeriod::__construct(string $isostr, int $options = 0) is deprecated, use DatePeriod::createFromISO8601String() instead")?;
             if v.is_null() {
                 vm.deprecated("DatePeriod::__construct(): Passing null to parameter #1 ($start) of type string is deprecated")?;
             }
+            vm.deprecated("Calling DatePeriod::__construct(string $isostr, int $options = 0) is deprecated, use DatePeriod::createFromISO8601String() instead")?;
             let spec = a.str(0);
             let options = match a.val(1) {
                 Value::Null => 0,
                 v => vm.to_int(&v)?,
             };
-            match Period::from_iso(&spec, options, func) {
+            match from_iso(&spec, options, func) {
                 Ok(p) => {
                     let sc = class(vm, "DateTime")?;
-                    store(&o, p, sc, None)
+                    store(vm, &o, p, sc, None, None)?
                 }
                 Err(e) => return period_error(vm, e),
             }
@@ -196,11 +251,11 @@ pub(super) fn dp_create_from_iso(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let cls = static_class(vm, a);
     let spec = a.str(0);
     let options = a.int_or(1, 0);
-    match Period::from_iso(&spec, options, "DatePeriod::createFromISO8601String") {
+    match from_iso(&spec, options, "DatePeriod::createFromISO8601String") {
         Ok(p) => {
             let o = vm.instantiate_raw(&cls)?;
             let sc = class(vm, "DateTimeImmutable")?;
-            store(&o, p, sc, None);
+            store(vm, &o, p, sc, None, None)?;
             Ok(Value::Object(o))
         }
         Err(e) => period_error(vm, e),
@@ -312,8 +367,7 @@ fn restore(vm: &mut Vm, a: &Args, o: &ObjRef, data: &PhpArray) -> R<()> {
     let Some((p, sc, ec, cur)) = period_from_data(vm, data)? else {
         return vm.throw("Error", "Invalid serialization data for DatePeriod object");
     };
-    store(o, p, sc, ec);
-    with_native::<PeriodObj, _>(o, |d| d.cur = cur);
+    store(vm, o, p, sc, ec, cur)?;
     let _ = a;
     for (k, v) in data.iter() {
         if let goro_runtime::KeyRef::Str(s) = k
@@ -343,8 +397,7 @@ pub(super) fn dp_wakeup(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some((p, sc, ec, cur)) = period_from_data(vm, &data)? else {
         return vm.throw("Error", "Invalid serialization data for DatePeriod object");
     };
-    store(&o, p, sc, ec);
-    with_native::<PeriodObj, _>(&o, |d| d.cur = cur);
+    store(vm, &o, p, sc, ec, cur)?;
     Ok(Value::Null)
 }
 
@@ -397,7 +450,7 @@ fn new_iterator(vm: &mut Vm, o: &ObjRef) -> R<ObjRef> {
         key: 0,
         yielded: 0,
     }));
-    iter_rewind(&it);
+    iter_rewind(vm, &it)?;
     Ok(it)
 }
 
@@ -413,46 +466,57 @@ fn stops(p: &Period, d: &DateTime, yielded: i64) -> bool {
     }
 }
 
-fn set_period_current(period: &Option<ObjRef>, d: &DateTime) {
-    if let Some(po) = period {
-        with_native::<PeriodObj, _>(po, |x| x.cur = Some(d.clone()));
-    }
+/// Records `d` as the period's `current` date.
+fn set_period_current(vm: &mut Vm, period: Option<ObjRef>, cls: &Rc<Class>, d: DateTime) -> R<()> {
+    let Some(po) = period else {
+        return Ok(());
+    };
+    with_native::<PeriodObj, _>(&po, |x| x.cur = Some(d.clone()));
+    let obj = new_date(vm, cls, d)?;
+    vm.set_prop_raw(&po, b"current", Value::Object(obj));
+    Ok(())
 }
 
-fn iter_rewind(it: &ObjRef) {
-    with_native::<DpIter, _>(it, |s| {
+fn iter_rewind(vm: &mut Vm, it: &ObjRef) -> R<()> {
+    let r = with_native::<DpIter, _>(it, |s| {
         let d = if s.p.include_start {
             s.p.start.clone()
         } else {
             s.p.step(&s.p.start)
         };
-        set_period_current(&s.period, &d);
         s.key = 0;
         if stops(&s.p, &d, 0) {
             s.cur = None;
             s.yielded = 0;
         } else {
-            s.cur = Some(d);
+            s.cur = Some(d.clone());
             s.yielded = 1;
         }
+        (s.period.clone(), s.cls.clone(), d)
     });
+    match r {
+        Some((po, cls, d)) => set_period_current(vm, po, &cls, d),
+        None => Ok(()),
+    }
 }
 
-fn iter_next(it: &ObjRef) {
-    with_native::<DpIter, _>(it, |s| {
-        let Some(c) = &s.cur else {
-            return;
-        };
-        let d = s.p.step(c);
-        set_period_current(&s.period, &d);
+fn iter_next(vm: &mut Vm, it: &ObjRef) -> R<()> {
+    let r = with_native::<DpIter, _>(it, |s| {
+        let c = s.cur.clone()?;
+        let d = s.p.step(&c);
         if stops(&s.p, &d, s.yielded) {
             s.cur = None;
         } else {
-            s.cur = Some(d);
+            s.cur = Some(d.clone());
             s.key += 1;
             s.yielded += 1;
         }
+        Some((s.period.clone(), s.cls.clone(), d))
     });
+    match r.flatten() {
+        Some((po, cls, d)) => set_period_current(vm, po, &cls, d),
+        None => Ok(()),
+    }
 }
 
 pub(super) fn it_current(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -471,8 +535,9 @@ pub(super) fn it_key(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     })
 }
 
-pub(super) fn it_next(_vm: &mut Vm, a: &mut Args) -> R<Value> {
-    iter_next(a.this_obj());
+pub(super) fn it_next(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let it = a.this_obj().clone();
+    iter_next(vm, &it)?;
     Ok(Value::Null)
 }
 
@@ -481,7 +546,8 @@ pub(super) fn it_valid(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Bool(st == Some(true)))
 }
 
-pub(super) fn it_rewind(_vm: &mut Vm, a: &mut Args) -> R<Value> {
-    iter_rewind(a.this_obj());
+pub(super) fn it_rewind(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let it = a.this_obj().clone();
+    iter_rewind(vm, &it)?;
     Ok(Value::Null)
 }
