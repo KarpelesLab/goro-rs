@@ -107,6 +107,8 @@ pub(crate) struct FinCtx {
 
 /// State of the function being compiled.
 pub(crate) struct FState<'a> {
+    /// The declared return type accepts null.
+    pub ret_allows_null: bool,
     pub ops: Vec<Op>,
     pub lines: Vec<u32>,
     pub consts: Vec<Value>,
@@ -158,6 +160,7 @@ impl<'a> FState<'a> {
     pub fn new(cvs: Vec<&'a [u8]>) -> FState<'a> {
         let n = cvs.len() as u32;
         FState {
+            ret_allows_null: false,
             ops: Vec::new(),
             lines: Vec::new(),
             consts: Vec::new(),
@@ -1571,6 +1574,22 @@ impl<'a> Compiler<'a> {
         }
         if self.f.flags & fflags::RETURNS_NEVER != 0 && !self.f.is_generator {
             return self.err("A never-returning function must not return", line);
+        }
+        // `return;` with a return type (tests Zend/tests/type_declarations/
+        // typed_return_*without_value).
+        if e.is_none()
+            && self.f.flags & fflags::HAS_RETURN_TYPE != 0
+            && self.f.flags & fflags::RETURNS_VOID == 0
+            && !self.f.is_generator
+        {
+            return self.err(
+                if self.f.ret_allows_null {
+                    "A function with return type must return a value (did you mean \"return null;\" instead of \"return;\"?)"
+                } else {
+                    "A function with return type must return a value"
+                },
+                line,
+            );
         }
         let val = match e {
             None => self.null_const(),

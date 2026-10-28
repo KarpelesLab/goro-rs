@@ -62,6 +62,9 @@ pub struct Run<'a> {
     pub stdin: Option<&'a [u8]>,
     pub capture: Capture,
     pub timeout: Duration,
+    /// Address-space limit of the child in bytes (RLIMIT_AS); none: no
+    /// limit. Keeps a runaway test from exhausting the machine's memory.
+    pub mem_limit: Option<u64>,
 }
 
 fn kill_group(pid: i32) {
@@ -95,6 +98,20 @@ pub fn run(r: &Run<'_>) -> std::io::Result<RunOutput> {
     let start = Instant::now();
     let mut cmd = Command::new(r.program);
     cmd.args(r.args).current_dir(r.cwd).process_group(0);
+    if let Some(limit) = r.mem_limit {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setrlimit is async-signal-safe; only the child is affected.
+        unsafe {
+            cmd.pre_exec(move || {
+                let rl = libc::rlimit {
+                    rlim_cur: limit as libc::rlim_t,
+                    rlim_max: limit as libc::rlim_t,
+                };
+                libc::setrlimit(libc::RLIMIT_AS, &rl);
+                Ok(())
+            });
+        }
+    }
     for (k, v) in r.env {
         cmd.env(k, v);
     }
