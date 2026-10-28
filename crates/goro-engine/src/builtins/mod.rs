@@ -2,6 +2,7 @@
 //! handling, output control, strings, arrays, math, files, json...
 
 pub mod array;
+pub mod bcmath;
 pub mod core_classes;
 pub mod core_funcs;
 pub mod ctype;
@@ -10,8 +11,11 @@ pub mod enums;
 pub mod exec;
 pub mod fiber;
 pub mod file;
+pub mod filter;
+pub mod gmp;
 pub mod hash;
 pub mod highlight;
+pub mod iconv;
 pub mod info;
 mod info_text;
 pub mod ini;
@@ -22,8 +26,10 @@ pub mod misc;
 pub mod output;
 pub mod password;
 pub mod pcre;
+pub mod random;
 pub mod reflection;
 pub mod serialize;
+pub mod sodium;
 pub mod spl;
 pub mod spl_autoload;
 pub mod streams;
@@ -33,6 +39,7 @@ pub mod uri;
 pub mod userstream;
 pub mod var;
 pub mod weakmap;
+pub mod zlib;
 
 use crate::registry::Module;
 
@@ -63,10 +70,17 @@ pub fn modules() -> Vec<&'static Module> {
         &ini::MODULE,
         &pcre::MODULE,
         &mbstring::MODULE,
+        &iconv::MODULE,
+        &zlib::MODULE,
         &ctype::MODULE,
         &date::MODULE,
         &array::MODULE,
         &math::MODULE,
+        &random::MODULE,
+        &bcmath::MODULE,
+        &gmp::MODULE,
+        &filter::MODULE,
+        &sodium::MODULE,
         &uri::MODULE,
     ]
 }

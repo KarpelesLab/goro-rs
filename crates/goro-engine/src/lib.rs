@@ -155,6 +155,11 @@ pub fn run(opts: RunOptions) -> i32 {
         vm.set_ini(k, v);
     }
     builtins::misc::startup_ini_deprecations(&mut vm, &opts.ini);
+    for m in vm.modules.clone() {
+        if let Some(f) = m.startup_ini {
+            f(&mut vm, &opts.ini);
+        }
+    }
     // disable_functions: since PHP 8.0 disabled functions are not defined
     // at all (PHP manual: php.ini directives; test
     // Zend/tests/errmsg/errmsg_020.phpt).
@@ -226,6 +231,7 @@ pub fn run(opts: RunOptions) -> i32 {
     } else {
         strip_shebang(src)
     };
+    builtins::output::start_ini_handler(&mut vm);
     vm.run_script(&src, &path)
 }
 

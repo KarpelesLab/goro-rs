@@ -13,6 +13,12 @@ goro-regex = { path = "../goro-regex" }
 goro-ext-hash = { path = "../goro-ext-hash" }
 goro-ext-random = { path = "../goro-ext-random" }
 goro-ext-date = { path = "../goro-ext-date" }
+goro-ext-bcmath = { path = "../goro-ext-bcmath" }
+goro-ext-gmp = { path = "../goro-ext-gmp" }
+goro-ext-filter = { path = "../goro-ext-filter" }
+goro-ext-sodium = { path = "../goro-ext-sodium" }
 goro-ext-uri = { path = "../goro-ext-uri" }
+goro-charset = { path = "../goro-charset" }
+goro-ext-zlib = { path = "../goro-ext-zlib" }
 libc = "0.2"
 corosensei = "0.2"

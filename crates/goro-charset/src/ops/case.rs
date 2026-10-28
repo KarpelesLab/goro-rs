@@ -114,7 +114,9 @@ fn push_full(cp: u32, out: &mut Vec<u32>, f: fn(char) -> intl::unicode::CaseMapI
 /// Whether the Σ at `i` is word-final (Unicode's Final_Sigma condition): a
 /// cased letter before it and none after it, skipping case-ignorables.
 fn final_sigma(cps: &[u32], i: usize) -> bool {
-    let before = cps[..i]
+    // mbstring looks back at most 64 characters (test
+    // mb_convert_case_various_mode.phpt: 'A' then 64 dots is too far).
+    let before = cps[i.saturating_sub(64)..i]
         .iter()
         .rev()
         .find(|&&c| !is_case_ignorable(c))
@@ -128,6 +130,25 @@ fn final_sigma(cps: &[u32], i: usize) -> bool {
 
 /// Maps code points (invalid-input markers pass through).
 pub fn convert_case_cps(cps: &[u32], mode: CaseMode, out: &mut Vec<u32>) {
+    convert_case_cps_lang(cps, mode, false, out)
+}
+
+/// The Turkish mappings of I, i, İ and ı (dotted and dotless i), which
+/// mbstring applies for ISO-8859-9 (test casemapping.phpt; observed on PHP
+/// 8.5, not for CP1254 or Unicode encodings): `upper` for uppercasing and
+/// titlecasing a word start, else lowercasing and folding.
+fn turkish(cp: u32, upper: bool) -> Option<u32> {
+    match (cp, upper) {
+        (0x69, true) => Some(0x130),
+        (0x131, true) => Some(0x49),
+        (0x49, false) => Some(0x131),
+        (0x130, false) => Some(0x69),
+        (0x49 | 0x130, true) | (0x69 | 0x131, false) => Some(cp),
+        _ => None,
+    }
+}
+
+fn convert_case_cps_lang(cps: &[u32], mode: CaseMode, tr: bool, out: &mut Vec<u32>) {
     use CaseMode::*;
     use intl::unicode::{case_fold, to_lowercase, to_titlecase, to_uppercase};
     out.reserve(cps.len());
@@ -135,6 +156,13 @@ pub fn convert_case_cps(cps: &[u32], mode: CaseMode, out: &mut Vec<u32>) {
     let upper = matches!(mode, Upper | UpperSimple);
     let title = matches!(mode, Title | TitleSimple);
     for (i, &cp) in cps.iter().enumerate() {
+        if tr && let Some(m) = turkish(cp, upper || (title && !in_word)) {
+            out.push(m);
+            if title {
+                in_word = true;
+            }
+            continue;
+        }
         if cp < 0x80 && !title {
             let b = cp as u8;
             out.push(if upper {
@@ -191,7 +219,8 @@ pub fn convert_case_cps(cps: &[u32], mode: CaseMode, out: &mut Vec<u32>) {
 
 /// `mb_convert_case()`.
 pub fn convert_case(s: &[u8], mode: CaseMode, enc: Encoding, sub: &Subst) -> Vec<u8> {
-    if s.is_ascii() && enc.is_ascii_compatible() {
+    let tr = enc == Encoding::Iso8859_9;
+    if s.is_ascii() && enc.is_ascii_compatible() && !tr {
         let mut v = s.to_vec();
         match mode {
             CaseMode::Upper | CaseMode::UpperSimple => v.make_ascii_uppercase(),
@@ -219,7 +248,7 @@ pub fn convert_case(s: &[u8], mode: CaseMode, enc: Encoding, sub: &Subst) -> Vec
     }
     let cps = convert::decode(s, enc);
     let mut out = Vec::with_capacity(cps.len());
-    convert_case_cps(&cps, mode, &mut out);
+    convert_case_cps_lang(&cps, mode, tr, &mut out);
     convert::encode(&out, enc, sub).bytes
 }
 

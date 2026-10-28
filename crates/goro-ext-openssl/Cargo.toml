@@ -1,0 +1,8 @@
+[package]
+name = "goro-ext-openssl"
+description = "PHP openssl extension on purecrypto: keys, X.509, CSR, PKCS#7/CMS/PKCS#12, ciphers, signatures, TLS streams"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]

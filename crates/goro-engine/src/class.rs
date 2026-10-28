@@ -301,6 +301,11 @@ pub struct NativeHooks {
     pub do_unary: Option<
         fn(&mut crate::vm::Vm, UnaryOp, &goro_runtime::ObjRef) -> Option<crate::vm::R<Value>>,
     >,
+    /// The legacy `C:` serialization format (`Serializable`) of an
+    /// internal class without an `unserialize()` method (GMP): receives
+    /// the values serialized in the payload between the braces.
+    pub unserialize_legacy:
+        Option<fn(&mut crate::vm::Vm, &goro_runtime::ObjRef, Vec<Value>) -> crate::vm::R<()>>,
 }
 
 /// The unary operators [`NativeHooks::do_unary`] receives.

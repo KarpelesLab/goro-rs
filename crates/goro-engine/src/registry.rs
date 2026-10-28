@@ -33,7 +33,7 @@ use goro_runtime::Value;
 
 use crate::class::NativeHooks;
 use crate::func::NativeFn;
-use crate::vm::Vm;
+use crate::vm::{R, Vm};
 
 /// A constant's value in a static table.
 #[derive(Clone, Copy, Debug)]
@@ -76,6 +76,13 @@ pub struct Module {
     pub init: Option<fn(&mut Vm)>,
     /// Called at request end.
     pub shutdown: Option<fn(&mut Vm)>,
+    /// Called once after the startup settings (`-d`, in order) are applied,
+    /// for "PHP Startup:" diagnostics and state derived from them.
+    pub startup_ini: Option<fn(&mut Vm, &[(Vec<u8>, Vec<u8>)])>,
+    /// Called by `ini_set()` and `ini_restore()` for every setting change
+    /// (any name), before the value is stored: `Ok(false)` refuses it
+    /// (`ini_set()` returns false).
+    pub on_ini_set: Option<fn(&mut Vm, &[u8], &[u8]) -> R<bool>>,
     /// Whether `php -m` lists it (core pieces are folded into "Core").
     pub listed: bool,
 }
@@ -91,6 +98,8 @@ impl Module {
         ini: &[],
         init: None,
         shutdown: None,
+        startup_ini: None,
+        on_ini_set: None,
         listed: true,
     };
 }

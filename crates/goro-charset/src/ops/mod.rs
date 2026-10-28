@@ -348,6 +348,19 @@ fn strpos_impl(
         let found = memchr::memmem::find(&hay[from..], needle);
         return Ok(found.map(|p| off as usize + utf8_count(&hay[from..from + p])));
     }
+    if !fold && enc == Encoding::Utf8 {
+        // Invalid UTF-8 matches only the same bytes (test mb_strpos.phpt:
+        // "\xFF" is not found in "abc\x80\x80").
+        let (_, offs) = char_spans(hay, enc);
+        let len = offs.len() as i64 - 1;
+        let off = if offset < 0 { offset + len } else { offset };
+        if off < 0 || off > len {
+            return Err(value_error(OFFSET_ERR));
+        }
+        let from = offs[off as usize];
+        let found = memchr::memmem::find(&hay[from..], needle);
+        return Ok(found.map(|p| offs.partition_point(|&b| b <= from + p) - 1));
+    }
     let raw = search_cps(hay, enc);
     let (h, n) = prepare(hay, needle, enc, fold);
     let len = raw.len() as i64;
@@ -511,6 +524,11 @@ pub fn substr_count(hay: &[u8], needle: &[u8], enc: Encoding) -> Result<usize, M
         return Err(value_error("Argument #2 ($needle) must not be empty"));
     }
     let (h, n) = prepare(hay, needle, enc, false);
+    // A needle of no characters ("\x1B(B" in ISO-2022-JP) is empty too
+    // (test mb_substr_count.phpt).
+    if n.is_empty() {
+        return Err(value_error("Argument #2 ($needle) must not be empty"));
+    }
     let mut count = 0;
     let mut i = 0;
     while let Some(p) = find_from(&h, &n, i) {
@@ -615,7 +633,9 @@ pub fn str_pad(
     if length <= len {
         return Ok(s.to_vec());
     }
-    if pad.is_empty() {
+    // A pad string without a whole character counts as empty (test
+    // gh20833.phpt: "1" in UTF-32).
+    if pad.is_empty() || strlen(pad, enc) == 0 {
         return Err(value_error("Argument #3 ($pad_string) must not be empty"));
     }
     let pad_type = PadType::from_php(pad_type)?;
@@ -970,7 +990,7 @@ fn strcut_utf16(s: &[u8], start: i64, len: Option<i64>, enc: Encoding) -> Vec<u8
 /// The byte offsets where characters start, plus the end of the string:
 /// by lead bytes for the encodings `mb_str_split` splits that way, from the
 /// decoder's progress otherwise.
-pub(crate) fn char_boundaries(s: &[u8], enc: Encoding) -> Vec<usize> {
+pub fn char_boundaries(s: &[u8], enc: Encoding) -> Vec<usize> {
     if let Some(len) = mblen(enc) {
         let mut out = Vec::with_capacity(s.len() + 1);
         let mut i = 0;

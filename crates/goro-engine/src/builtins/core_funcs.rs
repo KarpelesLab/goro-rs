@@ -341,7 +341,7 @@ pub static MODULE: Module = Module {
         ),
         (
             "function header(string $header, bool $replace = true, int $response_code = 0): void",
-            noop_void,
+            header,
         ),
         (
             "function header_remove(?string $name = null): void",
@@ -1754,6 +1754,13 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
             &format!("{} INI setting is deprecated", k.to_string_lossy()),
         )?;
     }
+    for m in vm.modules.clone() {
+        if let Some(f) = m.on_ini_set
+            && !f(vm, &k, &v)?
+        {
+            return Ok(Value::Bool(false));
+        }
+    }
     vm.ini
         .originals
         .entry(k.clone())
@@ -1768,6 +1775,11 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn ini_restore(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let k = a.str(0);
     if let Some(Some(orig)) = vm.ini.originals.remove(&k) {
+        for m in vm.modules.clone() {
+            if let Some(f) = m.on_ini_set {
+                f(vm, &k, &orig)?;
+            }
+        }
         vm.set_ini(&k, &orig);
     }
     Ok(Value::Null)
@@ -1928,6 +1940,24 @@ fn memory_get_usage(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     let objs = goro_runtime::object::live_object_count() * 64;
     let slots = vm.ex.stack.used_slots() * 16;
     Ok(Value::Int((base + objs + slots) as i64))
+}
+
+/// The response's Content-Type set by header(), for the output handlers
+/// that look at it (mb_output_handler; PHP manual: mb_output_handler).
+#[derive(Default)]
+pub struct ResponseHeaders {
+    pub content_type: Option<PhpStr>,
+}
+
+/// header(): nothing is sent in the CLI; the Content-Type is remembered.
+fn header(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let h = a.str(0);
+    if let Some(p) = h.iter().position(|&c| c == b':')
+        && h[..p].trim_ascii().eq_ignore_ascii_case(b"content-type")
+    {
+        vm.ext::<ResponseHeaders>().content_type = Some(PhpStr::from(h[p + 1..].trim_ascii()));
+    }
+    Ok(Value::Null)
 }
 
 fn noop_void(_vm: &mut Vm, _a: &mut Args) -> R<Value> {

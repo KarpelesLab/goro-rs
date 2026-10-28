@@ -1939,6 +1939,7 @@ pub(crate) fn copy_hooks(h: &NativeHooks) -> NativeHooks {
         get_iterator: h.get_iterator,
         do_operation: h.do_operation,
         do_unary: h.do_unary,
+        unserialize_legacy: h.unserialize_legacy,
     }
 }
 

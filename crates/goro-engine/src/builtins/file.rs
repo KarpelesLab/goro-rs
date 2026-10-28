@@ -450,7 +450,13 @@ impl Stream {
             }
             match r {
                 Ok(Some(out)) => self.filtered.extend_from_slice(&out),
-                Ok(None) => return Err(std::io::Error::other("stream filter failed")),
+                // a failed filter ends the stream: feof() is then true
+                // (test ext/zlib/tests/bug71417.phpt)
+                Ok(None) => {
+                    self.filters_closed = true;
+                    self.eof = true;
+                    return Err(std::io::Error::other("stream filter failed"));
+                }
                 Err(e) => {
                     if vm.err.deferred.is_none() {
                         vm.err.deferred = Some(e);
@@ -1025,6 +1031,11 @@ fn fread(vm: &mut Vm, a: &mut Args) -> R<Value> {
                         break;
                     }
                 }
+                // nothing read and a failed filter: false (test
+                // ext/zlib/tests/bug71417.phpt)
+                Err(e) if got == 0 && e.to_string() == "stream filter failed" => {
+                    return Ok(Value::Bool(false));
+                }
                 Err(_) => break,
             }
         }
@@ -1144,7 +1155,9 @@ fn feof(vm: &mut Vm, a: &mut Args) -> R<Value> {
             ));
         }
         Ok(Value::Bool(
-            at_end && s.eof || matches!(s.backing, Backing::Memory { .. }) && at_end,
+            at_end && s.eof
+                || matches!(s.backing, Backing::Memory { .. }) && at_end
+                || matches!(s.backing, Backing::Native(_)) && at_end && s.pending.is_empty(),
         ))
     })
 }
@@ -1477,7 +1490,9 @@ fn stream_get_meta_data(vm: &mut Vm, a: &mut Args) -> R<Value> {
             m.insert(Key::from("wrapper_data"), Value::Object(obj.clone()));
         }
         let pipe = s.is_pipe();
-        if !pipe {
+        // no wrapper: gzopen() streams (test zlib_wrapper_meta_data_basic.phpt)
+        let nowrap = pipe || s.wrapper.is_empty();
+        if !nowrap {
             m.insert(Key::from("wrapper_type"), Value::from(s.wrapper));
         }
         m.insert(Key::from("stream_type"), Value::from(s.stream_type));
@@ -1485,9 +1500,16 @@ fn stream_get_meta_data(vm: &mut Vm, a: &mut Args) -> R<Value> {
         m.insert(Key::from("unread_bytes"), Value::Int(0));
         m.insert(
             Key::from("seekable"),
-            Value::Bool(!pipe && matches!(s.backing, Backing::File(_) | Backing::Memory { .. })),
+            Value::Bool(
+                !pipe
+                    && match &mut s.backing {
+                        Backing::File(_) | Backing::Memory { .. } => true,
+                        Backing::Native(n) => n.tell().is_some(),
+                        _ => false,
+                    },
+            ),
         );
-        if !pipe {
+        if !nowrap {
             m.insert(Key::from("uri"), Value::Str(s.uri.clone()));
         }
         Ok(Value::Array(m))
@@ -1654,7 +1676,10 @@ fn file_put_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(mut s) = open_stream(vm, a, &f, mode, false)? else {
         return Ok(Value::Bool(false));
     };
-    match s.write_all(vm, &bytes) {
+    let r = s.write_all(vm, &bytes);
+    // native streams (compress.zlib://) finish their output on close
+    super::streams::close_stream(vm, &mut s)?;
+    match r {
         Ok(n) => Ok(Value::Int(n as i64)),
         Err(_) => Ok(Value::Bool(false)),
     }
@@ -1781,7 +1806,10 @@ fn copy(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(mut d) = open_stream(vm, a, &to, b"wb", false)? else {
         return Ok(Value::Bool(false));
     };
-    Ok(Value::Bool(d.write_all(vm, &data).is_ok()))
+    let ok = d.write_all(vm, &data).is_ok();
+    super::streams::close_stream(vm, &mut s)?;
+    super::streams::close_stream(vm, &mut d)?;
+    Ok(Value::Bool(ok))
 }
 
 fn mkdir(vm: &mut Vm, a: &mut Args) -> R<Value> {

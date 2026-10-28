@@ -751,6 +751,43 @@ impl Vm {
             if u.pos + len > u.d.len() {
                 return Err(UErr::At(start));
             }
+            // An internal class reading the payload as serialized values
+            // in this context, so that `R:`/`r:` reach the object (GMP:
+            // test ext/gmp/tests/unserialize_with_reference.phpt).
+            if let Some(cls) = &cls
+                && let Some(h) = cls.native.unserialize_legacy
+            {
+                // The payload has its own reference numbering, where 1 is
+                // the object (tests unserialize_with_reference.phpt,
+                // bug70284.phpt).
+                let end = u.pos + len;
+                let o = self.instantiate(cls)?;
+                let cell = u.cell(Value::Object(o.clone()));
+                let outer = std::mem::replace(&mut u.vals, vec![cell.clone()]);
+                let mut vals = Vec::new();
+                let mut r = Ok(());
+                while u.pos < end {
+                    match self.unser_elem(u) {
+                        Ok(v) => vals.push(v.deref()),
+                        Err(e) => {
+                            r = Err(e);
+                            break;
+                        }
+                    }
+                }
+                u.vals = outer;
+                if r.is_err() {
+                    // A payload that does not parse leaves the number
+                    // unreadable.
+                    vals.clear();
+                }
+                if u.pos != end {
+                    u.pos = end;
+                }
+                u.expect(b'}')?;
+                h(self, &o, vals)?;
+                return Ok(Value::Ref(cell));
+            }
             let data = PhpStr::new(&u.d[u.pos..u.pos + len]);
             u.pos += len;
             u.expect(b'}')?;

@@ -44,6 +44,26 @@ pub static MODULE: Module = Module {
     ..Module::EMPTY
 };
 
+/// The output_handler setting: a handler started before the script runs
+/// (PHP manual: output_handler, "Redirect all the output of your scripts
+/// to a function").
+pub fn start_ini_handler(vm: &mut Vm) {
+    let Some(h) = vm.get_ini(b"output_handler") else {
+        return;
+    };
+    if h.is_empty() {
+        return;
+    }
+    let cb = Value::Str(h);
+    let name = handler_name(vm, &cb);
+    vm.out.buffers.push(ObBuffer::new(
+        Some(cb),
+        0,
+        crate::vm::output::PHP_OUTPUT_HANDLER_STDFLAGS,
+        name,
+    ));
+}
+
 fn handler_name(vm: &mut Vm, cb: &Value) -> PhpStr {
     match cb {
         Value::Null => PhpStr::from("default output handler"),

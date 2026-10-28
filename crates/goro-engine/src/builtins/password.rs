@@ -164,11 +164,17 @@ fn password_hash(vm: &mut Vm, a: &mut Args) -> R<Value> {
             if !(1..=0xff_ffff).contains(&p) {
                 return vm.throw("ValueError", "Invalid number of threads");
             }
-            let salt = random16();
-            let h = argon2::hash(variant, &pw, &salt, t as u32, m as u32, p as u32, 32);
-            Ok(sv(argon2::encode(
-                variant, m as u32, t as u32, p as u32, &salt, &h,
-            )))
+            // goro-ext-sodium's Argon2 (SIMD kernel) for the hash itself.
+            match goro_ext_sodium::argon2_password_hash(
+                variant == Variant::Id,
+                &pw,
+                m as u32,
+                t as u32,
+                p as u32,
+            ) {
+                Some(h) => Ok(sv(h)),
+                None => vm.throw("Error", "Argon2 hashing failed"),
+            }
         }
     }
 }
