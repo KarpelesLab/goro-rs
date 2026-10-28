@@ -437,6 +437,12 @@ pub(crate) fn modern_fn(a: &Args) -> bool {
 
 /// Throws a DOMException.
 pub(crate) fn throw_dom<T>(vm: &mut Vm, e: DomError) -> R<T> {
+    if e == DomError::HierarchyRequest
+        && let Some(m) = node::DETAIL.with(|d| d.take())
+    {
+        return throw_dom_msg(vm, m, e.code() as i64);
+    }
+    node::DETAIL.with(|d| d.set(None));
     throw_dom_msg(vm, e.message(), e.code() as i64)
 }
 

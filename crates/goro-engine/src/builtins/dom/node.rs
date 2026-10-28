@@ -151,6 +151,99 @@ pub(crate) enum LegacyInsertError {
     Attr,
 }
 
+thread_local! {
+    /// The detailed message of the last `Dom\` hierarchy error.
+    pub(crate) static DETAIL: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// The messages PHP gives the document cases of the DOM Standard's
+/// pre-insertion validity (observed on PHP 8.5, tests modern/spec/
+/// Node_insertBefore_*.phpt, ParentNode_hierarchy_text_nodes.phpt).
+fn hierarchy_detail(
+    a: &goro_xml::Arena,
+    parent: NodeId,
+    node: NodeId,
+    child: Option<NodeId>,
+) -> Option<&'static str> {
+    let parent_is_doc = matches!(a.data(parent), NodeData::Document(_));
+    let is_doctype = |n: NodeId| matches!(a.data(n), NodeData::Doctype(_));
+    match a.data(node) {
+        NodeData::Doctype(_) if !parent_is_doc => {
+            return Some("Cannot insert a document type into anything other than a document");
+        }
+        NodeData::Text(_) | NodeData::CData(_) if parent_is_doc => {
+            return Some("Cannot insert text as a child of a document");
+        }
+        _ => {}
+    }
+    if !parent_is_doc {
+        return None;
+    }
+    if child.is_some_and(|c| a.parent(c) != Some(parent)) {
+        return None;
+    }
+    let has_el_except = |except: Option<NodeId>| {
+        a.children(parent)
+            .any(|c| Some(c) != except && a.is_element(c))
+    };
+    let doctype_at_or_after = |c: Option<NodeId>| {
+        let mut cur = c;
+        while let Some(x) = cur {
+            if is_doctype(x) {
+                return true;
+            }
+            cur = a.next_sibling(x);
+        }
+        false
+    };
+    match a.data(node) {
+        NodeData::Fragment => {
+            let els = a.children(node).filter(|&c| a.is_element(c)).count();
+            if a.children(node).any(|c| a.is_text(c)) {
+                return Some("Cannot insert text as a child of a document");
+            }
+            if els > 1 || els == 1 && has_el_except(None) {
+                return Some("Cannot have more than one element child in a document");
+            }
+            if els == 1 && doctype_at_or_after(child) {
+                return Some("Document types must be the first child in a document");
+            }
+        }
+        NodeData::Element(_) => {
+            if has_el_except(Some(node)) {
+                return Some("Cannot have more than one element child in a document");
+            }
+            if doctype_at_or_after(child) {
+                return Some("Document types must be the first child in a document");
+            }
+        }
+        NodeData::Doctype(_) => {
+            if a.children(parent).any(|c| c != node && is_doctype(c)) {
+                return Some("Cannot have more than one document type in a document");
+            }
+            let el_before = match child {
+                Some(c) => {
+                    let mut cur = a.prev_sibling(c);
+                    let mut found = false;
+                    while let Some(x) = cur {
+                        if a.is_element(x) {
+                            found = true;
+                        }
+                        cur = a.prev_sibling(x);
+                    }
+                    found
+                }
+                None => has_el_except(None),
+            };
+            if el_before {
+                return Some("Document types must be the first child in a document");
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
 /// The DOM Standard's pre-insert for `Dom\` nodes (adopting the node).
 pub(crate) fn modern_insert(
     parent: NodeId,
@@ -159,6 +252,10 @@ pub(crate) fn modern_insert(
 ) -> Result<Vec<NodeId>, DomError> {
     xmlstore::with(|s| {
         let a = &mut s.arena;
+        if let Some(m) = hierarchy_detail(a, parent, node, child) {
+            DETAIL.with(|d| d.set(Some(m)));
+            return Err(DomError::HierarchyRequest);
+        }
         a.check_pre_insert(parent, node, child)?;
         let mut child = child;
         if child == Some(node) {
