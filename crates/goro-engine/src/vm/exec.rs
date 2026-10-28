@@ -741,6 +741,7 @@ impl Vm {
                     nargs,
                     cache,
                 } => self.op_init_static_call(class, name, nargs, cache)?,
+                Op::InitParentHook { name, set } => self.op_init_parent_hook(name, set)?,
                 Op::Send { src, arg } => {
                     let v = self.get(src)?;
                     self.send_val(arg, v, false)?;

@@ -180,7 +180,7 @@ pub enum ConstState {
 }
 
 /// A declared instance property of a linked class.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PropInfo {
     pub name: PhpStr,
     /// Slot in objects.

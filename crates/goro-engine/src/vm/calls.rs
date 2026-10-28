@@ -77,6 +77,63 @@ impl goro_runtime::NativeData for ClosureData {
     }
 }
 
+/// The property a `parent::$prop::get/set` stand-in works on: the object
+/// and its own declaration of the property.
+fn parent_plain_target(vm: &mut Vm, a: &Args) -> R<(ObjRef, Rc<crate::class::PropInfo>)> {
+    let o = a.this.clone().expect("hook stand-in without $this");
+    let n = a.func.name.as_bytes();
+    let n = &n[1..n.len() - 5];
+    let cls = vm.class_of(&o);
+    let idx = cls
+        .prop_map
+        .borrow()
+        .get(&PhpStr::new(n))
+        .and_then(|v| v.first().copied());
+    let p = cls.props.borrow()[idx.expect("parent hook property") as usize].clone();
+    Ok((o, p))
+}
+
+fn parent_plain_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (o, p) = parent_plain_target(vm, a)?;
+    let v = o.obj().slots.borrow()[p.slot as usize].clone();
+    if vm.is_uninit(&v) {
+        if p.ty.is_some() {
+            return vm.throw(
+                "Error",
+                &format!(
+                    "Typed property {}::${} must not be accessed before initialization",
+                    vm.class_of(&o).name.dname(),
+                    p.name.to_string_lossy()
+                ),
+            );
+        }
+        return Ok(Value::Null);
+    }
+    Ok(v.into_deref())
+}
+
+fn parent_plain_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (o, p) = parent_plain_target(vm, a)?;
+    let v = a.vals[0].clone().into_deref();
+    let v = match &p.ty {
+        Some(t) => {
+            let cls = vm.class_of(&o);
+            vm.coerce_prop(&p, t, v, &cls)?
+        }
+        None => v,
+    };
+    let slots_ptr = o.obj().slots.as_ptr();
+    let slot = unsafe { &mut (&mut *slots_ptr)[p.slot as usize] };
+    if vm.is_uninit(slot) {
+        let old = std::mem::replace(slot, v.clone());
+        drop(old);
+    } else {
+        let old = slot.assign(v.clone());
+        drop(old);
+    }
+    Ok(v)
+}
+
 impl Vm {
     // ------------------------------------------------------------ pending calls
 
@@ -958,6 +1015,94 @@ impl Vm {
     pub(crate) fn class_ptr_of(&self, o: &ObjRef) -> *const Class {
         let c: &Rc<dyn goro_runtime::ClassInfo> = o.class();
         Rc::as_ptr(c) as *const Class
+    }
+
+    /// `parent::$prop::get()` / `parent::$prop::set()`: calls the parent
+    /// class's hook, or a stand-in reading or writing the backing value
+    /// when the parent property is plain (RFC: Property hooks).
+    pub(crate) fn op_init_parent_hook(&mut self, name: Reg, set: bool) -> R<()> {
+        let Some(o) = self.this_obj() else {
+            return self.throw("Error", "Using $this when not in object context");
+        };
+        let scope = self.scope_ptr();
+        if scope.is_null() {
+            return self.throw(
+                "Error",
+                "Cannot use \"parent\" when no class scope is active",
+            );
+        }
+        let Some(parent) = unsafe { &*scope }.parent.clone() else {
+            return self.throw(
+                "Error",
+                "Cannot use \"parent\" when current class scope has no parent",
+            );
+        };
+        let n = self.get(name)?;
+        let n = self.to_php_str(&n)?;
+        let pi = parent
+            .prop_map
+            .borrow()
+            .get(&n)
+            .and_then(|v| v.first().copied())
+            .map(|i| parent.props.borrow()[i as usize].clone());
+        let Some(pi) = pi else {
+            return self.throw(
+                "Error",
+                &format!(
+                    "Undefined property {}::${}",
+                    parent.name.dname(),
+                    n.to_string_lossy()
+                ),
+            );
+        };
+        if pi.flags & mflags::PRIVATE != 0 && !std::ptr::eq(pi.class, scope) {
+            return self.throw(
+                "Error",
+                &format!(
+                    "Cannot access private property {}::${}",
+                    unsafe { (*pi.class).name.dname() },
+                    n.to_string_lossy()
+                ),
+            );
+        }
+        let hook = if set { pi.set.clone() } else { pi.get.clone() };
+        let f = match hook {
+            Some(h) => h,
+            None => {
+                let fname = format!(
+                    "${}::{}",
+                    n.to_string_lossy(),
+                    if set { "set" } else { "get" }
+                );
+                let f = if set {
+                    Func::native(
+                        &fname,
+                        "function set(mixed $value): mixed",
+                        parent_plain_set,
+                        mflags::PUBLIC,
+                    )
+                } else {
+                    Func::native(
+                        &fname,
+                        "function get(): mixed",
+                        parent_plain_get,
+                        mflags::PUBLIC,
+                    )
+                };
+                f.scope.set(Rc::as_ptr(&parent));
+                Rc::new(f)
+            }
+        };
+        let cb = Callee {
+            scope: f.scope.get(),
+            func: f,
+            static_class: self.class_ptr_of(&o),
+            this: Some(o),
+            closure: None,
+            magic_name: None,
+        };
+        self.push_callee(cb, 0);
+        Ok(())
     }
 
     pub(crate) fn op_init_static_call(

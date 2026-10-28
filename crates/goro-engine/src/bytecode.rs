@@ -589,6 +589,11 @@ pub enum Op {
         nargs: u32,
         cache: u32,
     },
+    /// `parent::$prop::get()` / `parent::$prop::set()` in a property hook.
+    InitParentHook {
+        name: Reg,
+        set: bool,
+    },
     Send {
         src: Reg,
         arg: u32,

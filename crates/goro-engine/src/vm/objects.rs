@@ -440,6 +440,15 @@ impl Vm {
                     let h = h.clone();
                     let v = self.call_hook(o, &p, h, Vec::new())?;
                     Some(v)
+                } else if p.flags & mflags::VIRTUAL != 0 && !self.in_hook(o, &p) {
+                    return self.throw(
+                        "Error",
+                        &format!(
+                            "Property {}::${} is write-only",
+                            cls.name.dname(),
+                            name.to_string_lossy()
+                        ),
+                    );
                 } else {
                     let v = o.obj().slots.borrow()[p.slot as usize].clone();
                     if self.is_uninit(&v) {

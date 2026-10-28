@@ -888,7 +888,9 @@ impl Vm {
     pub(crate) fn unset_var_var(&mut self, n: &Value) -> R<()> {
         let name = self.to_php_str(n)?;
         let f = self.frame();
-        if f.flags & frame_flags::GLOBAL != 0 {
+        if f.flags & frame_flags::GLOBAL != 0
+            || (crate::compiler::is_superglobal_name(&name) && name.as_bytes() != b"GLOBALS")
+        {
             self.unset_owner_var(usize::MAX, &name);
             return Ok(());
         }
