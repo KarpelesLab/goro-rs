@@ -22,5 +22,6 @@ goro-charset = { path = "../goro-charset" }
 goro-ext-zlib = { path = "../goro-ext-zlib" }
 goro-xml = { path = "../goro-xml" }
 goro-ext-openssl = { path = "../goro-ext-openssl" }
+goro-ext-intl = { path = "../goro-ext-intl" }
 libc = "0.2"
 corosensei = "0.2"
