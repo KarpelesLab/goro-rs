@@ -149,8 +149,11 @@ pub struct Parser<'l> {
     /// Byte offset in the decoded input of the construct being processed.
     pub event_offset: usize,
     fragment: bool,
-    tag_end_lc: Option<(u32, u32)>,
-    name_end_lc: Option<(u32, u32)>,
+    tag_end_lc: Option<usize>,
+    name_end_lc: Option<usize>,
+    /// Byte position errors are reported at (start-tag checks), resolved
+    /// to a line and column only when an error is reported.
+    err_at: Option<usize>,
     halt_lc: Option<(u32, u32)>,
     utf16_input: bool,
     pub(crate) no_subset_error: bool,
@@ -170,8 +173,8 @@ struct RawAttr {
     name: Str,
     value: String,
     pieces: Option<Vec<AttrPiece>>,
-    name_lc: (u32, u32),
-    value_lc: (u32, u32),
+    name_lc: usize,
+    value_lc: usize,
 }
 
 impl<'l> Parser<'l> {
@@ -223,6 +226,7 @@ impl<'l> Parser<'l> {
             fragment: false,
             tag_end_lc: None,
             name_end_lc: None,
+            err_at: None,
             halt_lc: None,
             utf16_input: false,
             no_subset_error: false,
@@ -626,6 +630,17 @@ impl<'l> Parser<'l> {
         unsafe { std::str::from_utf8_unchecked(&self.buf[r.0..r.1]) }
     }
 
+    /// Interns the name at a buffer range.
+    pub(crate) fn intern_range(&mut self, r: (usize, usize)) -> Str {
+        let s = unsafe { std::str::from_utf8_unchecked(&self.buf[r.0..r.1]) };
+        if let Some(x) = self.names.get(s) {
+            return x.clone();
+        }
+        let rc: Str = Rc::from(s);
+        self.names.insert(rc.clone());
+        rc
+    }
+
     pub(crate) fn intern(&mut self, s: &str) -> Str {
         if let Some(x) = self.names.get(s) {
             return x.clone();
@@ -638,6 +653,18 @@ impl<'l> Parser<'l> {
     /// Line and column (1-based, in characters) of a position, computed
     /// incrementally from the last position asked for.
     pub(crate) fn line_col(&mut self, pos: usize) -> (u32, u32) {
+        let pos = self.advance_lines(pos);
+        self.col_val += self.buf[self.col_pos..pos]
+            .iter()
+            .filter(|&&b| (b & 0xC0) != 0x80)
+            .count() as u32;
+        self.col_pos = pos;
+        (self.line_no, self.col_val)
+    }
+
+    /// Counts lines up to `pos` (the column cache stays at a line start or
+    /// an earlier position on the same line).
+    fn advance_lines(&mut self, pos: usize) -> usize {
         let pos = pos.min(self.buf.len());
         if pos < self.line_pos || pos < self.col_pos {
             self.line_pos = 0;
@@ -652,19 +679,15 @@ impl<'l> Parser<'l> {
             self.col_val = 1;
         }
         self.line_pos = pos;
-        self.col_val += self.buf[self.col_pos..pos]
-            .iter()
-            .filter(|&&b| (b & 0xC0) != 0x80)
-            .count() as u32;
-        self.col_pos = pos;
-        (self.line_no, self.col_val)
+        pos
     }
 
     pub(crate) fn line(&mut self, pos: usize) -> u32 {
         if let Some((l, _)) = self.err_pos {
             return l;
         }
-        self.line_col(pos).0
+        self.advance_lines(pos);
+        self.line_no
     }
 
     // ----- errors ----------------------------------------------------------
@@ -673,7 +696,7 @@ impl<'l> Parser<'l> {
         let (line, column) = match (self.err_pos, self.halt_lc) {
             (Some(p), _) => p,
             (None, Some(p)) => p,
-            (None, None) => self.line_col(self.pos),
+            (None, None) => self.line_col(self.err_at.unwrap_or(self.pos)),
         };
         let e = XmlError {
             domain,
@@ -1454,9 +1477,9 @@ impl<'l> Parser<'l> {
             }
             return Err(self.fatal(68, "StartTag: invalid element name"));
         };
-        let raw_name = self.slice(nr).to_string();
+        let raw_name = self.intern_range(nr);
         let line = self.line(tag_start);
-        self.name_end_lc = Some(self.line_col(self.pos));
+        self.name_end_lc = Some(self.pos);
         let mut raw_attrs: Vec<RawAttr> = Vec::new();
         let mut empty = false;
         let mut failed = false;
@@ -1514,7 +1537,7 @@ impl<'l> Parser<'l> {
                 ));
             }
             let name_end = self.pos;
-            let aname = self.slice(an).to_string();
+            let aname = self.intern_range(an);
             self.skip_spaces();
             if self.cur() != b'=' {
                 if self.incomplete() {
@@ -1538,12 +1561,12 @@ impl<'l> Parser<'l> {
             }
             match self.parse_att_value(&aname)? {
                 Some((v, pieces)) => {
-                    if raw_attrs.iter().any(|r| *r.name == *aname) {
+                    if raw_attrs.iter().any(|r| r.name == aname) {
                         return Err(self.fatal(42, format!("Attribute {aname} redefined")));
                     }
-                    let name = self.intern(&aname);
-                    let name_lc = self.line_col(name_end);
-                    let value_lc = self.line_col(self.pos);
+                    let name = aname;
+                    let name_lc = name_end;
+                    let value_lc = self.pos;
                     raw_attrs.push(RawAttr {
                         name,
                         value: v,
@@ -1563,9 +1586,10 @@ impl<'l> Parser<'l> {
         if failed || self.stopped {
             return Err(Halt::Fatal);
         }
-        let end_lc = self.line_col(self.pos - if empty { 2 } else { 1 });
-        self.tag_end_lc = Some(end_lc);
+        let end_pos = self.pos - if empty { 2 } else { 1 };
+        self.tag_end_lc = Some(end_pos);
         if self.stack.len() >= self.max_depth {
+            let end_lc = self.line_col(end_pos);
             self.err_pos.get_or_insert(end_lc);
             return Err(self.halt(
                 114,
@@ -1593,10 +1617,11 @@ impl<'l> Parser<'l> {
         let decls: Vec<crate::tree::AttrDecl> = self.attr_decls(raw_name);
         let mut preserve = self.stack.last().is_some_and(|o| o.preserve);
         let outer_err = self.err_pos;
-        let at = |p: &Self, lc: (u32, u32)| p.err_pos_for(outer_err, lc);
-        let name_lc0 = self.name_end_lc.take();
-        if let Some(lc) = name_lc0 {
-            self.err_pos = at(self, lc);
+        let in_entity = !self.entity_stack.is_empty();
+        if let Some(p) = self.name_end_lc.take()
+            && !in_entity
+        {
+            self.err_at = Some(p);
         }
         if self.opts.namespaces && raw_name.contains(':') && split_qname(raw_name).is_none() {
             self.error(
@@ -1613,15 +1638,21 @@ impl<'l> Parser<'l> {
             value_lc,
         } in raw_attrs
         {
-            self.err_pos = at(self, value_lc);
+            if !in_entity {
+                self.err_at = Some(value_lc);
+            }
             if self.opts.namespaces && an.contains(':') && split_qname(&an).is_none() {
-                self.err_pos = at(self, name_lc);
+                if !in_entity {
+                    self.err_at = Some(name_lc);
+                }
                 self.error(
                     Domain::Namespace,
                     202,
                     format!("Failed to parse QName '{an}'"),
                 );
-                self.err_pos = at(self, value_lc);
+                if !in_entity {
+                    self.err_at = Some(value_lc);
+                }
             }
             let atype = decls
                 .iter()
@@ -1749,8 +1780,10 @@ impl<'l> Parser<'l> {
                 }
             }
         }
-        if let Some(lc) = self.tag_end_lc.take() {
-            self.err_pos = at(self, lc);
+        if let Some(p) = self.tag_end_lc.take()
+            && !in_entity
+        {
+            self.err_at = Some(p);
         }
         // Namespace resolution.
         for d in &ns_decls {
@@ -1855,6 +1888,7 @@ impl<'l> Parser<'l> {
             ns_decls = kept;
         }
         self.err_pos = outer_err;
+        self.err_at = None;
         if let Some(o) = self.stack.last_mut() {
             o.had_child = true;
         }
@@ -1913,16 +1947,6 @@ impl<'l> Parser<'l> {
                 100,
                 format!("{attr}: URI {v} is not absolute"),
             );
-        }
-    }
-
-    /// The error position for a construct inside the start tag: the given
-    /// one, unless an entity expansion fixes positions.
-    fn err_pos_for(&self, outer: Option<(u32, u32)>, lc: (u32, u32)) -> Option<(u32, u32)> {
-        if self.entity_stack.is_empty() {
-            Some(lc)
-        } else {
-            outer
         }
     }
 
