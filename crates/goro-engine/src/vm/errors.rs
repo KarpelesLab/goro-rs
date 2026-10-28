@@ -582,7 +582,14 @@ impl Vm {
             while natives > 0 && ex.native_calls[natives - 1].depth as usize == i {
                 let nc = &ex.native_calls[natives - 1];
                 natives -= 1;
-                out.push(self.native_trace_frame(ex, nc, i, with_args));
+                let mut e = self.native_trace_frame(ex, nc, i, with_args);
+                // Called by another internal function (call_user_func):
+                // no call site (test ReflectionFiber_notrace_2.phpt).
+                if natives > 0 && ex.native_calls[natives - 1].depth as usize == i {
+                    e.file = None;
+                    e.line = 0;
+                }
+                out.push(e);
             }
             if i == 0 {
                 break;

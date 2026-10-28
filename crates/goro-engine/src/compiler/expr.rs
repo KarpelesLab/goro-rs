@@ -507,6 +507,12 @@ impl<'a> Compiler<'a> {
                 c.free(o);
                 c.free(n);
                 let cache = c.cache();
+                // A method call is located at its name (observed on PHP
+                // 8.5: a multi-line `(new A)->m()` is on the line of `->m`).
+                let line = match name {
+                    MemberName::Ident(i) => i.span.line,
+                    MemberName::Expr(x) => x.span.line,
+                };
                 c.f.line = line;
                 c.emit(Op::InitMethod {
                     obj: o,

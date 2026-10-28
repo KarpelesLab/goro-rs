@@ -5870,25 +5870,24 @@ const FIBER_NO_INFO: &str =
     "Cannot fetch information from a fiber that has not been started or is terminated";
 /// Where the fiber stands: its Fiber::suspend() call, or the caller when
 /// it is the running fiber.
-fn fiber_location(vm: &mut Vm, a: &Args) -> R<(PhpStr, u32)> {
+/// None for a suspended fiber without user code frames (its callable is
+/// Fiber::suspend itself: test ReflectionFiber_notrace_1.phpt).
+fn fiber_location(vm: &mut Vm, a: &Args) -> R<Option<(PhpStr, u32)>> {
     let Some(f) = fiber_of(a) else {
         return vm.throw("Error", FIBER_NO_INFO);
     };
     use crate::builtins::fiber::FiberStatus;
     match vm.fiber_info(&f).map(|i| i.0) {
-        Some(FiberStatus::Suspended) => match vm.fiber_executing(&f) {
-            Some(at) => Ok(at),
-            None => vm.throw("Error", FIBER_NO_INFO),
-        },
-        Some(FiberStatus::Running) => Ok((vm.cur_file(), vm.cur_line())),
+        Some(FiberStatus::Suspended) => Ok(vm.fiber_executing(&f)),
+        Some(FiberStatus::Running) => Ok(Some((vm.cur_file(), vm.cur_line()))),
         _ => vm.throw("Error", FIBER_NO_INFO),
     }
 }
 fn fb_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    Ok(Value::Str(fiber_location(vm, a)?.0))
+    Ok(fiber_location(vm, a)?.map_or(Value::Null, |l| Value::Str(l.0)))
 }
 fn fb_line(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    Ok(Value::Int(fiber_location(vm, a)?.1 as i64))
+    Ok(fiber_location(vm, a)?.map_or(Value::Null, |l| Value::Int(l.1 as i64)))
 }
 fn fb_callable(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(f) = fiber_of(a) else {

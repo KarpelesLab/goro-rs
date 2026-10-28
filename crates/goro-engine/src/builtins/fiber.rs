@@ -400,13 +400,16 @@ impl Vm {
                 let d = any.downcast_ref::<FiberData>()?;
                 self.backtrace_ex(d.ex.as_ref()?, with_args, &mut frames);
             }
-            FiberStatus::Running
-                if self
-                    .fiber_stack
-                    .last()
-                    .is_some_and(|f| ObjRef::ptr_eq(f, o)) =>
-            {
-                self.backtrace_ex(&self.ex, with_args, &mut frames);
+            FiberStatus::Running => {
+                // The running fiber's stack, or (when it resumed another
+                // fiber) the one saved by that switch.
+                let k = self.fiber_stack.iter().position(|f| ObjRef::ptr_eq(f, o))?;
+                let ex = if k + 1 == self.fiber_stack.len() {
+                    &self.ex
+                } else {
+                    self.ex_parents.get(k + 1)?
+                };
+                self.backtrace_ex(ex, with_args, &mut frames);
             }
             _ => return None,
         }
