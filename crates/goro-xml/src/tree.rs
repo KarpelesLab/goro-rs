@@ -2036,7 +2036,7 @@ impl Arena {
                     let same = |x: NodeId| match self.element(x) {
                         Some(o) => {
                             if name == "*" {
-                                o.name.ns.is_some() && o.name.prefix.is_none()
+                                true
                             } else {
                                 o.name == e.name
                                     || (o.name.prefix == e.name.prefix
@@ -2046,7 +2046,7 @@ impl Arena {
                         None => false,
                     };
                     let (idx, total) = self.sibling_index(cur, same);
-                    if name == "*" {
+                    if name == "*" && total > 1 {
                         parts.push(format!("*[{idx}]"));
                     } else if total > 1 {
                         parts.push(format!("{name}[{idx}]"));
@@ -2137,6 +2137,32 @@ impl Arena {
             c = self.node(p).next;
         }
         (idx, total)
+    }
+
+    /// Copies a node (deep) from another arena into document `doc` of
+    /// this one (`XMLReader::expand($doc)`, cross-arena import). The copy
+    /// is detached.
+    pub fn import_from(&mut self, src: &Arena, n: NodeId, doc: NodeId) -> NodeId {
+        let node = src.node(n);
+        let mut data = node.data.clone();
+        if let NodeData::Element(e) = &mut data {
+            e.first_attr = None;
+            e.last_attr = None;
+            e.template_contents = None;
+        }
+        let copy = self.create(doc, data);
+        self.node_mut(copy).line = node.line;
+        if src.is_element(n) {
+            for a in src.attrs(n).collect::<Vec<_>>() {
+                let ac = self.import_from(src, a, doc);
+                self.raw_append_attr(copy, ac);
+            }
+        }
+        for c in src.children(n).collect::<Vec<_>>() {
+            let cc = self.import_from(src, c, doc);
+            self.raw_append(copy, cc);
+        }
+        copy
     }
 }
 

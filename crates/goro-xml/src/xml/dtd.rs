@@ -735,11 +735,14 @@ impl Parser<'_> {
             }
             let d = self.dtd.as_mut().unwrap();
             if d.elements.contains_key(&name) {
-                self.error(
-                    Domain::Valid,
-                    524,
-                    format!("Redefinition of element {name}"),
-                );
+                // Reported when validating while parsing (observed on PHP 8.5).
+                if self.opts.has(super::opt::DTDVALID) {
+                    self.error(
+                        Domain::Valid,
+                        509,
+                        format!("Redefinition of element {name}"),
+                    );
+                }
                 return Ok(());
             }
             d.elements.insert(

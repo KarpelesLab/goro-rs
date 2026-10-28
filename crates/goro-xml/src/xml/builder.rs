@@ -27,6 +27,11 @@ pub struct TreeBuilder<'a> {
 }
 
 impl<'a> TreeBuilder<'a> {
+    /// The node new content is appended to.
+    pub fn current(&self) -> NodeId {
+        self.cur
+    }
+
     /// A builder appending to `parent` (a document, element or fragment).
     pub fn new(arena: &'a mut Arena, parent: NodeId, opts: &ParseOptions) -> TreeBuilder<'a> {
         let doc = arena.doc_of(parent);
@@ -299,7 +304,7 @@ pub fn build_into(
     let mut ok = status == Status::Done;
     if ok || opts.has(opt::RECOVER) {
         if opts.has(opt::DTDVALID) {
-            let v = super::validate::validate(arena, doc);
+            let v = super::validate::validate_during_parse(arena, doc);
             for e in &v {
                 errors.push(e.clone());
             }

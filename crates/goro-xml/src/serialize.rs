@@ -29,6 +29,11 @@ pub struct SaveOptions {
     pub no_xml_decl: bool,
     /// Indentation string per level (libxml default: two spaces).
     pub indent: Option<String>,
+    /// Declare namespaces used but not declared within the output (what
+    /// a copied node gets; `XMLReader::readOuterXml`).
+    pub fixup_ns: bool,
+    /// Write elements without their children.
+    pub shallow: bool,
 }
 
 impl SaveOptions {
@@ -39,6 +44,8 @@ impl SaveOptions {
             no_empty_tags: flags & crate::xml::opt::NOEMPTYTAG != 0,
             no_xml_decl: flags & crate::xml::opt::NOXMLDECL != 0,
             indent: None,
+            fixup_ns: false,
+            shallow: false,
         }
     }
 }
@@ -48,6 +55,7 @@ struct Writer<'a> {
     out: String,
     opts: &'a SaveOptions,
     xhtml: bool,
+    scope: Vec<(Option<crate::tree::Str>, crate::tree::Str)>,
 }
 
 /// Escapes text content (`<`, `>`, `&`, CR).
@@ -165,7 +173,42 @@ impl Writer<'_> {
                 let name = e.name.qualified();
                 self.out.push('<');
                 self.out.push_str(&name);
-                for d in &e.ns_decls {
+                let scope_mark = self.scope.len();
+                let mut decls = e.ns_decls.clone();
+                if self.opts.fixup_ns {
+                    for d in &e.ns_decls {
+                        self.scope.push((d.prefix.clone(), d.uri.clone()));
+                    }
+                    let mut need: Vec<(Option<crate::tree::Str>, crate::tree::Str)> = Vec::new();
+                    if let Some(ns) = &e.name.ns {
+                        need.push((e.name.prefix.clone(), ns.clone()));
+                    }
+                    for a in arena.attrs(n) {
+                        let an = &arena.attr(a).unwrap().name;
+                        if let (Some(p), Some(ns)) = (&an.prefix, &an.ns)
+                            && &**p != "xml"
+                            && &**ns != crate::tree::XMLNS_NS
+                        {
+                            need.push((Some(p.clone()), ns.clone()));
+                        }
+                    }
+                    for (p, u) in need {
+                        let bound = self
+                            .scope
+                            .iter()
+                            .rev()
+                            .find(|(sp, _)| *sp == p)
+                            .map(|(_, su)| su.clone());
+                        if bound.as_deref() != Some(&*u) {
+                            decls.push(crate::tree::NsDecl {
+                                prefix: p.clone(),
+                                uri: u.clone(),
+                            });
+                            self.scope.push((p, u));
+                        }
+                    }
+                }
+                for d in &decls {
                     match &d.prefix {
                         Some(p) => {
                             self.out.push_str(" xmlns:");
@@ -181,7 +224,8 @@ impl Writer<'_> {
                     self.out.push(' ');
                     self.attr(a);
                 }
-                if arena.first_child(n).is_none() {
+                if arena.first_child(n).is_none() || self.opts.shallow {
+                    self.scope.truncate(scope_mark);
                     if self.xhtml {
                         if xhtml_void(&name) && e.name.prefix.is_none() {
                             self.out.push_str(" />");
@@ -216,6 +260,7 @@ impl Writer<'_> {
                 if fmt {
                     self.indent(level);
                 }
+                self.scope.truncate(scope_mark);
                 self.out.push_str("</");
                 self.out.push_str(&name);
                 self.out.push('>');
@@ -665,6 +710,7 @@ pub fn to_string(arena: &Arena, n: NodeId, opts: &SaveOptions) -> String {
         out: String::new(),
         opts,
         xhtml: is_xhtml(arena, doc),
+        scope: Vec::new(),
     };
     w.node(n, 0, opts.format);
     w.out
@@ -690,6 +736,7 @@ pub fn internal_subset(d: &DtdData) -> Option<String> {
         out: String::new(),
         opts: &opts,
         xhtml: false,
+        scope: Vec::new(),
     };
     w.dtd_body(d);
     Some(w.out)

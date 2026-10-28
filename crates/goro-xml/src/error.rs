@@ -78,6 +78,49 @@ impl XmlError {
     }
 }
 
+impl XmlError {
+    /// The three lines libxml's generic error handler prints (PHP uses
+    /// them for SimpleXML, XMLReader and others; observed on PHP 8.5):
+    /// "Entity: line N: parser error : msg", the source line, and a caret
+    /// under the column. `input` is the document text.
+    pub fn generic_lines(&self, input: &[u8]) -> Vec<String> {
+        let what = match (self.domain, self.level) {
+            (Domain::Namespace, LEVEL_WARNING) => "namespace warning",
+            (Domain::Namespace, _) => "namespace error",
+            (Domain::Valid | Domain::Dtd, LEVEL_WARNING) => "validity warning",
+            (Domain::Valid | Domain::Dtd, _) => "validity error",
+            (Domain::Io, LEVEL_WARNING) => "I/O warning",
+            (Domain::Io, _) => "I/O error",
+            (Domain::Html, LEVEL_WARNING) => "HTML parser warning",
+            (Domain::Html, _) => "HTML parser error",
+            (_, LEVEL_WARNING) => "parser warning",
+            _ => "parser error",
+        };
+        let file = self.file.as_deref().unwrap_or("Entity");
+        let mut v = vec![format!(
+            "{file}: line {}: {what} : {}",
+            self.line,
+            self.text()
+        )];
+        if self.line > 0 {
+            let line = input
+                .split(|&b| b == b'\n')
+                .nth(self.line as usize - 1)
+                .unwrap_or(&[]);
+            let text = String::from_utf8_lossy(line);
+            let chars: Vec<char> = text.chars().collect();
+            let col = (self.column.max(1) - 1) as usize;
+            // libxml shows at most 80 characters around the error.
+            let start = col.saturating_sub(40).min(chars.len());
+            let end = (start + 80).min(chars.len());
+            let shown: String = chars[start..end].iter().collect();
+            v.push(shown);
+            v.push(format!("{}^", " ".repeat(col - start)));
+        }
+        v
+    }
+}
+
 /// Collected errors of one operation.
 #[derive(Clone, Debug, Default)]
 pub struct Errors {

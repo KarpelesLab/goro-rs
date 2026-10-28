@@ -137,6 +137,8 @@ pub struct Parser<'l> {
     pub errors: Vec<XmlError>,
     line_pos: usize,
     line_no: u32,
+    col_pos: usize,
+    col_val: u32,
     entity_stack: Vec<Str>,
     pub(crate) err_pos: Option<(u32, u32)>,
     text: String,
@@ -208,6 +210,8 @@ impl<'l> Parser<'l> {
             errors: Vec::new(),
             line_pos: 0,
             line_no: 1,
+            col_pos: 0,
+            col_val: 1,
             entity_stack: Vec::new(),
             err_pos: None,
             text: String::new(),
@@ -631,21 +635,29 @@ impl<'l> Parser<'l> {
         r
     }
 
+    /// Line and column (1-based, in characters) of a position, computed
+    /// incrementally from the last position asked for.
     pub(crate) fn line_col(&mut self, pos: usize) -> (u32, u32) {
         let pos = pos.min(self.buf.len());
-        if pos < self.line_pos {
+        if pos < self.line_pos || pos < self.col_pos {
             self.line_pos = 0;
             self.line_no = 1;
+            self.col_pos = 0;
+            self.col_val = 1;
         }
-        self.line_no += memchr::memchr_iter(b'\n', &self.buf[self.line_pos..pos]).count() as u32;
+        let seg = &self.buf[self.line_pos..pos];
+        if let Some(i) = memchr::memrchr(b'\n', seg) {
+            self.line_no += memchr::memchr_iter(b'\n', seg).count() as u32;
+            self.col_pos = self.line_pos + i + 1;
+            self.col_val = 1;
+        }
         self.line_pos = pos;
-        let ls = memchr::memrchr(b'\n', &self.buf[..pos]).map_or(0, |i| i + 1);
-        let col = self.buf[ls..pos]
+        self.col_val += self.buf[self.col_pos..pos]
             .iter()
             .filter(|&&b| (b & 0xC0) != 0x80)
-            .count() as u32
-            + 1;
-        (self.line_no, col)
+            .count() as u32;
+        self.col_pos = pos;
+        (self.line_no, self.col_val)
     }
 
     pub(crate) fn line(&mut self, pos: usize) -> u32 {
@@ -1443,8 +1455,8 @@ impl<'l> Parser<'l> {
             return Err(self.fatal(68, "StartTag: invalid element name"));
         };
         let raw_name = self.slice(nr).to_string();
-        self.name_end_lc = Some(self.line_col(self.pos));
         let line = self.line(tag_start);
+        self.name_end_lc = Some(self.line_col(self.pos));
         let mut raw_attrs: Vec<RawAttr> = Vec::new();
         let mut empty = false;
         let mut failed = false;
@@ -2249,10 +2261,12 @@ impl<'l> Parser<'l> {
         let saved_buf = std::mem::replace(&mut self.buf, text.into_bytes());
         let saved_pos = std::mem::replace(&mut self.pos, 0);
         let saved_final = std::mem::replace(&mut self.final_, true);
-        let saved_line = (self.line_pos, self.line_no);
+        let saved_line = (self.line_pos, self.line_no, self.col_pos, self.col_val);
         let saved_enc = std::mem::replace(&mut self.enc_error, false);
         self.line_pos = 0;
         self.line_no = 1;
+        self.col_pos = 0;
+        self.col_val = 1;
         let ename = self.intern(name);
         self.entity_stack.push(ename);
         let depth = self.stack.len();
@@ -2287,7 +2301,7 @@ impl<'l> Parser<'l> {
         self.pos = saved_pos;
         self.final_ = saved_final;
         self.enc_error = saved_enc;
-        (self.line_pos, self.line_no) = saved_line;
+        (self.line_pos, self.line_no, self.col_pos, self.col_val) = saved_line;
         self.err_pos = saved_err_pos;
         if self.halted {
             self.pos = self.buf.len();
