@@ -281,6 +281,53 @@ fn ini_flag(vm: &Vm, name: &[u8]) -> i64 {
         .unwrap_or(0)
 }
 
+/// Whether setting `k` to `v` changes a deprecated assert.* setting from
+/// its default (observed on PHP 8.5: "assert.bail INI setting is
+/// deprecated" for `ini_set("assert.bail", "1")`, not for "0").
+pub(crate) fn assert_ini_deprecated(k: &[u8], v: &[u8]) -> bool {
+    let truthy = |v: &[u8]| {
+        let l = v.to_ascii_lowercase();
+        match &l[..] {
+            b"on" | b"yes" | b"true" => true,
+            b"off" | b"no" | b"false" | b"none" | b"" => false,
+            _ => goro_runtime::convert::str_to_int(&l) != 0,
+        }
+    };
+    match k {
+        b"assert.active" | b"assert.warning" | b"assert.exception" => !truthy(v),
+        b"assert.bail" => truthy(v),
+        b"assert.callback" => !v.is_empty(),
+        _ => false,
+    }
+}
+
+/// Startup diagnostics for deprecated `-d` settings, in registration
+/// order (observed on PHP 8.5).
+pub(crate) fn startup_ini_deprecations(vm: &mut Vm, ini: &[(Vec<u8>, Vec<u8>)]) {
+    for k in [
+        &b"assert.active"[..],
+        b"assert.bail",
+        b"assert.warning",
+        b"assert.callback",
+        b"assert.exception",
+    ] {
+        let Some((_, v)) = ini.iter().rev().find(|(n, _)| n.as_slice() == k) else {
+            continue;
+        };
+        if assert_ini_deprecated(k, v) {
+            let _ = vm.raise_at(
+                crate::vm::errors::E_DEPRECATED,
+                &format!(
+                    "PHP Startup: {} INI setting is deprecated",
+                    String::from_utf8_lossy(k)
+                ),
+                goro_runtime::PhpStr::from("Unknown"),
+                0,
+            );
+        }
+    }
+}
+
 fn assert_callback(vm: &mut Vm) -> Value {
     if let Some(cb) = vm.ext::<AssertState>().callback.clone() {
         return cb;

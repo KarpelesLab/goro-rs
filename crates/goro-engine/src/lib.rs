@@ -46,6 +46,7 @@ pub fn run(opts: RunOptions) -> i32 {
     for (k, v) in &opts.ini {
         vm.set_ini(k, v);
     }
+    builtins::misc::startup_ini_deprecations(&mut vm, &opts.ini);
     let (src, path, display): (Vec<u8>, Vec<u8>, Vec<u8>) = match &opts.script {
         Script::File(p) => {
             use std::os::unix::ffi::OsStrExt;

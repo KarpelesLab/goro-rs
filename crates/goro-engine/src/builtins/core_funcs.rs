@@ -1740,6 +1740,12 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(old) = vm.get_ini(&k) else {
         return Ok(Value::Bool(false));
     };
+    if super::misc::assert_ini_deprecated(&k, &v) {
+        vm.fdeprecated(
+            a,
+            &format!("{} INI setting is deprecated", k.to_string_lossy()),
+        )?;
+    }
     vm.ini
         .originals
         .entry(k.clone())
