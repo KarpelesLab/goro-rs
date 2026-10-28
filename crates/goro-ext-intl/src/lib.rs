@@ -10,6 +10,7 @@
 //! units (as ICU counts them) are converted where the PHP API exposes
 //! them.
 
+pub mod collator;
 pub mod error;
 pub mod locale;
 pub mod utf16;
