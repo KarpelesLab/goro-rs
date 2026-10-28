@@ -107,9 +107,23 @@ impl<'a> Compiler<'a> {
 
     pub(crate) fn closure(&mut self, cl: &'a Closure<'a>, span: Span) -> CResult<u32> {
         let name = self.closure_name(span.line);
-        for u in cl.uses {
+        for (i, u) in cl.uses.iter().enumerate() {
             if u.name.name == b"this" {
                 return self.err("Cannot use $this as lexical variable", u.span.line);
+            }
+            // tests Zend/tests/closures/closure_use_auto_global,
+            // closure_use_variable_twice
+            if super::is_superglobal_name(u.name.name) {
+                return self.err("Cannot use auto-global as lexical variable", u.span.line);
+            }
+            if cl.uses[..i].iter().any(|x| x.name.name == u.name.name) {
+                return self.err(
+                    format!(
+                        "Cannot use variable ${} twice",
+                        String::from_utf8_lossy(u.name.name)
+                    ),
+                    u.span.line,
+                );
             }
             if cl.params.iter().any(|p| p.name.name == u.name.name) {
                 return self.err(
@@ -2240,7 +2254,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn check_magic_method(
-        &self,
+        &mut self,
         cn: &str,
         lname: &[u8],
         md: &MethodDecl2<'a>,
@@ -2280,18 +2294,7 @@ impl<'a> Compiler<'a> {
                     md.span.line,
                 );
             }
-            if lname != b"__construct"
-                && lname != b"__destruct"
-                && lname != b"__clone"
-                && flags & mflags::PUBLIC == 0
-                && lname != b"__sleep"
-                && lname != b"__wakeup"
-                && lname != b"__serialize"
-                && lname != b"__unserialize"
-                && lname != b"__set_state"
-            {
-                // PHP warns: The magic method X::__get() must have public visibility
-            }
+
             if md.params.iter().any(|p| p.by_ref)
                 && matches!(
                     lname,
@@ -2307,11 +2310,108 @@ impl<'a> Compiler<'a> {
                 );
             }
         }
-        if lname == b"__construct" && flags & mflags::STATIC != 0 {
+        if matches!(lname, b"__construct" | b"__invoke") && flags & mflags::STATIC != 0 {
             return self.err(
                 format!("Method {}::{}() cannot be static", cn, mname),
                 md.span.line,
             );
+        }
+        // Visibility, parameter and return types of magic methods (tests
+        // Zend/tests/magic_methods/magic_methods_0*, return_types/0*).
+        let magic = matches!(
+            lname,
+            b"__get"
+                | b"__set"
+                | b"__isset"
+                | b"__unset"
+                | b"__call"
+                | b"__callstatic"
+                | b"__invoke"
+                | b"__tostring"
+                | b"__debuginfo"
+                | b"__serialize"
+                | b"__unserialize"
+                | b"__sleep"
+                | b"__wakeup"
+                | b"__set_state"
+        );
+        if magic && flags & mflags::PUBLIC == 0 {
+            self.notice(
+                goro_runtime::Level::Warning,
+                format!(
+                    "The magic method {}::{}() must have public visibility",
+                    cn, mname
+                ),
+                md.span.line,
+            );
+        }
+        let param_types: &[(usize, &str)] = match lname {
+            b"__get" | b"__isset" | b"__unset" | b"__set" => &[(0, "string")],
+            b"__call" | b"__callstatic" => &[(0, "string"), (1, "array")],
+            b"__unserialize" | b"__set_state" => &[(0, "array")],
+            _ => &[],
+        };
+        for &(i, want) in param_types {
+            if let Some(p) = md.params.get(i)
+                && let Some(t) = &p.ty
+            {
+                let th = self.type_hint(t, false)?;
+                let bit = if want == "string" {
+                    tmask::STRING
+                } else {
+                    tmask::ARRAY
+                };
+                if th.mask & (bit | tmask::MIXED) == 0 {
+                    return self.err(
+                        format!(
+                            "{}::{}(): Parameter #{} (${}) must be of type {} when declared",
+                            cn,
+                            mname,
+                            i + 1,
+                            String::from_utf8_lossy(p.name.name),
+                            want
+                        ),
+                        md.span.line,
+                    );
+                }
+            }
+        }
+        if let Some(rt) = md.ret {
+            if matches!(lname, b"__construct" | b"__destruct") {
+                return self.err(
+                    format!("Method {}::{}() cannot declare a return type", cn, mname),
+                    md.span.line,
+                );
+            }
+            let want: Option<&[&str]> = match lname {
+                b"__set" | b"__unset" | b"__unserialize" | b"__wakeup" | b"__clone" => {
+                    Some(&["void"])
+                }
+                b"__isset" => Some(&["bool"]),
+                b"__tostring" => Some(&["string"]),
+                b"__debuginfo" => Some(&["?array", "array"]),
+                b"__serialize" | b"__sleep" => Some(&["array"]),
+                b"__set_state" => Some(&["object"]),
+                _ => None,
+            };
+            if let Some(w) = want {
+                let th = self.type_hint(&rt, true)?;
+                let shown = th.display();
+                let ok = w.contains(&shown.as_str())
+                    || th.mask & tmask::NEVER != 0
+                    || (lname == b"__set_state"
+                        && (th.mask & tmask::STATIC != 0 || !th.classes.is_empty())
+                        && th.mask & !(tmask::STATIC | tmask::NULL) == 0);
+                if !ok {
+                    return self.err(
+                        format!(
+                            "{}::{}(): Return type must be {} when declared",
+                            cn, mname, w[0]
+                        ),
+                        md.span.line,
+                    );
+                }
+            }
         }
         if lname == b"__destruct" && flags & mflags::STATIC != 0 {
             return self.err(

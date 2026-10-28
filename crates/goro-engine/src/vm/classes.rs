@@ -2152,7 +2152,8 @@ impl Vm {
             );
         };
         let value = if cls.enum_backing.is_some() {
-            let v = match c.value.borrow().clone() {
+            let state = c.value.borrow().clone();
+            let v = match state {
                 ConstState::Value(v) => v,
                 ConstState::Pending(ce) => {
                     let v = self.eval_const_expr(&ce, Rc::as_ptr(cls))?;
@@ -2306,6 +2307,11 @@ impl Vm {
             }
             let cls = self.declare_class(decl)?;
             cls.flags.set(cls.flags.get() | cflags::INTERNAL);
+            // Closures take no dynamic properties (test Zend/tests/closures/
+            // closure_write_prop).
+            if cls.lname.as_bytes() == b"closure" {
+                cls.flags.set(cls.flags.get() | cflags::NO_DYNAMIC);
+            }
             // Stub-only markers (php-src stubs' @not-serializable).
             if cls
                 .attrs

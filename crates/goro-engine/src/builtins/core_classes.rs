@@ -563,7 +563,7 @@ fn do_bind(vm: &mut Vm, cl: &ObjRef, new_this: Value, scope_arg: Option<Value>) 
             && !c.func.is_native()
         {
             vm.warn(&format!(
-                "Cannot bind closure to scope of internal class {}",
+                "Cannot bind closure to scope of internal class {}, this will be an error in PHP 9",
                 s.name.dname()
             ))?;
             return Ok(Value::Null);
@@ -588,7 +588,9 @@ fn do_bind(vm: &mut Vm, cl: &ObjRef, new_this: Value, scope_arg: Option<Value>) 
     match new_this {
         Value::Object(t) => {
             if is_static {
-                vm.warn("Cannot bind an instance to a static closure")?;
+                vm.warn(
+                    "Cannot bind an instance to a static closure, this will be an error in PHP 9",
+                )?;
                 return Ok(Value::Null);
             }
             if c.func.is_native() || cd.from_callable {
@@ -668,7 +670,15 @@ fn closure_call(vm: &mut Vm, a: &mut Args) -> R<Value> {
         .code()
         .is_some_and(|code| code.flags & crate::bytecode::fflags::STATIC_CLOSURE != 0)
     {
-        vm.warn("Cannot bind an instance to a static closure")?;
+        vm.warn("Cannot bind an instance to a static closure, this will be an error in PHP 9")?;
+        return Ok(Value::Null);
+    }
+    // test Zend/tests/closures/closure_call
+    if tc.has_flag(crate::class::cflags::INTERNAL) && !c.func.is_native() {
+        vm.warn(&format!(
+            "Cannot bind closure to scope of internal class {}, this will be an error in PHP 9",
+            tc.name.dname()
+        ))?;
         return Ok(Value::Null);
     }
     c.this = Some(t);
