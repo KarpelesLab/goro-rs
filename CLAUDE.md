@@ -30,6 +30,15 @@ The development machine is the maintainer's desktop, shared with other work.
 - Don't let a hang hold the build lock: run tests under `timeout` (e.g.
   `flock ... timeout 900 cargo test ...`), or build under the lock with
   `--no-run` and run the test binaries outside it.
+- Memory: every goro process must be memory-capped. `goro --test` caps
+  each test (RLIMIT_AS) and goro enforces `memory_limit` (4 GB backstop when
+  unlimited). Run any goro or php85 script outside the runner under
+  `prlimit --as=4294967296 timeout 120 ...`. Never keep old goro binary
+  copies (baselines) that predate the memory_limit enforcement. On
+  2026-10-29 uncapped goro test processes reached 30–110 GB and the kernel
+  OOM killer killed the maintainer's applications.
+- Full-suite runs (`goro --test` over a whole tree): one at a time across
+  all agents, through `flock /tmp/claude-1000/goro-suite.lock`.
 - Tests and benchmarks: at most about 8 parallel jobs. Check `free -g` first,
   and wait if less than 30 GB is available or the machine is swapping.
 - Containers (the reference PHP binary runs in one): spot checks only, batched

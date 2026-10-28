@@ -109,6 +109,7 @@ pub mod ctx;
 pub mod error;
 pub mod float_fmt;
 pub mod gc;
+pub mod mem;
 pub mod numeric;
 pub mod object;
 pub mod ops;

@@ -280,6 +280,37 @@ fn clean_xfail_flaky_crash() {
 }
 
 #[test]
+fn memory_limit_applies_to_the_test() {
+    // The child's address space is capped (RLIMIT_AS): an allocation past
+    // it fails instead of growing the process.
+    let root = suite("memlimit");
+    let mut cfg = config(&root);
+    cfg.mem_limit = Some(256 << 20);
+    let t = write(
+        &root,
+        "tests/big.phpt",
+        "--TEST--\nb\n--FILE--\necho started\nalloc 1024\n--EXPECT--\nstarted\n",
+    );
+    let r = run(&cfg, &t);
+    let out = String::from_utf8_lossy(
+        &r.detail
+            .as_ref()
+            .map(|d| d.actual.clone())
+            .unwrap_or_default(),
+    )
+    .into_owned();
+    assert!(!out.contains("allocated"), "{out}");
+    // Under the limit the same allocation works.
+    let t = write(
+        &root,
+        "tests/small.phpt",
+        "--TEST--\ns\n--FILE--\nalloc 16\n--EXPECT--\nallocated 4096\n",
+    );
+    let r = run(&cfg, &t);
+    assert_eq!(r.status, Status::Pass, "{}", r.reason);
+}
+
+#[test]
 fn timeout_kills_the_test() {
     let root = suite("timeout");
     let mut cfg = config(&root);
