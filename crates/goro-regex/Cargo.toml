@@ -1,0 +1,8 @@
+[package]
+name = "goro-regex"
+description = "Regular expression engine compatible with PCRE2 syntax and semantics, for ext/pcre"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
