@@ -65,6 +65,14 @@ struct VarTable {
     /// unserialize() started, including the one that failed (observed on
     /// PHP 8.5; test ext/standard/tests/serialize/bug70436.phpt).
     holes: std::collections::HashSet<usize>,
+    /// The nesting depth and limit where the table was lent: a nested
+    /// unserialize() without a max_depth option continues them (test
+    /// ext/standard/tests/serialize/max_depth.phpt).
+    depth: i64,
+    max_depth: i64,
+    /// The allowed_classes of the outer call, which an internal class's
+    /// unserialize() follows (test bug72785.phpt).
+    allowed: Option<Vec<PhpStr>>,
 }
 
 impl Vm {
@@ -196,13 +204,7 @@ impl Vm {
                 .extend_from_slice(format!("E:{}:\"{}\";", full.len(), full).as_bytes());
             return Ok(());
         }
-        if cls.has_flag(cflags::NOT_SERIALIZABLE)
-            || cls.has_flag(cflags::ANON)
-            || matches!(
-                cls.lname.as_bytes(),
-                b"closure" | b"generator" | b"fiber" | b"weakreference" | b"weakmap"
-            )
-        {
+        if not_serializable(&cls) || cls.has_flag(cflags::ANON) {
             let n = if cls.has_flag(cflags::ANON) {
                 "class@anonymous".to_string()
             } else {
@@ -410,6 +412,28 @@ impl Vm {
     }
 }
 
+/// A class whose objects can't be serialized: flagged so, or one of the
+/// internal classes written in PHP or built in that are (PHP manual:
+/// SplFileInfo and its subclasses; test bug81111.phpt).
+fn not_serializable(cls: &Class) -> bool {
+    if cls.has_flag(cflags::NOT_SERIALIZABLE)
+        || matches!(
+            cls.lname.as_bytes(),
+            b"closure" | b"generator" | b"fiber" | b"weakreference" | b"weakmap"
+        )
+    {
+        return true;
+    }
+    let mut c = Some(cls);
+    while let Some(k) = c {
+        if k.lname.as_bytes() == b"splfileinfo" {
+            return true;
+        }
+        c = k.parent.as_deref();
+    }
+    false
+}
+
 /// A property name and its mangled private/protected forms.
 fn mangled_forms(cls: &Class, n: &PhpStr) -> Vec<PhpStr> {
     let mut v = vec![n.clone()];
@@ -450,6 +474,18 @@ struct Unser<'a> {
     t: VarTable,
     /// Values this parse started (see [`VarTable::holes`]).
     opened: usize,
+    /// The last count read was out of range.
+    overflow: bool,
+    /// max_depth was given as an option (see [`VarTable::depth`]).
+    explicit_depth: bool,
+    /// Follow the outer allowed_classes (see [`VarTable::allowed`]).
+    inherit_allowed: bool,
+    /// Warn about data after the value (before any __unserialize() or
+    /// __wakeup() call: test unserialize_extra_data_002).
+    check_extra: bool,
+    /// The function warnings name ("unserialize()", or an internal
+    /// class's unserialize() method).
+    who: &'static str,
     allowed: Option<Vec<PhpStr>>,
     max_depth: i64,
     depth: i64,
@@ -478,6 +514,11 @@ impl Unser<'_> {
             pos: 0,
             t: VarTable::default(),
             opened: 0,
+            overflow: false,
+            explicit_depth: false,
+            inherit_allowed: false,
+            check_extra: false,
+            who: "unserialize()",
             allowed,
             max_depth,
             depth: 0,
@@ -556,10 +597,17 @@ impl Unser<'_> {
                 self.pos
             }));
         }
-        let n = std::str::from_utf8(&self.d[st..self.pos])
+        // A count out of range saturates (observed on PHP 8.5: bug68044).
+        let n = match std::str::from_utf8(&self.d[st..self.pos])
             .ok()
-            .and_then(|t| t.parse::<usize>().ok())
-            .ok_or(UErr::At(self.pos))?;
+            .and_then(|t| t.parse::<u64>().ok())
+        {
+            Some(n) if n <= i64::MAX as u64 => n as usize,
+            _ => {
+                self.overflow = true;
+                i64::MAX as usize
+            }
+        };
         if self.peek() != Some(b':') {
             return Err(UErr::At(self.pos));
         }
@@ -588,6 +636,11 @@ impl Vm {
         };
         if !as_key && t != b'R' {
             u.opened += 1;
+        }
+        if t == b'}' {
+            // Observed on PHP 8.5 (tests __serialize_006, unserialize_leak).
+            self.warn(&format!("{}: Unexpected end of serialized data", u.who))?;
+            return Err(UErr::At(start));
         }
         if t == b'N' {
             if u.d.get(start + 1) != Some(&b';') {
@@ -741,26 +794,54 @@ impl Vm {
         }
     }
 
-    fn depth_check(&mut self, u: &mut Unser, start: usize) -> UR<()> {
+    fn depth_check(&mut self, u: &mut Unser) -> UR<()> {
         u.depth += 1;
         if u.max_depth > 0 && u.depth > u.max_depth {
             self.warn(&format!(
                 "unserialize(): Maximum depth of {} exceeded. The depth limit can be changed using the max_depth unserialize() option or the unserialize_max_depth ini setting",
                 u.max_depth
             ))?;
-            return Err(UErr::At(start));
+            return Err(UErr::At(u.pos));
         }
         Ok(())
     }
 
     fn unser_array(&mut self, u: &mut Unser, start: usize) -> UR<Value> {
-        let n = u.len(b':', start)?;
+        // A count out of range saturates, with a warning (observed on PHP
+        // 8.5: bug74614).
+        let n = {
+            let (_, d) = u.num(b':', false, start)?;
+            match std::str::from_utf8(&d)
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                Some(n) if n <= i64::MAX as u64 => n as usize,
+                _ => {
+                    self.warn("unserialize(): Numerical result out of range")?;
+                    i64::MAX as usize
+                }
+            }
+        };
         u.expect(b'{').map_err(|_| UErr::At(start))?;
-        self.depth_check(u, start)?;
+        // At least two bytes per element must follow (observed on PHP
+        // 8.5: `a:1:{}` fails there without a warning, `a:1:{}x` at its
+        // `}` with one).
+        if n > (u.d.len() - u.pos) / 2 {
+            return Err(UErr::At(u.pos));
+        }
+        self.depth_check(u)?;
         let cell = u.cell(Value::Null);
         let mut arr = PhpArray::new();
         for _ in 0..n {
             let key = self.unser_key(u)?;
+            // A value replaced by a later one under the same key can't be
+            // referred to, from the start of the new one (observed on PHP
+            // 8.5: bug75054, bug74103).
+            if let Some(Value::Ref(old)) = arr.get(key.as_ref())
+                && let Some(i) = u.t.vals.iter().rposition(|c| c.addr() == old.addr())
+            {
+                u.t.holes.insert(i);
+            }
             let v = self.unser_elem(u)?;
             arr.insert(key, v);
         }
@@ -782,7 +863,16 @@ impl Vm {
                 .get_ini(b"unserialize_callback_func")
                 .unwrap_or_default();
             if !cb.is_empty() {
-                self.call_value(&Value::Str(cb.clone()), vec![Value::Str(name.clone())])?;
+                let f = Value::Str(cb.clone());
+                // Observed on PHP 8.5 (test serialization_objects_008).
+                if !self.is_callable_value(&f, false) {
+                    let why = self.callable_error(&f);
+                    return self.throw(
+                        "Error",
+                        &format!("Invalid callback {}, {}", cb.to_string_lossy(), why),
+                    );
+                }
+                self.call_value(&f, vec![Value::Str(name.clone())])?;
                 let c = self.find_class(name, true)?;
                 if c.is_none() {
                     self.warn(&format!(
@@ -805,18 +895,36 @@ impl Vm {
 
     fn unser_object(&mut self, u: &mut Unser, t: u8, start: usize) -> UR<Value> {
         let name = u.quoted(start)?;
+        // The name must look like a class name (observed on PHP 8.5: an
+        // empty one fails at its length, a bad one at the token, as an
+        // anonymous class's does: bug81111.phpt).
+        if name.is_empty() {
+            return Err(UErr::At(start + 2));
+        }
+        if name.first() == Some(&b'\\')
+            || !name
+                .iter()
+                .all(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'\\' || c >= 0x80)
+        {
+            return Err(UErr::At(start));
+        }
         u.expect(b':')?;
         let cls = self.unser_class(u, &name)?;
         if t == b'C' {
             let (_, len) = u.count()?;
-            let at = u.pos;
-            u.pos += 1;
-            if len > u.d.len() {
-                return Err(UErr::At(at));
+            if u.overflow {
+                self.warn("unserialize(): Numerical result out of range")?;
             }
+            u.pos += 1;
             u.expect(b'{')?;
-            if u.pos + len > u.d.len() {
-                return Err(UErr::At(start));
+            // Observed on PHP 8.5 (tests unserialize_large, bug68044).
+            if len > u.d.len() - u.pos {
+                self.warn(&format!(
+                    "Insufficient data for unserializing - {} required, {} present",
+                    len,
+                    u.d.len() - u.pos
+                ))?;
+                return Err(UErr::At(u.pos));
             }
             // An internal class reading the payload as serialized values
             // in this context, so that `R:`/`r:` reach the object (GMP:
@@ -871,7 +979,7 @@ impl Vm {
                 self.warn("Class __PHP_Incomplete_Class has no unserializer")?;
                 return Ok(Value::Ref(cell));
             };
-            if cls.has_flag(cflags::NOT_SERIALIZABLE) {
+            if not_serializable(&cls) {
                 return Err(self.not_allowed(&cls));
             }
             let o = self.instantiate(&cls)?;
@@ -881,7 +989,10 @@ impl Vm {
             } else {
                 // The table is lent to unserialize() calls the method
                 // makes.
-                let t = std::mem::take(&mut u.t);
+                let mut t = std::mem::take(&mut u.t);
+                t.depth = u.depth;
+                t.max_depth = u.max_depth;
+                t.allowed = u.allowed.clone();
                 let prev = self.ext::<SerCtx>().unser.replace(t);
                 let r = self.call_method(&o, b"unserialize", vec![Value::Str(data)]);
                 let back = std::mem::replace(&mut self.ext::<SerCtx>().unser, prev);
@@ -892,7 +1003,15 @@ impl Vm {
             }
             return Ok(Value::Ref(cell));
         }
+        if u.pos == u.d.len() {
+            // Nothing after the class name (observed on PHP 8.5: bug73825).
+            self.warn("Bad unserialize data")?;
+            return Err(UErr::At(u.pos - 2));
+        }
         let (neg, n) = u.count()?;
+        if u.overflow {
+            self.warn("unserialize(): Numerical result out of range")?;
+        }
         let at = u.pos;
         if neg && n != 0 {
             return Err(UErr::At(at));
@@ -908,9 +1027,7 @@ impl Vm {
                 if c.is_enum() {
                     return Err(UErr::At(start));
                 }
-                if c.has_flag(cflags::NOT_SERIALIZABLE)
-                    || matches!(c.lname.as_bytes(), b"closure" | b"generator")
-                {
+                if not_serializable(c) {
                     return Err(self.not_allowed(c));
                 }
                 if c.kind != crate::class::ClassKind::Class || c.has_flag(cflags::ABSTRACT) {
@@ -943,7 +1060,7 @@ impl Vm {
             ))?;
             return Err(UErr::At(u.pos));
         }
-        self.depth_check(u, start)?;
+        self.depth_check(u)?;
         let uses_unserialize = !incomplete
             && cls
                 .as_ref()
@@ -951,9 +1068,31 @@ impl Vm {
                 .find_method(b"__unserialize")
                 .is_some();
         let mut data = PhpArray::new();
+        // The cells of the properties set so far: a property set twice
+        // keeps its cell, which both numbers name, and which a reference
+        // in the new value already reaches (observed on PHP 8.5; test
+        // typed_property_ref_overwrite2). One set from `R:` is replaced
+        // instead (overwrite_untyped_ref).
+        let mut set: HashMap<Key, PhpRef> = HashMap::new();
         for _ in 0..n {
             let key = self.unser_key(u)?;
-            let v = self.unser_elem(u)?;
+            let mut v = self.unser_elem(u)?;
+            if let Value::Ref(c) = &v {
+                match set.get(&key) {
+                    Some(old) => {
+                        let old = old.clone();
+                        drop(old.set(c.get()));
+                        if let Some(i) = u.t.vals.iter().rposition(|x| x.addr() == c.addr()) {
+                            u.t.vals[i] = old.clone();
+                        }
+                        v = Value::Ref(old);
+                    }
+                    None if !u.t.shared.contains(&c.addr()) => {
+                        set.insert(key.clone(), c.clone());
+                    }
+                    None => {}
+                }
+            }
             if uses_unserialize {
                 data.insert(key, v);
                 continue;
@@ -1046,6 +1185,13 @@ impl Vm {
         let nested = lent.is_some();
         let base = match lent {
             Some(t) => {
+                if !u.explicit_depth {
+                    u.depth = t.depth;
+                    u.max_depth = t.max_depth;
+                }
+                if u.inherit_allowed {
+                    u.allowed = t.allowed.clone();
+                }
                 u.t = t;
                 u.t.vals.len()
             }
@@ -1062,6 +1208,17 @@ impl Vm {
                 (o, d)
             })
             .collect();
+        let r = match r {
+            Ok(v) if u.check_extra && u.pos < u.d.len() => self
+                .warn(&format!(
+                    "unserialize(): Extra data starting at offset {} of {} bytes",
+                    u.pos,
+                    u.d.len()
+                ))
+                .map(|_| v)
+                .map_err(UErr::Php),
+            r => r,
+        };
         // The calls run with no table lent (they get tables of their own).
         let r = match r {
             Ok(v) => self.unser_calls(deferred).map(|_| v).map_err(UErr::Php),
@@ -1281,6 +1438,7 @@ impl Vm {
                 ));
             }
         };
+        let explicit_depth = options.get_str(&PhpStr::from("max_depth")).is_some();
         let max_depth = match options.get_str(&PhpStr::from("max_depth")) {
             Some(Value::Int(n)) => {
                 if *n < 0 {
@@ -1302,18 +1460,11 @@ impl Vm {
                 .unwrap_or(4096),
         };
         let mut u = Unser::new(data, allowed, max_depth);
+        u.explicit_depth = explicit_depth;
+        u.check_extra = true;
         let r = self.unser_run(&mut u);
         match r {
-            Ok(v) => {
-                if u.pos < data.len() {
-                    self.warn(&format!(
-                        "unserialize(): Extra data starting at offset {} of {} bytes",
-                        u.pos,
-                        data.len()
-                    ))?;
-                }
-                Ok(v.into_deref())
-            }
+            Ok(v) => Ok(v.into_deref()),
             Err(UErr::At(off)) => {
                 if !data.is_empty() {
                     self.warn(&format!(
@@ -1356,8 +1507,14 @@ impl Vm {
     /// The value at the start of `data`, numbered in the current table
     /// (see [`Vm::with_unser_ctx`]): the value and its length, or the
     /// offset of the error (no warning).
-    pub fn unser_part(&mut self, data: &[u8]) -> R<Result<(Value, usize), usize>> {
+    pub fn unser_part(
+        &mut self,
+        data: &[u8],
+        who: &'static str,
+    ) -> R<Result<(Value, usize), usize>> {
         let mut u = Unser::new(data, None, 4096);
+        u.who = who;
+        u.inherit_allowed = true;
         match self.unser_run(&mut u) {
             Ok(v) => Ok(Ok((v.into_deref(), u.pos))),
             Err(UErr::At(off)) => Ok(Err(off.min(data.len()))),

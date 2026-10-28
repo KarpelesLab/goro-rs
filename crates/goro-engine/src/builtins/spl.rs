@@ -1417,7 +1417,7 @@ fn ao_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
             return Ok(Err(0));
         }
         let mut cur = 2;
-        let flags = match vm.unser_part(&b[cur..])? {
+        let flags = match vm.unser_part(&b[cur..], "ArrayObject::unserialize()")? {
             Ok((Value::Int(f), n)) => {
                 cur += n;
                 f
@@ -1425,7 +1425,7 @@ fn ao_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
             Ok((_, n)) => return Ok(Err(cur + n)),
             Err(_) => return Ok(Err(cur)),
         };
-        let storage = match vm.unser_part(&b[cur..])? {
+        let storage = match vm.unser_part(&b[cur..], "ArrayObject::unserialize()")? {
             Ok((v @ (Value::Array(_) | Value::Object(_)), n)) => {
                 cur += n;
                 v
@@ -1441,7 +1441,7 @@ fn ao_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
             return Ok(Err(cur));
         }
         cur += 2;
-        let m = match vm.unser_part(&b[cur..])? {
+        let m = match vm.unser_part(&b[cur..], "ArrayObject::unserialize()")? {
             Ok((v @ Value::Array(_), _)) => v,
             Ok((_, n)) => return Ok(Err(cur + n)),
             Err(off) => return Ok(Err(cur + off)),
@@ -2598,7 +2598,7 @@ fn dll_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     // table of the unserialize() in progress (test bug70169; error offsets
     // observed on PHP 8.5).
     let parsed = vm.with_unser_ctx(|vm| -> R<Result<(i64, VecDeque<Value>), usize>> {
-        let (flags, mut cur) = match vm.unser_part(b)? {
+        let (flags, mut cur) = match vm.unser_part(b, "SplDoublyLinkedList::unserialize()")? {
             Ok((Value::Int(f), n)) => (f, n),
             Ok((_, n)) => return Ok(Err(n)),
             Err(_) => return Ok(Err(0)),
@@ -2609,7 +2609,7 @@ fn dll_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 return Ok(Err(cur));
             }
             cur += 1;
-            match vm.unser_part(&b[cur..])? {
+            match vm.unser_part(&b[cur..], "SplDoublyLinkedList::unserialize()")? {
                 Ok((v, n)) => {
                     items.push_back(v);
                     cur += n;
@@ -3616,7 +3616,7 @@ fn os_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
             return Ok(Err(0));
         }
         let mut cur = 2;
-        let n = match vm.unser_part(&b[cur..])? {
+        let n = match vm.unser_part(&b[cur..], "SplObjectStorage::unserialize()")? {
             Ok((Value::Int(n), len)) if n >= 0 => {
                 cur += len;
                 n
@@ -3627,7 +3627,7 @@ fn os_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
             Err(_) => return Ok(Err(cur)),
         };
         for _ in 0..n {
-            let obj = match vm.unser_part(&b[cur..])? {
+            let obj = match vm.unser_part(&b[cur..], "SplObjectStorage::unserialize()")? {
                 Ok((Value::Object(o), len)) if b[cur] != b'R' => {
                     cur += len;
                     o
@@ -3638,7 +3638,7 @@ fn os_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
             let mut inf = Value::Null;
             if b.get(cur) == Some(&b',') {
                 cur += 1;
-                match vm.unser_part(&b[cur..])? {
+                match vm.unser_part(&b[cur..], "SplObjectStorage::unserialize()")? {
                     Ok((v, len)) => {
                         cur += len;
                         inf = v;
@@ -3656,7 +3656,7 @@ fn os_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
             return Ok(Err(cur));
         }
         cur += 2;
-        match vm.unser_part(&b[cur..])? {
+        match vm.unser_part(&b[cur..], "SplObjectStorage::unserialize()")? {
             Ok((v @ Value::Array(_), _)) => Ok(Ok(v)),
             Ok((_, len)) => Ok(Err(cur + len)),
             Err(off) => Ok(Err(cur + off)),

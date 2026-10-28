@@ -320,8 +320,14 @@ impl Vm {
             }
             out.push((label, String::new(), Some(v.clone())));
         }
+        // Dynamic properties may keep mangled names (from unserialize():
+        // test unserialize_overwrite_undeclared_protected).
         for (k, v) in o.obj().props.borrow().iter() {
-            out.push((dump_key(k), String::new(), Some(v.clone())));
+            let key = match k {
+                KeyRef::Str(s) => mangled_label(s),
+                k => dump_key(k),
+            };
+            out.push((key, String::new(), Some(v.clone())));
         }
         Ok(out)
     }
