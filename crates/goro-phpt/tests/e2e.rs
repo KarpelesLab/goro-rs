@@ -28,6 +28,8 @@ fn config(root: &Path) -> Config {
         extensions: Extensions::probe(Path::new(FAKE), root),
         keep: false,
         tmp: std::env::temp_dir(),
+        mem_limit: None,
+        heavy: false,
     }
 }
 

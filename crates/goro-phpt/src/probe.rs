@@ -96,6 +96,7 @@ fn quick(php: &Path, cwd: &Path, args: &[OsString]) -> Option<Vec<u8>> {
         stdin: None,
         capture: Capture::ALL,
         timeout: Duration::from_secs(60),
+        mem_limit: None,
     })
     .ok()?;
     (out.exit == Exit::Code(0)).then_some(out.output)

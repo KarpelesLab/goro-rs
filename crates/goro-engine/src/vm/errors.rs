@@ -1190,7 +1190,14 @@ pub fn trace_arg_max(v: &Value, max: usize) -> String {
         Value::Bool(true) => "true".into(),
         Value::Bool(false) => "false".into(),
         Value::Int(i) => i.to_string(),
-        Value::Float(f) => goro_runtime::float_fmt::to_php_string(*f, 17),
+        Value::Float(f) => {
+            // Integral floats keep a ".0" (observed on PHP 8.5: "f(1.0)").
+            let mut s = goro_runtime::float_fmt::to_php_string(*f, 17);
+            if f.is_finite() && !s.contains(['.', 'E', 'e']) {
+                s.push_str(".0");
+            }
+            s
+        }
         Value::Str(s) => {
             let (head, more) = if s.len() > max {
                 (&s[..max], "...")

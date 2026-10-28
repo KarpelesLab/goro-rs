@@ -26,8 +26,11 @@ use crate::func::Args;
 use crate::registry::{ConstVal, Module};
 use crate::vm::{R, Vm};
 
+mod collator;
+mod locale;
+
 /// Every module of the extension (all named "intl").
-pub static MODULES: &[&Module] = &[&MODULE];
+pub static MODULES: &[&Module] = &[&MODULE, &locale::MODULE, &collator::MODULE];
 
 pub static MODULE: Module = Module {
     name: "intl",
