@@ -1138,9 +1138,8 @@ fn sodium_crypto_secretstream_xchacha20poly1305_rekey(vm: &mut Vm, a: &mut Args)
     let mut p0 = r0.get().deref();
     set_limit(vm);
     let r = s::sodium_crypto_secretstream_xchacha20poly1305_rekey(&mut p0);
-    let r = sr(vm, r)?;
+    sr(vm, r)?;
     r0.set(p0);
-    let _ = r;
     Ok(Value::Null)
 }
 fn sodium_crypto_shorthash(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1312,9 +1311,8 @@ fn sodium_add(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let p1 = a.str(1);
     set_limit(vm);
     let r = s::sodium_add(&mut p0, p1.as_bytes());
-    let r = sr(vm, r)?;
+    sr(vm, r)?;
     r0.set(p0);
-    let _ = r;
     Ok(Value::Null)
 }
 fn sodium_compare(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1330,9 +1328,8 @@ fn sodium_increment(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut p0 = r0.get().deref();
     set_limit(vm);
     let r = s::sodium_increment(&mut p0);
-    let r = sr(vm, r)?;
+    sr(vm, r)?;
     r0.set(p0);
-    let _ = r;
     Ok(Value::Null)
 }
 fn sodium_memcmp(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1348,9 +1345,8 @@ fn sodium_memzero(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut p0 = r0.get().deref();
     set_limit(vm);
     let r = s::sodium_memzero(&mut p0);
-    let r = sr(vm, r)?;
+    sr(vm, r)?;
     r0.set(p0);
-    let _ = r;
     Ok(Value::Null)
 }
 fn sodium_pad(vm: &mut Vm, a: &mut Args) -> R<Value> {
