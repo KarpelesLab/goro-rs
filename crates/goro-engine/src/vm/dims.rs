@@ -318,9 +318,7 @@ impl Vm {
                 // ArrayObject/ArrayIterator: isset() is false for null
                 // elements (php85: `isset(new ArrayObject(['n' => null])['n'])`).
                 if cls.native.dim_storage.is_some()
-                    && cls
-                        .find_method(b"offsetexists")
-                        .is_some_and(|f| f.is_native())
+                    && cls.find_method(b"offsetexists").is_some_and(|f| f.is_native())
                 {
                     let v = crate::builtins::spl::ao_isset(self, o, k)?;
                     return Ok(match v {

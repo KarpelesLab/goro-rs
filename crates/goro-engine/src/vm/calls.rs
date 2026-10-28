@@ -1485,9 +1485,7 @@ impl Vm {
             match self.check_type(&args[i], ty, strict, func.scope.get(), std::ptr::null())? {
                 Check::Ok => {}
                 Check::Coerced(v) => args[i] = v,
-                Check::Fail
-                    if ty.mask & !tmask::NULL == tmask::CALLABLE && ty.classes.is_empty() =>
-                {
+                Check::Fail if ty.mask & !tmask::NULL == tmask::CALLABLE && ty.classes.is_empty() => {
                     // PHP explains why a value is not callable (observed on
                     // PHP 8.5: "must be a valid callback or null, function
                     // \"x\" not found or invalid function name").

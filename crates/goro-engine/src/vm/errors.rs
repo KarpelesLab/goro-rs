@@ -339,10 +339,7 @@ impl Vm {
                     let p = self.slot_ptr(tr.exc_slot);
                     if let Some(Value::Object(prev)) = unsafe { (*p).take() }
                         && !ObjRef::ptr_eq(&prev, &ex)
-                        && !matches!(
-                            prev.class_name().as_bytes(),
-                            b"GeneratorExit_" | b"FiberExit_"
-                        )
+                        && !matches!(prev.class_name().as_bytes(), b"GeneratorExit_" | b"FiberExit_")
                     {
                         self.chain_previous(&ex, prev);
                     }
@@ -580,17 +577,16 @@ impl Vm {
             // (or from the engine itself: shutdown functions, fibers).
             let called_from_native =
                 natives > 0 && ex.native_calls[natives - 1].depth as usize == i;
-            let (file, line) =
-                if called_from_native || i == 0 || ex.frames[i - 1].code().file.is_empty() {
-                    (None, 0)
-                } else {
-                    let caller = &ex.frames[i - 1];
-                    let cip = caller.ip.saturating_sub(1);
-                    (
-                        Some(caller.code().file.clone()),
-                        caller.code().line_of(cip as usize),
-                    )
-                };
+            let (file, line) = if called_from_native || i == 0 || ex.frames[i - 1].code().file.is_empty() {
+                (None, 0)
+            } else {
+                let caller = &ex.frames[i - 1];
+                let cip = caller.ip.saturating_sub(1);
+                (
+                    Some(caller.code().file.clone()),
+                    caller.code().line_of(cip as usize),
+                )
+            };
             if code.flags & crate::bytecode::fflags::PSEUDO_MAIN != 0 {
                 if f.flags & frame_flags::ATTACHED == 0 {
                     continue;

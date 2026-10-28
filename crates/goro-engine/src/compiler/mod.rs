@@ -1157,14 +1157,7 @@ impl<'a> Compiler<'a> {
 
     /// Patches a goto: directly, or through a stub that frees the loop
     /// temporaries and runs the finally blocks of the blocks it leaves.
-    fn resolve_goto(
-        &mut self,
-        at: usize,
-        line: u32,
-        target: u32,
-        g: &[Region],
-        l: &[Region],
-    ) -> CResult<()> {
+    fn resolve_goto(&mut self, at: usize, line: u32, target: u32, g: &[Region], l: &[Region]) -> CResult<()> {
         let k = g.iter().zip(l.iter()).take_while(|(a, b)| a == b).count();
         if l[k..].iter().any(|r| matches!(r, Region::Finally(_))) {
             return self.err("jump into a finally block is disallowed", line);
@@ -1298,10 +1291,7 @@ impl<'a> Compiler<'a> {
         }
         let target = self.f.loops.len() - n;
         let rl = self.f.loops[target].region_len;
-        if self.f.regions[rl..]
-            .iter()
-            .any(|r| matches!(r, Region::Finally(_)))
-        {
+        if self.f.regions[rl..].iter().any(|r| matches!(r, Region::Finally(_))) {
             return self.err("jump out of a finally block is disallowed", line);
         }
         if !is_break && self.f.loops[target].is_switch {
@@ -1418,11 +1408,7 @@ impl<'a> Compiler<'a> {
         if from >= to {
             return;
         }
-        let frees: Vec<(Reg, bool)> = self.f.loops[from..to]
-            .iter()
-            .rev()
-            .filter_map(|l| l.free)
-            .collect();
+        let frees: Vec<(Reg, bool)> = self.f.loops[from..to].iter().rev().filter_map(|l| l.free).collect();
         for (slot, is_iter) in frees {
             if is_iter {
                 self.emit(Op::FeFree { iter: slot });
