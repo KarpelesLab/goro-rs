@@ -63,7 +63,8 @@ fn raw_bytes(vals: &[u32], sub: &Subst) -> Converted {
         if v == ERR {
             c.illegal += 1;
             if sub.mode != SubstMode::None {
-                c.bytes.push(if sub.ch < 0x100 { sub.ch as u8 } else { b'?' });
+                c.bytes
+                    .push(if sub.ch < 0x100 { sub.ch as u8 } else { b'?' });
             }
         } else {
             c.bytes.push(v as u8);

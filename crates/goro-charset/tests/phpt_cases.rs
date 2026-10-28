@@ -13,7 +13,8 @@ use goro_charset::{Encoding, Subst, SubstMode, check_encoding, convert};
 use std::path::PathBuf;
 
 fn tests_dir() -> Option<PathBuf> {
-    let base = std::env::var("GORO_PHP_TESTS").unwrap_or_else(|_| "/tmp/claude-1000/php-tests".into());
+    let base =
+        std::env::var("GORO_PHP_TESTS").unwrap_or_else(|_| "/tmp/claude-1000/php-tests".into());
     let p = PathBuf::from(base).join("ext/mbstring/tests");
     p.is_dir().then_some(p)
 }
@@ -104,9 +105,13 @@ fn parse_args(s: &str) -> Option<Vec<Arg>> {
                         }
                         b'u' if b.get(i) == Some(&b'{') => {
                             let end = i + b[i..].iter().position(|&c| c == b'}')?;
-                            let cp = u32::from_str_radix(std::str::from_utf8(&b[i + 1..end]).ok()?, 16).ok()?;
+                            let cp =
+                                u32::from_str_radix(std::str::from_utf8(&b[i + 1..end]).ok()?, 16)
+                                    .ok()?;
                             let mut buf = [0u8; 4];
-                            v.extend_from_slice(char::from_u32(cp)?.encode_utf8(&mut buf).as_bytes());
+                            v.extend_from_slice(
+                                char::from_u32(cp)?.encode_utf8(&mut buf).as_bytes(),
+                            );
                             i = end + 1;
                         }
                         _ => v.extend_from_slice(&[b'\\', e]),
@@ -156,7 +161,9 @@ fn calls(src: &str) -> Vec<(String, String)> {
         }
         // The statement must end on this line with `);` (a comment may follow).
         let rest = &l[p + 1..];
-        let Some(end) = find_close(rest) else { continue };
+        let Some(end) = find_close(rest) else {
+            continue;
+        };
         out.push((name.to_string(), rest[..end].to_string()));
     }
     out
@@ -234,7 +241,9 @@ fn encoding_test_cases() {
             if !helper {
                 continue;
             }
-            let Some(args) = parse_args(&argtext) else { continue };
+            let Some(args) = parse_args(&argtext) else {
+                continue;
+            };
             if name == "mb_substitute_character" {
                 match args.first() {
                     Some(Arg::Int(n)) => sub = Subst::char(*n as u32),
@@ -247,17 +256,33 @@ fn encoding_test_cases() {
             }
             let strs: Vec<&[u8]> = args
                 .iter()
-                .filter_map(|a| if let Arg::Str(s) = a { Some(&s[..]) } else { None })
+                .filter_map(|a| {
+                    if let Arg::Str(s) = a {
+                        Some(&s[..])
+                    } else {
+                        None
+                    }
+                })
                 .collect();
             let both = !matches!(args.last(), Some(Arg::Bool(false)));
             let enc = |n: &[u8]| Encoding::from_name(n);
-            let mut fail = |msg: String| failures.push(format!("{fname}: {name}({argtext}): {msg}"));
+            let mut fail =
+                |msg: String| failures.push(format!("{fname}: {name}({argtext}): {msg}"));
             let identify = |s: &[u8], e: Encoding, want: bool, fail: &mut dyn FnMut(String)| {
                 if check_encoding(s, e) != want {
-                    fail(format!("mb_check_encoding({}, {}) != {want}", hex(s), e.name()));
+                    fail(format!(
+                        "mb_check_encoding({}, {}) != {want}",
+                        hex(s),
+                        e.name()
+                    ));
                 }
             };
-            let conv = |from: &[u8], to: &[u8], fe: Encoding, te: Encoding, valid: bool, fail: &mut dyn FnMut(String)| {
+            let conv = |from: &[u8],
+                        to: &[u8],
+                        fe: Encoding,
+                        te: Encoding,
+                        valid: bool,
+                        fail: &mut dyn FnMut(String)| {
                 let c = convert(from, te, fe, &sub);
                 if c.bytes != to {
                     fail(format!(
@@ -280,7 +305,9 @@ fn encoding_test_cases() {
                     identify(s, e, name == "identifyValidString", &mut fail);
                 }
                 (_, [from, to, fe, te]) => {
-                    let (Some(fe), Some(te)) = (enc(fe), enc(te)) else { continue };
+                    let (Some(fe), Some(te)) = (enc(fe), enc(te)) else {
+                        continue;
+                    };
                     match name.as_str() {
                         "testValidString" | "convertValidString" => {
                             if name == "testValidString" {

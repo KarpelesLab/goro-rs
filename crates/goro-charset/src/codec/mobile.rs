@@ -65,11 +65,13 @@ fn emoji_code(c: Carrier, a: u32, b: u32) -> Option<u16> {
 fn starts_pair(c: Carrier, cp: u32) -> bool {
     let tab = enc_table(c);
     if (0x1F1E6..=0x1F1FF).contains(&cp) {
-        let mut flags = tab.iter().filter(|e| (0x1F1E6..=0x1F1FF).contains(&e.0) && e.1 != 0);
+        let mut flags = tab
+            .iter()
+            .filter(|e| (0x1F1E6..=0x1F1FF).contains(&e.0) && e.1 != 0);
         let Some(first) = flags.next() else {
             return false;
         };
-        let last = flags.last().unwrap_or(first);
+        let last = flags.next_back().unwrap_or(first);
         return (first.0..=last.0).contains(&cp);
     }
     let i = tab.partition_point(|e| e.0 < cp);
@@ -163,7 +165,12 @@ impl Decode for SjisMobileDec {
                     continue;
                 }
                 out.push(ERR);
-                i = if i + 1 < n && s[i + 1] == b'$' { (i + 3).min(n) } else { i + 2 }.min(n);
+                i = if i + 1 < n && s[i + 1] == b'$' {
+                    (i + 3).min(n)
+                } else {
+                    i + 2
+                }
+                .min(n);
                 continue;
             }
             if b < 0x80 {
@@ -187,11 +194,11 @@ impl Decode for SjisMobileDec {
                 out.push(ERR);
                 continue;
             }
-            if emoji_lead(c, b) {
-                if let Some(e) = emoji_at(c, ((b as u16) << 8) | tr as u16) {
-                    push_emoji(e, out);
-                    continue;
-                }
+            if emoji_lead(c, b)
+                && let Some(e) = emoji_at(c, ((b as u16) << 8) | tr as u16)
+            {
+                push_emoji(e, out);
+                continue;
             }
             let cp = t::CP932[sjis_to_index(b, tr)];
             out.push(if cp == 0 { ERR } else { cp as u32 });
@@ -523,7 +530,10 @@ pub(crate) fn kddi_jis_emoji_rev(cp: u32) -> Option<(u8, u8)> {
         if !(0x1F1E6..=0x1F1FF).contains(&cp) {
             return None;
         }
-        m::KDDI_ENC.iter().find(|e| e.0 == cp && e.1 != 0).map(|e| e.2)
+        m::KDDI_ENC
+            .iter()
+            .find(|e| e.0 == cp && e.1 != 0)
+            .map(|e| e.2)
     })?;
     let (l, tr) = ((code >> 8) as u8, code as u8);
     if !matches!(l, 0xF3 | 0xF4 | 0xF6 | 0xF7) {

@@ -30,7 +30,19 @@ fn utf7_direct(c: u32) -> bool {
     matches!(c, 0x41..=0x5A | 0x61..=0x7A | 0x30..=0x39)
         || matches!(
             c,
-            0x27 | 0x28 | 0x29 | 0x2C | 0x2D | 0x2E | 0x2F | 0x3A | 0x3F | 0x20 | 0x09 | 0x0D | 0x0A | 0x00
+            0x27 | 0x28
+                | 0x29
+                | 0x2C
+                | 0x2D
+                | 0x2E
+                | 0x2F
+                | 0x3A
+                | 0x3F
+                | 0x20
+                | 0x09
+                | 0x0D
+                | 0x0A
+                | 0x00
         )
 }
 
@@ -168,7 +180,11 @@ impl Decode for Utf7Dec {
             }
             i += 1;
             if self.imap {
-                out.push(if (0x20..=0x7E).contains(&b) { b as u32 } else { ERR });
+                out.push(if (0x20..=0x7E).contains(&b) {
+                    b as u32
+                } else {
+                    ERR
+                });
             } else if b < 0x80 {
                 if !utf7_check_ok(b) {
                     self.bad = true;

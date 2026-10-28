@@ -108,7 +108,7 @@ impl Decode for Utf8Dec {
         while i < n && out.len() < limit {
             if s[i] < 0x80 {
                 // ASCII run, 8 bytes at a time.
-                while i + 8 <= n && out.len() < limit {
+                while i + 8 <= n && out.len() + 8 <= limit {
                     let w = u64::from_le_bytes(s[i..i + 8].try_into().unwrap());
                     if w & HI != 0 {
                         break;

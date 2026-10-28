@@ -142,10 +142,9 @@ impl Decode for GbDec {
                     out.push(ERR);
                     continue;
                 }
-                let pointer = (((b - 0x81) as u32 * 10 + (c - 0x30) as u32) * 126
-                    + (d - 0x81) as u32)
-                    * 10
-                    + (e - 0x30) as u32;
+                let pointer =
+                    (((b - 0x81) as u32 * 10 + (c - 0x30) as u32) * 126 + (d - 0x81) as u32) * 10
+                        + (e - 0x30) as u32;
                 // The ranges are GB18030-2005's; the 2022 edition gives the
                 // four-byte codes of the 19 moved characters their old PUA
                 // code points (observed on PHP 8.5).
@@ -238,7 +237,11 @@ impl Encode for GbEnc {
                     .iter()
                     .find(|s| s.1 == cp || s.2 == cp)
                 {
-                    let two_byte = if self.kind == Kind::Gb2005 { sw.1 } else { sw.2 };
+                    let two_byte = if self.kind == Kind::Gb2005 {
+                        sw.1
+                    } else {
+                        sw.2
+                    };
                     if two_byte == cp {
                         out.extend_from_slice(&sw.0.to_be_bytes());
                         return true;

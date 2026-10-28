@@ -261,7 +261,8 @@ impl Decode for Iso2022JpDec {
                 continue;
             }
             if b >= 0x80 {
-                if f.cp5022x() && matches!(self.g0, G0::X0208 | G0::X0212) && b <= 0x97 && !self.so {
+                if f.cp5022x() && matches!(self.g0, G0::X0208 | G0::X0212) && b <= 0x97 && !self.so
+                {
                     // Rows 95..119 of CP932 (user-defined, IBM).
                 } else {
                     i += 1;
@@ -321,7 +322,9 @@ impl Decode for Iso2022JpDec {
                     }
                     let c = s[i + 1];
                     i += 2;
-                    if (0x21..=0x7E).contains(&c) && b != 0x7F || (b == 0x7F && f.cp5022x() && (0x21..=0x7E).contains(&c)) {
+                    if (0x21..=0x7E).contains(&c) && b != 0x7F
+                        || (b == 0x7F && f.cp5022x() && (0x21..=0x7E).contains(&c))
+                    {
                         self.lookup(b, c, out);
                     } else {
                         out.push(ERR);
@@ -333,8 +336,7 @@ impl Decode for Iso2022JpDec {
     }
 
     fn check_failed(&self) -> bool {
-        matches!(self.f, Flavor::Jis | Flavor::Iso)
-            && (self.bad || self.so || self.g0 != G0::Ascii)
+        matches!(self.f, Flavor::Jis | Flavor::Iso) && (self.bad || self.so || self.g0 != G0::Ascii)
     }
 }
 

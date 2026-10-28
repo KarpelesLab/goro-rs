@@ -241,9 +241,7 @@ pub(crate) struct Combine {
 impl Combine {
     /// Whether `cp` starts a JIS X 0213 combining sequence.
     fn is_base(cp: u32) -> bool {
-        t::X0213_COMBOS
-            .binary_search_by_key(&cp, |e| e.0)
-            .is_ok()
+        t::X0213_COMBOS.binary_search_by_key(&cp, |e| e.0).is_ok()
     }
 
     fn combo(a: u32, b: u32) -> Option<u16> {

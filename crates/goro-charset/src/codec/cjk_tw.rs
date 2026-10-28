@@ -37,7 +37,11 @@ impl Decode for Big5Dec {
     fn decode(&mut self, s: &[u8], pos: &mut usize, out: &mut Vec<u32>, limit: usize) {
         let mut i = *pos;
         let n = s.len();
-        let (first, last) = if self.cp950 { (0x81, 0xFE) } else { (0xA1, 0xF9) };
+        let (first, last) = if self.cp950 {
+            (0x81, 0xFE)
+        } else {
+            (0xA1, 0xF9)
+        };
         while i < n && out.len() < limit {
             let b = s[i];
             if b < 0x80 {
@@ -65,7 +69,11 @@ impl Decode for Big5Dec {
             }
             i += 2;
             let idx = (b - first) as usize * 157 + trail_offset(c);
-            let cp = if self.cp950 { t::CP950[idx] } else { t::BIG5[idx] };
+            let cp = if self.cp950 {
+                t::CP950[idx]
+            } else {
+                t::BIG5[idx]
+            };
             out.push(if cp == 0 { ERR } else { cp as u32 });
         }
         *pos = i;

@@ -118,7 +118,11 @@ static INFO: [Info; 79] = [
     info!("UCS-4", ["ISO-10646-UCS-4", "UCS4"], Some("UCS-4")),
     info!("UCS-4BE", ["byte4be"], Some("UCS-4BE")),
     info!("UCS-4LE", ["byte4le"], Some("UCS-4LE")),
-    info!("UCS-2", ["ISO-10646-UCS-2", "UCS2", "UNICODE"], Some("UCS-2")),
+    info!(
+        "UCS-2",
+        ["ISO-10646-UCS-2", "UCS2", "UNICODE"],
+        Some("UCS-2")
+    ),
     info!("UCS-2BE", ["byte2be"], Some("UCS-2BE")),
     info!("UCS-2LE", ["byte2le"], Some("UCS-2LE")),
     info!("UTF-32", ["utf32"], Some("UTF-32")),
@@ -147,7 +151,11 @@ static INFO: [Info; 79] = [
         ],
         Some("US-ASCII")
     ),
-    info!("EUC-JP", ["EUC", "EUC_JP", "eucJP", "x-euc-jp"], Some("EUC-JP")),
+    info!(
+        "EUC-JP",
+        ["EUC", "EUC_JP", "eucJP", "x-euc-jp"],
+        Some("EUC-JP")
+    ),
     info!("SJIS", ["x-sjis", "SHIFT-JIS"], Some("Shift_JIS")),
     info!("eucJP-win", ["eucJP-open", "eucJP-ms"], Some("EUC-JP")),
     info!("EUC-JP-2004", ["EUC_JP-2004"], Some("EUC-JP")),
@@ -163,11 +171,23 @@ static INFO: [Info; 79] = [
     ),
     info!(
         "SJIS-Mobile#SOFTBANK",
-        ["SJIS-SOFTBANK", "shift_jis-softbank", "x-sjis-emoji-softbank"],
+        [
+            "SJIS-SOFTBANK",
+            "shift_jis-softbank",
+            "x-sjis-emoji-softbank"
+        ],
         Some("Shift_JIS")
     ),
-    info!("SJIS-mac", ["MacJapanese", "x-Mac-Japanese"], Some("Shift_JIS")),
-    info!("SJIS-2004", ["SJIS2004", "Shift_JIS-2004"], Some("Shift_JIS")),
+    info!(
+        "SJIS-mac",
+        ["MacJapanese", "x-Mac-Japanese"],
+        Some("Shift_JIS")
+    ),
+    info!(
+        "SJIS-2004",
+        ["SJIS2004", "Shift_JIS-2004"],
+        Some("Shift_JIS")
+    ),
     info!(
         "UTF-8-Mobile#DOCOMO",
         ["UTF-8-DOCOMO", "UTF8-DOCOMO"],
@@ -184,7 +204,11 @@ static INFO: [Info; 79] = [
         ["UTF-8-SOFTBANK", "UTF8-SOFTBANK"],
         Some("UTF-8")
     ),
-    info!("CP932", ["MS932", "Windows-31J", "MS_Kanji"], Some("Shift_JIS")),
+    info!(
+        "CP932",
+        ["MS932", "Windows-31J", "MS_Kanji"],
+        Some("Shift_JIS")
+    ),
     info!("SJIS-win", ["SJIS-ms", "SJIS-open"], Some("Shift_JIS")),
     info!("CP51932", ["cp51932"], Some("CP51932")),
     info!("JIS", [], Some("ISO-2022-JP")),
@@ -407,6 +431,41 @@ impl Encoding {
                 | Gb18030
                 | Gb18030_2022
                 | Uhc
+        )
+    }
+
+    /// Whether every character is one byte (ASCII, 7bit, 8bit and the
+    /// table-driven single-byte encodings); `mb_substr` and friends then
+    /// work on bytes (observed on PHP 8.5).
+    pub fn is_single_byte(self) -> bool {
+        use Encoding::*;
+        matches!(
+            self,
+            Ascii
+                | SevenBit
+                | EightBit
+                | Cp1252
+                | Cp1254
+                | Iso8859_1
+                | Iso8859_2
+                | Iso8859_3
+                | Iso8859_4
+                | Iso8859_5
+                | Iso8859_6
+                | Iso8859_7
+                | Iso8859_8
+                | Iso8859_9
+                | Iso8859_10
+                | Iso8859_13
+                | Iso8859_14
+                | Iso8859_15
+                | Iso8859_16
+                | Cp1251
+                | Cp866
+                | Koi8R
+                | Koi8U
+                | ArmScii8
+                | Cp850
         )
     }
 

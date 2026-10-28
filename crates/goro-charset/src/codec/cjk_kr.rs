@@ -183,7 +183,10 @@ impl Decode for Iso2022KrDec {
                     i += 2;
                     // ISO-2022-KR lacks the KS X 1001:1998 additions at
                     // 0x2266/0x2267 (observed on PHP 8.5).
-                    let cp = if b < 0x7E && (0x21..=0x7E).contains(&c) && !(b == 0x22 && (c == 0x66 || c == 0x67)) {
+                    let cp = if b < 0x7E
+                        && (0x21..=0x7E).contains(&c)
+                        && !(b == 0x22 && (c == 0x66 || c == 0x67))
+                    {
                         t::KSX1001[(b - 0x21) as usize * 94 + (c - 0x21) as usize]
                     } else {
                         0
