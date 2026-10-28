@@ -15,8 +15,13 @@ pub mod collator;
 pub mod datefmt;
 pub mod dtpg;
 pub mod error;
+pub mod grapheme;
+pub mod idna;
 pub mod locale;
 pub mod msgfmt;
 pub mod numfmt;
 pub mod timezone;
 pub mod utf16;
+
+/// The intl crate, for the wiring.
+pub use intl;

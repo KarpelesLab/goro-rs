@@ -124,6 +124,13 @@ fn rule_override(lang: &str) -> Option<&'static str> {
 impl Collator {
     /// A collator for the locale; None when the locale isn't usable.
     pub fn new(id: &str) -> Collator {
+        // BCP 47 extensions in mixed IDs (ja_JP-u-ks-identic) as keywords
+        let canon = if id.contains('-') && !id.contains('@') {
+            locale::canonicalize(id)
+        } else {
+            id.to_string()
+        };
+        let id = canon.as_str();
         let (actual, valid, t) = resolve(id);
         let mut c = Collator {
             actual,

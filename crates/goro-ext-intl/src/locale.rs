@@ -776,6 +776,13 @@ pub fn display_language_code(id: &str) -> String {
         keys.push(format!("{}-{}", p.language, p.region.to_ascii_lowercase()));
     }
     keys.push(p.language.clone());
+    // ICU keeps two aliases CLDR 48 changed (ext/intl/tests/
+    // locale_get_display_language3.phpt)
+    match keys[0].as_str() {
+        "cel-gaulish" => return "cel".into(),
+        "sgn-no" => return "nsl".into(),
+        _ => {}
+    }
     for k in keys {
         if let Some(r) = lang_alias(&k)
             && !r.contains("-x-")

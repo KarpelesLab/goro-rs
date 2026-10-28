@@ -34,6 +34,7 @@ mod dtpg;
 mod locale;
 mod msgfmt;
 mod numfmt;
+mod text;
 mod timezone;
 
 /// Every module of the extension (all named "intl").
@@ -47,6 +48,7 @@ pub static MODULES: &[&Module] = &[
     &calendar::MODULE,
     &datefmt::MODULE,
     &dtpg::MODULE,
+    &text::MODULE,
 ];
 
 pub static MODULE: Module = Module {
