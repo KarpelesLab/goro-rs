@@ -23,6 +23,15 @@ const R_TYPED: u8 = 2;
 pub(crate) struct RefInner {
     pub(crate) val: RefCell<Value>,
     pub(crate) flags: Cell<u8>,
+    /// Root-buffer entry (when buffered).
+    pub(crate) gc_idx: Cell<u32>,
+}
+
+impl Drop for RefInner {
+    #[inline]
+    fn drop(&mut self) {
+        gc::ref_freed(self);
+    }
 }
 
 /// A shared reference cell. 8 bytes.
@@ -37,6 +46,7 @@ impl PhpRef {
             v => PhpRef(Rc::new(RefInner {
                 val: RefCell::new(v),
                 flags: Cell::new(0),
+                gc_idx: Cell::new(0),
             })),
         }
     }
