@@ -1583,7 +1583,15 @@ impl Vm {
                                 .ex
                                 .native_calls
                                 .last()
-                                .is_some_and(|n| n.depth as usize == self.ex.frames.len());
+                                .is_some_and(|n| {
+                                    n.depth as usize == self.ex.frames.len()
+                                        // call_user_func() calls as if
+                                        // directly (test func_get_arg_basic.phpt).
+                                        && !matches!(
+                                            n.func.lname.as_bytes(),
+                                            b"call_user_func" | b"call_user_func_array"
+                                        )
+                                });
                             let site = if from_native {
                                 String::new()
                             } else {

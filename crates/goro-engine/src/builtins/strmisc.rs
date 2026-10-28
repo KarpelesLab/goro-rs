@@ -465,7 +465,19 @@ fn parse_format(vm: &mut Vm, fmt: &[u8]) -> R<Vec<Result<Conv, u8>>> {
 fn sscanf(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let s = a.str(0);
     let fmt = a.str(1);
-    let items = parse_format(vm, &fmt)?;
+    scan_into(vm, a, &s, &fmt, 2)
+}
+
+/// sscanf() of `s` with `fmt`; the by-reference result variables, if
+/// any, are the arguments from `first_var` on (fscanf() shares this).
+pub(crate) fn scan_into(
+    vm: &mut Vm,
+    a: &mut Args,
+    s: &[u8],
+    fmt: &[u8],
+    first_var: usize,
+) -> R<Value> {
+    let items = parse_format(vm, fmt)?;
     // Result slots, by argument number.
     let mut nslots = 0usize;
     let mut auto = 0usize;
@@ -482,7 +494,7 @@ fn sscanf(vm: &mut Vm, a: &mut Args) -> R<Value> {
         };
         nslots = nslots.max(idx + 1);
     }
-    let nvars = a.len().saturating_sub(2);
+    let nvars = a.len().saturating_sub(first_var);
     if nvars > 0 && nvars != nslots {
         let msg = if nvars > nslots {
             "Variable is not assigned by any conversion specifiers"
@@ -638,7 +650,7 @@ fn sscanf(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     for (i, r) in results.into_iter().enumerate() {
         if let Some(v) = r {
-            a.set_ref(2 + i, v.into_value());
+            a.set_ref(first_var + i, v.into_value());
         }
     }
     Ok(Value::Int(converted))
