@@ -98,15 +98,7 @@ impl Parser<'_> {
             Err(super::LoadError::Refused) => return Ok(()),
         };
         let internal = self.dtd.clone().unwrap();
-        let enc = crate::encoding::declared_encoding(&bytes)
-            .and_then(|(n, _)| crate::encoding::lookup(&n));
-        let dec = crate::encoding::decode(&bytes, enc.or(crate::encoding::sniff(&bytes).0));
-        let mut text = dec.text;
-        if text.starts_with(b"<?xml")
-            && let Some(e) = memchr::memmem::find(&text, b"?>")
-        {
-            text.drain(..e + 2);
-        }
+        let text = self.decode_external(&bytes)?;
         // Internal declarations take precedence (XML 1.0 2.8): the external
         // subset is parsed into the same maps, where first declarations win.
         let r = self.with_buffer(text, |p| p.parse_subset(sink, true));
@@ -224,8 +216,7 @@ impl Parser<'_> {
                         // Expand parameter-entity references inside the
                         // declaration (allowed in the external subset).
                         let decl = self.take_decl_text()?;
-                        let expanded = self.expand_pe_text(&decl, 0)?;
-                        self.with_buffer(expanded.into_bytes(), |p| p.parse_markup_decl(true))?;
+                        self.with_buffer(decl.into_bytes(), |p| p.parse_markup_decl(true))?;
                     } else if let Err(e) = self.parse_markup_decl(false) {
                         if e == Halt::Fatal && !self.no_subset_error {
                             self.fatal(118, "Content error in the internal subset");
@@ -311,16 +302,8 @@ impl Parser<'_> {
         };
         match res {
             Ok(b) => {
-                let enc = crate::encoding::declared_encoding(&b)
-                    .and_then(|(n, _)| crate::encoding::lookup(&n));
-                let d = crate::encoding::decode(&b, enc.or(crate::encoding::sniff(&b).0));
-                let mut s = String::from_utf8(d.text).unwrap_or_default();
-                if s.starts_with("<?xml")
-                    && let Some(e) = s.find("?>")
-                {
-                    s.drain(..e + 2);
-                }
-                Ok(Some(s))
+                let text = self.decode_external(&b)?;
+                Ok(Some(String::from_utf8(text).unwrap_or_default()))
             }
             Err(super::LoadError::NotFound) => {
                 let url = super::parser::resolve_system_id(system, base.as_deref());
@@ -335,10 +318,92 @@ impl Parser<'_> {
         }
     }
 
+    /// Decodes an external entity and checks and removes its text
+    /// declaration (XML 1.0 4.3.1: `encoding` is required, `standalone`
+    /// is not allowed).
+    pub(crate) fn decode_external(&mut self, bytes: &[u8]) -> R<Vec<u8>> {
+        let enc = crate::encoding::declared_encoding(bytes)
+            .and_then(|(n, _)| crate::encoding::lookup(&n));
+        let d = crate::encoding::decode(bytes, enc.or(crate::encoding::sniff(bytes).0));
+        let mut text = d.text;
+        if text.starts_with(b"<?xml") && text.len() > 5 && is_space(text[5]) {
+            let Some(end) = memchr::memmem::find(&text, b"?>") else {
+                return Err(self.fatal(57, "parsing XML declaration: '?>' expected"));
+            };
+            let decl = String::from_utf8_lossy(&text[5..end]).into_owned();
+            let mut rest = decl.trim_start();
+            let mut has_encoding = false;
+            if let Some(r) = rest.strip_prefix("version") {
+                let r = r.trim_start();
+                let r = r.strip_prefix('=').map(str::trim_start).unwrap_or(r);
+                let q = r.chars().next().unwrap_or(' ');
+                let close = r[1..].find(q).map(|i| i + 2).unwrap_or(r.len());
+                rest = r[close.min(r.len())..].trim_start();
+            }
+            if let Some(r) = rest.strip_prefix("encoding") {
+                has_encoding = true;
+                let r = r.trim_start();
+                let r = r.strip_prefix('=').map(str::trim_start).unwrap_or(r);
+                let q = r.chars().next().unwrap_or(' ');
+                let close = r[1..].find(q).map(|i| i + 2).unwrap_or(r.len());
+                rest = r[close.min(r.len())..].trim_start();
+            }
+            if rest.starts_with("standalone") {
+                return Err(self.fatal(57, "parsing XML declaration: '?>' expected"));
+            }
+            if !rest.is_empty() || !has_encoding {
+                return Err(self.fatal(32, "Missing encoding in text declaration"));
+            }
+            text.drain(..end + 2);
+        }
+        Ok(text)
+    }
+
+    /// Replaces the parameter-entity reference at the position with its
+    /// replacement text padded with spaces (XML 1.0 4.4.8), in the buffer.
+    fn splice_pe(&mut self) -> R<()> {
+        let start = self.pos;
+        self.pos += 1;
+        let Some(r) = self.scan_name() else {
+            return Err(self.fatal(24, "PEReference: no name"));
+        };
+        let name = self.slice(r).to_string();
+        if self.cur() != b';' {
+            return Err(self.fatal(25, "PEReference: expecting ';'"));
+        }
+        let end = self.pos + 1;
+        self.splices += 1;
+        if self.splices > 10_000 {
+            return Err(self.halt(89, "Detected an entity reference loop"));
+        }
+        let val = match self.find_entity(&name, true) {
+            Some(e) if e.kind == EntityKind::InternalParameter => e.value.unwrap_or_default(),
+            Some(e) => {
+                let sys = e.system_id.unwrap_or_default();
+                self.load_text(e.public_id.as_deref(), &sys)?
+                    .unwrap_or_default()
+            }
+            None => {
+                self.warn(
+                    Domain::Parser,
+                    27,
+                    format!("PEReference: %{name}; not found"),
+                );
+                String::new()
+            }
+        };
+        let rep = format!(" {val} ");
+        self.buf.splice(start..end, rep.into_bytes());
+        self.pos = start;
+        Ok(())
+    }
+
     /// The text of the markup declaration at the position, up to and
-    /// including its `>` (quotes respected).
+    /// including its `>` (quotes respected), with parameter-entity
+    /// references expanded.
     fn take_decl_text(&mut self) -> R<String> {
         let start = self.pos;
+        let entity_decl = self.starts_with(b"<!ENTITY");
         let mut quote = 0u8;
         while !self.eof() {
             let b = self.cur();
@@ -351,137 +416,58 @@ impl Parser<'_> {
             } else if b == b'>' {
                 self.pos += 1;
                 return Ok(self.slice((start, self.pos)).to_string());
+            } else if b == b'%'
+                && self
+                    .char_at(self.pos + 1)
+                    .is_some_and(crate::chars::is_name_start)
+            {
+                let is_marker = entity_decl
+                    && self.buf[start..self.pos]
+                        .iter()
+                        .filter(|c| !is_space(**c))
+                        .count()
+                        == 8;
+                if !is_marker {
+                    self.splice_pe()?;
+                    continue;
+                }
             }
             self.pos += 1;
         }
         Err(self.fatal(73, "expected '>'"))
     }
 
-    /// Replaces `%name;` outside literals with the entity's text padded
-    /// with spaces (XML 1.0 4.4.8).
-    fn expand_pe_text(&mut self, s: &str, depth: usize) -> R<String> {
-        if !s.contains('%') {
-            return Ok(s.to_string());
-        }
-        if depth > 20 {
-            return Err(self.halt(89, "Detected an entity reference loop"));
-        }
-        let mut out = String::with_capacity(s.len());
-        let b = s.as_bytes();
-        let mut i = 0;
-        let mut quote = 0u8;
-        let mut decl_entity = s.starts_with("<!ENTITY");
-        while i < b.len() {
-            let c = b[i];
-            if quote != 0 {
-                if c == quote {
-                    quote = 0;
-                }
-                out.push(c as char);
-                i += 1;
-                continue;
-            }
-            if c == b'"' || c == b'\'' {
-                quote = c;
-                out.push(c as char);
-                i += 1;
-                continue;
-            }
-            if c == b'%' && i + 1 < b.len() && !is_space(b[i + 1]) {
-                if decl_entity {
-                    // `<!ENTITY % name`: the first % is the PE marker.
-                    decl_entity = false;
-                    out.push('%');
-                    i += 1;
-                    continue;
-                }
-                if let Some(end) = s[i + 1..].find(';') {
-                    let name = &s[i + 1..i + 1 + end];
-                    let val = match self.find_entity(name, true) {
-                        Some(e) if e.kind == EntityKind::InternalParameter => {
-                            e.value.unwrap_or_default()
-                        }
-                        Some(e) => {
-                            let sys = e.system_id.unwrap_or_default();
-                            self.load_text(e.public_id.as_deref(), &sys)?
-                                .unwrap_or_default()
-                        }
-                        None => {
-                            self.warn(
-                                Domain::Parser,
-                                27,
-                                format!("PEReference: %{name}; not found"),
-                            );
-                            String::new()
-                        }
-                    };
-                    let v = self.expand_pe_text(&val, depth + 1)?;
-                    out.push(' ');
-                    out.push_str(&v);
-                    out.push(' ');
-                    i += end + 2;
-                    continue;
-                }
-            }
-            if c == b'%' {
-                decl_entity = false;
-            }
-            let ch = s[i..].chars().next().unwrap();
-            out.push(ch);
-            i += ch.len_utf8();
-        }
-        Ok(out)
-    }
-
     fn parse_conditional(&mut self, sink: &mut dyn Sink) -> R<()> {
         self.pos += 3;
         self.skip_spaces();
-        // The keyword may come from a parameter entity.
+        while self.cur() == b'%' {
+            self.splice_pe()?;
+            self.skip_spaces();
+        }
         let mut kw = String::new();
-        if self.cur() == b'%' {
-            self.pos += 1;
-            if let Some(r) = self.scan_name() {
-                let n = self.slice(r).to_string();
-                if self.cur() == b';' {
-                    self.pos += 1;
-                }
-                kw = self
-                    .find_entity(&n, true)
-                    .and_then(|e| e.value)
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-            }
-        } else if let Some(r) = self.scan_name() {
+        if let Some(r) = self.scan_name() {
             kw = self.slice(r).to_string();
         }
         self.skip_spaces();
+        while self.cur() == b'%' {
+            self.splice_pe()?;
+            self.skip_spaces();
+        }
         if self.cur() != b'[' {
             return Err(self.fatal(49, "Invalid conditional section"));
         }
         self.pos += 1;
+        let Some(end) = self.find_section_end() else {
+            return Err(self.fatal(49, "Conditional section not closed"));
+        };
         match kw.as_str() {
             "INCLUDE" => {
-                // Parse declarations until the matching "]]>".
-                loop {
-                    self.skip_spaces();
-                    if self.starts_with(b"]]>") {
-                        self.pos += 3;
-                        return Ok(());
-                    }
-                    if self.eof() {
-                        return Err(self.fatal(49, "Conditional section not closed"));
-                    }
-                    let end = self.find_section_end();
-                    let inner = self.slice((self.pos, end)).to_string();
-                    self.pos = end + 3;
-                    self.with_buffer(inner.into_bytes(), |p| p.parse_subset(sink, true))?;
-                    return Ok(());
-                }
+                let inner = self.buf[self.pos..end].to_vec();
+                self.pos = end + 3;
+                self.with_buffer(inner, |p| p.parse_subset(sink, true))
             }
             "IGNORE" => {
-                let end = self.find_section_end();
-                self.pos = (end + 3).min(self.buf.len());
+                self.pos = end + 3;
                 Ok(())
             }
             _ => Err(self.fatal(49, "Invalid conditional section")),
@@ -490,10 +476,26 @@ impl Parser<'_> {
 
     /// Position of the `]]>` closing the conditional section that starts at
     /// the position (nested sections counted).
-    fn find_section_end(&self) -> usize {
+    fn find_section_end(&self) -> Option<usize> {
         let mut depth = 0;
         let mut i = self.pos;
+        let mut quote = 0u8;
         while i + 2 < self.buf.len() {
+            let b = self.buf[i];
+            if quote != 0 {
+                if b == quote {
+                    quote = 0;
+                }
+                i += 1;
+                continue;
+            }
+            if self.buf[i..].starts_with(b"<!--") {
+                match memchr::memmem::find(&self.buf[i + 4..], b"-->") {
+                    Some(o) => i += 4 + o + 3,
+                    None => return None,
+                }
+                continue;
+            }
             if self.buf[i..].starts_with(b"<![") {
                 depth += 1;
                 i += 3;
@@ -501,7 +503,7 @@ impl Parser<'_> {
             }
             if self.buf[i..].starts_with(b"]]>") {
                 if depth == 0 {
-                    return i;
+                    return Some(i);
                 }
                 depth -= 1;
                 i += 3;
@@ -509,7 +511,7 @@ impl Parser<'_> {
             }
             i += 1;
         }
-        self.buf.len()
+        None
     }
 
     fn scan_dtd_comment(&mut self) -> R<String> {
@@ -525,6 +527,7 @@ impl Parser<'_> {
                         self.fatal(80, format!("Double hyphen within comment: <!--{so_far}"))
                     );
                 }
+                self.check_chars(start, i)?;
                 let t = self.slice((start, i)).to_string();
                 self.pos = i + 3;
                 Ok(t)
@@ -551,9 +554,12 @@ impl Parser<'_> {
                 "XML declaration allowed only at the start of the document",
             ));
         }
-        self.skip_spaces();
+        if !self.starts_with(b"?>") && !self.skip_spaces() {
+            return Err(self.fatal(65, format!("ParsePI: PI {target} space expected")));
+        }
         match memchr::memmem::find(&self.buf[self.pos..], b"?>") {
             Some(off) => {
+                self.check_chars(self.pos, self.pos + off)?;
                 let d = self.slice((self.pos, self.pos + off)).to_string();
                 self.pos += off + 2;
                 Ok((target, d))
@@ -643,7 +649,7 @@ impl Parser<'_> {
         let start = self.pos;
         while !self.eof() && self.cur() != q {
             let c = self.cur() as char;
-            if !is_pubid_char(c) && c != '\t' {
+            if !is_pubid_char(c) {
                 return Err(self.fatal(69, "Unfinished PubidLiteral"));
             }
             self.pos += 1;
@@ -910,6 +916,9 @@ impl Parser<'_> {
                 return Err(self.fatal(65, "Space required after the NOTATION name'"));
             }
             let (p, s) = self.parse_external_id(true)?;
+            if p.is_none() && s.is_none() {
+                return Err(self.fatal(41, "Notation: Name expected here"));
+            }
             self.end_decl()?;
             let d = self.dtd.as_mut().unwrap();
             if !d.notations.contains_key(&name) {
@@ -972,12 +981,35 @@ impl Parser<'_> {
                                 }
                             } else if let Some(c) = crate::tree::predefined_entity(&r) {
                                 out.push(c);
-                            } else if let Some(e) = self.find_entity(&r, false) {
-                                out.push_str(&e.value.unwrap_or_default());
                             } else {
-                                out.push('&');
-                                out.push_str(&r);
-                                out.push(';');
+                                // WFCs No External Entity References and
+                                // Entity Declared apply to defaults too.
+                                match self.find_entity(&r, false) {
+                                    Some(e) if e.kind == EntityKind::InternalGeneral => {
+                                        if !self.expand_in_attr(&e, &mut out, 0)? {
+                                            return Err(Halt::Fatal);
+                                        }
+                                    }
+                                    Some(_) => {
+                                        return Err(self.fatal(
+                                            29,
+                                            format!("Attribute references external entity '{r}'"),
+                                        ));
+                                    }
+                                    None => {
+                                        if self.has_pe_refs
+                                            || self.ext.is_some() && self.standalone != 1
+                                        {
+                                            out.push('&');
+                                            out.push_str(&r);
+                                            out.push(';');
+                                        } else {
+                                            return Err(
+                                                self.fatal(26, format!("Entity '{r}' not defined"))
+                                            );
+                                        }
+                                    }
+                                }
                             }
                         }
                         _ => return Err(self.fatal(23, "EntityRef: expecting ';'")),

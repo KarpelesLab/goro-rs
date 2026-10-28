@@ -153,6 +153,7 @@ pub struct Parser<'l> {
     utf16_input: bool,
     pub(crate) no_subset_error: bool,
     pub(crate) pe_from_internal: bool,
+    pub(crate) splices: usize,
 }
 
 struct RawAttr {
@@ -207,6 +208,7 @@ impl<'l> Parser<'l> {
             utf16_input: false,
             no_subset_error: false,
             pe_from_internal: false,
+            splices: 0,
         }
     }
 
@@ -814,7 +816,7 @@ impl<'l> Parser<'l> {
                     }
                     i += 1;
                 }
-                0x20..=0x7F | b'\t' | b'\n' => i += 1,
+                0x20..=0x7F | b'\t' | b'\n' | b'\r' => i += 1,
                 0..=0x1F => {
                     self.text_push(start, i);
                     self.pos = i;
@@ -948,6 +950,12 @@ impl<'l> Parser<'l> {
             self.pos += 1;
             self.skip_spaces();
             let e = self.parse_decl_value()?;
+            let valid_name = e.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                && e.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+            if !valid_name {
+                return Err(self.fatal(81, "Invalid XML encoding name"));
+            }
             let up = e.to_ascii_uppercase();
             if (up == "UTF-16" || up == "UTF16" || up == "ISO-10646-UCS-2" || up == "UCS-2")
                 && !self.utf16_input
@@ -1090,12 +1098,21 @@ impl<'l> Parser<'l> {
         }
     }
 
-    fn check_chars(&mut self, start: usize, end: usize) -> R<()> {
+    pub(crate) fn check_chars(&mut self, start: usize, end: usize) -> R<()> {
         let s = &self.buf[start..end];
         for (i, &b) in s.iter().enumerate() {
-            if b < 0x20 && b != b'\t' && b != b'\n' {
+            if b < 0x20 && b != b'\t' && b != b'\n' && b != b'\r' {
                 self.pos = start + i;
                 return Err(self.halt(9, format!("xmlParseComment: invalid xmlChar value {b}")));
+            }
+            if b == 0xEF
+                && i + 2 < s.len()
+                && s[i + 1] == 0xBF
+                && (s[i + 2] == 0xBE || s[i + 2] == 0xBF)
+            {
+                self.pos = start + i;
+                let v = if s[i + 2] == 0xBE { 0xFFFE } else { 0xFFFF };
+                return Err(self.halt(9, format!("xmlParseComment: invalid xmlChar value {v}")));
             }
         }
         Ok(())
@@ -1119,7 +1136,7 @@ impl<'l> Parser<'l> {
             }
             return Err(self.fatal(64, "Invalid PI name"));
         }
-        if target.len() > 3 && target[..3].eq_ignore_ascii_case("xml") {
+        if target.len() > 3 && target.as_bytes()[..3].eq_ignore_ascii_case(b"xml") {
             self.warn(
                 Domain::Parser,
                 64,
@@ -1152,6 +1169,7 @@ impl<'l> Parser<'l> {
             match memchr::memmem::find(&self.buf[self.pos..], b"?>") {
                 Some(off) => {
                     let end = self.pos + off;
+                    self.check_chars(start, end)?;
                     data = self.slice((start, end)).to_string();
                     self.pos = end + 2;
                 }
@@ -1896,7 +1914,24 @@ impl<'l> Parser<'l> {
         Err(self.fatal(26, format!("Entity '{name}' not defined")))
     }
 
+    /// WFC Entity Declared: a standalone document may not reference
+    /// entities declared in the external subset.
+    pub(crate) fn declared_externally(&self, name: &str) -> bool {
+        self.standalone == 1
+            && !self
+                .dtd
+                .as_ref()
+                .is_some_and(|d| d.entities.contains_key(name))
+            && self
+                .ext
+                .as_ref()
+                .is_some_and(|d| d.entities.contains_key(name))
+    }
+
     fn expand_general_entity(&mut self, sink: &mut dyn Sink, name: &str) -> R<()> {
+        if self.declared_externally(name) {
+            return Err(self.fatal(26, format!("Entity '{name}' not defined")));
+        }
         let Some(ent) = self.find_entity(name, false) else {
             let r = self.undeclared_entity(name);
             if r.is_ok() {
@@ -1956,18 +1991,8 @@ impl<'l> Parser<'l> {
         };
         match res {
             Ok(bytes) => {
-                let mut text = bytes;
-                // Text declaration (XML 1.0 4.3.1).
-                let enc = crate::encoding::declared_encoding(&text)
-                    .and_then(|(n, _)| crate::encoding::lookup(&n));
-                let d = crate::encoding::decode(&text, enc.or(crate::encoding::sniff(&text).0));
-                text = d.text;
-                let mut s = String::from_utf8(text).unwrap_or_default();
-                if s.starts_with("<?xml")
-                    && let Some(end) = s.find("?>")
-                {
-                    s.drain(..end + 2);
-                }
+                let text = self.decode_external(&bytes)?;
+                let s = String::from_utf8(text).unwrap_or_default();
                 Ok(Some(s))
             }
             Err(LoadError::NotFound) => {
@@ -2060,6 +2085,9 @@ impl<'l> Parser<'l> {
                 if b == q || b == b'&' || b == b'<' || b < 0x20 {
                     break;
                 }
+                if b == 0xEF && i + 2 < len && self.buf[i + 1] == 0xBF && self.buf[i + 2] >= 0xBE {
+                    break;
+                }
                 i += 1;
             }
             if i > start {
@@ -2122,6 +2150,10 @@ impl<'l> Parser<'l> {
                         out.push(c);
                         continue;
                     }
+                    if self.declared_externally(&name) {
+                        self.fatal(26, format!("Entity '{name}' not defined"));
+                        continue;
+                    }
                     match self.find_entity(&name, false) {
                         None => {
                             self.undeclared_entity(&name).ok();
@@ -2152,6 +2184,10 @@ impl<'l> Parser<'l> {
                         }
                     }
                 }
+                0xEF => {
+                    self.fatal(9, "invalid character in attribute value");
+                    self.pos += 3;
+                }
                 _ => {
                     // Other control characters.
                     self.fatal(9, "invalid character in attribute value");
@@ -2168,7 +2204,12 @@ impl<'l> Parser<'l> {
         Ok(Some((out, pieces)))
     }
 
-    fn expand_in_attr(&mut self, e: &EntityDecl, out: &mut String, depth: usize) -> R<bool> {
+    pub(crate) fn expand_in_attr(
+        &mut self,
+        e: &EntityDecl,
+        out: &mut String,
+        depth: usize,
+    ) -> R<bool> {
         if depth > 40 || self.entity_stack.iter().any(|n| *n == e.name) {
             self.halt(89, "Detected an entity reference loop");
             return Ok(false);
