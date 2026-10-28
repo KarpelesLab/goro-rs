@@ -36,6 +36,101 @@ pub struct RunOptions {
     pub args: Vec<Vec<u8>>,
     /// Extra modules (extension crates).
     pub modules: Vec<&'static Module>,
+    /// Line mode (PHP manual: Command line options -B, -R, -F, -E): code
+    /// run before the input lines, for each line (`$argn`, `$argi`), and
+    /// after.
+    pub lines: Option<LineMode>,
+}
+
+pub struct LineMode {
+    pub begin: Option<Vec<u8>>,
+    /// `-R` code or `-F` file, for each input line.
+    pub each: Option<Script>,
+    pub end: Option<Vec<u8>>,
+}
+
+impl RunOptions {
+    pub fn new(script: Script) -> RunOptions {
+        RunOptions {
+            script,
+            ini: Vec::new(),
+            args: Vec::new(),
+            modules: Vec::new(),
+            lines: None,
+        }
+    }
+}
+
+/// Runs the -B/-R/-F/-E line mode.
+fn run_lines(vm: &mut Vm, lm: &LineMode) -> i32 {
+    use goro_runtime::{Key, Value};
+    let code = |c: &[u8]| {
+        let mut s = b"<?php ".to_vec();
+        s.extend_from_slice(c);
+        s
+    };
+    if let Some(b) = &lm.begin {
+        let r = vm.run_main_code(&code(b), b"Command line begin code");
+        let stop = r.is_err();
+        vm.handle_unwind(r);
+        if stop {
+            vm.shutdown();
+            return vm.exit_status;
+        }
+    }
+    if let Some(each) = &lm.each {
+        let (src, path) = match each {
+            Script::File(f) => {
+                use std::os::unix::ffi::OsStrExt;
+                let p = std::path::Path::new(std::ffi::OsStr::from_bytes(f));
+                match std::fs::read(p) {
+                    Ok(s) => (strip_shebang(s), f.clone()),
+                    Err(_) => {
+                        eprintln!("Could not open input file: {}", String::from_utf8_lossy(f));
+                        return 1;
+                    }
+                }
+            }
+            Script::Code(c) => (code(c), b"Command line run code".to_vec()),
+            Script::Stdin => (Vec::new(), Vec::new()),
+        };
+        use std::io::BufRead;
+        let stdin = std::io::stdin();
+        let mut lock = stdin.lock();
+        let mut n = 0i64;
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match lock.read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            n += 1;
+            let mut line = buf.clone();
+            if line.last() == Some(&b'\n') {
+                line.pop();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+            }
+            let g = &mut vm.globals.dyn_vars;
+            g.insert(Key::from("argn"), Value::Str(goro_runtime::PhpStr::from(line)));
+            g.insert(Key::from("argi"), Value::Int(n));
+            let r = vm.run_main_code(&src, &path);
+            let stop = r.is_err();
+            vm.handle_unwind(r);
+            if stop {
+                vm.shutdown();
+                return vm.exit_status;
+            }
+        }
+    }
+    if let Some(e) = &lm.end {
+        let r = vm.run_main_code(&code(e), b"Command line end code");
+        vm.handle_unwind(r);
+    }
+    vm.shutdown();
+    vm.exit_status
 }
 
 /// Runs a script; returns the process exit status.
@@ -47,6 +142,12 @@ pub fn run(opts: RunOptions) -> i32 {
         vm.set_ini(k, v);
     }
     builtins::misc::startup_ini_deprecations(&mut vm, &opts.ini);
+    if let Some(lm) = &opts.lines {
+        let mut argv = vec![b"Standard input code".to_vec()];
+        argv.extend(opts.args.iter().cloned());
+        vm.set_script(b"Standard input code", &argv);
+        return run_lines(&mut vm, lm);
+    }
     let (src, path, display): (Vec<u8>, Vec<u8>, Vec<u8>) = match &opts.script {
         Script::File(p) => {
             use std::os::unix::ffi::OsStrExt;

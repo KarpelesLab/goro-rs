@@ -51,6 +51,10 @@ fn cli(args: Vec<OsString>) -> i32 {
     let mut script: Option<Script> = None;
     let mut rest: Vec<Vec<u8>> = Vec::new();
     let mut mode = Mode::Run;
+    let mut begin: Option<Vec<u8>> = None;
+    let mut each: Option<Script> = None;
+    let mut end: Option<Vec<u8>> = None;
+    let mut lint_files: Vec<Vec<u8>> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -97,6 +101,38 @@ fn cli(args: Vec<OsString>) -> i32 {
                         eprint!("{}", usage());
                         return 1;
                     }
+                }
+            }
+            b"-B" | b"--process-begin" | b"-E" | b"--process-end" | b"-R" | b"--process-code" | b"-F" | b"--process-file" => {
+                let opt = a.clone();
+                i += 1;
+                let Some(v) = args.get(i).cloned() else {
+                    eprint!("{}", usage());
+                    return 1;
+                };
+                let which = match opt.as_slice() {
+                    b"-B" | b"--process-begin" => 'B',
+                    b"-E" | b"--process-end" => 'E',
+                    b"-R" | b"--process-code" => 'R',
+                    _ => 'F',
+                };
+                match which {
+                    'B' if begin.is_some() => {
+                        println!("You can use -B only once.");
+                        return 1;
+                    }
+                    'E' if end.is_some() => {
+                        println!("You can use -E only once.");
+                        return 1;
+                    }
+                    'R' | 'F' if each.is_some() => {
+                        println!("You can use -R or -F only once.");
+                        return 1;
+                    }
+                    'B' => begin = Some(v),
+                    'E' => end = Some(v),
+                    'R' => each = Some(Script::Code(v)),
+                    _ => each = Some(Script::File(v)),
                 }
             }
             b"-l" | b"--syntax-check" => mode = Mode::Lint,
@@ -153,16 +189,40 @@ fn cli(args: Vec<OsString>) -> i32 {
                 ini,
                 args: rest,
                 modules: Vec::new(),
+                lines: None,
             })
         }
-        Mode::Lint => lint(script),
+        Mode::Lint => {
+            // Every file argument is checked.
+            match script {
+                Some(Script::File(f)) => {
+                    lint_files.push(f);
+                    lint_files.extend(rest);
+                    let mut status = 0;
+                    for f in lint_files {
+                        let s = lint(Some(Script::File(f)));
+                        if s != 0 {
+                            status = s;
+                        }
+                    }
+                    status
+                }
+                other => lint(other),
+            }
+        }
         Mode::Run => {
+            let lines = if begin.is_some() || each.is_some() || end.is_some() {
+                Some(goro_engine::LineMode { begin, each, end })
+            } else {
+                None
+            };
             let script = script.unwrap_or(Script::Stdin);
             goro_engine::run(RunOptions {
                 script,
                 ini,
                 args: rest,
                 modules: Vec::new(),
+                lines,
             })
         }
     }
@@ -189,7 +249,7 @@ fn lint(script: Option<Script>) -> i32 {
             match std::fs::read(p) {
                 Ok(s) => (s, String::from_utf8_lossy(&f).into_owned()),
                 Err(_) => {
-                    println!("Could not open input file: {}", String::from_utf8_lossy(&f));
+                    eprintln!("Could not open input file: {}", String::from_utf8_lossy(&f));
                     return 1;
                 }
             }
@@ -216,7 +276,6 @@ fn lint(script: Option<Script>) -> i32 {
                 Some(m) => ("Parse error", m.to_string()),
                 None => ("Fatal error", e.message.clone()),
             };
-            println!("PHP {}:  {} in {} on line {}", label, msg, name, e.line);
             println!("\n{}: {} in {} on line {}", label, msg, name, e.line);
             println!("Errors parsing {}", name);
             255

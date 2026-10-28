@@ -570,6 +570,7 @@ pub static MODULE: Module = Module {
         ("cli_server.color", "0"),
     ],
     listed: false,
+    init: Some(core_init),
     ..Module::EMPTY
 };
 
@@ -2306,4 +2307,49 @@ fn clone_fn(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.clone_with(v, w);
     }
     vm.clone_value(v)
+}
+
+/// Constants known only at run time: PHP_BINARY (the running executable)
+/// and PHP_BUILD_DATE ("Mmm dd yyyy hh:mm:ss", the executable's date).
+fn core_init(vm: &mut Vm) {
+    use std::os::unix::ffi::OsStrExt;
+    let exe = std::env::current_exe().ok();
+    let bin = exe
+        .as_ref()
+        .map(|p| p.as_os_str().as_bytes().to_vec())
+        .unwrap_or_default();
+    vm.constants
+        .insert(PhpStr::intern(b"PHP_BINARY"), Value::Str(PhpStr::from(bin)));
+    let secs = exe
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400);
+    // Civil date from days since 1970-01-01 (proleptic Gregorian).
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    const MON: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let s = format!(
+        "{} {:>2} {} {:02}:{:02}:{:02}",
+        MON[(m - 1) as usize],
+        d,
+        y,
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    );
+    vm.constants
+        .insert(PhpStr::intern(b"PHP_BUILD_DATE"), Value::Str(PhpStr::from(s)));
 }

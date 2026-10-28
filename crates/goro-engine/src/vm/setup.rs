@@ -242,8 +242,35 @@ impl Vm {
     /// Runs a script with PHP's end-of-request sequence; returns the exit
     /// status.
     pub fn run_script(&mut self, src: &[u8], path: &[u8]) -> i32 {
+        // PHP manual (php.ini directives): auto_prepend_file and
+        // auto_append_file are parsed before/after the main file, as with
+        // require.
+        let side = |vm: &Vm, k: &[u8]| -> Option<(Vec<u8>, Vec<u8>)> {
+            let f = vm.get_ini(k)?;
+            if f.is_empty() {
+                return None;
+            }
+            let p = vm.resolve_include(&f)?;
+            use std::os::unix::ffi::OsStrExt;
+            let src = std::fs::read(&p).ok()?;
+            Some((src, p.as_os_str().as_bytes().to_vec()))
+        };
+        if let Some((s, p)) = side(self, b"auto_prepend_file") {
+            let r = self.run_main_code(&s, &p);
+            let stop = r.is_err();
+            self.handle_unwind(r);
+            if stop {
+                self.shutdown();
+                return self.exit_status;
+            }
+        }
         let r = self.run_main_code(src, path);
+        let ok = r.is_ok();
         self.handle_unwind(r);
+        if ok && let Some((s, p)) = side(self, b"auto_append_file") {
+            let r = self.run_main_code(&s, &p);
+            self.handle_unwind(r);
+        }
         self.shutdown();
         self.exit_status
     }
