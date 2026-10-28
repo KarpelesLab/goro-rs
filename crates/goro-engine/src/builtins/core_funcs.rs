@@ -298,6 +298,14 @@ pub static MODULE: Module = Module {
         ),
         ("function dl(string $extension_filename): bool", dl),
         ("function getmypid(): int|false", getmypid),
+        (
+            "function cli_set_process_title(string $title): bool",
+            cli_set_process_title,
+        ),
+        (
+            "function cli_get_process_title(): ?string",
+            cli_get_process_title,
+        ),
         ("function getmyuid(): int|false", getmyuid),
         ("function getmygid(): int|false", getmygid),
         (
@@ -2495,4 +2503,35 @@ fn unregister_tick_function(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     vm.tick_funcs = out;
     Ok(Value::Null)
+}
+
+thread_local! {
+    static PROCESS_TITLE: std::cell::RefCell<Option<PhpStr>> = const { std::cell::RefCell::new(None) };
+}
+
+/// cli_set_process_title(): the thread name the kernel shows (PR_SET_NAME,
+/// 15 bytes) and the title cli_get_process_title() returns (PHP manual).
+fn cli_set_process_title(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let t = a.str(0);
+    let mut name: Vec<u8> = t
+        .as_bytes()
+        .iter()
+        .copied()
+        .take(15)
+        .filter(|&c| c != 0)
+        .collect();
+    name.push(0);
+    // SAFETY: a NUL-terminated buffer of at most 16 bytes.
+    unsafe {
+        libc::prctl(libc::PR_SET_NAME, name.as_ptr() as libc::c_ulong, 0, 0, 0);
+    }
+    PROCESS_TITLE.with(|c| *c.borrow_mut() = Some(t));
+    Ok(Value::Bool(true))
+}
+
+fn cli_get_process_title(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    Ok(PROCESS_TITLE.with(|c| match &*c.borrow() {
+        Some(t) => Value::Str(t.clone()),
+        None => Value::Str(PhpStr::empty()),
+    }))
 }
