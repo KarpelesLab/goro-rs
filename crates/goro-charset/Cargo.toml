@@ -1,0 +1,8 @@
+[package]
+name = "goro-charset"
+description = "Character set conversion and Unicode text operations for mbstring and iconv"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]

@@ -1,0 +1,9 @@
+[package]
+name = "goro-ext-hash"
+description = "PHP hash extension algorithms: message digests, HMAC, HKDF, PBKDF2, checksums and non-cryptographic hashes"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+purecrypto = { version = "0.10", default-features = false, features = ["hash", "std"] }

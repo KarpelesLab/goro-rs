@@ -1,0 +1,420 @@
+L	Africa/Abidjan	CI	5.31666	-4.03333	
+L	Africa/Accra	GH	5.55	-0.21666	
+L	Africa/Addis_Ababa	ET	9.03333	38.7	
+L	Africa/Algiers	DZ	36.78333	3.05	
+L	Africa/Asmara	ER	15.33333	38.88333	
+L	Africa/Bamako	ML	12.65	-8.0	
+L	Africa/Bangui	CF	4.36666	18.58333	
+L	Africa/Banjul	GM	13.46666	-16.64999	
+L	Africa/Bissau	GW	11.85	-15.58333	
+L	Africa/Blantyre	MW	-15.78333	35.0	
+L	Africa/Brazzaville	CG	-4.26666	15.28333	
+L	Africa/Bujumbura	BI	-3.38333	29.36666	
+L	Africa/Cairo	EG	30.05	31.25	
+L	Africa/Casablanca	MA	33.65	-7.58333	
+L	Africa/Ceuta	ES	35.88333	-5.31666	Ceuta, Melilla
+L	Africa/Conakry	GN	9.51666	-13.71666	
+L	Africa/Dakar	SN	14.66666	-17.43333	
+L	Africa/Dar_es_Salaam	TZ	-6.8	39.28333	
+L	Africa/Djibouti	DJ	11.6	43.15	
+L	Africa/Douala	CM	4.05	9.69999	
+L	Africa/El_Aaiun	EH	27.15	-13.2	
+L	Africa/Freetown	SL	8.5	-13.25	
+L	Africa/Gaborone	BW	-24.65	25.91666	
+L	Africa/Harare	ZW	-17.83333	31.05	
+L	Africa/Johannesburg	ZA	-26.25	28.0	
+L	Africa/Juba	SS	4.84999	31.61666	
+L	Africa/Kampala	UG	0.31666	32.41666	
+L	Africa/Khartoum	SD	15.6	32.53333	
+L	Africa/Kigali	RW	-1.95	30.06666	
+L	Africa/Kinshasa	CD	-4.3	15.3	Dem. Rep. of Congo (west)
+L	Africa/Lagos	NG	6.45	3.4	
+L	Africa/Libreville	GA	0.38333	9.44999	
+L	Africa/Lome	TG	6.13333	1.21666	
+L	Africa/Luanda	AO	-8.8	13.23333	
+L	Africa/Lubumbashi	CD	-11.66666	27.46666	Dem. Rep. of Congo (east)
+L	Africa/Lusaka	ZM	-15.41666	28.28333	
+L	Africa/Malabo	GQ	3.75	8.78333	
+L	Africa/Maputo	MZ	-25.96666	32.58333	
+L	Africa/Maseru	LS	-29.46666	27.5	
+L	Africa/Mbabane	SZ	-26.3	31.1	
+L	Africa/Mogadishu	SO	2.06666	45.36666	
+L	Africa/Monrovia	LR	6.3	-10.78333	
+L	Africa/Nairobi	KE	-1.28333	36.81666	
+L	Africa/Ndjamena	TD	12.11666	15.05	
+L	Africa/Niamey	NE	13.51666	2.11666	
+L	Africa/Nouakchott	MR	18.1	-15.95	
+L	Africa/Ouagadougou	BF	12.36666	-1.51666	
+L	Africa/Porto-Novo	BJ	6.48333	2.61666	
+L	Africa/Sao_Tome	ST	0.33333	6.73333	
+L	Africa/Tripoli	LY	32.9	13.18333	
+L	Africa/Tunis	TN	36.79999	10.18333	
+L	Africa/Windhoek	NA	-22.56666	17.1	
+L	America/Adak	US	51.88	-176.65805	Alaska - western Aleutians
+L	America/Anchorage	US	61.21805	-149.90027	Alaska (most areas)
+L	America/Anguilla	AI	18.2	-63.06666	
+L	America/Antigua	AG	17.05	-61.8	
+L	America/Araguaina	BR	-7.2	-48.2	Tocantins
+L	America/Argentina/Buenos_Aires	AR	-34.6	-58.45	Buenos Aires (BA, CF)
+L	America/Argentina/Catamarca	AR	-28.46666	-65.78333	Catamarca (CT), Chubut (CH)
+L	America/Argentina/Cordoba	AR	-31.4	-64.18333	Argentina (most areas: CB, CC, CN, ER, FM, MN, SE, SF)
+L	America/Argentina/Jujuy	AR	-24.18333	-65.3	Jujuy (JY)
+L	America/Argentina/La_Rioja	AR	-29.43333	-66.84999	La Rioja (LR)
+L	America/Argentina/Mendoza	AR	-32.88333	-68.81666	Mendoza (MZ)
+L	America/Argentina/Rio_Gallegos	AR	-51.63333	-69.21666	Santa Cruz (SC)
+L	America/Argentina/Salta	AR	-24.78333	-65.41666	Salta (SA, LP, NQ, RN)
+L	America/Argentina/San_Juan	AR	-31.53333	-68.51666	San Juan (SJ)
+L	America/Argentina/San_Luis	AR	-33.31666	-66.34999	San Luis (SL)
+L	America/Argentina/Tucuman	AR	-26.81666	-65.21666	Tucuman (TM)
+L	America/Argentina/Ushuaia	AR	-54.8	-68.3	Tierra del Fuego (TF)
+L	America/Aruba	AW	12.5	-69.96666	
+L	America/Asuncion	PY	-25.26666	-57.66666	
+L	America/Atikokan	CA	48.75861	-91.62166	EST - ON (Atikokan), NU (Coral H)
+L	America/Bahia	BR	-12.98333	-38.51666	Bahia
+L	America/Bahia_Banderas	MX	20.8	-105.25	Bahia de Banderas
+L	America/Barbados	BB	13.1	-59.61666	
+L	America/Belem	BR	-1.45	-48.48333	Para (east), Amapa
+L	America/Belize	BZ	17.5	-88.2	
+L	America/Blanc-Sablon	CA	51.41666	-57.11666	AST - QC (Lower North Shore)
+L	America/Boa_Vista	BR	2.81666	-60.66666	Roraima
+L	America/Bogota	CO	4.59999	-74.08333	
+L	America/Boise	US	43.61361	-116.2025	Mountain - ID (south), OR (east)
+L	America/Cambridge_Bay	CA	69.11388	-105.05277	Mountain - NU (west)
+L	America/Campo_Grande	BR	-20.45	-54.61666	Mato Grosso do Sul
+L	America/Cancun	MX	21.08333	-86.76666	Quintana Roo
+L	America/Caracas	VE	10.5	-66.93333	
+L	America/Cayenne	GF	4.93333	-52.33333	
+L	America/Cayman	KY	19.3	-81.38333	
+L	America/Chicago	US	41.85	-87.65	Central (most areas)
+L	America/Chihuahua	MX	28.63333	-106.08333	Chihuahua (most areas)
+L	America/Ciudad_Juarez	MX	31.73333	-106.48333	Chihuahua (US border - west)
+L	America/Costa_Rica	CR	9.93333	-84.08333	
+L	America/Coyhaique	CL	-45.56666	-72.06666	Aysen Region
+L	America/Creston	CA	49.1	-116.51666	MST - BC (Creston)
+L	America/Cuiaba	BR	-15.58333	-56.08333	Mato Grosso
+L	America/Curacao	CW	12.18333	-69.0	
+L	America/Danmarkshavn	GL	76.76666	-18.66666	National Park (east coast)
+L	America/Dawson	CA	64.06666	-139.41666	MST - Yukon (west)
+L	America/Dawson_Creek	CA	55.76666	-120.23333	MST - BC (Dawson Cr, Ft St John)
+L	America/Denver	US	39.73916	-104.98416	Mountain (most areas)
+L	America/Detroit	US	42.33138	-83.04583	Eastern - MI (most areas)
+L	America/Dominica	DM	15.3	-61.4	
+L	America/Edmonton	CA	53.55	-113.46666	CST - AB, BC(E), NT(E), SK(W)
+L	America/Eirunepe	BR	-6.66666	-69.86666	Amazonas (west)
+L	America/El_Salvador	SV	13.7	-89.2	
+L	America/Fort_Nelson	CA	58.8	-122.7	MST - BC (Ft Nelson)
+L	America/Fortaleza	BR	-3.71666	-38.5	Brazil (northeast: MA, PI, CE, RN, PB)
+L	America/Glace_Bay	CA	46.2	-59.95	Atlantic - NS (Cape Breton)
+L	America/Goose_Bay	CA	53.33333	-60.41666	Atlantic - Labrador (most areas)
+L	America/Grand_Turk	TC	21.46666	-71.13333	
+L	America/Grenada	GD	12.05	-61.75	
+L	America/Guadeloupe	GP	16.23333	-61.53333	
+L	America/Guatemala	GT	14.63333	-90.51666	
+L	America/Guayaquil	EC	-2.16666	-79.83333	Ecuador (mainland)
+L	America/Guyana	GY	6.8	-58.16666	
+L	America/Halifax	CA	44.65	-63.6	Atlantic - NS (most areas), PE
+L	America/Havana	CU	23.13333	-82.36666	
+L	America/Hermosillo	MX	29.06666	-110.96666	Sonora
+L	America/Indiana/Indianapolis	US	39.76833	-86.15805	Eastern - IN (most areas)
+L	America/Indiana/Knox	US	41.29583	-86.625	Central - IN (Starke)
+L	America/Indiana/Marengo	US	38.37555	-86.34472	Eastern - IN (Crawford)
+L	America/Indiana/Petersburg	US	38.49194	-87.27861	Eastern - IN (Pike)
+L	America/Indiana/Tell_City	US	37.95305	-86.76138	Central - IN (Perry)
+L	America/Indiana/Vevay	US	38.74777	-85.06722	Eastern - IN (Switzerland)
+L	America/Indiana/Vincennes	US	38.67722	-87.52861	Eastern - IN (Da, Du, K, Mn)
+L	America/Indiana/Winamac	US	41.05138	-86.60305	Eastern - IN (Pulaski)
+L	America/Inuvik	CA	68.34972	-133.71666	CST - NT (west)
+L	America/Iqaluit	CA	63.73333	-68.46666	Eastern - NU (most areas)
+L	America/Jamaica	JM	17.96805	-76.79333	
+L	America/Juneau	US	58.30194	-134.41972	Alaska - Juneau area
+L	America/Kentucky/Louisville	US	38.25416	-85.75944	Eastern - KY (Louisville area)
+L	America/Kentucky/Monticello	US	36.82972	-84.84916	Eastern - KY (Wayne)
+L	America/Kralendijk	BQ	12.15083	-68.27666	
+L	America/La_Paz	BO	-16.5	-68.15	
+L	America/Lima	PE	-12.05	-77.05	
+L	America/Los_Angeles	US	34.05222	-118.24277	Pacific
+L	America/Lower_Princes	SX	18.05138	-63.04722	
+L	America/Maceio	BR	-9.66666	-35.71666	Alagoas, Sergipe
+L	America/Managua	NI	12.15	-86.28333	
+L	America/Manaus	BR	-3.13333	-60.01666	Amazonas (east)
+L	America/Marigot	MF	18.06666	-63.08333	
+L	America/Martinique	MQ	14.6	-61.08333	
+L	America/Matamoros	MX	25.83333	-97.5	Coahuila, Nuevo Leon, Tamaulipas (US border)
+L	America/Mazatlan	MX	23.21666	-106.41666	Baja California Sur, Nayarit (most areas), Sinaloa
+L	America/Menominee	US	45.10777	-87.61416	Central - MI (Wisconsin border)
+L	America/Merida	MX	20.96666	-89.61666	Campeche, Yucatan
+L	America/Metlakatla	US	55.12694	-131.57638	Alaska - Annette Island
+L	America/Mexico_City	MX	19.39999	-99.15	Central Mexico
+L	America/Miquelon	PM	47.05	-56.33333	
+L	America/Moncton	CA	46.1	-64.78333	Atlantic - New Brunswick
+L	America/Monterrey	MX	25.66666	-100.31666	Durango; Coahuila, Nuevo Leon, Tamaulipas (most areas)
+L	America/Montevideo	UY	-34.90916	-56.2125	
+L	America/Montserrat	MS	16.71666	-62.21666	
+L	America/Nassau	BS	25.08333	-77.34999	
+L	America/New_York	US	40.71416	-74.00638	Eastern (most areas)
+L	America/Nome	US	64.50111	-165.40638	Alaska (west)
+L	America/Noronha	BR	-3.85	-32.41666	Atlantic islands
+L	America/North_Dakota/Beulah	US	47.26416	-101.77777	Central - ND (Mercer)
+L	America/North_Dakota/Center	US	47.11638	-101.29916	Central - ND (Oliver)
+L	America/North_Dakota/New_Salem	US	46.845	-101.41083	Central - ND (Morton rural)
+L	America/Nuuk	GL	64.18333	-51.73333	most of Greenland
+L	America/Ojinaga	MX	29.56666	-104.41666	Chihuahua (US border - east)
+L	America/Panama	PA	8.96666	-79.53333	
+L	America/Paramaribo	SR	5.83333	-55.16666	
+L	America/Phoenix	US	33.44833	-112.07333	MST - AZ (except Navajo)
+L	America/Port-au-Prince	HT	18.53333	-72.33333	
+L	America/Port_of_Spain	TT	10.65	-61.51666	
+L	America/Porto_Velho	BR	-8.76666	-63.9	Rondonia
+L	America/Puerto_Rico	PR	18.46833	-66.10611	
+L	America/Punta_Arenas	CL	-53.15	-70.91666	Magallanes Region
+L	America/Rankin_Inlet	CA	62.81666	-92.08305	Central - NU (central)
+L	America/Recife	BR	-8.05	-34.9	Pernambuco
+L	America/Regina	CA	50.4	-104.65	CST - SK (most areas)
+L	America/Resolute	CA	74.69555	-94.82916	Central - NU (Resolute)
+L	America/Rio_Branco	BR	-9.96666	-67.8	Acre
+L	America/Santarem	BR	-2.43333	-54.86666	Para (west)
+L	America/Santiago	CL	-33.45	-70.66666	most of Chile
+L	America/Santo_Domingo	DO	18.46666	-69.9	
+L	America/Sao_Paulo	BR	-23.53333	-46.61666	Brazil (southeast: GO, DF, MG, ES, RJ, SP, PR, SC, RS)
+L	America/Scoresbysund	GL	70.48333	-21.96666	Scoresbysund/Ittoqqortoormiit
+L	America/Sitka	US	57.17638	-135.30194	Alaska - Sitka area
+L	America/St_Barthelemy	BL	17.88333	-62.85	
+L	America/St_Johns	CA	47.56666	-52.71666	Newfoundland, Labrador (SE)
+L	America/St_Kitts	KN	17.3	-62.71666	
+L	America/St_Lucia	LC	14.01666	-61.0	
+L	America/St_Thomas	VI	18.35	-64.93333	
+L	America/St_Vincent	VC	13.15	-61.23333	
+L	America/Swift_Current	CA	50.28333	-107.83333	CST - SK (midwest)
+L	America/Tegucigalpa	HN	14.1	-87.21666	
+L	America/Thule	GL	76.56666	-68.78333	Thule/Pituffik
+L	America/Tijuana	MX	32.53333	-117.01666	Baja California
+L	America/Toronto	CA	43.65	-79.38333	Eastern - ON & QC (most areas)
+L	America/Tortola	VG	18.45	-64.61666	
+L	America/Vancouver	CA	49.26666	-123.11666	MST - BC (most areas)
+L	America/Whitehorse	CA	60.71666	-135.05	MST - Yukon (east)
+L	America/Winnipeg	CA	49.88333	-97.15	EST - Manitoba, ON (northwest)
+L	America/Yakutat	US	59.54694	-139.72722	Alaska - Yakutat
+L	Antarctica/Casey	AQ	-66.28333	110.51666	Casey
+L	Antarctica/Davis	AQ	-68.58333	77.96666	Davis
+L	Antarctica/DumontDUrville	AQ	-66.66666	140.01666	Dumont-d'Urville
+L	Antarctica/Macquarie	AU	-54.5	158.94999	Macquarie Island
+L	Antarctica/Mawson	AQ	-67.59999	62.88333	Mawson
+L	Antarctica/McMurdo	AQ	-77.83333	166.6	New Zealand time - McMurdo, South Pole
+L	Antarctica/Palmer	AQ	-64.8	-64.09999	Palmer
+L	Antarctica/Rothera	AQ	-67.56666	-68.13333	Rothera
+L	Antarctica/Syowa	AQ	-69.00611	39.59	Syowa
+L	Antarctica/Troll	AQ	-72.01138	2.53499	Troll
+L	Antarctica/Vostok	AQ	-78.4	106.9	Vostok
+L	Arctic/Longyearbyen	SJ	78.0	16.0	
+L	Asia/Aden	YE	12.75	45.2	
+L	Asia/Almaty	KZ	43.25	76.95	most of Kazakhstan
+L	Asia/Amman	JO	31.95	35.93333	
+L	Asia/Anadyr	RU	64.75	177.48333	MSK+09 - Bering Sea
+L	Asia/Aqtau	KZ	44.51666	50.26666	Mangghystau/Mankistau
+L	Asia/Aqtobe	KZ	50.28333	57.16666	Aqtobe/Aktobe
+L	Asia/Ashgabat	TM	37.95	58.38333	
+L	Asia/Atyrau	KZ	47.11666	51.93333	Atyrau/Atirau/Gur'yev
+L	Asia/Baghdad	IQ	33.35	44.41666	
+L	Asia/Bahrain	BH	26.38333	50.58333	
+L	Asia/Baku	AZ	40.38333	49.85	
+L	Asia/Bangkok	TH	13.75	100.51666	
+L	Asia/Barnaul	RU	53.36666	83.75	MSK+04 - Altai
+L	Asia/Beirut	LB	33.88333	35.5	
+L	Asia/Bishkek	KG	42.9	74.59999	
+L	Asia/Brunei	BN	4.93333	114.91666	
+L	Asia/Chita	RU	52.05	113.46666	MSK+06 - Zabaykalsky
+L	Asia/Colombo	LK	6.93333	79.84999	
+L	Asia/Damascus	SY	33.5	36.29999	
+L	Asia/Dhaka	BD	23.71666	90.41666	
+L	Asia/Dili	TL	-8.55	125.58333	
+L	Asia/Dubai	AE	25.3	55.3	
+L	Asia/Dushanbe	TJ	38.58333	68.8	
+L	Asia/Famagusta	CY	35.11666	33.95	Northern Cyprus
+L	Asia/Gaza	PS	31.5	34.46666	Gaza Strip
+L	Asia/Hebron	PS	31.53333	35.095	West Bank
+L	Asia/Ho_Chi_Minh	VN	10.75	106.66666	
+L	Asia/Hong_Kong	HK	22.28333	114.15	
+L	Asia/Hovd	MN	48.01666	91.65	Bayan-Olgii, Hovd, Uvs
+L	Asia/Irkutsk	RU	52.26666	104.33333	MSK+05 - Irkutsk, Buryatia
+L	Asia/Jakarta	ID	-6.16666	106.8	Java, Sumatra
+L	Asia/Jayapura	ID	-2.53333	140.69999	New Guinea (West Papua / Irian Jaya), Malukus/Moluccas
+L	Asia/Jerusalem	IL	31.78055	35.22388	
+L	Asia/Kabul	AF	34.51666	69.2	
+L	Asia/Kamchatka	RU	53.01666	158.65	MSK+09 - Kamchatka
+L	Asia/Karachi	PK	24.86666	67.05	
+L	Asia/Kathmandu	NP	27.71666	85.31666	
+L	Asia/Khandyga	RU	62.65638	135.55388	MSK+06 - Tomponsky, Ust-Maysky
+L	Asia/Kolkata	IN	22.53333	88.36666	
+L	Asia/Krasnoyarsk	RU	56.01666	92.83333	MSK+04 - Krasnoyarsk area
+L	Asia/Kuala_Lumpur	MY	3.16666	101.7	Malaysia (peninsula)
+L	Asia/Kuching	MY	1.55	110.33333	Sabah, Sarawak
+L	Asia/Kuwait	KW	29.33333	47.98333	
+L	Asia/Macau	MO	22.19722	113.54166	
+L	Asia/Magadan	RU	59.56666	150.8	MSK+08 - Magadan
+L	Asia/Makassar	ID	-5.11666	119.4	Borneo (east, south), Sulawesi/Celebes, Bali, Nusa Tengarra, Timor (west)
+L	Asia/Manila	PH	14.58666	120.96777	
+L	Asia/Muscat	OM	23.6	58.58333	
+L	Asia/Nicosia	CY	35.16666	33.36666	most of Cyprus
+L	Asia/Novokuznetsk	RU	53.75	87.11666	MSK+04 - Kemerovo
+L	Asia/Novosibirsk	RU	55.03333	82.91666	MSK+04 - Novosibirsk
+L	Asia/Omsk	RU	55.0	73.4	MSK+03 - Omsk
+L	Asia/Oral	KZ	51.21666	51.35	West Kazakhstan
+L	Asia/Phnom_Penh	KH	11.55	104.91666	
+L	Asia/Pontianak	ID	-0.03333	109.33333	Borneo (west, central)
+L	Asia/Pyongyang	KP	39.01666	125.75	
+L	Asia/Qatar	QA	25.28333	51.53333	
+L	Asia/Qostanay	KZ	53.2	63.61666	Qostanay/Kostanay/Kustanay
+L	Asia/Qyzylorda	KZ	44.8	65.46666	Qyzylorda/Kyzylorda/Kzyl-Orda
+L	Asia/Riyadh	SA	24.63333	46.71666	
+L	Asia/Sakhalin	RU	46.96666	142.69999	MSK+08 - Sakhalin Island
+L	Asia/Samarkand	UZ	39.66666	66.8	Uzbekistan (west)
+L	Asia/Seoul	KR	37.54999	126.96666	
+L	Asia/Shanghai	CN	31.23333	121.46666	Beijing Time
+L	Asia/Singapore	SG	1.28333	103.85	
+L	Asia/Srednekolymsk	RU	67.46666	153.71666	MSK+08 - Sakha (E), N Kuril Is
+L	Asia/Taipei	TW	25.05	121.5	
+L	Asia/Tashkent	UZ	41.33333	69.3	Uzbekistan (east)
+L	Asia/Tbilisi	GE	41.71666	44.81666	
+L	Asia/Tehran	IR	35.66666	51.43333	
+L	Asia/Thimphu	BT	27.46666	89.65	
+L	Asia/Tokyo	JP	35.65444	139.74472	
+L	Asia/Tomsk	RU	56.5	84.96666	MSK+04 - Tomsk
+L	Asia/Ulaanbaatar	MN	47.91666	106.88333	most of Mongolia
+L	Asia/Urumqi	CN	43.8	87.58333	Xinjiang Time
+L	Asia/Ust-Nera	RU	64.56027	143.22666	MSK+07 - Oymyakonsky
+L	Asia/Vientiane	LA	17.96666	102.6	
+L	Asia/Vladivostok	RU	43.16666	131.93333	MSK+07 - Amur River
+L	Asia/Yakutsk	RU	62.0	129.66666	MSK+06 - Lena River
+L	Asia/Yangon	MM	16.78333	96.16666	
+L	Asia/Yekaterinburg	RU	56.85	60.6	MSK+02 - Urals
+L	Asia/Yerevan	AM	40.18333	44.5	
+L	Atlantic/Azores	PT	37.73333	-25.66666	Azores
+L	Atlantic/Bermuda	BM	32.28333	-64.76666	
+L	Atlantic/Canary	ES	28.1	-15.4	Canary Islands
+L	Atlantic/Cape_Verde	CV	14.91666	-23.51666	
+L	Atlantic/Faroe	FO	62.01666	-6.76666	
+L	Atlantic/Madeira	PT	32.63333	-16.89999	Madeira Islands
+L	Atlantic/Reykjavik	IS	64.15	-21.85	
+L	Atlantic/South_Georgia	GS	-54.26666	-36.53333	
+L	Atlantic/St_Helena	SH	-15.91666	-5.7	
+L	Atlantic/Stanley	FK	-51.7	-57.85	
+L	Australia/Adelaide	AU	-34.91666	138.58333	South Australia
+L	Australia/Brisbane	AU	-27.46666	153.03333	Queensland (most areas)
+L	Australia/Broken_Hill	AU	-31.95	141.44999	New South Wales (Yancowinna)
+L	Australia/Darwin	AU	-12.46666	130.83333	Northern Territory
+L	Australia/Eucla	AU	-31.71666	128.86666	Western Australia (Eucla)
+L	Australia/Hobart	AU	-42.88333	147.31666	Tasmania
+L	Australia/Lindeman	AU	-20.26666	149.0	Queensland (Whitsunday Islands)
+L	Australia/Lord_Howe	AU	-31.55	159.08333	Lord Howe Island
+L	Australia/Melbourne	AU	-37.81666	144.96666	Victoria
+L	Australia/Perth	AU	-31.95	115.85	Western Australia (most areas)
+L	Australia/Sydney	AU	-33.86666	151.21666	New South Wales (most areas)
+L	Europe/Amsterdam	NL	52.36666	4.9	
+L	Europe/Andorra	AD	42.5	1.51666	
+L	Europe/Astrakhan	RU	46.35	48.05	MSK+01 - Astrakhan
+L	Europe/Athens	GR	37.96666	23.71666	
+L	Europe/Belgrade	RS	44.83333	20.5	
+L	Europe/Berlin	DE	52.5	13.36666	most of Germany
+L	Europe/Bratislava	SK	48.15	17.11666	
+L	Europe/Brussels	BE	50.83333	4.33333	
+L	Europe/Bucharest	RO	44.43333	26.1	
+L	Europe/Budapest	HU	47.5	19.08333	
+L	Europe/Busingen	DE	47.7	8.68333	Busingen
+L	Europe/Chisinau	MD	47.0	28.83333	
+L	Europe/Copenhagen	DK	55.66666	12.58333	
+L	Europe/Dublin	IE	53.33333	-6.25	
+L	Europe/Gibraltar	GI	36.13333	-5.35	
+L	Europe/Guernsey	GG	49.45472	-2.53611	
+L	Europe/Helsinki	FI	60.16666	24.96666	
+L	Europe/Isle_of_Man	IM	54.15	-4.46666	
+L	Europe/Istanbul	TR	41.01666	28.96666	
+L	Europe/Jersey	JE	49.18361	-2.10666	
+L	Europe/Kaliningrad	RU	54.71666	20.5	MSK-01 - Kaliningrad
+L	Europe/Kirov	RU	58.6	49.65	MSK+00 - Kirov
+L	Europe/Kyiv	UA	50.43333	30.51666	most of Ukraine
+L	Europe/Lisbon	PT	38.71666	-9.13333	Portugal (mainland)
+L	Europe/Ljubljana	SI	46.05	14.51666	
+L	Europe/London	GB	51.50833	-0.12527	
+L	Europe/Luxembourg	LU	49.6	6.15	
+L	Europe/Madrid	ES	40.4	-3.68333	Spain (mainland)
+L	Europe/Malta	MT	35.9	14.51666	
+L	Europe/Mariehamn	AX	60.1	19.95	
+L	Europe/Minsk	BY	53.9	27.56666	
+L	Europe/Monaco	MC	43.7	7.38333	
+L	Europe/Moscow	RU	55.75583	37.61777	MSK+00 - Moscow area
+L	Europe/Oslo	NO	59.91666	10.75	
+L	Europe/Paris	FR	48.86666	2.33333	
+L	Europe/Podgorica	ME	42.43333	19.26666	
+L	Europe/Prague	CZ	50.08333	14.43333	
+L	Europe/Riga	LV	56.95	24.1	
+L	Europe/Rome	IT	41.9	12.48333	
+L	Europe/Samara	RU	53.2	50.15	MSK+01 - Samara, Udmurtia
+L	Europe/San_Marino	SM	43.91666	12.46666	
+L	Europe/Sarajevo	BA	43.86666	18.41666	
+L	Europe/Saratov	RU	51.56666	46.03333	MSK+01 - Saratov
+L	Europe/Simferopol	UA	44.95	34.1	Crimea
+L	Europe/Skopje	MK	41.98333	21.43333	
+L	Europe/Sofia	BG	42.68333	23.31666	
+L	Europe/Stockholm	SE	59.33333	18.05	
+L	Europe/Tallinn	EE	59.41666	24.75	
+L	Europe/Tirane	AL	41.33333	19.83333	
+L	Europe/Ulyanovsk	RU	54.33333	48.4	MSK+01 - Ulyanovsk
+L	Europe/Vaduz	LI	47.15	9.51666	
+L	Europe/Vatican	VA	41.90222	12.45305	
+L	Europe/Vienna	AT	48.21666	16.33333	
+L	Europe/Vilnius	LT	54.68333	25.31666	
+L	Europe/Volgograd	RU	48.73333	44.41666	MSK+00 - Volgograd
+L	Europe/Warsaw	PL	52.25	21.0	
+L	Europe/Zagreb	HR	45.8	15.96666	
+L	Europe/Zurich	CH	47.38333	8.53333	
+L	Indian/Antananarivo	MG	-18.91666	47.51666	
+L	Indian/Chagos	IO	-7.33333	72.41666	
+L	Indian/Christmas	CX	-10.41666	105.71666	
+L	Indian/Cocos	CC	-12.16666	96.91666	
+L	Indian/Comoro	KM	-11.68333	43.26666	
+L	Indian/Kerguelen	TF	-49.35277	70.2175	
+L	Indian/Mahe	SC	-4.66666	55.46666	
+L	Indian/Maldives	MV	4.16666	73.5	
+L	Indian/Mauritius	MU	-20.16666	57.5	
+L	Indian/Mayotte	YT	-12.78333	45.23333	
+L	Indian/Reunion	RE	-20.86666	55.46666	
+L	Pacific/Apia	WS	-13.83333	-171.73333	
+L	Pacific/Auckland	NZ	-36.86666	174.76666	most of New Zealand
+L	Pacific/Bougainville	PG	-6.21666	155.56666	Bougainville
+L	Pacific/Chatham	NZ	-43.95	-176.55	Chatham Islands
+L	Pacific/Chuuk	FM	7.41666	151.78333	Chuuk/Truk, Yap
+L	Pacific/Easter	CL	-27.15	-109.43333	Easter Island
+L	Pacific/Efate	VU	-17.66666	168.41666	
+L	Pacific/Fakaofo	TK	-9.36666	-171.23333	
+L	Pacific/Fiji	FJ	-18.13333	178.41666	
+L	Pacific/Funafuti	TV	-8.51666	179.21666	
+L	Pacific/Galapagos	EC	-0.9	-89.6	Galapagos Islands
+L	Pacific/Gambier	PF	-23.13333	-134.94999	Gambier Islands
+L	Pacific/Guadalcanal	SB	-9.53333	160.19999	
+L	Pacific/Guam	GU	13.46666	144.75	
+L	Pacific/Honolulu	US	21.30694	-157.85833	Hawaii
+L	Pacific/Kanton	KI	-2.78333	-171.71666	Phoenix Islands
+L	Pacific/Kiritimati	KI	1.86666	-157.33333	Line Islands
+L	Pacific/Kosrae	FM	5.31666	162.98333	Kosrae
+L	Pacific/Kwajalein	MH	9.08333	167.33333	Kwajalein
+L	Pacific/Majuro	MH	7.15	171.2	most of Marshall Islands
+L	Pacific/Marquesas	PF	-9.0	-139.5	Marquesas Islands
+L	Pacific/Midway	UM	28.21666	-177.36666	Midway Islands
+L	Pacific/Nauru	NR	-0.51666	166.91666	
+L	Pacific/Niue	NU	-19.01666	-169.91666	
+L	Pacific/Norfolk	NF	-29.05	167.96666	
+L	Pacific/Noumea	NC	-22.26666	166.44999	
+L	Pacific/Pago_Pago	AS	-14.26666	-170.7	
+L	Pacific/Palau	PW	7.33333	134.48333	
+L	Pacific/Pitcairn	PN	-25.06666	-130.08333	
+L	Pacific/Pohnpei	FM	6.96666	158.21666	Pohnpei/Ponape
+L	Pacific/Port_Moresby	PG	-9.5	147.16666	most of Papua New Guinea
+L	Pacific/Rarotonga	CK	-21.23333	-159.76666	
+L	Pacific/Saipan	MP	15.2	145.75	
+L	Pacific/Tahiti	PF	-17.53333	-149.56666	Society Islands
+L	Pacific/Tarawa	KI	1.41666	173.0	Gilbert Islands
+L	Pacific/Tongatapu	TO	-21.13333	-175.2	
+L	Pacific/Wake	UM	19.28333	166.61666	Wake Island
+L	Pacific/Wallis	WF	-13.3	-176.16666	
+L	UTC	??	0.0	0.0	?
+ALL	Africa/Abidjan,Africa/Accra,Africa/Addis_Ababa,Africa/Algiers,Africa/Asmara,Africa/Bamako,Africa/Bangui,Africa/Banjul,Africa/Bissau,Africa/Blantyre,Africa/Brazzaville,Africa/Bujumbura,Africa/Cairo,Africa/Casablanca,Africa/Ceuta,Africa/Conakry,Africa/Dakar,Africa/Dar_es_Salaam,Africa/Djibouti,Africa/Douala,Africa/El_Aaiun,Africa/Freetown,Africa/Gaborone,Africa/Harare,Africa/Johannesburg,Africa/Juba,Africa/Kampala,Africa/Khartoum,Africa/Kigali,Africa/Kinshasa,Africa/Lagos,Africa/Libreville,Africa/Lome,Africa/Luanda,Africa/Lubumbashi,Africa/Lusaka,Africa/Malabo,Africa/Maputo,Africa/Maseru,Africa/Mbabane,Africa/Mogadishu,Africa/Monrovia,Africa/Nairobi,Africa/Ndjamena,Africa/Niamey,Africa/Nouakchott,Africa/Ouagadougou,Africa/Porto-Novo,Africa/Sao_Tome,Africa/Tripoli,Africa/Tunis,Africa/Windhoek,America/Adak,America/Anchorage,America/Anguilla,America/Antigua,America/Araguaina,America/Argentina/Buenos_Aires,America/Argentina/Catamarca,America/Argentina/Cordoba,America/Argentina/Jujuy,America/Argentina/La_Rioja,America/Argentina/Mendoza,America/Argentina/Rio_Gallegos,America/Argentina/Salta,America/Argentina/San_Juan,America/Argentina/San_Luis,America/Argentina/Tucuman,America/Argentina/Ushuaia,America/Aruba,America/Asuncion,America/Atikokan,America/Bahia,America/Bahia_Banderas,America/Barbados,America/Belem,America/Belize,America/Blanc-Sablon,America/Boa_Vista,America/Bogota,America/Boise,America/Cambridge_Bay,America/Campo_Grande,America/Cancun,America/Caracas,America/Cayenne,America/Cayman,America/Chicago,America/Chihuahua,America/Ciudad_Juarez,America/Costa_Rica,America/Coyhaique,America/Creston,America/Cuiaba,America/Curacao,America/Danmarkshavn,America/Dawson,America/Dawson_Creek,America/Denver,America/Detroit,America/Dominica,America/Edmonton,America/Eirunepe,America/El_Salvador,America/Fort_Nelson,America/Fortaleza,America/Glace_Bay,America/Goose_Bay,America/Grand_Turk,America/Grenada,America/Guadeloupe,America/Guatemala,America/Guayaquil,America/Guyana,America/Halifax,America/Havana,America/Hermosillo,America/Indiana/Indianapolis,America/Indiana/Knox,America/Indiana/Marengo,America/Indiana/Petersburg,America/Indiana/Tell_City,America/Indiana/Vevay,America/Indiana/Vincennes,America/Indiana/Winamac,America/Inuvik,America/Iqaluit,America/Jamaica,America/Juneau,America/Kentucky/Louisville,America/Kentucky/Monticello,America/Kralendijk,America/La_Paz,America/Lima,America/Los_Angeles,America/Lower_Princes,America/Maceio,America/Managua,America/Manaus,America/Marigot,America/Martinique,America/Matamoros,America/Mazatlan,America/Menominee,America/Merida,America/Metlakatla,America/Mexico_City,America/Miquelon,America/Moncton,America/Monterrey,America/Montevideo,America/Montserrat,America/Nassau,America/New_York,America/Nome,America/Noronha,America/North_Dakota/Beulah,America/North_Dakota/Center,America/North_Dakota/New_Salem,America/Nuuk,America/Ojinaga,America/Panama,America/Paramaribo,America/Phoenix,America/Port-au-Prince,America/Port_of_Spain,America/Porto_Velho,America/Puerto_Rico,America/Punta_Arenas,America/Rankin_Inlet,America/Recife,America/Regina,America/Resolute,America/Rio_Branco,America/Santarem,America/Santiago,America/Santo_Domingo,America/Sao_Paulo,America/Scoresbysund,America/Sitka,America/St_Barthelemy,America/St_Johns,America/St_Kitts,America/St_Lucia,America/St_Thomas,America/St_Vincent,America/Swift_Current,America/Tegucigalpa,America/Thule,America/Tijuana,America/Toronto,America/Tortola,America/Vancouver,America/Whitehorse,America/Winnipeg,America/Yakutat,Antarctica/Casey,Antarctica/Davis,Antarctica/DumontDUrville,Antarctica/Macquarie,Antarctica/Mawson,Antarctica/McMurdo,Antarctica/Palmer,Antarctica/Rothera,Antarctica/Syowa,Antarctica/Troll,Antarctica/Vostok,Arctic/Longyearbyen,Asia/Aden,Asia/Almaty,Asia/Amman,Asia/Anadyr,Asia/Aqtau,Asia/Aqtobe,Asia/Ashgabat,Asia/Atyrau,Asia/Baghdad,Asia/Bahrain,Asia/Baku,Asia/Bangkok,Asia/Barnaul,Asia/Beirut,Asia/Bishkek,Asia/Brunei,Asia/Chita,Asia/Colombo,Asia/Damascus,Asia/Dhaka,Asia/Dili,Asia/Dubai,Asia/Dushanbe,Asia/Famagusta,Asia/Gaza,Asia/Hebron,Asia/Ho_Chi_Minh,Asia/Hong_Kong,Asia/Hovd,Asia/Irkutsk,Asia/Jakarta,Asia/Jayapura,Asia/Jerusalem,Asia/Kabul,Asia/Kamchatka,Asia/Karachi,Asia/Kathmandu,Asia/Khandyga,Asia/Kolkata,Asia/Krasnoyarsk,Asia/Kuala_Lumpur,Asia/Kuching,Asia/Kuwait,Asia/Macau,Asia/Magadan,Asia/Makassar,Asia/Manila,Asia/Muscat,Asia/Nicosia,Asia/Novokuznetsk,Asia/Novosibirsk,Asia/Omsk,Asia/Oral,Asia/Phnom_Penh,Asia/Pontianak,Asia/Pyongyang,Asia/Qatar,Asia/Qostanay,Asia/Qyzylorda,Asia/Riyadh,Asia/Sakhalin,Asia/Samarkand,Asia/Seoul,Asia/Shanghai,Asia/Singapore,Asia/Srednekolymsk,Asia/Taipei,Asia/Tashkent,Asia/Tbilisi,Asia/Tehran,Asia/Thimphu,Asia/Tokyo,Asia/Tomsk,Asia/Ulaanbaatar,Asia/Urumqi,Asia/Ust-Nera,Asia/Vientiane,Asia/Vladivostok,Asia/Yakutsk,Asia/Yangon,Asia/Yekaterinburg,Asia/Yerevan,Atlantic/Azores,Atlantic/Bermuda,Atlantic/Canary,Atlantic/Cape_Verde,Atlantic/Faroe,Atlantic/Madeira,Atlantic/Reykjavik,Atlantic/South_Georgia,Atlantic/St_Helena,Atlantic/Stanley,Australia/Adelaide,Australia/Brisbane,Australia/Broken_Hill,Australia/Darwin,Australia/Eucla,Australia/Hobart,Australia/Lindeman,Australia/Lord_Howe,Australia/Melbourne,Australia/Perth,Australia/Sydney,Europe/Amsterdam,Europe/Andorra,Europe/Astrakhan,Europe/Athens,Europe/Belgrade,Europe/Berlin,Europe/Bratislava,Europe/Brussels,Europe/Bucharest,Europe/Budapest,Europe/Busingen,Europe/Chisinau,Europe/Copenhagen,Europe/Dublin,Europe/Gibraltar,Europe/Guernsey,Europe/Helsinki,Europe/Isle_of_Man,Europe/Istanbul,Europe/Jersey,Europe/Kaliningrad,Europe/Kirov,Europe/Kyiv,Europe/Lisbon,Europe/Ljubljana,Europe/London,Europe/Luxembourg,Europe/Madrid,Europe/Malta,Europe/Mariehamn,Europe/Minsk,Europe/Monaco,Europe/Moscow,Europe/Oslo,Europe/Paris,Europe/Podgorica,Europe/Prague,Europe/Riga,Europe/Rome,Europe/Samara,Europe/San_Marino,Europe/Sarajevo,Europe/Saratov,Europe/Simferopol,Europe/Skopje,Europe/Sofia,Europe/Stockholm,Europe/Tallinn,Europe/Tirane,Europe/Ulyanovsk,Europe/Vaduz,Europe/Vatican,Europe/Vienna,Europe/Vilnius,Europe/Volgograd,Europe/Warsaw,Europe/Zagreb,Europe/Zurich,Indian/Antananarivo,Indian/Chagos,Indian/Christmas,Indian/Cocos,Indian/Comoro,Indian/Kerguelen,Indian/Mahe,Indian/Maldives,Indian/Mauritius,Indian/Mayotte,Indian/Reunion,Pacific/Apia,Pacific/Auckland,Pacific/Bougainville,Pacific/Chatham,Pacific/Chuuk,Pacific/Easter,Pacific/Efate,Pacific/Fakaofo,Pacific/Fiji,Pacific/Funafuti,Pacific/Galapagos,Pacific/Gambier,Pacific/Guadalcanal,Pacific/Guam,Pacific/Honolulu,Pacific/Kanton,Pacific/Kiritimati,Pacific/Kosrae,Pacific/Kwajalein,Pacific/Majuro,Pacific/Marquesas,Pacific/Midway,Pacific/Nauru,Pacific/Niue,Pacific/Norfolk,Pacific/Noumea,Pacific/Pago_Pago,Pacific/Palau,Pacific/Pitcairn,Pacific/Pohnpei,Pacific/Port_Moresby,Pacific/Rarotonga,Pacific/Saipan,Pacific/Tahiti,Pacific/Tarawa,Pacific/Tongatapu,Pacific/Wake,Pacific/Wallis,UTC

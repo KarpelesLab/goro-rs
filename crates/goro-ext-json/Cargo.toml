@@ -1,0 +1,9 @@
+[package]
+name = "goro-ext-json"
+description = "PHP json extension: json_encode, json_decode and json_validate"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+goro-runtime = { path = "../goro-runtime" }
