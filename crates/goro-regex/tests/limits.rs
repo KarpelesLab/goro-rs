@@ -19,10 +19,7 @@ fn match_all(p: &str, s: &str, limits: Limits) -> Result<usize, MatchError> {
 }
 
 fn lim(m: u32, d: u32) -> Limits {
-    Limits {
-        match_limit: m,
-        depth_limit: d,
-    }
+    Limits::new(m, d)
 }
 
 const BIG: u32 = 20_000_000;
@@ -178,4 +175,71 @@ fn php85_minimal_limits() {
         }
     }
     assert!(bad.is_empty(), "{bad:#?}");
+}
+
+/// The largest subject (in repetitions of the unit) that matches without a
+/// JIT stack error, measured on PHP 8.5 with pcre.jit=1
+/// (tools/regex_fixtures/jit2.php).
+#[test]
+fn php85_jit_stack_thresholds() {
+    let cases: &[(&str, &str, usize)] = &[
+        ("/(a)*/", "a", 8190),
+        ("/(?:a)*$/", "a", 24574),
+        ("/^(foo)+$/", "foo", 8191),
+        ("/(.)*/s", "a", 8190),
+        ("/((a))*/", "a", 4914),
+        ("/(?:(a)|b)*/", "a", 4914),
+        ("/(?:ab)*$/", "ab", 24574),
+        ("/(?:a(b))*$/", "ab", 8191),
+        ("/(a)+$/", "a", 8191),
+        // Known deviation: /(?:a|b)*$/ handles 8191 on PHP 8.5, 8190 here.
+        ("/(?>a)*$/", "a", 24573),
+        ("/(a)*?$/", "a", 8191),
+        ("/(?:(?=a)a)*$/", "a", 24573),
+        ("/((((a))))*$/", "a", 2729),
+    ];
+    let jit = Limits {
+        match_limit: 1_000_000,
+        depth_limit: 100_000,
+        jit_stack: Some(Limits::PHP_JIT_STACK),
+    };
+    let mut bad = Vec::new();
+    for &(p, unit, n) in cases {
+        let r = re(p);
+        let run = |k: usize| {
+            let s = unit.repeat(k);
+            let mut sc = Scratch::new();
+            let mut caps = Captures::default();
+            r.exec_with(
+                &mut sc,
+                s.as_bytes(),
+                0,
+                MatchOptions::default(),
+                jit,
+                &mut caps,
+            )
+        };
+        let ok = run(n);
+        let over = run(n + 1);
+        if ok.is_err() || over != Err(MatchError::JitStackLimit) {
+            bad.push(format!("{p}: at {n} {ok:?}, at {} {over:?}", n + 1));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
+    // ext/pcre/tests/errors05.phpt
+    let r = re("/^(foo)+$/");
+    let s = "foo".repeat(1024 * 8192);
+    let mut sc = Scratch::new();
+    let mut caps = Captures::default();
+    assert_eq!(
+        r.exec_with(
+            &mut sc,
+            s.as_bytes(),
+            0,
+            MatchOptions::default(),
+            jit,
+            &mut caps
+        ),
+        Err(MatchError::JitStackLimit)
+    );
 }

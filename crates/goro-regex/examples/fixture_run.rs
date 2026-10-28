@@ -19,15 +19,7 @@ fn run_match_all(pat: &[u8], subj: &[u8]) -> String {
         Ok(r) => r,
         Err(e) => return format!("ERR {}", e.message()),
     };
-    let mut g = GlobalMatcher::new(
-        &re,
-        subj,
-        0,
-        Limits {
-            match_limit: 1_000_000,
-            depth_limit: 100_000,
-        },
-    );
+    let mut g = GlobalMatcher::new(&re, subj, 0, Limits::new(1_000_000, 100_000));
     let mut n = 0;
     let mut body = String::new();
     loop {

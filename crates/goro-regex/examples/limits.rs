@@ -25,15 +25,9 @@ fn min_limit(re: &goro_regex::Regex, s: &[u8], depth: bool) -> i64 {
     let big = 20_000_000u32;
     let mk = |v: u32| {
         if depth {
-            Limits {
-                match_limit: big,
-                depth_limit: v,
-            }
+            Limits::new(big, v)
         } else {
-            Limits {
-                match_limit: v,
-                depth_limit: big,
-            }
+            Limits::new(v, big)
         }
     };
     if !ok(re, s, mk(big)) {

@@ -33,6 +33,8 @@ const K_MARK_UNDO: u32 = 11;
 /// A (*MARK) inside a completed atomic group or assertion: still a frame
 /// and an undo record, no longer visible to (*SKIP:NAME).
 const K_MARK_HID: u32 = 20;
+/// Emulated JIT stack use only.
+const K_JIT8: u32 = 21;
 const K_VERB: u32 = 12;
 const K_CALL_PUSH: u32 = 13;
 const K_CALL_POP: u32 = 14;
@@ -68,6 +70,9 @@ fn is_frame(kind: u32) -> bool {
         kind,
         K_ALT
             | K_ALT_LAZY
+            | K_CALL_PUSH
+            | K_MARK
+            | K_MARK_HID
             | K_REP_GREEDY
             | K_REP_LAZY
             | K_FRAME
@@ -101,6 +106,12 @@ struct CallFrame {
 pub struct Limits {
     pub match_limit: u32,
     pub depth_limit: u32,
+    /// Emulates PCRE2's JIT: the depth limit is not used; instead the
+    /// backtracking state is charged against a stack of this many bytes
+    /// and running out gives [`MatchError::JitStackLimit`]. The charges
+    /// reproduce the limits observed on PHP 8.5 with pcre.jit=1 (a 192 KiB
+    /// stack: /(a)*/ handles 8190 characters, /(?:a)*$/ 24574).
+    pub jit_stack: Option<u32>,
 }
 
 impl Default for Limits {
@@ -108,7 +119,37 @@ impl Default for Limits {
         Limits {
             match_limit: 10_000_000,
             depth_limit: 10_000_000,
+            jit_stack: None,
         }
+    }
+}
+
+impl Limits {
+    /// The interpreter's limits (pcre.jit=0).
+    pub fn new(match_limit: u32, depth_limit: u32) -> Limits {
+        Limits {
+            match_limit,
+            depth_limit,
+            jit_stack: None,
+        }
+    }
+
+    /// PHP's JIT stack size (pcre.jit=1), in bytes.
+    pub const PHP_JIT_STACK: u32 = 192 * 1024;
+}
+
+/// Bytes of emulated JIT stack an entry holds.
+#[inline(always)]
+fn jit_cost(e: &Bt) -> u64 {
+    match e.kind {
+        K_ALT | K_ALT_LAZY | K_JIT8 => 8,
+        K_ALT_BR | K_ALT_NC | K_ALT_TAG => 16,
+        K_REP_GREEDY | K_REP_LAZY => 16,
+        K_FRAME => e.a as u64,
+        K_ATOMIC | K_LOOK | K_BEHIND | K_VERB => 8,
+        K_MARK | K_MARK_HID | K_SCAN => 16,
+        K_CALL_PUSH => 32,
+        _ => 0,
     }
 }
 
@@ -167,6 +208,9 @@ struct Vm<'p, 's> {
     limits: Limits,
     count: u64,
     frames: u32,
+    /// Emulated JIT stack limit (0: off) and use.
+    jit_limit: u64,
+    jit_bytes: u64,
     mark: usize,
     last_mark: usize,
     // Slot layout.
@@ -224,8 +268,47 @@ impl Vm<'_, '_> {
         if self.frames > self.limits.depth_limit {
             return Err(MatchError::DepthLimit);
         }
-        sc.bt.push(Bt { kind, a, b, c });
+        let e = Bt { kind, a, b, c };
+        if self.jit_limit != 0 {
+            self.jit_bytes += jit_cost(&e);
+            if self.jit_bytes >= self.jit_limit {
+                return Err(MatchError::JitStackLimit);
+            }
+        }
+        sc.bt.push(e);
         Ok(())
+    }
+
+    /// Pushes a branch alternative (not a frame).
+    #[inline(always)]
+    fn push_alt(
+        &mut self,
+        sc: &mut Scratch,
+        kind: u32,
+        a: u32,
+        b: usize,
+        c: usize,
+    ) -> Result<(), MatchError> {
+        let e = Bt { kind, a, b, c };
+        if self.jit_limit != 0 {
+            self.jit_bytes += jit_cost(&e);
+            if self.jit_bytes >= self.jit_limit {
+                return Err(MatchError::JitStackLimit);
+            }
+        }
+        sc.bt.push(e);
+        Ok(())
+    }
+
+    /// Accounting for an entry leaving the stack.
+    #[inline(always)]
+    fn release(&mut self, e: &Bt) {
+        if is_frame(e.kind) {
+            self.frames -= 1;
+        }
+        if self.jit_limit != 0 {
+            self.jit_bytes -= jit_cost(e);
+        }
     }
 
     #[inline(always)]
@@ -726,7 +809,6 @@ impl Vm<'_, '_> {
     fn cut(&mut self, sc: &mut Scratch, idx: usize) {
         let len = sc.bt.len();
         let mut w = idx;
-        let mut removed_frames = 0u32;
         for r in idx..len {
             let e = sc.bt[r];
             if is_undo(e.kind) {
@@ -737,18 +819,18 @@ impl Vm<'_, '_> {
                 }
                 sc.bt[w] = e;
                 w += 1;
-            } else if is_frame(e.kind) {
-                removed_frames += 1;
+            } else {
+                self.release(&e);
             }
         }
         sc.bt.truncate(w);
-        self.frames = self.frames.saturating_sub(removed_frames);
     }
 
     /// Pops entries down to and including `idx`, applying undo records.
     fn unwind_to(&mut self, sc: &mut Scratch, idx: usize) {
         while sc.bt.len() > idx {
             let e = sc.bt.pop().unwrap();
+            self.release(&e);
             self.apply_undo(sc, e);
         }
     }
@@ -757,22 +839,16 @@ impl Vm<'_, '_> {
     fn apply_undo(&mut self, sc: &mut Scratch, e: Bt) {
         match e.kind {
             K_SLOT => sc.slots[e.a as usize] = e.b,
-            K_MARK | K_MARK_HID => {
-                self.mark = e.b;
-                self.frames = self.frames.saturating_sub(1);
-            }
-            K_MARK_UNDO => self.mark = e.b,
+            K_MARK | K_MARK_HID | K_MARK_UNDO => self.mark = e.b,
             K_CALL_PUSH => {
                 let f = sc.calls.pop().unwrap();
                 sc.arena.truncate(f.arena_off);
-                self.frames = self.frames.saturating_sub(1);
             }
             K_CALL_POP => {
                 let f = sc.popped.pop().unwrap();
                 sc.calls.push(f);
             }
             K_SCAN => self.end = e.c,
-            k if is_frame(k) => self.frames = self.frames.saturating_sub(1),
             _ => {}
         }
     }
@@ -856,18 +932,19 @@ impl Vm<'_, '_> {
             let Some(e) = sc.bt.pop() else {
                 return Ok(Step::Done(Attempt::NoMatch));
             };
+            self.release(&e);
             match e.kind {
                 K_SLOT => sc.slots[e.a as usize] = e.b,
                 K_ALT => {
-                    self.frames -= 1;
                     return Ok(Step::Resume(e.a, e.b));
                 }
                 K_ALT_NC => return Ok(Step::Resume(e.a, e.b)),
                 K_ALT_LAZY => {
-                    self.frames -= 1;
-                    self.count += 1;
-                    if self.count > self.limits.match_limit as u64 {
-                        return Err(MatchError::MatchLimit);
+                    // Taking the lazy alternative keeps a JIT frame
+                    // (observed on PHP 8.5: /(a)*?$/ handles 8191
+                    // characters, 24 bytes each).
+                    if self.jit_limit != 0 {
+                        self.push_alt(sc, K_JIT8, 0, 0, 0)?;
                     }
                     return Ok(Step::Resume(e.a, e.b));
                 }
@@ -879,7 +956,6 @@ impl Vm<'_, '_> {
                     return Ok(Step::Resume(e.a, e.b));
                 }
                 K_REP_GREEDY => {
-                    self.frames -= 1;
                     let min_pos = e.b;
                     let cur = e.c;
                     if cur <= min_pos {
@@ -907,7 +983,6 @@ impl Vm<'_, '_> {
                     return Ok(Step::Resume(e.a + 1, np));
                 }
                 K_REP_LAZY => {
-                    self.frames -= 1;
                     let Inst::Rep { item, max, .. } = &self.prog.insts[e.a as usize] else {
                         unreachable!()
                     };
@@ -933,13 +1008,8 @@ impl Vm<'_, '_> {
                     }
                     return Ok(Step::Resume(e.a + 1, np));
                 }
-                K_FRAME | K_THEN_SCOPE | K_ATOMIC | K_SR => {
-                    if is_frame(e.kind) {
-                        self.frames -= 1;
-                    }
-                }
+                K_FRAME | K_THEN_SCOPE | K_ATOMIC | K_SR => if is_frame(e.kind) {},
                 K_LOOK => {
-                    self.frames -= 1;
                     // The assertion body failed.
                     match e.c {
                         1 | 4 => return Ok(Step::Resume(e.a + 1, e.b)),
@@ -948,7 +1018,6 @@ impl Vm<'_, '_> {
                     }
                 }
                 K_BEHIND => {
-                    self.frames -= 1;
                     let Inst::Behind { min, .. } = &self.prog.insts[e.a as usize] else {
                         unreachable!()
                     };
@@ -966,11 +1035,9 @@ impl Vm<'_, '_> {
                 }
                 K_MARK | K_MARK_HID => {
                     self.mark = e.b;
-                    self.frames -= 1;
                 }
                 K_MARK_UNDO => self.mark = e.b,
                 K_VERB => {
-                    self.frames -= 1;
                     let act = match e.a {
                         V_COMMIT => VerbAct::Commit,
                         V_PRUNE => VerbAct::Prune,
@@ -997,14 +1064,12 @@ impl Vm<'_, '_> {
                 K_CALL_PUSH => {
                     let f = sc.calls.pop().unwrap();
                     sc.arena.truncate(f.arena_off);
-                    self.frames = self.frames.saturating_sub(1);
                 }
                 K_CALL_POP => {
                     let f = sc.popped.pop().unwrap();
                     sc.calls.push(f);
                 }
                 K_SCAN => {
-                    self.frames -= 1;
                     self.end = e.c;
                 }
                 _ => {}
@@ -1079,6 +1144,7 @@ impl Vm<'_, '_> {
                     VerbAct::Skip(p) => Attempt::Skip(p),
                 }));
             };
+            self.release(&e);
             match e.kind {
                 K_ALT_TAG => {
                     if let VerbAct::Then(t) = act
@@ -1101,12 +1167,10 @@ impl Vm<'_, '_> {
                 K_CALL_PUSH => {
                     let f = sc.calls.pop().unwrap();
                     sc.arena.truncate(f.arena_off);
-                    self.frames = self.frames.saturating_sub(1);
                     // The subroutine call fails; backtrack at the outer level.
                     return self.backtrack(sc);
                 }
                 K_LOOK => {
-                    self.frames -= 1;
                     match e.c {
                         // Negative assertion: true.
                         1 | 4 => return Ok(Step::Resume(e.a + 1, e.b)),
@@ -1122,7 +1186,6 @@ impl Vm<'_, '_> {
                     }
                 }
                 K_SCAN => {
-                    self.frames -= 1;
                     self.end = e.c;
                     if let VerbAct::Then(_) = act {
                         return self.backtrack(sc);
@@ -1146,6 +1209,7 @@ impl Vm<'_, '_> {
         // plain literal match are 2 for both.
         self.count = 2;
         self.frames = 2;
+        self.jit_bytes = 0;
         if self.count > self.limits.match_limit as u64 {
             return Err(MatchError::MatchLimit);
         }
@@ -1255,15 +1319,15 @@ impl Vm<'_, '_> {
                     pc += 1;
                 }
                 Inst::Branch { alt, count } => {
-                    self.push(sc, if *count { K_ALT_BR } else { K_ALT_NC }, *alt, pos, 0);
+                    self.push_alt(sc, if *count { K_ALT_BR } else { K_ALT_NC }, *alt, pos, 0)?;
                     pc += 1;
                 }
                 Inst::SplitLazy { to } => {
-                    self.push_frame(sc, K_ALT, pc + 1, pos, 0)?;
+                    self.push_frame(sc, K_ALT_LAZY, pc + 1, pos, 0)?;
                     pc = *to;
                 }
                 Inst::SplitTag { alt, tag } => {
-                    self.push(sc, K_ALT_TAG, *alt, pos, *tag as usize);
+                    self.push_alt(sc, K_ALT_TAG, *alt, pos, *tag as usize)?;
                     pc += 1;
                 }
                 Inst::ThenScope { tag } => {
@@ -1272,7 +1336,7 @@ impl Vm<'_, '_> {
                 }
                 Inst::Jmp(t) => pc = *t,
                 Inst::CapOpen(g) => {
-                    self.push_frame(sc, K_FRAME, 0, 0, 0)?;
+                    self.push_frame(sc, K_FRAME, 16, 0, 0)?;
                     let i = self.open_base + *g as usize;
                     self.set_slot(sc, i, pos);
                     pc += 1;
@@ -1312,7 +1376,7 @@ impl Vm<'_, '_> {
                         self.push_frame(sc, K_ALT, pc + 1, pos, 0)?;
                         pc = *start;
                     } else {
-                        self.push_frame(sc, K_ALT, *start, pos, 0)?;
+                        self.push_frame(sc, K_ALT_LAZY, *start, pos, 0)?;
                         pc += 1;
                     }
                 }
@@ -1408,7 +1472,14 @@ impl Vm<'_, '_> {
                     let g = *group;
                     for f in sc.calls.iter().rev() {
                         if f.group == g && f.entry_pos == pos {
-                            return Err(MatchError::RecurseLoop);
+                            // With the JIT the recursion runs until the stack is
+                            // exhausted (observed on PHP 8.5: /(?R)/ gives
+                            // PREG_JIT_STACKLIMIT_ERROR).
+                            return Err(if self.jit_limit != 0 {
+                                MatchError::JitStackLimit
+                            } else {
+                                MatchError::RecurseLoop
+                            });
                         }
                     }
                     self.count += 1;
@@ -1434,6 +1505,12 @@ impl Vm<'_, '_> {
                         b: 0,
                         c: 0,
                     });
+                    if self.jit_limit != 0 {
+                        self.jit_bytes += 32;
+                        if self.jit_bytes >= self.jit_limit {
+                            return Err(MatchError::JitStackLimit);
+                        }
+                    }
                     if sc.calls.len() as u32 >= self.limits.depth_limit {
                         return Err(MatchError::DepthLimit);
                     }
@@ -1948,6 +2025,10 @@ impl<'p, 's> Searcher<'p, 's> {
         if let Some(l) = prog.limit_depth {
             limits.depth_limit = limits.depth_limit.min(l);
         }
+        if limits.jit_stack.is_some() {
+            // The JIT does not use the depth limit (pcre2api).
+            limits.depth_limit = u32::MAX;
+        }
         Searcher {
             vm: Vm {
                 prog,
@@ -1960,6 +2041,8 @@ impl<'p, 's> Searcher<'p, 's> {
                 limits,
                 count: 0,
                 frames: 0,
+                jit_limit: limits.jit_stack.map_or(0, |j| j as u64),
+                jit_bytes: 0,
                 mark: NO_MARK,
                 last_mark: NO_MARK,
                 open_base,

@@ -12,15 +12,7 @@ fn main() {
     let mut n = 0;
     for _ in 0..5 {
         let t = Instant::now();
-        let mut g = GlobalMatcher::new(
-            &re,
-            &s,
-            0,
-            Limits {
-                match_limit: 1_000_000,
-                depth_limit: 100_000,
-            },
-        );
+        let mut g = GlobalMatcher::new(&re, &s, 0, Limits::new(1_000_000, 100_000));
         n = 0;
         while g.next_match().unwrap() {
             n += 1;

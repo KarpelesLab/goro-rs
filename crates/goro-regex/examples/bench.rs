@@ -25,10 +25,7 @@ const PATS: &[(&str, &str)] = &[
 fn main() {
     let path = std::env::args().nth(1).expect("corpus path");
     let corpus = std::fs::read(path).unwrap();
-    let limits = Limits {
-        match_limit: 1_000_000,
-        depth_limit: 100_000,
-    };
+    let limits = Limits::new(1_000_000, 100_000);
     for (name, p) in PATS {
         let re = php::compile(p.as_bytes()).ok().unwrap();
         let mut best = f64::INFINITY;

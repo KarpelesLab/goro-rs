@@ -28,15 +28,7 @@ fn main() {
         }
         println!("{:?}", re.prog().start);
     }
-    let mut g = GlobalMatcher::new(
-        &re,
-        &subj,
-        0,
-        Limits {
-            match_limit: 1_000_000,
-            depth_limit: 100_000,
-        },
-    );
+    let mut g = GlobalMatcher::new(&re, &subj, 0, Limits::new(1_000_000, 100_000));
     loop {
         match g.next_match() {
             Ok(true) => {

@@ -18,10 +18,7 @@ fn hex(b: &[u8]) -> String {
 
 /// PHP's defaults: pcre.backtrack_limit=1000000, pcre.recursion_limit=100000.
 pub fn php_limits() -> Limits {
-    Limits {
-        match_limit: 1_000_000,
-        depth_limit: 100_000,
-    }
+    Limits::new(1_000_000, 100_000)
 }
 
 pub fn run_match_all(pat: &[u8], subj: &[u8]) -> String {
