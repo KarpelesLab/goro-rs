@@ -1380,12 +1380,16 @@ fn ao_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn ao_serialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let (flags, storage) = with(&o, |d: &mut AoData| (d.flags, d.storage.clone())).unwrap();
-    let mut out = format!("x:i:{};", flags).into_bytes();
-    out.extend_from_slice(&vm.serialize_value(&storage)?);
-    out.extend_from_slice(b";m:");
-    let m = Value::Array(members(vm, &o));
-    out.extend_from_slice(&vm.serialize_value(&m)?);
-    Ok(Value::Str(PhpStr::from(out)))
+    // One numbering, where the flags are value 1 (test bug45826).
+    vm.with_ser_ctx(|vm| {
+        let mut out = b"x:".to_vec();
+        out.extend_from_slice(&vm.serialize_value(&Value::Int(flags))?);
+        out.extend_from_slice(&vm.serialize_value(&storage)?);
+        out.extend_from_slice(b";m:");
+        let m = Value::Array(members(vm, &o));
+        out.extend_from_slice(&vm.serialize_value(&m)?);
+        Ok(Value::Str(PhpStr::from(out)))
+    })
 }
 
 fn ao_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1403,27 +1407,51 @@ fn ao_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
         )
     };
     let b = s.as_bytes();
-    if !b.starts_with(b"x:i:") {
-        return bad(vm, 0, b.len());
-    }
-    let Some(semi) = b.iter().position(|&c| c == b';') else {
-        return bad(vm, 0, b.len());
+    // `x:` flags storage `;m:` members, read in the value table of the
+    // unserialize() in progress, where the flags take a number (tests
+    // bug70166, bug73029). Error offsets observed on PHP 8.5: a value
+    // that does not parse fails where the parser stopped, one of the
+    // wrong type at its start (storage) or end (flags, members).
+    let parsed = vm.with_unser_ctx(|vm| -> R<Result<(i64, Value, Value), usize>> {
+        if !b.starts_with(b"x:") {
+            return Ok(Err(0));
+        }
+        let mut cur = 2;
+        let flags = match vm.unser_part(&b[cur..])? {
+            Ok((Value::Int(f), n)) => {
+                cur += n;
+                f
+            }
+            Ok((_, n)) => return Ok(Err(cur + n)),
+            Err(_) => return Ok(Err(cur)),
+        };
+        let storage = match vm.unser_part(&b[cur..])? {
+            Ok((v @ (Value::Array(_) | Value::Object(_)), n)) => {
+                cur += n;
+                v
+            }
+            Ok(_) => return Ok(Err(cur)),
+            Err(off) => return Ok(Err(cur + off)),
+        };
+        if b.get(cur) != Some(&b';') {
+            return Ok(Err(cur));
+        }
+        cur += 1;
+        if !b[cur..].starts_with(b"m:") {
+            return Ok(Err(cur));
+        }
+        cur += 2;
+        let m = match vm.unser_part(&b[cur..])? {
+            Ok((v @ Value::Array(_), _)) => v,
+            Ok((_, n)) => return Ok(Err(cur + n)),
+            Err(off) => return Ok(Err(cur + off)),
+        };
+        Ok(Ok((flags, storage, m)))
+    })?;
+    let (flags, storage, m) = match parsed {
+        Ok(x) => x,
+        Err(at) => return bad(vm, at, b.len()),
     };
-    let Ok(flags) = std::str::from_utf8(&b[4..semi])
-        .unwrap_or("x")
-        .parse::<i64>()
-    else {
-        return bad(vm, 0, b.len());
-    };
-    let rest = &b[semi + 1..];
-    let Some(mpos) = rfind(rest, b";m:") else {
-        return bad(vm, semi + 1, b.len());
-    };
-    let storage = vm.unserialize_bytes(&rest[..mpos], &PhpArray::new())?;
-    let m = vm.unserialize_bytes(&rest[mpos + 3..], &PhpArray::new())?;
-    if !matches!(storage, Value::Array(_) | Value::Object(_)) {
-        return bad(vm, semi + 1, b.len());
-    }
     // The deprecation, the members, then the object check (test
     // ArrayObject/bug70155).
     if matches!(storage, Value::Object(_)) {
@@ -1440,15 +1468,6 @@ fn ao_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
         d.storage = storage;
     });
     Ok(Value::Null)
-}
-
-fn rfind(h: &[u8], n: &[u8]) -> Option<usize> {
-    if h.len() < n.len() {
-        return None;
-    }
-    (0..=h.len() - n.len())
-        .rev()
-        .find(|&i| &h[i..i + n.len()] == n)
 }
 
 fn ao_get_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2556,15 +2575,18 @@ fn dll_prev(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn dll_serialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let flags = dll(a, |d| d.flags);
-    let mut out = format!("i:{};", flags).into_bytes();
-    // The live list: serializing an element may change it (test gh16589).
-    let mut i = 0;
-    while let Some(v) = dll(a, |d| d.items.get(i).cloned()) {
-        i += 1;
-        out.push(b':');
-        out.extend_from_slice(&vm.serialize_value(&v)?);
-    }
-    Ok(Value::Str(PhpStr::from(out)))
+    vm.with_ser_ctx(|vm| {
+        let mut out = vm.serialize_value(&Value::Int(flags))?;
+        // The live list: serializing an element may change it (test
+        // gh16589).
+        let mut i = 0;
+        while let Some(v) = dll(a, |d| d.items.get(i).cloned()) {
+            i += 1;
+            out.push(b':');
+            out.extend_from_slice(&vm.serialize_value(&v)?);
+        }
+        Ok(Value::Str(PhpStr::from(out)))
+    })
 }
 fn dll_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let s = a.str(0);
@@ -2572,63 +2594,40 @@ fn dll_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if b.is_empty() {
         return Ok(Value::Null);
     }
-    let fail = |vm: &mut Vm| -> R<Value> {
-        vm.throw(
-            "UnexpectedValueException",
-            &format!("Error at offset 0 of {} bytes", b.len()),
-        )
-    };
-    if !b.starts_with(b"i:") {
-        return fail(vm);
-    }
-    let Some(semi) = b.iter().position(|&c| c == b';') else {
-        return fail(vm);
-    };
-    let Ok(flags) = std::str::from_utf8(&b[2..semi])
-        .unwrap_or("x")
-        .parse::<i64>()
-    else {
-        return fail(vm);
-    };
-    let mut items = VecDeque::new();
-    // Elements follow, each prefixed with ':' and serialized.
-    let rest = &b[semi + 1..];
-    let mut chunks: Vec<&[u8]> = Vec::new();
-    let mut start = None;
-    let mut i = 0;
-    while i < rest.len() {
-        if rest[i] == b':' && start.is_none() {
-            start = Some(i + 1);
-            i += 1;
-            continue;
-        }
-        i += 1;
-    }
-    if let Some(st) = start {
-        // Split greedily by trying successive prefixes.
-        let mut cur = st;
-        while cur <= rest.len() {
-            let mut end = cur + 1;
-            let mut found = None;
-            while end <= rest.len() {
-                if (end == rest.len() || rest[end] == b':')
-                    && let Some(v) = vm.unserialize_quiet(&rest[cur..end])
-                {
-                    found = Some((end, v));
-                    break;
-                }
-                end += 1;
+    // The flags, then `:` and a value for each element, read in the value
+    // table of the unserialize() in progress (test bug70169; error offsets
+    // observed on PHP 8.5).
+    let parsed = vm.with_unser_ctx(|vm| -> R<Result<(i64, VecDeque<Value>), usize>> {
+        let (flags, mut cur) = match vm.unser_part(b)? {
+            Ok((Value::Int(f), n)) => (f, n),
+            Ok((_, n)) => return Ok(Err(n)),
+            Err(_) => return Ok(Err(0)),
+        };
+        let mut items = VecDeque::new();
+        while cur < b.len() {
+            if b[cur] != b':' {
+                return Ok(Err(cur));
             }
-            match found {
-                Some((e, v)) => {
+            cur += 1;
+            match vm.unser_part(&b[cur..])? {
+                Ok((v, n)) => {
                     items.push_back(v);
-                    cur = e + 1;
+                    cur += n;
                 }
-                None => return fail(vm),
+                Err(off) => return Ok(Err(cur + off)),
             }
         }
-    }
-    let _ = chunks.drain(..);
+        Ok(Ok((flags, items)))
+    })?;
+    let (flags, items) = match parsed {
+        Ok(x) => x,
+        Err(at) => {
+            return vm.throw(
+                "UnexpectedValueException",
+                &format!("Error at offset {} of {} bytes", at, b.len()),
+            );
+        }
+    };
     dll(a, |d| {
         d.flags = flags;
         d.items = items;
@@ -3583,19 +3582,22 @@ fn os_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn os_serialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let s = a.this_obj().clone();
     let entries = os(&s, |d| d.live_entries());
-    let mut out = format!("x:i:{};", entries.len()).into_bytes();
-    for (i, (o, inf)) in entries.into_iter().enumerate() {
-        if i > 0 {
-            out.push(b';');
+    vm.with_ser_ctx(|vm| {
+        let mut out = b"x:".to_vec();
+        out.extend_from_slice(&vm.serialize_value(&Value::Int(entries.len() as i64))?);
+        for (i, (o, inf)) in entries.into_iter().enumerate() {
+            if i > 0 {
+                out.push(b';');
+            }
+            out.extend_from_slice(&vm.serialize_value(&Value::Object(o))?);
+            out.push(b',');
+            out.extend_from_slice(&vm.serialize_value(&inf)?);
         }
-        out.extend_from_slice(&vm.serialize_value(&Value::Object(o))?);
-        out.push(b',');
-        out.extend_from_slice(&vm.serialize_value(&inf)?);
-    }
-    out.extend_from_slice(b";m:");
-    let m = Value::Array(members(vm, &s));
-    out.extend_from_slice(&vm.serialize_value(&m)?);
-    Ok(Value::Str(PhpStr::from(out)))
+        out.extend_from_slice(b";m:");
+        let m = Value::Array(members(vm, &s));
+        out.extend_from_slice(&vm.serialize_value(&m)?);
+        Ok(Value::Str(PhpStr::from(out)))
+    })
 }
 fn os_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let s = a.this_obj().clone();
@@ -3604,56 +3606,71 @@ fn os_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if b.is_empty() {
         return Ok(Value::Null);
     }
-    let fail = |vm: &mut Vm, at: usize| -> R<Value> {
-        vm.throw(
-            "UnexpectedValueException",
-            &format!("Error at offset {} of {} bytes", at, b.len()),
-        )
-    };
-    if !b.starts_with(b"x:i:") {
-        return fail(vm, 0);
-    }
-    let Some(semi) = b.iter().position(|&c| c == b';') else {
-        return fail(vm, 0);
-    };
-    let Ok(n) = std::str::from_utf8(&b[4..semi])
-        .unwrap_or("x")
-        .parse::<i64>()
-    else {
-        return fail(vm, 0);
-    };
-    let mut cur = semi + 1;
-    for i in 0..n {
-        // [';'] object ',' info
-        if i > 0 {
+    // `x:` count, then each element as object [`,` info] `;`, then `m:`
+    // members, read in the value table of the unserialize() in progress.
+    // Error offsets observed on PHP 8.5 (test
+    // SplObjectStorage_unserialize_bad): an object that is not one, or
+    // comes from `R:`, fails at its start.
+    let parsed = vm.with_unser_ctx(|vm| -> R<Result<Value, usize>> {
+        if !b.starts_with(b"x:") {
+            return Ok(Err(0));
+        }
+        let mut cur = 2;
+        let n = match vm.unser_part(&b[cur..])? {
+            Ok((Value::Int(n), len)) if n >= 0 => {
+                cur += len;
+                n
+            }
+            // A negative count fails before its `;`.
+            Ok((Value::Int(_), len)) => return Ok(Err(cur + len - 1)),
+            Ok((_, len)) => return Ok(Err(cur + len)),
+            Err(_) => return Ok(Err(cur)),
+        };
+        for _ in 0..n {
+            let obj = match vm.unser_part(&b[cur..])? {
+                Ok((Value::Object(o), len)) if b[cur] != b'R' => {
+                    cur += len;
+                    o
+                }
+                Ok(_) => return Ok(Err(cur)),
+                Err(off) => return Ok(Err(cur + off)),
+            };
+            let mut inf = Value::Null;
+            if b.get(cur) == Some(&b',') {
+                cur += 1;
+                match vm.unser_part(&b[cur..])? {
+                    Ok((v, len)) => {
+                        cur += len;
+                        inf = v;
+                    }
+                    Err(off) => return Ok(Err(cur + off)),
+                }
+            }
             if b.get(cur) != Some(&b';') {
-                return fail(vm, cur);
+                return Ok(Err(cur));
             }
             cur += 1;
+            os_put(vm, &s, obj, inf)?;
         }
-        let Some((obj, next)) = vm.unserialize_prefix(&b[cur..]) else {
-            return fail(vm, cur);
-        };
-        cur += next;
-        if b.get(cur) != Some(&b',') {
-            return fail(vm, cur);
+        if !b[cur..].starts_with(b"m:") {
+            return Ok(Err(cur));
         }
-        cur += 1;
-        let Some((inf, next)) = vm.unserialize_prefix(&b[cur..]) else {
-            return fail(vm, cur);
-        };
-        cur += next;
-        let Value::Object(o) = obj else {
-            return fail(vm, cur);
-        };
-        os_put(vm, &s, o, inf)?;
-    }
-    if !b[cur..].starts_with(b";m:") {
-        return fail(vm, cur);
-    }
-    let m = vm.unserialize_bytes(&b[cur + 3..], &PhpArray::new())?;
-    if let Value::Array(m) = m {
-        restore_members(vm, &s, &m)?;
+        cur += 2;
+        match vm.unser_part(&b[cur..])? {
+            Ok((v @ Value::Array(_), _)) => Ok(Ok(v)),
+            Ok((_, len)) => Ok(Err(cur + len)),
+            Err(off) => Ok(Err(cur + off)),
+        }
+    })?;
+    match parsed {
+        Ok(Value::Array(m)) => restore_members(vm, &s, &m)?,
+        Ok(_) => {}
+        Err(at) => {
+            return vm.throw(
+                "UnexpectedValueException",
+                &format!("Error at offset {} of {} bytes", at, b.len()),
+            );
+        }
     }
     Ok(Value::Null)
 }

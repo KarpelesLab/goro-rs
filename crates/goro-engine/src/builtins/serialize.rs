@@ -29,24 +29,75 @@ pub static MODULE: Module = Module {
     ..Module::EMPTY
 };
 
+#[derive(Default)]
 struct Ser {
     out: Vec<u8>,
     /// Value numbers of objects (by handle) and references (by cell).
     objs: HashMap<u32, usize>,
     refs: HashMap<usize, usize>,
     n: usize,
+    /// The objects numbered, kept alive so that a temporary one (such as
+    /// a clone a Serializable::serialize() method serializes) does not
+    /// pass its handle on to a later one (test bug64146.phpt).
+    keep: Vec<ObjRef>,
+}
+
+/// The value tables of a serialize() or unserialize() in progress, lent
+/// while a Serializable::serialize() or ::unserialize() method runs: a
+/// serialize() or unserialize() called by that method continues the
+/// numbering of the outer one, so that its `r:`/`R:` reach the outer
+/// values (observed on PHP 8.5; tests ext/spl/tests/bug70166.phpt,
+/// bug45826.phpt). __serialize(), __unserialize(), __sleep() and
+/// __wakeup() get tables of their own (observed on PHP 8.5).
+#[derive(Default)]
+pub(crate) struct SerCtx {
+    ser: Option<Ser>,
+    unser: Option<VarTable>,
+}
+
+#[derive(Default)]
+struct VarTable {
+    /// The cells of values by number (for `R:` and `r:`).
+    vals: Vec<PhpRef>,
+    /// Cells bound by `R:` (kept as references).
+    shared: std::collections::HashSet<usize>,
+    /// Numbers no reference may name: those of the values a failed nested
+    /// unserialize() started, including the one that failed (observed on
+    /// PHP 8.5; test ext/standard/tests/serialize/bug70436.phpt).
+    holes: std::collections::HashSet<usize>,
 }
 
 impl Vm {
+    /// Serializes a value (in the numbering of the serialize() in
+    /// progress, if a Serializable::serialize() method is running: see
+    /// [`SerCtx`]).
     pub fn serialize_value(&mut self, v: &Value) -> R<Vec<u8>> {
-        let mut s = Ser {
-            out: Vec::new(),
-            objs: HashMap::new(),
-            refs: HashMap::new(),
-            n: 0,
-        };
-        self.ser(&mut s, v, false)?;
-        Ok(s.out)
+        let lent = self.ext::<SerCtx>().ser.take();
+        let nested = lent.is_some();
+        let mut s = lent.unwrap_or_default();
+        let saved = std::mem::take(&mut s.out);
+        let r = self.ser(&mut s, v, false);
+        let out = std::mem::replace(&mut s.out, saved);
+        if nested {
+            self.ext::<SerCtx>().ser = Some(s);
+        }
+        r.map(|_| out)
+    }
+
+    /// Runs `f` (an internal class's serialize() method) so that the
+    /// values it serializes share one numbering: that of the serialize()
+    /// in progress, or a new one (where `x:i:0;` counts as value 1: test
+    /// ext/spl/tests/bug45826.phpt).
+    pub fn with_ser_ctx<T>(&mut self, f: impl FnOnce(&mut Vm) -> R<T>) -> R<T> {
+        let fresh = self.ext::<SerCtx>().ser.is_none();
+        if fresh {
+            self.ext::<SerCtx>().ser = Some(Ser::default());
+        }
+        let r = f(self);
+        if fresh {
+            self.ext::<SerCtx>().ser = None;
+        }
+        r
     }
 
     fn ser(&mut self, s: &mut Ser, v: &Value, _in_array: bool) -> R<()> {
@@ -134,6 +185,7 @@ impl Vm {
             return Ok(());
         }
         s.objs.insert(o.handle(), s.n);
+        s.keep.push(o.clone());
         let cls = self.class_of(o);
         let name = cls.name.clone();
         if cls.is_enum() {
@@ -187,7 +239,14 @@ impl Vm {
             .find_class(b"Serializable", false)?
             .is_some_and(|ser| cls.is_subclass_of(&ser))
         {
-            let data = self.call_method(o, b"serialize", Vec::new())?;
+            // The table is lent to serialize() calls the method makes.
+            let prev = self.ext::<SerCtx>().ser.replace(std::mem::take(s));
+            let data = self.call_method(o, b"serialize", Vec::new());
+            let back = std::mem::replace(&mut self.ext::<SerCtx>().ser, prev);
+            if let Some(b) = back {
+                *s = b;
+            }
+            let data = data?;
             match data {
                 Value::Str(d) => {
                     s.out
@@ -387,10 +446,10 @@ fn serialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
 struct Unser<'a> {
     d: &'a [u8],
     pos: usize,
-    /// The cells of values by number (for `R:` and `r:`).
-    vals: Vec<PhpRef>,
-    /// Cells bound by `R:` (kept as references).
-    shared: std::collections::HashSet<usize>,
+    /// The values by number.
+    t: VarTable,
+    /// Values this parse started (see [`VarTable::holes`]).
+    opened: usize,
     allowed: Option<Vec<PhpStr>>,
     max_depth: i64,
     depth: i64,
@@ -417,8 +476,8 @@ impl Unser<'_> {
         Unser {
             d,
             pos: 0,
-            vals: Vec::new(),
-            shared: std::collections::HashSet::new(),
+            t: VarTable::default(),
+            opened: 0,
             allowed,
             max_depth,
             depth: 0,
@@ -509,7 +568,7 @@ impl Unser<'_> {
 
     fn cell(&mut self, v: Value) -> PhpRef {
         let c = PhpRef::new(v);
-        self.vals.push(c.clone());
+        self.t.vals.push(c.clone());
         c
     }
 }
@@ -527,6 +586,9 @@ impl Vm {
         let Some(t) = u.peek() else {
             return Err(UErr::At(start));
         };
+        if !as_key && t != b'R' {
+            u.opened += 1;
+        }
         if t == b'N' {
             if u.d.get(start + 1) != Some(&b';') {
                 return Err(UErr::At(start));
@@ -628,12 +690,17 @@ impl Vm {
                 if as_key {
                     return Err(UErr::At(u.pos));
                 }
-                if n == 0 || n > u.vals.len() {
+                if n == 0 || n > u.t.vals.len() || u.t.holes.contains(&(n - 1)) {
                     return Err(UErr::At(u.pos));
                 }
-                let target = u.vals[n - 1].clone();
+                let target = u.t.vals[n - 1].clone();
+                // `r:` names an object (observed on PHP 8.5: anything
+                // else fails after the token).
+                if t == b'r' && !matches!(target.get(), Value::Object(_)) {
+                    return Err(UErr::At(u.pos));
+                }
                 if t == b'R' {
-                    u.shared.insert(target.addr());
+                    u.t.shared.insert(target.addr());
                     return Ok(Item::Val(Value::Ref(target)));
                 }
                 let v = target.get();
@@ -763,7 +830,7 @@ impl Vm {
                 let end = u.pos + len;
                 let o = self.instantiate(cls)?;
                 let cell = u.cell(Value::Object(o.clone()));
-                let outer = std::mem::replace(&mut u.vals, vec![cell.clone()]);
+                let outer = std::mem::replace(&mut u.t.vals, vec![cell.clone()]);
                 let mut vals = Vec::new();
                 let mut r = Ok(());
                 while u.pos < end {
@@ -775,7 +842,7 @@ impl Vm {
                         }
                     }
                 }
-                u.vals = outer;
+                u.t.vals = outer;
                 if r.is_err() {
                     // A payload that does not parse leaves the number
                     // unreadable.
@@ -812,7 +879,16 @@ impl Vm {
             if cls.find_method(b"unserialize").is_none() {
                 self.warn(&format!("Class {} has no unserializer", cls.name.dname()))?;
             } else {
-                self.call_method(&o, b"unserialize", vec![Value::Str(data)])?;
+                // The table is lent to unserialize() calls the method
+                // makes.
+                let t = std::mem::take(&mut u.t);
+                let prev = self.ext::<SerCtx>().unser.replace(t);
+                let r = self.call_method(&o, b"unserialize", vec![Value::Str(data)]);
+                let back = std::mem::replace(&mut self.ext::<SerCtx>().unser, prev);
+                if let Some(t) = back {
+                    u.t = t;
+                }
+                r?;
             }
             return Ok(Value::Ref(cell));
         }
@@ -961,24 +1037,60 @@ impl Vm {
         }
     }
 
-    /// Runs a parse, then finishes the values and calls __unserialize()
-    /// and __wakeup() (in that order, after the whole value is built).
+    /// Runs a parse (in the table of the unserialize() in progress, when a
+    /// Serializable::unserialize() method is running: see [`SerCtx`]),
+    /// then finishes the values and calls __unserialize() and __wakeup()
+    /// (in that order, after the whole value is built).
     fn unser_run(&mut self, u: &mut Unser) -> UR<Value> {
-        let r = self.unser_elem(u);
-        let shared = std::mem::take(&mut u.shared);
-        let mut seen = std::collections::HashSet::new();
-        let v = {
-            let v = r?;
-            self.unser_finish(v, &shared, &mut seen)
+        let lent = self.ext::<SerCtx>().unser.take();
+        let nested = lent.is_some();
+        let base = match lent {
+            Some(t) => {
+                u.t = t;
+                u.t.vals.len()
+            }
+            None => 0,
         };
+        let r = self.unser_elem(u);
+        let mut seen = std::collections::HashSet::new();
+        let r = r.map(|v| self.unser_finish(v, &u.t.shared, &mut seen));
         // Every value is finished before any of the calls runs.
         let deferred: Vec<(ObjRef, Option<Value>)> = std::mem::take(&mut u.deferred)
             .into_iter()
             .map(|(o, d)| {
-                let d = d.map(|d| self.unser_finish(Value::Array(d), &shared, &mut seen));
+                let d = d.map(|d| self.unser_finish(Value::Array(d), &u.t.shared, &mut seen));
                 (o, d)
             })
             .collect();
+        // The calls run with no table lent (they get tables of their own).
+        let r = match r {
+            Ok(v) => self.unser_calls(deferred).map(|_| v).map_err(UErr::Php),
+            Err(e) => Err(e),
+        };
+        if r.is_err() {
+            // Objects of a failed unserialize are not destructed
+            // (bug72663).
+            for c in &u.t.vals[base..] {
+                if let Value::Object(o) = c.get() {
+                    o.mark_destructor_called();
+                }
+            }
+            if nested {
+                u.t.vals.truncate(base);
+                for _ in 0..u.opened {
+                    u.t.holes.insert(u.t.vals.len());
+                    u.t.vals.push(PhpRef::new(Value::Null));
+                }
+            }
+        }
+        // The outer table gets its values back.
+        if nested {
+            self.ext::<SerCtx>().unser = Some(std::mem::take(&mut u.t));
+        }
+        r
+    }
+
+    fn unser_calls(&mut self, deferred: Vec<(ObjRef, Option<Value>)>) -> R<()> {
         for (o, d) in deferred {
             match d {
                 Some(d) => {
@@ -989,7 +1101,7 @@ impl Vm {
                 }
             }
         }
-        Ok(v)
+        Ok(())
     }
 
     /// Sets an unserialized property (mangled names select private and
@@ -1203,13 +1315,6 @@ impl Vm {
                 Ok(v.into_deref())
             }
             Err(UErr::At(off)) => {
-                // Objects of a failed unserialize are not destructed
-                // (bug72663).
-                for c in &u.vals {
-                    if let Value::Object(o) = c.get() {
-                        o.mark_destructor_called();
-                    }
-                }
                 if !data.is_empty() {
                     self.warn(&format!(
                         "unserialize(): Error at offset {} of {} bytes",
@@ -1219,14 +1324,7 @@ impl Vm {
                 }
                 Ok(Value::Bool(false))
             }
-            Err(UErr::Php(e)) => {
-                for c in &u.vals {
-                    if let Value::Object(o) = c.get() {
-                        o.mark_destructor_called();
-                    }
-                }
-                Err(e)
-            }
+            Err(UErr::Php(e)) => Err(e),
         }
     }
 }
@@ -1238,6 +1336,33 @@ impl Vm {
         let mut u = Unser::new(data, None, 4096);
         let v = self.unser_run(&mut u).ok()?;
         Some((v.into_deref(), u.pos))
+    }
+
+    /// Runs `f` (an internal class's unserialize() method) in the value
+    /// table of the unserialize() in progress, or in a new one, for
+    /// [`Vm::unser_part`].
+    pub fn with_unser_ctx<T>(&mut self, f: impl FnOnce(&mut Vm) -> R<T>) -> R<T> {
+        let fresh = self.ext::<SerCtx>().unser.is_none();
+        if fresh {
+            self.ext::<SerCtx>().unser = Some(VarTable::default());
+        }
+        let r = f(self);
+        if fresh {
+            self.ext::<SerCtx>().unser = None;
+        }
+        r
+    }
+
+    /// The value at the start of `data`, numbered in the current table
+    /// (see [`Vm::with_unser_ctx`]): the value and its length, or the
+    /// offset of the error (no warning).
+    pub fn unser_part(&mut self, data: &[u8]) -> R<Result<(Value, usize), usize>> {
+        let mut u = Unser::new(data, None, 4096);
+        match self.unser_run(&mut u) {
+            Ok(v) => Ok(Ok((v.into_deref(), u.pos))),
+            Err(UErr::At(off)) => Ok(Err(off.min(data.len()))),
+            Err(UErr::Php(e)) => Err(e),
+        }
     }
 
     /// The whole of `data` as one serialized value.
