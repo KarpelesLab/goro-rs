@@ -137,6 +137,13 @@ fn anchors_and_newlines() {
     // CRLF bumpalong (pcre2api): .+A does not match \r\nA, [\r\n]A does.
     assert_eq!(m("/(*CRLF).+A/", "\r\nA"), None);
     assert_eq!(g0("/(*CRLF)[\\r\\n]A/", "\r\nA"), s("\nA"));
+    // A leading .* starts matches at line starts, or at the start offset
+    // (observed on PHP 8.5).
+    assert_eq!(all("/.*/", "ab\ncd"), ["ab", "", "cd", ""]);
+    let r = re("/.*b/");
+    let mut mt = r.matcher();
+    assert!(mt.exec(b"xab", 1).unwrap());
+    assert_eq!(mt.captures().get(0), Some((1, 3)));
 }
 
 #[test]

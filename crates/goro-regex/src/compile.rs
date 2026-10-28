@@ -756,10 +756,16 @@ fn build_onepass(prog: &Prog) -> Option<OnePass> {
             OpStep::Open(_) | OpStep::Assert(Assertion::WordBoundary { negated: false, .. })
         )
     });
+    // A bounded possessive run only helps with a literal after it (a
+    // match then starts at most `max` characters before the literal).
+    let mut lead_bounded = false;
     let lead_run = match first.map(|i| (i, &steps[i])) {
         Some((i, OpStep::Rep { item, min, max } | OpStep::BackRep { item, min, max, .. }))
-            if *min >= 1 && *max == u32::MAX && !depends_on_start =>
+            if *min >= 1
+                && (*max == u32::MAX || matches!(steps[i], OpStep::Rep { .. }))
+                && !depends_on_start =>
         {
+            lead_bounded = *max != u32::MAX;
             let single = match item {
                 Item::Byte(_) | Item::Byte2(..) => true,
                 Item::Set(s) => !prog.utf || (s.ascii_only()),
@@ -836,6 +842,7 @@ fn build_onepass(prog: &Prog) -> Option<OnePass> {
         }
         r
     });
+    let lead_run = lead_run.filter(|_| !lead_bounded || lead_lit.is_some());
     let lead_finder = lead_lit
         .as_ref()
         .filter(|l| l.len() > 1)
@@ -845,6 +852,7 @@ fn build_onepass(prog: &Prog) -> Option<OnePass> {
         frames,
         has_greedy,
         lead_run,
+        lead_bounded,
         back,
         lead_lit,
         lead_mid,
@@ -1796,10 +1804,22 @@ fn startline(n: &Node, no_dotstar: bool, ctx: &AnchorCtx) -> bool {
             body,
             ..
         } if !ctx.backref_groups.contains(g) => startline(body, no_dotstar, ctx),
-        _ => {
-            let _ = no_dotstar;
-            false
+        // pcre2api on PCRE2_NO_DOTSTAR_ANCHOR: a leading non-DOTALL .* means
+        // a match starts at the subject start or after a newline (the start
+        // offset counts as a start: observed on PHP 8.5, /.*b/ matches "ab"
+        // in "xab" from offset 1, and /.*/ finds "" at 2 in "ab\ncd").
+        Node::Repeat {
+            node,
+            min: 0,
+            max: None,
+            greed,
+        } => {
+            !no_dotstar
+                && !ctx.has_prune_skip
+                && *greed != Greed::Possessive
+                && matches!(**node, Node::Dot { dotall: false })
         }
+        _ => false,
     }
 }
 

@@ -216,6 +216,9 @@ pub struct OnePass {
     /// start position: after a failure at p, starts inside the same run
     /// fail too.
     pub lead_run: Option<usize>,
+    /// The leading run has a maximum (possessive, with `lead_lit`): only
+    /// the literal search uses it.
+    pub lead_bounded: bool,
     /// Index of the [`OpStep::BackRep`], if any.
     pub back: Option<usize>,
     /// With `lead_run`: the literal that follows the run (for a possessive

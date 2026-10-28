@@ -2265,7 +2265,7 @@ impl<'p, 's> Searcher<'p, 's> {
                 }
                 let Some(k) = found else { break 'scan };
                 let q = p + k;
-                let (OpStep::Rep { item, min, .. } | OpStep::BackRep { item, min, .. }) =
+                let (OpStep::Rep { item, min, max } | OpStep::BackRep { item, min, max, .. }) =
                     &op.steps[li]
                 else {
                     unreachable!()
@@ -2279,7 +2279,12 @@ impl<'p, 's> Searcher<'p, 's> {
                     }
                 }
                 let mut r = e;
-                while r > p && self.vm.match_item(item, r - 1).is_some() {
+                let lo = if op.lead_bounded {
+                    p.max(e.saturating_sub(*max as usize))
+                } else {
+                    p
+                };
+                while r > lo && self.vm.match_item(item, r - 1).is_some() {
                     r -= 1;
                 }
                 // A possessive run ends at the literal; a backtracking one may
@@ -2312,7 +2317,7 @@ impl<'p, 's> Searcher<'p, 's> {
                 }
             }
             if !anchored {
-                if st.startline && p > 0 && !self.vm.newline_before(p) {
+                if st.startline && p > start_offset && !self.vm.newline_before(p) {
                     // Advance to the next line start.
                     let q = if prog.newline == Newline::Lf {
                         match memchr::memchr(b'\n', &s[p..]) {
@@ -2345,7 +2350,7 @@ impl<'p, 's> Searcher<'p, 's> {
                         Some(k) => p += k,
                         None => break,
                     }
-                    if st.startline && p > 0 && !self.vm.newline_before(p) {
+                    if st.startline && p > start_offset && !self.vm.newline_before(p) {
                         continue;
                     }
                 } else if let Some((ai, bytes)) = &st.anchor {
@@ -2379,7 +2384,7 @@ impl<'p, 's> Searcher<'p, 's> {
                         }
                         from = p + ai + 1;
                     }
-                    if st.startline && p > 0 && !self.vm.newline_before(p) {
+                    if st.startline && p > start_offset && !self.vm.newline_before(p) {
                         continue;
                     }
                 } else if let Some(fb) = &st.first_bytes {
@@ -2398,7 +2403,7 @@ impl<'p, 's> Searcher<'p, 's> {
                         Some(q) => p = q,
                         None => break,
                     }
-                    if st.startline && p > 0 && !self.vm.newline_before(p) {
+                    if st.startline && p > start_offset && !self.vm.newline_before(p) {
                         continue;
                     }
                 }
@@ -2473,7 +2478,7 @@ impl<'p, 's> Searcher<'p, 's> {
                         if anchored || p >= len {
                             break;
                         }
-                        p = if op.lead_run.is_some() && run_end > p {
+                        p = if op.lead_run.is_some() && !op.lead_bounded && run_end > p {
                             // Starts inside the same run fail the same way.
                             run_end + 1
                         } else {
