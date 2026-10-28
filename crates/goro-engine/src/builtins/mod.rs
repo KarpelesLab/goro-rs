@@ -86,5 +86,6 @@ pub fn modules() -> Vec<&'static Module> {
         &sodium::MODULE,
         &uri::MODULE,
         &libxml::MODULE,
+        &dom::MODULE,
     ]
 }

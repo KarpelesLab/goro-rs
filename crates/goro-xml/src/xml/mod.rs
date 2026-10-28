@@ -13,7 +13,8 @@ mod dtd;
 mod parser;
 pub mod validate;
 
-pub use builder::{TreeBuilder, build, build_into, parse_fragment};
+pub use builder::{Built, TreeBuilder, build, build_into, parse_fragment};
+pub use dtd::attach_external_subset;
 pub use parser::{AttrPiece, Attribute, Parser, StartTag, Status, resolve_system_id};
 
 use crate::error::XmlError;

@@ -615,6 +615,8 @@ pub struct Arena {
     /// Documents whose last hold went away through an adoption (freed by
     /// [`Arena::collect`]).
     unheld_docs: Vec<NodeId>,
+    /// Bumped by every structural change (live collections cache on it).
+    generation: u64,
 }
 
 /// Iterator over a sibling chain.
@@ -656,6 +658,7 @@ impl Arena {
             nodes: vec![None],
             free: Vec::new(),
             unheld_docs: Vec::new(),
+            generation: 0,
         }
     }
 
@@ -996,6 +999,7 @@ impl Arena {
 
     /// Replaces an attribute's value.
     pub fn set_attr_value(&mut self, attr: NodeId, value: &str) {
+        self.generation += 1;
         self.remove_children(attr);
         if !value.is_empty() {
             let doc = self.doc_of(attr);
@@ -1112,6 +1116,7 @@ impl Arena {
 
     /// Detaches `n` from its parent (or attribute list). No checks.
     pub fn detach(&mut self, n: NodeId) {
+        self.generation += 1;
         let (parent, prev, next, is_attr) = {
             let node = self.node(n);
             (
@@ -1169,6 +1174,7 @@ impl Arena {
 
     /// Appends `child` (detached) as the last child of `parent`. No checks.
     pub fn raw_append(&mut self, parent: NodeId, child: NodeId) {
+        self.generation += 1;
         let last = self.node(parent).last_child;
         {
             let c = self.node_mut(child);
@@ -1186,6 +1192,7 @@ impl Arena {
     /// Inserts `child` (detached) before `reference` (a child of `parent`),
     /// or appends when `reference` is `None`. No checks.
     pub fn raw_insert_before(&mut self, parent: NodeId, child: NodeId, reference: Option<NodeId>) {
+        self.generation += 1;
         let Some(r) = reference else {
             return self.raw_append(parent, child);
         };
@@ -1206,6 +1213,7 @@ impl Arena {
     /// Appends an attribute node (detached) to an element's attribute list.
     /// No duplicate check.
     pub fn raw_append_attr(&mut self, el: NodeId, attr: NodeId) {
+        self.generation += 1;
         let last = self.element(el).and_then(|e| e.last_attr);
         {
             let a = self.node_mut(attr);
@@ -1238,6 +1246,7 @@ impl Arena {
     /// Frees a detached subtree (children, attributes, template contents).
     /// Handles to these nodes become invalid.
     pub fn free_subtree(&mut self, n: NodeId) {
+        self.generation += 1;
         if !self.is_live(n) {
             return;
         }
@@ -1283,6 +1292,19 @@ impl Arena {
             }
             self.free.push(x.0.get());
         }
+    }
+
+    /// The structural change counter: it changes whenever nodes are
+    /// attached, detached, freed or attribute values set, so a live
+    /// collection can reuse its last result while it is unchanged.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Records a change [`Arena::generation`] users must see (a rename, a
+    /// class attribute edited in place).
+    pub fn touch(&mut self) {
+        self.generation += 1;
     }
 
     // ----- holds --------------------------------------------------------------

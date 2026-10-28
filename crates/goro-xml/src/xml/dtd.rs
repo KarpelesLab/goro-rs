@@ -4,6 +4,55 @@
 
 use super::Sink;
 use super::parser::{Halt, Parser, R, collapse_spaces};
+
+/// Parses `text` as the external subset of document `doc` and attaches it
+/// (`DOMDocument::validate()` on a document parsed without loading it).
+/// Returns false when the subset is not well-formed.
+pub fn attach_external_subset(
+    arena: &mut crate::tree::Arena,
+    doc: crate::tree::NodeId,
+    text: &[u8],
+    public: Option<&str>,
+    system: &str,
+) -> bool {
+    struct Fixed(Vec<u8>);
+    impl super::EntityLoader for Fixed {
+        fn load(
+            &mut self,
+            _public_id: Option<&str>,
+            _system_id: &str,
+            _base: Option<&str>,
+        ) -> Result<Vec<u8>, super::LoadError> {
+            Ok(std::mem::take(&mut self.0))
+        }
+    }
+    struct Null;
+    impl Sink for Null {
+        fn start_element(&mut self, _tag: &mut super::StartTag<'_>) {}
+        fn end_element(&mut self, _name: &crate::tree::QName) {}
+        fn text(&mut self, _text: &str) {}
+    }
+    let mut fixed = Fixed(text.to_vec());
+    let opts = super::ParseOptions::with_flags(super::opt::DTDLOAD);
+    let mut internal = arena
+        .doc(doc)
+        .doctype
+        .and_then(|d| arena.dtd(d).cloned())
+        .unwrap_or_default();
+    internal.public_id = public.map(str::to_string);
+    internal.system_id = Some(system.to_string());
+    let mut p = Parser::new(opts, Some(&mut fixed));
+    p.dtd = Some(internal);
+    if p.load_external_subset(&mut Null).is_err() || p.stopped {
+        return false;
+    }
+    let Some(ext) = p.ext.take() else {
+        return false;
+    };
+    let x = arena.create(doc, crate::tree::NodeData::Doctype(Box::new(ext)));
+    arena.doc_mut(doc).ext_subset = Some(x);
+    true
+}
 use crate::chars::{is_pubid_char, is_space};
 use crate::error::Domain;
 use crate::tree::{

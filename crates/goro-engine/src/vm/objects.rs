@@ -1398,10 +1398,15 @@ impl Vm {
         match self.lookup_prop(&cls, name, scope) {
             PropLookup::Found(p) => {
                 if p.get.is_some() || p.set.is_some() || p.flags & mflags::VIRTUAL != 0 {
+                    // Internal classes' computed properties (ext/dom):
+                    // "Cannot unset DOMElement::$nodeValue" (observed on
+                    // PHP 8.5).
+                    let internal = p.get.as_ref().is_some_and(|g| g.is_native());
                     return self.throw(
                         "Error",
                         &format!(
-                            "Cannot unset hooked property {}::${}",
+                            "Cannot unset {}{}::${}",
+                            if internal { "" } else { "hooked property " },
                             cls.name.dname(),
                             name.to_string_lossy()
                         ),
