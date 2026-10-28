@@ -196,6 +196,45 @@ pub fn disabled(vm: &Vm, path: &[u8]) -> bool {
     vm.disabled_wrappers.contains(&s)
 }
 
+thread_local! {
+    /// The context of the stream function being run, for wrappers opened
+    /// below it (php://filter/resource=...).
+    static OPEN_CONTEXT: std::cell::RefCell<Option<Value>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The context argument of the calling stream function, or the default
+/// context: wrapper instances see it as `$this->context` (observed on PHP
+/// 8.5; test ext/standard/tests/streams/gh15155).
+fn call_context(a: &Args) -> Value {
+    let name = a.fname().to_ascii_lowercase();
+    let idx = match name.as_str() {
+        "fopen" | "mkdir" | "file_put_contents" => Some(3),
+        "file_get_contents" | "file" | "readfile" | "rename" | "copy" | "get_headers"
+        | "scandir" => Some(2),
+        "unlink" | "rmdir" | "opendir" | "dir" => Some(1),
+        _ => None,
+    };
+    if let Some(i) = idx {
+        let v = a.val(i);
+        if super::sockets::with_context(&v, |_| ()).is_some() {
+            return v;
+        }
+    }
+    if let Some(v) = OPEN_CONTEXT.with(|c| c.borrow().clone()) {
+        return v;
+    }
+    super::sockets::default_context()
+}
+
+/// Runs `f` with `ctx` as the context of wrappers opened inside it.
+pub fn with_open_context<T>(ctx: Value, f: impl FnOnce() -> T) -> T {
+    let prev = OPEN_CONTEXT.with(|c| c.replace(Some(ctx)));
+    let r = f();
+    OPEN_CONTEXT.with(|c| *c.borrow_mut() = prev);
+    r
+}
+
 /// A new wrapper instance (its `context` property set, then constructed).
 fn instance(vm: &mut Vm, class: &PhpStr, context: Option<Value>) -> R<ObjRef> {
     let cls = vm.find_class(class, true)?.expect("wrapper class");
@@ -230,7 +269,8 @@ pub fn open(
     mode: &[u8],
     quiet: bool,
 ) -> R<Option<Stream>> {
-    open_named(vm, &a.fname(), class, path, mode, quiet)
+    let ctx = call_context(a);
+    with_open_context(ctx, || open_named(vm, &a.fname(), class, path, mode, quiet))
 }
 
 /// Opens a user wrapper URL for `fname` (messages).
@@ -242,7 +282,10 @@ pub fn open_named(
     mode: &[u8],
     quiet: bool,
 ) -> R<Option<Stream>> {
-    let o = instance(vm, class, None)?;
+    let ctx = OPEN_CONTEXT
+        .with(|c| c.borrow().clone())
+        .unwrap_or_else(super::sockets::default_context);
+    let o = instance(vm, class, Some(ctx))?;
     let opened = PhpRef::new(Value::Null);
     let options = if quiet { 0 } else { 8 };
     let r = call(
@@ -442,7 +485,8 @@ pub fn url_stat(vm: &mut Vm, class: &PhpStr, path: &[u8], flags: i64) -> R<Optio
 /// A path operation (unlink, rename, mkdir, rmdir, stream_metadata) on a
 /// user wrapper URL: the method's result as a bool.
 pub fn path_op(vm: &mut Vm, a: &Args, class: &PhpStr, method: &str, args: Vec<Value>) -> R<Value> {
-    let o = instance(vm, class, None)?;
+    let ctx = call_context(a);
+    let o = instance(vm, class, Some(ctx))?;
     match call(vm, &o, method.as_bytes(), args)? {
         Some(v) => Ok(Value::Bool(vm.to_bool(&v))),
         None => {
@@ -491,7 +535,8 @@ pub fn list(vm: &mut Vm, a: &Args, class: &PhpStr, path: &[u8]) -> R<Option<Vec<
 
 /// opendir() on a user wrapper URL.
 pub fn opendir(vm: &mut Vm, a: &Args, class: &PhpStr, path: &[u8]) -> R<Option<ResRef>> {
-    let o = instance(vm, class, None)?;
+    let ctx = call_context(a);
+    let o = instance(vm, class, Some(ctx))?;
     let r = call(
         vm,
         &o,
