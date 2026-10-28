@@ -1250,7 +1250,7 @@ fn xml_create_from_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn html_create_empty(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let enc = if a.has(0) { s8(&a.str(0)) } else { "UTF-8".into() };
     let Some(e) = goro_xml::html5::encoding::encoding_for_label(&enc) else {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($encoding) is not a valid document encoding");
+        return vm.fthrow(a, "ValueError", "Argument #1 ($encoding) must be a valid document encoding");
     };
     let d = new_doc(DocKind::Html5, true);
     with_arena(|ar| ar.doc_mut(d).encoding = Some(e.name().to_string()));
@@ -1329,6 +1329,7 @@ fn html_create_from_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.fthrow(a, "ValueError", "Argument #1 ($path) must not contain percent-encoded NUL bytes");
     }
     let path = s8(&p);
+    modern_check_options(vm, a, 1, true)?;
     let bytes = match super::super::file::open_stream(vm, a, p.as_bytes(), b"rb", false)? {
         Some(mut st) => super::super::file::read_rest(vm, &mut st),
         None => return vm.throw("Exception", &format!("Cannot open file '{path}'")),

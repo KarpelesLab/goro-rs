@@ -2163,6 +2163,11 @@ impl Arena {
                 if x.name != y.name {
                     return false;
                 }
+                if x.ns_decls.len() != y.ns_decls.len()
+                    || !x.ns_decls.iter().all(|d| y.ns_decls.contains(d))
+                {
+                    return false;
+                }
                 let aa: Vec<NodeId> = self.attrs(a).collect();
                 let ab: Vec<NodeId> = self.attrs(b).collect();
                 if aa.len() != ab.len() {

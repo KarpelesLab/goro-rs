@@ -296,10 +296,7 @@ fn builtin_class(a: &Arena, n: NodeId) -> &'static str {
             },
             NodeData::Fragment => "Dom\\DocumentFragment",
             NodeData::Element(e) => {
-                let doc = a.doc_of(n);
-                if a.doc(doc).kind == DocKind::Html5
-                    && e.name.ns.as_deref() == Some(goro_xml::tree::HTML_NS)
-                {
+                if e.name.ns.as_deref() == Some(goro_xml::tree::HTML_NS) {
                     "Dom\\HTMLElement"
                 } else {
                     "Dom\\Element"

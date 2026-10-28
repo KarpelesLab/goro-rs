@@ -335,7 +335,42 @@ fn l_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
     )?))
 }
 
-fn iter_step(vm: &mut Vm, o: &ObjRef, pos: usize, op: ExtIterOp, _state: &mut Value) -> R<Value> {
+fn iter_step(vm: &mut Vm, o: &ObjRef, pos: usize, op: ExtIterOp, state: &mut Value) -> R<Value> {
+    // Legacy child lists iterate by node: the next one is the current
+    // one's next sibling, none once it was removed (test gh13863.phpt).
+    if let Some((ListKind::Children(parent), false)) = list_of(o) {
+        let cur = match state {
+            Value::Null => {
+                let f = with_arena(|a| if a.is_live(parent) { a.first_child(parent) } else { None });
+                *state = Value::Int(f.map_or(-1, |n| n.index() as i64));
+                f
+            }
+            Value::Int(i) if *i > 0 => NodeId::from_index(*i as u32),
+            _ => None,
+        };
+        let cur = cur.filter(|&n| with_arena(|a| a.is_live(n)));
+        return match op {
+            ExtIterOp::Valid => Ok(Value::Bool(cur.is_some())),
+            ExtIterOp::Current => match cur {
+                Some(n) => wrap_node(vm, n),
+                None => Ok(Value::Null),
+            },
+            ExtIterOp::Key => Ok(Value::Int(pos as i64)),
+            ExtIterOp::Next => {
+                let nx = cur.and_then(|n| {
+                    with_arena(|a| {
+                        if a.parent(n) == Some(parent) {
+                            a.next_sibling(n)
+                        } else {
+                            None
+                        }
+                    })
+                });
+                *state = Value::Int(nx.map_or(-1, |n| n.index() as i64));
+                Ok(Value::Null)
+            }
+        };
+    }
     let v = items(o);
     let is_map = matches!(
         list_of(o).map(|l| l.0),

@@ -351,6 +351,9 @@ pub(crate) fn set_body(vm: &mut Vm, d: NodeId, v: Value) -> R<()> {
     if cur == Some(new) {
         return Ok(());
     }
+    if with_arena(|a| a.document_element(d).is_none()) {
+        return throw_dom_msg(vm, "A body can only be set if there is a document element", 3);
+    }
     // Only documents with an html root get a body (DOM Standard note).
     if with_arena(|a| html_root(a, d).is_none()) {
         return Ok(());
