@@ -387,8 +387,125 @@ fn list_debug(vm: &mut Vm, o: &ObjRef) -> Option<PhpArray> {
     Some(out)
 }
 
+/// What a dimension key of a collection selects.
+enum DimKey {
+    Index(i64),
+    Name(String),
+    Nothing,
+}
+
+/// Dimension access on collections: `$list[0]`, `$attrs['name']`,
+/// `$collection['id']` (tests bug67949.phpt, modern/spec/
+/// NodeList_dimensions.phpt, NamedNodeMap_dimensions.phpt).
+fn list_dim(
+    vm: &mut Vm,
+    o: &ObjRef,
+    key: Option<&Value>,
+    op: crate::class::ObjAccess,
+) -> Option<R<Value>> {
+    use crate::class::ObjAccess as DimOp;
+    let (kind, modern) = list_of(o)?;
+    if matches!(kind, ListKind::ClassList(_)) {
+        return None;
+    }
+    let cname = vm.class_of(o).name.to_string_lossy();
+    let Some(key) = key else {
+        let m = if modern {
+            format!("Cannot append to {cname}")
+        } else {
+            format!("Cannot access {cname} without offset")
+        };
+        return Some(vm.throw("Error", &m));
+    };
+    if matches!(op, DimOp::Write(_) | DimOp::Unset) {
+        return None;
+    }
+    let is_map = matches!(
+        kind,
+        ListKind::Attrs(_) | ListKind::Entities(_) | ListKind::Notations(_)
+    );
+    let is_collection = matches!(
+        kind,
+        ListKind::TagName(..) | ListKind::TagNameNS(..) | ListKind::ClassName(..) | ListKind::ChildElements(_)
+    ) && modern;
+    let named_ok = is_map || is_collection;
+    let k = match key.deref() {
+        Value::Int(i) => DimKey::Index(i),
+        Value::Float(f) => {
+            if f.fract() != 0.0 && f.is_finite() {
+                if let Err(e) = vm.deprecated(&format!(
+                    "Implicit conversion from float {} to int loses precision",
+                    goro_runtime::convert::float_to_string(f, 17).to_string_lossy()
+                )) {
+                    return Some(Err(e));
+                }
+            }
+            DimKey::Index(f as i64)
+        }
+        Value::Str(s) => match goro_runtime::array::canonical_int(s.as_bytes()) {
+            Some(i) => DimKey::Index(i),
+            None => {
+                if named_ok {
+                    DimKey::Name(s8(&s))
+                } else if modern {
+                    return Some(vm.throw(
+                        "TypeError",
+                        &format!("Cannot access offset of type string on {cname}"),
+                    ));
+                } else {
+                    DimKey::Nothing
+                }
+            }
+        },
+        Value::Bool(_) | Value::Null if modern => {
+            let t = crate::class::TypeName::tname(&key.deref());
+            return Some(vm.throw(
+                "TypeError",
+                &format!("Cannot access offset of type {t} on {cname}"),
+            ));
+        }
+        Value::Bool(b) => DimKey::Index(b as i64),
+        Value::Null => DimKey::Index(0),
+        _ => DimKey::Nothing,
+    };
+    let found = match k {
+        DimKey::Index(i) if i < 0 => {
+            if is_map && !modern {
+                return Some(vm.throw("ValueError", "must be between 0 and 2147483647"));
+            }
+            None
+        }
+        DimKey::Index(i) => items(o).get(i as usize).copied(),
+        DimKey::Name(name) => {
+            let v = items(o);
+            with_arena(|ar| {
+                if is_collection {
+                    v.into_iter().find(|&n| {
+                        ar.get_attribute(n, "id").as_deref() == Some(name.as_str())
+                            || (ar.element(n).is_some_and(|e| {
+                                e.name.ns.as_deref() == Some(goro_xml::tree::HTML_NS)
+                            }) && ar.get_attribute(n, "name").as_deref() == Some(name.as_str()))
+                    })
+                } else {
+                    v.into_iter().find(|&n| ar.node_name(n) == name)
+                }
+            })
+        }
+        DimKey::Nothing => None,
+    };
+    Some(match op {
+        DimOp::Isset => Ok(Value::Bool(found.is_some())),
+        DimOp::Empty => Ok(Value::Bool(found.is_none())),
+        _ => match found {
+            Some(n) => wrap_node(vm, n),
+            None => Ok(Value::Null),
+        },
+    })
+}
+
 pub fn list_hooks() -> NativeHooks {
     NativeHooks {
+        dim: Some(list_dim),
         count: Some(|vm, o| {
             if let Some((ListKind::ClassList(el), _)) = list_of(o) {
                 return match super::modern::token_list_prop(vm, el, "length", false, Value::Null)?
