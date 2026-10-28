@@ -1683,18 +1683,18 @@ fn assert(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if vm.to_bool(&v) {
         return Ok(Value::Bool(true));
     }
-    let desc = a.val(1);
-    match desc {
-        Value::Object(o) => Err(Unwind::Throw(o)),
-        Value::Str(s) => {
-            let e = vm.create_exception("AssertionError", &s.to_string_lossy(), 0)?;
-            Err(Unwind::Throw(e))
-        }
-        _ => {
-            let e = vm.create_exception("AssertionError", "assert(false)", 0)?;
-            Err(Unwind::Throw(e))
-        }
+    if vm
+        .get_ini(b"assert.active")
+        .is_some_and(|v| goro_runtime::convert::str_to_int(&v) == 0)
+    {
+        return Ok(Value::Bool(true));
     }
+    let desc = match a.val(1) {
+        Value::Null => Value::from("assert(false)"),
+        d => d,
+    };
+    // assert.callback / assert.exception / assert.warning / assert.bail.
+    super::misc::assert_failed(vm, desc)
 }
 
 // ---------------------------------------------------------------- ini
