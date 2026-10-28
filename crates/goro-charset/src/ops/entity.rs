@@ -5,7 +5,6 @@
 //! A conversion map is a list of `[start, end, offset, mask]` quads; the
 //! caller validates the array (its length must be a multiple of 4).
 
-use crate::codec::ERR;
 use crate::{Encoding, Subst, convert};
 
 /// One `[start, end, offset, mask]` entry of a conversion map.
@@ -44,9 +43,9 @@ pub fn encode_numericentity(
     let cps = convert::decode(s, enc);
     let mut out = Vec::with_capacity(cps.len());
     for &cp in &cps {
-        let hit = (cp != ERR)
-            .then(|| map.iter().find(|m| m.start <= cp && cp <= m.end))
-            .flatten();
+        // The invalid-input marker 0xFFFFFFFF is mapped like any value
+        // (test mb_encode_numericentity_large_ints.phpt).
+        let hit = map.iter().find(|m| m.start <= cp && cp <= m.end);
         match hit {
             Some(m) => {
                 let v = cp.wrapping_add(m.offset) & m.mask;
@@ -83,6 +82,7 @@ pub fn decode_numericentity(s: &[u8], map: &[MapEntry], enc: Encoding, sub: &Sub
         let start = i + 2 + hex as usize;
         let mut j = start;
         let mut v: u32 = 0;
+        let mut overflow = false;
         let max = if hex { 8 } else { 10 };
         while j < n {
             let c = cps[j];
@@ -93,11 +93,17 @@ pub fn decode_numericentity(s: &[u8], map: &[MapEntry], enc: Encoding, sub: &Sub
                 _ => break,
             };
             // The value wraps at 32 bits (observed on PHP 8.5).
+            // A value over u32::MAX / 10 before the next decimal digit
+            // makes it no entity ("&#7001492542" stays as it is, test
+            // mb_decode_numericentity_large_ints.phpt), but the last step
+            // can still wrap at 32 bits (observed on PHP 8.5:
+            // "&#4294967296;" decodes to U+0000).
+            overflow |= !hex && v > u32::MAX / 10;
             v = v.wrapping_mul(if hex { 16 } else { 10 }).wrapping_add(d);
             j += 1;
         }
         let ndig = j - start;
-        if ndig == 0 || ndig > max {
+        if ndig == 0 || ndig > max || overflow {
             // Not an entity: copy what was scanned; a '&' starts afresh.
             out.extend_from_slice(&cps[i..j]);
             i = j;
