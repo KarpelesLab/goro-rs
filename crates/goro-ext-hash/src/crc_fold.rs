@@ -2,7 +2,7 @@
 //! Computation for Generic Polynomials Using PCLMULQDQ Instruction", Intel,
 //! 2009), for long inputs on x86_64 CPUs with PCLMULQDQ.
 //!
-//! Four 128-bit accumulators fold 64 bytes at a time; they are then folded
+//! Eight 128-bit accumulators fold 128 bytes at a time; they are then folded
 //! into one, and the CRC of that last 128-bit value (which is congruent to
 //! the message so far) is finished with the byte table. The folding
 //! constants are x^n mod P, computed at compile time.
@@ -49,23 +49,23 @@ pub(crate) const fn normal_consts(d: u32, poly: u64) -> (u64, u64) {
     (xpow_mod(d, poly), xpow_mod(d + 64, poly))
 }
 
-/// The constants of one CRC: folding by 512 and by 128 bits.
+/// The constants of one CRC: folding by 1024 and by 128 bits.
 #[derive(Clone, Copy)]
 pub(crate) struct Consts {
-    pub k512: (u64, u64),
+    pub kbig: (u64, u64),
     pub k128: (u64, u64),
 }
 
 pub(crate) const fn reflected(poly: u64) -> Consts {
     Consts {
-        k512: reflected_consts(512, poly),
+        kbig: reflected_consts(1024, poly),
         k128: reflected_consts(128, poly),
     }
 }
 
 pub(crate) const fn normal(poly: u64) -> Consts {
     Consts {
-        k512: normal_consts(512, poly),
+        kbig: normal_consts(1024, poly),
         k128: normal_consts(128, poly),
     }
 }
@@ -99,7 +99,7 @@ mod x86 {
         }
     }
 
-    /// Folds `data` (at least 64 bytes, a multiple of 16) for a reflected
+    /// Folds `data` (at least 128 bytes, a multiple of 16) for a reflected
     /// CRC whose register is `crc`; returns the 16 bytes left to finish
     /// with the table, starting from a zero register.
     ///
@@ -108,24 +108,28 @@ mod x86 {
     #[target_feature(enable = "pclmulqdq,sse4.1,ssse3")]
     pub(crate) unsafe fn fold_reflected(crc: u32, data: &[u8], c: &Consts) -> [u8; 16] {
         // SAFETY: loads stay inside `data`, whose length is a multiple of
-        // 16 and at least 64.
+        // 16 and at least 128.
         unsafe {
             let p = data.as_ptr() as *const __m128i;
             let n = data.len() / 16;
-            let k512 = _mm_set_epi64x(c.k512.1 as i64, c.k512.0 as i64);
+            let kbig = _mm_set_epi64x(c.kbig.1 as i64, c.kbig.0 as i64);
             let k128 = _mm_set_epi64x(c.k128.1 as i64, c.k128.0 as i64);
             let mut x = [
                 _mm_xor_si128(_mm_loadu_si128(p), _mm_cvtsi32_si128(crc as i32)),
                 _mm_loadu_si128(p.add(1)),
                 _mm_loadu_si128(p.add(2)),
                 _mm_loadu_si128(p.add(3)),
+                _mm_loadu_si128(p.add(4)),
+                _mm_loadu_si128(p.add(5)),
+                _mm_loadu_si128(p.add(6)),
+                _mm_loadu_si128(p.add(7)),
             ];
-            let mut i = 4;
-            while i + 4 <= n {
+            let mut i = 8;
+            while i + 8 <= n {
                 for (j, xj) in x.iter_mut().enumerate() {
-                    *xj = _mm_xor_si128(fold(*xj, k512), _mm_loadu_si128(p.add(i + j)));
+                    *xj = _mm_xor_si128(fold(*xj, kbig), _mm_loadu_si128(p.add(i + j)));
                 }
-                i += 4;
+                i += 8;
             }
             let mut y = x[0];
             for xj in &x[1..] {
@@ -155,20 +159,24 @@ mod x86 {
             // significant one.
             let rev = _mm_set_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
             let ld = |k: usize| _mm_shuffle_epi8(_mm_loadu_si128(p.add(k)), rev);
-            let k512 = _mm_set_epi64x(c.k512.1 as i64, c.k512.0 as i64);
+            let kbig = _mm_set_epi64x(c.kbig.1 as i64, c.kbig.0 as i64);
             let k128 = _mm_set_epi64x(c.k128.1 as i64, c.k128.0 as i64);
             let mut x = [
                 _mm_xor_si128(ld(0), _mm_set_epi32(crc as i32, 0, 0, 0)),
                 ld(1),
                 ld(2),
                 ld(3),
+                ld(4),
+                ld(5),
+                ld(6),
+                ld(7),
             ];
-            let mut i = 4;
-            while i + 4 <= n {
+            let mut i = 8;
+            while i + 8 <= n {
                 for (j, xj) in x.iter_mut().enumerate() {
-                    *xj = _mm_xor_si128(fold(*xj, k512), ld(i + j));
+                    *xj = _mm_xor_si128(fold(*xj, kbig), ld(i + j));
                 }
-                i += 4;
+                i += 8;
             }
             let mut y = x[0];
             for xj in &x[1..] {

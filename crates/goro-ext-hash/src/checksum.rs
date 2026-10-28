@@ -204,7 +204,7 @@ impl Engine for Crc32 {
         if data.len() >= 256 && crate::crc_fold::available() {
             let n = data.len() & !15;
             // SAFETY: the CPU has PCLMULQDQ and SSE4.1; `n` is a multiple
-            // of 16 and at least 64.
+            // of 16 and at least 128.
             let rest = unsafe {
                 match self.kind {
                     CrcKind::Bzip => crate::crc_fold::fold_normal(self.c, &data[..n], &FOLD_BZIP),
