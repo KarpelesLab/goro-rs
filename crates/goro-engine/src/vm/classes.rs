@@ -1995,6 +1995,9 @@ pub(crate) fn copy_hooks(h: &NativeHooks) -> NativeHooks {
         do_operation: h.do_operation,
         do_unary: h.do_unary,
         unserialize_legacy: h.unserialize_legacy,
+        prop: h.prop,
+        dim: h.dim,
+        destroy: h.destroy,
     }
 }
 

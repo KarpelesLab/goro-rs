@@ -2855,7 +2855,15 @@ impl Vm {
             self.dtor_depth += 1;
             let r = self.call_func_this(&d, Some(o.clone()), Vec::new());
             self.dtor_depth -= 1;
+            if r.is_err()
+                && let Some(h) = cls.native.destroy
+            {
+                h(self, &o);
+            }
             r?;
+        }
+        if let Some(h) = cls.native.destroy {
+            h(self, &o);
         }
         drop(o);
         Ok(())
