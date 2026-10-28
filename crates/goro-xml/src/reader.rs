@@ -107,7 +107,7 @@ impl Sink for ReaderSink<'_, '_> {
     fn doctype(&mut self, d: &DtdData, x: Option<&DtdData>) {
         self.tb.doctype(d, x)
     }
-    fn start_element(&mut self, tag: &StartTag<'_>) {
+    fn start_element(&mut self, tag: &mut StartTag<'_>) {
         self.tb.start_element(tag);
         let el = self.tb.current();
         if tag.empty {

@@ -501,13 +501,13 @@ impl<'a> TreeBuilder<'a> {
         let owner = self.owner;
         let el = self.arena.create(
             owner,
-            NodeData::Element(Box::new(ElementData {
+            NodeData::Element(ElementData {
                 name,
                 first_attr: None,
                 last_attr: None,
                 ns_decls: Vec::new(),
                 template_contents: None,
-            })),
+            }),
         );
         let line = if tag.start == 0 && tag.name_first == 0 && tag.attrs.is_empty() {
             // Implied element: no source position.
@@ -554,11 +554,11 @@ impl<'a> TreeBuilder<'a> {
             };
             let at = self.arena.create(
                 owner,
-                NodeData::Attribute(Box::new(AttrData {
+                NodeData::Attribute(AttrData {
                     name: q,
                     is_id: false,
                     defaulted: false,
-                })),
+                }),
             );
             self.arena.node_mut(at).line = line;
             if !a.value.is_empty() {

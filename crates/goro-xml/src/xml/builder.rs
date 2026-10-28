@@ -68,6 +68,22 @@ impl<'a> TreeBuilder<'a> {
         self.append(t);
     }
 
+    /// Links an attribute node at the end of an element's attribute list
+    /// (no ID registration).
+    fn link_attr(&mut self, el: NodeId, a: NodeId) {
+        let last = self.arena.element(el).and_then(|e| e.last_attr);
+        {
+            let node = self.arena.node_mut(a);
+            node.parent = Some(el);
+            node.prev = last;
+        }
+        match last {
+            Some(l) => self.arena.node_mut(l).next = Some(a),
+            None => self.arena.element_mut(el).unwrap().first_attr = Some(a),
+        }
+        self.arena.element_mut(el).unwrap().last_attr = Some(a);
+    }
+
     fn report(&mut self, code: u32, msg: String) {
         self.errors.push(XmlError {
             domain: Domain::Valid,
@@ -107,11 +123,11 @@ impl Sink for TreeBuilder<'_> {
         self.line = line;
     }
 
-    fn start_element(&mut self, tag: &StartTag<'_>) {
+    fn start_element(&mut self, tag: &mut StartTag<'_>) {
         self.line = tag.line;
         let el = self.arena.new_element(self.doc, tag.name.clone());
         if self.modern {
-            for d in tag.ns_decls {
+            for d in tag.ns_decls.iter() {
                 let name = match &d.prefix {
                     Some(p) => QName {
                         prefix: Some("xmlns".into()),
@@ -125,20 +141,34 @@ impl Sink for TreeBuilder<'_> {
                     },
                 };
                 let a = self.arena.new_attribute(self.doc, name, &d.uri);
-                self.arena.raw_append_attr(el, a);
+                self.link_attr(el, a);
             }
-        } else if let Some(e) = self.arena.element_mut(el) {
-            e.ns_decls = tag.ns_decls.to_vec();
+        } else if !tag.ns_decls.is_empty()
+            && let Some(e) = self.arena.element_mut(el)
+        {
+            e.ns_decls = std::mem::take(tag.ns_decls);
         }
-        for at in tag.attrs {
+        for at in tag.attrs.iter_mut() {
             let a = self.arena.create(
                 self.doc,
-                NodeData::Attribute(Box::new(AttrData {
+                NodeData::Attribute(AttrData {
                     name: at.name.clone(),
                     is_id: at.is_id,
                     defaulted: at.defaulted,
-                })),
+                }),
             );
+            self.arena.node_mut(a).line = tag.line;
+            if at.is_id {
+                if self.arena.doc(self.doc).ids.contains_key(&at.value) {
+                    let v = at.value.clone();
+                    self.report(513, format!("ID {v} already defined\n"));
+                } else {
+                    self.arena
+                        .doc_mut(self.doc)
+                        .ids
+                        .insert(at.value.clone(), el);
+                }
+            }
             match (&at.pieces, self.noent) {
                 (Some(pieces), false) => {
                     for p in pieces {
@@ -153,52 +183,13 @@ impl Sink for TreeBuilder<'_> {
                 }
                 _ => {
                     if !at.value.is_empty() {
-                        let t = self.arena.new_text(self.doc, at.value.as_str());
+                        let t = self.arena.new_text(self.doc, std::mem::take(&mut at.value));
                         self.arena.raw_append(a, t);
                     }
                 }
             }
-            self.arena.node_mut(a).line = tag.line;
-            if at.is_id {
-                let ids = &self.arena.doc(self.doc).ids;
-                if ids.contains_key(&at.value) {
-                    let v = at.value.clone();
-                    self.report(513, format!("ID {v} already defined\n"));
-                    // The attribute stays an ID-typed attribute but the
-                    // first element keeps the ID.
-                    self.arena.attr_mut(a).unwrap().is_id = true;
-                    // Append without registering.
-                    let last = self.arena.element(el).and_then(|e| e.last_attr);
-                    {
-                        let node = self.arena.node_mut(a);
-                        node.parent = Some(el);
-                        node.prev = last;
-                    }
-                    match last {
-                        Some(l) => self.arena.node_mut(l).next = Some(a),
-                        None => self.arena.element_mut(el).unwrap().first_attr = Some(a),
-                    }
-                    self.arena.element_mut(el).unwrap().last_attr = Some(a);
-                    continue;
-                }
-                self.arena
-                    .doc_mut(self.doc)
-                    .ids
-                    .insert(at.value.clone(), el);
-            }
-            // raw_append_attr registers IDs only for connected elements;
-            // the element is not attached yet, so register above.
-            let last = self.arena.element(el).and_then(|e| e.last_attr);
-            {
-                let node = self.arena.node_mut(a);
-                node.parent = Some(el);
-                node.prev = last;
-            }
-            match last {
-                Some(l) => self.arena.node_mut(l).next = Some(a),
-                None => self.arena.element_mut(el).unwrap().first_attr = Some(a),
-            }
-            self.arena.element_mut(el).unwrap().last_attr = Some(a);
+            // IDs were registered above: the element is not attached yet.
+            self.link_attr(el, a);
         }
         self.append(el);
         self.cur = el;
@@ -212,6 +203,17 @@ impl Sink for TreeBuilder<'_> {
 
     fn text(&mut self, text: &str) {
         self.add_text(text);
+    }
+
+    fn text_owned(&mut self, text: String) {
+        if let Some(last) = self.arena.last_child(self.cur)
+            && let NodeData::Text(t) = &mut self.arena.node_mut(last).data
+        {
+            t.push_str(&text);
+            return;
+        }
+        let t = self.arena.new_text(self.doc, text);
+        self.append(t);
     }
 
     fn cdata(&mut self, text: &str) {

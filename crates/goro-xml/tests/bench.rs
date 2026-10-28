@@ -37,10 +37,18 @@ fn html_document(n: usize) -> String {
     s
 }
 
+/// Records in the documents (`BENCH_N`, default 20000).
+fn bench_n() -> usize {
+    std::env::var("BENCH_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20000)
+}
+
 #[test]
 #[ignore]
 fn bench_parse_serialize() {
-    let doc = document(20000);
+    let doc = document(bench_n());
     let bytes = doc.as_bytes();
     let mut best_parse = f64::MAX;
     let mut best_save = f64::MAX;
@@ -65,7 +73,7 @@ fn bench_parse_serialize() {
         best_save * 1000.0,
         out_len
     );
-    let h = html_document(20000);
+    let h = html_document(bench_n());
     let mut best_parse = f64::MAX;
     let mut best_save = f64::MAX;
     for _ in 0..5 {

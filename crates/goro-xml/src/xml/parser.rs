@@ -55,10 +55,12 @@ pub struct Attribute {
 pub struct StartTag<'a> {
     /// The element name (with namespace when namespaces are processed).
     pub name: &'a QName,
-    /// Attributes, in document order, then defaulted ones.
-    pub attrs: &'a [Attribute],
-    /// Namespace declarations on this element, in document order.
-    pub ns_decls: &'a [NsDecl],
+    /// Attributes, in document order, then defaulted ones (a sink may take
+    /// the values).
+    pub attrs: &'a mut [Attribute],
+    /// Namespace declarations on this element, in document order (a sink
+    /// may take them).
+    pub ns_decls: &'a mut Vec<NsDecl>,
     /// Source line of the `<`.
     pub line: u32,
     /// `<a/>`
@@ -120,7 +122,7 @@ pub struct Parser<'l> {
     phase: Phase,
     stack: Vec<Open>,
     ns: Vec<(Option<Str>, Str)>,
-    names: HashSet<Str>,
+    names: HashSet<Str, crate::fxhash::FxBuild>,
     /// The internal subset, once read.
     pub dtd: Option<DtdData>,
     /// The external subset, when loaded.
@@ -160,6 +162,9 @@ pub struct Parser<'l> {
     pub(crate) pe_from_internal: bool,
     pub(crate) splices: usize,
     cr_positions: Vec<usize>,
+    text_span: Option<(usize, usize)>,
+    raw_attr_buf: Vec<RawAttr>,
+    attr_buf: Vec<Attribute>,
     utf8_chunks: bool,
     final_pending: bool,
     cr_next: usize,
@@ -201,7 +206,7 @@ impl<'l> Parser<'l> {
             phase: Phase::Start,
             stack: Vec::new(),
             ns: Vec::new(),
-            names: HashSet::new(),
+            names: HashSet::default(),
             dtd: None,
             ext: None,
             standalone: -1,
@@ -233,6 +238,9 @@ impl<'l> Parser<'l> {
             pe_from_internal: false,
             splices: 0,
             cr_positions: Vec::new(),
+            text_span: None,
+            raw_attr_buf: Vec::new(),
+            attr_buf: Vec::new(),
             utf8_chunks: false,
             final_pending: false,
             cr_next: 0,
@@ -371,7 +379,7 @@ impl<'l> Parser<'l> {
     /// The current position as [`Parser::orig_position`] gives it, with
     /// pending character data not yet consumed.
     pub fn sax_position(&mut self) -> (usize, u32, u32) {
-        let p = if self.text.is_empty() {
+        let p = if !self.has_text() {
             self.pos
         } else {
             self.text_begin
@@ -505,6 +513,24 @@ impl<'l> Parser<'l> {
                 }
             }
         }
+        if self.buf.is_empty() && cut == raw.len() {
+            // Whole input at once: validate and normalize in place.
+            let mut v = raw;
+            if v.starts_with(&[0xEF, 0xBB, 0xBF]) {
+                v.drain(..3);
+            }
+            if let Err(e) =
+                simdutf8::basic::from_utf8(&v).map_err(|_| std::str::from_utf8(&v).unwrap_err())
+            {
+                v.truncate(e.valid_up_to());
+                self.enc_error = true;
+            }
+            let mut cr = Vec::new();
+            crate::encoding::normalize_newlines_tracked(&mut v, self.opts.sax.then_some(&mut cr));
+            self.cr_positions = cr;
+            self.buf = v;
+            return;
+        }
         let d = if self.buf.is_empty() || !raw.starts_with(&[0xEF, 0xBB, 0xBF]) {
             crate::encoding::decode(&raw[..cut], None)
         } else {
@@ -603,11 +629,30 @@ impl<'l> Parser<'l> {
     /// Reads a `Name` at the position; returns the slice range.
     pub(crate) fn scan_name(&mut self) -> Option<(usize, usize)> {
         let start = self.pos;
-        let c = self.char_at(self.pos)?;
-        if !is_name_start(c) {
-            return None;
+        // ASCII fast path.
+        if let Some(&b0) = self.buf.get(start)
+            && (b0.is_ascii_alphabetic() || b0 == b'_' || b0 == b':')
+        {
+            let buf = &self.buf;
+            let mut i = start + 1;
+            while i < buf.len() && NAME_ASCII[buf[i] as usize] {
+                i += 1;
+            }
+            if i >= buf.len() {
+                self.hit_eof.set(true);
+            }
+            if i >= buf.len() || buf[i] < 0x80 {
+                self.pos = i;
+                return Some((start, i));
+            }
+            self.pos = i;
+        } else {
+            let c = self.char_at(self.pos)?;
+            if !is_name_start(c) {
+                return None;
+            }
+            self.pos += c.len_utf8();
         }
-        self.pos += c.len_utf8();
         loop {
             let b = self.at(self.pos);
             if b < 0x80 {
@@ -759,6 +804,9 @@ impl<'l> Parser<'l> {
     }
 
     fn flush_errors(&mut self, sink: &mut dyn Sink) {
+        if self.errs.is_empty() {
+            return;
+        }
         for e in self.errs.drain(..) {
             sink.error(&e);
             self.errors.push(e);
@@ -985,6 +1033,13 @@ impl<'l> Parser<'l> {
         let len = full.min(limit);
         let mut i = self.pos;
         while i < len {
+            // Fast path over ordinary bytes.
+            while i < len && !TEXT_SPECIAL[buf[i] as usize] {
+                i += 1;
+            }
+            if i >= len {
+                break;
+            }
             let b = buf[i];
             match b {
                 b'<' | b'&' => break,
@@ -1059,22 +1114,47 @@ impl<'l> Parser<'l> {
 
     fn text_push(&mut self, start: usize, end: usize) {
         if end > start {
-            if self.text.is_empty() {
+            if self.text.is_empty() && self.text_span.is_none() {
                 self.text_begin = start;
+                if self.entity_stack.is_empty() {
+                    // Kept as a range until something else is appended.
+                    self.text_span = Some((start, end));
+                    return;
+                }
             }
+            self.text_materialize();
             let s = unsafe { std::str::from_utf8_unchecked(&self.buf[start..end]) };
             self.text.push_str(s);
         }
     }
 
+    /// Copies pending character data kept as a buffer range.
+    fn text_materialize(&mut self) {
+        if let Some((a, b)) = self.text_span.take() {
+            let s = unsafe { std::str::from_utf8_unchecked(&self.buf[a..b]) };
+            self.text.push_str(s);
+        }
+    }
+
+    fn has_text(&self) -> bool {
+        !self.text.is_empty() || self.text_span.is_some()
+    }
+
     fn flush_text(&mut self, sink: &mut dyn Sink, before_end_tag: bool) {
-        if self.text.is_empty() {
+        if !self.has_text() {
             return;
         }
         if self.opts.sax {
             self.emit_position(sink, self.pos);
         }
-        let text = std::mem::take(&mut self.text);
+        let text = match self.text_span.take() {
+            Some((a, b)) => String::from(unsafe { std::str::from_utf8_unchecked(&self.buf[a..b]) }),
+            None => {
+                let t = String::from(self.text.as_str());
+                self.text.clear();
+                t
+            }
+        };
         let blank = text.bytes().all(is_space);
         let ignorable = blank && self.is_ignorable_blank(before_end_tag);
         if let Some(o) = self.stack.last_mut() {
@@ -1082,13 +1162,11 @@ impl<'l> Parser<'l> {
                 sink.ignorable_whitespace(&text);
             } else {
                 o.had_text = true;
-                sink.text(&text);
+                sink.text_owned(text);
             }
         } else if !blank || self.fragment {
-            sink.text(&text);
+            sink.text_owned(text);
         }
-        self.text = text;
-        self.text.clear();
     }
 
     /// The "blank node" judgement for LIBXML_NOBLANKS (observed on
@@ -1441,6 +1519,7 @@ impl<'l> Parser<'l> {
                         if let Some(o) = self.stack.last_mut() {
                             o.had_text = true;
                         }
+                        self.text_materialize();
                         self.text.push_str(&text);
                     } else {
                         sink.cdata(&text);
@@ -1480,7 +1559,8 @@ impl<'l> Parser<'l> {
         let raw_name = self.intern_range(nr);
         let line = self.line(tag_start);
         self.name_end_lc = Some(self.pos);
-        let mut raw_attrs: Vec<RawAttr> = Vec::new();
+        let mut raw_attrs = std::mem::take(&mut self.raw_attr_buf);
+        raw_attrs.clear();
         let mut empty = false;
         let mut failed = false;
         loop {
@@ -1599,20 +1679,23 @@ impl<'l> Parser<'l> {
                 ),
             ));
         }
-        self.finish_start_tag(sink, &raw_name, raw_attrs, line, empty)
+        self.finish_start_tag(sink, raw_name, raw_attrs, line, empty)
     }
 
     fn finish_start_tag(
         &mut self,
         sink: &mut dyn Sink,
-        raw_name: &str,
-        raw_attrs: Vec<RawAttr>,
+        raw_str: Str,
+        mut raw_attrs: Vec<RawAttr>,
         line: u32,
         empty: bool,
     ) -> R<()> {
+        let raw_rc = raw_str.clone();
+        let raw_name: &str = &raw_rc;
         let ns_mark = self.ns.len();
         let mut ns_decls: Vec<NsDecl> = Vec::new();
-        let mut attrs: Vec<Attribute> = Vec::with_capacity(raw_attrs.len());
+        let mut attrs = std::mem::take(&mut self.attr_buf);
+        attrs.clear();
         // DTD info for this element.
         let decls: Vec<crate::tree::AttrDecl> = self.attr_decls(raw_name);
         let mut preserve = self.stack.last().is_some_and(|o| o.preserve);
@@ -1636,7 +1719,7 @@ impl<'l> Parser<'l> {
             pieces,
             name_lc,
             value_lc,
-        } in raw_attrs
+        } in raw_attrs.drain(..)
         {
             if !in_entity {
                 self.err_at = Some(value_lc);
@@ -1810,7 +1893,7 @@ impl<'l> Parser<'l> {
                     let ns = self.resolve(None);
                     QName {
                         prefix: None,
-                        local: self.intern(raw_name),
+                        local: raw_str.clone(),
                         ns,
                     }
                 }
@@ -1818,7 +1901,7 @@ impl<'l> Parser<'l> {
         } else {
             QName {
                 prefix: None,
-                local: self.intern(raw_name),
+                local: raw_str.clone(),
                 ns: None,
             }
         };
@@ -1900,10 +1983,10 @@ impl<'l> Parser<'l> {
             sink.raw(&raw);
         }
         if !self.stopped {
-            sink.start_element(&StartTag {
+            sink.start_element(&mut StartTag {
                 name: &name,
-                attrs: &attrs,
-                ns_decls: &ns_decls,
+                attrs: &mut attrs,
+                ns_decls: &mut ns_decls,
                 line,
                 empty,
             });
@@ -1920,7 +2003,7 @@ impl<'l> Parser<'l> {
                 self.phase = Phase::Epilog;
             }
         } else {
-            let raw = self.intern(raw_name);
+            let raw = raw_str;
             self.stack.push(Open {
                 name,
                 raw,
@@ -1931,6 +2014,9 @@ impl<'l> Parser<'l> {
                 had_child: false,
             });
         }
+        attrs.clear();
+        self.attr_buf = attrs;
+        self.raw_attr_buf = raw_attrs;
         Ok(())
     }
 
@@ -2111,6 +2197,7 @@ impl<'l> Parser<'l> {
             if self.opts.split_text_at_refs {
                 self.flush_text(sink, false);
             }
+            self.text_materialize();
             self.text.push(c);
             if self.opts.split_text_at_refs {
                 self.flush_text(sink, false);
@@ -2143,6 +2230,7 @@ impl<'l> Parser<'l> {
             if self.opts.split_text_at_refs {
                 self.flush_text(sink, false);
             }
+            self.text_materialize();
             self.text.push(c);
             if self.opts.split_text_at_refs {
                 self.flush_text(sink, false);
@@ -2322,6 +2410,7 @@ impl<'l> Parser<'l> {
         }
         self.phase = saved_phase;
         self.entity_stack.pop();
+        self.text_materialize();
         self.buf = saved_buf;
         self.pos = saved_pos;
         self.final_ = saved_final;
@@ -2632,3 +2721,30 @@ pub fn resolve_system_id(system: &str, base: Option<&str>) -> String {
         None => system.to_string(),
     }
 }
+
+/// Bytes that end or need a check in a run of character data.
+static TEXT_SPECIAL: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut i = 0;
+    while i < 0x20 {
+        t[i] = !matches!(i as u8, b'\t' | b'\n' | b'\r');
+        i += 1;
+    }
+    t[b'<' as usize] = true;
+    t[b'&' as usize] = true;
+    t[b']' as usize] = true;
+    t[0xEF] = true;
+    t
+};
+
+/// ASCII bytes allowed after the first character of a name (XML 1.0 [4a]).
+static NAME_ASCII: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut i = 0;
+    while i < 128 {
+        let b = i as u8;
+        t[i] = b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':');
+        i += 1;
+    }
+    t
+};

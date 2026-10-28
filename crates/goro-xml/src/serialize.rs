@@ -170,7 +170,10 @@ impl Writer<'_> {
                 }
             }
             NodeData::Element(e) => {
-                let name = e.name.qualified();
+                let name: std::borrow::Cow<str> = match &e.name.prefix {
+                    None => std::borrow::Cow::Borrowed(&e.name.local),
+                    Some(_) => std::borrow::Cow::Owned(e.name.qualified()),
+                };
                 self.out.push('<');
                 self.out.push_str(&name);
                 let scope_mark = self.scope.len();
@@ -344,7 +347,11 @@ impl Writer<'_> {
     fn attr(&mut self, a: NodeId) {
         let arena = self.arena;
         let ad = arena.attr(a).unwrap();
-        self.out.push_str(&ad.name.qualified());
+        if let Some(p) = &ad.name.prefix {
+            self.out.push_str(p);
+            self.out.push(':');
+        }
+        self.out.push_str(&ad.name.local);
         self.out.push_str("=\"");
         for c in arena.children(a) {
             match arena.data(c) {

@@ -157,11 +157,15 @@ pub trait Sink {
     /// when loaded, external subset).
     fn doctype(&mut self, _dtd: &DtdData, _external: Option<&DtdData>) {}
     /// A start tag.
-    fn start_element(&mut self, tag: &StartTag<'_>);
+    fn start_element(&mut self, tag: &mut StartTag<'_>);
     /// An end tag (also after an empty-element tag).
     fn end_element(&mut self, name: &QName);
     /// Character data.
     fn text(&mut self, text: &str);
+    /// Character data the sink may keep.
+    fn text_owned(&mut self, text: String) {
+        self.text(&text)
+    }
     /// Whitespace the parser judged ignorable (LIBXML_NOBLANKS).
     fn ignorable_whitespace(&mut self, _text: &str) {}
     /// A CDATA section (with LIBXML_NOCDATA this comes as `text`).

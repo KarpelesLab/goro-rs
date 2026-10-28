@@ -460,9 +460,9 @@ pub enum NodeData {
     /// A document fragment.
     Fragment,
     /// An element.
-    Element(Box<ElementData>),
+    Element(ElementData),
     /// An attribute.
-    Attribute(Box<AttrData>),
+    Attribute(AttrData),
     /// Text.
     Text(String),
     /// A CDATA section.
@@ -715,13 +715,13 @@ impl Arena {
     pub fn new_element(&mut self, doc: NodeId, name: QName) -> NodeId {
         self.create(
             doc,
-            NodeData::Element(Box::new(ElementData {
+            NodeData::Element(ElementData {
                 name,
                 first_attr: None,
                 last_attr: None,
                 ns_decls: Vec::new(),
                 template_contents: None,
-            })),
+            }),
         )
     }
 
@@ -735,11 +735,11 @@ impl Arena {
     pub fn new_attribute(&mut self, doc: NodeId, name: QName, value: &str) -> NodeId {
         let a = self.create(
             doc,
-            NodeData::Attribute(Box::new(AttrData {
+            NodeData::Attribute(AttrData {
                 name,
                 is_id: false,
                 defaulted: false,
-            })),
+            }),
         );
         if !value.is_empty() {
             let t = self.new_text(doc, value);

@@ -677,11 +677,11 @@ impl Builder<'_> {
         for (an, v) in attrs {
             let a = self.arena.create(
                 self.doc,
-                NodeData::Attribute(Box::new(AttrData {
+                NodeData::Attribute(AttrData {
                     name: QName::local(&an),
                     is_id: false,
                     defaulted: false,
-                })),
+                }),
             );
             // A boolean attribute without value gets its name as value; other
             // valueless attributes have no value at all (observed on PHP 8.5).

@@ -402,10 +402,10 @@ impl Sink for Adaptor<'_> {
         self.raw.push_str(text);
     }
 
-    fn start_element(&mut self, tag: &StartTag<'_>) {
+    fn start_element(&mut self, tag: &mut StartTag<'_>) {
         let mut prefixes = Vec::new();
         if self.sep.is_some() {
-            for d in tag.ns_decls {
+            for d in tag.ns_decls.iter() {
                 prefixes.push(d.prefix.as_deref().map(str::to_string));
                 if self.handlers.namespace {
                     let p = d.prefix.as_deref().map(|p| self.out(p));
@@ -422,7 +422,7 @@ impl Sink for Adaptor<'_> {
             if self.sep.is_none() {
                 // Without namespace processing xmlns attributes are
                 // ordinary attributes.
-                for d in tag.ns_decls {
+                for d in tag.ns_decls.iter() {
                     let n = match &d.prefix {
                         Some(p) => format!("xmlns:{p}"),
                         None => "xmlns".to_string(),
@@ -434,7 +434,7 @@ impl Sink for Adaptor<'_> {
                     attrs.push((self.out(&n), self.out(&d.uri)));
                 }
             }
-            for a in tag.attrs {
+            for a in tag.attrs.iter() {
                 attrs.push((self.attr_name(&a.name), self.out(&a.value)));
             }
             self.h.start_element(&name, &attrs, &self.pos);

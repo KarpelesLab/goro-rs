@@ -32,6 +32,7 @@ pub mod chars;
 pub mod css;
 pub mod encoding;
 pub mod error;
+pub mod fxhash;
 pub mod html;
 mod html4_entities;
 pub mod html5;
