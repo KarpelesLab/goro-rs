@@ -250,6 +250,12 @@ pub static MODULE: Module = Module {
             "function fputcsv($stream, array $fields, string $separator = \",\", string $enclosure = \"\\\"\", string $escape = \"\\\\\", string $eol = \"\\n\"): int|false",
             fputcsv,
         ),
+        ("function fprintf($stream, string $format, mixed ...$values): int", fprintf),
+        ("function vfprintf($stream, string $format, array $values): int", vfprintf),
+        (
+            "function fscanf($stream, string $format, mixed &...$vars): array|int|false|null",
+            fscanf,
+        ),
         (
             "function fgetcsv($stream, ?int $length = null, string $separator = \",\", string $enclosure = \"\\\"\", string $escape = \"\\\\\"): array|false",
             fgetcsv,
@@ -2469,4 +2475,54 @@ fn str_getcsv(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Array(PhpArray::from_values(
         fields.into_iter().map(|f| Value::Str(PhpStr::from(f))),
     )))
+}
+
+/// Writes formatted output to a stream (fprintf, vfprintf).
+fn write_formatted(vm: &mut Vm, a: &mut Args, out: Vec<u8>) -> R<Value> {
+    with_stream(vm, a, 0, |vm, s| {
+        if !s.writable {
+            vm.notice_msg(&format!(
+                "{}(): Write of {} bytes failed with errno=9 Bad file descriptor",
+                a.fname(),
+                out.len()
+            ))?;
+            return Ok(Value::Int(0));
+        }
+        let _ = s.write_all(vm, &out);
+        Ok(Value::Int(out.len() as i64))
+    })
+}
+
+fn fprintf(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let fmt = a.str(1);
+    let vals: Vec<Value> = a.vals[2..].to_vec();
+    let out = super::string::format_values(vm, a, &fmt, &vals, goro_ext_standard::printf::ArgsKind::Variadic)?;
+    write_formatted(vm, a, out)
+}
+
+fn vfprintf(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let fmt = a.str(1);
+    let vals: Vec<Value> = a.array(2).iter().map(|(_, v)| v.deref()).collect();
+    let out = super::string::format_values(vm, a, &fmt, &vals, goro_ext_standard::printf::ArgsKind::Array)?;
+    write_formatted(vm, a, out)
+}
+
+fn fscanf(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let fmt = a.str(1);
+    let line = with_stream(vm, a, 0, |_vm, s| {
+        let r = read_line(s, None);
+        if let Backing::Memory { data, pos } = &s.backing
+            && *pos >= data.len()
+        {
+            s.eof = true;
+        }
+        Ok(match r {
+            Some(l) => Value::Str(PhpStr::from(l)),
+            None => Value::Bool(false),
+        })
+    })?;
+    match line {
+        Value::Str(l) => super::strmisc::scan_into(vm, a, &l, &fmt, 2),
+        other => Ok(other),
+    }
 }
