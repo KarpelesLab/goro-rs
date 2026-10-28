@@ -24,7 +24,11 @@ pub fn cp437_to_utf8(b: &[u8]) -> Vec<u8> {
             out.push(c);
         } else {
             let mut buf = [0u8; 4];
-            out.extend_from_slice(CP437_HIGH[(c - 0x80) as usize].encode_utf8(&mut buf).as_bytes());
+            out.extend_from_slice(
+                CP437_HIGH[(c - 0x80) as usize]
+                    .encode_utf8(&mut buf)
+                    .as_bytes(),
+            );
         }
     }
     out
@@ -82,7 +86,10 @@ mod tests {
     fn cp437() {
         assert_eq!(cp437_to_utf8(&[0x82, b'/']), "é/".as_bytes());
         assert_eq!(cp437_to_utf8(&[0x91]), "æ".as_bytes());
-        assert_eq!(utf8_to_cp437("Çüéâä").unwrap(), vec![0x80, 0x81, 0x82, 0x83, 0x84]);
+        assert_eq!(
+            utf8_to_cp437("Çüéâä").unwrap(),
+            vec![0x80, 0x81, 0x82, 0x83, 0x84]
+        );
         assert_eq!(decode(&[0x80], false, Decode::Guess), "Ç".as_bytes());
         assert_eq!(decode("è".as_bytes(), false, Decode::Guess), "è".as_bytes());
         assert_eq!(decode(&[0x80], false, Decode::Raw), vec![0x80]);

@@ -16,7 +16,9 @@ use std::borrow::Cow;
 use crate::codec::{self, cm};
 use crate::crypto::{self, AesStrength};
 use crate::error::{Error, Result, er};
-use crate::read::{AesInfo, SIG_CENTRAL, SIG_EOCD, SIG_EOCD64, SIG_EOCD64_LOCATOR, SIG_LOCAL, extra_id, gp};
+use crate::read::{
+    AesInfo, SIG_CENTRAL, SIG_EOCD, SIG_EOCD64, SIG_EOCD64_LOCATOR, SIG_LOCAL, extra_id, gp,
+};
 
 /// Encryption of a [`Payload::Plain`] entry.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -136,7 +138,11 @@ fn push64(v: &mut Vec<u8>, x: u64) {
 }
 
 fn sat32(x: u64) -> u32 {
-    if x >= 0xFFFF_FFFF { 0xFFFF_FFFF } else { x as u32 }
+    if x >= 0xFFFF_FFFF {
+        0xFFFF_FFFF
+    } else {
+        x as u32
+    }
 }
 
 fn deflate_level_bits(level: i32) -> u16 {
@@ -172,8 +178,10 @@ impl ArchiveWriter {
         if e.name.len() > 0xFFFF || e.comment.len() > 0xFFFF {
             return Err(Error::new(er::INVAL));
         }
-        let mut lextra = crate::read::strip_extra(&e.local_extra, &[extra_id::ZIP64, extra_id::AES]);
-        let mut cextra = crate::read::strip_extra(&e.central_extra, &[extra_id::ZIP64, extra_id::AES]);
+        let mut lextra =
+            crate::read::strip_extra(&e.local_extra, &[extra_id::ZIP64, extra_id::AES]);
+        let mut cextra =
+            crate::read::strip_extra(&e.central_extra, &[extra_id::ZIP64, extra_id::AES]);
         let mut flags: u16 = if e.utf8 { gp::UTF8 } else { 0 };
         let (stored, method, crc, size, aes, extra_needed) = match e.payload {
             Payload::Raw {
@@ -421,7 +429,7 @@ pub const TORRENTZIP_DATE: u16 = 0x2198;
 
 /// Writes `(name, data)` entries as a TorrentZip archive.
 pub fn torrentzip(mut entries: Vec<(Vec<u8>, Vec<u8>)>) -> Result<Vec<u8>> {
-    entries.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
+    entries.sort_by_key(|a| a.0.to_ascii_lowercase());
     let mut w = ArchiveWriter::new();
     for (name, data) in entries {
         let crc = crate::crc::crc32(&data);
@@ -463,7 +471,12 @@ pub fn torrentzip(mut entries: Vec<(Vec<u8>, Vec<u8>)>) -> Result<Vec<u8>> {
 
 /// Whether `comment` is the TorrentZip comment of the central directory
 /// at `cd_offset..cd_offset + cd_size` of `data`.
-pub fn torrentzip_comment_matches(comment: &[u8], data: &[u8], cd_offset: u64, cd_size: u64) -> bool {
+pub fn torrentzip_comment_matches(
+    comment: &[u8],
+    data: &[u8],
+    cd_offset: u64,
+    cd_size: u64,
+) -> bool {
     let Some(hex) = comment.strip_prefix(b"TORRENTZIPPED-") else {
         return false;
     };
@@ -498,13 +511,25 @@ mod tests {
     #[test]
     fn roundtrip() {
         let text = b"hello hello hello hello hello hello".to_vec();
-        let mut e1 = WriteEntry::new(b"a.txt".to_vec(), 1_577_232_000, plain(&text, cm::DEFLATE, Encryption::None));
+        let mut e1 = WriteEntry::new(
+            b"a.txt".to_vec(),
+            1_577_232_000,
+            plain(&text, cm::DEFLATE, Encryption::None),
+        );
         e1.comment = b"first".to_vec();
-        let e2 = WriteEntry::new(b"dir/".to_vec(), 1_577_232_000, plain(b"", cm::STORE, Encryption::None));
+        let e2 = WriteEntry::new(
+            b"dir/".to_vec(),
+            1_577_232_000,
+            plain(b"", cm::STORE, Encryption::None),
+        );
         let e3 = WriteEntry::new(
             b"secret".to_vec(),
             0,
-            plain(&text, cm::BZIP2, Encryption::Aes(AesStrength::Aes256, b"pw".to_vec())),
+            plain(
+                &text,
+                cm::BZIP2,
+                Encryption::Aes(AesStrength::Aes256, b"pw".to_vec()),
+            ),
         );
         let e4 = WriteEntry::new(
             b"trad".to_vec(),
@@ -512,7 +537,13 @@ mod tests {
             plain(&text, cm::STORE, Encryption::Pkware(b"pw".to_vec())),
         );
         let z = write_archive(vec![e1, e2, e3, e4], b"archive comment").unwrap();
-        let a = parse(&z, ReadOptions { check_consistency: true }).unwrap();
+        let a = parse(
+            &z,
+            ReadOptions {
+                check_consistency: true,
+            },
+        )
+        .unwrap();
         assert_eq!(a.entries.len(), 4);
         assert_eq!(a.comment, b"archive comment");
         assert_eq!(a.entries[0].comment, b"first");
@@ -556,11 +587,25 @@ mod tests {
     fn empty_and_errors() {
         let z = empty_archive(b"");
         assert_eq!(z.len(), 22);
-        assert!(parse(&z, ReadOptions::default()).unwrap().entries.is_empty());
-        assert_eq!(parse(b"not a zip file at all, really", ReadOptions::default()).unwrap_err().code, er::NOZIP);
+        assert!(
+            parse(&z, ReadOptions::default())
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        assert_eq!(
+            parse(b"not a zip file at all, really", ReadOptions::default())
+                .unwrap_err()
+                .code,
+            er::NOZIP
+        );
         // CRC damage
         let mut z = write_archive(
-            vec![WriteEntry::new(b"x".to_vec(), 0, plain(b"abc", cm::STORE, Encryption::None))],
+            vec![WriteEntry::new(
+                b"x".to_vec(),
+                0,
+                plain(b"abc", cm::STORE, Encryption::None),
+            )],
             b"",
         )
         .unwrap();
@@ -571,8 +616,18 @@ mod tests {
 
     #[test]
     fn torrent() {
-        let z = torrentzip(vec![(b"b".to_vec(), b"2".to_vec()), (b"A".to_vec(), b"1".to_vec())]).unwrap();
-        let a = parse(&z, ReadOptions { check_consistency: true }).unwrap();
+        let z = torrentzip(vec![
+            (b"b".to_vec(), b"2".to_vec()),
+            (b"A".to_vec(), b"1".to_vec()),
+        ])
+        .unwrap();
+        let a = parse(
+            &z,
+            ReadOptions {
+                check_consistency: true,
+            },
+        )
+        .unwrap();
         assert!(a.is_torrentzip(&z));
         assert_eq!(a.entries[0].name, b"A");
         assert_eq!(a.read(&z, 1, None).unwrap(), b"2");

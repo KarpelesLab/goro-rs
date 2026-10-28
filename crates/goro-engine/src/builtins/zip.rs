@@ -238,16 +238,25 @@ static METHODS: &[(&str, NativeFn)] = &[
     ("ziparchive::getstreamname", m_get_stream_name),
     ("ziparchive::getstream", m_get_stream),
     ("ziparchive::setexternalattributesname", m_set_ext_attr_name),
-    ("ziparchive::setexternalattributesindex", m_set_ext_attr_index),
+    (
+        "ziparchive::setexternalattributesindex",
+        m_set_ext_attr_index,
+    ),
     ("ziparchive::getexternalattributesname", m_get_ext_attr_name),
-    ("ziparchive::getexternalattributesindex", m_get_ext_attr_index),
+    (
+        "ziparchive::getexternalattributesindex",
+        m_get_ext_attr_index,
+    ),
     ("ziparchive::setcompressionname", m_set_compression_name),
     ("ziparchive::setcompressionindex", m_set_compression_index),
     ("ziparchive::setencryptionname", m_set_encryption_name),
     ("ziparchive::setencryptionindex", m_set_encryption_index),
     ("ziparchive::registerprogresscallback", m_register_progress),
     ("ziparchive::registercancelcallback", m_register_cancel),
-    ("ziparchive::iscompressionmethodsupported", m_is_cm_supported),
+    (
+        "ziparchive::iscompressionmethodsupported",
+        m_is_cm_supported,
+    ),
     ("ziparchive::isencryptionmethodsupported", m_is_em_supported),
 ];
 
@@ -261,12 +270,18 @@ pub static MODULE: Module = Module {
             "function zip_entry_open($zip_dp, $zip_entry, string $mode = \"rb\"): bool",
             zip_entry_open,
         ),
-        ("function zip_entry_close($zip_entry): bool", zip_entry_close),
+        (
+            "function zip_entry_close($zip_entry): bool",
+            zip_entry_close,
+        ),
         (
             "function zip_entry_read($zip_entry, int $len = 1024): string|false",
             zip_entry_read,
         ),
-        ("function zip_entry_name($zip_entry): string|false", zip_entry_name),
+        (
+            "function zip_entry_name($zip_entry): string|false",
+            zip_entry_name,
+        ),
         (
             "function zip_entry_compressedsize($zip_entry): int|false",
             zip_entry_compressedsize,
@@ -419,7 +434,14 @@ fn hooks() -> NativeHooks {
     }
 }
 
-const PROPS: [&str; 6] = ["lastId", "status", "statusSys", "numFiles", "filename", "comment"];
+const PROPS: [&str; 6] = [
+    "lastId",
+    "status",
+    "statusSys",
+    "numFiles",
+    "filename",
+    "comment",
+];
 
 fn with_obj<T>(o: &ObjRef, f: impl FnOnce(&mut ZipObj) -> T) -> Option<T> {
     let mut n = o.obj().native.borrow_mut();
@@ -544,7 +566,6 @@ impl Open {
     fn orig(&self, i: usize) -> Option<&zf::Entry> {
         self.slots.get(i)?.orig.map(|o| &self.arc.entries[o])
     }
-
 
     /// The index of `name` per the FL_NOCASE/FL_NODIR/FL_UNCHANGED flags.
     fn locate(&self, name: &[u8], flags: i64) -> Option<usize> {
@@ -728,7 +749,8 @@ fn open_archive(vm: &mut Vm, filename: &[u8], flags: i64) -> R<Result<Open, ZErr
         Err(e) => return Ok(Err(ZErr::io(er::READ, &e))),
     };
     if flags & OVERWRITE != 0 {
-        op.truncated = !data.is_empty();
+        // an existing file, even empty, is replaced or removed (test bug_gh8781.phpt)
+        op.truncated = true;
         return Ok(Ok(op));
     }
     if data.is_empty() {
@@ -854,7 +876,8 @@ fn write_entry<'a>(op: &'a Open, i: usize) -> Result<zf::WriteEntry<'a>, ZErr> {
         (None, Some(e)) => (e.dos_time, e.dos_date),
         (None, None) => zf::dostime::unix_to_dos(now()),
     };
-    let is_dir = matches!(s.src, Some(Src::Dir)) || (s.src.is_none() && s.name.last() == Some(&b'/'));
+    let is_dir =
+        matches!(s.src, Some(Src::Dir)) || (s.src.is_none() && s.name.last() == Some(&b'/'));
     let (made_by, external) = match (s.attr, orig) {
         (Some((os, at)), Some(e)) => (((os as u16) << 8) | (e.version_made_by & 0xff), at),
         (Some((os, at)), None) => (((os as u16) << 8) | 63, at),
@@ -894,7 +917,9 @@ fn write_entry<'a>(op: &'a Open, i: usize) -> Result<zf::WriteEntry<'a>, ZErr> {
         _ => {
             let data = match &s.src {
                 Some(src) => read_src(src)?,
-                None => op.arc.read(&op.data, s.orig.unwrap_or(0), op.password.as_deref())?,
+                None => op
+                    .arc
+                    .read(&op.data, s.orig.unwrap_or(0), op.password.as_deref())?,
             };
             let (method, level, fallback) = match s.method {
                 Some((m, l)) if m >= 0 => (m as u16, l, false),
@@ -905,10 +930,17 @@ fn write_entry<'a>(op: &'a Open, i: usize) -> Result<zf::WriteEntry<'a>, ZErr> {
                     _ => (cm::DEFLATE, -1, true),
                 },
             };
-            let method = if is_dir && data.is_empty() { cm::STORE } else { method };
+            let method = if is_dir && data.is_empty() {
+                cm::STORE
+            } else {
+                method
+            };
             let encryption = match &s.enc {
                 Some((m, pw)) => {
-                    let pw = pw.clone().or_else(|| op.password.clone()).unwrap_or_default();
+                    let pw = pw
+                        .clone()
+                        .or_else(|| op.password.clone())
+                        .unwrap_or_default();
                     match *m {
                         em::TRAD_PKWARE => zf::Encryption::Pkware(pw),
                         em::AES_128 => zf::Encryption::Aes(zf::crypto::AesStrength::Aes128, pw),
@@ -963,9 +995,13 @@ fn commit(vm: &mut Vm, op: &mut Open) -> R<Option<Unwind>> {
     if op.rdonly || !op.changed() {
         return Ok(None);
     }
-    let live: Vec<usize> = (0..op.slots.len()).filter(|&i| !op.slots[i].deleted).collect();
+    let live: Vec<usize> = (0..op.slots.len())
+        .filter(|&i| !op.slots[i].deleted)
+        .collect();
     if live.is_empty() && !op.keep_empty {
-        if op.on_disk && let Err(e) = std::fs::remove_file(&op.path) {
+        if op.on_disk
+            && let Err(e) = std::fs::remove_file(&op.path)
+        {
             op.err = ZErr::io(er::REMOVE, &e);
         }
         return Ok(None);
@@ -984,7 +1020,9 @@ fn commit(vm: &mut Vm, op: &mut Open) -> R<Option<Unwind>> {
             let s = &op.slots[i];
             let data = match &s.src {
                 Some(src) => read_src(src),
-                None => op.arc.read(&op.data, s.orig.unwrap_or(0), op.password.as_deref()),
+                None => op
+                    .arc
+                    .read(&op.data, s.orig.unwrap_or(0), op.password.as_deref()),
             };
             match data {
                 Ok(d) => items.push((s.name.clone(), d)),
@@ -1100,12 +1138,17 @@ fn m_set_password(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn m_count(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Int(
-        with_obj(a.this_obj(), |z| z.open.as_ref().map(|o| o.slots.len())).flatten().unwrap_or(0) as i64,
+        with_obj(a.this_obj(), |z| z.open.as_ref().map(|o| o.slots.len()))
+            .flatten()
+            .unwrap_or(0) as i64,
     ))
 }
 
 fn m_get_status_string(_vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let e = with_obj(a.this_obj(), |z| z.open.as_ref().map(|o| o.err).unwrap_or(z.err)).unwrap_or_default();
+    let e = with_obj(a.this_obj(), |z| {
+        z.open.as_ref().map(|o| o.err).unwrap_or(z.err)
+    })
+    .unwrap_or_default();
     Ok(Value::from(e.message().as_str()))
 }
 
@@ -1168,7 +1211,9 @@ fn m_add_empty_dir(vm: &mut Vm, a: &mut Args) -> R<Value> {
         name.push(b'/');
     }
     let flags = a.int_or(1, 0);
-    with_zip(vm, a, |_, op| Ok(Value::Bool(op.add(name, Src::Dir, flags, now()))))
+    with_zip(vm, a, |_, op| {
+        Ok(Value::Bool(op.add(name, Src::Dir, flags, now())))
+    })
 }
 
 fn m_add_from_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1182,7 +1227,14 @@ fn m_add_from_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 /// The source of addFile()/replaceFile(): None (after a warning) when the
 /// file is missing.
-fn file_src(vm: &mut Vm, a: &Args, path: &[u8], start: i64, len: i64, flags: i64) -> R<Option<(Src, i64)>> {
+fn file_src(
+    vm: &mut Vm,
+    a: &Args,
+    path: &[u8],
+    start: i64,
+    len: i64,
+    flags: i64,
+) -> R<Option<(Src, i64)>> {
     let p = resolve(vm, path);
     let meta = match std::fs::metadata(&p) {
         Ok(m) => m,
@@ -1217,7 +1269,10 @@ fn check_range(vm: &mut Vm, a: &Args, start_arg: usize) -> R<Option<(i64, i64)>>
         return vm.fthrow(
             a,
             "ValueError",
-            &format!("Argument #{} ($start) must be greater than or equal to 0", start_arg + 1),
+            &format!(
+                "Argument #{} ($start) must be greater than or equal to 0",
+                start_arg + 1
+            ),
         );
     }
     if len < 0 && len != LENGTH_UNCHECKED {
@@ -1254,7 +1309,9 @@ fn m_add_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some((src, mtime)) = file_src(vm, a, &path, start, len, flags)? else {
         return Ok(Value::Bool(false));
     };
-    with_zip(vm, a, |_, op| Ok(Value::Bool(op.add(name, src, flags, mtime))))
+    with_zip(vm, a, |_, op| {
+        Ok(Value::Bool(op.add(name, src, flags, mtime)))
+    })
 }
 
 fn m_replace_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1268,9 +1325,9 @@ fn m_replace_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     let flags = a.int_or(4, 0);
     let valid = with_obj(a.this_obj(), |z| {
-        z.open
-            .as_ref()
-            .map(|op| idx >= 0 && (idx as usize) < op.slots.len() && !op.slots[idx as usize].deleted)
+        z.open.as_ref().map(|op| {
+            idx >= 0 && (idx as usize) < op.slots.len() && !op.slots[idx as usize].deleted
+        })
     })
     .flatten();
     match valid {
@@ -1398,7 +1455,16 @@ fn add_files(vm: &mut Vm, a: &Args, files: Vec<Vec<u8>>, o: &AddOptions) -> R<Va
         };
         let mtime = file_mtime(&meta);
         let ok = with_zip(vm, a, |_, op| {
-            if !op.add(name, Src::File { path: p, start: 0, len: 0 }, o.flags, mtime) {
+            if !op.add(
+                name,
+                Src::File {
+                    path: p,
+                    start: 0,
+                    len: 0,
+                },
+                o.flags,
+                mtime,
+            ) {
                 return Ok(false);
             }
             let i = op.last_id as usize;
@@ -1426,7 +1492,10 @@ fn m_add_glob(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.throw("ValueError", "Invalid or uninitialized Zip object");
     }
     let o = add_options(vm, &opts)?;
-    let r = vm.call_value(&Value::from("glob"), vec![Value::Str(pat), Value::Int(flags)])?;
+    let r = vm.call_value(
+        &Value::from("glob"),
+        vec![Value::Str(pat), Value::Int(flags)],
+    )?;
     let Value::Array(list) = r else {
         return Ok(Value::Bool(false));
     };
@@ -1439,7 +1508,10 @@ fn m_add_glob(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn m_add_pattern(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let pat = a.str(0);
-    let dir = a.opt_str(1).map(|s| s.to_vec()).unwrap_or_else(|| b".".to_vec());
+    let dir = a
+        .opt_str(1)
+        .map(|s| s.to_vec())
+        .unwrap_or_else(|| b".".to_vec());
     let opts = a.array(2);
     if with_obj(a.this_obj(), |z| z.open.is_none()).unwrap_or(true) {
         return vm.throw("ValueError", "Invalid or uninitialized Zip object");
@@ -1658,7 +1730,10 @@ fn comment_len_check(vm: &mut Vm, a: &Args, i: usize) -> R<()> {
         vm.fthrow::<()>(
             a,
             "ValueError",
-            &format!("Argument #{} ($comment) must be less than 65535 bytes", i + 1),
+            &format!(
+                "Argument #{} ($comment) must be less than 65535 bytes",
+                i + 1
+            ),
         )?;
     }
     Ok(())
@@ -1685,7 +1760,9 @@ fn m_get_archive_comment(vm: &mut Vm, a: &mut Args) -> R<Value> {
         } else {
             &op.comment
         };
-        Ok(Value::from(zf::text::decode(c, false, decode_mode(flags)).as_slice()))
+        Ok(Value::from(
+            zf::text::decode(c, false, decode_mode(flags)).as_slice(),
+        ))
     })
 }
 
@@ -1723,7 +1800,9 @@ fn get_comment(vm: &mut Vm, a: &Args, by_name: bool) -> R<Value> {
         } else {
             (s.comment.clone(), s.utf8)
         };
-        Ok(Value::from(zf::text::decode(&c, utf8, decode_mode(flags)).as_slice()))
+        Ok(Value::from(
+            zf::text::decode(&c, utf8, decode_mode(flags)).as_slice(),
+        ))
     })
 }
 
@@ -1781,7 +1860,11 @@ fn get_ext_attr(vm: &mut Vm, a: &Args, by_name: bool) -> R<Value> {
     let flags = a.int_or(3, 0);
     let r = on_entry(vm, a, by_name, flags & FL_UNCHANGED, |_, op, i| {
         let s = &op.slots[i];
-        let cur = if flags & FL_UNCHANGED == 0 { s.attr } else { None };
+        let cur = if flags & FL_UNCHANGED == 0 {
+            s.attr
+        } else {
+            None
+        };
         let v = match (cur, op.orig(i)) {
             (Some(x), _) => x,
             (None, Some(e)) => (e.opsys(), e.external_attr),
@@ -1973,15 +2056,21 @@ fn stat_array(op: &Open, i: usize, flags: i64) -> Option<PhpArray> {
 
 fn stat(vm: &mut Vm, a: &Args, by_name: bool) -> R<Value> {
     let flags = a.int_or(1, 0);
-    on_entry(vm, a, by_name, flags & (FL_UNCHANGED | FL_NOCASE | FL_NODIR), |_, op, i| {
-        Ok(match stat_array(op, i, flags) {
-            Some(arr) => Value::Array(arr),
-            None => {
-                op.err = ZErr::new(er::CHANGED);
-                Value::Bool(false)
-            }
-        })
-    })
+    on_entry(
+        vm,
+        a,
+        by_name,
+        flags & (FL_UNCHANGED | FL_NOCASE | FL_NODIR),
+        |_, op, i| {
+            Ok(match stat_array(op, i, flags) {
+                Some(arr) => Value::Array(arr),
+                None => {
+                    op.err = ZErr::new(er::CHANGED);
+                    Value::Bool(false)
+                }
+            })
+        },
+    )
 }
 
 fn m_stat_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2018,7 +2107,9 @@ fn m_get_name_index(vm: &mut Vm, a: &mut Args) -> R<Value> {
         } else {
             (s.name.clone(), s.utf8)
         };
-        Ok(Value::from(zf::text::decode(&n, utf8, decode_mode(flags)).as_slice()))
+        Ok(Value::from(
+            zf::text::decode(&n, utf8, decode_mode(flags)).as_slice(),
+        ))
     })
 }
 
@@ -2026,10 +2117,18 @@ fn get_from(vm: &mut Vm, a: &Args, by_name: bool) -> R<Value> {
     let len = a.int_or(1, 0);
     let flags = a.int_or(2, 0);
     if len < 0 {
-        return vm.fthrow(a, "ValueError", "Argument #2 ($len) must be greater than or equal to 0");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #2 ($len) must be greater than or equal to 0",
+        );
     }
-    on_entry(vm, a, by_name, flags & (FL_UNCHANGED | FL_NOCASE | FL_NODIR), |_, op, i| {
-        match op.read_data(i, flags & FL_UNCHANGED != 0, flags & FL_COMPRESSED != 0) {
+    on_entry(
+        vm,
+        a,
+        by_name,
+        flags & (FL_UNCHANGED | FL_NOCASE | FL_NODIR),
+        |_, op, i| match op.read_data(i, flags & FL_UNCHANGED != 0, flags & FL_COMPRESSED != 0) {
             Ok(mut d) => {
                 if len > 0 && (len as usize) < d.len() {
                     d.truncate(len as usize);
@@ -2040,8 +2139,8 @@ fn get_from(vm: &mut Vm, a: &Args, by_name: bool) -> R<Value> {
                 op.err = e;
                 Ok(Value::Bool(false))
             }
-        }
-    })
+        },
+    )
 }
 
 fn m_get_from_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2127,7 +2226,12 @@ impl NativeStream for EntryStream {
 }
 
 /// Decodes entry `e` of `arc` for a stream.
-fn entry_stream(arc: &zf::Archive, data: &[u8], i: usize, pw: Option<&[u8]>) -> Result<EntryStream, ZErr> {
+fn entry_stream(
+    arc: &zf::Archive,
+    data: &[u8],
+    i: usize,
+    pw: Option<&[u8]>,
+) -> Result<EntryStream, ZErr> {
     let d = arc.decode(data, i, pw)?;
     let e = &arc.entries[i];
     Ok(EntryStream {
@@ -2142,36 +2246,42 @@ fn entry_stream(arc: &zf::Archive, data: &[u8], i: usize, pw: Option<&[u8]>) -> 
 }
 
 fn get_stream(vm: &mut Vm, a: &Args, by_name: bool, flags: i64) -> R<Value> {
-    on_entry(vm, a, by_name, flags & (FL_UNCHANGED | FL_NOCASE | FL_NODIR), |_, op, i| {
-        let unchanged = flags & FL_UNCHANGED != 0;
-        let s = &op.slots[i];
-        let name = s.name.clone();
-        let r = match (&s.src, s.orig) {
-            (Some(src), _) if !unchanged => read_src(src).map(|d| EntryStream {
-                data: d,
-                pos: 0,
-                seekable: true,
-                crc_bad: false,
-                failed: false,
-                alive: None,
-                uri: None,
-            }),
-            (_, Some(o)) => entry_stream(&op.arc, &op.data, o, op.password.as_deref()),
-            _ => Err(ZErr::new(er::CHANGED)),
-        };
-        match r {
-            Ok(mut st) => {
-                st.alive = Some(op.alive.clone());
-                st.uri = Some(name.clone());
-                let s = Stream::new(Backing::Native(Box::new(st)), b"rb", &name, "", "zip");
-                Ok(Value::Resource(new_stream_res(s)))
+    on_entry(
+        vm,
+        a,
+        by_name,
+        flags & (FL_UNCHANGED | FL_NOCASE | FL_NODIR),
+        |_, op, i| {
+            let unchanged = flags & FL_UNCHANGED != 0;
+            let s = &op.slots[i];
+            let name = s.name.clone();
+            let r = match (&s.src, s.orig) {
+                (Some(src), _) if !unchanged => read_src(src).map(|d| EntryStream {
+                    data: d,
+                    pos: 0,
+                    seekable: true,
+                    crc_bad: false,
+                    failed: false,
+                    alive: None,
+                    uri: None,
+                }),
+                (_, Some(o)) => entry_stream(&op.arc, &op.data, o, op.password.as_deref()),
+                _ => Err(ZErr::new(er::CHANGED)),
+            };
+            match r {
+                Ok(mut st) => {
+                    st.alive = Some(op.alive.clone());
+                    st.uri = Some(name.clone());
+                    let s = Stream::new(Backing::Native(Box::new(st)), b"rb", &name, "", "zip");
+                    Ok(Value::Resource(new_stream_res(s)))
+                }
+                Err(e) => {
+                    op.err = e;
+                    Ok(Value::Bool(false))
+                }
             }
-            Err(e) => {
-                op.err = e;
-                Ok(Value::Bool(false))
-            }
-        }
-    })
+        },
+    )
 }
 
 fn m_get_stream(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2236,8 +2346,8 @@ fn wrapper_open(vm: &mut Vm, a: &Args, url: &[u8], mode: &[u8], quiet: bool) -> 
     let Some(i) = arc.locate(entry) else {
         return fail(vm);
     };
-    let pw = super::sockets::context_option(&context_arg(a), "zip", "password")
-        .and_then(|v| match v {
+    let pw =
+        super::sockets::context_option(&context_arg(a), "zip", "password").and_then(|v| match v {
             Value::Str(s) => Some(s.to_vec()),
             Value::Int(n) => Some(n.to_string().into_bytes()),
             _ => None,
@@ -2292,7 +2402,9 @@ fn extract(vm: &mut Vm, a: &Args, op: &Open, dest: &[u8], files: &Value) -> R<Va
         let _ = std::fs::create_dir_all(resolve(vm, dest));
     }
     let idx: Vec<usize> = match files {
-        Value::Null => (0..op.slots.len()).filter(|&i| !op.slots[i].deleted).collect(),
+        Value::Null => (0..op.slots.len())
+            .filter(|&i| !op.slots[i].deleted)
+            .collect(),
         Value::Array(arr) => {
             let mut v = Vec::new();
             for (_, x) in arr.iter() {
@@ -2329,9 +2441,7 @@ fn extract(vm: &mut Vm, a: &Args, op: &Open, dest: &[u8], files: &Value) -> R<Va
             }
             continue;
         }
-        if !is_url
-            && let Some(p) = target.iter().rposition(|&c| c == b'/')
-        {
+        if !is_url && let Some(p) = target.iter().rposition(|&c| c == b'/') {
             let _ = std::fs::create_dir_all(resolve(vm, &target[..p]));
         }
         let data = match op.read_data(i, false, false) {
@@ -2350,9 +2460,13 @@ fn extract(vm: &mut Vm, a: &Args, op: &Open, dest: &[u8], files: &Value) -> R<Va
         if !is_url {
             let mtime = s.mtime.or_else(|| op.orig(i).map(|e| e.mtime()));
             if let Some(t) = mtime
-                && let Ok(f) = std::fs::OpenOptions::new().write(true).open(resolve(vm, &target))
+                && let Ok(f) = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(resolve(vm, &target))
             {
-                let _ = f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(t.max(0) as u64));
+                let _ = f.set_modified(
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(t.max(0) as u64),
+                );
             }
         }
     }
@@ -2389,7 +2503,13 @@ fn deprecated(vm: &mut Vm, name: &str, alt: Option<&str>) -> R<()> {
 
 /// The `T` behind resource argument `i` ("supplied resource is not a valid
 /// `kind` resource" otherwise).
-fn res_arg<T: 'static>(vm: &mut Vm, a: &Args, i: usize, param: &str, kind: &str) -> R<(ResRef, *const RefCell<T>)> {
+fn res_arg<T: 'static>(
+    vm: &mut Vm,
+    a: &Args,
+    i: usize,
+    param: &str,
+    kind: &str,
+) -> R<(ResRef, *const RefCell<T>)> {
     let v = a.val(i);
     let Value::Resource(r) = &v else {
         return vm.fthrow(
@@ -2484,7 +2604,10 @@ fn load_entry(e: &mut ZipEntryRes) -> bool {
         return false;
     };
     let data = d.res().data.borrow();
-    let Some(dir) = data.as_ref().and_then(|x| x.downcast_ref::<RefCell<ZipDir>>()) else {
+    let Some(dir) = data
+        .as_ref()
+        .and_then(|x| x.downcast_ref::<RefCell<ZipDir>>())
+    else {
         return false;
     };
     let dir = dir.borrow();
@@ -2554,7 +2677,11 @@ fn zip_entry_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn zip_entry_compressedsize(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    deprecated(vm, "zip_entry_compressedsize", Some("ZipArchive::statIndex()"))?;
+    deprecated(
+        vm,
+        "zip_entry_compressedsize",
+        Some("ZipArchive::statIndex()"),
+    )?;
     entry_info(vm, a, |e| Value::Int(e.comp_size as i64))
 }
 
@@ -2564,7 +2691,11 @@ fn zip_entry_filesize(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn zip_entry_compressionmethod(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    deprecated(vm, "zip_entry_compressionmethod", Some("ZipArchive::statIndex()"))?;
+    deprecated(
+        vm,
+        "zip_entry_compressionmethod",
+        Some("ZipArchive::statIndex()"),
+    )?;
     entry_info(vm, a, |e| {
         Value::from(match e.real_method() {
             0 => "stored",

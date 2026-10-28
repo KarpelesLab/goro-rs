@@ -79,7 +79,10 @@ pub fn extra_fields(extra: &[u8]) -> Vec<(u16, &[u8])> {
 
 /// The data of the first extra record `id`.
 pub fn find_extra(extra: &[u8], id: u16) -> Option<&[u8]> {
-    extra_fields(extra).into_iter().find(|r| r.0 == id).map(|r| r.1)
+    extra_fields(extra)
+        .into_iter()
+        .find(|r| r.0 == id)
+        .map(|r| r.1)
 }
 
 /// `extra` without the records whose id is in `ids` (and without a
@@ -332,9 +335,13 @@ pub fn parse(data: &[u8], opts: ReadOptions) -> Result<Archive> {
             found = true;
             match read_eocd(data, pos, opts.check_consistency) {
                 Ok(e) => {
-                    let fits = e.cd_offset.checked_add(e.cd_size).is_some_and(|end| end <= e.pos as u64);
+                    let fits = e
+                        .cd_offset
+                        .checked_add(e.cd_size)
+                        .is_some_and(|end| end <= e.pos as u64);
                     let starts = e.cd_size == 0
-                        || (e.cd_offset as usize + 4 <= data.len() && u32le(data, e.cd_offset as usize) == SIG_CENTRAL);
+                        || (e.cd_offset as usize + 4 <= data.len()
+                            && u32le(data, e.cd_offset as usize) == SIG_CENTRAL);
                     if fits && starts {
                         break e;
                     }
@@ -344,7 +351,11 @@ pub fn parse(data: &[u8], opts: ReadOptions) -> Result<Archive> {
             }
         }
         if pos == lo {
-            return Err(if found { last_err } else { Error::new(er::NOZIP) });
+            return Err(if found {
+                last_err
+            } else {
+                Error::new(er::NOZIP)
+            });
         }
         pos -= 1;
     };
@@ -454,7 +465,12 @@ pub fn parse(data: &[u8], opts: ReadOptions) -> Result<Archive> {
         // entries must not overlap
         let mut spans: Vec<(u64, u64)> = entries
             .iter()
-            .map(|e| (e.local_offset, e.data_offset.unwrap_or(e.local_offset) + e.comp_size))
+            .map(|e| {
+                (
+                    e.local_offset,
+                    e.data_offset.unwrap_or(e.local_offset) + e.comp_size,
+                )
+            })
             .collect();
         spans.sort();
         for w in spans.windows(2) {
@@ -494,8 +510,11 @@ pub fn decode_entry(e: &Entry, raw: &[u8], password: Option<&[u8]>) -> Result<De
         };
         match e.encryption_method() {
             em::TRAD_PKWARE => {
-                let check =
-                    crypto::pkware_check_byte(e.crc, e.dos_time, e.flags & gp::DATA_DESCRIPTOR != 0);
+                let check = crypto::pkware_check_byte(
+                    e.crc,
+                    e.dos_time,
+                    e.flags & gp::DATA_DESCRIPTOR != 0,
+                );
                 plain = crypto::pkware_decrypt(raw, pw, check)?;
                 &plain
             }
@@ -526,7 +545,9 @@ impl Archive {
     pub fn raw<'d>(&self, data: &'d [u8], i: usize) -> Result<&'d [u8]> {
         let e = self.entries.get(i).ok_or(Error::new(er::INVAL))?;
         let start = e.data_offset.ok_or(Error::new(er::INCONS))?;
-        let end = start.checked_add(e.comp_size).ok_or(Error::new(er::INCONS))?;
+        let end = start
+            .checked_add(e.comp_size)
+            .ok_or(Error::new(er::INCONS))?;
         if end > data.len() as u64 {
             return Err(Error::new(er::EOF));
         }

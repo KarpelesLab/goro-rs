@@ -247,7 +247,12 @@ pub fn aes_encrypt(data: &[u8], password: &[u8], strength: AesStrength) -> Vec<u
 }
 
 /// Encrypts with WinZip AES under `salt` (of the strength's salt length).
-pub fn aes_encrypt_with_salt(data: &[u8], password: &[u8], strength: AesStrength, salt: &[u8]) -> Vec<u8> {
+pub fn aes_encrypt_with_salt(
+    data: &[u8],
+    password: &[u8],
+    strength: AesStrength,
+    salt: &[u8],
+) -> Vec<u8> {
     let (key, hkey, pv) = aes_keys(password, salt, strength);
     let mut out = Vec::with_capacity(data.len() + strength.overhead());
     out.extend_from_slice(salt);
@@ -267,7 +272,10 @@ mod tests {
     #[test]
     fn pkware_roundtrip() {
         let enc = pkware_encrypt(b"hello world", b"secret", 0x5a);
-        assert_eq!(pkware_decrypt(&enc, b"secret", 0x5a).unwrap(), b"hello world");
+        assert_eq!(
+            pkware_decrypt(&enc, b"secret", 0x5a).unwrap(),
+            b"hello world"
+        );
         let e = pkware_decrypt(&enc, b"wrong", 0x5a);
         // one in 256 wrong passwords passes the check byte
         if let Err(e) = e {
@@ -277,7 +285,11 @@ mod tests {
 
     #[test]
     fn aes_roundtrip() {
-        for s in [AesStrength::Aes128, AesStrength::Aes192, AesStrength::Aes256] {
+        for s in [
+            AesStrength::Aes128,
+            AesStrength::Aes192,
+            AesStrength::Aes256,
+        ] {
             let data: Vec<u8> = (0..1000u32).map(|i| (i * 7) as u8).collect();
             let enc = aes_encrypt(&data, b"pw", s);
             assert_eq!(enc.len(), data.len() + s.overhead());

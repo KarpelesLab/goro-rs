@@ -2,7 +2,6 @@
 //! handled here and by goro-ext-zlib; bzip2, deflate64, LZMA, zstd, xz and
 //! the legacy shrink/reduce/implode codecs come from compcol.
 
-
 use crate::error::{Error, Result, er};
 
 /// The method numbers (PHP's `ZipArchive::CM_*`).
@@ -36,22 +35,24 @@ pub mod cm {
 pub fn can_decompress(method: u16) -> bool {
     matches!(
         method,
-        cm::STORE
-            | cm::SHRINK
-            | cm::REDUCE_1..=cm::REDUCE_4
-            | cm::IMPLODE
-            | cm::DEFLATE
-            | cm::DEFLATE64
-            | cm::BZIP2
-            | cm::LZMA
-            | cm::ZSTD
-            | cm::XZ
+        cm::STORE | cm::SHRINK | cm::REDUCE_1
+            ..=cm::REDUCE_4
+                | cm::IMPLODE
+                | cm::DEFLATE
+                | cm::DEFLATE64
+                | cm::BZIP2
+                | cm::LZMA
+                | cm::ZSTD
+                | cm::XZ
     )
 }
 
 /// Whether data can be compressed with `method`.
 pub fn can_compress(method: u16) -> bool {
-    matches!(method, cm::STORE | cm::DEFLATE | cm::BZIP2 | cm::ZSTD | cm::XZ)
+    matches!(
+        method,
+        cm::STORE | cm::DEFLATE | cm::BZIP2 | cm::ZSTD | cm::XZ
+    )
 }
 
 /// The "version needed to extract" for a method (APPNOTE 4.4.3).
@@ -84,7 +85,7 @@ pub fn inflate(data: &[u8], max: u64) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(max.min(1 << 26) as usize);
     let mut pos = 0;
     loop {
-        let room = (max as usize).saturating_sub(out.len()).max(1).min(1 << 20);
+        let room = (max as usize).saturating_sub(out.len()).clamp(1, 1 << 20);
         let before = out.len();
         let (n, st) = inf.inflate(&data[pos..], &mut out, room, InflateFlush::None);
         pos += n;
@@ -114,12 +115,15 @@ pub fn decompress(method: u16, flags: u16, data: &[u8], size: u64) -> Result<Vec
     match method {
         cm::STORE => Ok(data.to_vec()),
         cm::DEFLATE => inflate(data, cap(size)),
-        cm::DEFLATE64 => {
-            dec::<compcol::deflate64::Deflate64>(data, Default::default(), cap(size)).map_err(codec_err)
+        cm::DEFLATE64 => dec::<compcol::deflate64::Deflate64>(data, Default::default(), cap(size))
+            .map_err(codec_err),
+        cm::BZIP2 => {
+            dec::<compcol::bzip2::Bzip2>(data, Default::default(), cap(size)).map_err(codec_err)
         }
-        cm::BZIP2 => dec::<compcol::bzip2::Bzip2>(data, Default::default(), cap(size)).map_err(codec_err),
-        cm::ZSTD => dec::<compcol::zstd::Zstd>(data, Default::default(), cap(size)).map_err(codec_err),
-        cm::XZ => dec::<compcol::xz::Xz>(data, Default::default(), cap(size)).map_err(codec_err),
+        cm::ZSTD => {
+            dec::<compcol::zstd::Zstd>(data, (), cap(size)).map_err(codec_err)
+        }
+        cm::XZ => dec::<compcol::xz::Xz>(data, (), cap(size)).map_err(codec_err),
         cm::LZMA => {
             // APPNOTE 5.8.8: version (2), properties size (2), properties,
             // then the raw stream; bit 1 marks an end-of-stream marker.
@@ -136,22 +140,29 @@ pub fn decompress(method: u16, flags: u16, data: &[u8], size: u64) -> Result<Vec
             let n = if flags & 2 != 0 { u64::MAX } else { size };
             framed.extend_from_slice(&n.to_le_bytes());
             framed.extend_from_slice(&data[9..]);
-            compcol::vec::decompress_to_vec_capped::<compcol::lzma::Lzma>(&framed, cap(size)).map_err(codec_err)
+            compcol::vec::decompress_to_vec_capped::<compcol::lzma::Lzma>(&framed, cap(size))
+                .map_err(codec_err)
         }
         cm::SHRINK => {
             let n = u32::try_from(size).map_err(|_| Error::new(er::COMPNOTSUPP))?;
             let mut framed = n.to_le_bytes().to_vec();
             framed.extend_from_slice(data);
-            compcol::vec::decompress_to_vec_capped::<compcol::zip_shrink::ZipShrink>(&framed, cap(size))
-                .map_err(codec_err)
+            compcol::vec::decompress_to_vec_capped::<compcol::zip_shrink::ZipShrink>(
+                &framed,
+                cap(size),
+            )
+            .map_err(codec_err)
         }
         cm::REDUCE_1..=cm::REDUCE_4 => {
             let n = u32::try_from(size).map_err(|_| Error::new(er::COMPNOTSUPP))?;
             let mut framed = vec![(method - 1) as u8];
             framed.extend_from_slice(&n.to_le_bytes());
             framed.extend_from_slice(data);
-            compcol::vec::decompress_to_vec_capped::<compcol::zip_reduce::ZipReduce>(&framed, cap(size))
-                .map_err(codec_err)
+            compcol::vec::decompress_to_vec_capped::<compcol::zip_reduce::ZipReduce>(
+                &framed,
+                cap(size),
+            )
+            .map_err(codec_err)
         }
         cm::IMPLODE => {
             // APPNOTE 4.4.4: bit 1 = 8K window, bit 2 = 3 Shannon-Fano trees
@@ -160,8 +171,11 @@ pub fn decompress(method: u16, flags: u16, data: &[u8], size: u64) -> Result<Vec
             let mut framed = vec![f];
             framed.extend_from_slice(&n.to_le_bytes());
             framed.extend_from_slice(data);
-            compcol::vec::decompress_to_vec_capped::<compcol::zip_implode::ZipImplode>(&framed, cap(size))
-                .map_err(codec_err)
+            compcol::vec::decompress_to_vec_capped::<compcol::zip_implode::ZipImplode>(
+                &framed,
+                cap(size),
+            )
+            .map_err(codec_err)
         }
         _ => Err(Error::new(er::COMPNOTSUPP)),
     }
@@ -177,11 +191,20 @@ pub fn compress(method: u16, level: i32, data: &[u8]) -> Result<Vec<u8>> {
             Ok(goro_ext_zlib::compress(data, l, goro_ext_zlib::Wrap::Raw))
         }
         cm::BZIP2 => {
-            let l = if (1..=9).contains(&level) { level as u8 } else { 9 };
-            enc::<compcol::bzip2::Bzip2>(data, compcol::bzip2::EncoderConfig { level: l }).map_err(codec_err)
+            let l = if (1..=9).contains(&level) {
+                level as u8
+            } else {
+                9
+            };
+            enc::<compcol::bzip2::Bzip2>(data, compcol::bzip2::EncoderConfig { level: l })
+                .map_err(codec_err)
         }
         cm::XZ => {
-            let l = if (0..=9).contains(&level) { level as u8 } else { 6 };
+            let l = if (0..=9).contains(&level) {
+                level as u8
+            } else {
+                6
+            };
             enc::<compcol::xz::Xz>(data, compcol::xz::EncoderConfig { level: l }).map_err(codec_err)
         }
         cm::ZSTD => {
@@ -199,10 +222,16 @@ mod tests {
 
     #[test]
     fn roundtrips() {
-        let data: Vec<u8> = (0..20000u32).map(|i| (i % 251) as u8 ^ (i / 97) as u8).collect();
+        let data: Vec<u8> = (0..20000u32)
+            .map(|i| (i % 251) as u8 ^ (i / 97) as u8)
+            .collect();
         for m in [cm::STORE, cm::DEFLATE, cm::BZIP2, cm::XZ, cm::ZSTD] {
             let c = compress(m, -1, &data).unwrap();
-            assert_eq!(decompress(m, 0, &c, data.len() as u64).unwrap(), data, "method {m}");
+            assert_eq!(
+                decompress(m, 0, &c, data.len() as u64).unwrap(),
+                data,
+                "method {m}"
+            );
         }
     }
 

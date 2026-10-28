@@ -70,7 +70,10 @@ mod tests {
         let (tm, dt) = unix_to_dos(t);
         assert_eq!(dos_to_unix(tm, dt), t);
         // odd seconds are rounded down
-        assert_eq!(dos_to_unix(unix_to_dos(t + 3).0, unix_to_dos(t + 3).1), t + 2);
+        assert_eq!(
+            dos_to_unix(unix_to_dos(t + 3).0, unix_to_dos(t + 3).1),
+            t + 2
+        );
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         // 1996-12-24 23:32:00, the TorrentZip timestamp
         assert_eq!(dos_to_unix(0xBC00, 0x2198), 851_470_320);
