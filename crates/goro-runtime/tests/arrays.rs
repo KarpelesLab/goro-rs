@@ -539,3 +539,35 @@ fn array_data_api() {
     assert_eq!(p.len(), 1);
     assert_eq!(int(p.get_bytes(b"x").unwrap()), 2);
 }
+
+/// Power-of-two strides and sequential runs must not degrade lookups (the
+/// index folds high key bits into the slot position).
+#[test]
+fn strided_int_keys() {
+    for shift in [0u32, 4, 10, 16, 20, 32, 40] {
+        let mut a = PhpArray::new();
+        a.insert(Key::from("first"), Value::Null);
+        let n = 50_000i64;
+        for i in 0..n {
+            a.insert(Key::Int(i << shift), Value::Int(i));
+        }
+        for i in 0..n {
+            assert_eq!(a.get_int(i << shift).map(int), Some(i), "shift {shift}");
+        }
+        assert!(a.get_int((n + 1) << shift).is_none());
+        assert_eq!(a.len(), n as usize + 1);
+    }
+}
+
+/// Converting a list to a hash keeps every element reachable.
+#[test]
+fn packed_to_hash_lookups() {
+    for n in [1i64, 7, 8, 9, 100, 1000] {
+        let mut a = list(&(0..n).collect::<Vec<_>>());
+        a.insert(Key::from("s"), Value::Int(-1));
+        for i in 0..n {
+            assert_eq!(a.get_int(i).map(int), Some(i));
+        }
+        assert_eq!(a.get_bytes(b"s").map(int), Some(-1));
+    }
+}

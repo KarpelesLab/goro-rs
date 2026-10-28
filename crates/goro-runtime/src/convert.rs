@@ -15,9 +15,21 @@ use crate::value::Value;
 /// conversion; -1 for the shortest round-trip form used with
 /// serialize_precision=-1).
 pub fn float_to_string(f: f64, precision: i32) -> PhpStr {
-    let mut out = Vec::with_capacity(24);
-    float_fmt::format_php(f, precision, &mut out);
-    PhpStr::new(&out)
+    thread_local! {
+        static BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    BUF.with(|b| match b.try_borrow_mut() {
+        Ok(mut out) => {
+            out.clear();
+            float_fmt::format_php(f, precision, &mut out);
+            PhpStr::new(&out)
+        }
+        Err(_) => {
+            let mut out = Vec::with_capacity(24);
+            float_fmt::format_php(f, precision, &mut out);
+            PhpStr::new(&out)
+        }
+    })
 }
 
 /// The shortest round-trip form, as used in diagnostics ("Implicit
@@ -31,6 +43,21 @@ pub fn float_repr(f: f64) -> String {
 /// Appends the decimal form of an int.
 pub fn push_int(out: &mut Vec<u8>, i: i64) {
     let mut buf = [0u8; 20];
+    out.extend_from_slice(int_digits(i, &mut buf));
+}
+
+/// The decimal form of an int as a string (small values don't allocate).
+pub fn int_to_string(i: i64) -> PhpStr {
+    if (0..10).contains(&i) {
+        return PhpStr::from_byte(b'0' + i as u8);
+    }
+    let mut buf = [0u8; 20];
+    PhpStr::new(int_digits(i, &mut buf))
+}
+
+/// Writes the decimal form of `i` at the end of `buf`, returning it.
+#[inline]
+pub fn int_digits(i: i64, buf: &mut [u8; 20]) -> &[u8] {
     let mut n = i.unsigned_abs();
     let mut p = buf.len();
     loop {
@@ -42,19 +69,10 @@ pub fn push_int(out: &mut Vec<u8>, i: i64) {
         }
     }
     if i < 0 {
-        out.push(b'-');
+        p -= 1;
+        buf[p] = b'-';
     }
-    out.extend_from_slice(&buf[p..]);
-}
-
-/// The decimal form of an int as a string (small values don't allocate).
-pub fn int_to_string(i: i64) -> PhpStr {
-    if (0..10).contains(&i) {
-        return PhpStr::from_byte(b'0' + i as u8);
-    }
-    let mut v = Vec::with_capacity(20);
-    push_int(&mut v, i);
-    PhpStr::new(&v)
+    &buf[p..]
 }
 
 // ---------------------------------------------------------------- bool

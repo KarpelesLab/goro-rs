@@ -134,20 +134,23 @@ macro_rules! overload_first {
 }
 
 /// `$a + $b` (array union for two arrays).
+#[inline]
 pub fn add(a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<Value> {
     match (a, b) {
-        (Value::Int(x), Value::Int(y)) => {
-            return Ok(match x.checked_add(*y) {
-                Some(r) => Value::Int(r),
-                None => Value::Float(*x as f64 + *y as f64),
-            });
-        }
-        (Value::Float(x), Value::Float(y)) => return Ok(Value::Float(x + y)),
-        (Value::Int(x), Value::Float(y)) => return Ok(Value::Float(*x as f64 + y)),
-        (Value::Float(x), Value::Int(y)) => return Ok(Value::Float(x + *y as f64)),
-        (Value::Array(x), Value::Array(y)) => return Ok(Value::Array(array_union(x, y))),
-        _ => {}
+        (Value::Int(x), Value::Int(y)) => Ok(match x.checked_add(*y) {
+            Some(r) => Value::Int(r),
+            None => Value::Float(*x as f64 + *y as f64),
+        }),
+        (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x + y)),
+        (Value::Int(x), Value::Float(y)) => Ok(Value::Float(*x as f64 + y)),
+        (Value::Float(x), Value::Int(y)) => Ok(Value::Float(x + *y as f64)),
+        (Value::Array(x), Value::Array(y)) => Ok(Value::Array(array_union(x, y))),
+        _ => add_slow(a, b, ctx),
     }
+}
+
+#[inline(never)]
+fn add_slow(a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<Value> {
     deref2!(add, a, b, ctx);
     overload_first!(BinOp::Add, a, b, ctx);
     let (x, y) = num_operands(BinOp::Add, a, b, ctx)?;
@@ -178,19 +181,22 @@ pub fn array_union(a: &PhpArray, b: &PhpArray) -> PhpArray {
 }
 
 /// `$a - $b`.
+#[inline]
 pub fn sub(a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<Value> {
     match (a, b) {
-        (Value::Int(x), Value::Int(y)) => {
-            return Ok(match x.checked_sub(*y) {
-                Some(r) => Value::Int(r),
-                None => Value::Float(*x as f64 - *y as f64),
-            });
-        }
-        (Value::Float(x), Value::Float(y)) => return Ok(Value::Float(x - y)),
-        (Value::Int(x), Value::Float(y)) => return Ok(Value::Float(*x as f64 - y)),
-        (Value::Float(x), Value::Int(y)) => return Ok(Value::Float(x - *y as f64)),
-        _ => {}
+        (Value::Int(x), Value::Int(y)) => Ok(match x.checked_sub(*y) {
+            Some(r) => Value::Int(r),
+            None => Value::Float(*x as f64 - *y as f64),
+        }),
+        (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x - y)),
+        (Value::Int(x), Value::Float(y)) => Ok(Value::Float(*x as f64 - y)),
+        (Value::Float(x), Value::Int(y)) => Ok(Value::Float(x - *y as f64)),
+        _ => sub_slow(a, b, ctx),
     }
+}
+
+#[inline(never)]
+fn sub_slow(a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<Value> {
     deref2!(sub, a, b, ctx);
     overload_first!(BinOp::Sub, a, b, ctx);
     let (x, y) = num_operands(BinOp::Sub, a, b, ctx)?;
@@ -204,19 +210,22 @@ pub fn sub(a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<Value> {
 }
 
 /// `$a * $b`.
+#[inline]
 pub fn mul(a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<Value> {
     match (a, b) {
-        (Value::Int(x), Value::Int(y)) => {
-            return Ok(match x.checked_mul(*y) {
-                Some(r) => Value::Int(r),
-                None => Value::Float(*x as f64 * *y as f64),
-            });
-        }
-        (Value::Float(x), Value::Float(y)) => return Ok(Value::Float(x * y)),
-        (Value::Int(x), Value::Float(y)) => return Ok(Value::Float(*x as f64 * y)),
-        (Value::Float(x), Value::Int(y)) => return Ok(Value::Float(x * *y as f64)),
-        _ => {}
+        (Value::Int(x), Value::Int(y)) => Ok(match x.checked_mul(*y) {
+            Some(r) => Value::Int(r),
+            None => Value::Float(*x as f64 * *y as f64),
+        }),
+        (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x * y)),
+        (Value::Int(x), Value::Float(y)) => Ok(Value::Float(*x as f64 * y)),
+        (Value::Float(x), Value::Int(y)) => Ok(Value::Float(x * *y as f64)),
+        _ => mul_slow(a, b, ctx),
     }
+}
+
+#[inline(never)]
+fn mul_slow(a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<Value> {
     deref2!(mul, a, b, ctx);
     overload_first!(BinOp::Mul, a, b, ctx);
     let (x, y) = num_operands(BinOp::Mul, a, b, ctx)?;
@@ -417,6 +426,16 @@ pub fn concat(a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<PhpStr> {
             return Ok(y.clone());
         }
         return Ok(PhpStr::concat(x, y));
+    }
+    let mut buf = [0u8; 20];
+    match (a, b) {
+        (Value::Str(x), Value::Int(i)) => {
+            return Ok(PhpStr::concat(x, crate::convert::int_digits(*i, &mut buf)));
+        }
+        (Value::Int(i), Value::Str(y)) => {
+            return Ok(PhpStr::concat(crate::convert::int_digits(*i, &mut buf), y));
+        }
+        _ => {}
     }
     let mut out = Vec::new();
     append_str(&mut out, a, ctx)?;

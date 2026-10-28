@@ -119,7 +119,17 @@ fn cmp_num_str(n: Number, s: &[u8], ctx: &mut dyn Ctx) -> i32 {
 }
 
 /// `$a <=> $b`.
+#[inline]
 pub fn compare(a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<i32> {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => Ok(ord(x.cmp(y))),
+        (Value::Float(x), Value::Float(y)) => Ok(cmp_f64(*x, *y)),
+        _ => compare_slow(a, b, ctx),
+    }
+}
+
+#[inline(never)]
+fn compare_slow(a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<i32> {
     use Value::*;
     Ok(match (a, b) {
         (Int(x), Int(y)) => ord(x.cmp(y)),
@@ -259,7 +269,17 @@ pub fn compare_arrays(a: &PhpArray, b: &PhpArray, ctx: &mut dyn Ctx) -> PhpResul
 }
 
 /// `$a == $b`.
+#[inline]
 pub fn loose_eq(a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<bool> {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => Ok(x == y),
+        (Value::Float(x), Value::Float(y)) => Ok(x == y),
+        _ => loose_eq_slow(a, b, ctx),
+    }
+}
+
+#[inline(never)]
+fn loose_eq_slow(a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<bool> {
     use Value::*;
     Ok(match (a, b) {
         (Int(x), Int(y)) => x == y,

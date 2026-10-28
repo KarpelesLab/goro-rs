@@ -60,18 +60,34 @@ impl ErrorKind {
 }
 
 /// An error PHP throws (the engine creates the exception object).
+///
+/// Boxed so that `PhpResult<Value>` stays 16 bytes and the success path of
+/// every operator returns in registers; read the fields through `Deref`
+/// (`err.kind`, `err.message`).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PhpError {
+pub struct PhpError(Box<PhpErrorData>);
+
+/// The contents of a [`PhpError`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhpErrorData {
     pub kind: ErrorKind,
     pub message: String,
 }
 
+impl std::ops::Deref for PhpError {
+    type Target = PhpErrorData;
+    fn deref(&self) -> &PhpErrorData {
+        &self.0
+    }
+}
+
 impl PhpError {
+    #[cold]
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> PhpError {
-        PhpError {
+        PhpError(Box::new(PhpErrorData {
             kind,
             message: message.into(),
-        }
+        }))
     }
     pub fn type_error(message: impl Into<String>) -> PhpError {
         Self::new(ErrorKind::TypeError, message)

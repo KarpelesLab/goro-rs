@@ -6,3 +6,7 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+
+[[bench]]
+name = "runtime"
+harness = false

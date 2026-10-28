@@ -160,44 +160,91 @@ impl From<&str> for Key {
     }
 }
 
+/// Slot hash of an int key: the splitmix64 finaliser (Steele, Lea and
+/// Flood, "Fast splittable pseudorandom number generators", 2014), so that
+/// both the low bits (slot position) and the high bits (tag) are mixed.
 #[inline]
 fn hash_int(i: i64) -> u64 {
-    let h = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    h ^ (h >> 32)
-}
-
-#[inline]
-fn key_hash(k: KeyRef<'_>) -> u64 {
-    match k {
-        KeyRef::Int(i) => hash_int(i),
-        KeyRef::Str(s) => s.hash_code(),
-    }
-}
-
-#[inline]
-fn key_eq(stored: &Key, k: KeyRef<'_>) -> bool {
-    match (stored, k) {
-        (Key::Int(a), KeyRef::Int(b)) => *a == b,
-        (Key::Str(a), KeyRef::Str(b)) => a == b,
-        _ => false,
-    }
+    let mut x = i as u64;
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
 }
 
 // ---------------------------------------------------------------- storage
 
-#[derive(Clone, Copy)]
-struct Slot {
-    idx: u32,
-    tag: u32,
+/// The hash stored in a bucket: the key itself for int keys (as PHP does),
+/// the string hash for string keys.
+#[inline]
+fn bucket_hash(k: KeyRef<'_>) -> u64 {
+    match k {
+        KeyRef::Int(i) => i as u64,
+        KeyRef::Str(s) => s.hash_code(),
+    }
 }
 
-const EMPTY: u32 = u32::MAX;
-const EMPTY_SLOT: Slot = Slot { idx: EMPTY, tag: 0 };
+/// The hash used to place a key in the index (int keys are mixed).
+#[inline]
+fn slot_hash(bh: u64, is_int: bool) -> u64 {
+    if is_int {
+        // Position (low half) from the key itself, folded, so runs of
+        // nearby int keys land in nearby slots (cache friendly, like PHP's
+        // identity hash for ints); tag (high half) from the mixed key.
+        (hash_int(bh as i64) & 0xFFFF_FFFF_0000_0000)
+            | ((bh ^ (bh >> 16) ^ (bh >> 32)) & 0xFFFF_FFFF)
+    } else {
+        bh
+    }
+}
 
+/// An index slot: 0 when empty, else `(tag << 32) | (entry + 1)` where the
+/// tag is the upper half of the slot hash.
+type Slot = u64;
+
+/// Hash arrays with at most this many entries have no index: lookups scan
+/// the entries, comparing stored hashes first.
+const SMALL: usize = 8;
+
+/// One entry, 32 bytes: the value (`None` for a deleted entry), the stored
+/// hash (the key for int keys) and the string key (`None` for int keys).
 struct Bucket {
-    key: Key,
-    /// `None` marks a deleted entry (tombstone).
     val: Option<Value>,
+    h: u64,
+    skey: Option<PhpStr>,
+}
+
+impl Bucket {
+    #[inline]
+    fn key(&self) -> KeyRef<'_> {
+        match &self.skey {
+            Some(s) => KeyRef::Str(s),
+            None => KeyRef::Int(self.h as i64),
+        }
+    }
+
+    #[inline]
+    fn matches(&self, bh: u64, k: KeyRef<'_>) -> bool {
+        self.h == bh
+            && match (&self.skey, k) {
+                (None, KeyRef::Int(_)) => true,
+                (Some(a), KeyRef::Str(b)) => a == b,
+                _ => false,
+            }
+    }
+
+    #[inline]
+    fn new(k: Key, bh: u64, v: Value) -> Bucket {
+        Bucket {
+            val: Some(v),
+            h: bh,
+            skey: match k {
+                Key::Int(_) => None,
+                Key::Str(s) => Some(s),
+            },
+        }
+    }
 }
 
 struct HashStore {
@@ -244,20 +291,34 @@ impl NextIndexOccupied {
     }
 }
 
-fn index_size_for(n: usize) -> usize {
-    (n.max(4) * 2).next_power_of_two()
-}
-
 #[inline]
 fn may_cycle_value(v: &Value) -> bool {
     matches!(v, Value::Array(_) | Value::Object(_) | Value::Ref(_))
 }
 
+#[inline]
+fn needs_drop(v: &Value) -> bool {
+    !matches!(
+        v,
+        Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_)
+    )
+}
+
 /// Copy of an element for a separated array: references held only by the
 /// array being copied are dereferenced (observed on PHP 8.5: after
 /// `$r = &$a[0]; unset($r); $b = $a; $b[0] = 2;`, `$a[0]` is unchanged).
-#[inline]
+#[inline(always)]
 fn copy_elem(v: &Value) -> Value {
+    if needs_drop(v) {
+        copy_owned_elem(v)
+    } else {
+        // SAFETY: scalar variants own nothing; a bitwise copy is a clone.
+        unsafe { std::ptr::read(v) }
+    }
+}
+
+#[inline(never)]
+fn copy_owned_elem(v: &Value) -> Value {
     match v {
         Value::Ref(r) if r.refcount() == 1 => r.get(),
         v => v.clone(),
@@ -266,55 +327,85 @@ fn copy_elem(v: &Value) -> Value {
 
 impl HashStore {
     fn with_capacity(n: usize) -> HashStore {
-        let size = index_size_for(n);
+        if n <= SMALL {
+            return HashStore {
+                entries: Vec::with_capacity(n.max(2)),
+                index: Box::new([]),
+                live: 0,
+            };
+        }
+        let size = (n * 2).next_power_of_two();
         HashStore {
             entries: Vec::with_capacity(size / 2),
-            index: vec![EMPTY_SLOT; size].into_boxed_slice(),
+            index: vec![0; size].into_boxed_slice(),
             live: 0,
         }
     }
 
     #[inline]
     fn limit(&self) -> usize {
-        self.index.len() / 2
+        if self.index.is_empty() {
+            SMALL
+        } else {
+            self.index.len() / 2
+        }
     }
 
+    /// Finds the live entry for `k`, whose bucket hash is `bh`.
     #[inline]
-    fn find(&self, k: KeyRef<'_>, h: u64) -> Option<u32> {
-        let mask = self.index.len() - 1;
-        let tag = (h >> 32) as u32;
-        let mut i = h as usize & mask;
-        loop {
-            let s = self.index[i];
-            if s.idx == EMPTY {
-                return None;
-            }
-            if s.tag == tag {
-                let b = &self.entries[s.idx as usize];
-                if b.val.is_some() && key_eq(&b.key, k) {
-                    return Some(s.idx);
+    fn find(&self, k: KeyRef<'_>, bh: u64) -> Option<u32> {
+        if self.index.is_empty() {
+            for (i, b) in self.entries.iter().enumerate() {
+                if b.matches(bh, k) && b.val.is_some() {
+                    return Some(i as u32);
                 }
             }
-            i = (i + 1) & mask;
+            return None;
+        }
+        let sh = slot_hash(bh, matches!(k, KeyRef::Int(_)));
+        let mask = self.index.len() - 1;
+        let tag = sh >> 32;
+        let mut i = sh as usize & mask;
+        let mut step = 0;
+        loop {
+            let s = self.index[i];
+            if s == 0 {
+                return None;
+            }
+            if s >> 32 == tag {
+                let idx = (s as u32).wrapping_sub(1);
+                let b = &self.entries[idx as usize];
+                if b.matches(bh, k) && b.val.is_some() {
+                    return Some(idx);
+                }
+            }
+            // Triangular probing visits every slot of a power-of-two table
+            // and avoids the primary clustering of linear probing.
+            step += 1;
+            i = (i + step) & mask;
         }
     }
 
+    /// Records entry `idx` (with slot hash `sh`) in the index.
     #[inline]
-    fn place(&mut self, idx: u32, h: u64) {
-        let mask = self.index.len() - 1;
-        let mut i = h as usize & mask;
-        while self.index[i].idx != EMPTY {
-            i = (i + 1) & mask;
+    fn place(&mut self, idx: u32, sh: u64) {
+        if self.index.is_empty() {
+            return;
         }
-        self.index[i] = Slot {
-            idx,
-            tag: (h >> 32) as u32,
-        };
+        let mask = self.index.len() - 1;
+        let mut i = sh as usize & mask;
+        let mut step = 0;
+        while self.index[i] != 0 {
+            step += 1;
+            i = (i + step) & mask;
+        }
+        self.index[i] = ((sh >> 32) << 32) | (idx as u64 + 1);
     }
 
     /// Rebuilds the index with room for at least `min_cap` entries,
     /// dropping tombstones. Returns the position remap (old → new) if any
     /// entry moved.
+    #[inline(never)]
     fn rebuild(&mut self, min_cap: usize) -> Option<Vec<u32>> {
         let had_holes = self.live as usize != self.entries.len();
         let remap = if had_holes {
@@ -332,28 +423,82 @@ impl HashStore {
         } else {
             None
         };
-        let size = index_size_for(min_cap.max(self.entries.len()));
-        self.index = vec![EMPTY_SLOT; size].into_boxed_slice();
+        let n = min_cap.max(self.entries.len());
+        if n <= SMALL {
+            self.index = Box::new([]);
+            return remap;
+        }
+        let size = (n * 2).next_power_of_two();
+        self.index = vec![0; size].into_boxed_slice();
         if self.entries.capacity() < size / 2 {
             self.entries.reserve_exact(size / 2 - self.entries.len());
         }
-        for i in 0..self.entries.len() {
-            let h = key_hash(self.entries[i].key.as_ref());
-            self.place(i as u32, h);
+        for idx in 0..self.entries.len() {
+            let b = &self.entries[idx];
+            let sh = slot_hash(b.h, b.skey.is_none());
+            self.place(idx as u32, sh);
         }
         remap
+    }
+}
+
+impl Drop for ArrayData {
+    fn drop(&mut self) {
+        // Drop only the elements that own something; scalars are skipped
+        // without calling drop glue (most arrays hold mostly scalars).
+        match &mut self.store {
+            Store::Packed(v) => {
+                let len = v.len();
+                let p = v.as_mut_ptr();
+                // SAFETY: the length is reset first, so each element is
+                // dropped at most once even if a drop panics.
+                unsafe {
+                    v.set_len(0);
+                    for i in 0..len {
+                        let e = &mut *p.add(i);
+                        if needs_drop(e) {
+                            std::ptr::drop_in_place(e);
+                        }
+                    }
+                }
+            }
+            Store::Hash(h) => {
+                let len = h.entries.len();
+                let p = h.entries.as_mut_ptr();
+                // SAFETY: as above.
+                unsafe {
+                    h.entries.set_len(0);
+                    for i in 0..len {
+                        let b = &mut *p.add(i);
+                        if b.skey.is_some() {
+                            std::ptr::drop_in_place(&mut b.skey);
+                        }
+                        if let Some(v) = &mut b.val
+                            && needs_drop(v)
+                        {
+                            std::ptr::drop_in_place(v);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
 impl Clone for ArrayData {
     fn clone(&self) -> ArrayData {
         let store = match &self.store {
-            Store::Packed(v) => Store::Packed(v.iter().map(copy_elem).collect()),
+            Store::Packed(v) => {
+                let mut out = Vec::with_capacity(v.len());
+                out.extend(v.iter().map(copy_elem));
+                Store::Packed(out)
+            }
             Store::Hash(h) => {
                 let mut entries = Vec::with_capacity(h.entries.capacity());
                 entries.extend(h.entries.iter().map(|b| Bucket {
-                    key: b.key.clone(),
                     val: b.val.as_ref().map(copy_elem),
+                    h: b.h,
+                    skey: b.skey.clone(),
                 }));
                 Store::Hash(HashStore {
                     entries,
@@ -424,7 +569,7 @@ impl ArrayData {
                 .iter()
                 .filter(|b| b.val.is_some())
                 .enumerate()
-                .all(|(i, b)| b.key == Key::Int(i as i64)),
+                .all(|(i, b)| b.key() == KeyRef::Int(i as i64)),
         }
     }
 
@@ -513,7 +658,7 @@ impl ArrayData {
                 }
             }
             Store::Hash(h) => {
-                let idx = h.find(KeyRef::Int(i), hash_int(i))?;
+                let idx = h.find(KeyRef::Int(i), i as u64)?;
                 h.entries[idx as usize].val.as_ref()
             }
         }
@@ -560,7 +705,7 @@ impl ArrayData {
                 _ => None,
             },
             Store::Hash(h) => {
-                let idx = h.find(k, key_hash(k))?;
+                let idx = h.find(k, bucket_hash(k))?;
                 h.entries[idx as usize].val.as_mut()
             }
         }
@@ -568,18 +713,27 @@ impl ArrayData {
 
     // ------------------------------------------------------------ insert
 
+    #[inline]
     fn convert_to_hash(&mut self, extra: usize) {
+        if let Store::Packed(_) = &self.store {
+            self.packed_to_hash(extra);
+        }
+    }
+
+    #[inline(never)]
+    fn packed_to_hash(&mut self, extra: usize) {
         if let Store::Packed(v) = &mut self.store {
             let v = std::mem::take(v);
             let mut h = HashStore::with_capacity(v.len() + extra);
             h.live = v.len() as u32;
             h.entries
                 .extend(v.into_iter().enumerate().map(|(i, val)| Bucket {
-                    key: Key::Int(i as i64),
                     val: Some(val),
+                    h: i as u64,
+                    skey: None,
                 }));
             for i in 0..h.entries.len() {
-                h.place(i as u32, hash_int(i as i64));
+                h.place(i as u32, slot_hash(i as u64, true));
             }
             self.store = Store::Hash(h);
         }
@@ -615,18 +769,17 @@ impl ArrayData {
         self.apply_remap(remap);
     }
 
-    fn hash_insert_new(&mut self, k: Key, h_: u64, v: Value) -> &mut Value {
+    #[inline]
+    fn hash_insert_new(&mut self, k: Key, bh: u64, v: Value) -> &mut Value {
         self.hash_reserve_one();
         let Store::Hash(h) = &mut self.store else {
             unreachable!()
         };
         let idx = h.entries.len() as u32;
-        h.entries.push(Bucket {
-            key: k,
-            val: Some(v),
-        });
+        let sh = slot_hash(bh, matches!(k, Key::Int(_)));
+        h.entries.push(Bucket::new(k, bh, v));
         h.live += 1;
-        h.place(idx, h_);
+        h.place(idx, sh);
         h.entries[idx as usize].val.as_mut().unwrap()
     }
 
@@ -653,14 +806,14 @@ impl ArrayData {
         } else {
             self.convert_to_hash(1);
         }
-        let h_ = key_hash(k.as_ref());
+        let bh = bucket_hash(k.as_ref());
         let Store::Hash(h) = &mut self.store else {
             unreachable!()
         };
-        if let Some(idx) = h.find(k.as_ref(), h_) {
+        if let Some(idx) = h.find(k.as_ref(), bh) {
             return h.entries[idx as usize].val.replace(v);
         }
-        self.hash_insert_new(k, h_, v);
+        self.hash_insert_new(k, bh, v);
         None
     }
 
@@ -700,17 +853,17 @@ impl ArrayData {
         } else {
             self.convert_to_hash(1);
         }
-        let h_ = key_hash(k.as_ref());
+        let bh = bucket_hash(k.as_ref());
         let Store::Hash(h) = &mut self.store else {
             unreachable!()
         };
-        if let Some(idx) = h.find(k.as_ref(), h_) {
+        if let Some(idx) = h.find(k.as_ref(), bh) {
             let Store::Hash(h) = &mut self.store else {
                 unreachable!()
             };
             return h.entries[idx as usize].val.as_mut().unwrap();
         }
-        self.hash_insert_new(k, h_, Value::Null)
+        self.hash_insert_new(k, bh, Value::Null)
     }
 
     /// Appends `v` at the next index (`$a[] = v`), returning the key used.
@@ -755,7 +908,7 @@ impl ArrayData {
         let Store::Hash(h) = &mut self.store else {
             unreachable!()
         };
-        let idx = h.find(k, key_hash(k))?;
+        let idx = h.find(k, bucket_hash(k))?;
         let v = h.entries[idx as usize].val.take();
         h.live -= 1;
         if h.live == 0 && self.iters.is_empty() {
@@ -874,7 +1027,7 @@ impl ArrayData {
             Store::Hash(h) => {
                 let b = h.entries.get(p as usize)?;
                 b.val.as_ref()?;
-                Some(b.key.as_ref())
+                Some(b.key())
             }
         }
     }
@@ -886,7 +1039,7 @@ impl ArrayData {
             Store::Packed(v) => v.get(p as usize).map(|v| (KeyRef::Int(p as i64), v)),
             Store::Hash(h) => {
                 let b = h.entries.get(p as usize)?;
-                Some((b.key.as_ref(), b.val.as_ref()?))
+                Some((b.key(), b.val.as_ref()?))
             }
         }
     }
@@ -1095,10 +1248,18 @@ impl PhpArray {
     }
 
     /// Write access, separating a shared copy first (copy on write).
-    #[inline]
+    #[inline(always)]
     pub fn make_mut(&mut self) -> &mut ArrayData {
         let rc = self.0.get_or_insert_with(|| Rc::new(ArrayData::new()));
-        Rc::make_mut(rc)
+        // A unique array with a weak pointer (its GC root entry) is moved
+        // to a new allocation by `make_mut`, leaving the root entry dead:
+        // clear the "buffered" flag so it can be recorded again.
+        let moved = Rc::strong_count(rc) == 1 && Rc::weak_count(rc) > 0;
+        let d = Rc::make_mut(rc);
+        if moved {
+            d.flags.set(d.flags.get() & !A_GC_BUFFERED);
+        }
+        d
     }
 
     /// Number of handles sharing this array's data (0 for the empty array).

@@ -17,6 +17,7 @@ use crate::string::PhpStr;
 
 /// A PHP value.
 #[derive(Clone, Default)]
+#[repr(u64)]
 pub enum Value {
     #[default]
     Null,
@@ -289,6 +290,8 @@ mod tests {
     fn sizes() {
         assert_eq!(std::mem::size_of::<Value>(), 16);
         assert_eq!(std::mem::size_of::<Option<Value>>(), 16);
+        assert_eq!(std::mem::size_of::<crate::PhpResult<Value>>(), 16);
+        assert_eq!(std::mem::size_of::<crate::Key>(), 16);
     }
 
     #[test]
