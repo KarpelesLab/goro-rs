@@ -259,6 +259,8 @@ fn enc_out(o: &Out) -> String {
                 StdError::ValueError(m) => ("ValueError", m),
                 StdError::TypeError(m) => ("TypeError", m),
                 StdError::ArgumentCountError(m) => ("ArgumentCountError", m),
+                StdError::DivisionByZeroError(m) => ("DivisionByZeroError", m),
+                StdError::ArithmeticError(m) => ("ArithmeticError", m),
                 StdError::Fatal(m) => ("Fatal", m),
             };
             format!("X{c}:{}", hex(m.as_bytes()))
