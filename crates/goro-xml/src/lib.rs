@@ -6,6 +6,7 @@ pub mod error;
 pub mod sax;
 pub mod serialize;
 pub mod tree;
+pub mod writer;
 pub mod xml;
 
 pub use tree::{Arena, NodeId, NodeType, QName, Str};

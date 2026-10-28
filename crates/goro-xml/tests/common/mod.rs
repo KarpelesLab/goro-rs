@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 //! Helpers for fixture tests.
+pub mod json;
 
 /// Decodes standard base64.
 pub fn b64(s: &str) -> Vec<u8> {
