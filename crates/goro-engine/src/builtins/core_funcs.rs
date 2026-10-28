@@ -1023,7 +1023,14 @@ fn class_arg(vm: &mut Vm, v: &Value, autoload: bool) -> R<Option<Rc<Class>>> {
 fn get_parent_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = if a.has(0) {
         let v = a.val(0);
-        class_arg(vm, &v, true)?
+        let c = class_arg(vm, &v, true)?;
+        if c.is_none() {
+            return vm.type_error(&format!(
+                "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given",
+                v.tname()
+            ));
+        }
+        c
     } else {
         let p = vm.scope_ptr();
         (!p.is_null()).then(|| vm.rc_class(p))

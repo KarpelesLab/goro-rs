@@ -1442,6 +1442,22 @@ impl Vm {
             if let Value::Ref(r) = &args[i] {
                 args[i] = r.get();
             }
+            // Class-name parameters are not juggled (observed on PHP 8.5:
+            // "get_parent_class(): Argument #1 ($object_or_class) must be an
+            // object or a valid class name, int given").
+            if i == 0
+                && matches!(fname.as_bytes(), b"get_parent_class" | b"get_class_methods")
+                && !matches!(args[0], Value::Object(_) | Value::Str(_))
+            {
+                return self.throw(
+                    "TypeError",
+                    &format!(
+                        "{}(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given",
+                        fname,
+                        Vm::type_name_given(&args[0])
+                    ),
+                );
+            }
             if args[i].is_null() && !ty.allows_null() {
                 let scalar = ty.mask & (tmask::BOOL | tmask::INT | tmask::FLOAT | tmask::STRING)
                     != 0
