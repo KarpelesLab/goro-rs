@@ -155,7 +155,7 @@ fn build_attributes(
             )?;
             continue;
         };
-        let s = entry_str(vm, &v)?;
+        let s = entry_str(vm, v)?;
         given.push((oid, s));
     }
     let attr_sec = req.get("attributes").map(|s| s.to_string());

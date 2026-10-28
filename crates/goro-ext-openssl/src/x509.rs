@@ -306,14 +306,14 @@ fn oneline_bytes(a: &Attr) -> Vec<u8> {
     // BMPString / UniversalString whose high bytes are all zero are shown
     // by their low bytes.
     match a.tag {
-        tag::BMP_STRING if a.value.len() % 2 == 0 => {
+        tag::BMP_STRING if a.value.len().is_multiple_of(2) => {
             if a.value.chunks(2).all(|c| c[0] == 0) {
                 a.value.chunks(2).map(|c| c[1]).collect()
             } else {
                 a.value.clone()
             }
         }
-        tag::UNIVERSAL_STRING if a.value.len() % 4 == 0 => {
+        tag::UNIVERSAL_STRING if a.value.len().is_multiple_of(4) => {
             if a.value
                 .chunks(4)
                 .all(|c| c[0] == 0 && c[1] == 0 && c[2] == 0)
@@ -337,9 +337,7 @@ fn escape_2253(v: &[u8]) -> String {
         if special {
             s.push('\\');
             s.push(b as char);
-        } else if b < 0x20 || b == 0x7f {
-            s.push_str(&format!("\\{:02X}", b));
-        } else if b >= 0x80 {
+        } else if !(0x20..0x7f).contains(&b) {
             s.push_str(&format!("\\{:02X}", b));
         } else {
             s.push(b as char);
@@ -1189,12 +1187,11 @@ impl Cert {
                 }
                 if let Some(n) = self.ns_cert_type()
                     && n & NS_SMIME == 0
+                    && n & NS_SSL_CLIENT == 0
                 {
-                    if n & NS_SSL_CLIENT == 0 {
-                        return 0;
-                    }
-                    // Tolerated with a warning.
+                    return 0;
                 }
+                // Tolerated with a warning.
                 let bits = if id == 4 {
                     KU_DIGITAL_SIGNATURE | KU_NON_REPUDIATION
                 } else {
@@ -1493,7 +1490,7 @@ k7cdtlwtLX5rMfssQY+be0HPQX2sCY4=
         assert_eq!(c.check_purpose(1, false), 1);
         assert_eq!(c.check_purpose(9, false), 0);
         assert_eq!(c.check_purpose(10, true), 1);
-        assert_eq!(c.verify_signature_by(&c), true);
+        assert!(c.verify_signature_by(&c));
         assert_eq!(
             c.issuer.print_compat(),
             "C=FR, ST=\\xC3\\x8Ele-de-France, L=Paris, O=Org \"Q\" & <x>, OU=Unit1, OU=Unit2, CN=t\\xC3\\xABst\\/name=1/emailAddress=a@b.c"

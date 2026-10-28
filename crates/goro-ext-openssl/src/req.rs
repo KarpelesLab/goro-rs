@@ -130,11 +130,11 @@ impl Req {
         let curve_name = get("curve_name").map(|o| o.as_str());
         let string_mask = StringMask::parse(cget("string_mask").as_deref());
         let mut custom_oids = Vec::new();
-        if let Some(sec) = conf.get("default", "oid_section").map(|s| s.to_string()) {
-            if let Some(e) = conf.section(&sec) {
-                for (n, v) in e {
-                    custom_oids.push((n.clone(), v.trim().to_string()));
-                }
+        if let Some(sec) = conf.get("default", "oid_section").map(|s| s.to_string())
+            && let Some(e) = conf.section(&sec)
+        {
+            for (n, v) in e {
+                custom_oids.push((n.clone(), v.trim().to_string()));
             }
         }
         if let Some(sec) = cget("oid_section")

@@ -78,11 +78,11 @@ fn err(name: &str, value: &str, reason: &'static str) -> V3Error {
 pub fn build_one(name: &str, value: &str, ctx: &Ctx) -> Result<Option<Extension>, V3Error> {
     let mut v = value.trim();
     let mut critical = false;
-    if let Some(rest) = v.strip_prefix("critical") {
-        if let Some(r) = rest.trim_start().strip_prefix(',') {
-            critical = true;
-            v = r.trim();
-        }
+    if let Some(rest) = v.strip_prefix("critical")
+        && let Some(r) = rest.trim_start().strip_prefix(',')
+    {
+        critical = true;
+        v = r.trim();
     }
     let oid_s = match oid::by_name(name) {
         Some(o) => o.oid.to_string(),

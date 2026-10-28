@@ -37,11 +37,10 @@ fn export_common(vm: &mut Vm, a: &Args) -> R<Option<Vec<u8>>> {
                 other => vec![other],
             };
             for item in list {
-                match cert_from_value(vm, a, &item)? {
-                    Some(c) => extra.push((*c).clone()),
-                    // Unreadable extra certificates are skipped silently
-                    // (test bug81713.phpt).
-                    None => {}
+                // Unreadable extra certificates are skipped silently (test
+                // bug81713.phpt).
+                if let Some(c) = cert_from_value(vm, a, &item)? {
+                    extra.push((*c).clone());
                 }
             }
         }

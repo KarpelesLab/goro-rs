@@ -260,7 +260,7 @@ pub fn decrypt(alg: &der::Tlv, data: &[u8], pass: &[u8]) -> Result<Vec<u8>, PbeE
             let coid = er.next().and_then(|x| x.oid()).map_err(e)?;
             let iv = er.expect(tag::OCTET_STRING).map_err(e)?.content.to_vec();
             let c = CbcCipher::by_oid(&coid).ok_or(PbeError::Unsupported)?;
-            if iter < 1 || iter > 10_000_000 {
+            if !(1..=10_000_000).contains(&iter) {
                 return Err(PbeError::Decode);
             }
             let key = crate::digest::pbkdf2(

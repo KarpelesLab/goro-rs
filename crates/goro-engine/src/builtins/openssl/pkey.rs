@@ -63,17 +63,15 @@ pub(super) fn generate_key(vm: &mut Vm, a: &Args, req: &ossl::req::Req) -> R<Opt
         return Ok(None);
     };
     match t {
-        KeyType::Rsa | KeyType::Dsa | KeyType::Dh => {
-            if req.bits < 384 {
-                vm.fwarn(
-                    a,
-                    &format!(
-                        "Private key length must be at least 384 bits, configured to {}",
-                        req.bits
-                    ),
-                )?;
-                return Ok(None);
-            }
+        KeyType::Rsa | KeyType::Dsa | KeyType::Dh if req.bits < 384 => {
+            vm.fwarn(
+                a,
+                &format!(
+                    "Private key length must be at least 384 bits, configured to {}",
+                    req.bits
+                ),
+            )?;
+            return Ok(None);
         }
         _ => {}
     }

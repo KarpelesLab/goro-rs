@@ -111,10 +111,8 @@ pub fn verify_chain(
         });
     }
     for i in 0..chain.len() {
-        if i + 1 < chain.len() {
-            if !chain[i].verify_signature_by(&chain[i + 1]) {
-                return Err(VerifyError::CertSignatureFailure);
-            }
+        if i + 1 < chain.len() && !chain[i].verify_signature_by(&chain[i + 1]) {
+            return Err(VerifyError::CertSignatureFailure);
         }
     }
     for c in &chain {

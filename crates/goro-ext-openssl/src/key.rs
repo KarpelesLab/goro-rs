@@ -387,7 +387,7 @@ fn random_below(n: &[u8]) -> Vec<u8> {
     let n = strip(n);
     let nb = bits_of(&n);
     let len = n.len();
-    let mask = if nb % 8 == 0 {
+    let mask = if nb.is_multiple_of(8) {
         0xff
     } else {
         (1u8 << (nb % 8)) - 1
