@@ -520,9 +520,66 @@ fn import_legacy_node(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let deep = a.bool(1);
     let c = with_arena(|ar| {
         let c = ar.clone_node(n, d, deep);
+        // Legacy namespace declarations become xmlns attributes (test
+        // modern/spec/Document_importLegacyNode.phpt).
+        let mut els = vec![c];
+        els.extend(ar.descendants(c).filter(|&x| ar.is_element(x)));
+        for el in els {
+            let decls = match ar.element_mut(el) {
+                Some(e) => std::mem::take(&mut e.ns_decls),
+                None => continue,
+            };
+            let first = ar.element(el).and_then(|e| e.first_attr);
+            for dcl in decls.into_iter().rev() {
+                let name = match &dcl.prefix {
+                    Some(p) => QName {
+                        prefix: Some("xmlns".into()),
+                        local: p.clone(),
+                        ns: Some(XMLNS_NS.into()),
+                    },
+                    None => QName {
+                        prefix: None,
+                        local: "xmlns".into(),
+                        ns: Some(XMLNS_NS.into()),
+                    },
+                };
+                let at = ar.new_attribute(d, name, &dcl.uri);
+                let cur_first = ar.element(el).and_then(|e| e.first_attr);
+                match cur_first {
+                    Some(f0) => {
+                        let _ = first;
+                        ar.raw_append_attr(el, at);
+                        // move before the first original attribute
+                        ar.detach(at);
+                        insert_attr_before(ar, el, at, f0);
+                    }
+                    None => ar.raw_append_attr(el, at),
+                }
+            }
+        }
         c
     });
     wrap_node(vm, c)
+}
+
+/// Inserts attribute `at` (detached) before attribute `before` of `el`.
+fn insert_attr_before(ar: &mut goro_xml::Arena, el: NodeId, at: NodeId, before: NodeId) {
+    let rest: Vec<NodeId> = {
+        let mut v = Vec::new();
+        let mut c = Some(before);
+        while let Some(x) = c {
+            v.push(x);
+            c = ar.next_sibling(x);
+        }
+        v
+    };
+    for &x in &rest {
+        ar.detach(x);
+    }
+    ar.raw_append_attr(el, at);
+    for x in rest {
+        ar.raw_append_attr(el, x);
+    }
 }
 
 fn normalize_document(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -549,10 +606,13 @@ fn register_node_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let root = vm
         .find_class(if modern { b"Dom\\Node" as &[u8] } else { b"DOMNode" }, false)?
         .unwrap();
+    if modern && bc.has_flag(crate::class::cflags::ABSTRACT) && bc.is_subclass_of(&root) {
+        return vm.fthrow(a, "ValueError", "Argument #1 ($baseClass) must not be an abstract class");
+    }
     if !bc.is_subclass_of(&root) || !bc.has_flag(crate::class::cflags::INTERNAL) {
         return vm.fthrow(
             a,
-            "ValueError",
+            "TypeError",
             &format!(
                 "Argument #1 ($baseClass) must be a class name derived from {}, {} given",
                 if modern { "Dom\\Node" } else { "DOMNode" },
@@ -1358,8 +1418,8 @@ fn impl_create_doctype(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if name.is_empty() && !modern {
         return vm.fthrow(a, "ValueError", "Argument #1 ($qualifiedName) must not be empty");
     }
-    if !goro_xml::chars::is_qname(&name) && !(modern && name.is_empty()) {
-        let e = if goro_xml::chars::is_name(&name) {
+    if !goro_xml::chars::is_qname(&name) {
+        let e = if modern || goro_xml::chars::is_name(&name) {
             DomError::Namespace
         } else {
             DomError::InvalidCharacter

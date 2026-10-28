@@ -54,7 +54,18 @@ pub(crate) fn set_data(n: NodeId, text: &str) {
 
 /// Checks `offset` against the length: IndexSizeError when past the end
 /// or negative.
+/// A `Dom\` offset or count: DOM's `unsigned long` (modulo 2^32), above
+/// 2^31-1 an IndexSizeError (tests modern/spec/CharacterData_*_mod32.phpt).
+fn ulong(vm: &mut Vm, v: i64) -> R<i64> {
+    let u = (v as u64 & 0xffff_ffff) as i64;
+    if u > i32::MAX as i64 {
+        return throw_dom(vm, DomError::IndexSize);
+    }
+    Ok(u)
+}
+
 fn check_offset(vm: &mut Vm, a: &Args, n: NodeId, off: i64, len: usize) -> R<Option<usize>> {
+    let off = if modern_fn(a) { ulong(vm, off)? } else { off };
     if off < 0 || off as usize > len {
         if modern_fn(a) {
             return throw_dom(vm, DomError::IndexSize);
@@ -71,8 +82,8 @@ fn substring_data(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(off) = check_offset(vm, a, n, a.int(0), c.len())? else {
         return Ok(Value::Bool(false));
     };
-    let count = a.int(1);
-    if count < 0 && !modern_fn(a) {
+    let count = if modern_fn(a) { ulong(vm, a.int(1))? } else { a.int(1) };
+    if count < 0 {
         legacy_error(vm, a, n, DomError::IndexSize)?;
         return Ok(Value::Bool(false));
     }
@@ -101,6 +112,7 @@ fn edit(vm: &mut Vm, a: &Args, off: i64, count: i64, insert: &str) -> R<Value> {
     let Some(off) = check_offset(vm, a, n, off, c.len())? else {
         return Ok(Value::Bool(false));
     };
+    let count = if modern_fn(a) { ulong(vm, count)? } else { count };
     if count < 0 && !modern_fn(a) {
         legacy_error(vm, a, n, DomError::IndexSize)?;
         return Ok(Value::Bool(false));
@@ -136,6 +148,9 @@ fn split_text(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = this_node(vm, a)?;
     let c = chars(&data_of(n));
     let off = a.int(0);
+    if off < 0 && modern_fn(a) {
+        return vm.fthrow(a, "ValueError", "Argument #1 ($offset) must be greater than or equal to 0");
+    }
     if off < 0 || off as usize > c.len() {
         if modern_fn(a) {
             return throw_dom(vm, DomError::IndexSize);

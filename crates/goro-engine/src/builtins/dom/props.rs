@@ -346,12 +346,7 @@ fn compute(a: &mut goro_xml::Arena, n: NodeId, name: &str, modern: bool) -> PV {
             }
         }
         "textContent" => {
-            if modern
-                && matches!(
-                    a.data(n),
-                    NodeData::Document(_) | NodeData::Doctype(_) | NodeData::Notation(_)
-                )
-            {
+            if modern && matches!(a.data(n), NodeData::Document(_)) {
                 return PV::Null;
             }
             if !modern && matches!(a.data(n), NodeData::Document(_)) {
@@ -558,6 +553,23 @@ pub(crate) fn pv_value(vm: &mut Vm, o: &ObjRef, pv: PV, modern: bool) -> R<Value
         PV::Node(None) => Value::Null,
         PV::List(k) => lists::new_list_owned(vm, k, modern, Some(o.clone()))?,
         PV::Cached(k) => lists::cached_list(vm, o, k)?,
+        PV::Impl if modern => {
+            let found = super::with_dom_obj(o, |d| {
+                d.cached
+                    .borrow()
+                    .iter()
+                    .find(|(t, _)| *t == 3)
+                    .map(|(_, x)| x.clone())
+            })
+            .flatten();
+            if let Some(x) = found {
+                return Ok(Value::Object(x));
+            }
+            let cls = vm.find_class(b"Dom\\Implementation", false)?.unwrap();
+            let x = vm.instantiate_raw(&cls)?;
+            super::with_dom_obj(o, |d| d.cached.borrow_mut().push((3, x.clone())));
+            Value::Object(x)
+        }
         PV::Impl => {
             let c = if modern {
                 "Dom\\Implementation"
@@ -633,7 +645,10 @@ pub(crate) fn set_prop(vm: &mut Vm, o: &ObjRef, name: &str, v: Value) -> R<()> {
         "substitutedNodeValue" if modern => {
             super::node::set_text_content(vm, n, &text)?;
         }
-        "prefix" => {}
+        "prefix" => {
+            let c = vm.class_of(o).name.to_string_lossy();
+            return vm.throw("Error", &format!("Cannot modify readonly property {c}::$prefix"));
+        }
         _ => return readonly(vm),
     }
     Ok(())

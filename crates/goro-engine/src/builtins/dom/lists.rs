@@ -498,7 +498,7 @@ fn list_dim(
             if f.fract() != 0.0 && f.is_finite() {
                 if let Err(e) = vm.deprecated(&format!(
                     "Implicit conversion from float {} to int loses precision",
-                    goro_runtime::convert::float_to_string(f, 17).to_string_lossy()
+                    goro_runtime::convert::float_repr(f)
                 )) {
                     return Some(Err(e));
                 }
@@ -522,10 +522,12 @@ fn list_dim(
         },
         Value::Bool(_) | Value::Null if modern => {
             let t = crate::class::TypeName::tname(&key.deref());
-            return Some(vm.throw(
-                "TypeError",
-                &format!("Cannot access offset of type {t} on {cname}"),
-            ));
+            let m = if matches!(op, DimOp::Isset | DimOp::Empty) {
+                format!("Cannot access offset of type {t} in isset or empty")
+            } else {
+                format!("Cannot access offset of type {t} on {cname}")
+            };
+            return Some(vm.throw("TypeError", &m));
         }
         Value::Bool(b) => DimKey::Index(b as i64),
         Value::Null => DimKey::Index(0),

@@ -252,6 +252,9 @@ pub(crate) fn modern_insert(
 ) -> Result<Vec<NodeId>, DomError> {
     xmlstore::with(|s| {
         let a = &mut s.arena;
+        if matches!(a.data(parent), NodeData::Attribute(_)) {
+            return Err(DomError::HierarchyRequest);
+        }
         if let Some(m) = hierarchy_detail(a, parent, node, child) {
             DETAIL.with(|d| d.set(Some(m)));
             return Err(DomError::HierarchyRequest);
@@ -356,6 +359,14 @@ fn replace_child(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
         }
         let ar = &mut s.arena;
+        if modern
+            && !matches!(
+                ar.data(parent),
+                NodeData::Element(_) | NodeData::Document(_) | NodeData::Fragment
+            )
+        {
+            return Err(DomError::HierarchyRequest);
+        }
         if ar.parent(child) != Some(parent) {
             return Err(DomError::NotFound);
         }
