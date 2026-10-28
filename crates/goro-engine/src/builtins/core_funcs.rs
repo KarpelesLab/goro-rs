@@ -2100,10 +2100,6 @@ pub struct ResponseHeaders {
     pub content_type: Option<PhpStr>,
 }
 
-fn noop_void(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Null)
-}
-
 fn zero_int(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Int(0))
 }
