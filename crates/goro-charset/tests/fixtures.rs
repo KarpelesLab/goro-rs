@@ -190,8 +190,14 @@ fn stateful_prefixes(name: &str) -> Vec<&'static [u8]> {
         b"\x1B$B\x1B(B",
     ];
     match name {
-        "JIS" | "ISO-2022-JP" | "ISO-2022-JP-MS" | "CP50220" | "CP50221" | "CP50222"
-        | "ISO-2022-JP-2004" | "ISO-2022-JP-MOBILE#KDDI" => jis,
+        "JIS"
+        | "ISO-2022-JP"
+        | "ISO-2022-JP-MS"
+        | "CP50220"
+        | "CP50221"
+        | "CP50222"
+        | "ISO-2022-JP-2004"
+        | "ISO-2022-JP-MOBILE#KDDI" => jis,
         "UTF-7" => vec![
             b"", b"+", b"+A", b"+AA", b"+AAA", b"+AAAA", b"+AAAAA", b"+AGE", b"+2D3", b"+2D3e",
             b"+2D3eA", b"+2D3eAA", b"+AGEA", b"a+AGE-",
@@ -201,13 +207,7 @@ fn stateful_prefixes(name: &str) -> Vec<&'static [u8]> {
             b"&2D3eA", b"&AGEA", b"a&AGE-",
         ],
         "HZ" => vec![b"", b"~{", b"~{\x21", b"~{\x30\x21", b"~"],
-        "ISO-2022-KR" => vec![
-            b"",
-            b"\x1B$)C",
-            b"\x1B$)C\x0E",
-            b"\x0E",
-            b"\x1B$)C\x0E\x30",
-        ],
+        "ISO-2022-KR" => vec![b"", b"\x1B$)C", b"\x1B$)C\x0E", b"\x0E", b"\x1B$)C\x0E\x30"],
         "SJIS-Mobile#SOFTBANK" => vec![
             b"\x1B$G", b"\x1B$E", b"\x1B$F", b"\x1B$O", b"\x1B$P", b"\x1B$Q", b"\x1B$",
         ],
@@ -218,11 +218,10 @@ fn stateful_prefixes(name: &str) -> Vec<&'static [u8]> {
 /// The sample code points of the pair section of mb_stateful.php.
 const PAIR_CPS: [u32; 62] = [
     0x00, 0x0A, 0x0E, 0x0F, 0x1B, 0x20, 0x41, 0x5C, 0x7E, 0x7F, 0x80, 0xA5, 0xA6, 0xA7, 0xAF,
-    0x203E, 0x2015, 0x2016, 0x2116, 0x2160, 0x2170, 0x2225, 0x3000, 0x3042, 0x304B, 0x309A,
-    0x30AB, 0x31F7, 0x4E00, 0x4E02, 0x4E28, 0x7E8A, 0x9ED1, 0xE000, 0xE3AC, 0xE757, 0xE63E,
-    0xEE70, 0xF8F0, 0xFF01, 0xFF5E, 0xFF61, 0xFF71, 0xFF9F, 0xFFE2, 0xFFE4, 0x1F600, 0x20089,
-    0x2B, 0x2D, 0x26, 0x2F, 0x3D, 0x7A, 0xD800, 0x10FFFF, 0x00E6, 0x0300, 0x02E9, 0x02E5, 0xD55C,
-    0x4E2D,
+    0x203E, 0x2015, 0x2016, 0x2116, 0x2160, 0x2170, 0x2225, 0x3000, 0x3042, 0x304B, 0x309A, 0x30AB,
+    0x31F7, 0x4E00, 0x4E02, 0x4E28, 0x7E8A, 0x9ED1, 0xE000, 0xE3AC, 0xE757, 0xE63E, 0xEE70, 0xF8F0,
+    0xFF01, 0xFF5E, 0xFF61, 0xFF71, 0xFF9F, 0xFFE2, 0xFFE4, 0x1F600, 0x20089, 0x2B, 0x2D, 0x26,
+    0x2F, 0x3D, 0x7A, 0xD800, 0x10FFFF, 0x00E6, 0x0300, 0x02E9, 0x02E5, 0xD55C, 0x4E2D,
 ];
 
 /// Lines of mb_stateful.php for one encoding: section 0 is the prefixed
@@ -242,7 +241,11 @@ fn stateful_lines(name: &str, section: usize, dump: Option<&std::path::Path>) ->
     let mut file = file.map(std::io::BufWriter::new);
     if section == 0 {
         for p in stateful_prefixes(name) {
-            let ph = if p.is_empty() { "-".to_string() } else { hex(p) };
+            let ph = if p.is_empty() {
+                "-".to_string()
+            } else {
+                hex(p)
+            };
             let mut r = String::new();
             for b in 0..=255u8 {
                 let mut s = p.to_vec();
@@ -317,10 +320,13 @@ fn stateful_matches_php() {
         }
         let got = stateful_lines(enc, section, dump);
         let got_c = compact(&got);
-        let bad = got_c.iter().zip(exp).filter(|(a, b)| a != b).count()
-            + got_c.len().abs_diff(exp.len());
+        let bad =
+            got_c.iter().zip(exp).filter(|(a, b)| a != b).count() + got_c.len().abs_diff(exp.len());
         if bad > 0 {
-            let mut msg = format!("{enc} (section {section}): {bad} of {} groups differ", exp.len());
+            let mut msg = format!(
+                "{enc} (section {section}): {bad} of {} groups differ",
+                exp.len()
+            );
             if let Some(full) = &full {
                 let mine: std::collections::HashSet<String> =
                     got.iter().map(|l| format!("{enc} {l}")).collect();
@@ -340,7 +346,11 @@ fn stateful_matches_php() {
         }
     }
     if !failed.is_empty() {
-        panic!("{} sections differ from PHP 8.5:\n{}", failed.len(), failed.join("\n"));
+        panic!(
+            "{} sections differ from PHP 8.5:\n{}",
+            failed.len(),
+            failed.join("\n")
+        );
     }
 }
 
@@ -452,8 +462,8 @@ fn run(fixture: &str, full_name: &str, encode: bool) {
         }
         let got = lines(enc, encode, dump);
         let got_c = compact(&got);
-        let bad = got_c.iter().zip(exp).filter(|(a, b)| a != b).count()
-            + got_c.len().abs_diff(exp.len());
+        let bad =
+            got_c.iter().zip(exp).filter(|(a, b)| a != b).count() + got_c.len().abs_diff(exp.len());
         if bad > 0 {
             let mut msg = format!("{enc}: {bad} of {} groups differ", exp.len());
             if let Some(full) = &full {
@@ -481,6 +491,83 @@ fn run(fixture: &str, full_name: &str, encode: bool) {
             failed.join("\n")
         );
     }
+}
+
+/// tools/charset/fixtures/mb_unicode.php: mb_strwidth and every
+/// mb_convert_case mode on each code point.
+#[test]
+fn unicode_matches_php() {
+    use goro_charset::ops::{CaseMode, convert_case, strwidth};
+    let modes = [
+        CaseMode::Upper,
+        CaseMode::Lower,
+        CaseMode::Title,
+        CaseMode::Fold,
+        CaseMode::UpperSimple,
+        CaseMode::LowerSimple,
+        CaseMode::TitleSimple,
+        CaseMode::FoldSimple,
+    ];
+    let sub = Subst::default();
+    let dump = std::env::var("GORO_CHARSET_DUMP").ok().map(|d| {
+        std::io::BufWriter::new(
+            std::fs::File::create(std::path::Path::new(&d).join("unicode.txt")).unwrap(),
+        )
+    });
+    let mut dump = dump;
+    let mut got = Vec::new();
+    let mut skipped = 0;
+    for blk in 0..0x1100u32 {
+        let mut r = String::new();
+        let mut identity = true;
+        for i in 0..256 {
+            let cp = blk * 256 + i;
+            if (0xD800..=0xDFFF).contains(&cp) {
+                continue;
+            }
+            let c = char::from_u32(cp).unwrap().to_string();
+            let w = strwidth(c.as_bytes(), Encoding::Utf8);
+            if w != 1 {
+                identity = false;
+            }
+            r += &w.to_string();
+            for m in modes {
+                let o = convert_case(c.as_bytes(), m, Encoding::Utf8, &sub);
+                if o != c.as_bytes() {
+                    identity = false;
+                    r += ":";
+                    r += &hex(&o);
+                } else {
+                    r += ":=";
+                }
+            }
+            r += ",";
+        }
+        if identity {
+            skipped += 1;
+            continue;
+        }
+        got.push(format!("{blk:04x} {:08x}", crc32(r.as_bytes())));
+        if let Some(d) = dump.as_mut() {
+            writeln!(d, "{blk:04x} {r}").unwrap();
+        }
+    }
+    got.push(format!("skipped {skipped}"));
+    let exp: Vec<&str> = include_str!("fixtures/mb_unicode.txt").lines().collect();
+    let bad: Vec<String> = exp
+        .iter()
+        .zip(&got)
+        .filter(|(a, b)| **a != b.as_str())
+        .map(|(a, _)| a.split(' ').next().unwrap().to_string())
+        .collect();
+    assert!(
+        bad.is_empty() && exp.len() == got.len(),
+        "{} blocks differ ({} vs {} lines): {}",
+        bad.len(),
+        exp.len(),
+        got.len(),
+        bad.join(" ")
+    );
 }
 
 #[test]

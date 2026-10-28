@@ -28,3 +28,33 @@ fn probe() {
         }
     }
 }
+
+/// `GORO_CHARSET_DETECT="HEX:ENC,ENC[:strict]" cargo test --test probe detect -- --ignored --nocapture`
+/// (`ALL` for every encoding); prints each candidate's demerits and the result.
+#[test]
+#[ignore]
+fn detect() {
+    let Ok(spec) = std::env::var("GORO_CHARSET_DETECT") else {
+        return;
+    };
+    let mut it = spec.split(':');
+    let hex = it.next().unwrap();
+    let s: Vec<u8> = (0..hex.len() / 2)
+        .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap())
+        .collect();
+    let names = it.next().unwrap();
+    let list: Vec<Encoding> = if names == "ALL" {
+        goro_charset::encoding::ALL.to_vec()
+    } else {
+        names
+            .split(',')
+            .map(|n| Encoding::from_name(n.as_bytes()).unwrap())
+            .collect()
+    };
+    let strict = it.next() == Some("strict");
+    for &e in &list {
+        println!("  {} {}", e.name(), goro_charset::ops::detect::score(&s, e));
+    }
+    let r = goro_charset::ops::detect::detect_encoding(&s, &list, strict);
+    println!("{:?}", r.map(|e| e.name()));
+}

@@ -1,12 +1,24 @@
 //! Generated character set tables (tools/charset/gen_tables.py).
 
+#[rustfmt::skip]
 pub(crate) mod big5;
+#[rustfmt::skip]
+pub(crate) mod case;
+#[rustfmt::skip]
+pub(crate) mod detect;
+#[rustfmt::skip]
 pub(crate) mod gb;
+#[rustfmt::skip]
 pub(crate) mod html;
-pub(crate) mod kana;
-pub(crate) mod kr;
-pub(crate) mod mobile;
+#[rustfmt::skip]
 pub(crate) mod jis;
+#[rustfmt::skip]
+pub(crate) mod kana;
+#[rustfmt::skip]
+pub(crate) mod kr;
+#[rustfmt::skip]
+pub(crate) mod mobile;
+#[rustfmt::skip]
 pub(crate) mod single;
 
 /// Looks `cp` up in a paged reverse table (`NAME_IDX`, `NAME_DATA`): the

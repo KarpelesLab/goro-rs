@@ -765,8 +765,95 @@ def gen_html():
     write("html.rs", body)
 
 
+def read_ranges(path, prop):
+    """Code point ranges of a binary property in a UCD property file."""
+    rs = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            cps, p = [x.strip() for x in line.split(";")[:2]]
+            if p != prop:
+                continue
+            a, _, b = cps.partition("..")
+            rs.append((int(a, 16), int(b or a, 16)))
+    rs.sort()
+    merged = []
+    for a, b in rs:
+        if merged and merged[-1][1] + 1 >= a:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return merged
+
+
+def gen_case():
+    """Simple case mappings (UnicodeData.txt fields 12-14), simple case
+    folding (CaseFolding.txt statuses C and S), and the Cased and
+    Case_Ignorable properties (DerivedCoreProperties.txt). The full mappings
+    come from the intl crate."""
+    up, lo, ti = {}, {}, {}
+    with open(os.path.join(DATA, "ucd", "UnicodeData.txt"), encoding="utf-8") as f:
+        for line in f:
+            p = line.rstrip("\n").split(";")
+            cp = int(p[0], 16)
+            if p[12]:
+                up[cp] = int(p[12], 16)
+            if p[13]:
+                lo[cp] = int(p[13], 16)
+            if p[14]:
+                ti[cp] = int(p[14], 16)
+    fold = {}
+    with open(os.path.join(DATA, "ucd", "CaseFolding.txt"), encoding="utf-8") as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            c, status, m = [x.strip() for x in line.split(";")[:3]]
+            if status in ("C", "S"):
+                fold[int(c, 16)] = int(m, 16)
+    body = ""
+    for name, m in (("SIMPLE_UPPER", up), ("SIMPLE_LOWER", lo), ("SIMPLE_TITLE", ti), ("SIMPLE_FOLD", fold)):
+        rows = sorted(m.items())
+        body += "pub(crate) static %s: [(u32, u32); %d] = [\n" % (name, len(rows))
+        for i in range(0, len(rows), 6):
+            body += "    " + " ".join("(0x%X, 0x%X)," % r for r in rows[i:i + 6]) + "\n"
+        body += "];\n\n"
+    dcp = os.path.join(DATA, "ucd", "DerivedCoreProperties.txt")
+    for name, prop in (("CASED", "Cased"), ("CASE_IGNORABLE", "Case_Ignorable")):
+        rs = read_ranges(dcp, prop)
+        body += "pub(crate) static %s: [(u32, u32); %d] = [\n" % (name, len(rs))
+        for i in range(0, len(rs), 6):
+            body += "    " + " ".join("(0x%X, 0x%X)," % r for r in rs[i:i + 6]) + "\n"
+        body += "];\n\n"
+    write("case.rs", body)
+
+
+def gen_detect():
+    """mb_detect_encoding() demerits: tools/charset/detect_common.txt holds
+    the BMP ranges whose demerit differs from the default, as observed on
+    PHP 8.5 (see tools/charset/detect_weights.py)."""
+    rows = []
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "detect_common.txt")) as f:
+        for line in f:
+            if line.startswith("#") or not line.strip():
+                continue
+            a, b, v = line.split()
+            rows.append((int(a, 16), int(b, 16), int(v)))
+    body = "// Data: tools/charset/detect_common.txt, observed on PHP 8.5.\n\n"
+    body += "/// BMP ranges whose demerit is not the default (sorted, disjoint).\n"
+    body += "pub(crate) static DEMERITS: [(u16, u16, u8); %d] = [\n" % len(rows)
+    for i in range(0, len(rows), 6):
+        body += "    " + " ".join("(0x%X, 0x%X, %d)," % r for r in rows[i:i + 6]) + "\n"
+    body += "];\n"
+    write("detect.rs", body)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
+    gen_detect()
+    gen_case()
     gen_html()
     gen_kana()
     gen_mobile()
