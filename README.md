@@ -51,6 +51,21 @@ Fresh start. The previous code base is kept on the `old` branch for the
 record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
 
+- `goro-runtime`: PHP values (16-byte `Value`, byte strings, copy-on-write
+  ordered arrays, references, objects, destructor queue, cycle collector),
+  conversions, comparisons and arithmetic, checked against PHP 8.5 output.
+- `goro-phpt`: the `.phpt` runner behind `goro --test` (all test sections).
+- `goro-ext-standard`: printf family, string, math, random (`mt_rand`),
+  sorting, HTML entities (WHATWG table), URL and encoding functions.
+- `goro-ext-date`: date/time library with tzdata 2026e compiled from the
+  IANA database: parsing (`strtotime`, `DateTime::createFromFormat`),
+  formatting, intervals, periods and sunrise/sunset, checked on ~33k PHP 8.5
+  cases.
+- `goro-charset`: mbstring's 79 encodings (tables generated from Unicode,
+  WHATWG and UCD 17 data), the `mb_*` string operations, case conversion,
+  kana conversion, MIME headers and `mb_detect_encoding` scoring; iconv
+  with 247 charsets, `//TRANSLIT` and `//IGNORE`. Checked against PHP 8.5
+  fixtures for every 1–2 byte input and all of Unicode.
 - `goro-syntax`: lexer, parser and AST for PHP 8.5. The token stream
   matches `token_get_all()`; every `--FILE--` section of the php-src
   tests that PHP accepts parses, and the in-file parse errors the tests
