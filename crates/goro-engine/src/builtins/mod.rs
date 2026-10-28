@@ -19,6 +19,7 @@ pub mod serialize;
 pub mod spl;
 pub mod string;
 pub mod strmisc;
+pub mod userstream;
 pub mod var;
 pub mod weakmap;
 
@@ -38,6 +39,7 @@ pub fn modules() -> Vec<&'static Module> {
         &reflection::MODULE,
         &spl::MODULE,
         &weakmap::MODULE,
+        &userstream::MODULE,
         &string::MODULE,
         &strmisc::MODULE,
         &password::MODULE,

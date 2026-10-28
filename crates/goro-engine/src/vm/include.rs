@@ -260,6 +260,21 @@ impl Vm {
             IncludeKind::Require => "require",
             IncludeKind::RequireOnce => "require_once",
         };
+        if let Some(cls) = crate::builtins::userstream::wrapper_for(self, &path) {
+            let Some(src) = crate::builtins::userstream::read_all(self, fname, &cls, &path)? else {
+                self.warn(&format!(
+                    "{}(): Failed opening '{}' for inclusion (include_path='{}')",
+                    fname,
+                    path.to_string_lossy(),
+                    self.ini.include_path.to_string_lossy()
+                ))?;
+                self.put(dst, Value::Bool(false));
+                return Ok(());
+            };
+            let v = self.run_attached(&src, &path, false, fname)?;
+            self.put(dst, v);
+            return Ok(());
+        }
         let resolved = self.resolve_include(&path);
         let Some(resolved) = resolved else {
             if path.is_empty() {

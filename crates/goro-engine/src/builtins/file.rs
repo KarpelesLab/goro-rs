@@ -353,6 +353,14 @@ pub enum Backing {
         entries: Vec<Vec<u8>>,
         pos: usize,
     },
+    /// A user stream wrapper instance (stream_wrapper_register).
+    User {
+        obj: goro_runtime::ObjRef,
+    },
+    /// A directory opened through a user wrapper.
+    UserDir {
+        obj: goro_runtime::ObjRef,
+    },
 }
 
 /// A stream resource's data.
@@ -366,8 +374,10 @@ pub struct Stream {
     pub mode: PhpStr,
     pub wrapper: &'static str,
     pub stream_type: &'static str,
-    /// Bytes read ahead (stdin line reads).
+    /// Bytes read ahead (stdin line reads, user stream chunks).
     pub pending: Vec<u8>,
+    /// The position seen by the caller (user streams).
+    pub upos: i64,
 }
 
 impl Stream {
@@ -392,10 +402,26 @@ impl Stream {
             wrapper,
             stream_type,
             pending: Vec::new(),
+            upos: 0,
         }
     }
 
-    pub fn read_some(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    pub fn read_some(&mut self, vm: &mut Vm, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pending.is_empty() && matches!(self.backing, Backing::User { .. }) {
+            if let Err(e) = super::userstream::fill(vm, self) {
+                if vm.err.deferred.is_none() {
+                    vm.err.deferred = Some(e);
+                }
+                return Err(std::io::Error::other("user stream error"));
+            }
+        }
+        if !self.pending.is_empty() {
+            let n = buf.len().min(self.pending.len());
+            buf[..n].copy_from_slice(&self.pending[..n]);
+            self.pending.drain(..n);
+            self.upos += n as i64;
+            return Ok(n);
+        }
         if !self.pending.is_empty() {
             let n = buf.len().min(self.pending.len());
             buf[..n].copy_from_slice(&self.pending[..n]);
@@ -416,6 +442,20 @@ impl Stream {
     }
 
     pub fn write_all(&mut self, vm: &mut Vm, b: &[u8]) -> std::io::Result<usize> {
+        if matches!(self.backing, Backing::User { .. }) {
+            return match super::userstream::write(vm, self, b) {
+                Ok(n) => {
+                    self.upos += n as i64;
+                    Ok(n)
+                }
+                Err(e) => {
+                    if vm.err.deferred.is_none() {
+                        vm.err.deferred = Some(e);
+                    }
+                    Err(std::io::Error::other("user stream error"))
+                }
+            };
+        }
         match &mut self.backing {
             Backing::File(f) => {
                 if self.append {
@@ -585,6 +625,28 @@ pub fn open_stream(
     quiet: bool,
 ) -> R<Option<Stream>> {
     let fname = a.fname();
+    if let Some(cls) = super::userstream::wrapper_for(vm, filename) {
+        return super::userstream::open(vm, a, &cls, filename, mode, quiet);
+    }
+    if super::userstream::disabled(vm, filename) {
+        if !quiet {
+            let scheme = filename
+                .windows(3)
+                .position(|w| w == b"://")
+                .map(|p| String::from_utf8_lossy(&filename[..p]).into_owned())
+                .unwrap_or_else(|| "file".into());
+            vm.warn(&format!(
+                "{}(): Unable to find the wrapper \"{}\" - did you forget to enable it when you configured PHP?",
+                fname, scheme
+            ))?;
+            vm.warn(&format!(
+                "{}({}): Failed to open stream: No such file or directory",
+                fname,
+                String::from_utf8_lossy(filename)
+            ))?;
+        }
+        return Ok(None);
+    }
     if let Some(rest) = filename.strip_prefix(b"php://") {
         let lower = rest.to_ascii_lowercase();
         let s = match &lower[..] {
@@ -735,6 +797,19 @@ fn fclose(vm: &mut Vm, a: &mut Args) -> R<Value> {
     .iter()
     .any(|x| x.as_ref().is_some_and(|x| ResRef::ptr_eq(x, r)));
     let _ = is_std;
+    let user = {
+        let data = r.res().data.borrow();
+        data.as_ref()
+            .and_then(|d| d.downcast_ref::<std::cell::RefCell<Stream>>())
+            .and_then(|c| match &c.borrow().backing {
+                Backing::User { obj } => Some(obj.clone()),
+                _ => None,
+            })
+    };
+    if let Some(o) = user {
+        super::userstream::call(vm, &o, b"stream_flush", Vec::new())?;
+        super::userstream::call(vm, &o, b"stream_close", Vec::new())?;
+    }
     r.close();
     Ok(Value::Bool(true))
 }
@@ -759,7 +834,7 @@ fn fread(vm: &mut Vm, a: &mut Args) -> R<Value> {
         let mut buf = vec![0u8; n as usize];
         let mut got = 0;
         while got < buf.len() {
-            match s.read_some(&mut buf[got..]) {
+            match s.read_some(vm, &mut buf[got..]) {
                 Ok(0) => {
                     s.eof = true;
                     break;
@@ -800,7 +875,7 @@ fn fwrite(vm: &mut Vm, a: &mut Args) -> R<Value> {
     })
 }
 
-fn read_line(s: &mut Stream, max: Option<usize>) -> Option<Vec<u8>> {
+fn read_line(vm: &mut Vm, s: &mut Stream, max: Option<usize>) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     let mut b = [0u8; 1];
     loop {
@@ -809,7 +884,7 @@ fn read_line(s: &mut Stream, max: Option<usize>) -> Option<Vec<u8>> {
         {
             break;
         }
-        match s.read_some(&mut b) {
+        match s.read_some(vm, &mut b) {
             Ok(1) => {
                 out.push(b[0]);
                 if b[0] == b'\n' {
@@ -836,8 +911,8 @@ fn fgets(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "Argument #2 ($length) must be greater than 0",
         );
     }
-    with_stream(vm, a, 0, |_vm, s| {
-        let r = read_line(s, max.map(|m| (m as usize).saturating_sub(1).max(1)));
+    with_stream(vm, a, 0, |vm, s| {
+        let r = read_line(vm, s, max.map(|m| (m as usize).saturating_sub(1).max(1)));
         // Detect EOF right after the last line for memory/file streams.
         if let Backing::Memory { data, pos } = &s.backing
             && *pos >= data.len()
@@ -852,9 +927,9 @@ fn fgets(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn fgetc(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    with_stream(vm, a, 0, |_vm, s| {
+    with_stream(vm, a, 0, |vm, s| {
         let mut b = [0u8; 1];
-        match s.read_some(&mut b) {
+        match s.read_some(vm, &mut b) {
             Ok(1) => Ok(Value::Str(PhpStr::from_byte(b[0]))),
             _ => {
                 s.eof = true;
@@ -866,6 +941,9 @@ fn fgetc(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn feof(vm: &mut Vm, a: &mut Args) -> R<Value> {
     with_stream(vm, a, 0, |_vm, s| {
+        if matches!(s.backing, Backing::User { .. }) {
+            return Ok(Value::Bool(s.eof && s.pending.is_empty()));
+        }
         let at_end = match &mut s.backing {
             Backing::Memory { data, pos } => *pos >= data.len() && (s.eof || *pos >= data.len()),
             Backing::File(f) => {
@@ -892,6 +970,10 @@ fn fflush(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 let _ = f.flush();
             }
             Backing::Stdout | Backing::Output => vm.out.flush(),
+            Backing::User { .. } => {
+                let r = super::userstream::simple(vm, s, b"stream_flush", Vec::new())?;
+                return Ok(Value::Bool(r.is_some_and(|v| vm.to_bool(&v))));
+            }
             _ => {}
         }
         Ok(Value::Bool(true))
@@ -903,12 +985,24 @@ fn ftell(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Ok(match &mut s.backing {
             Backing::File(f) => Value::Int(f.stream_position().map(|p| p as i64).unwrap_or(0)),
             Backing::Memory { pos, .. } => Value::Int(*pos as i64),
+            Backing::User { .. } => Value::Int(s.upos),
             _ => Value::Bool(false),
         })
     })
 }
 
-fn do_seek(s: &mut Stream, off: i64, whence: i64) -> bool {
+fn do_seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> bool {
+    if matches!(s.backing, Backing::User { .. }) {
+        return match super::userstream::seek(vm, s, off, whence) {
+            Ok(b) => b,
+            Err(e) => {
+                if vm.err.deferred.is_none() {
+                    vm.err.deferred = Some(e);
+                }
+                false
+            }
+        };
+    }
     s.eof = false;
     s.pending.clear();
     match &mut s.backing {
@@ -945,13 +1039,13 @@ fn do_seek(s: &mut Stream, off: i64, whence: i64) -> bool {
 fn fseek(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let off = a.int(1);
     let wh = a.int_or(2, 0);
-    with_stream(vm, a, 0, |_vm, s| {
-        Ok(Value::Int(if do_seek(s, off, wh) { 0 } else { -1 }))
+    with_stream(vm, a, 0, |vm, s| {
+        Ok(Value::Int(if do_seek(vm, s, off, wh) { 0 } else { -1 }))
     })
 }
 
 fn rewind(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    with_stream(vm, a, 0, |_vm, s| Ok(Value::Bool(do_seek(s, 0, 0))))
+    with_stream(vm, a, 0, |vm, s| Ok(Value::Bool(do_seek(vm, s, 0, 0))))
 }
 
 fn ftruncate(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -963,12 +1057,31 @@ fn ftruncate(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "Argument #2 ($size) must be greater than or equal to 0",
         );
     }
-    with_stream(vm, a, 0, |_vm, s| {
+    with_stream(vm, a, 0, |vm, s| {
         Ok(Value::Bool(match &mut s.backing {
             Backing::File(f) => f.set_len(size as u64).is_ok(),
             Backing::Memory { data, .. } => {
                 data.resize(size as usize, 0);
                 true
+            }
+            Backing::User { .. } => {
+                let r = super::userstream::simple(vm, s, b"stream_truncate", vec![Value::Int(size)])?;
+                match r {
+                    None => {
+                        vm.warn("ftruncate(): Can't truncate this stream!")?;
+                        false
+                    }
+                    Some(Value::Bool(b)) => b,
+                    Some(v) => {
+                        let c = super::userstream::class_of_stream(vm, s);
+                        vm.warn(&format!(
+                            "ftruncate(): {}::stream_truncate value must be of type bool, {} given",
+                            c,
+                            crate::class::TypeName::tname(&v)
+                        ))?;
+                        false
+                    }
+                }
             }
             _ => false,
         }))
@@ -1002,7 +1115,13 @@ fn stat_array(m: &std::fs::Metadata) -> PhpArray {
 }
 
 fn fstat(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    with_stream(vm, a, 0, |_vm, s| {
+    with_stream(vm, a, 0, |vm, s| {
+        if matches!(s.backing, Backing::User { .. }) {
+            return Ok(match super::userstream::simple(vm, s, b"stream_stat", Vec::new())? {
+                Some(Value::Array(st)) => Value::Array(stat_from_user(&st)),
+                _ => Value::Bool(false),
+            });
+        }
         Ok(match &s.backing {
             Backing::File(f) => match f.metadata() {
                 Ok(m) => Value::Array(stat_array(&m)),
@@ -1073,15 +1192,29 @@ fn fstat(vm: &mut Vm, a: &mut Args) -> R<Value> {
     })
 }
 
-fn flock(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Bool(true))
+fn flock(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let op = a.int(1);
+    with_stream(vm, a, 0, |vm, s| {
+        if matches!(s.backing, Backing::User { .. }) {
+            let r = super::userstream::simple(vm, s, b"stream_lock", vec![Value::Int(op)])?;
+            return Ok(Value::Bool(match r {
+                Some(v) => vm.to_bool(&v),
+                None => {
+                    let c = super::userstream::class_of_stream(vm, s);
+                    vm.warn(&format!("flock(): {}::stream_lock is not implemented!", c))?;
+                    false
+                }
+            }));
+        }
+        Ok(Value::Bool(true))
+    })
 }
 
-fn read_rest(s: &mut Stream) -> Vec<u8> {
+fn read_rest(vm: &mut Vm, s: &mut Stream) -> Vec<u8> {
     let mut out = Vec::new();
     let mut buf = [0u8; 8192];
     loop {
-        match s.read_some(&mut buf) {
+        match s.read_some(vm, &mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => out.extend_from_slice(&buf[..n]),
         }
@@ -1091,7 +1224,7 @@ fn read_rest(s: &mut Stream) -> Vec<u8> {
 }
 
 fn fpassthru(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let data = with_stream(vm, a, 0, |_vm, s| Ok(read_rest(s)))?;
+    let data = with_stream(vm, a, 0, |vm, s| Ok(read_rest(vm, s)))?;
     vm.echo(&data);
     Ok(Value::Int(data.len() as i64))
 }
@@ -1099,11 +1232,11 @@ fn fpassthru(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn stream_get_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let len = a.opt_int(1);
     let off = a.int_or(2, -1);
-    with_stream(vm, a, 0, |_vm, s| {
+    with_stream(vm, a, 0, |vm, s| {
         if off >= 0 {
-            do_seek(s, off, 0);
+            do_seek(vm, s, off, 0);
         }
-        let mut data = read_rest(s);
+        let mut data = read_rest(vm, s);
         if let Some(l) = len
             && l >= 0
             && (l as usize) < data.len()
@@ -1131,6 +1264,9 @@ fn stream_get_meta_data(vm: &mut Vm, a: &mut Args) -> R<Value> {
             _ => s.eof,
         };
         m.insert(Key::from("eof"), Value::Bool(eof));
+        if let Backing::User { obj } = &s.backing {
+            m.insert(Key::from("wrapper_data"), Value::Object(obj.clone()));
+        }
         m.insert(Key::from("wrapper_type"), Value::from(s.wrapper));
         m.insert(Key::from("stream_type"), Value::from(s.stream_type));
         m.insert(Key::from("mode"), Value::Str(s.mode.clone()));
@@ -1173,12 +1309,50 @@ fn stream_context_create(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     )))
 }
 
-fn stream_get_wrappers(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Array(PhpArray::from_values(
-        ["php", "file", "glob", "data"]
-            .iter()
-            .map(|s| Value::from(*s)),
-    )))
+fn stream_get_wrappers(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    let mut out: Vec<Value> = ["php", "file", "glob", "data"]
+        .iter()
+        .filter(|s| !vm.disabled_wrappers.iter().any(|d| d.as_slice() == s.as_bytes()))
+        .map(|s| Value::from(*s))
+        .collect();
+    let mut users: Vec<&Vec<u8>> = vm.user_wrappers.keys().collect();
+    users.sort();
+    for u in users {
+        out.push(Value::Str(PhpStr::new(u)));
+    }
+    Ok(Value::Array(PhpArray::from_values(out)))
+}
+
+/// A stat array from a user wrapper's stream_stat/url_stat result: the 13
+/// fields by number and name (missing ones 0).
+pub fn stat_from_user(st: &PhpArray) -> PhpArray {
+    const NAMES: [&str; 13] = [
+        "dev", "ino", "mode", "nlink", "uid", "gid", "rdev", "size", "atime", "mtime", "ctime",
+        "blksize", "blocks",
+    ];
+    let get = |i: usize| -> i64 {
+        let v = st
+            .get_str(&PhpStr::from(NAMES[i]))
+            .or_else(|| st.get_int(i as i64))
+            .map(|v| v.deref());
+        match v {
+            Some(Value::Int(n)) => n,
+            Some(Value::Float(f)) => f as i64,
+            Some(Value::Bool(b)) => b as i64,
+            Some(Value::Str(s)) => goro_runtime::convert::str_to_int(&s),
+            _ => {
+                if i >= 11 { -1 } else { 0 }
+            }
+        }
+    };
+    let mut a = PhpArray::new();
+    for i in 0..13 {
+        let _ = a.push(Value::Int(get(i)));
+    }
+    for (i, n) in NAMES.iter().enumerate() {
+        a.insert(Key::from(*n), Value::Int(get(i)));
+    }
+    a
 }
 
 fn file_get_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1206,14 +1380,14 @@ fn file_get_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
         vm.fnotice(a, "Read of 8192 bytes failed with errno=21 Is a directory")?;
         return Ok(Value::Str(PhpStr::empty()));
     }
-    if off != 0 && !do_seek(&mut s, off, if off < 0 { 2 } else { 0 }) {
+    if off != 0 && !do_seek(vm, &mut s, off, if off < 0 { 2 } else { 0 }) {
         vm.fwarn(
             a,
             &format!("Failed to seek to position {} in the stream", off),
         )?;
         return Ok(Value::Bool(false));
     }
-    let mut data = read_rest(&mut s);
+    let mut data = read_rest(vm, &mut s);
     if let Some(l) = len {
         data.truncate(l as usize);
     }
@@ -1242,7 +1416,7 @@ fn file_put_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 static_class: std::ptr::null(),
                 named: None,
             };
-            with_stream(vm, &tmp_args, 0, |_vm, st| Ok(read_rest(st)))?
+            with_stream(vm, &tmp_args, 0, |vm, st| Ok(read_rest(vm, st)))?
         }
         Value::Object(_) => {
             let s = vm.to_php_str(&data)?;
@@ -1280,7 +1454,7 @@ fn file(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(mut s) = open_stream(vm, a, &f, b"rb", false)? else {
         return Ok(Value::Bool(false));
     };
-    let data = read_rest(&mut s);
+    let data = read_rest(vm, &mut s);
     let mut out = PhpArray::new();
     let mut start = 0;
     let ignore_nl = flags & 2 != 0;
@@ -1308,7 +1482,7 @@ fn readfile(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(mut s) = open_stream(vm, a, &f, b"rb", false)? else {
         return Ok(Value::Bool(false));
     };
-    let data = read_rest(&mut s);
+    let data = read_rest(vm, &mut s);
     vm.echo(&data);
     Ok(Value::Int(data.len() as i64))
 }
@@ -1323,6 +1497,9 @@ fn fs_warn(vm: &mut Vm, a: &Args, what: &[u8], e: &std::io::Error) -> R<Value> {
 
 fn unlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let f = a.str(0);
+    if let Some(cls) = super::userstream::wrapper_for(vm, &f) {
+        return super::userstream::path_op(vm, a, &cls, "unlink", vec![Value::Str(f)]);
+    }
     let p = vm.fs_path(&f);
     if p.is_dir() {
         vm.fwarn(a, &format!("{}: Is a directory", f.to_string_lossy()))?;
@@ -1337,6 +1514,9 @@ fn unlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn rename(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let from = a.str(0);
     let to = a.str(1);
+    if let Some(cls) = super::userstream::wrapper_for(vm, &from) {
+        return super::userstream::path_op(vm, a, &cls, "rename", vec![Value::Str(from), Value::Str(to)]);
+    }
     match std::fs::rename(vm.fs_path(&from), vm.fs_path(&to)) {
         Ok(()) => Ok(Value::Bool(true)),
         Err(e) => {
@@ -1360,7 +1540,7 @@ fn copy(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(mut s) = open_stream(vm, a, &from, b"rb", false)? else {
         return Ok(Value::Bool(false));
     };
-    let data = read_rest(&mut s);
+    let data = read_rest(vm, &mut s);
     let Some(mut d) = open_stream(vm, a, &to, b"wb", false)? else {
         return Ok(Value::Bool(false));
     };
@@ -1371,6 +1551,10 @@ fn mkdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let d = a.str(0);
     let perms = a.int_or(1, 0o777);
     let rec = a.bool_or(2, false);
+    if let Some(cls) = super::userstream::wrapper_for(vm, &d) {
+        let opts = if rec { 1 | 8 } else { 8 };
+        return super::userstream::path_op(vm, a, &cls, "mkdir", vec![Value::Str(d), Value::Int(perms), Value::Int(opts)]);
+    }
     let p = vm.fs_path(&d);
     let r = if rec {
         if p.is_dir() {
@@ -1406,9 +1590,29 @@ fn current_umask() -> u32 {
 
 fn rmdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let d = a.str(0);
+    if let Some(cls) = super::userstream::wrapper_for(vm, &d) {
+        return super::userstream::path_op(vm, a, &cls, "rmdir", vec![Value::Str(d), Value::Int(8)]);
+    }
     match std::fs::remove_dir(vm.fs_path(&d)) {
         Ok(()) => Ok(Value::Bool(true)),
         Err(e) => fs_warn(vm, a, &d, &e),
+    }
+}
+
+/// url_stat() through a user wrapper for the path argument: Some(None)
+/// when the wrapper reports no file.
+fn user_stat(vm: &mut Vm, a: &Args, flags: i64) -> R<Option<Option<PhpArray>>> {
+    let f = a.str(0);
+    let Some(cls) = super::userstream::wrapper_for(vm, &f) else {
+        return Ok(None);
+    };
+    Ok(Some(super::userstream::url_stat(vm, &cls, &f, flags)?.map(|st| stat_from_user(&st))))
+}
+
+fn user_mode(st: &PhpArray) -> u32 {
+    match st.get_str(&PhpStr::from("mode")) {
+        Some(Value::Int(m)) => *m as u32,
+        _ => 0,
     }
 }
 
@@ -1421,9 +1625,15 @@ fn meta(vm: &Vm, a: &Args) -> Option<std::fs::Metadata> {
 }
 
 fn is_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if let Some(st) = user_stat(vm, a, 2)? {
+        return Ok(Value::Bool(st.is_some_and(|st| user_mode(&st) & 0o170000 == 0o100000)));
+    }
     Ok(Value::Bool(meta(vm, a).is_some_and(|m| m.is_file())))
 }
 fn is_dir(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if let Some(st) = user_stat(vm, a, 2)? {
+        return Ok(Value::Bool(st.is_some_and(|st| user_mode(&st) & 0o170000 == 0o040000)));
+    }
     Ok(Value::Bool(meta(vm, a).is_some_and(|m| m.is_dir())))
 }
 fn is_link(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1433,6 +1643,9 @@ fn is_link(vm: &mut Vm, a: &mut Args) -> R<Value> {
     ))
 }
 fn file_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if let Some(st) = user_stat(vm, a, 2)? {
+        return Ok(Value::Bool(st.is_some()));
+    }
     Ok(Value::Bool(meta(vm, a).is_some()))
 }
 
@@ -1469,6 +1682,22 @@ fn stat_fail(vm: &mut Vm, a: &Args, what: &str) -> R<Value> {
 macro_rules! stat_fn {
     ($name:ident, $label:literal, $m:ident => $e:expr) => {
         fn $name(vm: &mut Vm, a: &mut Args) -> R<Value> {
+            if let Some(st) = user_stat(vm, a, 0)? {
+                let key = match stringify!($name) {
+                    "filesize" => "size",
+                    "filemtime" => "mtime",
+                    "fileatime" => "atime",
+                    "filectime" => "ctime",
+                    "fileperms" => "mode",
+                    "fileinode" => "ino",
+                    "fileowner" => "uid",
+                    _ => "gid",
+                };
+                return match st {
+                    Some(st) => Ok(st.get_str(&PhpStr::from(key)).cloned().unwrap_or_default()),
+                    None => stat_fail(vm, a, $label),
+                };
+            }
             match meta(vm, a) {
                 Some($m) => Ok(Value::Int($e)),
                 None => stat_fail(vm, a, $label),
@@ -1515,6 +1744,13 @@ fn filetype(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn touch(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let f = a.str(0);
+    if let Some(cls) = super::userstream::wrapper_for(vm, &f) {
+        let times = match (a.opt_int(1), a.opt_int(2)) {
+            (None, _) => PhpArray::new(),
+            (Some(m), at) => PhpArray::from_values([Value::Int(m), Value::Int(at.unwrap_or(m))]),
+        };
+        return super::userstream::path_op(vm, a, &cls, "stream_metadata", vec![Value::Str(f), Value::Int(1), Value::Array(times)]);
+    }
     let p = vm.fs_path(&f);
     if !p.exists() && std::fs::File::create(&p).is_err() {
         vm.fwarn(
@@ -1550,6 +1786,9 @@ fn touch(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn chmod(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let f = a.str(0);
     let m = a.int(1);
+    if let Some(cls) = super::userstream::wrapper_for(vm, &f) {
+        return super::userstream::path_op(vm, a, &cls, "stream_metadata", vec![Value::Str(f), Value::Int(6), Value::Int(m)]);
+    }
     match std::fs::set_permissions(vm.fs_path(&f), std::fs::Permissions::from_mode(m as u32)) {
         Ok(()) => Ok(Value::Bool(true)),
         Err(e) => {
@@ -1560,6 +1799,12 @@ fn chmod(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn stat(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if let Some(st) = user_stat(vm, a, 0)? {
+        return match st {
+            Some(st) => Ok(Value::Array(st)),
+            None => stat_fail(vm, a, "stat"),
+        };
+    }
     match meta(vm, a) {
         Some(m) => Ok(Value::Array(stat_array(&m))),
         None => stat_fail(vm, a, "stat"),
@@ -1567,6 +1812,12 @@ fn stat(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn lstat(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if let Some(st) = user_stat(vm, a, 1)? {
+        return match st {
+            Some(st) => Ok(Value::Array(st)),
+            None => stat_fail(vm, a, "Lstat"),
+        };
+    }
     let f = a.str(0);
     match std::fs::symlink_metadata(vm.fs_path(&f)) {
         Ok(m) => Ok(Value::Array(stat_array(&m))),
@@ -1975,7 +2226,14 @@ fn scandir(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.fthrow(a, "ValueError", "Argument #1 ($directory) cannot be empty");
     }
     let order = a.int_or(1, 0);
-    match list_dir(vm, &d) {
+    let listed = match super::userstream::wrapper_for(vm, &d) {
+        Some(cls) => match super::userstream::list(vm, a, &cls, &d)? {
+            Some(n) => Ok(n),
+            None => return Ok(Value::Bool(false)),
+        },
+        None => list_dir(vm, &d),
+    };
+    match listed {
         Ok(mut names) => {
             match order {
                 0 => names.sort(),
@@ -2006,6 +2264,15 @@ fn scandir(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn opendir(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let d = a.str(0);
+    if let Some(cls) = super::userstream::wrapper_for(vm, &d) {
+        return Ok(match super::userstream::opendir(vm, a, &cls, &d)? {
+            Some(r) => {
+                vm.last_dir = Some(r.clone());
+                Value::Resource(r)
+            }
+            None => Value::Bool(false),
+        });
+    }
     match list_dir(vm, &d) {
         Ok(entries) => {
             let s = Stream::new(
@@ -2052,7 +2319,15 @@ fn readdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
         static_class: std::ptr::null(),
         named: None,
     };
-    with_stream(vm, &args, 0, |_vm, s| {
+    with_stream(vm, &args, 0, |vm, s| {
+        if let Backing::UserDir { obj } = &s.backing {
+            let o = obj.clone();
+            return Ok(match super::userstream::call(vm, &o, b"dir_readdir", Vec::new())? {
+                Some(Value::Str(n)) => Value::Str(n),
+                Some(Value::Bool(false)) | None => Value::Bool(false),
+                Some(v) => Value::Str(vm.to_php_str(&v)?),
+            });
+        }
         if let Backing::Dir { entries, pos } = &mut s.backing
             && *pos < entries.len()
         {
@@ -2075,7 +2350,11 @@ fn rewinddir(vm: &mut Vm, a: &mut Args) -> R<Value> {
         static_class: std::ptr::null(),
         named: None,
     };
-    with_stream(vm, &args, 0, |_vm, s| {
+    with_stream(vm, &args, 0, |vm, s| {
+        if let Backing::UserDir { obj } = &s.backing {
+            let o = obj.clone();
+            super::userstream::call(vm, &o, b"dir_rewinddir", Vec::new())?;
+        }
         if let Backing::Dir { pos, .. } = &mut s.backing {
             *pos = 0;
         }
@@ -2085,6 +2364,18 @@ fn rewinddir(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn closedir(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if let Some(r) = dir_arg(vm, a) {
+        let user = {
+            let data = r.res().data.borrow();
+            data.as_ref()
+                .and_then(|d| d.downcast_ref::<std::cell::RefCell<Stream>>())
+                .and_then(|c| match &c.borrow().backing {
+                    Backing::UserDir { obj } => Some(obj.clone()),
+                    _ => None,
+                })
+        };
+        if let Some(o) = user {
+            super::userstream::call(vm, &o, b"dir_closedir", Vec::new())?;
+        }
         r.close();
     }
     Ok(Value::Null)
@@ -2412,12 +2703,12 @@ fn fputcsv(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn fgetcsv(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (sep, enc, esc) = csv_opts(vm, a, 2)?;
-    with_stream(vm, a, 0, |_vm, s| {
+    with_stream(vm, a, 0, |vm, s| {
         // Read a logical line (enclosures may span lines).
         let mut buf = Vec::new();
         let mut in_enc = false;
         loop {
-            let Some(line) = read_line(s, None) else {
+            let Some(line) = read_line(vm, s, None) else {
                 break;
             };
             for &c in &line {
@@ -2527,8 +2818,8 @@ fn vfprintf(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn fscanf(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let fmt = a.str(1);
-    let line = with_stream(vm, a, 0, |_vm, s| {
-        let r = read_line(s, None);
+    let line = with_stream(vm, a, 0, |vm, s| {
+        let r = read_line(vm, s, None);
         if let Backing::Memory { data, pos } = &s.backing
             && *pos >= data.len()
         {

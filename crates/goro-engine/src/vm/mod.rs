@@ -376,6 +376,10 @@ pub struct Vm {
     pub err: ErrorState,
     pub core: CoreClasses,
     pub autoloaders: Vec<Value>,
+    /// User stream wrappers: lowercase protocol to class name.
+    pub user_wrappers: std::collections::HashMap<Vec<u8>, PhpStr>,
+    /// Built-in wrappers disabled by stream_wrapper_unregister().
+    pub disabled_wrappers: Vec<Vec<u8>>,
     pub autoloading: Vec<PhpStr>,
     pub shutdown_functions: Vec<(Value, Vec<Value>)>,
     pub exit_status: i32,
