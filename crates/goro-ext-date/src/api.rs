@@ -396,3 +396,25 @@ pub fn transitions(zone: &TimeZone, begin: i64, end: i64) -> Option<Vec<Transiti
 /// The default `$timestampEnd` of `getTransitions()` (observed on PHP 8.5:
 /// the list stops before 2038-01-19).
 pub const TRANSITIONS_DEFAULT_END: i64 = i32::MAX as i64;
+
+/// `date_default_timezone_set()` and the `date.timezone` setting: only
+/// database identifiers, matched case-insensitively and keeping the
+/// spelling given ("utc", "europe/paris" are accepted and reported back
+/// as given; "+05:00", " UTC" are not; observed on PHP 8.5). On `None`
+/// PHP emits [`invalid_default_zone_notice`] (E_NOTICE) and returns false,
+/// or for the ini setting [`invalid_ini_zone_warning`] (E_WARNING) and
+/// uses UTC.
+pub fn default_timezone(name: &str) -> Option<TimeZone> {
+    TimeZone::from_id(name)
+}
+
+/// "Timezone ID '%s' is invalid" (prefixed with the function name by the
+/// caller).
+pub fn invalid_default_zone_notice(name: &str) -> String {
+    format!("Timezone ID '{name}' is invalid")
+}
+
+/// "Invalid date.timezone value '%s', using 'UTC' instead".
+pub fn invalid_ini_zone_warning(name: &str) -> String {
+    format!("Invalid date.timezone value '{name}', using 'UTC' instead")
+}
