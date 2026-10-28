@@ -183,6 +183,43 @@ pub fn truecolor_to_palette(im: &mut Image, dither: bool, colors: usize) {
         hist.cells[k] = hist.cells[k].saturating_add(1);
         hist.alpha[k] += tc_a(p) as u64;
     }
+    // Few enough colors: they are kept exactly, in order of appearance
+    // (bug36697: a red-only image written as GIF stays 255,0,0).
+    let mut exact: Vec<i32> = Vec::new();
+    let mut seen = std::collections::HashMap::new();
+    for &p in &im.tpixels {
+        if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(p) {
+            if exact.len() == colors {
+                exact.clear();
+                break;
+            }
+            e.insert(exact.len());
+            exact.push(p);
+        }
+    }
+    if !exact.is_empty() {
+        let pixels = im.tpixels.iter().map(|p| seen[p] as u8).collect();
+        let had_transparent = im.transparent;
+        im.pixels = pixels;
+        im.tpixels = Vec::new();
+        im.truecolor = false;
+        im.open = [true; MAX_COLORS];
+        for (i, &c) in exact.iter().enumerate() {
+            im.red[i] = tc_r(c);
+            im.green[i] = tc_g(c);
+            im.blue[i] = tc_b(c);
+            im.alpha[i] = tc_a(c);
+            im.open[i] = false;
+        }
+        im.colors_total = exact.len() as i32;
+        im.transparent = if had_transparent >= 0 {
+            seen.get(&had_transparent).map(|&i| i as i32).unwrap_or(-1)
+        } else {
+            -1
+        };
+        im.alpha_blending = EFFECT_REPLACE;
+        return;
+    }
     let pal = median_cut(&hist, colors);
     let nearest = |r: i32, g: i32, b: i32| -> usize {
         let mut best = 0;

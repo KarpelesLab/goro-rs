@@ -254,19 +254,22 @@ impl Image {
         let (y1, y2) = if y1 > y2 { (y2, y1) } else { (y1, y2) };
         let t = self.thick;
         if t > 1 {
+            // Horizontal bars `t` rows high centred on the edges,
+            // vertical bars one column wider (imagesetthickness_basic.png:
+            // thickness 5 gives 5-row and 6-column bars).
             let half = t / 2;
             let (ox1, oy1) = (x1 - half, y1 - half);
-            let (ox2, oy2) = (x2 + half - (1 - t % 2), y2 + half - (1 - t % 2));
-            let (ix1, iy1) = (ox1 + t, oy1 + t);
-            let (ix2, iy2) = (ox2 - t, oy2 - t);
-            if ix1 > ix2 || iy1 > iy2 {
+            let (ox2, oy2) = (x2 + half, y2 + half);
+            let top_end = oy1 + t - 1;
+            let bot_start = oy2 - t + 1;
+            if top_end + 1 >= bot_start || ox1 + t >= ox2 - t {
                 self.filled_rectangle(ox1, oy1, ox2, oy2, color);
                 return;
             }
-            self.filled_rectangle(ox1, oy1, ox2, iy1 - 1, color);
-            self.filled_rectangle(ox1, iy2 + 1, ox2, oy2, color);
-            self.filled_rectangle(ox1, iy1, ix1 - 1, iy2, color);
-            self.filled_rectangle(ix2 + 1, iy1, ox2, iy2, color);
+            self.filled_rectangle(ox1, oy1, ox2, top_end, color);
+            self.filled_rectangle(ox1, bot_start, ox2, oy2, color);
+            self.filled_rectangle(ox1, top_end + 1, ox1 + t, bot_start - 1, color);
+            self.filled_rectangle(ox2 - t, top_end + 1, ox2, bot_start - 1, color);
             return;
         }
         if x1 == x2 && y1 == y2 {
@@ -353,8 +356,7 @@ impl Image {
 
     /// imagefilledpolygon: even-odd scanline fill.
     pub fn filled_polygon(&mut self, pts: &[(i32, i32)], color: i32) {
-        let n = pts.len();
-        if n == 0 {
+        if pts.is_empty() {
             return;
         }
         let fill_color = if color == ANTIALIASED {
@@ -362,45 +364,10 @@ impl Image {
         } else {
             color
         };
-        if n == 1 {
-            self.set_pixel(pts[0].0, pts[0].1, fill_color);
-            return;
-        }
-        let miny = pts.iter().map(|p| p.1).min().unwrap();
-        let maxy = pts.iter().map(|p| p.1).max().unwrap();
-        if miny == maxy {
-            let minx = pts.iter().map(|p| p.0).min().unwrap();
-            let maxx = pts.iter().map(|p| p.0).max().unwrap();
-            self.hline_plain(miny, minx, maxx, fill_color);
-            return;
-        }
-        let miny = miny.max(0);
-        let maxy = maxy.min(self.sy - 1);
-        let mut xs: Vec<i32> = Vec::with_capacity(n);
-        for y in miny..=maxy {
-            xs.clear();
-            for i in 0..n {
-                let (ind1, ind2) = if i == 0 { (n - 1, 0) } else { (i - 1, i) };
-                let (mut x1, mut y1) = pts[ind1];
-                let (mut x2, mut y2) = pts[ind2];
-                if y1 < y2 {
-                } else if y1 > y2 {
-                    std::mem::swap(&mut x1, &mut x2);
-                    std::mem::swap(&mut y1, &mut y2);
-                } else {
-                    continue;
-                }
-                if (y >= y1 && y < y2) || (y == maxy && y > y1 && y <= y2) {
-                    let v = ((y - y1) as f64 * (x2 - x1) as f64) / ((y2 - y1) as f64) + 0.5;
-                    xs.push(v.floor() as i32 + x1);
-                }
-            }
-            xs.sort_unstable();
-            let mut i = 0;
-            while i + 1 < xs.len() {
-                self.hline_plain(y, xs[i], xs[i + 1], fill_color);
-                i += 2;
-            }
+        let mut spans = Vec::new();
+        polygon_spans(pts, 0, self.sy - 1, &mut spans);
+        for (y, x1, x2) in spans {
+            self.hline_plain(y, x1, x2, fill_color);
         }
         if color == ANTIALIASED {
             self.polygon(pts, color, true);
@@ -502,11 +469,10 @@ impl Image {
 
     /// imagearc: the outline of a partial ellipse.
     pub fn arc(&mut self, cx: i32, cy: i32, w: i32, h: i32, s: i32, e: i32, color: i32) {
-        if (s % 360) == (e % 360) {
-            self.ellipse(cx, cy, w, h, color);
-        } else {
-            self.filled_arc(cx, cy, w, h, s, e, color, ARC_NOFILL);
-        }
+        // Points every degree, truncated toward the centre
+        // (imagearc_basic.png); full circles too, so that the thickness
+        // applies (bug72604).
+        self.filled_arc(cx, cy, w, h, s, e, color, ARC_NOFILL);
     }
 
     /// imagefilledarc.
@@ -544,13 +510,7 @@ impl Image {
                 e = 360;
             }
         }
-        let pt = |a: i32| -> (i32, i32) {
-            let r = (a as f64).to_radians();
-            (
-                cx + (r.cos() * w as f64 / 2.0).round() as i32,
-                cy + (r.sin() * h as f64 / 2.0).round() as i32,
-            )
-        };
+        let pt = |a: i32| arc_point(cx, cy, w, h, a);
         let mut pts: Vec<(i32, i32)> = Vec::new();
         let (mut lx, mut ly) = (0, 0);
         let (mut fx, mut fy) = (0, 0);
@@ -594,10 +554,48 @@ impl Image {
                 self.line(cx, cy, fx, fy, color);
             }
         } else {
-            if style & ARC_EDGED != 0 {
-                pts.push((cx, cy));
+            // A pie: a fan of triangles from the centre, one per degree,
+            // whose union is painted once (imagefilledarc_basic.png,
+            // imagegammacorrect_basic.png).
+            let fill_color = if color == ANTIALIASED {
+                self.aa_color
+            } else {
+                color
+            };
+            let mut spans = Vec::new();
+            let mut prev = pts[1];
+            for &p in &pts[2..] {
+                polygon_spans(&[(cx, cy), prev, p], 0, self.sy - 1, &mut spans);
+                prev = p;
             }
-            self.filled_polygon(&pts, color);
+            if pts.len() == 2 {
+                polygon_spans(&[(cx, cy), pts[1]], 0, self.sy - 1, &mut spans);
+            }
+            self.paint_spans(&mut spans, fill_color);
+        }
+    }
+
+    /// Paints the union of spans, each pixel once.
+    fn paint_spans(&mut self, spans: &mut [(i32, i32, i32)], color: i32) {
+        for sp in spans.iter_mut() {
+            if sp.1 > sp.2 {
+                std::mem::swap(&mut sp.1, &mut sp.2);
+            }
+        }
+        spans.sort_unstable();
+        let mut cur: Option<(i32, i32, i32)> = None;
+        for &(y, a, b) in spans.iter() {
+            match cur {
+                Some((cy, ca, cb)) if cy == y && a <= cb + 1 => cur = Some((cy, ca, cb.max(b))),
+                Some((cy, ca, cb)) => {
+                    self.hline_plain(cy, ca, cb, color);
+                    cur = Some((y, a, b));
+                }
+                None => cur = Some((y, a, b)),
+            }
+        }
+        if let Some((cy, ca, cb)) = cur {
+            self.hline_plain(cy, ca, cb, color);
         }
     }
 
@@ -741,10 +739,12 @@ impl Image {
                 stack.push((sx, sy + 1));
             }
         }
-        self.alpha_blending = restore;
+        // The fill color replaces the pixels, without alpha blending
+        // (bug27582_1: alpha 1 over opaque black stays alpha 1).
         for (px, py) in pts {
             self.set_pixel(px, py, color);
         }
+        self.alpha_blending = restore;
     }
 
     // ------------------------------------------------------------ antialiasing
@@ -884,4 +884,70 @@ fn clip_1d(x0: &mut i64, y0: &mut i64, x1: &mut i64, y1: &mut i64, min: i64, max
         return true;
     }
     true
+}
+
+/// The horizontal spans `(y, x1, x2)` filling a polygon (even-odd rule,
+/// rows `ymin..=ymax` only). Each edge covers the rows from its upper
+/// end to just above its lower end, the lowest row of the polygon
+/// included; crossings are rounded to the nearest pixel.
+pub fn polygon_spans(pts: &[(i32, i32)], ymin: i32, ymax: i32, out: &mut Vec<(i32, i32, i32)>) {
+    let n = pts.len();
+    if n == 0 {
+        return;
+    }
+    if n == 1 {
+        if (ymin..=ymax).contains(&pts[0].1) {
+            out.push((pts[0].1, pts[0].0, pts[0].0));
+        }
+        return;
+    }
+    let miny = pts.iter().map(|p| p.1).min().unwrap();
+    let maxy = pts.iter().map(|p| p.1).max().unwrap();
+    if miny == maxy {
+        if (ymin..=ymax).contains(&miny) {
+            let minx = pts.iter().map(|p| p.0).min().unwrap();
+            let maxx = pts.iter().map(|p| p.0).max().unwrap();
+            out.push((miny, minx, maxx));
+        }
+        return;
+    }
+    let mut xs: Vec<i32> = Vec::with_capacity(n);
+    for y in miny.max(ymin)..=maxy.min(ymax) {
+        xs.clear();
+        for i in 0..n {
+            let (ind1, ind2) = if i == 0 { (n - 1, 0) } else { (i - 1, i) };
+            let (mut x1, mut y1) = pts[ind1];
+            let (mut x2, mut y2) = pts[ind2];
+            if y1 < y2 {
+            } else if y1 > y2 {
+                std::mem::swap(&mut x1, &mut x2);
+                std::mem::swap(&mut y1, &mut y2);
+            } else {
+                continue;
+            }
+            if (y >= y1 && y < y2) || (y == maxy && y > y1 && y <= y2) {
+                let v = ((y - y1) as f64 * (x2 - x1) as f64) / ((y2 - y1) as f64) + 0.5;
+                xs.push(v.floor() as i32 + x1);
+            }
+        }
+        xs.sort_unstable();
+        let mut i = 0;
+        while i + 1 < xs.len() {
+            out.push((y, xs[i], xs[i + 1]));
+            i += 2;
+        }
+    }
+}
+
+/// The point of an ellipse at `deg` degrees, as GD computes it: sine
+/// and cosine scaled by 1024 and truncated, the offsets truncated toward
+/// the centre (imagearc_basic.png, imagegammacorrect_basic.png).
+pub fn arc_point(cx: i32, cy: i32, w: i32, h: i32, deg: i32) -> (i32, i32) {
+    let r = (deg as f64).to_radians();
+    let ct = (r.cos() * 1024.0) as i64;
+    let st = (r.sin() * 1024.0) as i64;
+    (
+        cx + ((ct * w as i64 / 2) / 1024) as i32,
+        cy + ((st * h as i64 / 2) / 1024) as i32,
+    )
 }
