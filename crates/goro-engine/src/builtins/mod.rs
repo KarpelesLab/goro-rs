@@ -17,6 +17,7 @@ pub mod hash;
 pub mod highlight;
 pub mod iconv;
 pub mod info;
+mod intl;
 mod info_text;
 pub mod ini;
 pub mod json;
@@ -47,7 +48,7 @@ use crate::registry::Module;
 
 /// The modules every engine has.
 pub fn modules() -> Vec<&'static Module> {
-    vec![
+    let mut v = vec![
         &core_funcs::MODULE,
         &core_classes::MODULE,
         &var::MODULE,
@@ -86,5 +87,7 @@ pub fn modules() -> Vec<&'static Module> {
         &sodium::MODULE,
         &uri::MODULE,
         &openssl::MODULE,
-    ]
+    ];
+    v.extend_from_slice(intl::MODULES);
+    v
 }

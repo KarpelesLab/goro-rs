@@ -1,0 +1,11 @@
+[package]
+name = "goro-ext-intl"
+description = "PHP's intl extension (collation, formatting, locales, ...) on the intl crate"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+intl = "0.6.5"
+goro-ext-date = { path = "../goro-ext-date" }
+goro-charset = { path = "../goro-charset" }

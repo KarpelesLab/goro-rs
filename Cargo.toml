@@ -20,6 +20,7 @@ members = [
     "crates/goro-ext-sodium",
     "crates/goro-xml",
     "crates/goro-ext-openssl",
+    "crates/goro-ext-intl",
 ]
 
 [workspace.package]
