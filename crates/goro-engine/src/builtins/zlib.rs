@@ -585,10 +585,8 @@ fn include_path_file(vm: &Vm, name: &[u8]) -> Vec<u8> {
             return p;
         }
     }
-    if vm.fs_path(name).exists() {
-        return name.to_vec();
-    }
-    // then the script's directory (test gzopen_variation4.phpt)
+    // then the script's directory, then the working directory (test
+    // gzopen_variation4.phpt)
     let dir = super::file::dirname_bytes(&vm.script_path);
     let mut p = dir;
     p.push(b'/');

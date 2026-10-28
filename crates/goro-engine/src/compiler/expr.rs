@@ -129,7 +129,7 @@ impl<'a> Compiler<'a> {
         match &e.kind {
             ExprKind::Int(i) => Some(Value::Int(*i)),
             ExprKind::Float(f) => Some(Value::Float(*f)),
-            ExprKind::String(s, _) => Some(Value::Str(PhpStr::intern(s))),
+            ExprKind::String(s, _) => Some(Value::Str(PhpStr::intern(&super::lit(s)))),
             ExprKind::Const(n) => self.const_name_value(n),
             ExprKind::MagicConst(m) => self.magic_value(*m, e.span.line),
             ExprKind::Unary { op, expr } => {
@@ -302,7 +302,7 @@ impl<'a> Compiler<'a> {
         match &e.kind {
             ExprKind::Int(i) => Ok(self.int_const(*i)),
             ExprKind::Float(f) => Ok(self.add_const(Value::Float(*f))),
-            ExprKind::String(s, _) => Ok(self.str_const(s)),
+            ExprKind::String(s, _) => Ok(self.str_const(&super::lit(s))),
             ExprKind::Interpolated(parts, _) => self.rope(parts, hint),
             ExprKind::ShellExec(parts) => {
                 let s = self.rope(parts, NONE)?;
@@ -1134,7 +1134,7 @@ impl<'a> Compiler<'a> {
             match p {
                 StrPart::Lit(s) => {
                     if !s.is_empty() {
-                        ops.push(self.str_const(s));
+                        ops.push(self.str_const(&super::lit(s)));
                     }
                 }
                 StrPart::Expr(x) => {

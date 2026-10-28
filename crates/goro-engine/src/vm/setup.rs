@@ -24,6 +24,8 @@ impl Vm {
             trace_const_expr: false,
             deprecating: Vec::new(),
             early_binding: false,
+            linking_early: false,
+            link_deferred: false,
             obligations: Vec::new(),
             delayed_obligations: Vec::new(),
             magic_call_name: None,

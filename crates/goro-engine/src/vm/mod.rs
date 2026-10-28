@@ -413,6 +413,10 @@ pub struct Vm {
     /// Classes are being bound early (when a file is loaded): variance
     /// checks needing unknown classes defer the class to run time.
     pub early_binding: bool,
+    /// The class being linked is bound early.
+    pub(crate) linking_early: bool,
+    /// Its binding waits for run time (a check needed an unknown class).
+    pub(crate) link_deferred: bool,
     /// Variance checks of the class being linked.
     pub(crate) obligations: Vec<variance::Obligation>,
     /// Variance checks waiting for a class being autoloaded (lowercase

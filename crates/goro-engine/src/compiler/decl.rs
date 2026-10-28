@@ -1430,6 +1430,7 @@ impl<'a> Compiler<'a> {
                             flags,
                             is_interface,
                             it.span.line,
+                            p.ty.as_ref(),
                         )?;
                         let mut f = flags;
                         if default.is_some() || (ty.is_none() && flags & mflags::STATIC == 0) {
@@ -1715,6 +1716,7 @@ impl<'a> Compiler<'a> {
                                 pf,
                                 false,
                                 p.span.line,
+                                p.ty.as_ref(),
                             )?;
                             let attrs = self.attributes(p.attrs)?;
                             props.push(PropDecl {
@@ -1828,6 +1830,7 @@ impl<'a> Compiler<'a> {
         pflags: u32,
         iface: bool,
         line: u32,
+        ast_ty: Option<&'a Type<'a>>,
     ) -> CResult<(Option<Rc<FuncCode>>, Option<Rc<FuncCode>>, u32)> {
         let mut get = None;
         let mut set = None;
@@ -1966,7 +1969,9 @@ impl<'a> Compiler<'a> {
             let spec = FnSpec {
                 name: spec_name,
                 params,
-                ret: None,
+                // A get hook returns the property type (RFC: Property
+                // hooks; test Zend/tests/property_hooks/get_type_check).
+                ret: if is_get { ast_ty } else { None },
                 body,
                 by_ref: h.by_ref,
                 kind: FnKind::Method {

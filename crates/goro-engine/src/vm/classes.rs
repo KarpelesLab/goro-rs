@@ -168,6 +168,18 @@ impl Vm {
     }
 
     fn link_class_inner(&mut self, decl: &Rc<ClassDecl>, eb: bool) -> R<Option<Rc<Class>>> {
+        let saved_early = std::mem::replace(&mut self.linking_early, eb);
+        let saved_def = std::mem::replace(&mut self.link_deferred, false);
+        let r = self.link_class_body(decl, eb);
+        let deferred = std::mem::replace(&mut self.link_deferred, saved_def);
+        self.linking_early = saved_early;
+        match r {
+            Ok(Some(_)) if deferred => Ok(None),
+            r => r,
+        }
+    }
+
+    fn link_class_body(&mut self, decl: &Rc<ClassDecl>, eb: bool) -> R<Option<Rc<Class>>> {
         let cname = decl.name.dname();
         // Parent.
         let parent = match &decl.parent {
@@ -528,7 +540,7 @@ impl Vm {
             self.early_binding = true;
             let ok = self.obligations_resolvable(&obs);
             self.early_binding = false;
-            if !ok? {
+            if !ok? || self.link_deferred {
                 return Ok(None);
             }
         }
@@ -668,6 +680,46 @@ impl Vm {
         }
         let get = p.get.as_ref().map(|c| hook_func(c, 1, 4));
         let set = p.set.as_ref().map(|c| hook_func(c, 2, 8));
+        // A set hook's parameter accepts the property type (test
+        // Zend/tests/property_hooks/set_value_parameter_type_variance_*).
+        let mixed = TypeHint {
+            mask: tmask::MIXED,
+            classes: Vec::new(),
+        };
+        if let Some(sc) = &p.set
+            && let Some(par) = sc.params.first()
+            && let Some(at) = &par.ty
+            && at.display() != p.ty.as_ref().unwrap_or(&mixed).display()
+            && {
+                let pt = p.ty.clone().unwrap_or(mixed.clone());
+                let was = std::mem::replace(&mut self.early_binding, self.linking_early);
+                let r = self.type_sub(&pt, cls, at, cls);
+                self.early_binding = was;
+                match r? {
+                    super::variance::Sub::Yes => false,
+                    super::variance::Sub::No => true,
+                    super::variance::Sub::Unresolved(_) => {
+                        // Bound when its declaration runs.
+                        if self.linking_early {
+                            self.link_deferred = true;
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                }
+            }
+        {
+            return self.link_err(
+                decl,
+                &format!(
+                    "Type of parameter ${} of hook {}::${}::set must be compatible with property type",
+                    par.name.dname(),
+                    cname,
+                    p.name.dname()
+                ),
+            );
+        }
         if p.flags & mflags::STATIC != 0 {
             // Redeclaration of a parent static property gets its own cell.
             if let Some(prev) = cls.find_static(&p.name) {
@@ -819,51 +871,7 @@ impl Vm {
                         ),
                     );
                 }
-                match (&prev.ty, &p.ty) {
-                    (Some(a), Some(b)) => {
-                        if a.display() != b.display()
-                            && !(a.mask & tmask::MIXED != 0 && b.mask & tmask::MIXED != 0)
-                        {
-                            let pcn = unsafe { (*prev.class).name.dname() };
-                            return self.link_err(
-                                decl,
-                                &format!(
-                                    "Type of {}::${} must be {} (as in class {})",
-                                    cname,
-                                    p.name.dname(),
-                                    a.display(),
-                                    pcn
-                                ),
-                            );
-                        }
-                    }
-                    (Some(a), None) => {
-                        let pcn = unsafe { (*prev.class).name.dname() };
-                        return self.link_err(
-                            decl,
-                            &format!(
-                                "Type of {}::${} must be {} (as in class {})",
-                                cname,
-                                p.name.dname(),
-                                a.display(),
-                                pcn
-                            ),
-                        );
-                    }
-                    (None, Some(_)) => {
-                        let pcn = unsafe { (*prev.class).name.dname() };
-                        return self.link_err(
-                            decl,
-                            &format!(
-                                "Type of {}::${} must not be defined (as in class {})",
-                                cname,
-                                p.name.dname(),
-                                pcn
-                            ),
-                        );
-                    }
-                    _ => {}
-                }
+                self.prop_type_check(cls, decl, &cname, &prev, p, set.as_ref())?;
                 self.prop_set_vis_check(decl, &cname, &prev, p)?;
                 for (mine, theirs, what) in [(&p.get, &prev.get, "get"), (&p.set, &prev.set, "set")]
                 {
@@ -970,6 +978,161 @@ impl Vm {
                     p.name.dname()
                 ),
             );
+        }
+        Ok(())
+    }
+
+    /// The type of a redeclared property: invariant, or covariant for a
+    /// parent virtual property with only a get hook and contravariant with
+    /// only a set hook (RFC: Property hooks, "Inheritance"; tests
+    /// Zend/tests/property_hooks/type_compatibility*,
+    /// Zend/tests/type_declarations/variance/property_types_early_bind).
+    fn prop_type_check(
+        &mut self,
+        cls: &Rc<Class>,
+        decl: &ClassDecl,
+        cname: &str,
+        prev: &PropInfo,
+        p: &PropDecl,
+        set: Option<&Rc<Func>>,
+    ) -> R<()> {
+        use super::variance::Sub;
+        let pcls = unsafe { &*prev.class };
+        let pcn = pcls.name.dname();
+        let mixed = TypeHint {
+            mask: tmask::MIXED,
+            classes: Vec::new(),
+        };
+        let pt = prev.ty.clone().unwrap_or_else(|| mixed.clone());
+        let ct = p.ty.clone().unwrap_or_else(|| mixed.clone());
+        let virt = prev.flags & mflags::VIRTUAL != 0;
+        let get_only = virt && prev.get.is_some() && prev.set.is_none();
+        let set_only = virt && prev.set.is_some() && prev.get.is_none();
+        // Early binding: an unknown class defers the class to run time.
+        let sub = |vm: &mut Vm, a: &TypeHint, ac: &Class, b: &TypeHint, bc: &Class| -> R<bool> {
+            let was = std::mem::replace(&mut vm.early_binding, vm.linking_early);
+            let r = vm.type_sub(a, ac, b, bc);
+            vm.early_binding = was;
+            Ok(match r? {
+                Sub::Yes => true,
+                Sub::No => false,
+                Sub::Unresolved(_) => {
+                    if vm.linking_early {
+                        vm.link_deferred = true;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            })
+        };
+        let hook_sig = |c: &str, t: &TypeHint, get: bool| -> String {
+            if get {
+                format!("{}::${}::get(): {}", c, p.name.dname(), t.display())
+            } else {
+                format!(
+                    "{}::${}::set({} $value): void",
+                    c,
+                    p.name.dname(),
+                    t.display()
+                )
+            }
+        };
+        if get_only {
+            if prev.ty.is_some() && !sub(self, &ct, cls, &pt, pcls)? {
+                let msg = format!(
+                    "Declaration of {} must be compatible with {}",
+                    hook_sig(cname, &ct, true),
+                    hook_sig(&pcn, &pt, true)
+                );
+                return self.link_err(decl, &msg);
+            }
+        } else if set_only {
+            if p.ty.is_some() && !sub(self, &pt, pcls, &ct, cls)? {
+                let msg = format!(
+                    "Declaration of {} must be compatible with {}",
+                    hook_sig(cname, &ct, false),
+                    hook_sig(&pcn, &pt, false)
+                );
+                return self.link_err(decl, &msg);
+            }
+        } else {
+            match (&prev.ty, &p.ty) {
+                (Some(a), Some(b)) => {
+                    let same = a.display() == b.display()
+                        || (a.mask & tmask::MIXED != 0 && b.mask & tmask::MIXED != 0)
+                        || (sub(self, a, pcls, b, cls)? && sub(self, b, cls, a, pcls)?);
+                    if !same {
+                        return self.link_err(
+                            decl,
+                            &format!(
+                                "Type of {}::${} must be {} (as in class {})",
+                                cname,
+                                p.name.dname(),
+                                a.display(),
+                                pcn
+                            ),
+                        );
+                    }
+                }
+                (Some(a), None) => {
+                    return self.link_err(
+                        decl,
+                        &format!(
+                            "Type of {}::${} must be {} (as in class {})",
+                            cname,
+                            p.name.dname(),
+                            a.display(),
+                            pcn
+                        ),
+                    );
+                }
+                (None, Some(_)) => {
+                    return self.link_err(
+                        decl,
+                        &format!(
+                            "Type of {}::${} must not be defined (as in class {})",
+                            cname,
+                            p.name.dname(),
+                            pcn
+                        ),
+                    );
+                }
+                _ => {}
+            }
+        }
+        // A parent set hook with a wider parameter type: the property
+        // must accept it (test Zend/tests/property_hooks/gh15140).
+        if let Some(ps) = &prev.set
+            && let Some(pty) = ps
+                .code()
+                .and_then(|c| c.params.first())
+                .and_then(|x| x.ty.clone())
+        {
+            let cty = set
+                .and_then(|f| f.code())
+                .and_then(|c| c.params.first())
+                .and_then(|x| x.ty.clone())
+                .unwrap_or(ct.clone());
+            let shown = pty.display();
+            if p.ty.is_some() && !sub(self, &pty, pcls, &cty, cls)? {
+                let what = if pcls.is_interface() {
+                    "interface"
+                } else {
+                    "class"
+                };
+                return self.link_err(
+                    decl,
+                    &format!(
+                        "Set type of {}::${} must be supertype of {} (as in {} {})",
+                        cname,
+                        p.name.dname(),
+                        shown,
+                        what,
+                        pcn
+                    ),
+                );
+            }
         }
         Ok(())
     }
@@ -1114,8 +1277,23 @@ impl Vm {
                         child: f.clone(),
                         parent: prev.clone(),
                     });
+                    *f.proto.borrow_mut() = Some(prev.clone());
+                } else if let Some(pr) = prev.proto.borrow().clone()
+                    && (pr.flags & mflags::ABSTRACT != 0
+                        || pr.scope().is_some_and(|c| c.is_interface()))
+                {
+                    // A constructor still answers to an abstract or
+                    // interface one further up (test Zend/tests/
+                    // type_declarations/variance/abstract_constructor).
+                    self.check_signature(cls, &f, &pr, decl)?;
+                    self.obligations.push(super::variance::Obligation {
+                        child: f.clone(),
+                        parent: pr.clone(),
+                    });
+                    *f.proto.borrow_mut() = Some(pr);
+                } else {
+                    *f.proto.borrow_mut() = Some(prev.clone());
                 }
-                *f.proto.borrow_mut() = Some(prev.clone());
             }
             cls.methods.borrow_mut().insert(ln, f);
         } else {

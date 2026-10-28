@@ -23,6 +23,17 @@ use crate::class::ClassDecl;
 pub use decl::parse_native_sig;
 
 /// Whether a variable name is a superglobal.
+/// A string literal's bytes in the internal encoding (zend.multibyte with
+/// a non-UTF-8 internal_encoding; test ext/mbstring/tests/zend_multibyte-02).
+pub(crate) fn lit(s: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    match LITERAL_ENCODING.with(|c| c.get()) {
+        Some(e) if !s.is_ascii() => std::borrow::Cow::Owned(
+            goro_charset::convert(s, e, goro_charset::Encoding::Utf8, &Default::default()).bytes,
+        ),
+        _ => std::borrow::Cow::Borrowed(s),
+    }
+}
+
 pub fn is_superglobal_name(n: &[u8]) -> bool {
     scan::is_superglobal(n)
 }
@@ -781,7 +792,12 @@ impl<'a> Compiler<'a> {
                             if let Some(t) = t {
                                 self.ticks = t;
                             }
+                            // Statements of a declare block do not count as
+                            // statements before a later encoding declare
+                            // (test ext/mbstring/tests/zend_multibyte-15).
+                            let first = self.past_first_stmt;
                             let r = self.top_stmts(b, hoisted, classes);
+                            self.past_first_stmt = first;
                             self.ticks = saved;
                             r?
                         }
@@ -1852,4 +1868,8 @@ fn needs_rtd_key(cd: &goro_syntax::ast::ClassDecl) -> bool {
 thread_local! {
     /// The zend.multibyte setting for the next compilation.
     pub static ZEND_MULTIBYTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// zend.multibyte: the encoding string literals are converted to from
+    /// UTF-8 (the internal encoding).
+    pub static LITERAL_ENCODING: std::cell::Cell<Option<goro_charset::Encoding>> =
+        const { std::cell::Cell::new(None) };
 }
