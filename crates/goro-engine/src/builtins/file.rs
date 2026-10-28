@@ -2132,7 +2132,9 @@ fn pathinfo(_vm: &mut Vm, a: &mut Args) -> R<Value> {
         };
         out.insert(Key::from("filename"), Value::Str(PhpStr::new(f)));
     }
-    if flags != 15 && flags.count_ones() == 1 {
+    // Any other selection than PATHINFO_ALL gives the first element
+    // (observed on PHP 8.5: DIRNAME|BASENAME is the dirname).
+    if flags != 15 {
         return Ok(out
             .iter()
             .next()

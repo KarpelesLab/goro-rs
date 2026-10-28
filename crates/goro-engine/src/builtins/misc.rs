@@ -31,6 +31,14 @@ pub static MODULE: Module = Module {
             assert_options,
         ),
         (
+            "function getservbyname(string $service, string $protocol): int|false",
+            getservbyname,
+        ),
+        (
+            "function getservbyport(int $port, string $protocol): string|false",
+            getservbyport,
+        ),
+        (
             "function version_compare(string $version1, string $version2, ?string $operator = null): int|bool",
             version_compare,
         ),
@@ -326,6 +334,15 @@ fn ini_flag(vm: &Vm, name: &[u8]) -> i64 {
 /// Whether setting `k` to `v` changes a deprecated assert.* setting from
 /// its default (observed on PHP 8.5: "assert.bail INI setting is
 /// deprecated" for `ini_set("assert.bail", "1")`, not for "0").
+fn assert_ini_truthy(v: &[u8]) -> bool {
+    let l = v.to_ascii_lowercase();
+    match &l[..] {
+        b"on" | b"yes" | b"true" => true,
+        b"off" | b"no" | b"false" | b"none" | b"" => false,
+        _ => goro_runtime::convert::str_to_int(&l) != 0,
+    }
+}
+
 pub(crate) fn assert_ini_deprecated(k: &[u8], v: &[u8]) -> bool {
     let truthy = |v: &[u8]| {
         let l = v.to_ascii_lowercase();
@@ -363,6 +380,33 @@ pub(crate) fn startup_ini_deprecations(vm: &mut Vm, ini: &[(Vec<u8>, Vec<u8>)]) 
                     "PHP Startup: {} INI setting is deprecated",
                     String::from_utf8_lossy(k)
                 ),
+                goro_runtime::PhpStr::from("Unknown"),
+                0,
+            );
+        }
+    }
+    if ini
+        .iter()
+        .rev()
+        .find(|(n, _)| n.as_slice() == b"allow_url_include")
+        .is_some_and(|(_, v)| assert_ini_truthy(v))
+    {
+        let _ = vm.raise_at(
+            crate::vm::errors::E_DEPRECATED,
+            "Directive 'allow_url_include' is deprecated",
+            goro_runtime::PhpStr::from("Unknown"),
+            0,
+        );
+    }
+    for k in [
+        &b"mbstring.http_input"[..],
+        b"mbstring.http_output",
+        b"mbstring.internal_encoding",
+    ] {
+        if ini.iter().rev().find(|(n, _)| n.as_slice() == k).is_some_and(|(_, v)| !v.is_empty()) {
+            let _ = vm.raise_at(
+                crate::vm::errors::E_DEPRECATED,
+                &format!("PHP Startup: Use of {} is deprecated", String::from_utf8_lossy(k)),
                 goro_runtime::PhpStr::from("Unknown"),
                 0,
             );
@@ -633,4 +677,63 @@ pub(crate) fn const_deprecation(name: &[u8]) -> Option<&'static str> {
         n if n.starts_with(b"MHASH_") => "8.5, as the mhash*() functions were deprecated",
         _ => return None,
     })
+}
+
+// ---------------------------------------------------------------- services
+
+/// The entries of /etc/services: (name, port, protocol, aliases) (PHP
+/// manual: getservbyname() reads the system's services database).
+fn services() -> Vec<(Vec<u8>, i64, Vec<u8>, Vec<Vec<u8>>)> {
+    let Ok(data) = std::fs::read("/etc/services") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in data.split(|&c| c == b'\n') {
+        let line = match line.iter().position(|&c| c == b'#') {
+            Some(p) => &line[..p],
+            None => line,
+        };
+        let mut f = line
+            .split(|c| c.is_ascii_whitespace())
+            .filter(|w| !w.is_empty());
+        let (Some(name), Some(pp)) = (f.next(), f.next()) else {
+            continue;
+        };
+        let Some(slash) = pp.iter().position(|&c| c == b'/') else {
+            continue;
+        };
+        let Some(port) = std::str::from_utf8(&pp[..slash])
+            .ok()
+            .and_then(|p| p.parse::<i64>().ok())
+        else {
+            continue;
+        };
+        out.push((
+            name.to_vec(),
+            port,
+            pp[slash + 1..].to_vec(),
+            f.map(|w| w.to_vec()).collect(),
+        ));
+    }
+    out
+}
+
+fn getservbyname(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (svc, proto) = (a.bytes(0).to_vec(), a.bytes(1).to_vec());
+    for (name, port, p, aliases) in services() {
+        if p == proto && (name == svc || aliases.contains(&svc)) {
+            return Ok(Value::Int(port));
+        }
+    }
+    Ok(Value::Bool(false))
+}
+
+fn getservbyport(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (port, proto) = (a.int(0), a.bytes(1).to_vec());
+    for (name, p, pr, _) in services() {
+        if p == port && pr == proto {
+            return Ok(sv(name));
+        }
+    }
+    Ok(Value::Bool(false))
 }

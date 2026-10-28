@@ -1075,16 +1075,21 @@ impl Vm {
             Value::Array(a) if a.len() == 2 => {
                 let t = a.get_int(0).map(|x| x.deref()).unwrap_or_default();
                 let m = a.get_int(1).map(|x| x.deref()).unwrap_or_default();
-                let cn = match &t {
-                    Value::Object(o) => self.class_of(o).name.dname(),
-                    Value::Str(s) => s.to_string_lossy(),
+                // Byte-exact (anonymous class names hold a NUL: test
+                // is_callable_anon).
+                let cn: PhpStr = match &t {
+                    Value::Object(o) => self.class_of(o).name.clone(),
+                    Value::Str(s) => s.clone(),
                     _ => return PhpStr::from("Array"),
                 };
                 let mn = match &m {
-                    Value::Str(s) => s.to_string_lossy(),
+                    Value::Str(s) => s.clone(),
                     _ => return PhpStr::from("Array"),
                 };
-                PhpStr::from(format!("{}::{}", cn, mn))
+                let mut out = cn.to_vec();
+                out.extend_from_slice(b"::");
+                out.extend_from_slice(&mn);
+                PhpStr::from(out)
             }
             Value::Object(o) => {
                 let c = self.class_of(o);

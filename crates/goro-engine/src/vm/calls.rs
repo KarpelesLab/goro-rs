@@ -1653,6 +1653,38 @@ impl Vm {
                     ),
                 );
             }
+            // ini_set()'s value names no given type (observed on PHP 8.5).
+            if i == 1
+                && fname.as_bytes() == b"ini_set"
+                && matches!(args[1], Value::Array(_) | Value::Resource(_))
+            {
+                return self.throw(
+                    "TypeError",
+                    "ini_set(): Argument #2 ($value) must be of type string|int|float|bool|null",
+                );
+            }
+            // strtr()'s $from is an array with two arguments and a string
+            // with three (observed on PHP 8.5).
+            if i == 1 && fname.as_bytes() == b"strtr" {
+                let want = if n == 2 { "array" } else { "string" };
+                let bad = match &args[1] {
+                    Value::Array(_) => n != 2,
+                    Value::Null => false,
+                    Value::Str(_) => n == 2,
+                    Value::Resource(_) => true,
+                    _ => n == 2,
+                };
+                if bad {
+                    return self.throw(
+                        "TypeError",
+                        &format!(
+                            "strtr(): Argument #2 ($from) must be of type {}, {} given",
+                            want,
+                            Vm::type_name_given(&args[1])
+                        ),
+                    );
+                }
+            }
             if args[i].is_null() && !ty.allows_null() {
                 // Unions with classes too (observed on PHP 8.5:
                 // ReflectionClass|string takes "" with a deprecation).
