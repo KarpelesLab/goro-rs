@@ -946,24 +946,67 @@ impl<'a> Compiler<'a> {
             goro_syntax::ast::ClassKind::Enum => ClassKind::Enum,
         };
         let line = cd.span.line;
+        // Names that can't be used (messages observed on PHP 8.5).
+        let special = |n: &Name| {
+            n.kind == NameKind::Unqualified
+                && matches!(
+                    &n.name.to_ascii_lowercase()[..],
+                    b"self" | b"parent" | b"static"
+                )
+        };
+        if let Some(e) = &cd.extends
+            && special(e)
+        {
+            return self.err(
+                format!(
+                    "Cannot use \"{}\" as class name, as it is reserved",
+                    String::from_utf8_lossy(e.name)
+                ),
+                line,
+            );
+        }
+        for i in cd.implements.iter() {
+            if special(i) {
+                return self.err(
+                    format!(
+                        "Cannot use \"{}\" as interface name, as it is reserved",
+                        String::from_utf8_lossy(i.name)
+                    ),
+                    line,
+                );
+            }
+        }
+        for m in cd.members.iter() {
+            if let ClassMember::TraitUse(tu) = m {
+                for t in tu.traits.iter() {
+                    if special(t) {
+                        return self.err(
+                            format!(
+                                "Cannot use \"{}\" as trait name, as it is reserved",
+                                String::from_utf8_lossy(t.name)
+                            ),
+                            line,
+                        );
+                    }
+                }
+            }
+        }
         let parent = cd.extends.as_ref().map(|n| self.resolve_class(n));
         let name: Vec<u8> = match &cd.name {
             Some(n) => {
                 let l = n.name.to_ascii_lowercase();
-                if matches!(&l[..], b"self" | b"parent" | b"static") {
+                if matches!(&l[..], b"self" | b"parent" | b"static") || is_reserved_type_name(&l) {
+                    let what = match kind {
+                        ClassKind::Class => "a class",
+                        ClassKind::Interface => "an interface",
+                        ClassKind::Trait => "a trait",
+                        ClassKind::Enum => "an enum",
+                    };
                     return self.err(
                         format!(
-                            "Cannot use '{}' as class name as it is reserved",
-                            String::from_utf8_lossy(n.name)
-                        ),
-                        line,
-                    );
-                }
-                if is_reserved_type_name(&l) {
-                    return self.err(
-                        format!(
-                            "Cannot use '{}' as class name as it is reserved",
-                            String::from_utf8_lossy(n.name)
+                            "Cannot use \"{}\" as {} name as it is reserved",
+                            String::from_utf8_lossy(n.name),
+                            what
                         ),
                         line,
                     );

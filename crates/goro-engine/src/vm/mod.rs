@@ -374,6 +374,8 @@ pub struct ErrorState {
     /// Diagnostics wait in `queued` while this is non-zero.
     pub defer_depth: u32,
     pub queued: Vec<(i64, String, PhpStr, u32)>,
+    /// The last diagnostic shown (ignore_repeated_errors).
+    pub last_shown: Option<(String, Vec<u8>, u32)>,
 }
 
 /// Classes and functions the engine refers to directly.

@@ -93,9 +93,10 @@ impl Vm {
         }
         let msg_s = PhpStr::from(msg);
         self.err.last = Some((level, msg_s.clone(), file.clone(), line as i64));
-        // User error handler (called regardless of error_reporting).
-        if !self.err.in_handler
-            && let Some((h, mask)) = self.err.handlers.last().cloned()
+        // User error handler (called regardless of error_reporting). While
+        // it runs it is not the handler: errors it raises go to a handler
+        // it installs, or to the standard one (test Zend/tests/bug63206.phpt).
+        if let Some((h, mask)) = self.err.handlers.last().cloned()
             && mask & level != 0
             && !h.is_null()
             && level
@@ -107,6 +108,10 @@ impl Vm {
                     | E_COMPILE_WARNING)
                 == 0
         {
+            let depth = self.err.handlers.len();
+            if let Some(top) = self.err.handlers.last_mut() {
+                top.0 = Value::Null;
+            }
             self.err.in_handler = true;
             let args = vec![
                 Value::Int(level),
@@ -116,6 +121,12 @@ impl Vm {
             ];
             let r = self.call_value(&h, args);
             self.err.in_handler = false;
+            if self.err.handlers.len() == depth
+                && let Some(top) = self.err.handlers.last_mut()
+                && top.0.is_null()
+            {
+                top.0 = h.clone();
+            }
             match r {
                 Ok(Value::Bool(false)) => {}
                 Ok(_) => return Ok(()),
@@ -130,6 +141,18 @@ impl Vm {
     }
 
     pub fn display_error(&mut self, level: i64, msg: &str, file: &[u8], line: u32) {
+        // ignore_repeated_errors / ignore_repeated_source (PHP manual:
+        // Error Handling and Logging Configuration Options).
+        if self.ini_bool(b"ignore_repeated_errors", false) {
+            let same_src = self.ini_bool(b"ignore_repeated_source", false);
+            if let Some((m, f, l)) = &self.err.last_shown
+                && m == msg
+                && (same_src || (f.as_slice() == file && *l == line))
+            {
+                return;
+            }
+            self.err.last_shown = Some((msg.to_string(), file.to_vec(), line));
+        }
         let label = level_label(level);
         let file = String::from_utf8_lossy(file);
         if self.ini.log_errors {
