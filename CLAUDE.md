@@ -23,7 +23,10 @@ The development machine is the maintainer's desktop, shared with other work.
   (no `find`, `bfs`, `du` or similar over `/`, `/home`, `/tmp`, `/usr`) and
   never use files from the system or the user's home as data.
 - Builds: at most one at a time across agents, through
-  `flock /tmp/claude-1000/goro-build.lock cargo build --release -j4`.
+  `flock /tmp/claude-1000/goro-build.lock cargo build ...`. Keep the job
+  count from `~/.cargo/config.toml` (don't pass `-j`). An agent working in its
+  own worktree uses its own `CARGO_TARGET_DIR=/tmp/cargo-target-goro-<name>`
+  and deletes it when done.
 - Tests and benchmarks: at most about 8 parallel jobs. Check `free -g` first,
   and wait if less than 30 GB is available or the machine is swapping.
 - Containers (the reference PHP binary runs in one): spot checks only, batched
@@ -32,6 +35,17 @@ The development machine is the maintainer's desktop, shared with other work.
 - At most one sub-agent per agent.
 - Delete your worktrees, scratch files and build directories when done.
 - Stop processes only by PID, and only ones you started.
+
+## Test suite
+
+php-src's tests (only the tests) are at `/tmp/claude-1000/php-tests`
+(php-src 8.5.4: `tests/`, `Zend/tests/`, `ext/*/tests/`, `sapi/*/tests/`).
+Never fetch other php-src files.
+
+The reference PHP 8.5 binary is `/tmp/claude-1000/bin/php85` (a container
+wrapper). It loads a production php.ini, so pass
+`-d error_reporting=-1 -d display_errors=1 -d log_errors=0 -d html_errors=0`
+for comparable output. Spot checks only.
 
 ## Code
 
