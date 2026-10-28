@@ -12,8 +12,8 @@ use crate::class::NativeHooks;
 use crate::func::{Args, NativeFn};
 use crate::vm::{R, Vm};
 
-pub const PHAR_CLASS: &str = include_str!("phar.php");
-pub const PHARDATA_CLASS: &str = include_str!("phardata.php");
+pub const PHAR_CLASS: &str = concat!(include_str!("phar.php"), include_str!("shared.php"));
+pub const PHARDATA_CLASS: &str = concat!(include_str!("phardata.php"), include_str!("shared.php"));
 pub const PHARFILEINFO_CLASS: &str = include_str!("pharfileinfo.php");
 
 pub fn hooks() -> NativeHooks {
@@ -56,8 +56,10 @@ pub static METHODS: &[(&str, NativeFn)] = methods!([
     "addemptydir" => add_empty_dir,
     "addfile" => add_file,
     "addfromstring" => add_from_string,
-    "buildfromdirectory" => build_from_directory,
-    "buildfromiterator" => build_from_iterator,
+    "__h_checkwrite" => h_check_write,
+    "__h_addfile" => h_add_file,
+    "__h_adddata" => h_add_data,
+    "__h_save" => h_save,
     "compressfiles" => compress_files,
     "decompressfiles" => decompress_files,
     "compress" => compress,
@@ -232,7 +234,7 @@ fn put_file(vm: &mut Vm, s: &Shared, name: &[u8], data: Vec<u8>) -> R<()> {
         match l.a.get_mut(name) {
             Some(e) if !e.is_dir => e.set_contents(data),
             _ => {
-                l.a.put(Entry::file(name, data, 0, 0o666));
+                l.a.put(Entry::file(name, data, 0, new_perms()));
             }
         }
     }
@@ -310,6 +312,20 @@ fn phar_init(vm: &mut Vm, a: &mut Args) -> R<Value> {
             );
         }
     }
+    if let Some(al) = &alias
+        && let Some(other) = state(vm).aliases.get(&al.to_vec()).cloned()
+        && other != key
+    {
+        return vm.throw(
+            "UnexpectedValueException",
+            &format!(
+                "alias \"{}\" is already used for archive \"{}\" cannot be overloaded with \"{}\"",
+                al.to_string_lossy(),
+                lossy(&other),
+                lossy(&key)
+            ),
+        );
+    }
     let s = match load(vm, &key, true, is_data) {
         Ok(s) => s,
         Err(m) => return vm.throw("UnexpectedValueException", &m),
@@ -331,15 +347,17 @@ fn phar_init(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if let Some(al) = alias {
         let al = al.to_vec();
         let cur = s.borrow().a.alias.clone();
-        if let Some(other) = state(vm).aliases.get(&al).cloned()
-            && other != key
+        if let Some(c) = &cur
+            && c != &al
+            && s.borrow().on_disk
         {
+            // test alias_acrobatics.phpt
             return vm.throw(
                 "UnexpectedValueException",
                 &format!(
                     "alias \"{}\" is already used for archive \"{}\" cannot be overloaded with \"{}\"",
                     lossy(&al),
-                    lossy(&other),
+                    lossy(&key),
                     lossy(&key)
                 ),
             );
@@ -877,6 +895,11 @@ fn set_stub(vm: &mut Vm, a: &mut Args) -> R<Value> {
     )?;
     let stub = match a.val(0) {
         Value::Resource(_) => {
+            // PHP 8.5 deprecation (test cache_list/copyonwrite10)
+            vm.deprecated(&format!(
+                "Calling {}(resource $stub, int $length) is deprecated",
+                a.fname()
+            ))?;
             let len = a.int_or(1, -1);
             let v = vm.call_value(
                 &Value::from("stream_get_contents"),
@@ -1211,13 +1234,19 @@ fn convert(
             }
         }
     }
+    let from = s.borrow().a.format;
     if exec {
-        if na.stub.is_empty() || (format == Format::Phar && s.borrow().a.format != Format::Phar) {
-            na.stub = if format == Format::Phar {
-                goro_ext_phar::stub::default_stub(None, None).unwrap_or_default()
-            } else {
-                Vec::new()
+        // a new format gets its default stub; a tar its file name as alias,
+        // other formats none (test phar_convert_repeated.phpt)
+        if format != from || na.stub.is_empty() {
+            na.stub = match format {
+                Format::Phar => goro_ext_phar::stub::default_stub(None, None).unwrap_or_default(),
+                Format::Tar => goro_ext_phar::tar::DEFAULT_STUB.to_vec(),
+                Format::Zip => goro_ext_phar::zip::DEFAULT_STUB.to_vec(),
             };
+        }
+        if format != from {
+            na.alias = (format == Format::Tar).then(|| target.clone());
         }
         if na.sig_type.is_none() {
             na.sig_type = Some(SigType::Sha256);
@@ -1348,72 +1377,8 @@ fn convert_to_data(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 // ---------------------------------------------------------------- building
 
-fn build_from_directory(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let (s, _) = this_phar(vm, a)?;
-    check_write(
-        vm,
-        &s,
-        "UnexpectedValueException",
-        "Cannot write to archive - write operations restricted by INI setting",
-    )?;
-    let dir = a.str(0).to_vec();
-    let pattern = a.opt_str(1).map(|p| p.to_vec()).unwrap_or_default();
-    let base = super::abs_path(vm, &dir);
-    let mut files: Vec<Vec<u8>> = Vec::new();
-    fn walk(p: &std::path::Path, out: &mut Vec<Vec<u8>>) {
-        use std::os::unix::ffi::OsStrExt;
-        let Ok(rd) = std::fs::read_dir(p) else {
-            return;
-        };
-        let mut ents: Vec<_> = rd.flatten().collect();
-        ents.sort_by_key(|e| e.file_name());
-        for e in ents {
-            let path = e.path();
-            if path.is_dir() {
-                walk(&path, out);
-            } else {
-                out.push(path.as_os_str().as_bytes().to_vec());
-            }
-        }
-    }
-    let bp = super::os_path(&base);
-    if !bp.is_dir() {
-        return vm.throw(
-            "UnexpectedValueException",
-            &format!(
-                "RecursiveDirectoryIterator::__construct({}): Failed to open directory: No such file or directory",
-                lossy(&dir)
-            ),
-        );
-    }
-    walk(&bp, &mut files);
-    let mut out = PhpArray::new();
-    for f in files {
-        if !pattern.is_empty() {
-            let m = vm.call_value(
-                &Value::from("preg_match"),
-                vec![
-                    Value::Str(PhpStr::from(pattern.clone())),
-                    Value::Str(PhpStr::from(f.clone())),
-                ],
-            )?;
-            if !vm.to_bool(&m) {
-                continue;
-            }
-        }
-        let rel = super::norm_inner(&f[base.len()..]);
-        let data = std::fs::read(super::os_path(&f)).unwrap_or_default();
-        {
-            let mut l = s.borrow_mut();
-            l.a.put(Entry::file(&rel, data, 0, 0o666));
-        }
-        out.insert(Key::from_bytes(&rel), Value::Str(PhpStr::from(f)));
-    }
-    save(vm, &s)?;
-    Ok(Value::Array(out))
-}
-
-fn build_from_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
+/// `__h_checkWrite()`: buildFromIterator() on a read-only phar.
+fn h_check_write(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (s, _) = this_phar(vm, a)?;
     check_write(
         vm,
@@ -1421,101 +1386,66 @@ fn build_from_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
         "UnexpectedValueException",
         "Cannot write out phar archive, phar is read-only",
     )?;
-    let it = a.val(0);
-    let base = a.opt_str(1).map(|b| b.to_vec());
-    let items = vm.iterate_to_vec(&it, true)?;
-    let cls = match &it {
-        Value::Object(o) => {
-            use crate::class::DisplayName;
-            vm.class_of(o).name.dname()
-        }
-        _ => String::new(),
-    };
-    let mut out = PhpArray::new();
-    for (k, v) in items {
-        let is_info = matches!(v, Value::Object(_)) && {
-            let r = vm.call_value(
-                &Value::from("is_a"),
-                vec![v.clone(), Value::from("SplFileInfo")],
-            )?;
-            vm.to_bool(&r)
-        };
-        let (path, data): (Vec<u8>, Vec<u8>) = match &v {
-            Value::Str(p) => {
-                let Some(d) = read_file(vm, a, p)? else {
-                    return vm.throw(
-                        "UnexpectedValueException",
-                        &format!(
-                            "Iterator {} returned a file that could not be opened \"{}\"",
-                            cls,
-                            p.to_string_lossy()
-                        ),
-                    );
-                };
-                (p.to_vec(), d)
-            }
-            Value::Resource(_) => {
-                let d = vm.call_value(&Value::from("stream_get_contents"), vec![v.clone()])?;
-                (Vec::new(), vm.to_php_str(&d)?.to_vec())
-            }
-            Value::Object(o) if is_info => {
-                let p = vm.call_method(o, b"getpathname", Vec::new())?;
-                let p = vm.to_php_str(&p)?.to_vec();
-                if std::path::Path::new(&*String::from_utf8_lossy(&p)).is_dir() {
-                    continue;
-                }
-                let Some(d) = read_file(vm, a, &p)? else {
-                    continue;
-                };
-                (p, d)
-            }
-            _ => {
-                return vm.throw(
-                    "UnexpectedValueException",
-                    &format!(
-                        "Iterator {cls} returned an invalid value (must return a string, a stream, or an SplFileInfo object)"
-                    ),
-                );
-            }
-        };
-        let name = match (&k, &v, &base) {
-            (_, Value::Object(_), Some(b)) => {
-                let full = super::abs_path(vm, &path);
-                let bb = super::abs_path(vm, b);
-                if full.starts_with(&bb) {
-                    super::norm_inner(&full[bb.len()..])
-                } else {
-                    return vm.throw(
-                        "UnexpectedValueException",
-                        &format!(
-                            "Iterator {} returned a path \"{}\" that is not in the base directory \"{}\"",
-                            cls,
-                            lossy(&path),
-                            lossy(b)
-                        ),
-                    );
-                }
-            }
-            (Value::Str(ks), _, _) => super::norm_inner(ks),
-            (Value::Int(_), Value::Object(_), None) => {
-                // no base directory: the key must name it
-                return vm.throw(
-                    "UnexpectedValueException",
-                    &format!("Iterator {cls} returned an invalid key (must return a string)"),
-                );
-            }
-            _ => {
-                return vm.throw(
-                    "UnexpectedValueException",
-                    &format!("Iterator {cls} returned an invalid key (must return a string)"),
-                );
-            }
-        };
-        s.borrow_mut().a.put(Entry::file(&name, data, 0, 0o666));
-        out.insert(Key::from_bytes(&name), Value::Str(PhpStr::from(path)));
+    Ok(Value::Null)
+}
+
+/// `__h_addFile($name, $path)`: adds a file from disk with its
+/// permissions (test bug77022.phpt); its real path, none for phar's own
+/// names, false when it can't be read.
+fn h_add_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (s, _) = this_phar(vm, a)?;
+    let name = local_name(&vm.to_php_str(&a.val(0))?);
+    let path = vm.to_php_str(&a.val(1))?.to_vec();
+    if goro_ext_phar::is_meta_name(&name) {
+        return Ok(Value::Null);
     }
+    let Some(data) = read_file(vm, a, &path)? else {
+        return Ok(Value::Bool(false));
+    };
+    let real = super::abs_path(vm, &path);
+    let perms = file_perms(&real).unwrap_or(0o666);
+    let mut e = Entry::file(&name, data, 0, perms);
+    e.flags = perms;
+    s.borrow_mut().a.put(e);
+    Ok(Value::Str(PhpStr::from(real)))
+}
+
+/// `__h_addData($name, $data)`: adds a file's contents (false for phar's
+/// own names).
+fn h_add_data(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (s, _) = this_phar(vm, a)?;
+    let name = local_name(&vm.to_php_str(&a.val(0))?);
+    if goro_ext_phar::is_meta_name(&name) {
+        return Ok(Value::Bool(false));
+    }
+    let data = vm.to_php_str(&a.val(1))?.to_vec();
+    s.borrow_mut().a.put(Entry::file(&name, data, 0, new_perms()));
+    Ok(Value::Bool(true))
+}
+
+fn h_save(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (s, _) = this_phar(vm, a)?;
     save(vm, &s)?;
-    Ok(Value::Array(out))
+    Ok(Value::Null)
+}
+
+/// The permissions of a file on disk.
+fn file_perms(p: &[u8]) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(super::os_path(p))
+        .ok()
+        .map(|m| m.permissions().mode() & 0o777)
+}
+
+/// New entries: 0666 less the umask (test bug77022.phpt).
+pub(crate) fn new_perms() -> u32 {
+    // SAFETY: umask() only swaps the process mask; it is put back.
+    let m = unsafe {
+        let m = libc::umask(0o022);
+        libc::umask(m);
+        m
+    };
+    0o666 & !(m as u32)
 }
 
 fn extract_to(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1589,18 +1519,20 @@ fn extract_to(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
         };
         for n in list {
+            // names are kept inside the directory (test bug70019.phpt)
             let mut target = base.clone();
             target.push(b'/');
-            target.extend_from_slice(&n);
+            target.extend_from_slice(&local_name(&n));
             let tp = super::os_path(&target);
-            let (is_dir, data) = {
+            let (is_dir, data, perms) = {
                 let mut l = s.borrow_mut();
                 let fname = l.a.fname.clone();
                 let e = l.a.get_mut(&n).unwrap();
+                let perms = e.perms();
                 if e.is_dir {
-                    (true, Ok(Vec::new()))
+                    (true, Ok(Vec::new()), perms)
                 } else {
-                    (false, e.contents(&fname).map(|d| d.to_vec()))
+                    (false, e.contents(&fname).map(|d| d.to_vec()), perms)
                 }
             };
             if is_dir {
@@ -1627,7 +1559,12 @@ fn extract_to(vm: &mut Vm, a: &mut Args) -> R<Value> {
                     ),
                 );
             }
-            if std::fs::write(&tp, &data).is_err() {
+            let written = std::fs::write(&tp, &data);
+            if written.is_ok() {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&tp, std::fs::Permissions::from_mode(perms));
+            }
+            if written.is_err() {
                 return vm.throw(
                     "PharException",
                     &format!(
@@ -1746,17 +1683,23 @@ fn map_phar(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return Ok(Value::Bool(true));
     }
     let data = std::fs::read(super::os_path(&key)).unwrap_or_default();
-    let start = match goro_ext_phar::phar::manifest_start(&data) {
-        Ok(p) => p,
-        Err(m) => return vm.throw("PharException", &m),
-    };
     let opts = goro_ext_phar::ParseOptions {
         require_hash: super::ini_bool(vm, b"phar.require_hash"),
         verify: None,
         is_data: false,
         hint: None,
     };
-    let arc = match goro_ext_phar::phar::parse_at(&key, &data, start, &opts) {
+    // a tar or zip runs the stub inside it
+    let tarzip = goro_ext_phar::zip::looks_like_zip(&data) || goro_ext_phar::tar::looks_like_tar(&data);
+    let parsed = if tarzip {
+        goro_ext_phar::Archive::parse(&key, &data, &opts)
+    } else {
+        match goro_ext_phar::phar::manifest_start(&data) {
+            Ok(start) => goro_ext_phar::phar::parse_at(&key, &data, start, &opts),
+            Err(m) => Err(m),
+        }
+    };
+    let arc = match parsed {
         Ok(x) => x,
         Err(m) => return vm.throw("PharException", &m),
     };

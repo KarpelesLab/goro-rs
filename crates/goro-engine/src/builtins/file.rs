@@ -487,6 +487,9 @@ impl Stream {
             Backing::File(f) => f.read(buf),
             Backing::Memory { data, pos } => {
                 let n = buf.len().min(data.len().saturating_sub(*pos));
+                if n == 0 {
+                    return Ok(0);
+                }
                 buf[..n].copy_from_slice(&data[*pos..*pos + n]);
                 *pos += n;
                 Ok(n)

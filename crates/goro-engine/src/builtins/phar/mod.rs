@@ -46,6 +46,19 @@ pub static MODULE: Module = Module {
 
 fn init(vm: &mut Vm) {
     super::streams::register_wrapper(vm, "phar", &wrapper::WRAPPER);
+    super::streams::register_include_filter(vm, include_filter);
+}
+
+/// Including a tar- or zip-based phar runs its stub (PHP manual: Phar,
+/// "tar and zip based phars").
+pub(crate) fn include_filter(_vm: &mut Vm, path: &[u8], src: &[u8]) -> Option<Vec<u8>> {
+    if !goro_ext_phar::zip::looks_like_zip(src) && !goro_ext_phar::tar::looks_like_tar(src) {
+        return None;
+    }
+    let opts = ParseOptions::default();
+    let a = Archive::parse(path, src, &opts).ok()?;
+    goro_ext_phar::stub::find_halt(&a.stub)?;
+    Some(a.stub)
 }
 
 /// phar.readonly and phar.require_hash can be turned on at run time but
@@ -372,10 +385,21 @@ pub(crate) fn load(vm: &mut Vm, abs: &[u8], create: bool, is_data: bool) -> Resu
         if let Some(other) = state(vm).aliases.get(&al)
             && other != abs
         {
-            return Err(format!(
-                "Cannot open archive \"{}\", alias is already in use by existing archive",
-                lossy(abs)
-            ));
+            // tests alias_acrobatics.phpt (phar, tar, zip)
+            return Err(match loaded.a.format {
+                Format::Phar => format!(
+                    "Cannot open archive \"{}\", alias is already in use by existing archive",
+                    lossy(abs)
+                ),
+                Format::Tar => format!(
+                    "phar error: Unable to add tar-based phar \"{}\", alias is already in use",
+                    lossy(abs)
+                ),
+                Format::Zip => format!(
+                    "phar error: Unable to add zip-based phar \"{}\" with implicit alias, alias is already in use",
+                    lossy(abs)
+                ),
+            });
         }
         state(vm).aliases.insert(al, abs.to_vec());
     }

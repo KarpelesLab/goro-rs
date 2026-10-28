@@ -124,7 +124,7 @@ fn open(vm: &mut Vm, a: &Args, url: &[u8], mode: &[u8], quiet: bool) -> R<Option
         }
         return match read_entry(vm, &s, &inner) {
             Ok(data) => Ok(Some(Stream::new(
-                Backing::Memory { data, pos: 0 },
+                Backing::Native(Box::new(PharRead { data, pos: 0 })),
                 mode,
                 url,
                 "phar",
@@ -212,6 +212,40 @@ fn open(vm: &mut Vm, a: &Args, url: &[u8], mode: &[u8], quiet: bool) -> R<Option
     )))
 }
 
+/// A stream reading an entry: seeks stay inside it (test
+/// fseek_outside_bounds.phpt).
+struct PharRead {
+    data: Vec<u8>,
+    pos: usize,
+}
+
+impl NativeStream for PharRead {
+    fn read(&mut self, _vm: &mut Vm, out: &mut [u8]) -> std::io::Result<usize> {
+        let n = out.len().min(self.data.len().saturating_sub(self.pos));
+        out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+    fn seek(&mut self, _vm: &mut Vm, pos: std::io::SeekFrom) -> Option<std::io::Result<u64>> {
+        let n = match pos {
+            std::io::SeekFrom::Start(n) => n as i64,
+            std::io::SeekFrom::Current(n) => self.pos as i64 + n,
+            std::io::SeekFrom::End(n) => self.data.len() as i64 + n,
+        };
+        if n < 0 || n as usize > self.data.len() {
+            return Some(Err(std::io::Error::other("seek outside the entry")));
+        }
+        self.pos = n as usize;
+        Some(Ok(n as u64))
+    }
+    fn tell(&mut self) -> Option<u64> {
+        Some(self.pos as u64)
+    }
+    fn eof(&self) -> bool {
+        self.pos >= self.data.len()
+    }
+}
+
 /// A stream writing an entry: the contents go in when it is closed.
 struct PharWrite {
     s: Shared,
@@ -238,7 +272,7 @@ impl PharWrite {
                     let _ = comp;
                 }
                 None => {
-                    let e = Entry::file(&self.name, data, 0, 0o666);
+                    let e = Entry::file(&self.name, data, 0, super::classes::new_perms());
                     l.a.put(e);
                 }
             }
@@ -303,7 +337,7 @@ impl Drop for PharWrite {
 fn stat_arr(dir: bool, perms: u32, size: u32, mtime: u32, ino: u32) -> PhpArray {
     let mut a = PhpArray::new();
     let mode = if dir {
-        0o40000 | 0o777
+        0o40000 | (perms & 0o777)
     } else {
         0o100000 | (perms & 0o777)
     };
@@ -660,9 +694,14 @@ fn opendir(vm: &mut Vm, a: &Args, url: &[u8]) -> R<Option<Vec<Vec<u8>>>> {
         ))?;
         Ok(None)
     };
-    // "phar://alias" without the root slash (test 017.phpt)
+    // "phar://alias" without the root slash (tests 017.phpt, 027.phpt)
     let rest = &url[7.min(url.len())..];
-    if !rest.contains(&b'/') && super::state(vm).aliases.contains_key(rest) {
+    let unknown = format!(
+        "phar error: invalid url or non-existent phar \"{}\"\nphar url \"{}\" is unknown",
+        lossy(url),
+        lossy(url)
+    );
+    if rest.is_empty() || (!rest.contains(&b'/') && super::state(vm).aliases.contains_key(rest)) {
         return dfail(
             vm,
             &format!(
@@ -675,23 +714,18 @@ fn opendir(vm: &mut Vm, a: &Args, url: &[u8]) -> R<Option<Vec<Vec<u8>>>> {
     }
     let (abs, inner) = match split_url(vm, url) {
         Ok(x) => x,
-        Err(m) => return dfail(vm, &m),
+        Err(_) => return dfail(vm, &unknown),
     };
     let is_data = data_by_name(vm, &abs);
     let s = match load(vm, &abs, false, is_data) {
         Ok(s) => s,
+        Err(m) if m.starts_with("phar error: invalid url") => return dfail(vm, &unknown),
         Err(m) => return dfail(vm, &m),
     };
     let l = s.borrow();
     if !l.a.is_dir(&inner) || l.a.get(&inner).is_some_and(|e| !e.is_dir) {
         drop(l);
-        return dfail(
-            vm,
-            &format!(
-                "phar error: invalid url or non-existent phar \"{}\"",
-                lossy(url)
-            ),
-        );
+        return dfail(vm, &unknown);
     }
     let mut names = l.a.list_dir(&inner);
     // mounted directories show at the root
@@ -777,6 +811,14 @@ fn include(vm: &mut Vm, fname: &str, url: &[u8], quiet: bool) -> R<Option<(Vec<u
             return Ok(None);
         }
     };
+    // the archive itself: its stub runs (test 017.phpt)
+    if inner.is_empty() {
+        let Ok(src) = std::fs::read(super::os_path(&abs)) else {
+            return Ok(None);
+        };
+        let src = super::include_filter(vm, &abs, &src).unwrap_or(src);
+        return Ok(Some((src, abs)));
+    }
     match read_entry(vm, &s, &inner) {
         Ok(src) => {
             let mut name = b"phar://".to_vec();

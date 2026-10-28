@@ -29,8 +29,6 @@ class Phar extends RecursiveDirectoryIterator implements Countable, ArrayAccess 
     public function addEmptyDir(string $directory): void {}
     public function addFile(string $filename, ?string $localName = null): void {}
     public function addFromString(string $localName, string $contents): void {}
-    public function buildFromDirectory(string $directory, string $pattern = ""): array {}
-    public function buildFromIterator(Traversable $iterator, ?string $baseDirectory = null): array {}
     public function compressFiles(int $compression): void {}
     public function decompressFiles(): bool {}
     public function compress(int $compression, ?string $extension = null): ?Phar {}
@@ -80,4 +78,3 @@ class Phar extends RecursiveDirectoryIterator implements Countable, ArrayAccess 
     final public static function mungServer(array $variables): void {}
     final public static function unlinkArchive(string $filename): bool {}
     final public static function webPhar(?string $alias = null, ?string $index = null, ?string $fileNotFoundScript = null, array $mimeTypes = [], ?callable $rewrite = null): void {}
-}

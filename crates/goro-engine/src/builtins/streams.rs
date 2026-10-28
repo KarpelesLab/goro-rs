@@ -285,6 +285,7 @@ pub struct StreamRegistry {
     filters: Vec<(&'static str, FilterFactory)>,
     /// stream_filter_register(): (name or `family.*`, class name).
     user_filters: Vec<(Vec<u8>, PhpStr)>,
+    include_filters: Vec<IncludeFilter>,
 }
 
 /// Registers a stream wrapper for `scheme` (lower case, without `://`).
@@ -292,6 +293,40 @@ pub fn register_wrapper(vm: &mut Vm, scheme: &str, w: &'static NativeWrapper) {
     vm.ext::<StreamRegistry>()
         .wrappers
         .insert(scheme.as_bytes().to_ascii_lowercase(), w);
+}
+
+/// Splits include_path on ':' but not inside a URL's "scheme://"
+/// (PHP manual: include_path; "phar://" entries).
+pub fn split_include_path(p: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut cur = Vec::new();
+    let mut i = 0;
+    while i < p.len() {
+        if p[i] == b':' && !p[i..].starts_with(b"://") {
+            out.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(p[i]);
+        }
+        i += 1;
+    }
+    out.push(cur);
+    out.retain(|d| !d.is_empty());
+    out
+}
+
+/// A hook that may replace the source of an included file (phar: an
+/// archive's stub); none keeps it.
+pub type IncludeFilter = fn(&mut Vm, &[u8], &[u8]) -> Option<Vec<u8>>;
+
+/// Registers an include filter.
+pub fn register_include_filter(vm: &mut Vm, f: IncludeFilter) {
+    vm.ext::<StreamRegistry>().include_filters.push(f);
+}
+
+/// Runs the include filters on a file's source.
+pub(crate) fn include_filter(vm: &mut Vm, path: &[u8], src: &[u8]) -> Option<Vec<u8>> {
+    let fs = vm.ext::<StreamRegistry>().include_filters.clone();
+    fs.into_iter().find_map(|f| f(vm, path, src))
 }
 
 /// Registers a filter name (`zlib.inflate`) or family (`convert.iconv.*`,
