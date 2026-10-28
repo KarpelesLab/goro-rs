@@ -19,6 +19,7 @@ pub mod headers;
 pub mod highlight;
 pub mod http;
 pub mod iconv;
+pub mod image;
 pub mod info;
 mod info_text;
 pub mod ini;
@@ -82,6 +83,7 @@ pub fn modules() -> Vec<&'static Module> {
         &strmisc::MODULE,
         &password::MODULE,
         &misc::MODULE,
+        &image::MODULE,
         &exec::MODULE,
         &highlight::MODULE,
         &ini::MODULE,
