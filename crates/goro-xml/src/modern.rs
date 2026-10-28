@@ -470,10 +470,8 @@ fn generate_prefix(
     }
 }
 
-/// Serializes the children of element `n` in its namespace context
-/// (`Dom\Element::$innerHTML` on XML documents: the element's default
-/// namespace and prefixes are in scope; test ext/dom/tests/modern/xml/
-/// Element_innerOuterHTML_reading.phpt).
+/// Serializes the children of element `n` with its prefixes in scope
+/// (`Dom\Element::$innerHTML` on XML documents).
 pub fn children_to_string(
     arena: &Arena,
     n: NodeId,
@@ -487,9 +485,10 @@ pub fn children_to_string(
     };
     let mut map = PrefixMap::default();
     map.add(Some(XML_NS.into()), "xml".into());
-    let mut ctx_ns = None;
+    // The context namespace stays null: a default namespace is declared
+    // again (test ext/dom/tests/modern/xml/Element_innerHTML_writing.phpt).
+    let ctx_ns = None;
     if let Some(e) = arena.element(n) {
-        ctx_ns = e.name.ns.clone();
         if let (Some(p), Some(ns)) = (&e.name.prefix, &e.name.ns) {
             map.add(Some(ns.clone()), p.clone());
         }
