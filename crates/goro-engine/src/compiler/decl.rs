@@ -1228,7 +1228,7 @@ impl<'a> Compiler<'a> {
                         );
                     }
                     let attrs = self.attributes(p.attrs)?;
-                    for it in p.props {
+                    for (pi, it) in p.props.iter().enumerate() {
                         if props.iter().any(|x| x.name.as_bytes() == it.name.name) {
                             return self.err(
                                 format!(
@@ -1294,7 +1294,12 @@ impl<'a> Compiler<'a> {
                             get,
                             set,
                             hook_flags,
-                            doc: it.doc_comment.or(p.doc_comment).map(PhpStr::new),
+                            // A declaration's doc comment belongs to its
+                            // first property (observed on PHP 8.5).
+                            doc: it
+                                .doc_comment
+                                .or(if pi == 0 { p.doc_comment } else { None })
+                                .map(PhpStr::new),
                             attrs: attrs.clone(),
                             line: it.span.line,
                         });
@@ -1716,7 +1721,8 @@ impl<'a> Compiler<'a> {
                 self.compile_fn(spec)?
             };
             if h.modifiers.has(Modifiers::FINAL) {
-                code.flags |= fflags::ABSTRACT & 0;
+                // Recorded for Reflection (`{ final get; }`): bits 4/8.
+                hflags |= if is_get { 4 } else { 8 };
             }
             if is_get {
                 get = Some(Rc::new(code));
@@ -2241,7 +2247,15 @@ pub fn parse_native_sig(
     known_const: Option<&dyn Fn(&[u8]) -> Option<Value>>,
 ) -> Result<crate::func::NativeSig, String> {
     let mut src = Vec::from(&b"<?php "[..]);
-    src.extend_from_slice(sig.as_bytes());
+    // Reserved words (PHP 8.5's clone()) cannot be parsed as function
+    // names: the name is not needed here.
+    let sig_text = match (sig.find("function "), sig.find('(')) {
+        (Some(f), Some(p)) if f < p && crate::registry::sig_name(sig).eq_ignore_ascii_case("clone") => {
+            format!("{}function __clone_fn{}", &sig[..f], &sig[p..])
+        }
+        _ => sig.to_string(),
+    };
+    src.extend_from_slice(sig_text.as_bytes());
     src.extend_from_slice(b" {}");
     let arena = goro_syntax::Arena::new();
     let prog = goro_syntax::parse(&arena, &src).map_err(|e| format!("{}: {}", sig, e))?;

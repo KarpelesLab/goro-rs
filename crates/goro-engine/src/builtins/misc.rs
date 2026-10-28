@@ -36,6 +36,9 @@ pub static MODULE: Module = Module {
         ),
     ],
     constants: &[
+        ("CONNECTION_ABORTED", ConstVal::Int(1)),
+        ("CONNECTION_NORMAL", ConstVal::Int(0)),
+        ("CONNECTION_TIMEOUT", ConstVal::Int(2)),
         ("ASSERT_ACTIVE", ConstVal::Int(1)),
         ("ASSERT_CALLBACK", ConstVal::Int(2)),
         ("ASSERT_BAIL", ConstVal::Int(3)),

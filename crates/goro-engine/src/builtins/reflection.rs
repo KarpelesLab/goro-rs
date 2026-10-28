@@ -92,8 +92,8 @@ class ReflectionMethod extends ReflectionFunctionAbstract {
     public function isDestructor(): bool {}
     public function getClosure(?object $object = null): Closure {}
     public function getModifiers(): int {}
-    public function invoke(?object $object, mixed ...$args): mixed {}
-    public function invokeArgs(?object $object, array $args = []): mixed {}
+    public function invoke($object, mixed ...$args): mixed {}
+    public function invokeArgs($object = null, array $args = []): mixed {}
     public function getDeclaringClass(): ReflectionClass {}
     public function getPrototype(): ReflectionMethod {}
     public function hasPrototype(): bool {}
@@ -107,15 +107,8 @@ class ReflectionClass implements Reflector {
     const SKIP_INITIALIZATION_ON_SERIALIZE = 8;
     const SKIP_DESTRUCTOR = 16;
     public string $name = "";
+    private function __clone(): void {}
     public function __construct(object|string $objectOrClass) {}
-    public function newLazyGhost(callable $initializer, int $options = 0): object {}
-    public function newLazyProxy(callable $factory, int $options = 0): object {}
-    public function resetAsLazyGhost(object $object, callable $initializer, int $options = 0): void {}
-    public function resetAsLazyProxy(object $object, callable $factory, int $options = 0): void {}
-    public function initializeLazyObject(object $object): object {}
-    public function isUninitializedLazyObject(object $object): bool {}
-    public function markLazyObjectAsInitialized(object $object): object {}
-    public function getLazyInitializer(object $object): ?callable {}
     public function __toString(): string {}
     public function getName(): string {}
     public function isInternal(): bool {}
@@ -155,6 +148,14 @@ class ReflectionClass implements Reflector {
     public function newInstance(mixed ...$args): object {}
     public function newInstanceWithoutConstructor(): object {}
     public function newInstanceArgs(array $args = []): ?object {}
+    public function newLazyGhost(callable $initializer, int $options = 0): object {}
+    public function newLazyProxy(callable $factory, int $options = 0): object {}
+    public function resetAsLazyGhost(object $object, callable $initializer, int $options = 0): void {}
+    public function resetAsLazyProxy(object $object, callable $factory, int $options = 0): void {}
+    public function initializeLazyObject(object $object): object {}
+    public function isUninitializedLazyObject(object $object): bool {}
+    public function markLazyObjectAsInitialized(object $object): object {}
+    public function getLazyInitializer(object $object): ?callable {}
     public function getParentClass(): ReflectionClass|false {}
     public function isSubclassOf(ReflectionClass|string $class): bool {}
     public function getStaticProperties(): array {}
@@ -293,6 +294,7 @@ class ReflectionIntersectionType extends ReflectionType {
 }
 class ReflectionAttribute implements Reflector {
     const IS_INSTANCEOF = 2;
+    public string $name = "";
     public function getName(): string {}
     public function getTarget(): int {}
     public function isRepeated(): bool {}
@@ -452,17 +454,18 @@ pub static MODULE: Module = Module {
         ("reflectionfunctionabstract::getreturntype", fa_ret),
         (
             "reflectionfunctionabstract::hastentativereturntype",
-            ret_false,
+            fa_has_tentative,
         ),
         (
             "reflectionfunctionabstract::gettentativereturntype",
-            ret_null,
+            fa_tentative,
         ),
         ("reflectionfunctionabstract::getattributes", fa_attrs),
         ("reflectionfunction::__construct", f_construct),
         ("reflectionfunction::__tostring", f_to_string),
         ("reflectionfunction::isanonymous", f_is_anon),
-        ("reflectionfunction::isdisabled", ret_false),
+        ("reflectionfunction::isdisabled", f_is_disabled),
+        ("reflectionattribute::__construct", a_construct),
         ("reflectionfunction::invoke", f_invoke),
         ("reflectionfunction::invokeargs", f_invoke_args),
         ("reflectionfunction::getclosure", f_get_closure),
@@ -483,7 +486,7 @@ pub static MODULE: Module = Module {
         ("reflectionmethod::getdeclaringclass", m_declaring),
         ("reflectionmethod::getprototype", m_prototype),
         ("reflectionmethod::hasprototype", m_has_prototype),
-        ("reflectionmethod::setaccessible", noop),
+        ("reflectionmethod::setaccessible", m_set_accessible),
         // classes
         ("reflectionclass::__construct", c_construct),
         ("reflectionobject::__construct", c_construct),
@@ -584,9 +587,9 @@ pub static MODULE: Module = Module {
         ("reflectionproperty::getmodifiers", p_modifiers),
         ("reflectionproperty::getdeclaringclass", p_declaring),
         ("reflectionproperty::getdoccomment", p_doc),
-        ("reflectionproperty::setaccessible", noop),
+        ("reflectionproperty::setaccessible", p_set_accessible),
         ("reflectionproperty::gettype", p_type),
-        ("reflectionproperty::getsettabletype", p_type),
+        ("reflectionproperty::getsettabletype", p_settable_type),
         ("reflectionproperty::hastype", p_has_type),
         ("reflectionproperty::hasdefaultvalue", p_has_default),
         ("reflectionproperty::getdefaultvalue", p_default),
@@ -697,16 +700,22 @@ pub static MODULE: Module = Module {
         ("reflectionconstant::getnamespacename", gc_ns),
         ("reflectionconstant::getshortname", gc_short),
         ("reflectionconstant::getvalue", gc_value),
-        ("reflectionconstant::isdeprecated", ret_false),
-        ("reflectionconstant::getfilename", ret_false),
-        ("reflectionconstant::getextension", ret_null),
-        ("reflectionconstant::getextensionname", ret_false),
+        ("reflectionconstant::isdeprecated", gc_deprecated),
+        ("reflectionconstant::getfilename", gc_file),
+        ("reflectionconstant::getextension", gc_extension),
+        ("reflectionconstant::getextensionname", gc_extension_name),
         ("reflectionconstant::getattributes", empty_array),
         ("reflectionconstant::__tostring", gc_to_string),
         ("reflectiongenerator::__construct", g_construct),
         ("reflectiongenerator::getexecutingline", g_line),
         ("reflectiongenerator::getexecutingfile", g_file),
-        ("reflectiongenerator::gettrace", empty_array),
+        ("reflectiongenerator::gettrace", g_trace),
+        ("reflectionfiber::__construct", fb_construct),
+        ("reflectionfiber::getfiber", fb_fiber),
+        ("reflectionfiber::getexecutingfile", fb_file),
+        ("reflectionfiber::getexecutingline", fb_line),
+        ("reflectionfiber::getcallable", fb_callable),
+        ("reflectionfiber::gettrace", fb_trace),
         ("reflectiongenerator::getfunction", g_function),
         ("reflectiongenerator::getthis", g_this),
         ("reflectiongenerator::getexecutinggenerator", g_gen),
@@ -760,6 +769,7 @@ pub enum Refl {
         repeated: bool,
     },
     Generator(ObjRef),
+    Fiber(ObjRef),
     Reference(usize),
     Extension(PhpStr),
     GlobalConst(PhpStr),
@@ -776,7 +786,9 @@ impl goro_runtime::NativeData for ReflData {
             | Refl::Param {
                 closure: Some(c), ..
             } => visit(&Value::Object(c.clone())),
-            Refl::Generator(g) | Refl::Object(_, g) => visit(&Value::Object(g.clone())),
+            Refl::Generator(g) | Refl::Fiber(g) | Refl::Object(_, g) => {
+                visit(&Value::Object(g.clone()))
+            }
             _ => {}
         }
     }
@@ -794,6 +806,14 @@ fn data<T>(o: &ObjRef, f: impl FnOnce(&Refl) -> T) -> T {
 }
 
 fn set_data(o: &ObjRef, r: Refl) {
+    // Reflection objects cannot be cloned or serialized (observed on PHP
+    // 8.5: "Trying to clone an uncloneable object of class ReflectionClass").
+    let c: &Rc<dyn goro_runtime::ClassInfo> = o.class();
+    let any: &dyn std::any::Any = &**c;
+    if let Some(cls) = any.downcast_ref::<Class>() {
+        cls.flags
+            .set(cls.flags.get() | cflags::NOT_CLONEABLE | cflags::NOT_SERIALIZABLE);
+    }
     *o.obj().native.borrow_mut() = Some(Box::new(ReflData(r)));
 }
 
@@ -803,6 +823,12 @@ fn refl_error<T>(vm: &mut Vm, msg: &str) -> R<T> {
 
 /// A new Reflection object of `class` reflecting `r`.
 fn new_refl(vm: &mut Vm, class: &str, r: Refl) -> R<ObjRef> {
+    // Classes handed out by Reflection are ReflectionEnum for enums
+    // (observed on PHP 8.5: getDeclaringClass() of an enum method).
+    let class = match &r {
+        Refl::Class(c) if class == "ReflectionClass" && c.is_enum() => "ReflectionEnum",
+        _ => class,
+    };
     let cls = vm
         .find_class(class.as_bytes(), false)?
         .expect("reflection class");
@@ -842,6 +868,9 @@ fn new_refl(vm: &mut Vm, class: &str, r: Refl) -> R<ObjRef> {
             if let Some(p) = ps.get(*idx) {
                 vm.set_prop_raw(&o, b"name", Value::Str(p.name.clone()));
             }
+        }
+        Refl::Attr { info, .. } => {
+            vm.set_prop_raw(&o, b"name", Value::Str(info.name.clone()));
         }
         Refl::Extension(n) | Refl::GlobalConst(n) => {
             vm.set_prop_raw(&o, b"name", Value::Str(n.clone()))
@@ -910,6 +939,22 @@ macro_rules! need_class {
             }
         }
     };
+}
+
+fn a_construct(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    refl_error(vm, "Cannot directly instantiate ReflectionAttribute")
+}
+fn f_is_disabled(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    vm.deprecated("Method ReflectionFunction::isDisabled() is deprecated since 8.0, as ReflectionFunction can no longer be constructed for disabled functions")?;
+    Ok(Value::Bool(false))
+}
+fn m_set_accessible(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    vm.deprecated("Method ReflectionMethod::setAccessible() is deprecated since 8.5, as it has no effect since PHP 8.1")?;
+    Ok(Value::Null)
+}
+fn p_set_accessible(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    vm.deprecated("Method ReflectionProperty::setAccessible() is deprecated since 8.5, as it has no effect since PHP 8.1")?;
+    Ok(Value::Null)
 }
 
 fn noop(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
@@ -1042,10 +1087,8 @@ fn fa_in_namespace(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Bool(f.name.contains(&b'\\')))
 }
 fn fa_is_closure(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let (f, c, _) = need_func!(vm, a);
-    Ok(Value::Bool(
-        c.is_some() && code_of(&f).is_some_and(|c| c.flags & fflags::CLOSURE != 0),
-    ))
+    let (_, c, _) = need_func!(vm, a);
+    Ok(Value::Bool(c.is_some()))
 }
 fn fa_is_deprecated(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, _, _) = need_func!(vm, a);
@@ -1173,10 +1216,11 @@ fn fa_extension(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !f.is_native() {
         return Ok(Value::Null);
     }
+    let e = func_ext(vm, &f).unwrap_or("Core");
     Ok(Value::Object(new_refl(
         vm,
         "ReflectionExtension",
-        Refl::Extension(PhpStr::from("standard")),
+        Refl::Extension(PhpStr::from(e)),
     )?))
 }
 fn fa_extension_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1184,17 +1228,7 @@ fn fa_extension_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !f.is_native() {
         return Ok(Value::Bool(false));
     }
-    let name = vm
-        .modules
-        .iter()
-        .find(|m| {
-            m.functions.iter().any(|(s, _)| {
-                crate::registry::sig_name(s).eq_ignore_ascii_case(&f.name.to_string_lossy())
-            })
-        })
-        .map(|m| m.name)
-        .unwrap_or("Core");
-    Ok(Value::from(name))
+    Ok(Value::from(func_ext(vm, &f).unwrap_or("Core")))
 }
 fn fa_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, c, _) = need_func!(vm, a);
@@ -1283,7 +1317,17 @@ fn fa_statics(vm: &mut Vm, a: &mut Args) -> R<Value> {
             Some(v) => v,
             None => {
                 // Not yet initialized: the initializer if constant.
-                Value::Null
+                code.ops
+                    .iter()
+                    .find_map(|op| match op {
+                        crate::bytecode::Op::StaticInit { index, src }
+                            if *index == idx && crate::bytecode::is_const(*src) =>
+                        {
+                            code.consts.get(crate::bytecode::slot_of(*src)).cloned()
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(Value::Null)
             }
         };
         out.insert(Key::Str(name), v);
@@ -1315,10 +1359,31 @@ fn ret_type_of(vm: &mut Vm, f: &Func) -> Option<TypeHint> {
 }
 fn fa_has_ret(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, _, _) = need_func!(vm, a);
-    Ok(Value::Bool(ret_type_of(vm, &f).is_some()))
+    Ok(Value::Bool(
+        !is_tentative(&f) && ret_type_of(vm, &f).is_some(),
+    ))
+}
+fn fa_has_tentative(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (f, _, _) = need_func!(vm, a);
+    Ok(Value::Bool(
+        is_tentative(&f) && ret_type_of(vm, &f).is_some(),
+    ))
+}
+fn fa_tentative(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (f, _, _) = need_func!(vm, a);
+    if !is_tentative(&f) {
+        return Ok(Value::Null);
+    }
+    match ret_type_of(vm, &f) {
+        Some(t) => Ok(Value::Object(new_type(vm, t, f.scope.get())?)),
+        None => Ok(Value::Null),
+    }
 }
 fn fa_ret(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, _, _) = need_func!(vm, a);
+    if is_tentative(&f) {
+        return Ok(Value::Null);
+    }
     match ret_type_of(vm, &f) {
         Some(t) => Ok(Value::Object(new_type(vm, t, f.scope.get())?)),
         None => Ok(Value::Null),
@@ -1368,7 +1433,7 @@ fn f_get_closure(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Object(o))
 }
 
-fn param_string(vm: &mut Vm, p: &ParamInfo, i: usize, required: bool) -> String {
+fn param_string(vm: &mut Vm, p: &ParamInfo, i: usize, required: bool, internal: bool) -> String {
     let mut s = format!(
         "Parameter #{} [ <{}> ",
         i,
@@ -1386,6 +1451,14 @@ fn param_string(vm: &mut Vm, p: &ParamInfo, i: usize, required: bool) -> String 
     }
     s.push('$');
     s.push_str(&p.name.to_string_lossy());
+    // Internal functions show their declared default text ("null",
+    // "<default>" when it has none: observed on PHP 8.5).
+    if internal && let Some(d) = &p.default_text {
+        s.push_str(" = ");
+        s.push_str(if d == "UNKNOWN" { "<default>" } else { d });
+        s.push_str(" ]");
+        return s;
+    }
     let names_const = p.default_text.as_deref().is_some_and(text_has_name);
     match (&p.default, &p.default_text) {
         (ParamDefault::Const(v), t) if !names_const || t.is_none() => {
@@ -1470,6 +1543,19 @@ fn render_value(vm: &mut Vm, v: &Value) -> String {
             }
             format!("[{}]", parts.join(", "))
         }
+        // Enum cases print as Name::Case, other objects as object(Class)
+        // (observed on PHP 8.5; tests gh8444, gh15902).
+        Value::Object(o) => {
+            let c = vm.class_of(o);
+            if c.is_enum() {
+                let case = vm.get_prop_raw(o, b"name");
+                let mut b = Vec::new();
+                let _ = vm.append_to_string(&mut b, &case);
+                format!("{}::{}", c.name.dname(), String::from_utf8_lossy(&b))
+            } else {
+                format!("object({})", c.name.dname())
+            }
+        }
         _ => {
             let mut out = Vec::new();
             let _ = vm.var_export_into(&mut out, v, 0);
@@ -1481,62 +1567,224 @@ fn render_value(vm: &mut Vm, v: &Value) -> String {
 /// Non-constant default source text, normalized the way Reflection shows
 /// expressions (`new \Foo()`).
 fn render_expr_text(t: &str) -> String {
-    let tt = t.trim();
-    if let Some(rest) = tt.strip_prefix("new ") {
-        let rest = rest.trim();
-        let (name, args) = match rest.find('(') {
-            Some(p) => (rest[..p].trim(), &rest[p..]),
-            None => (rest, "()"),
-        };
-        let name = if name.starts_with('\\') {
-            name.to_string()
-        } else {
-            format!("\\{}", name)
-        };
-        return format!("new {}{}", name, args);
+    let b = t.trim().as_bytes();
+    let mut out: Vec<u8> = Vec::new();
+    let mut i = 0;
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'\\' || c >= 0x80;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'\'' || c == b'"' {
+            let st = i;
+            i += 1;
+            while i < b.len() && b[i] != c {
+                if b[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i = (i + 1).min(b.len());
+            out.extend_from_slice(&b[st..i]);
+            continue;
+        }
+        let word_start = i == 0 || !ident(b[i - 1]);
+        if word_start
+            && b[i..].len() > 4
+            && b[i..i + 3].eq_ignore_ascii_case(b"new")
+            && b[i + 3].is_ascii_whitespace()
+        {
+            let mut j = i + 3;
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            let ns = j;
+            while j < b.len() && ident(b[j]) {
+                j += 1;
+            }
+            if j > ns {
+                let name = String::from_utf8_lossy(&b[ns..j]);
+                out.extend_from_slice(b"new ");
+                if !name.starts_with('\\') && !name.eq_ignore_ascii_case("class") {
+                    out.push(b'\\');
+                }
+                out.extend_from_slice(name.as_bytes());
+                let mut k = j;
+                while k < b.len() && b[k].is_ascii_whitespace() {
+                    k += 1;
+                }
+                if k >= b.len() || b[k] != b'(' {
+                    out.extend_from_slice(b"()");
+                }
+                i = j;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
     }
-    tt.to_string()
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn f_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, c, m) = need_func!(vm, a);
-    let params = vm.params_of(&f).to_vec();
-    let nreq = match &f.kind {
-        FuncKind::User(code) => code.num_required as usize,
-        FuncKind::Native { .. } => vm.native_sig(&f).num_required as usize,
-    };
+    let s = func_string(vm, &f, m.as_ref(), c.as_ref(), "");
+    Ok(Value::Str(PhpStr::from(s)))
+}
+
+// ---------------------------------------------------------------- __toString layouts
+//
+// The layouts of Reflection*::__toString() (observed on PHP 8.5 and in
+// the ext/reflection/tests expectations): nested members are indented by
+// four spaces per level, sections are "- Name [count] {" ... "}".
+
+/// The extension of an internal function or method, as Reflection names
+/// it (`<internal:ext>`); `None` for engine-provided methods of user
+/// classes (enum `cases()`...).
+fn func_ext(vm: &Vm, f: &Func) -> Option<&'static str> {
+    if is_closure_invoke(f) {
+        return None;
+    }
+    if let Some(c) = f.scope() {
+        if c.has_flag(cflags::INTERNAL) {
+            return Some(class_ext(vm, c));
+        }
+        return None;
+    }
+    let n = f.name.to_string_lossy();
+    Some(
+        vm.modules
+            .iter()
+            .find(|m| {
+                m.functions
+                    .iter()
+                    .any(|(s, _)| crate::registry::sig_name(s).eq_ignore_ascii_case(&n))
+            })
+            .map(|m| item_ext(m.name, Item::Func, &n))
+            .unwrap_or("Core"),
+    )
+}
+
+fn class_ext(vm: &Vm, c: &Class) -> &'static str {
+    vm.modules
+        .iter()
+        .find(|m| {
+            m.classes
+                .iter()
+                .any(|(l, _)| l.as_bytes() == c.lname.as_bytes())
+        })
+        .map(|m| m.name)
+        .unwrap_or("Core")
+}
+
+fn func_internal(f: &Func) -> bool {
+    f.is_native() || f.scope().is_some_and(|c| c.has_flag(cflags::INTERNAL))
+}
+
+fn func_deprecated(f: &Func) -> bool {
+    code_of(f).is_some_and(|c| c.flags & fflags::DEPRECATED != 0)
+}
+
+/// The root of a method's prototype chain.
+fn proto_root(f: &Func) -> Option<Rc<Func>> {
+    let mut root = f.proto.borrow().clone()?;
+    loop {
+        let next = root.proto.borrow().clone();
+        match next {
+            Some(n) => root = n,
+            None => return Some(root),
+        }
+    }
+}
+
+fn doc_text(out: &mut String, indent: &str, doc: Option<&PhpStr>) {
+    if let Some(d) = doc {
+        out.push_str(indent);
+        out.push_str(&d.to_string_lossy());
+        out.push('\n');
+    }
+}
+
+/// Function, method or closure (`cls`: the class reflected through, for
+/// the inherits/overwrites tags).
+fn func_string(
+    vm: &mut Vm,
+    f: &Rc<Func>,
+    cls: Option<&Rc<Class>>,
+    closure: Option<&ObjRef>,
+    indent: &str,
+) -> String {
+    let internal = func_internal(f);
     let mut s = String::new();
-    let kind = if m.is_some() {
+    doc_text(
+        &mut s,
+        indent,
+        code_of(f).and_then(|c| c.doc_comment.as_ref()),
+    );
+    let kind = if cls.is_some() {
         "Method"
-    } else if c.is_some() {
+    } else if closure.is_some() {
         "Closure"
     } else {
         "Function"
     };
-    let internal = f.is_native();
-    s.push_str(&format!(
-        "{} [ <{}> ",
-        kind,
-        if internal {
-            "internal:standard"
-        } else {
-            "user"
+    let mut tag = if internal {
+        let ext = func_ext(vm, f);
+        match (func_deprecated(f), ext) {
+            (true, Some(e)) => format!("internal, deprecated:{}", e),
+            (true, None) => "internal, deprecated".to_string(),
+            (false, Some(e)) => format!("internal:{}", e),
+            (false, None) => "internal".to_string(),
         }
-    ));
-    if m.is_some() {
-        let mods = method_modifiers(&f);
-        let names: Vec<&str> = [
-            (mods & 64 != 0, "abstract"),
-            (mods & 32 != 0, "final"),
-            (mods & 16 != 0, "static"),
-        ]
-        .iter()
-        .filter(|x| x.0)
-        .map(|x| x.1)
-        .collect();
-        for n in names {
-            s.push_str(n);
-            s.push(' ');
+    } else if func_deprecated(f) {
+        "user, deprecated".to_string()
+    } else {
+        "user".to_string()
+    };
+    if let Some(c) = cls {
+        let decl = f.scope();
+        let ctor = f.lname.as_bytes() == b"__construct";
+        match decl {
+            Some(d) if !std::ptr::eq(d, &**c) => {
+                tag.push_str(&format!(", inherits {}", d.name.dname()));
+            }
+            _ => {
+                if let Some(p) = &c.parent
+                    && let Some(pm) = p.find_method(&f.lname)
+                    && pm.flags & mflags::PRIVATE == 0
+                    && let Some(pd) = pm.scope()
+                {
+                    tag.push_str(&format!(", overwrites {}", pd.name.dname()));
+                }
+            }
+        }
+        let root = proto_root(f).or_else(|| {
+            c.interfaces
+                .borrow()
+                .iter()
+                .find_map(|i| i.find_method(&f.lname))
+                .filter(|m| !std::ptr::eq(Rc::as_ptr(m), Rc::as_ptr(f)))
+        });
+        if let Some(root) = root
+            && let Some(rc) = root.scope()
+            && (!ctor || rc.is_interface() || root.flags & mflags::ABSTRACT != 0)
+        {
+            tag.push_str(&format!(", prototype {}", rc.name.dname()));
+        }
+        if ctor {
+            tag.push_str(", ctor");
+        }
+    }
+    s.push_str(&format!("{}{} [ <{}> ", indent, kind, tag));
+    if cls.is_some() {
+        let mods = method_modifiers(f);
+        let abs = mods & 64 != 0 || f.scope().is_some_and(|c| c.is_interface());
+        if abs {
+            s.push_str("abstract ");
+        }
+        if mods & 32 != 0 {
+            s.push_str("final ");
+        }
+        if mods & 16 != 0 {
+            s.push_str("static ");
         }
         s.push_str(if mods & 4 != 0 {
             "private"
@@ -1549,34 +1797,620 @@ fn f_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     } else {
         s.push_str("function ");
     }
-    s.push_str(&func_name(&f, c.is_some()).to_string_lossy());
+    let by_ref = match &f.kind {
+        FuncKind::User(c) => c.flags & fflags::BY_REF != 0,
+        FuncKind::Native { .. } => vm.native_sig(f).by_ref_return,
+    };
+    if by_ref {
+        s.push('&');
+    }
+    s.push_str(&func_name(f, closure.is_some()).to_string_lossy());
     s.push_str(" ] {\n");
-    if let Some(code) = code_of(&f)
+    if let Some(code) = code_of(f)
         && !internal
     {
         s.push_str(&format!(
-            "  @@ {} {} - {}\n",
+            "{}  @@ {} {} - {}\n",
+            indent,
             code.file.to_string_lossy(),
             code.line_start,
             code.line_end
         ));
     }
-    if !params.is_empty() {
-        s.push_str(&format!("\n  - Parameters [{}] {{\n", params.len()));
+    // Bound variables of a closure.
+    if let (Some(c), Some(code)) = (closure, code_of(f))
+        && !code.uses.is_empty()
+    {
+        let mut names = Vec::new();
+        closure_cd(c, |_| {
+            for (inner, _, _) in code.uses.iter() {
+                names.push(code.cv_names[*inner as usize].to_string_lossy());
+            }
+        });
+        s.push_str(&format!(
+            "\n{}  - Bound Variables [{}] {{\n",
+            indent,
+            names.len()
+        ));
+        for (i, n) in names.iter().enumerate() {
+            s.push_str(&format!("{}      Variable #{} [ ${} ]\n", indent, i, n));
+        }
+        s.push_str(&format!("{}  }}\n", indent));
+    }
+    let params = vm.params_of(f).to_vec();
+    let nreq = match &f.kind {
+        FuncKind::User(code) => code.num_required as usize,
+        FuncKind::Native { .. } => vm.native_sig(f).num_required as usize,
+    };
+    let ret = ret_type_of(vm, f);
+    if !params.is_empty() || ret.is_some() {
+        s.push_str(&format!(
+            "\n{}  - Parameters [{}] {{\n",
+            indent,
+            params.len()
+        ));
         for (i, p) in params.iter().enumerate() {
-            let ps = param_string(vm, p, i, i < nreq);
-            s.push_str(&format!("    {}\n", ps));
+            let ps = param_string(vm, p, i, i < nreq, internal);
+            s.push_str(&format!("{}    {}\n", indent, ps));
+        }
+        s.push_str(&format!("{}  }}\n", indent));
+    }
+    if let Some(t) = ret {
+        let word = if is_tentative(f) {
+            "Tentative return"
+        } else {
+            "Return"
+        };
+        s.push_str(&format!("{}  - {} [ {} ]\n", indent, word, t.display()));
+    }
+    s.push_str(indent);
+    s.push_str("}\n");
+    s
+}
+
+/// Return types of methods of internal classes are "tentative" (PHP 8.1:
+/// extending classes may still omit them), except in final classes and
+/// for constructors (observed on PHP 8.5).
+fn is_tentative(f: &Func) -> bool {
+    // Methods added in PHP 8.0 and later, and magic methods, have real
+    // return types (PHP manual changelogs).
+    const REAL: &[&str] = &[
+        "__clone",
+        "__tostring",
+        "__construct",
+        "isenum",
+        "isreadonly",
+        "getattributes",
+        "newlazyghost",
+        "newlazyproxy",
+        "resetaslazyghost",
+        "resetaslazyproxy",
+        "initializelazyobject",
+        "isuninitializedlazyobject",
+        "marklazyobjectasinitialized",
+        "getlazyinitializer",
+        "hastentativereturntype",
+        "gettentativereturntype",
+        "getclosureusedvariables",
+        "getclosurecalledclass",
+        "ispromoted",
+        "hasdefaultvalue",
+        "getdefaultvalue",
+        "isenumcase",
+        "hastype",
+        "gettype",
+        "isvirtual",
+        "hashooks",
+        "gethooks",
+        "hashook",
+        "gethook",
+        "getsettabletype",
+        "getrawvalue",
+        "setrawvalue",
+        "islazy",
+        "skiplazyinitialization",
+        "setrawvaluewithoutlazyinitialization",
+        "isprivateset",
+        "isprotectedset",
+        "getmangledname",
+        "isdynamic",
+    ];
+    f.scope().is_some_and(|c| {
+        c.has_flag(cflags::INTERNAL)
+            && !c.has_flag(cflags::FINAL)
+            && !REAL.contains(&f.lname.to_string_lossy().as_ref())
+    })
+}
+
+/// PHP's "Core" functions (the engine's built-in functions, PHP manual:
+/// Function handling, Classes/Objects, Error handling...), which goro
+/// registers with the standard library.
+fn core_function(name: &[u8]) -> bool {
+    const CORE: &[&str] = &[
+        "zend_version",
+        "func_num_args",
+        "func_get_arg",
+        "func_get_args",
+        "strlen",
+        "strcmp",
+        "strncmp",
+        "strcasecmp",
+        "strncasecmp",
+        "error_reporting",
+        "define",
+        "defined",
+        "get_class",
+        "get_called_class",
+        "get_parent_class",
+        "method_exists",
+        "property_exists",
+        "class_exists",
+        "interface_exists",
+        "trait_exists",
+        "enum_exists",
+        "function_exists",
+        "class_alias",
+        "get_included_files",
+        "get_required_files",
+        "is_subclass_of",
+        "is_a",
+        "get_class_vars",
+        "get_object_vars",
+        "get_mangled_object_vars",
+        "get_class_methods",
+        "trigger_error",
+        "user_error",
+        "set_error_handler",
+        "restore_error_handler",
+        "set_exception_handler",
+        "restore_exception_handler",
+        "get_declared_classes",
+        "get_declared_traits",
+        "get_declared_interfaces",
+        "get_defined_functions",
+        "get_defined_vars",
+        "get_resource_type",
+        "get_resource_id",
+        "get_resources",
+        "get_loaded_extensions",
+        "get_defined_constants",
+        "debug_backtrace",
+        "debug_print_backtrace",
+        "extension_loaded",
+        "get_extension_funcs",
+        "gc_mem_caches",
+        "gc_collect_cycles",
+        "gc_enabled",
+        "gc_enable",
+        "gc_disable",
+        "gc_status",
+    ];
+    CORE.iter().any(|c| c.as_bytes().eq_ignore_ascii_case(name))
+}
+
+/// A property line (`Property [ public int $x = 1 ]`).
+fn prop_string(vm: &mut Vm, cls: &Class, name: &PhpStr, dynamic: bool, indent: &str) -> R<String> {
+    let mut s = String::new();
+    let p = match pinfo(cls, name) {
+        Some(p) if !dynamic => p,
+        _ => {
+            return Ok(format!(
+                "{}Property [ <dynamic> public ${} ]\n",
+                indent,
+                name.to_string_lossy()
+            ));
+        }
+    };
+    doc_text(&mut s, indent, p.doc.as_ref());
+    s.push_str(indent);
+    s.push_str("Property [ ");
+    let mut m = prop_modifiers(p.flags);
+    if prop_abstract(cls, name) {
+        m |= 64;
+    }
+    if p.flags & mflags::PRIVATE_SET != 0 {
+        m |= 32;
+    }
+    if m & 64 != 0 {
+        s.push_str("abstract ");
+    }
+    if m & 32 != 0 {
+        s.push_str("final ");
+    }
+    s.push_str(if m & 4 != 0 {
+        "private"
+    } else if m & 2 != 0 {
+        "protected"
+    } else {
+        "public"
+    });
+    if m & 4096 != 0 && m & 4 == 0 {
+        s.push_str(" private(set)");
+    } else if m & 2048 != 0 && m & 6 == 0 {
+        s.push_str(" protected(set)");
+    }
+    if p.is_static {
+        s.push_str(" static");
+    }
+    if m & 128 != 0 {
+        s.push_str(" readonly");
+    }
+    if m & 512 != 0 {
+        s.push_str(" virtual");
+    }
+    if let Some(t) = &p.ty {
+        s.push(' ');
+        s.push_str(&t.display());
+    }
+    s.push_str(&format!(" ${}", name.to_string_lossy()));
+    let hooked = p.has_hooks.0 || p.has_hooks.1;
+    let internal_typed = cls.has_flag(cflags::INTERNAL) && p.ty.is_some();
+    if !hooked && !internal_typed && p.flags & (mflags::VIRTUAL | mflags::PROMOTED) == 0 {
+        match &p.default {
+            Some(ce) => {
+                let v = vm.eval_const_expr(ce, p.class)?;
+                if !vm.is_uninit(&v) {
+                    s.push_str(" = ");
+                    s.push_str(&render_value(vm, &v));
+                }
+            }
+            None if p.ty.is_none() => s.push_str(" = NULL"),
+            None => {}
+        }
+    }
+    if hooked {
+        s.push_str(" {");
+        for get in [true, false] {
+            if hook_func(cls, name, get).is_some() {
+                s.push(' ');
+                if hook_final(cls, name, get) {
+                    s.push_str("final ");
+                }
+                s.push_str(if get { "get;" } else { "set;" });
+            }
+        }
+        s.push_str(" }");
+    }
+    s.push_str(" ]\n");
+    Ok(s)
+}
+
+/// A class constant line (`Constant [ public int X ] { 1 }`).
+fn const_string(
+    vm: &mut Vm,
+    cls: &Rc<Class>,
+    k: &crate::class::ClassConst,
+    indent: &str,
+) -> R<String> {
+    let v = if k.flags & mflags::CASE != 0 {
+        vm.enum_case(cls, &k.name)?
+    } else {
+        vm.eval_class_const(k)?
+    };
+    let vis = if k.flags & mflags::PRIVATE != 0 {
+        "private"
+    } else if k.flags & mflags::PROTECTED != 0 {
+        "protected"
+    } else {
+        "public"
+    };
+    let ty = match (&k.ty, &v) {
+        (Some(t), _) => t.display(),
+        (None, Value::Object(o)) => vm.class_of(o).name.dname(),
+        (None, v) => crate::builtins::var::type_name(v)
+            .replace("integer", "int")
+            .replace("boolean", "bool")
+            .replace("double", "float")
+            .replace("NULL", "null"),
+    };
+    let mut val = Vec::new();
+    match &v {
+        Value::Array(_) => val.extend_from_slice(b"Array"),
+        Value::Object(_) => val.extend_from_slice(b"Object"),
+        other => vm.append_to_string(&mut val, other)?,
+    }
+    let mut s = String::new();
+    doc_text(&mut s, indent, k.doc.as_ref());
+    s.push_str(&format!(
+        "{}Constant [ {}{} {} {} ] {{ {} }}\n",
+        indent,
+        if k.flags & mflags::FINAL != 0 {
+            "final "
+        } else {
+            ""
+        },
+        vis,
+        ty,
+        k.name.to_string_lossy(),
+        String::from_utf8_lossy(&val)
+    ));
+    Ok(s)
+}
+
+/// The visible members of a class, in Reflection's order: own first,
+/// then inherited; private members of ancestors are left out.
+fn visible_props(cls: &Rc<Class>) -> (Vec<PhpStr>, Vec<PhpStr>) {
+    let cp = Rc::as_ptr(cls);
+    let props: Vec<_> = cls
+        .props
+        .borrow()
+        .iter()
+        .filter(|p| p.flags & mflags::HIDDEN == 0)
+        .cloned()
+        .collect();
+    let mut inst: Vec<PhpStr> = Vec::new();
+    for p in props.iter().filter(|p| std::ptr::eq(p.class, cp)) {
+        if !inst.contains(&p.name) {
+            inst.push(p.name.clone());
+        }
+    }
+    if let Some(parent) = &cls.parent {
+        for n in visible_props(parent).0 {
+            if !inst.contains(&n)
+                && props.iter().any(|p| {
+                    p.name == n && p.flags & mflags::PRIVATE == 0 && !std::ptr::eq(p.class, cp)
+                })
+            {
+                inst.push(n);
+            }
+        }
+    }
+    for p in props
+        .iter()
+        .filter(|p| !std::ptr::eq(p.class, cp) && p.flags & mflags::PRIVATE == 0)
+    {
+        if !inst.contains(&p.name) {
+            inst.push(p.name.clone());
+        }
+    }
+    let mut stat: Vec<PhpStr> = Vec::new();
+    for sp in static_order(cls) {
+        if !stat.contains(&sp.name) && !inst.contains(&sp.name) {
+            stat.push(sp.name.clone());
+        }
+    }
+    (inst, stat)
+}
+
+/// Constants in Reflection's order: the class's own, then inherited ones
+/// in the parent's order, then those of interfaces.
+fn const_order(cls: &Rc<Class>) -> Vec<Rc<crate::class::ClassConst>> {
+    let all: Vec<_> = cls
+        .consts
+        .borrow()
+        .iter()
+        .filter(|k| k.flags & mflags::PRIVATE == 0 || std::ptr::eq(k.class, Rc::as_ptr(cls)))
+        .cloned()
+        .collect();
+    let cp = Rc::as_ptr(cls);
+    let mut out: Vec<Rc<crate::class::ClassConst>> = all
+        .iter()
+        .filter(|k| std::ptr::eq(k.class, cp))
+        .cloned()
+        .collect();
+    if let Some(p) = &cls.parent {
+        for k in const_order(p) {
+            if let Some(mine) = all.iter().find(|x| x.name == k.name)
+                && !out.iter().any(|x| x.name == k.name)
+            {
+                out.push(mine.clone());
+            }
+        }
+    }
+    for k in &all {
+        if !out.iter().any(|x| x.name == k.name) {
+            out.push(k.clone());
+        }
+    }
+    out
+}
+
+fn class_string(vm: &mut Vm, cls: &Rc<Class>, obj: Option<&ObjRef>) -> R<String> {
+    let internal = cls.has_flag(cflags::INTERNAL);
+    let mut s = String::new();
+    doc_text(&mut s, "", cls.doc.as_ref());
+    let kind = if obj.is_some() {
+        "Object of class"
+    } else if cls.is_interface() {
+        "Interface"
+    } else if cls.is_trait() {
+        "Trait"
+    } else if cls.is_enum() {
+        "Enum"
+    } else {
+        "Class"
+    };
+    s.push_str(kind);
+    s.push_str(" [ <");
+    if internal {
+        s.push_str("internal:");
+        s.push_str(class_ext(vm, cls));
+    } else {
+        s.push_str("user");
+    }
+    s.push_str("> ");
+    let hooked = cls
+        .props
+        .borrow()
+        .iter()
+        .any(|p| p.get.is_some() || p.set.is_some());
+    if vm.is_traversable(cls) || hooked {
+        s.push_str("<iterateable> ");
+    }
+    let word = if cls.is_interface() {
+        "interface"
+    } else if cls.is_trait() {
+        "trait"
+    } else if cls.is_enum() {
+        "enum"
+    } else {
+        if cls.has_flag(cflags::ABSTRACT) {
+            s.push_str("abstract ");
+        }
+        if cls.has_flag(cflags::FINAL) {
+            s.push_str("final ");
+        }
+        if cls.has_flag(cflags::READONLY) {
+            s.push_str("readonly ");
+        }
+        "class"
+    };
+    s.push_str(word);
+    s.push(' ');
+    s.push_str(&String::from_utf8_lossy(&cls.name));
+    if cls.is_enum()
+        && let Some(b) = cls.enum_backing
+    {
+        s.push_str(if b == tmask::INT { ": int" } else { ": string" });
+    }
+    if let Some(p) = &cls.parent {
+        s.push_str(&format!(" extends {}", p.name.dname()));
+    }
+    let ifs: Vec<String> = iface_order(cls).iter().map(|i| i.name.dname()).collect();
+    if !ifs.is_empty() {
+        s.push_str(if cls.is_interface() {
+            " extends "
+        } else {
+            " implements "
+        });
+        s.push_str(&ifs.join(", "));
+    }
+    s.push_str(" ] {\n");
+    if let Some(f) = &cls.file
+        && !internal
+    {
+        s.push_str(&format!(
+            "  @@ {} {}-{}\n",
+            f.to_string_lossy(),
+            cls.line_start,
+            cls.line_end
+        ));
+    }
+    let consts = const_order(cls);
+    if cls.is_enum() {
+        let cases: Vec<_> = consts
+            .iter()
+            .filter(|k| k.flags & mflags::CASE != 0)
+            .collect();
+        s.push_str(&format!("\n  - Enum cases [{}] {{\n", cases.len()));
+        for k in cases {
+            s.push_str(&format!("    Case {}", k.name.to_string_lossy()));
+            if cls.enum_backing.is_some() {
+                let case = vm.enum_case(cls, &k.name)?;
+                if let Value::Object(o) = &case {
+                    let v = vm.get_prop_raw(o, b"value");
+                    let mut b = Vec::new();
+                    vm.append_to_string(&mut b, &v)?;
+                    s.push_str(&format!(" = {}", String::from_utf8_lossy(&b)));
+                }
+            }
+            s.push('\n');
         }
         s.push_str("  }\n");
     }
-    if let Some(t) = ret_type_of(vm, &f) {
-        s.push_str(&format!("  - Return [ {} ]\n", t.display()));
+    let plain: Vec<_> = consts
+        .iter()
+        .filter(|k| k.flags & mflags::CASE == 0)
+        .collect();
+    s.push_str(&format!("\n  - Constants [{}] {{\n", plain.len()));
+    for k in plain {
+        s.push_str(&const_string(vm, cls, k, "    ")?);
     }
+    s.push_str("  }\n");
+    let (inst, stat) = visible_props(cls);
+    s.push_str(&format!("\n  - Static properties [{}] {{\n", stat.len()));
+    for n in &stat {
+        s.push_str(&prop_string(vm, cls, n, false, "    ")?);
+    }
+    s.push_str("  }\n");
+    let order = cls.method_order.borrow().clone();
+    let methods: Vec<Rc<Func>> = order
+        .iter()
+        .filter_map(|ln| cls.methods.borrow().get(ln).cloned())
+        .filter(|f| {
+            // Private methods of ancestors are not members.
+            f.flags & mflags::PRIVATE == 0 || f.scope().is_some_and(|d| std::ptr::eq(d, &**cls))
+        })
+        .collect();
+    let (st, inst_m): (Vec<_>, Vec<_>) = methods
+        .into_iter()
+        .partition(|f| f.flags & mflags::STATIC != 0);
+    let section = |vm: &mut Vm, s: &mut String, title: &str, list: &[Rc<Func>]| {
+        s.push_str(&format!("\n  - {} [{}] {{\n", title, list.len()));
+        for (i, f) in list.iter().enumerate() {
+            if i > 0 {
+                s.push('\n');
+            }
+            s.push_str(&func_string(vm, f, Some(cls), None, "    "));
+        }
+        s.push_str("  }\n");
+    };
+    section(vm, &mut s, "Static methods", &st);
+    s.push_str(&format!("\n  - Properties [{}] {{\n", inst.len()));
+    for n in &inst {
+        s.push_str(&prop_string(vm, cls, n, false, "    ")?);
+    }
+    s.push_str("  }\n");
+    if let Some(o) = obj {
+        let mut dynamic = Vec::new();
+        for (k, _) in o.obj().props.borrow().iter() {
+            let name = match k {
+                goro_runtime::KeyRef::Str(s) => s.clone(),
+                goro_runtime::KeyRef::Int(i) => PhpStr::from(i.to_string()),
+            };
+            if !cls.prop_map.borrow().contains_key(&name) {
+                dynamic.push(name);
+            }
+        }
+        s.push_str(&format!(
+            "\n  - Dynamic properties [{}] {{\n",
+            dynamic.len()
+        ));
+        for n in &dynamic {
+            s.push_str(&format!(
+                "    Property [ <dynamic> public ${} ]\n",
+                n.to_string_lossy()
+            ));
+        }
+        s.push_str("  }\n");
+    }
+    section(vm, &mut s, "Methods", &inst_m);
     s.push_str("}\n");
-    Ok(Value::Str(PhpStr::from(s)))
+    Ok(s)
 }
 
 // ---------------------------------------------------------------- methods
+
+/// `Closure::__invoke` of a closure object: an internal public method with
+/// the closure's parameters and return type (observed on PHP 8.5:
+/// "Method [ <internal> public method __invoke ]").
+fn closure_invoke(vm: &mut Vm, v: &Value, name: &[u8]) -> Option<Rc<Func>> {
+    let Value::Object(o) = v else { return None };
+    if !name.eq_ignore_ascii_case(b"__invoke") {
+        return None;
+    }
+    let cd = vm.closure_data(o)?;
+    let code = code_of(&cd.func)?.clone();
+    let closure_cls = vm.class_of(o);
+    let f = Func {
+        name: PhpStr::intern(b"__invoke"),
+        lname: PhpStr::intern(b"__invoke"),
+        kind: FuncKind::User(code),
+        flags: mflags::PUBLIC,
+        scope: std::cell::Cell::new(Rc::as_ptr(&closure_cls)),
+        from_trait: std::cell::Cell::new(std::ptr::null()),
+        statics: std::cell::RefCell::new(Vec::new()),
+        proto: std::cell::RefCell::new(None),
+    };
+    Some(Rc::new(f))
+}
+
+/// The synthesized `Closure::__invoke` (no extension, no source).
+fn is_closure_invoke(f: &Func) -> bool {
+    f.code().is_some()
+        && f.lname.as_bytes() == b"__invoke"
+        && f.scope().is_some_and(|c| c.lname.as_bytes() == b"closure")
+}
 
 fn find_method_in(vm: &mut Vm, cls: &Rc<Class>, name: &[u8]) -> R<Rc<Func>> {
     let ln = lower(name);
@@ -1601,6 +2435,9 @@ fn find_method_in(vm: &mut Vm, cls: &Rc<Class>, name: &[u8]) -> R<Rc<Func>> {
 fn m_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let first = a.val(0);
+    if !a.has(1) || a.val(1).is_null() {
+        vm.deprecated("Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead")?;
+    }
     let (cls, mname) = if a.has(1) && !a.val(1).is_null() {
         (class_arg(vm, &first)?, a.str(1))
     } else {
@@ -1619,10 +2456,11 @@ fn m_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
         }
     };
-    if a.has(1) && a.val(1).is_null() {
-        vm.deprecated("Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead")?;
-    }
-    let f = find_method_in(vm, &cls, &mname)?;
+
+    let f = match closure_invoke(vm, &first, &mname) {
+        Some(f) => f,
+        None => find_method_in(vm, &cls, &mname)?,
+    };
     vm.set_prop_raw(&o, b"name", Value::Str(f.name.clone()));
     let cn = f.scope().map(|c| c.name.clone()).unwrap_or_default();
     vm.set_prop_raw(&o, b"class", Value::Str(cn));
@@ -1705,6 +2543,25 @@ fn m_modifiers(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn m_callee(vm: &mut Vm, f: &Rc<Func>, cls: &Rc<Class>, obj: Value, fname: &str) -> R<Callee> {
+    // Observed on PHP 8.5: abstract methods are refused before the object
+    // argument is looked at.
+    if f.flags & mflags::ABSTRACT != 0 {
+        return refl_error(
+            vm,
+            &format!(
+                "Trying to invoke abstract method {}::{}()",
+                f.scope().map(|c| c.name.dname()).unwrap_or_default(),
+                f.name.dname()
+            ),
+        );
+    }
+    if !matches!(obj, Value::Null | Value::Object(_)) {
+        return vm.type_error(&format!(
+            "ReflectionMethod::{}(): Argument #1 ($object) must be of type ?object, {} given",
+            fname,
+            Vm::type_name_given(&obj)
+        ));
+    }
     if f.flags & mflags::STATIC != 0 {
         return Ok(Callee {
             func: f.clone(),
@@ -1714,6 +2571,16 @@ fn m_callee(vm: &mut Vm, f: &Rc<Func>, cls: &Rc<Class>, obj: Value, fname: &str)
             closure: None,
             magic_name: None,
         });
+    }
+    if obj.is_null() {
+        return refl_error(
+            vm,
+            &format!(
+                "Trying to invoke non static method {}::{}() without an object",
+                f.scope().map(|c| c.name.dname()).unwrap_or_default(),
+                f.name.dname()
+            ),
+        );
     }
     let Value::Object(o) = obj else {
         return vm.type_error(&format!(
@@ -1880,47 +2747,8 @@ fn this_object(a: &Args) -> Option<ObjRef> {
 
 fn c_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let cls = need_class!(vm, a);
-    let kind = if cls.is_interface() {
-        "Interface"
-    } else if cls.is_trait() {
-        "Trait"
-    } else if cls.is_enum() {
-        "Enum"
-    } else {
-        "Class"
-    };
-    let mut s = format!(
-        "{} [ <{}> {}class {}",
-        kind,
-        if cls.has_flag(cflags::INTERNAL) {
-            "internal:Core"
-        } else {
-            "user"
-        },
-        if cls.has_flag(cflags::ABSTRACT) {
-            "abstract "
-        } else if cls.has_flag(cflags::FINAL) {
-            "final "
-        } else {
-            ""
-        },
-        cls.name.dname()
-    );
-    if let Some(p) = &cls.parent {
-        s.push_str(&format!(" extends {}", p.name.dname()));
-    }
-    s.push_str(" ] {\n");
-    if let Some(f) = &cls.file
-        && !cls.has_flag(cflags::INTERNAL)
-    {
-        s.push_str(&format!(
-            "  @@ {} {}-{}\n",
-            f.to_string_lossy(),
-            cls.line_start,
-            cls.line_end
-        ));
-    }
-    s.push_str("}\n");
+    let obj = this_object(a);
+    let s = class_string(vm, &cls, obj.as_ref())?;
     Ok(Value::Str(PhpStr::from(s)))
 }
 
@@ -2008,7 +2836,11 @@ fn c_has_method(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn c_get_method(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let n = a.str(0);
-    let f = find_method_in(vm, &c, &n)?;
+    let obj = this_object(a).map(Value::Object).unwrap_or_default();
+    let f = match closure_invoke(vm, &obj, &n) {
+        Some(f) => f,
+        None => find_method_in(vm, &c, &n)?,
+    };
     Ok(Value::Object(new_refl(
         vm,
         "ReflectionMethod",
@@ -2020,11 +2852,19 @@ fn c_methods(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let filter = a.opt_int(0);
     let mut out = PhpArray::new();
     let order = c.method_order.borrow().clone();
+    let obj = this_object(a).map(Value::Object).unwrap_or_default();
     for ln in order {
-        let f = c.methods.borrow().get(&ln).cloned().unwrap();
+        let mut f = c.methods.borrow().get(&ln).cloned().unwrap();
+        if let Some(inv) = closure_invoke(vm, &obj, &ln) {
+            f = inv;
+        }
         if let Some(fl) = filter
             && method_modifiers(&f) & fl == 0
         {
+            continue;
+        }
+        // Private methods of ancestors are not listed (observed on PHP 8.5).
+        if f.flags & mflags::PRIVATE != 0 && !f.scope().is_some_and(|d| std::ptr::eq(d, &*c)) {
             continue;
         }
         let o = new_refl(
@@ -2042,7 +2882,12 @@ fn c_methods(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn c_has_prop(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let n = a.str(0);
-    if c.prop_map.borrow().contains_key(&n) || c.find_static(&n).is_some() {
+    if has_member_prop(&c, &n) {
+        return Ok(Value::Bool(true));
+    }
+    if let Some(obj) = this_object(a)
+        && obj.obj().props.borrow().get_str(&n).is_some()
+    {
         return Ok(Value::Bool(true));
     }
     // ReflectionObject also sees dynamic properties.
@@ -2056,6 +2901,16 @@ fn c_get_prop(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if let Some(p) = n.windows(2).position(|w| w == b"::") {
         let c2 = class_arg(vm, &Value::Str(PhpStr::new(&n[..p])))?;
         let pn = PhpStr::new(&n[p + 2..]);
+        if !has_member_prop(&c2, &pn) {
+            return refl_error(
+                vm,
+                &format!(
+                    "Property {}::${} does not exist",
+                    c2.name.dname(),
+                    pn.dname()
+                ),
+            );
+        }
         if !c.is_subclass_of(&c2) {
             return refl_error(
                 vm,
@@ -2077,7 +2932,22 @@ fn c_get_prop(vm: &mut Vm, a: &mut Args) -> R<Value> {
             },
         )?));
     }
-    if c.prop_map.borrow().contains_key(&n) || c.find_static(&n).is_some() {
+    // ReflectionObject: dynamic properties of the object.
+    if !has_member_prop(&c, &n)
+        && let Some(obj) = this_object(a)
+        && obj.obj().props.borrow().get_str(&n).is_some()
+    {
+        return Ok(Value::Object(new_refl(
+            vm,
+            "ReflectionProperty",
+            Refl::Prop {
+                cls: c,
+                name: n,
+                dynamic: true,
+            },
+        )?));
+    }
+    if has_member_prop(&c, &n) {
         return Ok(Value::Object(new_refl(
             vm,
             "ReflectionProperty",
@@ -2136,71 +3006,58 @@ fn prop_modifiers(flags: u32) -> i64 {
     m
 }
 
+/// Property names in getProperties() order: the class's own in
+/// declaration order (static ones included), then inherited instance and
+/// static properties (observed on PHP 8.5).
+fn prop_order(c: &Rc<Class>) -> Vec<PhpStr> {
+    let (inst, stat) = visible_props(c);
+    let cp = Rc::as_ptr(c);
+    let own = |n: &PhpStr| pinfo(c, n).is_some_and(|p| std::ptr::eq(p.class, cp));
+    let mut out: Vec<PhpStr> = Vec::new();
+    if let Some(d) = &c.decl {
+        for p in &d.props {
+            if (inst.contains(&p.name) || stat.contains(&p.name))
+                && own(&p.name)
+                && !out.contains(&p.name)
+            {
+                out.push(p.name.clone());
+            }
+        }
+    }
+    for n in inst.iter().chain(stat.iter()) {
+        if own(n) && !out.contains(n) {
+            out.push(n.clone());
+        }
+    }
+    for n in inst.iter().chain(stat.iter()) {
+        if !out.contains(n) {
+            out.push(n.clone());
+        }
+    }
+    out
+}
+
 fn c_props(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let filter = a.opt_int(0);
     let mut out = PhpArray::new();
-    let mut seen: Vec<PhpStr> = Vec::new();
-    // Own properties first, then inherited (PHP's order).
-    let props: Vec<_> = c
-        .props
-        .borrow()
-        .iter()
-        .filter(|p| p.flags & mflags::HIDDEN == 0)
-        .cloned()
-        .collect();
-    let cp = Rc::as_ptr(&c);
-    let mut ordered: Vec<_> = props
-        .iter()
-        .filter(|p| std::ptr::eq(p.class, cp))
-        .cloned()
-        .collect();
-    ordered.extend(
-        props
-            .iter()
-            .filter(|p| !std::ptr::eq(p.class, cp) && p.flags & mflags::PRIVATE == 0)
-            .cloned(),
-    );
-    for p in ordered {
-        if seen.contains(&p.name) {
-            continue;
+    for n in prop_order(&c) {
+        let Some(p) = pinfo(&c, &n) else { continue };
+        let mut m = prop_modifiers(p.flags);
+        if p.is_static {
+            m |= 16;
         }
         if let Some(fl) = filter
-            && prop_modifiers(p.flags) & fl == 0
+            && m & fl == 0
         {
             continue;
         }
-        seen.push(p.name.clone());
         let o = new_refl(
             vm,
             "ReflectionProperty",
             Refl::Prop {
                 cls: c.clone(),
-                name: p.name.clone(),
-                dynamic: false,
-            },
-        )?;
-        let _ = out.push(Value::Object(o));
-    }
-    let statics = c.static_props.borrow().clone();
-    for sp in statics {
-        if seen.contains(&sp.name)
-            || (sp.flags & mflags::PRIVATE != 0 && !std::ptr::eq(sp.class, cp))
-        {
-            continue;
-        }
-        if let Some(fl) = filter
-            && prop_modifiers(sp.flags) & fl == 0
-        {
-            continue;
-        }
-        seen.push(sp.name.clone());
-        let o = new_refl(
-            vm,
-            "ReflectionProperty",
-            Refl::Prop {
-                cls: c.clone(),
-                name: sp.name.clone(),
+                name: n,
                 dynamic: false,
             },
         )?;
@@ -2253,7 +3110,7 @@ fn const_modifiers(flags: u32) -> i64 {
 fn c_consts(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let filter = a.opt_int(0);
-    let consts = c.consts.borrow().clone();
+    let consts = const_order(&c);
     let mut out = PhpArray::new();
     for k in consts {
         if let Some(f) = filter
@@ -2273,7 +3130,7 @@ fn c_consts(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn c_refl_consts(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let filter = a.opt_int(0);
-    let consts = c.consts.borrow().clone();
+    let consts = const_order(&c);
     let mut out = PhpArray::new();
     for k in consts {
         if let Some(f) = filter
@@ -2304,7 +3161,10 @@ fn c_const(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 vm.eval_class_const(&k)
             }
         }
-        None => Ok(Value::Bool(false)),
+        None => {
+            vm.deprecated("ReflectionClass::getConstant() for a non-existent constant is deprecated, use ReflectionClass::hasConstant() to check if the constant exists")?;
+            Ok(Value::Bool(false))
+        }
     }
 }
 fn c_refl_const(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2319,10 +3179,71 @@ fn c_refl_const(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Refl::Const { cls: c, name: n },
     )?))
 }
+/// Interfaces in PHP's order (observed on PHP 8.5): the parent's, then
+/// those named in the declaration followed by the implicit ones
+/// (Stringable for `__toString()`, first for internal classes; UnitEnum and
+/// BackedEnum for enums), then for each of these, the interfaces it
+/// extends in reverse order.
+fn iface_order(c: &Rc<Class>) -> Vec<Rc<Class>> {
+    let all = c.interfaces.borrow().clone();
+    let mut out: Vec<Rc<Class>> = Vec::new();
+    let add = |out: &mut Vec<Rc<Class>>, i: &Rc<Class>| {
+        if !out.iter().any(|x| Rc::ptr_eq(x, i)) {
+            out.push(i.clone());
+        }
+    };
+    let find = |n: &[u8]| {
+        let l = lower(n.strip_prefix(b"\\").unwrap_or(n));
+        all.iter().find(|i| i.lname == l).cloned()
+    };
+    if let Some(p) = &c.parent {
+        for i in iface_order(p) {
+            if let Some(i) = all.iter().find(|x| Rc::ptr_eq(x, &i)) {
+                add(&mut out, i);
+            }
+        }
+    }
+    let internal = c.has_flag(cflags::INTERNAL);
+    let mut direct: Vec<Rc<Class>> = Vec::new();
+    if internal && let Some(st) = find(b"stringable") {
+        add(&mut direct, &st);
+    }
+    for n in c.direct_interfaces.borrow().iter() {
+        if let Some(i) = find(n) {
+            add(&mut direct, &i);
+        }
+    }
+    let mut implicit: Vec<&[u8]> = Vec::new();
+    if !internal {
+        implicit.push(b"stringable");
+    }
+    if c.is_enum() {
+        implicit.push(b"unitenum");
+        implicit.push(b"backedenum");
+    }
+    for n in implicit {
+        if let Some(i) = find(n) {
+            add(&mut direct, &i);
+        }
+    }
+    for i in &direct {
+        add(&mut out, i);
+    }
+    for i in &direct {
+        for k in iface_order(i).iter().rev() {
+            add(&mut out, k);
+        }
+    }
+    for i in &all {
+        add(&mut out, i);
+    }
+    out
+}
+
 fn c_interfaces(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let mut out = PhpArray::new();
-    let ifs = c.interfaces.borrow().clone();
+    let ifs = iface_order(&c);
     for i in ifs {
         let o = new_refl(vm, "ReflectionClass", Refl::Class(i.clone()))?;
         out.insert(Key::Str(i.name.clone()), Value::Object(o));
@@ -2332,10 +3253,7 @@ fn c_interfaces(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn c_interface_names(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     Ok(Value::Array(PhpArray::from_values(
-        c.interfaces
-            .borrow()
-            .iter()
-            .map(|i| Value::Str(i.name.clone())),
+        iface_order(&c).iter().map(|i| Value::Str(i.name.clone())),
     )))
 }
 fn c_is_interface(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2484,7 +3402,12 @@ fn new_with_args(vm: &mut Vm, c: &Rc<Class>, args: PhpArray) -> R<Value> {
                 closure: None,
                 magic_name: None,
             };
-            vm.call_callee_named(callee, args)?;
+            // A constructor that throws leaves an object whose destructor
+            // does not run (observed on PHP 8.5; test bug77882).
+            if let Err(e) = vm.call_callee_named(callee, args) {
+                o.mark_destructor_called();
+                return Err(e);
+            }
         }
         None => {
             if !args.is_empty() {
@@ -2548,16 +3471,54 @@ fn c_is_subclass(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = other_class(vm, &a.val(0))?;
     Ok(Value::Bool(!Rc::ptr_eq(&c, &o) && c.is_subclass_of(&o)))
 }
-fn c_static_props(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let c = need_class!(vm, a);
-    vm.ensure_statics(&c)?;
-    let mut out = PhpArray::new();
-    for sp in c.static_props.borrow().iter() {
+/// The static properties of a class that are members: its own, then the
+/// parent's (recursively), without private ones of ancestors.
+fn static_order(c: &Rc<Class>) -> Vec<Rc<crate::class::StaticProp>> {
+    let cp = Rc::as_ptr(c);
+    let statics = c.static_props.borrow().clone();
+    let mut out: Vec<Rc<crate::class::StaticProp>> = statics
+        .iter()
+        .filter(|sp| std::ptr::eq(sp.class, cp))
+        .cloned()
+        .collect();
+    if let Some(p) = &c.parent {
+        for sp in static_order(p) {
+            if sp.flags & mflags::PRIVATE == 0
+                && !out.iter().any(|x| x.name == sp.name)
+                && let Some(mine) = statics.iter().find(|x| x.name == sp.name)
+            {
+                out.push(mine.clone());
+            }
+        }
+    }
+    for sp in &statics {
+        if !std::ptr::eq(sp.class, cp)
+            && sp.flags & mflags::PRIVATE == 0
+            && !out.iter().any(|x| x.name == sp.name)
+        {
+            out.push(sp.clone());
+        }
+    }
+    out
+}
+
+/// Static properties visible in the class: its own first, then the
+/// non-private inherited ones (observed on PHP 8.5).
+fn static_members(vm: &mut Vm, c: &Rc<Class>, out: &mut PhpArray) -> R<()> {
+    vm.ensure_statics(c)?;
+    for sp in static_order(c) {
         let v = sp.cell.get();
-        if !vm.is_uninit(&v) {
+        if !vm.is_uninit(&v) && out.get_str(&sp.name).is_none() {
             out.insert(Key::Str(sp.name.clone()), v);
         }
     }
+    Ok(())
+}
+
+fn c_static_props(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let c = need_class!(vm, a);
+    let mut out = PhpArray::new();
+    static_members(vm, &c, &mut out)?;
     Ok(Value::Array(out))
 }
 fn c_get_static(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2567,6 +3528,11 @@ fn c_get_static(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match c.find_static(&n) {
         Some(sp) => {
             let v = sp.cell.get();
+            // An uninitialized property gives the default when one is
+            // passed (test gh12856).
+            if vm.is_uninit(&v) && a.has(1) {
+                return Ok(a.val(1));
+            }
             if vm.is_uninit(&v) {
                 return vm.throw(
                     "Error",
@@ -2590,30 +3556,49 @@ fn c_get_static(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     }
 }
+/// Assigns a static property with its type's coercion; the message names
+/// the reference when the property is bound to one (observed on PHP 8.5).
+fn set_static_checked(
+    vm: &mut Vm,
+    c: &Rc<Class>,
+    sp: &crate::class::StaticProp,
+    v: Value,
+) -> R<()> {
+    let mut v = v;
+    if let Some(t) = &sp.ty {
+        match vm.check_type(&v, t, false, sp.class, Rc::as_ptr(c))? {
+            crate::vm::types::Check::Ok => {}
+            crate::vm::types::Check::Coerced(x) => v = x,
+            crate::vm::types::Check::Fail => {
+                return vm.type_error(&format!(
+                    "Cannot assign {} to {}property {}::${} of type {}",
+                    v.tname(),
+                    if sp.cell.refcount() > 1 {
+                        "reference held by "
+                    } else {
+                        ""
+                    },
+                    unsafe { (*sp.class).name.dname() },
+                    sp.name.dname(),
+                    t.display()
+                ));
+            }
+        }
+    }
+    // A reference bound to typed properties keeps their types.
+    let v = vm.typed_ref_value(&sp.cell, v)?;
+    let old = sp.cell.set(v);
+    drop(old);
+    Ok(())
+}
+
 fn c_set_static(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let n = a.str(0);
     vm.ensure_statics(&c)?;
     match c.find_static(&n) {
         Some(sp) => {
-            let mut v = a.val(1);
-            if let Some(t) = &sp.ty {
-                match vm.check_type(&v, t, false, sp.class, Rc::as_ptr(&c))? {
-                    crate::vm::types::Check::Ok => {}
-                    crate::vm::types::Check::Coerced(x) => v = x,
-                    crate::vm::types::Check::Fail => {
-                        return vm.type_error(&format!(
-                            "Cannot assign {} to property {}::${} of type {}",
-                            v.tname(),
-                            c.name.dname(),
-                            n.dname(),
-                            t.display()
-                        ));
-                    }
-                }
-            }
-            let old = sp.cell.set(v);
-            drop(old);
+            set_static_checked(vm, &c, &sp, a.val(1))?;
             Ok(Value::Null)
         }
         None => refl_error(
@@ -2628,23 +3613,30 @@ fn c_set_static(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn c_default_props(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
-    vm.ensure_statics(&c)?;
     let mut out = PhpArray::new();
-    for sp in c.static_props.borrow().iter() {
-        let v = sp.cell.get();
-        if !vm.is_uninit(&v) {
-            out.insert(Key::Str(sp.name.clone()), v);
-        }
-    }
+    static_members(vm, &c, &mut out)?;
     let defaults = vm.class_defaults(&c)?;
-    for p in c.props.borrow().iter() {
-        let v = &defaults[p.slot as usize];
-        if vm.is_uninit(v) || p.flags & mflags::HIDDEN != 0 {
+    let (inst, _) = visible_props(&c);
+    for n in inst {
+        let Some(slot) = pinfo(&c, &n).and_then(|p| p.slot) else {
+            continue;
+        };
+        let v = &defaults[slot as usize];
+        if vm.is_uninit(v) {
             continue;
         }
-        out.insert(Key::Str(p.name.clone()), v.clone());
+        out.insert(Key::Str(n), v.clone());
     }
     Ok(Value::Array(out))
+}
+
+/// Whether the class has the property as a member (private properties of
+/// ancestors are not).
+fn has_member_prop(c: &Rc<Class>, n: &PhpStr) -> bool {
+    match pinfo(c, n) {
+        Some(p) => p.flags & mflags::PRIVATE == 0 || std::ptr::eq(p.class, Rc::as_ptr(c)),
+        None => false,
+    }
 }
 fn c_is_iterable(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
@@ -2655,7 +3647,22 @@ fn c_is_iterable(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn c_implements(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
-    let i = other_class(vm, &a.val(0))?;
+    let v = a.val(0);
+    let i = match &v {
+        Value::Object(_) => other_class(vm, &v)?,
+        _ => {
+            let n = vm.to_php_str(&v)?;
+            match vm.find_class(&n, true)? {
+                Some(i) => i,
+                None => {
+                    return refl_error(
+                        vm,
+                        &format!("Interface \"{}\" does not exist", n.to_string_lossy()),
+                    );
+                }
+            }
+        }
+    };
     if !i.is_interface() {
         return refl_error(vm, &format!("{} is not an interface", i.name.dname()));
     }
@@ -2767,11 +3774,17 @@ fn pinfo(cls: &Class, name: &PhpStr) -> Option<PInfo> {
         is_static: true,
         doc: s.doc.clone(),
         attrs: s.attrs.to_vec(),
-        default: s
-            .init
-            .borrow()
-            .clone()
-            .or_else(|| Some(ConstExpr::Value(s.cell.get()))),
+        default: unsafe { &*s.class }
+            .decl
+            .as_ref()
+            .and_then(|d| d.props.iter().find(|p| p.name == *name))
+            .map(|p| p.default.clone())
+            .unwrap_or_else(|| {
+                s.init
+                    .borrow()
+                    .clone()
+                    .or_else(|| Some(ConstExpr::Value(s.cell.get())))
+            }),
         has_hooks: (false, false),
         slot: None,
     })
@@ -2782,7 +3795,7 @@ fn p_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let v = a.val(0);
     let cls = class_arg(vm, &v)?;
     let n = a.str(1);
-    let dynamic = if cls.prop_map.borrow().contains_key(&n) || cls.find_static(&n).is_some() {
+    let dynamic = if has_member_prop(&cls, &n) {
         false
     } else if let Value::Object(obj) = &v
         && obj.obj().props.borrow().get_str(&n).is_some()
@@ -2819,32 +3832,7 @@ fn p_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn p_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, dynamic) = need_prop!(vm, a);
-    let s = match pinfo(&c, &n) {
-        Some(p) if !dynamic => {
-            let vis = if p.flags & mflags::PRIVATE != 0 {
-                "private"
-            } else if p.flags & mflags::PROTECTED != 0 {
-                "protected"
-            } else {
-                "public"
-            };
-            let mut s = format!(
-                "Property [ {}{}",
-                vis,
-                if p.is_static { " static" } else { "" }
-            );
-            if p.flags & mflags::READONLY != 0 {
-                s.push_str(" readonly");
-            }
-            if let Some(t) = &p.ty {
-                s.push(' ');
-                s.push_str(&t.display());
-            }
-            s.push_str(&format!(" ${} ]\n", n.to_string_lossy()));
-            s
-        }
-        _ => format!("Property [ <dynamic> public ${} ]\n", n.to_string_lossy()),
-    };
+    let s = prop_string(vm, &c, &n, dynamic, "")?;
     Ok(Value::Str(PhpStr::from(s)))
 }
 fn p_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2916,15 +3904,14 @@ fn p_get_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "ReflectionProperty::getValue(): Argument #1 ($object) must be provided for instance properties"
         ));
     };
-    if !vm.class_of(&o).is_subclass_of(&c) {
-        return vm.type_error(&format!(
-            "Cannot fetch property {}::${} of instance of {}",
-            c.name.dname(),
-            n.dname(),
-            vm.class_of(&o).name.dname()
-        ));
+    let decl = info.as_ref().map(|p| p.class).unwrap_or(Rc::as_ptr(&c));
+    if !vm.class_of(&o).is_subclass_of(unsafe { &*decl }) {
+        return refl_error(
+            vm,
+            "Given object is not an instance of the class this property was declared in",
+        );
     }
-    let scope = info.map(|p| p.class).unwrap_or(Rc::as_ptr(&c));
+    let scope = decl;
     with_scope(vm, scope, |vm| vm.read_prop(&o, &n, false, None))
 }
 fn p_set_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2934,10 +3921,20 @@ fn p_set_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
         && p.is_static
     {
         vm.ensure_statics(&c)?;
-        let v = if a.has(1) { a.val(1) } else { a.val(0) };
+        // Observed on PHP 8.5: the static form takes (null, value).
+        let v = if a.has(1) {
+            if !matches!(a.val(0), Value::Null | Value::Object(_)) {
+                vm.deprecated("Calling ReflectionProperty::setValue() with a 1st argument which is not null or an object is deprecated")?;
+            }
+            a.val(1)
+        } else {
+            vm.deprecated(
+                "Calling ReflectionProperty::setValue() with a single argument is deprecated",
+            )?;
+            a.val(0)
+        };
         let sp = c.find_static(&n).unwrap();
-        let old = sp.cell.set(v);
-        drop(old);
+        set_static_checked(vm, &c, &sp, v)?;
         return Ok(Value::Null);
     }
     let Some(o) = a.obj(0) else {
@@ -2953,12 +3950,19 @@ fn p_get_raw(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(o) = a.obj(0) else {
         return Ok(Value::Null);
     };
-    let info = pinfo(&c, &n);
+    let info = raw_info(vm, &c, &o, &n);
     if let Some(p) = &info
         && let Some(slot) = p.slot
     {
         if p.flags & mflags::VIRTUAL != 0 {
-            return refl_error(vm, "Must not read virtual property");
+            return refl_error(
+                vm,
+                &format!(
+                    "Must not read from virtual property {}::${}",
+                    unsafe { (*p.class).name.dname() },
+                    n.dname()
+                ),
+            );
         }
         let v = o.obj().slots.borrow()[slot as usize].clone();
         if vm.is_uninit(&v) {
@@ -2975,16 +3979,37 @@ fn p_get_raw(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     p_get_value(vm, a)
 }
+/// The declaration raw access goes through: the object's class's when it
+/// redeclares the (non-private) property (observed on PHP 8.5, GH-17713).
+fn raw_info(vm: &Vm, c: &Rc<Class>, o: &ObjRef, n: &PhpStr) -> Option<PInfo> {
+    let oc = vm.class_of(o);
+    match pinfo(&oc, n) {
+        Some(p) if p.flags & mflags::PRIVATE == 0 && oc.is_subclass_of(c) => Some(p),
+        _ => pinfo(c, n),
+    }
+}
+
 fn p_set_raw(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, _) = need_prop!(vm, a);
     let Some(o) = a.obj(0) else {
         return Ok(Value::Null);
     };
     let v = a.val(1);
-    let info = pinfo(&c, &n);
+    let info = raw_info(vm, &c, &o, &n);
     if let Some(p) = &info
         && let Some(slot) = p.slot
     {
+        if p.flags & mflags::VIRTUAL != 0 {
+            return refl_error(
+                vm,
+                &format!(
+                    "Must not write to virtual property {}::${}",
+                    unsafe { (*p.class).name.dname() },
+                    n.dname()
+                ),
+            );
+        }
+        let c = vm.rc_class(p.class);
         let v = match &p.ty {
             Some(t) => {
                 let props = c.props.borrow();
@@ -3018,6 +4043,12 @@ fn p_is_init(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     if dynamic {
         return Ok(Value::Bool(o.obj().props.borrow().get_str(&n).is_some()));
+    }
+    if !vm.class_of(&o).is_subclass_of(&c) {
+        return refl_error(
+            vm,
+            "Given object is not an instance of the class this property was declared in",
+        );
     }
     match info.and_then(|p| p.slot) {
         Some(slot) => {
@@ -3068,7 +4099,8 @@ fn p_is_dynamic(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Bool(dynamic))
 }
 fn p_is_abstract(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    pflag(vm, a, mflags::ABSTRACT)
+    let (c, n, _) = need_prop!(vm, a);
+    Ok(Value::Bool(prop_abstract(&c, &n)))
 }
 fn p_is_virtual(vm: &mut Vm, a: &mut Args) -> R<Value> {
     pflag(vm, a, mflags::VIRTUAL)
@@ -3077,7 +4109,8 @@ fn p_is_promoted(vm: &mut Vm, a: &mut Args) -> R<Value> {
     pflag(vm, a, mflags::PROMOTED)
 }
 fn p_is_final(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    pflag(vm, a, mflags::FINAL)
+    // private(set) implies final (PHP 8.4 asymmetric visibility RFC).
+    pflag(vm, a, mflags::FINAL | mflags::PRIVATE_SET)
 }
 fn p_modifiers(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, dynamic) = need_prop!(vm, a);
@@ -3088,6 +4121,9 @@ fn p_modifiers(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut m = prop_modifiers(p.flags);
     if p.is_static {
         m |= 16;
+    }
+    if prop_abstract(&c, &n) {
+        m |= 64;
     }
     Ok(Value::Int(m))
 }
@@ -3118,6 +4154,32 @@ fn p_type(vm: &mut Vm, a: &mut Args) -> R<Value> {
         None => Ok(Value::Null),
     }
 }
+/// The type accepted on writes (PHP manual: getSettableType): `never` for
+/// virtual properties without a set hook, the set hook's parameter type,
+/// else the property type.
+fn p_settable_type(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (c, n, _) = need_prop!(vm, a);
+    let Some(p) = pinfo(&c, &n) else {
+        return Ok(Value::Null);
+    };
+    let set = hook_func(&c, &n, false);
+    let ty = match &set {
+        None if p.flags & mflags::VIRTUAL != 0 => Some(TypeHint {
+            mask: tmask::NEVER,
+            classes: Vec::new(),
+        }),
+        Some(h) => vm
+            .params_of(h)
+            .first()
+            .and_then(|q| q.ty.clone())
+            .or(p.ty.clone()),
+        None => p.ty.clone(),
+    };
+    match ty {
+        Some(t) => Ok(Value::Object(new_type(vm, t, p.class)?)),
+        None => Ok(Value::Null),
+    }
+}
 fn p_has_type(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, _) = need_prop!(vm, a);
     Ok(Value::Bool(pinfo(&c, &n).is_some_and(|p| p.ty.is_some())))
@@ -3135,12 +4197,18 @@ fn p_has_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn p_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, dynamic) = need_prop!(vm, a);
     if dynamic {
+        vm.deprecated("ReflectionProperty::getDefaultValue() for a property without a default value is deprecated, use ReflectionProperty::hasDefaultValue() to check if the default value exists")?;
         return Ok(Value::Null);
     }
     let p = pinfo(&c, &n).unwrap();
     match p.default {
         Some(ce) => vm.eval_const_expr(&ce, p.class),
-        None => Ok(Value::Null),
+        None => {
+            if p.ty.is_some() || p.flags & mflags::VIRTUAL != 0 {
+                vm.deprecated("ReflectionProperty::getDefaultValue() for a property without a default value is deprecated, use ReflectionProperty::hasDefaultValue() to check if the default value exists")?;
+            }
+            Ok(Value::Null)
+        }
     }
 }
 fn p_attrs(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -3156,6 +4224,30 @@ fn p_has_hooks(vm: &mut Vm, a: &mut Args) -> R<Value> {
         pinfo(&c, &n).is_some_and(|p| p.has_hooks.0 || p.has_hooks.1),
     ))
 }
+/// Whether a property's hook is declared final.
+fn hook_final(c: &Class, n: &PhpStr, get: bool) -> bool {
+    let Some(decl_class) = prop_decl_class(c, n) else {
+        return false;
+    };
+    let dc = unsafe { &*decl_class };
+    dc.decl.as_ref().is_some_and(|d| {
+        d.props
+            .iter()
+            .any(|p| p.name == *n && p.hook_flags & if get { 4 } else { 8 } != 0)
+    })
+}
+
+/// A property with an abstract hook (in an interface or declared
+/// `abstract`) is abstract.
+fn prop_abstract(c: &Class, n: &PhpStr) -> bool {
+    pinfo(c, n).is_some_and(|p| p.flags & mflags::ABSTRACT != 0)
+        || [true, false].iter().any(|&g| {
+            hook_func(c, n, g).is_some_and(|f| {
+                f.flags & mflags::ABSTRACT != 0 || f.scope().is_some_and(|k| k.is_interface())
+            })
+        })
+}
+
 fn hook_func(c: &Class, n: &PhpStr, get: bool) -> Option<Rc<Func>> {
     let map = c.prop_map.borrow();
     let idxs = map.get(n)?;
@@ -3269,42 +4361,7 @@ fn cc_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn cc_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n) = need_const!(vm, a);
     let k = c.find_const(&n).unwrap();
-    let v = if k.flags & mflags::CASE != 0 {
-        vm.enum_case(&c, &n)?
-    } else {
-        vm.eval_class_const(&k)?
-    };
-    let vis = if k.flags & mflags::PRIVATE != 0 {
-        "private"
-    } else if k.flags & mflags::PROTECTED != 0 {
-        "protected"
-    } else {
-        "public"
-    };
-    let ty = match &v {
-        Value::Object(_) => "object".to_string(),
-        v => crate::builtins::var::type_name(v)
-            .replace("integer", "int")
-            .replace("boolean", "bool"),
-    };
-    let mut val = Vec::new();
-    match &v {
-        Value::Array(_) => val.extend_from_slice(b"Array"),
-        Value::Object(_) => val.extend_from_slice(b"Object"),
-        other => vm.append_to_string(&mut val, other)?,
-    }
-    let s = format!(
-        "Constant [ {}{} {} {} ] {{ {} }}\n",
-        if k.flags & mflags::FINAL != 0 {
-            "final "
-        } else {
-            ""
-        },
-        vis,
-        ty,
-        n.to_string_lossy(),
-        String::from_utf8_lossy(&val)
-    );
+    let s = const_string(vm, &c, &k, "")?;
     Ok(Value::Str(PhpStr::from(s)))
 }
 fn cc_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -3440,10 +4497,14 @@ fn par_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
         }
         Value::Array(arr) if arr.len() == 2 => {
-            let c = class_arg(vm, &arr.get_int(0).map(|x| x.deref()).unwrap_or_default())?;
+            let target = arr.get_int(0).map(|x| x.deref()).unwrap_or_default();
+            let c = class_arg(vm, &target)?;
             let m = arr.get_int(1).map(|x| x.deref()).unwrap_or_default();
             let m = vm.to_php_str(&m)?;
-            (find_method_in(vm, &c, &m)?, None)
+            match closure_invoke(vm, &target, &m) {
+                Some(f) => (f, None),
+                None => (find_method_in(vm, &c, &m)?, None),
+            }
         }
         Value::Object(ob) => match vm.closure_data(ob) {
             Some(cd) => (cd.func.clone(), Some(ob.clone())),
@@ -3458,14 +4519,23 @@ fn par_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
         _ => {
             return refl_error(
                 vm,
-                "The parameter class is expected to be either a string, an array(class, method) or a callable object",
+                &format!(
+                    "ReflectionParameter::__construct(): Argument #1 ($function) must be a string, an array(class, method), or a callable object, {} given",
+                    a.val(0).tname()
+                ),
             );
         }
     };
     let ps = vm.params_of(&func).to_vec();
     let idx = match a.val(1) {
         Value::Int(i) => {
-            if i < 0 || i as usize >= ps.len() {
+            if i < 0 {
+                return vm.throw(
+                    "ValueError",
+                    "ReflectionParameter::__construct(): Argument #2 ($param) must be greater than or equal to 0",
+                );
+            }
+            if i as usize >= ps.len() {
                 return refl_error(
                     vm,
                     "The parameter specified by its offset could not be found",
@@ -3496,7 +4566,14 @@ fn par_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
         FuncKind::User(c) => c.num_required as usize,
         FuncKind::Native { .. } => vm.native_sig(&f).num_required as usize,
     };
-    Ok(Value::Str(PhpStr::from(param_string(vm, &p, i, i < nreq))))
+    let internal = func_internal(&f) && !is_closure_invoke(&f);
+    Ok(Value::Str(PhpStr::from(param_string(
+        vm,
+        &p,
+        i,
+        i < nreq,
+        internal,
+    ))))
 }
 fn par_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (_, _, _, p) = need_param!(vm, a);
@@ -3507,8 +4584,10 @@ fn par_by_ref(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Bool(p.by_ref))
 }
 fn par_by_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let (_, _, _, p) = need_param!(vm, a);
-    Ok(Value::Bool(!p.by_ref))
+    let (f, _, _, p) = need_param!(vm, a);
+    // "Prefer reference" parameters take values too (array_multisort()).
+    let prefer = f.is_native() && matches!(f.lname.as_bytes(), b"array_multisort" | b"extract");
+    Ok(Value::Bool(!p.by_ref || prefer))
 }
 fn par_func(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, c, _, _) = need_param!(vm, a);
@@ -3547,7 +4626,7 @@ fn par_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn par_get_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
     vm.deprecated("Method ReflectionParameter::getClass() is deprecated since 8.0, use ReflectionParameter::getType() instead")?;
-    let (f, _, _, p) = need_param!(vm, a);
+    let (f, cl, _, p) = need_param!(vm, a);
     let Some(t) = &p.ty else {
         return Ok(Value::Null);
     };
@@ -3556,9 +4635,31 @@ fn par_get_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     let n = t.classes[0][0].clone();
     let ln = lower(&n);
+    // A closure's scope is the one it is bound to.
+    let scope: *const Class = match &cl {
+        Some(c) => closure_cd(c, |d| d.scope).unwrap_or(std::ptr::null()),
+        None => f.scope.get(),
+    };
     let c = match ln.as_bytes() {
-        b"self" => Some(vm.rc_class(f.scope.get())),
-        b"parent" => f.scope().and_then(|c| c.parent.clone()),
+        b"self" | b"parent" if scope.is_null() => {
+            return refl_error(
+                vm,
+                &format!(
+                    "Parameter uses \"{}\" as type but function is not a class member",
+                    ln.to_string_lossy()
+                ),
+            );
+        }
+        b"self" => Some(vm.rc_class(scope)),
+        b"parent" => match vm.rc_class(scope).parent.clone() {
+            Some(p) => Some(p),
+            None => {
+                return refl_error(
+                    vm,
+                    "Parameter uses \"parent\" as type although class does not have a parent",
+                );
+            }
+        },
         _ => vm.find_class(&n, true)?,
     };
     match c {
@@ -3615,9 +4716,17 @@ fn par_optional(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Bool(i >= nreq || p.variadic))
 }
 fn par_has_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let (_, _, _, p) = need_param!(vm, a);
+    let (f, _, i, p) = need_param!(vm, a);
+    // A default before a required parameter is not available (the
+    // parameter is implicitly required).
+    let nreq = match &f.kind {
+        FuncKind::User(c) => c.num_required as usize,
+        FuncKind::Native { .. } => vm.native_sig(&f).num_required as usize,
+    };
     Ok(Value::Bool(
-        !matches!(p.default, ParamDefault::None) && p.default_text.as_deref() != Some("UNKNOWN"),
+        i >= nreq
+            && !matches!(p.default, ParamDefault::None)
+            && p.default_text.as_deref() != Some("UNKNOWN"),
     ))
 }
 fn par_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -3649,6 +4758,9 @@ fn par_default_is_const(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn par_default_const_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (_, _, _, p) = need_param!(vm, a);
+    if matches!(p.default, ParamDefault::None) {
+        return refl_error(vm, "Internal error: Failed to retrieve the default value");
+    }
     Ok(default_const_name(&p)
         .map(|s| Value::Str(PhpStr::from(s)))
         .unwrap_or_default())
@@ -3879,9 +4991,8 @@ fn t_types(vm: &mut Vm, a: &mut Args) -> R<Value> {
             },
         )?;
         let _ = out.push(Value::Object(o));
-        if !names.contains(&"array") {
-            names.push("array");
-        }
+        names.retain(|n| *n != "array");
+        names.insert(0, "array");
     }
     if t.mask & tmask::NULL != 0 && t.mask & tmask::MIXED == 0 {
         names.push("null");
@@ -4277,7 +5388,7 @@ fn rr_from(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let key = vm.to_key(&k, "array")?;
     match arr.get(key.as_ref()) {
         None => refl_error(vm, "Array key not found"),
-        Some(Value::Ref(r)) if r.refcount() > 1 || true => {
+        Some(Value::Ref(r)) if r.refcount() > 1 => {
             let id = r.addr();
             let cls = vm.find_class(b"ReflectionReference", false)?.unwrap();
             let o = vm.instantiate_raw(&cls)?;
@@ -4302,6 +5413,77 @@ fn ext_name_of(a: &Args) -> PhpStr {
         _ => PhpStr::empty(),
     })
 }
+/// Item kinds of a module, for [`item_ext`].
+#[derive(Clone, Copy, PartialEq)]
+enum Item {
+    Func,
+    Const,
+    Ini,
+}
+
+/// The extension PHP files a module's item under: goro's "Core" module
+/// also carries functions, constants and settings of ext/standard
+/// (PHP manual: Function handling, Classes/Objects, Errors... are Core;
+/// sleep(), CONNECTION_*, user_agent are standard).
+fn item_ext(module: &'static str, kind: Item, name: &str) -> &'static str {
+    if module != "Core" {
+        return module;
+    }
+    let core = match kind {
+        Item::Func => core_function(name.as_bytes()),
+        Item::Const => {
+            [
+                "E_",
+                "PHP_",
+                "ZEND_",
+                "DEBUG_BACKTRACE_",
+                "UPLOAD_ERR_",
+                "PEAR_",
+            ]
+            .iter()
+            .any(|p| name.starts_with(p))
+                || matches!(
+                    name,
+                    "DEFAULT_INCLUDE_PATH"
+                        | "TRUE"
+                        | "FALSE"
+                        | "NULL"
+                        | "STDIN"
+                        | "STDOUT"
+                        | "STDERR"
+                )
+        }
+        Item::Ini => !matches!(
+            name,
+            "user_agent"
+                | "default_socket_timeout"
+                | "auto_detect_line_endings"
+                | "from"
+                | "url_rewriter.tags"
+                | "url_rewriter.hosts"
+                | "browscap"
+                | "assert.active"
+                | "assert.bail"
+                | "assert.callback"
+                | "assert.exception"
+                | "assert.warning"
+        ),
+    };
+    if core { "Core" } else { "standard" }
+}
+
+/// The modules whose items may belong to extension `n` (Core's items are
+/// split between Core and standard).
+fn ext_modules(vm: &Vm, n: &[u8]) -> Vec<&'static Module> {
+    vm.modules
+        .iter()
+        .filter(|m| {
+            m.name.as_bytes() == n || (m.name == "Core" && n.eq_ignore_ascii_case(b"standard"))
+        })
+        .copied()
+        .collect()
+}
+
 fn ext_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let n = a.str(0);
@@ -4337,9 +5519,13 @@ fn ext_functions(vm: &mut Vm, a: &mut Args) -> R<Value> {
         .filter(|m| m.name.as_bytes() == n.as_bytes())
         .copied()
         .collect();
-    for m in mods {
+    let _ = mods;
+    for m in ext_modules(vm, &n) {
         for (sig, _) in m.functions {
             let name = crate::registry::sig_name(sig);
+            if item_ext(m.name, Item::Func, name).as_bytes() != n.as_bytes() {
+                continue;
+            }
             if let Some(f) = vm.functions.get(&lower(name.as_bytes())).cloned() {
                 let o = new_refl(
                     vm,
@@ -4358,13 +5544,11 @@ fn ext_functions(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn ext_constants(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = ext_name_of(a);
     let mut out = PhpArray::new();
-    for m in vm
-        .modules
-        .iter()
-        .filter(|m| m.name.as_bytes() == n.as_bytes())
-    {
+    for m in ext_modules(vm, &n) {
         for (k, v) in m.constants {
-            out.insert(Key::from(*k), v.to_value());
+            if item_ext(m.name, Item::Const, k).as_bytes() == n.as_bytes() {
+                out.insert(Key::from(*k), v.to_value());
+            }
         }
     }
     Ok(Value::Array(out))
@@ -4378,8 +5562,12 @@ fn ext_ini(vm: &mut Vm, a: &mut Args) -> R<Value> {
         .filter(|m| m.name.as_bytes() == n.as_bytes())
         .copied()
         .collect();
-    for m in mods {
+    let _ = mods;
+    for m in ext_modules(vm, &n) {
         for (k, _) in m.ini {
+            if item_ext(m.name, Item::Ini, k).as_bytes() != n.as_bytes() {
+                continue;
+            }
             let v = vm.get_ini(k.as_bytes()).map(Value::Str).unwrap_or_default();
             out.insert(Key::from(*k), v);
         }
@@ -4429,17 +5617,44 @@ fn gc_name_of(a: &Args) -> PhpStr {
         _ => PhpStr::empty(),
     })
 }
+/// Where user constants were declared (ReflectionConstant::getFileName()).
+#[derive(Default)]
+pub(crate) struct ConstMeta {
+    files: std::collections::HashMap<PhpStr, PhpStr>,
+}
+
+/// Records the file declaring a user constant (`const` or define()).
+pub(crate) fn note_constant(vm: &mut Vm, key: &PhpStr) {
+    let f = vm.cur_file();
+    if !f.is_empty() {
+        vm.ext::<ConstMeta>().files.insert(key.clone(), f);
+    }
+}
+
+/// The extension registering an internal constant.
+fn const_ext(vm: &Vm, n: &[u8]) -> Option<&'static str> {
+    if matches!(n, b"STDIN" | b"STDOUT" | b"STDERR") {
+        return Some("Core");
+    }
+    let name = String::from_utf8_lossy(n).into_owned();
+    vm.modules
+        .iter()
+        .find(|m| m.constants.iter().any(|(k, _)| k.as_bytes() == n))
+        .map(|m| item_ext(m.name, Item::Const, &name))
+}
+
 fn gc_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
-    let n = a.str(0);
-    let n = PhpStr::new(n.strip_prefix(b"\\").unwrap_or(&n));
+    let given = a.str(0);
+    let n = PhpStr::new(given.strip_prefix(b"\\").unwrap_or(&given));
     if vm.lookup_constant(&n)?.is_none() {
         return refl_error(
             vm,
             &format!("Constant \"{}\" does not exist", n.to_string_lossy()),
         );
     }
-    vm.set_prop_raw(&o, b"name", Value::Str(n.clone()));
+    // The name property keeps the spelling given (observed on PHP 8.5).
+    vm.set_prop_raw(&o, b"name", Value::Str(given.clone()));
     set_data(&o, Refl::GlobalConst(n));
     Ok(Value::Null)
 }
@@ -4458,6 +5673,46 @@ fn gc_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = gc_name_of(a);
     Ok(vm.lookup_constant(&n)?.unwrap_or_default())
 }
+fn gc_deprecated(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let n = gc_name_of(a);
+    Ok(Value::Bool(super::misc::const_deprecation(&n).is_some()))
+}
+fn gc_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let n = normalize_const(&gc_name_of(a));
+    Ok(vm
+        .ext::<ConstMeta>()
+        .files
+        .get(&n)
+        .cloned()
+        .map(Value::Str)
+        .unwrap_or(Value::Bool(false)))
+}
+fn normalize_const(n: &[u8]) -> PhpStr {
+    crate::vm::include::normalize_const_name(n)
+}
+fn gc_ext_of(vm: &mut Vm, a: &Args) -> Option<&'static str> {
+    let n = normalize_const(&gc_name_of(a));
+    if vm.user_constants.contains(&n) {
+        return None;
+    }
+    const_ext(vm, &n)
+}
+fn gc_extension(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    match gc_ext_of(vm, a) {
+        Some(e) => Ok(Value::Object(new_refl(
+            vm,
+            "ReflectionExtension",
+            Refl::Extension(PhpStr::from(e)),
+        )?)),
+        None => Ok(Value::Null),
+    }
+}
+fn gc_extension_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(gc_ext_of(vm, a)
+        .map(Value::from)
+        .unwrap_or(Value::Bool(false)))
+}
+
 fn gc_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = gc_name_of(a);
     let v = vm.lookup_constant(&n)?.unwrap_or_default();
@@ -4484,57 +5739,74 @@ fn g_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(g) = a.obj(0) else {
         return Ok(Value::Null);
     };
-    let done = vm
-        .with_gen(&g, |d| d.state == crate::vm::iter::GenState::Done)
-        .unwrap_or(true);
-    if done {
-        return refl_error(
-            vm,
-            "Cannot create ReflectionGenerator based on a terminated Generator",
-        );
-    }
+    let _ = vm;
+    // PHP 8.4+: finished generators can be reflected too (observed on
+    // PHP 8.5; test ReflectionGenerator_after_termination).
     set_data(&o, Refl::Generator(g));
     Ok(Value::Null)
 }
-fn g_line(vm: &mut Vm, a: &mut Args) -> R<Value> {
+fn gen_done(vm: &Vm, g: &ObjRef) -> bool {
+    vm.with_gen(g, |d| d.state == crate::vm::iter::GenState::Done)
+        .unwrap_or(true)
+}
+/// The generator, unless it has finished ("Cannot fetch information from
+/// a closed Generator").
+fn open_gen(vm: &mut Vm, a: &Args) -> R<Option<ObjRef>> {
     let Some(g) = gen_of(a) else {
+        return Ok(None);
+    };
+    if gen_done(vm, &g) {
+        return refl_error(vm, "Cannot fetch information from a closed Generator");
+    }
+    Ok(Some(g))
+}
+/// Where the innermost generator stands; a generator not started yet is
+/// at its function's first line.
+fn gen_location(vm: &mut Vm, g: &ObjRef) -> (PhpStr, u32) {
+    let inner = vm.generator_executing_gen(g);
+    if let Some(at) = vm.generator_executing(&inner) {
+        let started = vm
+            .with_gen(&inner, |d| d.state != crate::vm::iter::GenState::Created)
+            .unwrap_or(true);
+        if started {
+            return at;
+        }
+    }
+    match vm.generator_func_info(&inner) {
+        Some((f, _, _)) => match code_of(&f) {
+            Some(c) => (c.file.clone(), c.line_start),
+            None => (PhpStr::empty(), 0),
+        },
+        None => (vm.cur_file(), vm.cur_line()),
+    }
+}
+fn g_line(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let Some(g) = open_gen(vm, a)? else {
         return Ok(Value::Null);
     };
-    let l = vm
-        .with_gen(&g, |d| {
-            d.frame
-                .as_ref()
-                .map(|f| f.code().line_of(f.ip.saturating_sub(1) as usize))
-        })
-        .flatten()
-        .unwrap_or(0);
-    Ok(Value::Int(l as i64))
+    Ok(Value::Int(gen_location(vm, &g).1 as i64))
 }
 fn g_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some(g) = gen_of(a) else {
+    let Some(g) = open_gen(vm, a)? else {
         return Ok(Value::Null);
     };
-    let f = vm
-        .with_gen(&g, |d| d.frame.as_ref().map(|f| f.code().file.clone()))
-        .flatten()
-        .unwrap_or_default();
-    Ok(Value::Str(f))
+    Ok(Value::Str(gen_location(vm, &g).0))
+}
+fn g_trace(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let Some(g) = open_gen(vm, a)? else {
+        return Ok(Value::Array(PhpArray::new()));
+    };
+    let opts = a.int_or(0, 1);
+    Ok(Value::Array(vm.generator_trace(&g, opts)))
 }
 fn g_function(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(g) = gen_of(a) else {
         return Ok(Value::Null);
     };
-    let info = vm
-        .with_gen(&g, |d| {
-            d.frame
-                .as_ref()
-                .map(|f| (f.func.clone(), f.closure.clone()))
-        })
-        .flatten();
-    match info {
-        Some((f, c)) => {
-            if f.scope().is_some() && c.is_none() {
-                let cls = vm.rc_class(f.scope.get());
+    match vm.generator_func_info(&g) {
+        Some((f, c, scope)) => {
+            if !scope.is_null() && c.is_none() {
+                let cls = vm.rc_class(scope);
                 return Ok(Value::Object(new_refl(
                     vm,
                     "ReflectionMethod",
@@ -4554,7 +5826,7 @@ fn g_function(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
 }
 fn g_this(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some(g) = gen_of(a) else {
+    let Some(g) = open_gen(vm, a)? else {
         return Ok(Value::Null);
     };
     Ok(vm
@@ -4563,17 +5835,82 @@ fn g_this(vm: &mut Vm, a: &mut Args) -> R<Value> {
         .map(Value::Object)
         .unwrap_or_default())
 }
-fn g_gen(_vm: &mut Vm, a: &mut Args) -> R<Value> {
-    Ok(gen_of(a).map(Value::Object).unwrap_or_default())
+fn g_gen(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let Some(g) = open_gen(vm, a)? else {
+        return Ok(Value::Null);
+    };
+    Ok(Value::Object(vm.generator_executing_gen(&g)))
 }
 fn g_closed(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(g) = gen_of(a) else {
         return Ok(Value::Bool(true));
     };
-    Ok(Value::Bool(
-        vm.with_gen(&g, |d| d.state == crate::vm::iter::GenState::Done)
-            .unwrap_or(true),
-    ))
+    Ok(Value::Bool(gen_done(vm, &g)))
+}
+
+// ---------------------------------------------------------------- fibers
+
+fn fiber_of(a: &Args) -> Option<ObjRef> {
+    data(a.this_obj(), |r| match r {
+        Refl::Fiber(f) => Some(f.clone()),
+        _ => None,
+    })
+}
+fn fb_construct(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    if let Some(f) = a.obj(0) {
+        set_data(&o, Refl::Fiber(f));
+    }
+    Ok(Value::Null)
+}
+fn fb_fiber(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(fiber_of(a).map(Value::Object).unwrap_or_default())
+}
+const FIBER_NO_INFO: &str =
+    "Cannot fetch information from a fiber that has not been started or is terminated";
+/// Where the fiber stands: its Fiber::suspend() call, or the caller when
+/// it is the running fiber.
+fn fiber_location(vm: &mut Vm, a: &Args) -> R<(PhpStr, u32)> {
+    let Some(f) = fiber_of(a) else {
+        return vm.throw("Error", FIBER_NO_INFO);
+    };
+    use crate::builtins::fiber::FiberStatus;
+    match vm.fiber_info(&f).map(|i| i.0) {
+        Some(FiberStatus::Suspended) => match vm.fiber_executing(&f) {
+            Some(at) => Ok(at),
+            None => vm.throw("Error", FIBER_NO_INFO),
+        },
+        Some(FiberStatus::Running) => Ok((vm.cur_file(), vm.cur_line())),
+        _ => vm.throw("Error", FIBER_NO_INFO),
+    }
+}
+fn fb_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Str(fiber_location(vm, a)?.0))
+}
+fn fb_line(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Int(fiber_location(vm, a)?.1 as i64))
+}
+fn fb_callable(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let Some(f) = fiber_of(a) else {
+        return Ok(Value::Null);
+    };
+    match vm.fiber_info(&f) {
+        Some((crate::builtins::fiber::FiberStatus::Terminated, _)) | None => vm.throw(
+            "Error",
+            "Cannot fetch the callable from a fiber that has terminated",
+        ),
+        Some((_, c)) => Ok(c),
+    }
+}
+fn fb_trace(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let Some(f) = fiber_of(a) else {
+        return vm.throw("Error", FIBER_NO_INFO);
+    };
+    let opts = a.int_or(0, 1);
+    match vm.fiber_trace(&f, opts) {
+        Some(t) => Ok(Value::Array(t)),
+        None => vm.throw("Error", FIBER_NO_INFO),
+    }
 }
 
 #[allow(dead_code)]
