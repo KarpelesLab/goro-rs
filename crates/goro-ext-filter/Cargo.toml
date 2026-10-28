@@ -6,3 +6,6 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+goro-runtime = { path = "../goro-runtime" }
+goro-regex = { path = "../goro-regex" }
+goro-ext-standard = { path = "../goro-ext-standard" }

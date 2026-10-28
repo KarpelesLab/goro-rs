@@ -110,3 +110,14 @@ bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
   pattern tried (~3.6k compressed outputs, ~3.6k behaviour cases recorded
   from PHP 8.5); compression at 1.0-1.3x and decompression at 1.3-1.5x
   PHP's throughput.
+- `goro-ext-filter`: ext/filter on runtime values: every filter of
+  `filter_list()` (the int, float, bool, regexp, domain, URL, e-mail, IP
+  and MAC validators with all their flags and options, the sanitizers,
+  FILTER_CALLBACK through a host hook), `filter_var`/`filter_var_array`/
+  `filter_input`/`filter_input_array`/`filter_has_var` with PHP 8.5's
+  FILTER_THROW_ON_FAILURE, input sources as a host trait, and
+  `filter.default` for the SAPI. Checked against a 224k-line PHP 8.5
+  fixture (~320k cases: every byte at every position of sample values, the
+  IP range boundaries, every Unicode letter and number for
+  FILTER_FLAG_EMAIL_UNICODE); common validators take 7-80 ns, 1.2-5.7x
+  faster than PHP 8.5's filter_var() (`examples/filter_bench.rs`).
