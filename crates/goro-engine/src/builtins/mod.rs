@@ -13,6 +13,7 @@ pub mod exec;
 pub mod fiber;
 pub mod file;
 pub mod filter;
+pub mod gd;
 pub mod gmp;
 pub mod hash;
 pub mod highlight;
@@ -104,6 +105,7 @@ pub fn modules() -> Vec<&'static Module> {
         &xmlreader::MODULE,
         &simplexml::MODULE,
         &openssl::MODULE,
+        &gd::MODULE,
     ];
     v.extend_from_slice(intl::MODULES);
     v
