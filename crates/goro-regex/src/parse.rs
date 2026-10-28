@@ -441,7 +441,15 @@ impl<'a> Parser<'a> {
         max: Option<u32>,
         start: usize,
     ) -> PResult<()> {
-        // A + or ? directly after the quantifier makes it possessive or lazy.
+        let qend = self.i - 1;
+        let _ = start;
+        if !br.repeatable || br.items.is_empty() {
+            return self.err(E::QuantifierInvalid, qend);
+        }
+        // A + or ? after the quantifier makes it possessive or lazy;
+        // ignorable items in between are skipped (observed on PHP 8.5:
+        // /a+ ?/x and /a+(?#c)?/ are lazy).
+        self.skip_ignorable();
         let mut greed = Greed::Greedy;
         match self.peek() {
             Some(b'+') => {
@@ -460,11 +468,6 @@ impl<'a> Parser<'a> {
                 Greed::Lazy => Greed::Greedy,
                 g => g,
             };
-        }
-        let qend = self.i - 1;
-        let _ = start;
-        if !br.repeatable || br.items.is_empty() {
-            return self.err(E::QuantifierInvalid, qend);
         }
         let node = br.items.pop().unwrap();
         br.repeatable = false;
@@ -500,6 +503,30 @@ impl<'a> Parser<'a> {
             greed,
         });
         Ok(())
+    }
+
+    /// Skips items that do not separate a quantifier from its + or ?
+    /// suffix: white space and #-comments in extended mode, (?#...)
+    /// comments and empty \Q\E pairs.
+    fn skip_ignorable(&mut self) {
+        loop {
+            let before = self.i;
+            self.skip_extended();
+            if self.starts_with(b"(?#")
+                && let Some(k) = self.p[self.i..].iter().position(|&b| b == b')')
+            {
+                self.i += k + 1;
+            }
+            while self.starts_with(b"\\Q\\E") {
+                self.i += 4;
+            }
+            if self.starts_with(b"\\E") {
+                self.i += 2;
+            }
+            if self.i == before {
+                break;
+            }
+        }
     }
 
     fn push_item(&self, br: &mut Branch, n: Node, repeatable: bool) {
@@ -728,8 +755,9 @@ impl<'a> Parser<'a> {
                 self.i += 1;
                 lit((x.to_ascii_uppercase() ^ 0x40) as u32)
             }
-            b'N' if self.peek() == Some(b'{') => {
-                // \N{U+hhh} (UTF only); \N{name} is not supported.
+            b'N' if self.peek() == Some(b'{') && !self.brace_quantifier_at(self.i) => {
+                // \N{U+hhh} (UTF only); \N{name} is not supported. \N
+                // followed by a quantifier is \N repeated.
                 if !self.p[self.i..].starts_with(b"{U+") {
                     return self.err(E::UnsupportedEscapeSequence, self.i);
                 }
@@ -781,6 +809,15 @@ impl<'a> Parser<'a> {
             b'k' => self.escape_k(bs),
             _ => self.err(E::UnknownEscape, after - 1),
         }
+    }
+
+    /// Whether a `{` at `at` starts a quantifier.
+    fn brace_quantifier_at(&mut self, at: usize) -> bool {
+        let save = self.i;
+        self.i = at;
+        let r = self.try_brace_quantifier();
+        self.i = save;
+        !matches!(r, Ok(None))
     }
 
     fn word_ucp(&self) -> bool {
@@ -949,7 +986,10 @@ impl<'a> Parser<'a> {
                 if n > MAX_QUANT as u64 {
                     return self.err(E::SubpatternNumberTooBig, self.i);
                 }
-                Ok(GroupRef::num(n as u32, end_off))
+                Ok(GroupRef::num(
+                    n as u32,
+                    if close == b'}' { self.i } else { end_off },
+                ))
             }
             -1 => {
                 if n == 0 {
@@ -2481,7 +2521,10 @@ impl<'a> Parser<'a> {
                     (self.ncap as u64 + n).min(MAX_QUANT as u64 + 1) as u32
                 }
             };
-            return Ok(Condition::GroupSet(GroupRef::num(g, cond_open)));
+            return Ok(Condition::GroupSet(GroupRef::num(
+                g,
+                close.saturating_sub(2).max(cond_open),
+            )));
         }
         if c == b'<' || c == b'\'' {
             let close = if c == b'<' { b'>' } else { b'\'' };

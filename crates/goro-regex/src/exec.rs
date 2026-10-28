@@ -30,11 +30,22 @@ const K_LOOK: u32 = 8;
 const K_BEHIND: u32 = 9;
 const K_MARK: u32 = 10;
 const K_MARK_UNDO: u32 = 11;
+/// A (*MARK) inside a completed atomic group or assertion: still a frame
+/// and an undo record, no longer visible to (*SKIP:NAME).
+const K_MARK_HID: u32 = 20;
 const K_VERB: u32 = 12;
 const K_CALL_PUSH: u32 = 13;
 const K_CALL_POP: u32 = 14;
 const K_SR: u32 = 15;
 const K_SCAN: u32 = 16;
+/// A branch alternative: not a frame while pending; trying it counts as
+/// one (PCRE2 tries each branch of a group with a new backtracking frame).
+const K_ALT_BR: u32 = 17;
+/// A branch alternative of a non-capturing group (not counted).
+const K_ALT_NC: u32 = 18;
+/// A lazy quantifier's "one more" alternative: a frame while pending, and
+/// trying it counts again.
+const K_ALT_LAZY: u32 = 19;
 
 // Verb codes in K_VERB.a
 const V_COMMIT: u32 = 0;
@@ -47,7 +58,7 @@ const V_THEN: u32 = 4;
 fn is_undo(kind: u32) -> bool {
     matches!(
         kind,
-        K_SLOT | K_MARK | K_MARK_UNDO | K_CALL_PUSH | K_CALL_POP
+        K_SLOT | K_MARK | K_MARK_UNDO | K_MARK_HID | K_CALL_PUSH | K_CALL_POP
     )
 }
 
@@ -56,7 +67,7 @@ fn is_frame(kind: u32) -> bool {
     matches!(
         kind,
         K_ALT
-            | K_ALT_TAG
+            | K_ALT_LAZY
             | K_REP_GREEDY
             | K_REP_LAZY
             | K_FRAME
@@ -210,7 +221,7 @@ impl<'a> Vm<'a> {
         if self.count > self.limits.match_limit as u64 {
             return Err(MatchError::MatchLimit);
         }
-        if self.frames >= self.limits.depth_limit {
+        if self.frames > self.limits.depth_limit {
             return Err(MatchError::DepthLimit);
         }
         sc.bt.push(Bt { kind, a, b, c });
@@ -705,7 +716,7 @@ impl<'a> Vm<'a> {
                 let mut e = e;
                 if e.kind == K_MARK {
                     // No longer visible to (*SKIP:NAME).
-                    e.kind = K_MARK_UNDO;
+                    e.kind = K_MARK_HID;
                 }
                 sc.bt[w] = e;
                 w += 1;
@@ -729,10 +740,15 @@ impl<'a> Vm<'a> {
     fn apply_undo(&mut self, sc: &mut Scratch, e: Bt) {
         match e.kind {
             K_SLOT => sc.slots[e.a as usize] = e.b,
-            K_MARK | K_MARK_UNDO => self.mark = e.b,
+            K_MARK | K_MARK_HID => {
+                self.mark = e.b;
+                self.frames = self.frames.saturating_sub(1);
+            }
+            K_MARK_UNDO => self.mark = e.b,
             K_CALL_PUSH => {
                 let f = sc.calls.pop().unwrap();
                 sc.arena.truncate(f.arena_off);
+                self.frames = self.frames.saturating_sub(1);
             }
             K_CALL_POP => {
                 let f = sc.popped.pop().unwrap();
@@ -825,8 +841,20 @@ impl<'a> Vm<'a> {
             };
             match e.kind {
                 K_SLOT => sc.slots[e.a as usize] = e.b,
-                K_ALT | K_ALT_TAG => {
+                K_ALT => {
                     self.frames -= 1;
+                    return Ok(Step::Resume(e.a, e.b));
+                }
+                K_ALT_NC => return Ok(Step::Resume(e.a, e.b)),
+                K_ALT_LAZY => {
+                    self.frames -= 1;
+                    self.count += 1;
+                    if self.count > self.limits.match_limit as u64 {
+                        return Err(MatchError::MatchLimit);
+                    }
+                    return Ok(Step::Resume(e.a, e.b));
+                }
+                K_ALT_BR | K_ALT_TAG => {
                     self.count += 1;
                     if self.count > self.limits.match_limit as u64 {
                         return Err(MatchError::MatchLimit);
@@ -914,7 +942,11 @@ impl<'a> Vm<'a> {
                     }
                     return Ok(Step::Resume(e.a + 1, p));
                 }
-                K_MARK | K_MARK_UNDO => self.mark = e.b,
+                K_MARK | K_MARK_HID => {
+                    self.mark = e.b;
+                    self.frames -= 1;
+                }
+                K_MARK_UNDO => self.mark = e.b,
                 K_VERB => {
                     self.frames -= 1;
                     let act = match e.a {
@@ -943,6 +975,7 @@ impl<'a> Vm<'a> {
                 K_CALL_PUSH => {
                     let f = sc.calls.pop().unwrap();
                     sc.arena.truncate(f.arena_off);
+                    self.frames = self.frames.saturating_sub(1);
                 }
                 K_CALL_POP => {
                     let f = sc.popped.pop().unwrap();
@@ -997,7 +1030,6 @@ impl<'a> Vm<'a> {
             };
             match e.kind {
                 K_ALT_TAG => {
-                    self.frames -= 1;
                     if let VerbAct::Then(t) = act
                         && t != 0
                         && e.c == t
@@ -1018,6 +1050,7 @@ impl<'a> Vm<'a> {
                 K_CALL_PUSH => {
                     let f = sc.calls.pop().unwrap();
                     sc.arena.truncate(f.arena_off);
+                    self.frames = self.frames.saturating_sub(1);
                     // The subroutine call fails; backtrack at the outer level.
                     return self.backtrack(sc);
                 }
@@ -1057,8 +1090,17 @@ impl<'a> Vm<'a> {
         let mut pc: Pc = 0;
         let mut pos = start;
         self.attempt_start = start;
-        self.count = 1;
-        self.frames = 1;
+        // pcre2api: a counter "incremented each time round its main
+        // matching loop"; the minimum limits observed on PHP 8.5 for a
+        // plain literal match are 2 for both.
+        self.count = 2;
+        self.frames = 2;
+        if self.count > self.limits.match_limit as u64 {
+            return Err(MatchError::MatchLimit);
+        }
+        if self.frames > self.limits.depth_limit {
+            return Err(MatchError::DepthLimit);
+        }
         loop {
             match &insts[pc as usize] {
                 Inst::One(item) => match self.match_item(item, pos) {
@@ -1157,12 +1199,16 @@ impl<'a> Vm<'a> {
                     self.push_frame(sc, K_ALT, *alt, pos, 0)?;
                     pc += 1;
                 }
+                Inst::Branch { alt, count } => {
+                    self.push(sc, if *count { K_ALT_BR } else { K_ALT_NC }, *alt, pos, 0);
+                    pc += 1;
+                }
                 Inst::SplitLazy { to } => {
                     self.push_frame(sc, K_ALT, pc + 1, pos, 0)?;
                     pc = *to;
                 }
                 Inst::SplitTag { alt, tag } => {
-                    self.push_frame(sc, K_ALT_TAG, *alt, pos, *tag as usize)?;
+                    self.push(sc, K_ALT_TAG, *alt, pos, *tag as usize);
                     pc += 1;
                 }
                 Inst::ThenScope { tag } => {
@@ -1171,6 +1217,7 @@ impl<'a> Vm<'a> {
                 }
                 Inst::Jmp(t) => pc = *t,
                 Inst::CapOpen(g) => {
+                    self.push_frame(sc, K_FRAME, 0, 0, 0)?;
                     let i = self.open_base + *g as usize;
                     self.set_slot(sc, i, pos);
                     pc += 1;
@@ -1310,8 +1357,12 @@ impl<'a> Vm<'a> {
                         }
                     }
                     self.count += 1;
+                    self.frames += 1;
                     if self.count > self.limits.match_limit as u64 {
                         return Err(MatchError::MatchLimit);
+                    }
+                    if self.frames > self.limits.depth_limit {
+                        return Err(MatchError::DepthLimit);
                     }
                     let arena_off = sc.arena.len();
                     sc.arena.extend_from_slice(&sc.slots);
@@ -1331,7 +1382,11 @@ impl<'a> Vm<'a> {
                     if sc.calls.len() as u32 >= self.limits.depth_limit {
                         return Err(MatchError::DepthLimit);
                     }
-                    pc = self.prog.group_pc[g as usize];
+                    // Enter the group's body past its CapOpen: the captures
+                    // of a call are restored on return anyway, and PCRE2
+                    // counts no group frame for a recursion.
+                    let t = self.prog.group_pc[g as usize];
+                    pc = if g == 0 { t } else { t + 1 };
                 }
                 Inst::CondRef { groups, no } => {
                     if groups.iter().any(|&g| sc.slots[2 * g as usize] != UNSET) {
@@ -1350,7 +1405,7 @@ impl<'a> Vm<'a> {
                 }
                 Inst::Mark(n) => {
                     let old = self.mark;
-                    self.push(sc, K_MARK, *n, old, pos);
+                    self.push_frame(sc, K_MARK, *n, old, pos)?;
                     self.mark = *n as usize;
                     self.last_mark = self.mark;
                     pc += 1;

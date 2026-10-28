@@ -65,7 +65,7 @@ pub fn compile(mut parsed: Parsed, flags: crate::Flags) -> CResult<Compiled> {
         has_verbs: false,
         no_auto_possess: parsed.no_auto_possess,
     };
-    em.emit(&node, true)?;
+    em.emit(&node, Cx::END)?;
     em.push(Inst::Match);
     let start = if parsed.no_start_opt {
         // Explicit anchors still anchor; the .* rule is a start-up
@@ -525,6 +525,41 @@ struct Emitter {
     no_auto_possess: bool,
 }
 
+/// What follows a node being emitted.
+#[derive(Clone, Copy)]
+struct Cx<'a> {
+    /// Nothing that can fail follows within the pattern (so giving back
+    /// characters cannot help).
+    last: bool,
+    /// The node that follows, when known.
+    follow: Option<&'a Node>,
+}
+
+impl Cx<'_> {
+    const NONE: Cx<'static> = Cx {
+        last: false,
+        follow: None,
+    };
+    const END: Cx<'static> = Cx {
+        last: true,
+        follow: None,
+    };
+}
+
+fn contains_capture(n: &Node) -> bool {
+    let mut found = false;
+    walk(n, &mut |x| {
+        if let Node::Group {
+            kind: GroupKind::Capture(_),
+            ..
+        } = x
+        {
+            found = true;
+        }
+    });
+    found
+}
+
 /// Whether a (*THEN) inside `n` binds to an alternation enclosing `n`.
 fn then_binds_outside(n: &Node) -> bool {
     match n {
@@ -616,6 +651,7 @@ impl Emitter {
     fn patch_split(&mut self, at: usize, target: Pc) {
         match &mut self.insts[at] {
             Inst::Split { alt } => *alt = target,
+            Inst::Branch { alt, .. } => *alt = target,
             Inst::SplitTag { alt, .. } => *alt = target,
             Inst::SplitLazy { to } => *to = target,
             Inst::Jmp(t) => *t = target,
@@ -648,16 +684,15 @@ impl Emitter {
         });
     }
 
-    /// `last` tells whether nothing follows this node in the whole pattern
-    /// (used for auto-possessification).
-    fn emit(&mut self, n: &Node, last: bool) -> CResult<()> {
+    /// `cx` describes what follows the node (for auto-possessification).
+    fn emit<'a>(&mut self, n: &'a Node, cx: Cx<'a>) -> CResult<()> {
         match n {
             Node::Empty => {}
             Node::Char { .. } => {
                 let item = item_of(n, self.utf, self.ucp).unwrap();
                 self.push(Inst::One(item));
             }
-            Node::Seq(v) => self.emit_seq(v, last)?,
+            Node::Seq(v) => self.emit_seq(v, cx)?,
             Node::Dot { .. } | Node::NotNewline | Node::CodeUnit | Node::Set(_) => {
                 let item = item_of(n, self.utf, self.ucp).unwrap();
                 self.push(Inst::One(item));
@@ -674,14 +709,14 @@ impl Emitter {
             Node::Keep => {
                 self.push(Inst::Keep);
             }
-            Node::Alt(v) => self.emit_alt(v, last)?,
-            Node::Group { kind, body, .. } => self.emit_group(*kind, body, last)?,
+            Node::Alt(v) => self.emit_alt(v, cx, true)?,
+            Node::Group { kind, body, .. } => self.emit_group(*kind, body, cx)?,
             Node::Repeat {
                 node,
                 min,
                 max,
                 greed,
-            } => self.emit_repeat(node, *min, *max, *greed, last, None)?,
+            } => self.emit_repeat(node, *min, *max, *greed, cx)?,
             Node::Backref {
                 target,
                 caseless,
@@ -696,7 +731,7 @@ impl Emitter {
             Node::Call { target } => {
                 self.push(Inst::Call { group: target.num });
             }
-            Node::Cond { cond, yes, no, .. } => self.emit_cond(cond, yes, no.as_deref(), last)?,
+            Node::Cond { cond, yes, no, .. } => self.emit_cond(cond, yes, no.as_deref(), cx)?,
             Node::Verb { verb, name } => self.emit_verb(verb, name.as_ref()),
             Node::ScanSubstring { groups, body } => {
                 let gs: Vec<u32> = groups
@@ -708,7 +743,7 @@ impl Emitter {
                     end: 0,
                 });
                 let saved = std::mem::take(&mut self.open_caps);
-                self.emit(body, false)?;
+                self.emit(body, Cx::NONE)?;
                 self.open_caps = saved;
                 let end = self.pc();
                 self.push(Inst::ScanEnd);
@@ -718,7 +753,7 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_seq(&mut self, v: &[Node], last: bool) -> CResult<()> {
+    fn emit_seq<'a>(&mut self, v: &'a [Node], cx: Cx<'a>) -> CResult<()> {
         let mut i = 0;
         while i < v.len() {
             // Merge runs of literal characters.
@@ -760,25 +795,24 @@ impl Emitter {
                     continue;
                 }
             }
-            let is_last = last && i + 1 == v.len();
-            if let Node::Repeat {
-                node,
-                min,
-                max,
-                greed,
-            } = &v[i]
-            {
-                let next = v.get(i + 1);
-                self.emit_repeat(node, *min, *max, *greed, is_last, next)?;
+            let icx = if i + 1 == v.len() {
+                cx
             } else {
-                self.emit(&v[i], is_last)?;
-            }
+                Cx {
+                    last: false,
+                    follow: Some(&v[i + 1]),
+                }
+            };
+            self.emit(&v[i], icx)?;
             i += 1;
         }
         Ok(())
     }
 
-    fn emit_alt(&mut self, v: &[Node], last: bool) -> CResult<()> {
+    /// `count_branches`: whether trying a later branch counts towards the
+    /// match limit (observed on PHP 8.5: it does at the top level and in
+    /// capture groups, not in non-capturing groups).
+    fn emit_alt<'a>(&mut self, v: &'a [Node], cx: Cx<'a>, count_branches: bool) -> CResult<()> {
         let tag = if v.len() > 1 && v.iter().any(then_binds_outside) {
             let t = self.next_tag;
             self.next_tag += 1;
@@ -798,12 +832,15 @@ impl Emitter {
             let split = if k + 1 < v.len() {
                 Some(self.push(match tag {
                     Some(t) => Inst::SplitTag { alt: 0, tag: t },
-                    None => Inst::Split { alt: 0 },
+                    None => Inst::Branch {
+                        alt: 0,
+                        count: count_branches,
+                    },
                 }))
             } else {
                 None
             };
-            self.emit(b, last)?;
+            self.emit(b, cx)?;
             if k + 1 < v.len() {
                 jumps.push(self.push(Inst::Jmp(0)));
             }
@@ -822,9 +859,19 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_group(&mut self, kind: GroupKind, body: &Node, last: bool) -> CResult<()> {
+    fn emit_group<'a>(&mut self, kind: GroupKind, body: &'a Node, cx: Cx<'a>) -> CResult<()> {
         match kind {
-            GroupKind::NonCapture => self.emit(body, last)?,
+            GroupKind::NonCapture => {
+                // A group with alternatives is a bracket of its own (one
+                // frame); single-branch groups are not.
+                match body {
+                    Node::Alt(v) if v.len() > 1 => {
+                        self.push(Inst::GroupFrame);
+                        self.emit_alt(v, cx, false)?
+                    }
+                    _ => self.emit(body, cx)?,
+                }
+            }
             GroupKind::Capture(g) => {
                 let pc = self.pc();
                 if self.group_pc[g as usize] == 0 {
@@ -832,13 +879,14 @@ impl Emitter {
                 }
                 self.push(Inst::CapOpen(g));
                 self.open_caps.push(g);
-                self.emit(body, false)?;
+                self.emit(body, cx)?;
                 self.open_caps.pop();
                 self.push(Inst::CapClose(g));
             }
             GroupKind::Atomic => {
                 self.push(Inst::AtomicStart);
-                self.emit(body, false)?;
+                // Nothing can backtrack into a completed atomic group.
+                self.emit(body, Cx::END)?;
                 self.push(Inst::AtomicEnd);
             }
             GroupKind::LookAhead { negated, atomic } => {
@@ -863,7 +911,7 @@ impl Emitter {
             }
             GroupKind::ScriptRun { .. } => {
                 self.push(Inst::ScriptRunStart);
-                self.emit(body, false)?;
+                self.emit(body, Cx::NONE)?;
                 self.push(Inst::ScriptRunEnd);
             }
         }
@@ -875,6 +923,11 @@ impl Emitter {
         let start = self.push(Inst::LookStart { kind, end: 0 });
         let saved_caps = std::mem::take(&mut self.open_caps);
         let saved_tags = std::mem::take(&mut self.then_tags);
+        let bcx = if kind == LookKind::NonAtomic {
+            Cx::NONE
+        } else {
+            Cx::END
+        };
         if behind {
             let branches: Vec<&Node> = match body {
                 Node::Alt(v) => v.iter().collect(),
@@ -894,14 +947,17 @@ impl Emitter {
                 let split = if k + 1 < branches.len() {
                     Some(self.push(match tag {
                         Some(t) => Inst::SplitTag { alt: 0, tag: t },
-                        None => Inst::Split { alt: 0 },
+                        None => Inst::Branch {
+                            alt: 0,
+                            count: true,
+                        },
                     }))
                 } else {
                     None
                 };
                 let (min, max) = branch_len(b);
                 self.push(Inst::Behind { min, max });
-                self.emit(b, false)?;
+                self.emit(b, bcx)?;
                 self.push(Inst::BehindCheck);
                 if k + 1 < branches.len() {
                     jumps.push(self.push(Inst::Jmp(0)));
@@ -917,7 +973,7 @@ impl Emitter {
             }
             self.then_tags.pop();
         } else {
-            self.emit(body, false)?;
+            self.emit(body, bcx)?;
         }
         self.open_caps = saved_caps;
         self.then_tags = saved_tags;
@@ -926,12 +982,12 @@ impl Emitter {
         Ok(end)
     }
 
-    fn emit_cond(
+    fn emit_cond<'a>(
         &mut self,
         cond: &Condition,
-        yes: &Node,
-        no: Option<&Node>,
-        last: bool,
+        yes: &'a Node,
+        no: Option<&'a Node>,
+        cx: Cx<'a>,
     ) -> CResult<()> {
         // The condition's test jumps to `no_label` when false.
         let test_at = match cond {
@@ -958,11 +1014,11 @@ impl Emitter {
                 Some(self.emit_look(LookKind::Cond { negated }, body, behind)?)
             }
         };
-        self.emit(yes, last)?;
+        self.emit(yes, cx)?;
         let jmp_end = self.push(Inst::Jmp(0));
         let no_label = self.pc();
         if let Some(n) = no {
-            self.emit(n, last)?;
+            self.emit(n, cx)?;
         }
         let end = self.pc();
         self.patch_split(jmp_end, end);
@@ -1022,18 +1078,28 @@ impl Emitter {
         }
     }
 
-    fn emit_repeat(
+    fn emit_repeat<'a>(
         &mut self,
-        node: &Node,
+        node: &'a Node,
         min: u32,
         max: Option<u32>,
         greed: Greed,
-        last: bool,
-        next: Option<&Node>,
+        cx: Cx<'a>,
     ) -> CResult<()> {
+        let (last, next) = (cx.last, cx.follow);
         if let Some(item) = item_of(node, self.utf, self.ucp) {
             let mut greed = greed;
             if greed == Greed::Greedy && !self.no_auto_possess && can_possessify(&item, next, last)
+            {
+                greed = Greed::Possessive;
+            }
+            // A lazy repeat followed by something it cannot match is
+            // possessified too (observed on PHP 8.5: /[a-z]+?1/ needs no
+            // backtracking frames).
+            if greed == Greed::Lazy
+                && !self.no_auto_possess
+                && next.is_some()
+                && can_possessify(&item, next, false)
             {
                 greed = Greed::Possessive;
             }
@@ -1051,13 +1117,9 @@ impl Emitter {
         }
         if max == Some(0) {
             // {0}: groups are kept (callable) but skipped.
-            if let Node::Group {
-                kind: GroupKind::Capture(_),
-                ..
-            } = node
-            {
+            if contains_capture(node) {
                 let j = self.push(Inst::Jmp(0));
-                self.emit(node, false)?;
+                self.emit(node, Cx::NONE)?;
                 let end = self.pc();
                 self.patch_split(j, end);
             }
@@ -1065,7 +1127,7 @@ impl Emitter {
         }
         if greed == Greed::Possessive {
             self.push(Inst::AtomicStart);
-            self.emit_repeat(node, min, max, Greed::Greedy, false, None)?;
+            self.emit_repeat(node, min, max, Greed::Greedy, Cx::NONE)?;
             self.push(Inst::AtomicEnd);
             return Ok(());
         }
@@ -1075,7 +1137,7 @@ impl Emitter {
         let unbounded = max.is_none();
         let fixed = if unbounded && min > 0 { min - 1 } else { min };
         for _ in 0..fixed {
-            self.emit(node, false)?;
+            self.emit(node, Cx::NONE)?;
         }
         if unbounded {
             let slot = self.nloops;
@@ -1089,7 +1151,7 @@ impl Emitter {
                 };
                 let body = self.pc();
                 self.push(Inst::LoopStart { slot });
-                self.emit(node, false)?;
+                self.emit(node, Cx::NONE)?;
                 self.push(Inst::LoopEnd {
                     slot,
                     start: body,
@@ -1105,7 +1167,7 @@ impl Emitter {
             } else {
                 let body = self.pc();
                 self.push(Inst::LoopStart { slot });
-                self.emit(node, false)?;
+                self.emit(node, Cx::NONE)?;
                 self.push(Inst::LoopEnd {
                     slot,
                     start: body,
@@ -1124,7 +1186,7 @@ impl Emitter {
                 self.push(Inst::SplitLazy { to: 0 })
             };
             splits.push(s);
-            self.emit(node, false)?;
+            self.emit(node, Cx::NONE)?;
         }
         let end = self.pc();
         for s in splits {
@@ -1187,6 +1249,18 @@ fn branch_len(n: &Node) -> (u32, u32) {
 fn can_possessify(item: &Item, next: Option<&Node>, last: bool) -> bool {
     match next {
         None => last,
+        // $, \z and \Z can only match at a newline or the end, so an item
+        // that cannot match a newline need not give anything back
+        // (observed on PHP 8.5: /(\w+)$/ uses no backtracking frame; .*$
+        // does).
+        Some(Node::Assert(
+            Assertion::Dollar { .. } | Assertion::EndSubject | Assertion::EndSubjectOrNewline,
+        )) => {
+            !matches!(item, Item::Any | Item::AnyNoNl | Item::CodeUnit)
+                && [0x0a, 0x0b, 0x0c, 0x0d, 0x85, 0x2028, 0x2029]
+                    .iter()
+                    .all(|&c| !item_matches_cp(item, c))
+        }
         Some(n) => {
             let Some(next_first) = node_first_chars(n) else {
                 return false;
@@ -1676,6 +1750,81 @@ fn required_byte(n: &Node, utf: bool) -> Option<(u8, u8)> {
     last_req(n, utf)
 }
 
+/// The code unit every match must start with, looking only through verbs,
+/// \K and groups (PCRE2's "first code unit"; it does not look through
+/// assertions: observed on PHP 8.5, /(\b(*COMMIT)2)/ is tried before the
+/// first "2").
+fn first_unit(n: &Node, utf: bool) -> Option<(u8, u8)> {
+    fn go(n: &Node, utf: bool) -> Result<Option<(u8, u8)>, ()> {
+        // Ok(None): zero-width, look further; Ok(Some): found; Err: none.
+        match n {
+            Node::Empty | Node::Keep => Ok(None),
+            Node::Verb { verb, .. } => match verb {
+                Verb::Fail | Verb::Accept => Err(()),
+                _ => Ok(None),
+            },
+            Node::Char { c, caseless } => {
+                let mut v = Vec::new();
+                if *caseless {
+                    class::case_equivalents(*c, CaseMode::Unicode, &mut v);
+                } else {
+                    v.push(*c);
+                }
+                let mut units: Vec<u8> = v
+                    .iter()
+                    .filter(|&&x| utf || x < 256)
+                    .map(|&x| {
+                        let mut e = Vec::new();
+                        if utf {
+                            utf8::encode(x, &mut e);
+                        } else {
+                            e.push(x as u8);
+                        }
+                        e[0]
+                    })
+                    .collect();
+                units.sort_unstable();
+                units.dedup();
+                match units.len() {
+                    1 => Ok(Some((units[0], units[0]))),
+                    2 if units[0].is_ascii_uppercase() && units[1] == units[0] + 32 => {
+                        Ok(Some((units[0], units[1])))
+                    }
+                    _ => Err(()),
+                }
+            }
+            Node::Seq(v) => {
+                for c in v {
+                    if let Some(u) = go(c, utf)? {
+                        return Ok(Some(u));
+                    }
+                }
+                Ok(None)
+            }
+            Node::Alt(v) => {
+                let mut r = None;
+                for b in v {
+                    let u = go(b, utf)?.ok_or(())?;
+                    match r {
+                        None => r = Some(u),
+                        Some(x) if x == u => {}
+                        _ => return Err(()),
+                    }
+                }
+                Ok(r)
+            }
+            Node::Group {
+                kind: GroupKind::NonCapture | GroupKind::Capture(_) | GroupKind::Atomic,
+                body,
+                ..
+            } => go(body, utf),
+            Node::Repeat { node, min, .. } if *min > 0 => go(node, utf),
+            _ => Err(()),
+        }
+    }
+    go(n, utf).ok().flatten()
+}
+
 fn start_info(n: &Node, parsed: &Parsed, flags: crate::Flags) -> StartInfo {
     let ctx = AnchorCtx::new(n);
     let no_dotstar = parsed.no_dotstar_anchor;
@@ -1710,6 +1859,32 @@ fn start_info(n: &Node, parsed: &Parsed, flags: crate::Flags) -> StartInfo {
     let f = first_of(n, parsed.utf, 0);
     if !f.any && !f.nullable && s.prefix.is_empty() {
         s.first_bytes = Some(Box::new(f.bytes));
+    }
+    // With (*COMMIT) or (*SKIP) the positions skipped by a start-up
+    // optimisation are observable. PCRE2 still skips to a required first
+    // code unit (pcre2pattern: "(*COMMIT)abc" matches "xyzabc") but builds
+    // no start bitmap (observed on PHP 8.5: /(*COMMIT)a{0,2}2|c/ does not
+    // match "A-1AbAb2Bca"), and only the first code unit counts, not a
+    // longer literal prefix.
+    let mut commit_or_skip = false;
+    walk(n, &mut |x| {
+        if let Node::Verb {
+            verb: Verb::Commit | Verb::Skip | Verb::SkipName,
+            ..
+        } = x
+        {
+            commit_or_skip = true;
+        }
+    });
+    if commit_or_skip {
+        s.prefix.clear();
+        s.first_bytes = None;
+        if let Some((a, b)) = first_unit(n, parsed.utf) {
+            let mut fb = [false; 256];
+            fb[a as usize] = true;
+            fb[b as usize] = true;
+            s.first_bytes = Some(Box::new(fb));
+        }
     }
     s.required = required_byte(n, parsed.utf);
     // The required byte is only useful when it is not just the first byte.

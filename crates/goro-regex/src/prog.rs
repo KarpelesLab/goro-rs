@@ -60,9 +60,16 @@ pub enum Inst {
     /// `\X`
     Grapheme,
     Assert(Assertion),
-    /// Push a choice to `alt`, continue with the next instruction.
+    /// Push a choice to `alt`, continue with the next instruction (an
+    /// optional or repeated group: one frame).
     Split {
         alt: Pc,
+    },
+    /// The next branch of an alternation; `count`: trying it counts
+    /// towards the match limit.
+    Branch {
+        alt: Pc,
+        count: bool,
     },
     /// Push a choice to the next instruction, continue at `to` (lazy).
     SplitLazy {

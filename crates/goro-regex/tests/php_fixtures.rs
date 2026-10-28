@@ -63,14 +63,25 @@ fn php85_match_all() {
     // thread's default in debug builds.
     std::thread::Builder::new()
         .stack_size(256 << 20)
-        .spawn(check_match_all)
+        .spawn(|| check(include_str!("fixtures/php85_match_all.txt")))
         .unwrap()
         .join()
         .unwrap();
 }
 
-fn check_match_all() {
-    let data = include_str!("fixtures/php85_match_all.txt");
+/// Random patterns and subjects (tools/regex_fixtures/gen_random.py) run
+/// through php85 in one batch.
+#[test]
+fn php85_random() {
+    std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(|| check(include_str!("fixtures/php85_random.txt")))
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn check(data: &str) {
     let mut fails = Vec::new();
     let mut total = 0;
     for line in data.lines() {
