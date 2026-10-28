@@ -888,6 +888,25 @@ fn phpt_strings() {
     assert!(d.is_empty(), "{d:?}");
 }
 
+/// test ext/iconv/tests/iconv_strpos_error_001.phpt: an ini default is not
+/// length-checked.
+#[test]
+fn phpt_default_charset_not_length_checked() {
+    let x = vec![b'X'; 256];
+    let d = diags_of(|d| {
+        assert_eq!(
+            strpos(b"Hello, world", b"world", -2, CharsetArg::Default(&x), d),
+            Ok(None)
+        );
+    });
+    assert!(
+        matches!(&d[..], [Diag::Warning(m)] if m.starts_with("Wrong encoding, conversion from \"XXXX"))
+    );
+    let d = diags_of(|d| assert_eq!(strlen(b"a", CharsetArg::Given(&x), d), None));
+    assert!(matches!(&d[..], [Diag::Warning(m)] if m.starts_with("Encoding parameter exceeds")));
+    assert!(!check_charset_len(&[b'/'; 64], &mut Vec::new()));
+}
+
 /// Observed on PHP 8.5: the string functions' errors and encodings.
 #[test]
 fn observed_strings() {

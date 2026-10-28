@@ -9,7 +9,7 @@
 use super::charset::Charset;
 use super::convert::{self, ConvertError, ConvertErrorKind};
 use super::names;
-use super::{Diag, IconvError, MAX_CHARSET_LEN};
+use super::{CharsetArg, Diag, IconvError, MAX_CHARSET_LEN};
 
 pub(crate) const MSG_TOO_LONG: &str =
     "Encoding parameter exceeds the maximum allowed length of 64 characters";
@@ -62,11 +62,8 @@ pub fn iconv(from: &[u8], to: &[u8], input: &[u8], diags: &mut Vec<Diag>) -> Opt
 }
 
 /// Resolves the charset of a string function; `None` after a warning.
-fn string_charset(charset: &[u8], diags: &mut Vec<Diag>) -> Option<Charset> {
-    if charset.len() >= MAX_CHARSET_LEN {
-        diags.push(Diag::Warning(MSG_TOO_LONG.into()));
-        return None;
-    }
+fn string_charset(charset: CharsetArg<'_>, diags: &mut Vec<Diag>) -> Option<Charset> {
+    let charset = charset.checked(diags)?;
     match names::parse_charset(charset) {
         Some((cs, _)) => Some(cs),
         None => {
@@ -87,22 +84,24 @@ fn decode(cs: Charset, s: &[u8], diags: &mut Vec<Diag>) -> Option<Vec<u32>> {
 }
 
 /// `iconv_strlen(string $string, ?string $encoding = null): int|false`.
-/// `charset` is the resolved encoding (the wiring layer applies the
-/// `iconv.internal_encoding` / `default_charset` default).
-pub fn strlen(s: &[u8], charset: &[u8], diags: &mut Vec<Diag>) -> Option<usize> {
-    let cs = string_charset(charset, diags)?;
+pub fn strlen<'a>(
+    s: &[u8],
+    charset: impl Into<CharsetArg<'a>>,
+    diags: &mut Vec<Diag>,
+) -> Option<usize> {
+    let cs = string_charset(charset.into(), diags)?;
     Some(decode(cs, s, diags)?.len())
 }
 
 /// `iconv_substr(string $string, int $offset, ?int $length = null, ?string $encoding = null): string|false`.
-pub fn substr(
+pub fn substr<'a>(
     s: &[u8],
     offset: i64,
     length: Option<i64>,
-    charset: &[u8],
+    charset: impl Into<CharsetArg<'a>>,
     diags: &mut Vec<Diag>,
 ) -> Option<Vec<u8>> {
-    let cs = string_charset(charset, diags)?;
+    let cs = string_charset(charset.into(), diags)?;
     let chars = decode(cs, s, diags)?;
     let total = chars.len() as i64;
     let mut start = offset;
@@ -141,14 +140,14 @@ fn find(hay: &[u32], needle: &[u32], from: usize) -> Option<usize> {
 }
 
 /// `iconv_strpos(string $haystack, string $needle, int $offset = 0, ?string $encoding = null): int|false`.
-pub fn strpos(
+pub fn strpos<'a>(
     haystack: &[u8],
     needle: &[u8],
     offset: i64,
-    charset: &[u8],
+    charset: impl Into<CharsetArg<'a>>,
     diags: &mut Vec<Diag>,
 ) -> Result<Option<usize>, IconvError> {
-    let Some(cs) = string_charset(charset, diags) else {
+    let Some(cs) = string_charset(charset.into(), diags) else {
         return Ok(None);
     };
     let Some(hay) = decode(cs, haystack, diags) else {
@@ -175,13 +174,13 @@ pub fn strpos(
 }
 
 /// `iconv_strrpos(string $haystack, string $needle, ?string $encoding = null): int|false`.
-pub fn strrpos(
+pub fn strrpos<'a>(
     haystack: &[u8],
     needle: &[u8],
-    charset: &[u8],
+    charset: impl Into<CharsetArg<'a>>,
     diags: &mut Vec<Diag>,
 ) -> Option<usize> {
-    let cs = string_charset(charset, diags)?;
+    let cs = string_charset(charset.into(), diags)?;
     if needle.is_empty() {
         return None;
     }

@@ -21,8 +21,8 @@
 use super::charset::{Charset, Encoder};
 use super::convert::{self, ConvertErrorKind};
 use super::names::{self, Flags};
-use super::php::{MSG_ILLEGAL, MSG_INCOMPLETE, MSG_TOO_LONG};
-use super::{Diag, MAX_CHARSET_LEN, MIME_DECODE_CONTINUE_ON_ERROR, MIME_DECODE_STRICT};
+use super::php::{MSG_ILLEGAL, MSG_INCOMPLETE};
+use super::{CharsetArg, Diag, MIME_DECODE_CONTINUE_ON_ERROR, MIME_DECODE_STRICT};
 
 /// The encoding scheme of `iconv_mime_encode()`'s preferences.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,15 +33,15 @@ pub enum MimeScheme {
     Q,
 }
 
-/// `iconv_mime_encode()`'s preferences, with PHP's defaults applied by the
-/// caller (scheme "B", charsets `iconv.internal_encoding`, line length 76,
-/// line break "\r\n"; the scheme is "B" unless the preference starts with
-/// "Q" or "q", observed).
+/// `iconv_mime_encode()`'s preferences (PHP manual). The caller applies the
+/// defaults of the scheme (B; Q when the preference starts with "Q" or "q",
+/// observed), line length (76) and line break ("\r\n"); a missing charset
+/// is the `default_charset` argument of [`mime_encode`].
 #[derive(Clone, Debug)]
 pub struct MimeEncodeOptions {
     pub scheme: MimeScheme,
-    pub input_charset: Vec<u8>,
-    pub output_charset: Vec<u8>,
+    pub input_charset: Option<Vec<u8>>,
+    pub output_charset: Option<Vec<u8>>,
     pub line_length: i64,
     pub line_break_chars: Vec<u8>,
 }
@@ -139,22 +139,27 @@ pub fn mime_encode(
     name: &[u8],
     value: &[u8],
     opts: &MimeEncodeOptions,
+    default_charset: &[u8],
     diags: &mut Vec<Diag>,
 ) -> Option<Vec<u8>> {
-    if opts.input_charset.len() >= MAX_CHARSET_LEN || opts.output_charset.len() >= MAX_CHARSET_LEN {
-        diags.push(Diag::Warning(MSG_TOO_LONG.into()));
-        return None;
+    fn arg<'a>(c: &'a Option<Vec<u8>>, default: &'a [u8]) -> CharsetArg<'a> {
+        match c {
+            Some(c) => CharsetArg::Given(c.as_slice()),
+            None => CharsetArg::Default(default),
+        }
     }
+    let in_cs = arg(&opts.input_charset, default_charset);
+    let out_cs = arg(&opts.output_charset, default_charset);
+    let in_name = in_cs.checked(diags)?;
+    let out_name = out_cs.checked(diags)?;
     let (Some((src, _)), Some((dst, flags))) = (
-        names::parse_charset(&opts.input_charset),
-        names::parse_charset(&opts.output_charset),
+        names::parse_charset(in_name),
+        names::parse_charset(out_name),
     ) else {
-        diags.push(super::php::wrong_encoding(
-            &opts.input_charset,
-            &opts.output_charset,
-        ));
+        diags.push(super::php::wrong_encoding(in_name, out_name));
         return None;
     };
+    let out_charset = out_name.to_vec();
     let chars = match convert::decode_all(src, value) {
         Ok(c) => c,
         Err(e) => {
@@ -172,7 +177,7 @@ pub fn mime_encode(
     out.extend_from_slice(name);
     out.extend_from_slice(b": ");
     let mut prefix = b"=?".to_vec();
-    prefix.extend_from_slice(&opts.output_charset);
+    prefix.extend_from_slice(&out_charset);
     prefix.extend_from_slice(match opts.scheme {
         MimeScheme::B => b"?B?",
         MimeScheme::Q => b"?Q?",
@@ -902,13 +907,13 @@ pub(crate) fn b64_decode(d: &[u8]) -> Vec<u8> {
     out
 }
 
-fn output_charset(charset: &[u8], diags: &mut Vec<Diag>) -> Option<(Charset, Flags)> {
-    if charset.len() >= MAX_CHARSET_LEN {
-        diags.push(Diag::Warning(MSG_TOO_LONG.into()));
-        return None;
-    }
+fn output_charset<'a>(
+    charset: CharsetArg<'a>,
+    diags: &mut Vec<Diag>,
+) -> Option<(&'a [u8], Charset, Flags)> {
+    let charset = charset.checked(diags)?;
     match names::parse_charset(charset) {
-        Some(v) => Some(v),
+        Some((cs, flags)) => Some((charset, cs, flags)),
         None => {
             diags.push(wrong_encoding(charset));
             None
@@ -933,8 +938,13 @@ fn decode_field(
 }
 
 /// `iconv_mime_decode(string $string, int $mode = 0, ?string $encoding = null): string|false`.
-pub fn mime_decode(s: &[u8], mode: i64, charset: &[u8], diags: &mut Vec<Diag>) -> Option<Vec<u8>> {
-    let (cs, flags) = output_charset(charset, diags)?;
+pub fn mime_decode<'a>(
+    s: &[u8],
+    mode: i64,
+    charset: impl Into<CharsetArg<'a>>,
+    diags: &mut Vec<Diag>,
+) -> Option<Vec<u8>> {
+    let (charset, cs, flags) = output_charset(charset.into(), diags)?;
     match decode_field(s, 0, mode, charset, cs, flags) {
         Ok((v, _)) => Some(v),
         Err(d) => {
@@ -949,13 +959,13 @@ pub fn mime_decode(s: &[u8], mode: i64, charset: &[u8], diags: &mut Vec<Diag>) -
 /// The headers in first-seen order, each with its values (a header that
 /// appears once has one value; PHP makes the repeated ones an array).
 #[allow(clippy::type_complexity)]
-pub fn mime_decode_headers(
+pub fn mime_decode_headers<'a>(
     s: &[u8],
     mode: i64,
-    charset: &[u8],
+    charset: impl Into<CharsetArg<'a>>,
     diags: &mut Vec<Diag>,
 ) -> Option<Vec<(Vec<u8>, Vec<Vec<u8>>)>> {
-    let (cs, flags) = output_charset(charset, diags)?;
+    let (charset, cs, flags) = output_charset(charset.into(), diags)?;
     let mut headers: Vec<(Vec<u8>, Vec<Vec<u8>>)> = Vec::new();
     let mut i = 0;
     while i < s.len() {

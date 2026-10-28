@@ -45,13 +45,13 @@ fn enc(
 ) -> Result<String, Diag> {
     let opts = MimeEncodeOptions {
         scheme,
-        input_charset: inc.as_bytes().to_vec(),
-        output_charset: outc.as_bytes().to_vec(),
+        input_charset: Some(inc.as_bytes().to_vec()),
+        output_charset: Some(outc.as_bytes().to_vec()),
         line_length: ll,
         line_break_chars: lf.as_bytes().to_vec(),
     };
     let mut d = Vec::new();
-    match mime_encode(name.as_bytes(), value, &opts, &mut d) {
+    match mime_encode(name.as_bytes(), value, &opts, b"ISO-8859-1", &mut d) {
         Some(v) => Ok(String::from_utf8(v).unwrap()),
         None => Err(d.remove(0)),
     }

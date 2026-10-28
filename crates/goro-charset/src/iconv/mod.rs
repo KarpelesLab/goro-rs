@@ -56,6 +56,66 @@ pub const MIME_DECODE_CONTINUE_ON_ERROR: i64 = 2;
 /// Longest charset argument PHP accepts, minus one.
 pub const MAX_CHARSET_LEN: usize = 64;
 
+/// The charset argument of a string or MIME function.
+///
+/// PHP limits the arguments a script passes to 63 bytes ("Encoding
+/// parameter exceeds the maximum allowed length of 64 characters"), but not
+/// the ini default (`iconv.internal_encoding`, else `default_charset`) used
+/// when the argument is null (test ext/iconv/tests/iconv_strpos_error_001.phpt).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CharsetArg<'a> {
+    /// Passed by the script.
+    Given(&'a [u8]),
+    /// The ini default, for a null argument.
+    Default(&'a [u8]),
+}
+
+impl<'a> CharsetArg<'a> {
+    /// The charset name.
+    pub fn name(self) -> &'a [u8] {
+        match self {
+            CharsetArg::Given(n) | CharsetArg::Default(n) => n,
+        }
+    }
+
+    /// The name, after the length check of a given argument.
+    pub(crate) fn checked(self, diags: &mut Vec<Diag>) -> Option<&'a [u8]> {
+        match self {
+            CharsetArg::Given(n) if !check_charset_len(n, diags) => None,
+            _ => Some(self.name()),
+        }
+    }
+}
+
+impl<'a> From<&'a [u8]> for CharsetArg<'a> {
+    fn from(n: &'a [u8]) -> Self {
+        CharsetArg::Given(n)
+    }
+}
+
+impl<'a, const N: usize> From<&'a [u8; N]> for CharsetArg<'a> {
+    fn from(n: &'a [u8; N]) -> Self {
+        CharsetArg::Given(n)
+    }
+}
+
+impl<'a> From<&'a Vec<u8>> for CharsetArg<'a> {
+    fn from(n: &'a Vec<u8>) -> Self {
+        CharsetArg::Given(n)
+    }
+}
+
+/// PHP's limit on charset arguments: false (after the warning) when `name`
+/// is 64 bytes or longer. Also for `iconv_set_encoding()` (test
+/// iconv_set_encoding-charset-length-cve-2007-4840.phpt).
+pub fn check_charset_len(name: &[u8], diags: &mut Vec<Diag>) -> bool {
+    if name.len() >= MAX_CHARSET_LEN {
+        diags.push(Diag::Warning(php::MSG_TOO_LONG.into()));
+        return false;
+    }
+    true
+}
+
 /// An error PHP throws from an iconv function.
 ///
 /// The message is the full `getMessage()` text, `func(): ` prefix included.
