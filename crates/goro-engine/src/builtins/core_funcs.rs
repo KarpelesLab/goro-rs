@@ -1879,10 +1879,29 @@ fn get_cfg_var(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if k.as_bytes() == b"cfg_file_path" {
         return Ok(Value::Str(PhpStr::empty()));
     }
-    Ok(match vm.get_ini(&k) {
-        Some(v) => Value::Str(v),
-        None => Value::Bool(false),
-    })
+    if let Some(v) = vm.get_ini(&k) {
+        return Ok(Value::Str(v));
+    }
+    // Array entries (`ary[a] = 1` in the configuration) come back as an
+    // array (test get_cfg_var_array).
+    let mut prefix = k.to_vec();
+    prefix.push(b'[');
+    let mut items: Vec<(PhpStr, PhpStr)> = vm
+        .ini
+        .values
+        .iter()
+        .filter(|(n, _)| n.starts_with(&prefix) && n.ends_with(b"]"))
+        .map(|(n, v)| (PhpStr::new(&n[prefix.len()..n.len() - 1]), v.clone()))
+        .collect();
+    if items.is_empty() {
+        return Ok(Value::Bool(false));
+    }
+    items.sort();
+    let mut out = PhpArray::new();
+    for (sub, v) in items {
+        out.insert(Key::from_php_str(&sub), Value::Str(v));
+    }
+    Ok(Value::Array(out))
 }
 
 fn php_ini_loaded_file(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
