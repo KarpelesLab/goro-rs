@@ -7,6 +7,7 @@ pub mod enums;
 pub mod fiber;
 pub mod file;
 pub mod json;
+pub mod reflection;
 pub mod output;
 pub mod serialize;
 pub mod var;
@@ -24,5 +25,6 @@ pub fn modules() -> Vec<&'static Module> {
         &file::MODULE,
         &serialize::MODULE,
         &json::MODULE,
+        &reflection::MODULE,
     ]
 }

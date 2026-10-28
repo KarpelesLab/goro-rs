@@ -388,6 +388,32 @@ impl Vm {
                 return self.link_err(decl, &msg);
             }
         }
+        // Method order as PHP lists them: the class's own, then inherited,
+        // then from traits, then from interfaces.
+        {
+            let mut order: Vec<PhpStr> = Vec::new();
+            for m in &decl.methods {
+                let l = lower(&m.code.name);
+                if !order.contains(&l) {
+                    order.push(l);
+                }
+            }
+            let methods = cls.methods.borrow();
+            let old = cls.method_order.borrow().clone();
+            let is_iface = |n: &PhpStr| methods.get(n).and_then(|f| f.scope()).is_some_and(|c| c.is_interface());
+            for n in old.iter().filter(|n| !is_iface(n)) {
+                if !order.contains(n) {
+                    order.push(n.clone());
+                }
+            }
+            for n in old.iter() {
+                if !order.contains(n) {
+                    order.push(n.clone());
+                }
+            }
+            drop(methods);
+            *cls.method_order.borrow_mut() = order;
+        }
         self.finish_class(&cls);
         self.register_class(cls.clone());
         // #[\Override] checks.

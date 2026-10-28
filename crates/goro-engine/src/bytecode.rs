@@ -963,6 +963,9 @@ pub struct ParamInfo {
     /// Constructor promotion: property modifiers.
     pub promote: Option<u16>,
     pub attrs: Rc<[AttrInfo]>,
+    /// The default as a constant expression when it is computed by the
+    /// prologue (for Reflection).
+    pub default_ce: Option<ConstExpr>,
 }
 
 /// A compiled attribute: name and argument evaluation code.

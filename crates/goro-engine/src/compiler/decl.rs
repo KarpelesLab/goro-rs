@@ -574,6 +574,11 @@ impl<'a> Compiler<'a> {
                     .into_owned()
             });
             let attrs = self.attributes(p.attrs)?;
+            let default_ce = if matches!(default, ParamDefault::Code) {
+                Some(self.const_expr(p.default.as_ref().unwrap())?)
+            } else {
+                None
+            };
             out.push(ParamInfo {
                 name: PhpStr::intern(p.name.name),
                 by_ref: p.by_ref,
@@ -583,6 +588,7 @@ impl<'a> Compiler<'a> {
                 default_text,
                 promote,
                 attrs,
+                default_ce,
             });
         }
         if spec.params.iter().any(|p| p.variadic) {
@@ -1758,6 +1764,7 @@ impl<'a> Compiler<'a> {
                     default_text: None,
                     promote: None,
                     attrs: Rc::from(Vec::new()),
+                    default_ce: None,
                 }]
             };
             match &spec.body {
