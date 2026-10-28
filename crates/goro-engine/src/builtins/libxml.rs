@@ -391,7 +391,16 @@ pub fn read_resource(vm: &mut Vm, res: &goro_runtime::ResRef) -> Option<Vec<u8>>
 /// Reads a file or stream URL without PHP-level warnings (libxml reports
 /// failures itself). `None` when it can't be opened.
 pub fn read_url_quiet(vm: &mut Vm, path: &[u8]) -> R<Option<Vec<u8>>> {
-    let p = path.strip_prefix(b"file://").unwrap_or(path);
+    // file: URLs are percent-decoded (RFC 8089; test ext/xmlreader 008).
+    let decoded;
+    let p = match path.strip_prefix(b"file://") {
+        Some(rest) if rest.contains(&b'%') => {
+            decoded = percent_decode(rest);
+            &decoded[..]
+        }
+        Some(rest) => rest,
+        None => path,
+    };
     // Plain files directly; other URLs through the stream layer.
     if !p.windows(3).any(|w| w == b"://") && !p.starts_with(b"data:") {
         let fp = vm.fs_path(p);
@@ -414,6 +423,25 @@ pub fn read_url_quiet(vm: &mut Vm, path: &[u8]) -> R<Option<Vec<u8>>> {
         Err(Unwind::Throw(e)) => Err(Unwind::Throw(e)),
         Err(e) => Err(e),
     }
+}
+
+fn percent_decode(s: &[u8]) -> Vec<u8> {
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if s[i] == b'%'
+            && i + 2 < s.len()
+            && let (Some(h), Some(l)) = (hex(s[i + 1]), hex(s[i + 2]))
+        {
+            out.push(h * 16 + l);
+            i += 3;
+            continue;
+        }
+        out.push(s[i]);
+        i += 1;
+    }
+    out
 }
 
 /// Resolves a system ID against a base URL (or the current directory),

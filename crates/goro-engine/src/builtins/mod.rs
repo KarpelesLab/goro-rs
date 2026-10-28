@@ -42,6 +42,7 @@ pub mod userstream;
 pub mod var;
 pub mod weakmap;
 pub mod xml;
+pub mod xmlreader;
 pub mod xmlstore;
 pub mod xmlwriter;
 pub mod zlib;
@@ -90,5 +91,6 @@ pub fn modules() -> Vec<&'static Module> {
         &libxml::MODULE,
         &xml::MODULE,
         &xmlwriter::MODULE,
+        &xmlreader::MODULE,
     ]
 }
