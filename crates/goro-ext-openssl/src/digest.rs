@@ -341,6 +341,7 @@ impl Md {
 }
 
 /// A streaming hasher for any [`Md`].
+#[allow(clippy::large_enum_variant)]
 pub enum Hasher {
     H(purecrypto::hash::Hasher),
     Md5Sha1(purecrypto::hash::Hasher, purecrypto::hash::Hasher),

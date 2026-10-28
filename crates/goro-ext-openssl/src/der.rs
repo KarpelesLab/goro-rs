@@ -160,6 +160,7 @@ impl<'a> Reader<'a> {
         &self.data[self.pos..]
     }
     /// The next element.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Tlv<'a>> {
         let (t, n) = parse_one(&self.data[self.pos..], 0)?;
         self.pos += n;
