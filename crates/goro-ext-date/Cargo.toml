@@ -1,0 +1,8 @@
+[package]
+name = "goro-ext-date"
+description = "PHP date and time: formatting, parsing, time zones, DateTime arithmetic"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
