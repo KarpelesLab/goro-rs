@@ -53,7 +53,7 @@ pub fn convert(input: &[u8], to: Encoding, from: Encoding, sub: &Subst) -> Conve
     buf.clear();
     d.finish(&mut buf);
     e.encode(&buf, &mut out, sub, &mut illegal);
-    e.finish(&mut out);
+    e.finish(&mut out, sub, &mut illegal);
     Converted {
         bytes: out,
         illegal,

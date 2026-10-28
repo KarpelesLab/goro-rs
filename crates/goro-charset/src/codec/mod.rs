@@ -14,7 +14,8 @@ use crate::Encoding;
 // mod cjk_tw;
 // mod html;
 // mod iso2022jp;
-// mod japanese;
+mod japanese;
+mod macjapanese;
 // mod mobile;
 // mod qprint;
 mod single;
@@ -97,7 +98,7 @@ pub trait Encode {
 
     /// Called once at the end, to flush state (pending characters, a final
     /// shift sequence).
-    fn finish(&mut self, _out: &mut Vec<u8>) {}
+    fn finish(&mut self, _out: &mut Vec<u8>, _sub: &Subst, _errors: &mut usize) {}
 
     /// Encodes a run of values, substituting the unrepresentable ones.
     fn encode(&mut self, cps: &[u32], out: &mut Vec<u8>, sub: &Subst, errors: &mut usize) {
@@ -185,6 +186,8 @@ pub fn decoder(enc: Encoding) -> Box<dyn Decode> {
         EightBit => Box::new(single::Latin1Dec),
         Iso8859_1 => Box::new(single::Latin1Dec),
         Base64 | Uuencode | QuotedPrintable => Box::new(single::Latin1Dec),
+        EucJp | EucJpWin | Cp51932 | EucJp2004 => Box::new(japanese::EucJpDec::new(enc)),
+        Sjis | SjisMac | Sjis2004 | Cp932 | SjisWin => Box::new(japanese::SjisDec::new(enc)),
         _ => match single::table(enc) {
             Some(t) => Box::new(single::SingleDec::new(t)),
             None => Box::new(single::AsciiDec),
@@ -207,6 +210,9 @@ pub fn encoder(enc: Encoding) -> Box<dyn Encode> {
         Ucs4Le => Box::new(unicode::Utf32Enc::new(true, false)),
         Ascii | SevenBit => Box::new(single::AsciiEnc),
         EightBit | Iso8859_1 | Base64 | Uuencode | QuotedPrintable => Box::new(single::Latin1Enc),
+        EucJp | EucJpWin | Cp51932 | EucJp2004 => Box::new(japanese::EucJpEnc::new(enc)),
+        SjisMac => Box::new(macjapanese::MacEnc::new()),
+        Sjis | Sjis2004 | Cp932 | SjisWin => Box::new(japanese::SjisEnc::new(enc)),
         _ => match single::table(enc) {
             Some(t) => Box::new(single::SingleEnc::new(t)),
             None => Box::new(single::AsciiEnc),
@@ -239,6 +245,6 @@ pub fn encode_all(cps: &[u32], enc: Encoding, sub: &Subst, out: &mut Vec<u8>) ->
     let mut errors = 0;
     out.reserve(cps.len());
     e.encode(cps, out, sub, &mut errors);
-    e.finish(out);
+    e.finish(out, sub, &mut errors);
     errors
 }

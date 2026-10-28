@@ -171,9 +171,260 @@ def gen_single():
     write("single.rs", body)
 
 
+# ---------------------------------------------------------------------------
+# Japanese. Double-byte tables are indexed by "kuten index": (row-1)*94 +
+# (cell-1), with rows 1..94 for JIS X 0208/0212/0213 planes and rows 1..120
+# for the Shift_JIS-addressable range (lead bytes 0x81..0x9F, 0xE0..0xFC).
+# Reverse tables map a code point to kuten index + 1 (0 = unmapped).
+
+
+def jis_index(code):
+    """JIS code 0x2121.. -> kuten index."""
+    return ((code >> 8) - 0x21) * 94 + ((code & 0xFF) - 0x21)
+
+
+def sjis_index(code):
+    """Shift_JIS double-byte code -> kuten index (rows 1..120)."""
+    lead, trail = code >> 8, code & 0xFF
+    base = (lead - 0x81) * 2 if lead <= 0x9F else (lead - 0xC1) * 2
+    if trail >= 0x9F:
+        return (base + 1) * 94 + (trail - 0x9F)
+    return base * 94 + (trail - 0x40 - (1 if trail >= 0x80 else 0))
+
+
+def index_to_sjis(idx):
+    """Kuten index (rows 1..120) -> (lead, trail) Shift_JIS bytes."""
+    row, cell = divmod(idx, 94)
+    lead = 0x81 + row // 2 if row < 62 else 0xC1 + row // 2
+    if row % 2:
+        trail = cell + 0x9F
+    else:
+        trail = cell + 0x40 + (1 if cell + 0x40 >= 0x7F else 0)
+    return lead, trail
+
+
+def jis0208():
+    m = {}
+    for sj, jis, cp in read_pairs(uc("JIS0208.TXT"), (0, 1, 2)):
+        m[jis_index(jis)] = cp
+    # mbstring decodes JIS 0x2140 as FULLWIDTH REVERSE SOLIDUS, since 0x5C is
+    # the ASCII backslash (test ext/mbstring/tests/sjis_encoding.phpt).
+    m[jis_index(0x2140)] = 0xFF3C
+    return m
+
+
+def jis0212():
+    return {jis_index(jis): cp for jis, cp in read_pairs(uc("JIS0212.TXT"))}
+
+
+def cp932():
+    m = {}
+    for code, cp in read_pairs(uc("CP932.TXT")):
+        if code > 0xFF:
+            m[sjis_index(code)] = cp
+    # The user-defined area F040..F9FC maps to the Private Use Area
+    # U+E000..U+E757, as in Windows (observed on PHP 8.5).
+    for i in range(94 * 20):
+        m[94 * 94 + i] = 0xE000 + i
+    return m
+
+
+def rev_of(fwd, prefer_first=True):
+    r = {}
+    for idx in sorted(fwd):
+        cp = fwd[idx]
+        if cp not in r or not prefer_first:
+            r[cp] = idx + 1
+    return r
+
+
+def parse_seq(s):
+    return [int(x, 16) for x in s.replace("U+", "").replace("0x", "").split("+")]
+
+
+class SeqTable:
+    """Forward values as u32: a code point, or SEQ_FLAG | index into a list of
+    multi-code-point sequences."""
+    SEQ_FLAG = 0x80000000
+
+    def __init__(self):
+        self.seqs = []
+        self.seq_ids = {}
+
+    def value(self, cps):
+        if len(cps) == 1:
+            return cps[0]
+        key = tuple(cps)
+        if key not in self.seq_ids:
+            self.seq_ids[key] = len(self.seqs)
+            self.seqs.append(key)
+        return self.SEQ_FLAG | self.seq_ids[key]
+
+    def emit(self, name):
+        flat = []
+        offs = [0]
+        for s in self.seqs:
+            flat.extend(s)
+            offs.append(len(flat))
+        return fmt_array(name + "_SEQ", "u32", flat) + fmt_array(name + "_SEQ_OFF", "u16", offs)
+
+
+def x0213():
+    """JIS X 0213:2004 planes 1 and 2 (Project X0213's table), kuten indexes
+    0..8835 (plane 1) and 8836.. (plane 2), as lists of code points."""
+    m = {}
+    with open(os.path.join(DATA, "x0213", "jisx0213-2004-std.txt"), encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 2 or not parts[1].startswith("U+"):
+                continue
+            plane, code = parts[0].split("-")
+            idx = jis_index(int(code, 16)) + (94 * 94 if plane == "4" else 0)
+            cps = parse_seq(parts[1])
+            # mbstring uses the fullwidth forms the table notes for the cells
+            # it maps to ASCII (observed on PHP 8.5, EUC-JP-2004/SJIS-2004).
+            fw = re.search(r"Fullwidth: U\+([0-9A-F]+)", line)
+            if fw:
+                cps = [int(fw.group(1), 16)]
+            m[idx] = cps
+    # 1-1-17 and 1-1-79 are FULLWIDTH MACRON and FULLWIDTH YEN SIGN, as in
+    # JIS X 0208 (observed on PHP 8.5).
+    m[jis_index(0x2131)] = [0xFFE3]
+    m[jis_index(0x216F)] = [0xFFE5]
+    return m
+
+
+def sjis_mac():
+    """Apple's JAPANESE.TXT: single bytes and double bytes, as code point
+    lists keyed by byte (single) or kuten index (double)."""
+    single = {}
+    double = {}
+    with open(uc("JAPANESE.TXT"), encoding="latin-1") as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            code, uni = line.split()[:2]
+            code = int(code, 16)
+            cps = parse_seq(uni)
+            if code > 0xFF:
+                double[sjis_index(code)] = cps
+            else:
+                single[code] = cps
+    return single, double
+
+
+def gen_japanese():
+    body = ""
+    j208 = jis0208()
+    j212 = jis0212()
+    c932 = cp932()
+    body += emit_fwd("JIS0208", j208, 94 * 94)
+    body += emit_fwd("JIS0212", j212, 94 * 94)
+    body += emit_fwd("CP932", c932, 120 * 94)
+    body += emit_rev("JIS0208_REV", rev_of(j208), 0xFFFF)
+    body += emit_rev("JIS0212_REV", rev_of(j212), 0xFFFF)
+    # CP932 writes characters it has twice with the IBM extension codes
+    # (rows 115..119) rather than the NEC-selected ones (rows 89..92)
+    # (observed on PHP 8.5, as Windows does); CP51932 has only the latter.
+    def cp932_rank(i):
+        return (1 if 88 * 94 <= i < 92 * 94 else 0, i)
+    c932_rev = {}
+    for i in sorted(c932, key=cp932_rank):
+        c932_rev.setdefault(c932[i], i + 1)
+    body += emit_rev("CP932_REV", c932_rev, 0xFFFF)
+    body += emit_rev("CP51932_REV", rev_of({i: v for i, v in c932.items() if i < 94 * 94}), 0xFFFF)
+
+    # eucJP-win (eucJP-ms): JIS X 0208 plus the NEC row 13 of CP932, the
+    # user-defined rows 85..94 (U+E000..U+E3AB); with 0x8F, JIS X 0212 plus
+    # the CP932 IBM extensions that neither JIS X 0208 nor JIS X 0212 has, in
+    # CP932 order from 0x8FF3F3, and user-defined rows 85..94 (U+E3AC..)
+    # (observed on PHP 8.5).
+    # Rows 1..84 are CP932's (so 0x2141 is U+FF5E, 0x2142 U+2225, ...), and
+    # JIS X 0212 0x2237 and 0x2243 are the fullwidth U+FF5E and U+FFE4.
+    ew = {i: cp for i, cp in c932.items() if i < 84 * 94}
+    for i in range(10 * 94):
+        ew[84 * 94 + i] = 0xE000 + i
+    ew8f = dict(j212)
+    ew8f[jis_index(0x2237)] = 0xFF5E
+    ew8f[jis_index(0x2243)] = 0xFFE4
+    # Characters of the NEC row 13 are repeated in the IBM area.
+    # So is NUMERO SIGN, although JIS X 0212 has it too.
+    have = {cp for i, cp in ew.items() if not 12 * 94 <= i < 13 * 94} | set(ew8f.values())
+    have.discard(0x2116)
+    nxt = jis_index(0x7373)
+    for i in range(114 * 94, 120 * 94):
+        cp = c932.get(i)
+        if cp is None or cp in have:
+            continue
+        ew8f[nxt] = cp
+        nxt += 1
+    assert nxt <= jis_index(0x7521)
+    for i in range(10 * 94):
+        ew8f[84 * 94 + i] = 0xE3AC + i
+    body += emit_fwd("EUCJPWIN", ew, 94 * 94)
+    body += emit_fwd("EUCJPWIN_8F", ew8f, 94 * 94)
+    body += emit_rev("EUCJPWIN_REV", rev_of(ew), 0xFFFF)
+    body += emit_rev("EUCJPWIN_8F_REV", rev_of(ew8f), 0xFFFF)
+    # CP51932: CP932's rows 1..94 (with the NEC row 13 and the NEC-selected
+    # IBM extensions in rows 89..92), no JIS X 0212 (observed on PHP 8.5).
+
+    # JIS X 0213 (EUC-JP-2004, SJIS-2004, ISO-2022-JP-2004).
+    xt = SeqTable()
+    xm = x0213()
+    vals = {i: xt.value(cps) for i, cps in xm.items()}
+    body += emit_fwd32("X0213", vals, 2 * 94 * 94)
+    body += xt.emit("X0213")
+    single_rev = {cps[0]: i + 1 for i, cps in sorted(xm.items(), reverse=True) if len(cps) == 1}
+    body += emit_rev("X0213_REV", single_rev)
+    # Combining sequences: (first, second, kuten index + 1).
+    combos = sorted((cps[0], cps[1], i + 1) for i, cps in xm.items() if len(cps) == 2)
+    body += "pub(crate) static X0213_COMBOS: [(u32, u32, u16); %d] = [\n" % len(combos)
+    for a, b, i in combos:
+        body += "    (0x%X, 0x%X, %d),\n" % (a, b, i)
+    body += "];\n\n"
+
+    # MacJapanese.
+    mt = SeqTable()
+    ms, md = sjis_mac()
+    body += emit_fwd32("SJISMAC", {i: mt.value(c) for i, c in md.items()}, 120 * 94)
+    body += emit_fwd32("SJISMAC_SINGLE", {b: mt.value(c) for b, c in ms.items()}, 256)
+    body += mt.emit("SJISMAC")
+    # Reverse: code point -> byte or Shift_JIS code; sequences separately.
+    def mac_code(i):
+        return (lambda l_t: (l_t[0] << 8) | l_t[1])(index_to_sjis(i))
+    mrev = {}
+    mseqs = []
+    for b, c in sorted(ms.items()):
+        if len(c) == 1:
+            if b >= 0x80 or b == 0x5C:
+                mrev.setdefault(c[0], b)
+        else:
+            mseqs.append((c, b))
+    for i, c in sorted(md.items()):
+        if len(c) == 1:
+            mrev.setdefault(c[0], mac_code(i))
+        else:
+            mseqs.append((c, mac_code(i)))
+    # test ext/mbstring/tests/sjismac_encoding.phpt: U+2015 (HORIZONTAL BAR)
+    # also encodes to 0x815C, OVERLINE and MACRON to 0x8150, FULLWIDTH TILDE
+    # to 0x8160.
+    mrev.update({0x2015: 0x815C, 0x203E: 0x8150, 0xAF: 0x8150, 0xFF5E: 0x8160})
+    body += emit_rev("SJISMAC_REV", mrev, 0xFFFF)
+    mseqs.sort()
+    body += "pub(crate) static SJISMAC_SEQS: [(&[u32], u16); %d] = [\n" % len(mseqs)
+    for c, code in mseqs:
+        body += "    (&[%s], 0x%X),\n" % (", ".join("0x%X" % x for x in c), code)
+    body += "];\n\n"
+    write("jis.rs", body)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     gen_single()
+    gen_japanese()
 
 
 if __name__ == "__main__":
