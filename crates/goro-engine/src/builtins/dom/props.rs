@@ -93,6 +93,8 @@ pub(crate) enum PV {
     Cached(ListKind),
     Impl,
     Missing,
+    /// The XML serialization would not be well-formed.
+    NotWellFormed,
 }
 
 impl From<Option<String>> for PV {
@@ -372,8 +374,14 @@ fn compute(a: &mut goro_xml::Arena, n: NodeId, name: &str, modern: bool) -> PV {
         "nextElementSibling" => PV::Node(next_el(a, n)),
         "children" => PV::Cached(ListKind::ChildElements(n)),
         "classList" => PV::Cached(ListKind::ClassList(n)),
-        "innerHTML" => PV::S(super::modern::inner_html(a, n)),
-        "outerHTML" => PV::S(super::modern::outer_html(a, n)),
+        "innerHTML" => match super::modern::inner_html(a, n) {
+            Ok(s) => PV::S(s),
+            Err(()) => PV::NotWellFormed,
+        },
+        "outerHTML" => match super::modern::outer_html(a, n) {
+            Ok(s) => PV::S(s),
+            Err(()) => PV::NotWellFormed,
+        },
         "substitutedNodeValue" => PV::S(a.text_content(n)),
         // CharacterData, Text, ProcessingInstruction.
         "data" => PV::S(a.char_data(n).unwrap_or("").to_string()),
@@ -580,6 +588,13 @@ pub(crate) fn pv_value(vm: &mut Vm, o: &ObjRef, pv: PV, modern: bool) -> R<Value
             Value::Object(vm.instantiate_raw(&cls)?)
         }
         PV::Missing => Value::Null,
+        PV::NotWellFormed => {
+            return super::throw_dom_msg(
+                vm,
+                "The resulting XML serialization is not well-formed",
+                12,
+            );
+        }
     })
 }
 

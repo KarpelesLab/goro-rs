@@ -49,30 +49,31 @@ fn is_html_el(a: &Arena, n: NodeId, name: &str) -> bool {
 // ----------------------------------------------------- inner/outer HTML
 
 /// Serializes the children of `n` (HTML or XML rules by document).
-pub(crate) fn inner_html(a: &Arena, n: NodeId) -> String {
+pub(crate) fn inner_html(a: &Arena, n: NodeId) -> Result<String, ()> {
     if is_html_doc(a, n) {
         let target = a
             .element(n)
             .and_then(|e| e.template_contents)
             .unwrap_or(n);
-        return goro_xml::html5::serialize::serialize_children(a, target);
+        return Ok(goro_xml::html5::serialize::serialize_children(a, target));
     }
-    let mut out = String::new();
-    for c in a.children(n) {
-        match goro_xml::modern::to_string(a, c, Default::default()) {
-            Ok(s) => out.push_str(&s),
-            Err(_) => {}
-        }
+    goro_xml::modern::children_to_string(a, n, well_formed()).map_err(|_| ())
+}
+
+/// XML serialization requiring well-formedness (DOM Parsing: innerHTML).
+fn well_formed() -> goro_xml::modern::ModernOptions {
+    goro_xml::modern::ModernOptions {
+        require_well_formed: true,
+        ..Default::default()
     }
-    out
 }
 
 /// Serializes `n` itself.
-pub(crate) fn outer_html(a: &Arena, n: NodeId) -> String {
+pub(crate) fn outer_html(a: &Arena, n: NodeId) -> Result<String, ()> {
     if is_html_doc(a, n) {
-        return goro_xml::html5::serialize::serialize_node(a, n);
+        return Ok(goro_xml::html5::serialize::serialize_node(a, n));
     }
-    goro_xml::modern::to_string(a, n, Default::default()).unwrap_or_default()
+    goro_xml::modern::to_string(a, n, well_formed()).map_err(|_| ())
 }
 
 /// Parses `text` as a fragment in the context of `ctx` (HTML fragment
@@ -87,8 +88,11 @@ fn parse_in_context(vm: &mut Vm, ctx: NodeId, text: &str) -> R<NodeId> {
     let r = with_arena(|a| {
         let doc = a.doc_of(ctx);
         let f = a.create(doc, NodeData::Fragment);
-        // In-scope namespaces of the context apply.
-        let holder = a.clone_node(ctx, doc, false);
+        // In-scope namespaces of the context apply, the document's DTD
+        // does not (test modern/xml/Element_innerHTML_writing_errors).
+        let tmp = a.new_document(DocKind::Xml);
+        a.doc_mut(tmp).modern = true;
+        let holder = a.clone_node(ctx, tmp, false);
         let opts = goro_xml::xml::ParseOptions {
             modern: true,
             ..Default::default()
@@ -98,10 +102,12 @@ fn parse_in_context(vm: &mut Vm, ctx: NodeId, text: &str) -> R<NodeId> {
             let kids: Vec<NodeId> = a.children(holder).collect();
             for k in kids {
                 a.detach(k);
+                a.adopt(k, doc);
                 a.raw_append(f, k);
             }
         }
         a.free_subtree(holder);
+        a.free_document_if_unheld(tmp);
         if ok { Ok(f) } else {
             a.free_subtree(f);
             Err(())
@@ -141,11 +147,7 @@ pub(crate) fn set_outer_html(vm: &mut Vm, n: NodeId, text: &str) -> R<()> {
         return Ok(());
     };
     if with_arena(|a| matches!(a.data(parent), NodeData::Document(_))) {
-        return throw_dom_msg(
-            vm,
-            "Cannot set outerHTML on element whose parent is a document",
-            7,
-        );
+        return throw_dom_msg(vm, "Invalid Modification Error", 13);
     }
     let ctx = if with_arena(|a| matches!(a.data(parent), NodeData::Fragment)) {
         // A body element in the HTML namespace as context.

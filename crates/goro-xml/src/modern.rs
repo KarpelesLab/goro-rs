@@ -218,12 +218,9 @@ impl W<'_> {
                     (Some(p), s) if !p.is_empty() => {
                         self.out.push_str(" PUBLIC \"");
                         self.out.push_str(p);
+                        self.out.push_str("\" \"");
+                        self.out.push_str(s.as_deref().unwrap_or(""));
                         self.out.push('"');
-                        if let Some(s) = s.as_ref().filter(|s| !s.is_empty()) {
-                            self.out.push_str(" \"");
-                            self.out.push_str(s);
-                            self.out.push('"');
-                        }
                     }
                     (_, Some(s)) if !s.is_empty() => {
                         self.out.push_str(" SYSTEM \"");
@@ -470,6 +467,47 @@ fn generate_prefix(
         }
         map.add(ns, p.clone());
         return p;
+    }
+}
+
+/// Serializes the children of element `n` in its namespace context
+/// (`Dom\Element::$innerHTML` on XML documents: the element's default
+/// namespace and prefixes are in scope; test ext/dom/tests/modern/xml/
+/// Element_innerOuterHTML_reading.phpt).
+pub fn children_to_string(
+    arena: &Arena,
+    n: NodeId,
+    opts: ModernOptions,
+) -> Result<String, NotWellFormed> {
+    let mut w = W {
+        arena,
+        out: String::new(),
+        opts,
+        err: None,
+    };
+    let mut map = PrefixMap::default();
+    map.add(Some(XML_NS.into()), "xml".into());
+    let mut ctx_ns = None;
+    if let Some(e) = arena.element(n) {
+        ctx_ns = e.name.ns.clone();
+        if let (Some(p), Some(ns)) = (&e.name.prefix, &e.name.ns) {
+            map.add(Some(ns.clone()), p.clone());
+        }
+        for a in arena.attrs(n) {
+            let ad = arena.attr(a).unwrap();
+            if ad.name.ns.as_deref() == Some(XMLNS_NS) && ad.name.prefix.is_some() {
+                let v = arena.attr_value(a);
+                map.add(Some(v.as_str().into()), ad.name.local.clone());
+            }
+        }
+    }
+    let mut index = 1;
+    for c in arena.children(n).collect::<Vec<_>>() {
+        w.node(c, ctx_ns.clone(), &mut map, &mut index, 0, opts.format);
+    }
+    match w.err {
+        Some(e) => Err(e),
+        None => Ok(w.out),
     }
 }
 

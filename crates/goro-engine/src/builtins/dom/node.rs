@@ -690,6 +690,13 @@ fn c14n_run(vm: &mut Vm, a: &Args, first: usize) -> R<Option<String>> {
     let attached = with_arena(|ar| ar.is_connected(n) || ar.parent(n).is_some());
     let is_doc = with_arena(|ar| matches!(ar.data(n), NodeData::Document(_)));
     if !attached && !is_doc {
+        if modern_fn(a) {
+            return super::throw_dom_msg(
+                vm,
+                "Canonicalization can only happen on nodes attached to a document.",
+                11,
+            );
+        }
         return vm.throw("ValueError", "Node must be associated with a document");
     }
     let node_set = match xpath {

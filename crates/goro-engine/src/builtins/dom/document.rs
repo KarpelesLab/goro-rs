@@ -328,7 +328,10 @@ fn create_text_node(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn create_comment(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let d = this_doc(vm, a)?;
-    let t = s8(&a.str(0));
+    let mut t = s8(&a.str(0));
+    if let Some(i) = t.find('\0') {
+        t.truncate(i);
+    }
     let n = with_arena(|ar| ar.create(d, NodeData::Comment(t)));
     wrap_node(vm, n)
 }
@@ -1161,7 +1164,7 @@ fn modern_parse(vm: &mut Vm, a: &Args, input: &[u8], url: String, from_string: b
     if let Some(e) = &enc
         && goro_xml::encoding::lookup(e).is_none()
     {
-        return vm.fthrow(a, "ValueError", "Argument #3 ($overrideEncoding) is not a valid document encoding");
+        return vm.fthrow(a, "ValueError", "Argument #3 ($overrideEncoding) must be a valid document encoding");
     }
     let fname = a.fname();
     let mut opts_flags = flags;
@@ -1172,7 +1175,7 @@ fn modern_parse(vm: &mut Vm, a: &Args, input: &[u8], url: String, from_string: b
         let mut opts = ParseOptions::with_flags(opts_flags);
         opts.url = if from_string { None } else { Some(url.clone()) };
         opts.modern = true;
-        opts.encoding_override = enc;
+        opts.encoding_override = enc.clone();
         let mut loader = PhpLoader::new(vm, &fname);
         let built = xmlstore::with(|s| goro_xml::xml::build(&mut s.arena, input, &opts, Some(&mut loader)));
         loader.finish(vm)?;
@@ -1187,6 +1190,10 @@ fn modern_parse(vm: &mut Vm, a: &Args, input: &[u8], url: String, from_string: b
         built.doc
     };
     with_arena(|ar| ar.doc_mut(d).url = Some(url));
+    if let Some(e) = a.opt_str(2) {
+        let e = s8(&e);
+        with_arena(|ar| ar.doc_mut(d).encoding = Some(e));
+    }
     with_arena(|ar| {
         let dd = ar.doc_mut(d);
         if dd.encoding.is_none() {
@@ -1209,11 +1216,18 @@ fn xml_create_from_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(path) = check_path(vm, a, 0, "path")? else {
         return Ok(Value::Null);
     };
+    if path.to_ascii_lowercase().contains("%00") {
+        return vm.fthrow(a, "ValueError", "Argument #1 ($path) must not contain percent-encoded NUL bytes");
+    }
     let fname = a.fname();
     let Some(bytes) = read_for_load(vm, &fname, &path)? else {
         return vm.throw("Exception", &format!("Cannot open file '{path}'"));
     };
-    let url = file_url(vm, &path);
+    let url = if path.contains("://") {
+        path.clone()
+    } else {
+        format!("file://{}", file_url(vm, &path).replace(' ', "%20"))
+    };
     modern_parse(vm, a, &bytes, url, false)
 }
 
@@ -1643,6 +1657,10 @@ pub(crate) fn set_doc_prop(
         }
         "version" | "xmlVersion" => {
             let e = str_of(vm, &v)?;
+            if modern && !matches!(e.as_deref(), Some("1.0" | "1.1")) {
+                // Test modern/spec/XMLDocument_version.phpt.
+                return vm.throw("ValueError", "Invalid XML version");
+            }
             with_arena(|ar| ar.doc_mut(d).version = e);
         }
         "standalone" | "xmlStandalone" => {
@@ -1660,6 +1678,7 @@ pub(crate) fn set_doc_prop(
         "body" if modern => {
             super::modern::set_body(vm, d, v)?;
         }
+        "textContent" if modern => return readonly(vm, o, name),
         "textContent" | "nodeValue" => {}
         _ => return readonly(vm, o, name),
     }

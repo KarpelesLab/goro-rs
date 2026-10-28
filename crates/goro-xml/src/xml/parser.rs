@@ -853,6 +853,11 @@ impl<'l> Parser<'l> {
             let (n, l) = (o.raw.clone(), o.line);
             return self.fatal(77, format!("Premature end of data in tag {n} line {l}"));
         }
+        if self.buf.is_empty() {
+            // Nothing at all (test ext/dom/tests/modern/xml/
+            // XMLDocument_createFromFile_empty_input.phpt).
+            return self.fatal(4, "Document is empty");
+        }
         self.fatal(4, "Start tag expected, '<' not found")
     }
 

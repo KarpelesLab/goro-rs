@@ -243,6 +243,8 @@ struct Handler {
     allowed: Allowed,
     ns_functions: Vec<(String, String, Value)>,
     modern: bool,
+    /// Node objects callbacks returned.
+    keep: Vec<ObjRef>,
 }
 
 /// What a PHP error inside XPath carries back.
@@ -324,6 +326,8 @@ impl Handler {
             Value::Null => Ok(xpath::Value::String(String::new())),
             Value::Object(o) => {
                 if let Some(n) = node_of(&o) {
+                    // Keep it alive (test modern/xml/return_dom_node_from_xpath).
+                    self.keep.push(o.clone());
                     return Ok(xpath::Value::NodeSet(vec![n]));
                 }
                 let msg = "Only objects that are instances of DOMNode can be converted to an XPath expression".to_string();
@@ -477,6 +481,7 @@ fn run(vm: &mut Vm, a: &Args) -> R<Option<xpath::Value>> {
         allowed,
         ns_functions,
         modern,
+        keep: Vec::new(),
     };
     let has_fns = !matches!(handler.allowed, Allowed::None)
         || !handler.ns_functions.is_empty()
@@ -574,6 +579,9 @@ fn node_list(vm: &mut Vm, v: Vec<NodeId>, modern: bool) -> R<Value> {
 fn evaluate(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let modern = modern_fn(a);
     let Some(v) = run(vm, a)? else {
+        if modern {
+            return vm.throw("Error", "Could not evaluate XPath expression");
+        }
         return Ok(Value::Bool(false));
     };
     Ok(match v {
@@ -587,6 +595,9 @@ fn evaluate(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn query(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let modern = modern_fn(a);
     let Some(v) = run(vm, a)? else {
+        if modern {
+            return vm.throw("Error", "Could not evaluate XPath expression");
+        }
         return Ok(Value::Bool(false));
     };
     match v {
