@@ -373,7 +373,14 @@ class AppendIterator extends IteratorIterator {
         }
     }
     public function valid(): bool { $this->__h_chk(); return $this->__valid; }
-    public function current(): mixed { $this->__h_chk(); return $this->__cur; }
+    /* The current element is the inner iterator's (test bug74519). */
+    public function current(): mixed {
+        $this->__h_chk();
+        if ($this->__valid && $this->__it !== null && $this->__it->valid()) {
+            return $this->__it->current();
+        }
+        return $this->__cur;
+    }
     public function next(): void {
         $this->__h_chk();
         if ($this->__it !== null) {

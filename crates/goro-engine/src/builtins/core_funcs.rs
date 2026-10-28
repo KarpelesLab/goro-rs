@@ -147,22 +147,6 @@ pub static MODULE: Module = Module {
             get_declared_interfaces,
         ),
         ("function get_declared_traits(): array", get_declared_traits),
-        (
-            "function spl_autoload_register(?callable $callback = null, bool $throw = true, bool $prepend = false): bool",
-            spl_autoload_register,
-        ),
-        (
-            "function spl_autoload_unregister(callable $callback): bool",
-            spl_autoload_unregister,
-        ),
-        (
-            "function spl_autoload_functions(): array",
-            spl_autoload_functions,
-        ),
-        (
-            "function spl_autoload_call(string $class): void",
-            spl_autoload_call,
-        ),
         ("function spl_object_id(object $object): int", spl_object_id),
         (
             "function spl_object_hash(object $object): string",
@@ -1275,7 +1259,7 @@ fn class_list_arg(vm: &mut Vm, a: &mut Args, fname: &str) -> R<Option<Rc<Class>>
         other => vm.type_error(&format!(
             "{}(): Argument #1 ($object_or_class) must be of type object|string, {} given",
             fname,
-            other.tname()
+            Vm::type_name_given(other)
         )),
     }
 }
@@ -1366,50 +1350,6 @@ fn get_declared_interfaces(vm: &mut Vm, _a: &mut Args) -> R<Value> {
 }
 fn get_declared_traits(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Array(declared(vm, |c| c.is_trait())))
-}
-
-fn spl_autoload_register(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let f = a.val(0);
-    if f.is_null() {
-        return Ok(Value::Bool(true));
-    }
-    if !vm.is_callable_value(&f, false) {
-        return vm.type_error("spl_autoload_register(): Argument #1 ($callback) must be a valid callback or null, no array or string given");
-    }
-    let prepend = a.bool_or(2, false);
-    // The same callable is registered once.
-    let exists = vm
-        .autoloaders
-        .iter()
-        .any(|x| goro_runtime::compare::strict_eq(x, &f));
-    if !exists {
-        if prepend {
-            vm.autoloaders.insert(0, f);
-        } else {
-            vm.autoloaders.push(f);
-        }
-    }
-    Ok(Value::Bool(true))
-}
-
-fn spl_autoload_unregister(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let f = a.val(0);
-    let before = vm.autoloaders.len();
-    vm.autoloaders
-        .retain(|x| !goro_runtime::compare::strict_eq(x, &f));
-    Ok(Value::Bool(vm.autoloaders.len() != before))
-}
-
-fn spl_autoload_functions(vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Array(PhpArray::from_values(
-        vm.autoloaders.iter().cloned(),
-    )))
-}
-
-fn spl_autoload_call(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let n = a.str(0);
-    vm.find_class(&n, true)?;
-    Ok(Value::Null)
 }
 
 fn spl_object_id(_vm: &mut Vm, a: &mut Args) -> R<Value> {

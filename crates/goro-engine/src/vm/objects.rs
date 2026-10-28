@@ -1315,6 +1315,18 @@ impl Vm {
                         );
                     }
                 }
+                // An unset declared property takes __unset like a missing
+                // one (observed on PHP 8.5; test ext/spl/tests/bug45622).
+                if self.is_unset_mark(&o.obj().slots.borrow()[p.slot as usize])
+                    && let Some(f) = cls.magic.borrow().unset.clone()
+                    && !self.guarded(o, name, 3)
+                {
+                    self.prop_guards.push((o.handle(), name.clone(), 3));
+                    let r =
+                        self.call_func_this(&f, Some(o.clone()), vec![Value::Str(name.clone())]);
+                    self.prop_guards.pop();
+                    return r.map(|_| ());
+                }
                 let mark = self.unset_value();
                 let mut slots = o.obj().slots.borrow_mut();
                 let old = std::mem::replace(&mut slots[p.slot as usize], mark);

@@ -42,10 +42,13 @@ impl Vm {
             return Ok(None);
         }
         self.autoloading.push(lname.clone());
-        let loaders = self.autoloaders.clone();
+        // The live list: an autoloader may register or remove others
+        // (test ext/spl/tests/bug71202).
         let mut result = Ok(None);
-        for l in loaders {
-            if let Err(e) = self.call_value(&l, vec![Value::Str(PhpStr::new(name))]) {
+        let mut i = 0;
+        while let Some(l) = self.autoloaders.get(i).cloned() {
+            i += 1;
+            if let Err(e) = self.call_callee(l, vec![Value::Str(PhpStr::new(name))]) {
                 result = Err(e);
                 break;
             }
