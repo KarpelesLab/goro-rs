@@ -78,6 +78,21 @@ fn decode_text(t: &[u8]) -> Vec<char> {
     out
 }
 
+/// The hhea table's ascender, descender and line gap.
+fn hhea_metrics(d: &[u8]) -> Option<(f64, f64, f64)> {
+    let n = u16::from_be_bytes([*d.get(4)?, *d.get(5)?]) as usize;
+    for i in 0..n {
+        let r = d.get(12 + 16 * i..28 + 16 * i)?;
+        if &r[..4] == b"hhea" {
+            let off = u32::from_be_bytes(r[8..12].try_into().ok()?) as usize;
+            let t = d.get(off..off + 10)?;
+            let g = |k: usize| i16::from_be_bytes([t[k], t[k + 1]]) as f64;
+            return Some((g(4), g(6), g(8)));
+        }
+    }
+    None
+}
+
 /// A segment of a flattened outline, in pixel coordinates (y down).
 type Seg = ((f64, f64), (f64, f64));
 
@@ -244,8 +259,18 @@ pub fn text(im: Option<&mut Image>, req: &TextReq) -> Result<[i32; 8], String> {
     let upem = font.units_per_em().max(1) as f64;
     let ppem = req.size * DPI / 72.0;
     let scale = ppem / upem;
-    let height = (font.ascent() as f64 - font.descent() as f64 + font.line_gap() as f64) * scale;
-    let line_h = (height.round()) * LINESPACE * req.linespacing;
+    // Line height from the hhea metrics (ascender - descender + lineGap).
+    let (asc, desc, gap) = hhea_metrics(req.font).unwrap_or((
+        font.ascent() as f64,
+        font.descent() as f64,
+        font.line_gap() as f64,
+    ));
+    // Pixel metrics: ascender rounded up, descender down, gap rounded
+    // (bug48732: 12pt Tuffy lines are 22 pixels apart).
+    let height = (asc * scale).ceil() + (-desc * scale).ceil() + (gap * scale).round();
+    // Pair kerning from the 'kern' table only.
+    let has_kern = font.kern_header_variant().is_some();
+    let line_h = height * LINESPACE * req.linespacing;
     let chars = decode_text(req.text);
     // Pen positions and glyphs.
     let mut placed: Vec<(f64, f64, Glyph)> = Vec::new();
@@ -264,7 +289,9 @@ pub fn text(im: Option<&mut Image>, req: &TextReq) -> Result<[i32; 8], String> {
             continue;
         }
         let gid = font.glyph_index(c).unwrap_or(0);
-        if let Some(p) = prev {
+        if let Some(p) = prev
+            && has_kern
+        {
             let k = font.lookup_kerning(p, gid) as f64 * scale;
             pen_x += k.round();
         }
