@@ -144,6 +144,31 @@ pub fn set_limit(limit: Option<usize>) {
     LIMIT.store(limit.unwrap_or(usize::MAX), Relaxed);
 }
 
+/// Raises the armed limit by `bytes` while alive: for work whose memory
+/// PHP takes outside its own heap (libargon2, libsodium), which
+/// memory_limit does not count.
+pub struct Allowance(usize);
+
+impl Allowance {
+    pub fn new(bytes: usize) -> Allowance {
+        let l = LIMIT.load(Relaxed);
+        if l == usize::MAX {
+            return Allowance(0);
+        }
+        LIMIT.store(l.saturating_add(bytes), Relaxed);
+        Allowance(bytes)
+    }
+}
+
+impl Drop for Allowance {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            let l = LIMIT.load(Relaxed);
+            LIMIT.store(l.saturating_sub(self.0), Relaxed);
+        }
+    }
+}
+
 /// The armed limit, if any.
 pub fn limit() -> Option<usize> {
     match LIMIT.load(Relaxed) {

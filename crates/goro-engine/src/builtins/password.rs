@@ -164,7 +164,9 @@ fn password_hash(vm: &mut Vm, a: &mut Args) -> R<Value> {
             if !(1..=0xff_ffff).contains(&p) {
                 return vm.throw("ValueError", "Invalid number of threads");
             }
-            // goro-ext-sodium's Argon2 (SIMD kernel) for the hash itself.
+            // goro-ext-sodium's Argon2 (SIMD kernel) for the hash itself;
+            // its memory is outside memory_limit as libargon2's is.
+            let _allow = goro_runtime::mem::Allowance::new((m as usize).saturating_mul(1024));
             match goro_ext_sodium::argon2_password_hash(
                 variant == Variant::Id,
                 &pw,
@@ -183,6 +185,9 @@ fn password_verify(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     let pw = a.bytes(0);
     let hash = a.bytes(1);
     if hash.starts_with(b"$argon2") {
+        // Test ext/sodium/tests/php_password_verify.
+        let m = argon2::decode(hash).map_or(0, |e| e.m as usize);
+        let _allow = goro_runtime::mem::Allowance::new(m.saturating_mul(1024));
         return Ok(Value::Bool(argon2::verify(pw, hash)));
     }
     let c = cr::crypt(pw, hash);

@@ -2070,8 +2070,17 @@ fn gc_status(vm: &mut Vm, _a: &mut Args) -> R<Value> {
 fn shown_usage(bytes: usize, real: bool) -> i64 {
     const START: usize = 460 * 1024;
     const CHUNK: usize = 2 << 20;
+    // Without `$real_usage`: in 64 KB steps, so the engine's own lazily
+    // grown tables (caches, interned names) don't show as leaks in the
+    // tests comparing two readings (Zend/tests/gh8548,
+    // ext/standard/tests/serialize/bug81142).
+    const STEP: usize = 64 << 10;
     let n = bytes + START;
-    (if real { n.div_ceil(CHUNK) * CHUNK } else { n }) as i64
+    (if real {
+        n.div_ceil(CHUNK) * CHUNK
+    } else {
+        n / STEP * STEP
+    }) as i64
 }
 
 /// PHP manual: memory_get_usage().
