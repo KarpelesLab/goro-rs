@@ -184,6 +184,23 @@ fn bits_of(b: &[u8]) -> usize {
     (b.len() - 1) * 8 + (8 - b[0].leading_zeros() as usize)
 }
 
+/// An RSA public key; sizes down to 256 bits are accepted (PHP accepts
+/// the 512-bit keys of its tests; purecrypto's `try_new` floor is 1024).
+fn rsa_pub(n: &[u8], e: &[u8]) -> KResult<BoxedRsaPublicKey> {
+    let nb = uint(n);
+    let eb = uint(e);
+    let bits = nb.bit_len();
+    // Even or tiny exponents are accepted like OpenSSL does (test
+    // bug79145.phpt loads a key with e = 65538).
+    if !(256..=16384).contains(&bits) || !nb.is_odd() || eb.is_zero() {
+        return Err(KeyError::Invalid);
+    }
+    if !eb.lt(&nb) || eb.bit_len() > 256 {
+        return Err(KeyError::Invalid);
+    }
+    Ok(BoxedRsaPublicKey::new(nb, eb))
+}
+
 fn uint(b: &[u8]) -> BoxedUint {
     BoxedUint::from_be_bytes(b)
 }
@@ -281,11 +298,9 @@ impl Curve {
             &uint(if h.is_empty() { &[1] } else { h }),
         )
         .map_err(|_| KeyError::Invalid)?;
-        if let Some(id) = boxed.id()
-            && let Some((_, oid, _)) = CURVES.iter().find(|(_, _, c)| *c == id)
-        {
-            return Ok(Curve::from_id(oid, id));
-        }
+        // Curves given by parameters keep the explicit encoding even when
+        // they equal a named curve (observed on PHP 8.5, test
+        // ecc_sm2.phpt: a 475-byte public key PEM).
         // SpecifiedECDomain (SEC 1 §C.2), version 1, prime field.
         let flen = p.len().max(strip(p).len());
         let pad = |v: &[u8]| {
@@ -472,8 +487,7 @@ impl Key {
     pub fn rsa_public(n: &[u8], e: &[u8]) -> KResult<Key> {
         let n = strip(n);
         let e = strip(e);
-        let public =
-            BoxedRsaPublicKey::try_new(uint(&n), uint(&e)).map_err(|_| KeyError::Invalid)?;
+        let public = rsa_pub(&n, &e)?;
         Ok(Key {
             data: KeyData::Rsa {
                 n,
@@ -503,8 +517,7 @@ impl Key {
         if !nb.is_odd() || nb.is_zero() {
             return Err(KeyError::Invalid);
         }
-        let public =
-            BoxedRsaPublicKey::try_new(nb.clone(), uint(&e)).map_err(|_| KeyError::Invalid)?;
+        let public = rsa_pub(&n, &e)?;
         let key = match (p, q) {
             (Some(p), Some(q)) => match (dmp1, dmq1, iqmp) {
                 (Some(dp), Some(dq), Some(qi)) => BoxedRsaPrivateKey::from_crt_components(
@@ -550,7 +563,8 @@ impl Key {
                 secret(q.map(strip).unwrap_or_else(|| vec![0])),
             ),
         };
-        let (dp, dq, qi) = match key.crt_params() {
+        let given = dmp1.is_some() && dmq1.is_some() && iqmp.is_some();
+        let (dp, dq, qi) = match key.crt_params().filter(|_| !given) {
             Some((a, b, c)) => (get(Some(a)), get(Some(b)), get(Some(c))),
             None => (
                 secret(dmp1.map(strip).unwrap_or_else(|| vec![0])),

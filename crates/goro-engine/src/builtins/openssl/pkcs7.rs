@@ -89,6 +89,17 @@ fn prepare_content(data: &[u8], flags: i64) -> Vec<u8> {
     c
 }
 
+/// Whether the pre-RFC 5751 `application/x-pkcs7-*` types are written:
+/// PKCS #7 defaults to them (PKCS7_NOOLDMIMETYPE turns them off), CMS
+/// writes them only with OPENSSL_CMS_OLDMIMETYPE (same bit).
+fn old_mime(is_cms: bool, flags: i64) -> bool {
+    if is_cms {
+        flags & F_NOOLDMIMETYPE != 0
+    } else {
+        flags & F_NOOLDMIMETYPE == 0
+    }
+}
+
 fn push_queue(es: &[E]) {
     for e in es {
         oerr::push(*e);
@@ -121,7 +132,7 @@ fn sign_common(
         }
     };
     let Some(key) = key_from_value(vm, a, &a.val(3), Want::Private, None)? else {
-        vm.fwarn(a, "Error getting private key")?;
+        kwarn(vm, a, "Error getting private key")?;
         return Ok(Value::Bool(false));
     };
     let Some(cert) = cert_from_value(vm, a, &a.val(2))? else {
@@ -158,7 +169,11 @@ fn sign_common(
     let Some(p7) = cms::sign(&content, &cert, &key, &extra, md, opts, super::x509::now()) else {
         return Ok(Value::Bool(false));
     };
-    let mut out = headers;
+    let mut out = if encoding == ENC_SMIME {
+        headers
+    } else {
+        Vec::new()
+    };
     match encoding {
         ENC_DER => out.extend_from_slice(&p7),
         ENC_PEM => out.extend_from_slice(ossl::pem::encode("CMS", &p7).as_bytes()),
@@ -168,10 +183,14 @@ fn sign_common(
                     &content,
                     &p7,
                     cms::micalg(md),
-                    !is_cms,
+                    old_mime(is_cms, flags),
                 ));
             } else {
-                out.extend_from_slice(&cms::smime_opaque(&p7, "signed-data", !is_cms));
+                out.extend_from_slice(&cms::smime_opaque(
+                    &p7,
+                    "signed-data",
+                    old_mime(is_cms, flags),
+                ));
             }
         }
     }
@@ -188,12 +207,14 @@ fn sign_common(
 }
 
 pub(super) fn openssl_pkcs7_sign(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    check_path_args(vm, a, &[0, 1, 6])?;
     let flags = a.int_or(5, F_DETACHED);
     let extra = a.opt_str(6);
     sign_common(vm, a, flags, ENC_SMIME, extra, false)
 }
 
 pub(super) fn openssl_cms_sign(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    check_path_args(vm, a, &[0, 1, 7])?;
     let flags = a.int_or(5, 0);
     let enc = a.int_or(6, ENC_SMIME);
     let extra = a.opt_str(7);
@@ -225,6 +246,7 @@ fn verify_common(vm: &mut Vm, a: &Args, v: VerifyArgs) -> R<Value> {
         vm.fwarn(a, "Detached signatures not possible with S/MIME encoding")?;
         return Ok(Value::Bool(false));
     }
+    let trusted = super::x509::load_ca_info(vm, a, &v.ca_info)?.unwrap_or_default();
     if !vm.basedir_allows(&v.infile) {
         basedir_warning(vm, a, &v.infile)?;
         return Ok(fail);
@@ -233,6 +255,15 @@ fn verify_common(vm: &mut Vm, a: &Args, v: VerifyArgs) -> R<Value> {
         return Ok(fail);
     };
     // The message (and detached content).
+    for p in [&v.sigfile, &v.signers_out, &v.content_out, &v.p7_out]
+        .into_iter()
+        .flatten()
+    {
+        if !vm.basedir_allows(p) {
+            basedir_warning(vm, a, p)?;
+            return Ok(Value::Bool(false));
+        }
+    }
     let (p7, mut detached) = match (&v.sigfile, v.encoding) {
         (Some(sf), enc) => {
             let Some(sig) = read_file(sf.as_bytes()) else {
@@ -279,7 +310,6 @@ fn verify_common(vm: &mut Vm, a: &Args, v: VerifyArgs) -> R<Value> {
     {
         detached = Some(cms::crlf(c));
     }
-    let trusted = super::x509::load_ca_info(vm, a, &v.ca_info)?.unwrap_or_default();
     let extra = match certs_from_file(v.untrusted.clone()) {
         Some(e) => e,
         None => return Ok(fail),
@@ -344,6 +374,7 @@ fn verify_common(vm: &mut Vm, a: &Args, v: VerifyArgs) -> R<Value> {
 }
 
 pub(super) fn openssl_pkcs7_verify(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    check_path_args(vm, a, &[0, 2, 4, 5, 6])?;
     let v = VerifyArgs {
         infile: a.str(0),
         flags: a.int(1),
@@ -360,6 +391,7 @@ pub(super) fn openssl_pkcs7_verify(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 pub(super) fn openssl_cms_verify(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    check_path_args(vm, a, &[0, 2, 4, 5, 6, 7])?;
     let v = VerifyArgs {
         infile: a.str(0),
         flags: a.int_or(1, 0),
@@ -420,12 +452,20 @@ fn encrypt_common(
     let Some(p7) = cms::envelope(&content, &certs, cipher) else {
         return Ok(Value::Bool(false));
     };
-    let mut out = headers;
+    let mut out = if encoding == ENC_SMIME {
+        headers
+    } else {
+        Vec::new()
+    };
     match encoding {
         ENC_DER => out.extend_from_slice(&p7),
         ENC_PEM => out.extend_from_slice(ossl::pem::encode("CMS", &p7).as_bytes()),
         _ => {
-            let old = !is_cms && flags & F_NOOLDMIMETYPE == 0;
+            let old = if is_cms {
+                flags & F_NOOLDMIMETYPE != 0
+            } else {
+                flags & F_NOOLDMIMETYPE == 0
+            };
             let st = if matches!(cipher, ContentCipher::Gcm(_)) {
                 "authEnveloped-data"
             } else {
@@ -438,12 +478,14 @@ fn encrypt_common(
 }
 
 pub(super) fn openssl_pkcs7_encrypt(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    check_path_args(vm, a, &[0, 1])?;
     let flags = a.int_or(4, 0);
     let c = cipher_from_const(a.int_or(5, 5));
     encrypt_common(vm, a, flags, ENC_SMIME, c, false)
 }
 
 pub(super) fn openssl_cms_encrypt(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    check_path_args(vm, a, &[0, 1])?;
     let flags = a.int_or(4, 0);
     let enc = a.int_or(5, ENC_SMIME);
     let c = match a.val(6) {
@@ -470,7 +512,7 @@ fn decrypt_common(vm: &mut Vm, a: &Args, encoding: i64) -> R<Value> {
         a.val(2)
     };
     let Some(key) = key_from_value(vm, a, &keyv, Want::Private, None)? else {
-        vm.fwarn(a, "Unable to get private key")?;
+        kwarn(vm, a, "Unable to get private key")?;
         return Ok(Value::Bool(false));
     };
     let Some(data) = read_file(&infile) else {
@@ -500,10 +542,12 @@ fn decrypt_common(vm: &mut Vm, a: &Args, encoding: i64) -> R<Value> {
 }
 
 pub(super) fn openssl_pkcs7_decrypt(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    check_path_args(vm, a, &[0, 1])?;
     decrypt_common(vm, a, ENC_SMIME)
 }
 
 pub(super) fn openssl_cms_decrypt(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    check_path_args(vm, a, &[0, 1])?;
     let enc = a.int_or(4, ENC_SMIME);
     decrypt_common(vm, a, enc)
 }

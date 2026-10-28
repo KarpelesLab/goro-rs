@@ -536,12 +536,107 @@ fn basedir_warning(vm: &mut Vm, a: &Args, path: &[u8]) -> R<()> {
 }
 
 /// The data behind a key/cert string argument: the file for `file://`
-/// paths, else the string itself.
+/// paths, else the string itself. A path with a NUL byte defers the
+/// ValueError PHP 8.5 raises for it (test bug81713.phpt: the function
+/// still finishes, with its usual warning for certificates).
 pub(crate) fn arg_data(vm: &mut Vm, a: &Args, s: &[u8]) -> R<Option<Vec<u8>>> {
     if s.len() >= 7 && s[..7].eq_ignore_ascii_case(b"file://") {
+        if s.contains(&0) {
+            defer_nul_error(vm, a, s);
+            return Ok(None);
+        }
         return read_openssl_file(vm, a, &s[7..]);
     }
     Ok(Some(s.to_vec()))
+}
+
+/// "#N ($name)" of argument `i`.
+pub(crate) fn arg_label(vm: &mut Vm, a: &Args, i: usize) -> String {
+    let sig = vm.native_sig(a.func);
+    let name = sig
+        .params
+        .get(i)
+        .map(|p| p.name.to_string_lossy())
+        .unwrap_or_default();
+    format!("#{} (${})", i + 1, name)
+}
+
+fn defer_nul_error(vm: &mut Vm, a: &Args, s: &[u8]) {
+    if vm.err.deferred.is_some() {
+        return;
+    }
+    // Which argument holds the string: directly, in a list, or in the
+    // options' extracerts.
+    let mut where_ = None;
+    for (i, v) in a.vals.iter().enumerate() {
+        match v.deref() {
+            Value::Str(x) if x.as_bytes() == s => {
+                where_ = Some((i, ""));
+                break;
+            }
+            Value::Array(arr) => {
+                for (k, item) in arr.iter() {
+                    match item.deref() {
+                        Value::Str(x) if x.as_bytes() == s => {
+                            where_ = Some((i, "array item "));
+                        }
+                        Value::Array(inner)
+                            if matches!(k, goro_runtime::KeyRef::Str(n) if n.as_bytes() == b"extracerts")
+                                && inner
+                                    .iter()
+                                    .any(|(_, y)| matches!(y.deref(), Value::Str(z) if z.as_bytes() == s)) =>
+                        {
+                            where_ = Some((i, "option extracerts array item "));
+                        }
+                        _ => {}
+                    }
+                }
+                if where_.is_some() {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let (i, sfx) = where_.unwrap_or((0, ""));
+    let label = arg_label(vm, a, i);
+    let msg = format!(
+        "{}(): Argument {} {}must not contain any null bytes",
+        a.fname(),
+        label,
+        sfx
+    );
+    vm.err.deferred = Some(vm.throw_error_msg("ValueError", &msg));
+}
+
+/// A warning for a key that couldn't be had, unless a ValueError is
+/// already pending for it.
+pub(crate) fn kwarn(vm: &mut Vm, a: &Args, msg: &str) -> R<()> {
+    if vm.err.deferred.is_some() {
+        return Ok(());
+    }
+    vm.fwarn(a, msg)
+}
+
+/// PHP's path parameters: a NUL byte is a ValueError before anything
+/// else runs.
+pub(crate) fn check_path_args(vm: &mut Vm, a: &Args, idx: &[usize]) -> R<()> {
+    for &i in idx {
+        if let Some(Value::Str(s)) = a.get(i).map(|v| v.deref())
+            && s.contains(&0)
+        {
+            let label = arg_label(vm, a, i);
+            return vm.throw(
+                "ValueError",
+                &format!(
+                    "{}(): Argument {} must not contain any null bytes",
+                    a.fname(),
+                    label
+                ),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Checks an output path argument (PHP: "must be a valid file path";
@@ -552,16 +647,16 @@ pub(crate) fn check_output_path(
     path: &[u8],
     argname: &str,
 ) -> R<Option<std::path::PathBuf>> {
-    if path.is_empty() || path.contains(&0) {
+    if path.contains(&0) {
+        check_path_args(vm, a, &[1])?;
+    }
+    // Empty or longer than PATH_MAX (observed on PHP 8.5; tests
+    // openssl_*_export_to_file_leak.phpt).
+    if path.is_empty() || path.len() >= 4096 {
         vm.warn(&format!(
-            "{}({}): must be a valid file path {}",
+            "{}({}): must be a valid file path ",
             a.fname(),
-            argname,
-            if path.contains(&0) {
-                "(contains null byte)".to_string()
-            } else {
-                String::new()
-            }
+            argname
         ))?;
         return Ok(None);
     }
@@ -592,7 +687,10 @@ pub(crate) fn write_output(p: &std::path::Path, data: &[u8]) -> bool {
 /// queued).
 pub(crate) fn cert_from_value(vm: &mut Vm, a: &Args, v: &Value) -> R<Option<Rc<ossl::x509::Cert>>> {
     match v.deref() {
-        Value::Object(o) => Ok(with_native::<CertData, _>(&o, |c| c.0.clone())),
+        Value::Object(o) if with_native::<CertData, _>(&o, |_| ()).is_some() => {
+            Ok(with_native::<CertData, _>(&o, |c| c.0.clone()))
+        }
+        Value::Object(o) if obj_class_is(vm, &o, b"OpenSSLAsymmetricKey") => Ok(None),
         other => {
             let s = vm.to_php_str(&other)?;
             let Some(data) = arg_data(vm, a, s.as_bytes())? else {
@@ -756,7 +854,12 @@ pub(crate) fn req_from_options(
         oerr::push(errs::SYS_NOENT);
         oerr::push(errs::BIO_NO_SUCH_FILE);
     }
-    let _ = vm;
+    if let Ok(req) = &r
+        && req.oid_file_bad
+    {
+        // Observed on PHP 8.5 (test gh9339.phpt).
+        vm.fwarn(a, "Path for oid_file option must be a valid file path")?;
+    }
     Ok(r)
 }
 

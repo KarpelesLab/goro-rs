@@ -287,7 +287,7 @@ fn export_common(vm: &mut Vm, a: &Args) -> R<Option<ossl::key::Secret>> {
         pass.as_ref().map(|p| p.as_bytes()),
     )?
     else {
-        vm.fwarn(a, "Cannot get key from parameter 1")?;
+        kwarn(vm, a, "Cannot get key from parameter 1")?;
         return Ok(None);
     };
     let req = match req_from_options(vm, a, opts.as_ref())? {
@@ -409,7 +409,11 @@ fn md_arg(v: &Value) -> Option<ossl::digest::Md> {
 pub(super) fn openssl_sign(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let data = a.str(0);
     let Some(k) = key_from_value(vm, a, &a.val(2), Want::Private, None)? else {
-        vm.fwarn(a, "Supplied key param cannot be coerced into a private key")?;
+        kwarn(
+            vm,
+            a,
+            "Supplied key param cannot be coerced into a private key",
+        )?;
         return Ok(Value::Bool(false));
     };
     let alg = if a.has(3) { a.val(3) } else { Value::Int(1) };
@@ -446,7 +450,11 @@ pub(super) fn openssl_verify(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let data = a.str(0);
     let sig = a.str(1);
     let Some(k) = key_from_value(vm, a, &a.val(2), Want::Public, None)? else {
-        vm.fwarn(a, "Supplied key param cannot be coerced into a public key")?;
+        kwarn(
+            vm,
+            a,
+            "Supplied key param cannot be coerced into a public key",
+        )?;
         return Ok(Value::Bool(false));
     };
     let alg = if a.has(3) { a.val(3) } else { Value::Int(1) };
@@ -504,9 +512,10 @@ fn oaep_md(vm: &mut Vm, a: &Args, i: usize) -> R<Option<ossl::digest::Md>> {
 }
 
 pub(super) fn openssl_public_encrypt(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    check_path_args(vm, a, &[4])?;
     let data = a.str(0);
     let Some(k) = key_from_value(vm, a, &a.val(2), Want::Public, None)? else {
-        vm.fwarn(a, "key parameter is not a valid public key")?;
+        kwarn(vm, a, "key parameter is not a valid public key")?;
         return Ok(Value::Bool(false));
     };
     let padding = a.int_or(3, 1);
@@ -526,9 +535,10 @@ pub(super) fn openssl_public_encrypt(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 pub(super) fn openssl_private_decrypt(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    check_path_args(vm, a, &[4])?;
     let data = a.str(0);
     let Some(k) = key_from_value(vm, a, &a.val(2), Want::Private, None)? else {
-        vm.fwarn(a, "key parameter is not a valid private key")?;
+        kwarn(vm, a, "key parameter is not a valid private key")?;
         return Ok(Value::Bool(false));
     };
     let padding = a.int_or(3, 1);
@@ -550,7 +560,7 @@ pub(super) fn openssl_private_decrypt(vm: &mut Vm, a: &mut Args) -> R<Value> {
 pub(super) fn openssl_private_encrypt(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let data = a.str(0);
     let Some(k) = key_from_value(vm, a, &a.val(2), Want::Private, None)? else {
-        vm.fwarn(a, "key param is not a valid private key")?;
+        kwarn(vm, a, "key param is not a valid private key")?;
         return Ok(Value::Bool(false));
     };
     let padding = a.int_or(3, 1);
@@ -569,7 +579,7 @@ pub(super) fn openssl_private_encrypt(vm: &mut Vm, a: &mut Args) -> R<Value> {
 pub(super) fn openssl_public_decrypt(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let data = a.str(0);
     let Some(k) = key_from_value(vm, a, &a.val(2), Want::Public, None)? else {
-        vm.fwarn(a, "key parameter is not a valid public key")?;
+        kwarn(vm, a, "key parameter is not a valid public key")?;
         return Ok(Value::Bool(false));
     };
     let padding = a.int_or(3, 1);
@@ -616,16 +626,19 @@ pub(super) fn openssl_pkey_derive(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "the $key_length parameter is deprecated as it is either ignored or truncates the key",
         )?;
     }
-    let Some(pk) = key_from_value(vm, a, &a.val(0), Want::Public, None)? else {
-        return Ok(Value::Bool(false));
-    };
-    let Some(sk) = key_from_value(vm, a, &a.val(1), Want::Private, None)? else {
+    let pk = key_from_value(vm, a, &a.val(0), Want::Public, None)?;
+    let sk = key_from_value(vm, a, &a.val(1), Want::Private, None)?;
+    let (Some(pk), Some(sk)) = (pk, sk) else {
         return Ok(Value::Bool(false));
     };
     match sk.derive(&pk) {
         Ok(mut s) => {
             let kl = a.int_or(2, 0);
             if kl > 0 && (kl as usize) < s.len() {
+                // DH secrets are not truncated (test gh19428.phpt).
+                if matches!(sk.key_type(), KeyType::Dh) {
+                    return Ok(Value::Bool(false));
+                }
                 s.truncate(kl as usize);
             }
             Ok(bin(s))

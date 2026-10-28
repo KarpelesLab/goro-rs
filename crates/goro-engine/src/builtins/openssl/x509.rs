@@ -55,8 +55,24 @@ pub(super) fn name_array(n: &Name, short: bool) -> PhpArray {
     arr
 }
 
+/// The Unix time of a validity bound; malformed times warn (observed on
+/// PHP 8.5; tests cve-2013-6420.phpt and gh13343.phpt) and give -1.
 fn time_t(vm: &mut Vm, a: &Args, t: &ossl::x509::Time) -> R<Value> {
-    let _ = (vm, a);
+    let want = if t.generalized { 15 } else { 13 };
+    if t.raw.len() < want {
+        vm.fwarn(a, "Illegal length in timestamp")?;
+        return Ok(Value::Int(-1));
+    }
+    if t.unix == -1 && t.raw.len() != want {
+        vm.fwarn(a, "Illegal length in timestamp")?;
+        return Ok(Value::Int(-1));
+    }
+    if t.unix == -1 {
+        vm.fwarn(
+            a,
+            &format!("Unable to parse time string {} correctly", t.raw),
+        )?;
+    }
     Ok(Value::Int(t.unix))
 }
 
@@ -209,6 +225,7 @@ pub(super) fn openssl_x509_verify(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 pub(super) fn openssl_x509_checkpurpose(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    check_path_args(vm, a, &[3])?;
     let Some(c) = cert_from_value(vm, a, &a.val(0))? else {
         return Ok(Value::Int(-1));
     };
@@ -248,6 +265,22 @@ pub(super) fn load_ca_info(vm: &mut Vm, a: &Args, ca: &PhpArray) -> R<Option<Vec
     let mut out = Vec::new();
     for (_, v) in ca.iter() {
         let s = vm.to_php_str(&v.deref())?;
+        if s.contains(&0) {
+            let i = a
+                .vals
+                .iter()
+                .position(|x| matches!(x.deref(), Value::Array(_)))
+                .unwrap_or(0);
+            let label = arg_label(vm, a, i);
+            return vm.throw(
+                "ValueError",
+                &format!(
+                    "{}(): Argument {} array item must not contain any null bytes",
+                    a.fname(),
+                    label
+                ),
+            );
+        }
         let p = os_path(s.as_bytes());
         if p.is_dir() {
             if let Ok(rd) = std::fs::read_dir(&p) {

@@ -26,6 +26,8 @@ pub struct Req {
     pub string_mask: StringMask,
     /// Names from the config's oid_section.
     pub custom_oids: Vec<(String, String)>,
+    /// The `oid_file` setting is not a usable path.
+    pub oid_file_bad: bool,
 }
 
 /// An option value as the engine passes it.
@@ -54,7 +56,7 @@ impl Opt {
 
 /// The built-in configuration used when no file is given (written for
 /// goro: a `req` section with the documented defaults).
-pub const DEFAULT_CONF: &str = "[ req ]\ndefault_bits = 2048\ndefault_md = sha256\ndistinguished_name = req_distinguished_name\nstring_mask = utf8only\n[ req_distinguished_name ]\n";
+pub const DEFAULT_CONF: &str = "[ req ]\ndefault_bits = 2048\ndefault_md = sha256\ndistinguished_name = req_distinguished_name\nstring_mask = utf8only\n[ req_distinguished_name ]\n[ v3_req ]\nbasicConstraints = CA:FALSE\n[ v3_ca ]\nsubjectKeyIdentifier = hash\nauthorityKeyIdentifier = keyid:always,issuer\nbasicConstraints = critical,CA:true\n[ usr_cert ]\nbasicConstraints = CA:FALSE\n";
 
 #[derive(Debug, Clone)]
 pub enum ReqError {
@@ -142,6 +144,9 @@ impl Req {
                 custom_oids.push((n.clone(), v.trim().to_string()));
             }
         }
+        let oid_file_bad = conf
+            .get("default", "oid_file")
+            .is_some_and(|p| p.len() >= 4096 || p.contains('\0'));
         let r = Req {
             conf,
             config_path: path,
@@ -156,6 +161,7 @@ impl Req {
             curve_name,
             string_mask,
             custom_oids,
+            oid_file_bad,
         };
         if let Some(s) = &r.x509_extensions
             && r.conf.section(s).is_none()

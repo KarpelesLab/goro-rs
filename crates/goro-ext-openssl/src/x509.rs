@@ -371,7 +371,21 @@ impl Time {
             return Err(X509Error);
         }
         let raw = String::from_utf8_lossy(t.content).into_owned();
-        let unix = crate::time::parse_asn1_time(t.content, generalized).ok_or(X509Error)?;
+        // OpenSSL 3.3+ rejects UTCTime without seconds (test
+        // gh13343_openssl33.phpt); a malformed GeneralizedTime still
+        // decodes and shows as -1 (test cve-2013-6420.phpt).
+        if !generalized {
+            if t.content.len() != 13 {
+                return Err(X509Error);
+            }
+            let unix = crate::time::parse_asn1_time(t.content, false).ok_or(X509Error)?;
+            return Ok(Time {
+                raw,
+                generalized,
+                unix,
+            });
+        }
+        let unix = crate::time::parse_asn1_time(t.content, true).unwrap_or(-1);
         Ok(Time {
             raw,
             generalized,
@@ -462,7 +476,13 @@ impl Cert {
         crate::pem::encode("CERTIFICATE", &self.der)
     }
 
+    /// Decimal up to 64 bits, `0x`-prefixed hex beyond (observed on PHP
+    /// 8.5; test openssl_csr_sign_with_serial_hex.phpt).
     pub fn serial_decimal(&self) -> String {
+        let neg = self.serial.first().is_some_and(|b| b & 0x80 != 0);
+        if !neg && crate::key::strip(&self.serial).len() > 8 {
+            return format!("0x{}", signed_hex(&self.serial));
+        }
         signed_decimal(&self.serial)
     }
 
@@ -854,7 +874,10 @@ pub fn extension_text(e: &Extension) -> Option<String> {
                             s.push('\n');
                         }
                     }
-                    2 => s.push_str(&format!("serial:{}\n", colon_hex(x.content))),
+                    2 => s.push_str(&format!(
+                        "serial:{}\n",
+                        colon_hex(&crate::key::strip(x.content))
+                    )),
                     _ => return None,
                 }
             }

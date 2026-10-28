@@ -292,7 +292,18 @@ pub(super) fn openssl_csr_new(vm: &mut Vm, a: &mut Args) -> R<Value> {
     } else {
         match key_from_value(vm, a, &keyv, Want::Private, None)? {
             Some(k) => k,
-            None => return Ok(Value::Bool(false)),
+            None if vm.err.deferred.is_some() => return Ok(Value::Bool(false)),
+            // Observed on PHP 8.5 (test openssl_csr_new_basic.phpt): a
+            // key that can't be loaded is replaced by a generated one.
+            None => {
+                let Some(k) = super::pkey::generate_key(vm, a, &req)? else {
+                    return Ok(Value::Bool(false));
+                };
+                let k = Rc::new(k);
+                let obj = key_obj_rc(vm, k.clone())?;
+                set_out(a, 1, obj);
+                k
+            }
         }
     };
     let Some(mut attrs) = attrs else {
@@ -369,7 +380,7 @@ pub(super) fn openssl_csr_sign(vm: &mut Vm, a: &mut Args) -> R<Value> {
         },
     };
     let Some(key) = key_from_value(vm, a, &a.val(2), Want::Private, None)? else {
-        vm.fwarn(a, "Cannot get private key from parameter 3")?;
+        kwarn(vm, a, "Cannot get private key from parameter 3")?;
         return Ok(Value::Bool(false));
     };
     let days = a.int(3);

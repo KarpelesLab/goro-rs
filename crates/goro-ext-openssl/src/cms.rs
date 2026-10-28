@@ -652,13 +652,6 @@ pub fn decrypt(ctype: &str, inner: &[u8], cert: Option<&Cert>, key: &Key) -> CRe
         // Implicit rejection with the known key length (RFC 3218 §2.3.2
         // mitigation): a wrong key yields a random CEK and then a
         // padding/tag failure, never a distinguishable RSA error.
-        let k = crate::key::strip(
-            &key.rsa_public_key()
-                .map(|p| p.modulus().to_be_bytes(0))
-                .unwrap_or_default(),
-        )
-        .len();
-        let _ = k;
         let cek = match sk.decrypt_pkcs1v15_session(&ek, klen) {
             Ok(c) => purecrypto::zeroize::Zeroizing::new(c),
             Err(_) => {

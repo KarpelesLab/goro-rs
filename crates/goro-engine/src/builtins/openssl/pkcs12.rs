@@ -14,7 +14,7 @@ fn export_common(vm: &mut Vm, a: &Args) -> R<Option<Vec<u8>>> {
         return Ok(None);
     };
     let Some(key) = key_from_value(vm, a, &a.val(2), Want::Private, None)? else {
-        vm.fwarn(a, "Cannot get private key from parameter 3")?;
+        kwarn(vm, a, "Cannot get private key from parameter 3")?;
         return Ok(None);
     };
     match cert.public_key() {
