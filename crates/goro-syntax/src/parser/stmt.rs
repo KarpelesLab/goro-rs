@@ -334,7 +334,7 @@ impl<'a> Parser<'a> {
                         }
                         return Err(self.unexpected(&[T::RParen]));
                     }
-                    let v = self.expr()?;
+                    let v = self.expr_bp(super::expr::BP_INC_OPERAND)?;
                     if !super::expr::is_variable(&v)
                         || !matches!(self.peek_kind(), T::Comma | T::RParen)
                     {
@@ -607,7 +607,10 @@ impl<'a> Parser<'a> {
     /// true;)` expects ",").
     fn for_exprs(&mut self, end: T, is_cond: bool) -> PResult<&'a [Expr<'a>]> {
         let mut v = self.bvec();
-        if self.at(end) {
+        // The list is optional: anything that cannot start one leaves it
+        // empty (observed on PHP 8.5: `for (, ;;)` expects ";").
+        if !super::expr::starts_expr(self.peek_kind()) && !self.at(T::VoidCast) {
+            let _ = end;
             return Ok(v.into_bump_slice());
         }
         loop {
@@ -667,12 +670,33 @@ impl<'a> Parser<'a> {
         ))
     }
 
+    /// The key or value target of `foreach`: a variable, or (not by
+    /// reference) a `[...]` / `list(...)` destructuring (observed on PHP
+    /// 8.5: `as 1` and `as &[$b]` are syntax errors).
     fn foreach_target(&mut self) -> PResult<(Expr<'a>, bool)> {
         let by_ref = self.eat_amp();
+        let k = self.peek_kind();
+        if !(super::expr::starts_variable(k) || (!by_ref && k == T::List)) {
+            return Err(self.unexpected(&[]));
+        }
         self.list_ok += 1;
         let e = self.expr_bp(super::expr::BP_ASSIGN + 100);
         self.list_ok -= 1;
-        Ok((self.to_assign_target(e?), by_ref))
+        let e = e?;
+        let ok = super::expr::is_variable(&e)
+            || (!by_ref
+                && matches!(
+                    e.kind,
+                    ExprKind::Array { short: true, .. } | ExprKind::List { .. }
+                ));
+        if !ok {
+            return Err(self.unexpected(&[
+                T::ObjectOperator,
+                T::NullsafeObjectOperator,
+                T::LBracket,
+            ]));
+        }
+        Ok((self.to_assign_target(e), by_ref))
     }
 
     #[inline(never)]
@@ -689,7 +713,7 @@ impl<'a> Parser<'a> {
         } else {
             (None, first, first_ref)
         };
-        self.expect(T::RParen, &[])?;
+        self.expect1(T::RParen)?;
         let (body, alt) = if self.eat(T::Colon) {
             let b = self.inner_statements(&[T::Endforeach])?;
             self.expect(T::Endforeach, &[])?;
@@ -719,7 +743,7 @@ impl<'a> Parser<'a> {
         let alt = if self.eat(T::Colon) {
             true
         } else {
-            self.expect1(T::LBrace)?;
+            self.expect(T::LBrace, &[T::Colon, T::LBrace])?;
             false
         };
         let end = if alt { T::Endswitch } else { T::RBrace };

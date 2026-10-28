@@ -412,3 +412,705 @@ $a = (unset) $b;
 $a = (void) foo();
 class A { private (set) mixed $v1; }
 class C { use T { x as y?><?= as my_echo; } }
+class A { public int $x { get => 1; } }
+class A { public int $x { get { return 1; } set { } } }
+class A { public int $x { get; set; } }
+class A { public int $x { get => } }
+class A { public int $x { get 1 } }
+class A { public int $x { 1 } }
+class A { public int $x { get => 1 }
+class A { public int $x { get => 1; } = 5; }
+class A { public int $x = 5 { get => 1; } }
+class A { public $x { set($v) {} } }
+class A { public $x { set(int $v, $w) {} } }
+class A { public $x { set( {} } }
+class A { public $x { &get => 1; } }
+class A { public $x { #[A] get => 1; } }
+class A { public function __construct(public $x { get => 1; }) {} }
+class A { abstract public $x { get; } }
+interface I { public $x { get; } }
+class A { public private(set) int $x; }
+class A { private(set) int $x; }
+class A { public protected(set) readonly int $x; }
+class A { public(set) $x; }
+class A { public private(set) $x; }
+class A { final public const X = 1; }
+class A { const int|string X = 1; }
+class A { const ?int X = null; }
+class A { const array X = []; }
+class A { const X; }
+class A { const = 1; }
+class A { const X = ; }
+class A { const X = 1, ; }
+enum E { case A; case B = ; }
+enum E: string { case A = 'a' }
+enum E { case A, B; }
+enum E { public const X = 1; case A; }
+enum E implements { }
+enum E: int|string { }
+enum E: { case A; }
+enum E { use T; }
+enum E { function f() {} }
+enum { }
+enum E extends F { }
+match ($x) { 1, 2 => 3, default => 4 };
+match ($x) { 1 => 2; };
+match ($x) { 1 => };
+match ($x) { => 1 };
+match ($x) { default => 1, default => 2 };
+match ($x) 1;
+match { };
+match ($x, $y) { };
+#[A] class B {}
+#[A, B] function f() {}
+#[A()] #[B(1, 2)] class C {}
+#[A(x: 1)] class B {}
+#[A] #[B] interface I {}
+#[A] enum E {}
+#[A] trait T {}
+#[A] $f = function() {};
+$f = #[A] function() {};
+$f = #[A] fn() => 1;
+$f = #[A] static function() {};
+$f = #[A] 1;
+#[A
+#[A]]
+#[A(1)
+#[A(1,)] class B {}
+#[A::B] class C {}
+#[\\A] class C {}
+#[namespace\\A] class C {}
+function f(#[A] $x) {}
+function f(#[A] int $x = 1) {}
+class C { #[A] public $x; #[A] public function f() {} #[A] const X = 1; }
+class C { #[A] }
+class C { #[A] use T; }
+$x = new #[A] class {};
+$x = new #[A] class(1) {};
+function f(): never {}
+function f(): void {}
+function f(): mixed {}
+function f(): static {}
+function f(): ?static {}
+function f(): A|static {}
+function f(): (A&B)|null {}
+function f(): A&B {}
+function f(): ?A&B {}
+function f(): ?(A&B) {}
+function f(): (A|B)&C {}
+function f(): A|B|C {}
+function f(): A| {}
+function f(): |A {}
+function f(): ? {}
+function f(int|string|null $x) {}
+function f(?int|string $x) {}
+function f(callable $x, array $y, iterable $z) {}
+function f(self $x) {}
+function f(static $x) {}
+function f(int ...$x) {}
+function f(int &...$x) {}
+function f(&$x = 1) {}
+function f($x = 1, $y) {}
+function f($x,) {}
+function f(,) {}
+function f($x $y) {}
+function f(int) {}
+function f(int $) {}
+function f(...$x = 1) {}
+function f(readonly int $x) {}
+fn($x) => $x;
+fn(&$x) => $x;
+fn&($x) => $x;
+fn($x): int => $x;
+fn($x) => { return $x; };
+fn => 1;
+fn() => fn() => 1;
+static static fn() => 1;
+function () use () {};
+function () use ($a, $b,) {};
+function () use (&$a) {};
+function () use ($a): int {};
+function () use (1) {};
+function () use ($this) {};
+function () use {};
+$x = function &() {};
+$x = function &use() {};
+readonly class A {}
+abstract readonly class A {}
+final class A extends B {}
+class A extends {}
+class A implements {}
+class A extends B implements C, D {}
+interface A implements B {}
+interface A extends B, C {}
+trait T extends U {}
+trait T implements U {}
+class A { use T, U; }
+class A { use T { a as b; } }
+class A { use T { a as protected b; } }
+class A { use T { T::a insteadof U, V; } }
+class A { use T { T::a as private; } }
+class A { use T { a insteadof U; } }
+class A { use T { T::a as; } }
+class A { use T { as b; } }
+class A { use T {} }
+class A { use T { a as b c; } }
+class A { use ; }
+class A { use T U; }
+class A { var $x = 1; }
+class A { var int $x; }
+class A { static $x; }
+class A { static function f() {} }
+class A { abstract function f(); }
+class A { function f() }
+class A { function () {} }
+class A { function f() {} }}
+class A { public function __get($x) { return $this->$x; } }
+class A { public static function new() {} public function list() {} }
+class A { public function foreach() {} }
+class A { const CLASS = 1; }
+class A { const class = 1; }
+A::class;
+A::CLASS;
+$a::class;
+static::class;
+new class { public function __construct() {} };
+new class(...$args) {};
+new class extends A implements B {};
+new class implements B, C {};
+new (A::class);
+new ($a . 'b')(1);
+new A::$b;
+new A::$b->c;
+new $a['x']();
+new $a->b->c();
+new $a::$b();
+new static::$x;
+new A()();
+new A()->b;
+new A()::C;
+new A()[0];
+new A->b();
+new readonly class {};
+clone $a;
+clone($a);
+clone($a, ['x' => 1]);
+clone($a, x: 1);
+clone(object: $a);
+clone $a, $b;
+clone;
+clone $a->b->c;
+clone new A;
+clone new A();
+$x |> f(...);
+$x |> fn($y) => $y;
+$x |> (fn($y) => $y);
+$x |> $f;
+$x |> 'strlen';
+$x |> [$o, 'm'];
+$x |> new A;
+$x |> ;
+|> $x;
+$x |> f(...) |> g(...);
+(void) f();
+(void) $x = 1;
+(void) (void) f();
+$x = (void) f();
+if ((void) f()) {}
+f((void) 1);
+(void) f() + 1;
+(void);
+(int) $a;
+(integer) $a;
+(bool) $a;
+(boolean) $a;
+(float) $a;
+(double) $a;
+(string) $a;
+(binary) $a;
+(array) $a;
+(object) $a;
+(unset) $a;
+( int ) $a;
+(int)(float) $a;
+$a = (int) ;
+echo "a" "b";
+echo 'a' . ;
+echo ;
+print ;
+print 1, 2;
+echo 1, 2,;
+echo (1, 2);
+$a = [1, 2, 3,];
+$a = [1, 2, 3,,];
+$a = [, 1];
+$a = array(1, 2,);
+$a = array(1, , 2);
+$a = [...$b, ...$c];
+$a = [...];
+$a = ['k' => ...$b];
+[$a, $b] = [$b, $a];
+[, $b] = $c;
+[$a, , $c] = $d;
+['x' => $a, 'y' => $b] = $c;
+[[$a, $b], $c] = $d;
+list($a, list($b)) = $c;
+list('x' => $a) = $b;
+[&$a, $b] = $c;
+list(&$a) = $b;
+[$a ?? $b] = $c;
+[1] = $a;
+[$a + 1] = $b;
+foreach ($a as [$b, $c]) {}
+foreach ($a as $k => [$b, $c]) {}
+foreach ($a as list($b)) {}
+foreach ($a as &[$b]) {}
+foreach ($a as $k => &$v) {}
+foreach ($a as $b->c) {}
+foreach ($a as $b['c']) {}
+foreach ($a as $$b) {}
+foreach ($a as f()) {}
+foreach ($a as 1) {}
+foreach ($a as $k => $v => $w) {}
+foreach (as $a) {}
+foreach ($a as $b);
+foreach ($a as $b): endforeach;
+foreach ($a as $b): endfor;
+while ($a): endfor;
+for ($i = 0; $i < 10; $i++);
+for ($i = 0, $j = 0; $i < 10, $j < 5; $i++, $j++) {}
+for (;;) {}
+for (;;);
+for ($i;;) ;
+for (;; $i++, ) ;
+for (, ;;) ;
+for ($i = 0; $i < 10) {}
+for ($i = 0) {}
+do { } while ($a);
+do echo 1; while ($a);
+do { } while ($a)
+do { } until ($a);
+do while ($a);
+switch ($a) { }
+switch ($a) { ; case 1: }
+switch ($a) { case 1; case 2: }
+switch ($a) { default; }
+switch ($a): ; case 1: endswitch;
+switch ($a) { case 1: case 2: break; default: }
+switch ($a) { case 1: { } }
+switch ($a) { case 1 => 2 }
+switch ($a) { else: }
+switch ($a);
+switch $a {}
+if ($a) {} else {} else {}
+if ($a): elseif ($b): else: endif;
+if ($a): else if ($b): endif;
+if ($a): endif
+if ($a): ; endif;
+if ($a) {} elseif {}
+if ($a) {} else if ($b) {} else {}
+if ($a) : echo 1; else echo 2; endif;
+if ($a) echo 1; elseif ($b): echo 2; endif;
+if ($a): echo 1; elseif ($b) echo 2; endif;
+if ($a) {} endif;
+if ($a) else {}
+if $a {}
+if ($a {}
+if ($a)) {}
+while ($a) {}
+while ($a);
+while ($a): endwhile;
+while ($a): endwhile
+while {}
+try {} catch (Exception $e) {}
+try {} catch (A | B $e) {}
+try {} catch (\\A\\B $e) {}
+try {} catch (A) {}
+try {} catch (A $e) {} finally {}
+try {} finally {}
+try {} catch ($e) {}
+try {} catch (A $e, B $f) {}
+try {} catch (A $e) {} catch {}
+try {} catch (A $e)
+try catch (A $e) {}
+try {} finally {} finally {}
+try {} finally {} catch (A $e) {}
+throw new E;
+throw $e;
+throw;
+$a = throw $e;
+$a ?? throw new E;
+$a ?: throw new E;
+fn() => throw new E;
+throw throw $e;
+goto a;
+goto;
+a: echo 1;
+a:
+echo 1; a: b: c:
+global $a, $b;
+global $a->b;
+global $$a;
+global ${'a'};
+global $a[0];
+global;
+static $a = 1, $b = 2;
+static $a = [1, 2];
+static $a = f();
+static $a, ;
+static $$a;
+unset($a, $b);
+unset($a[0], $b->c, A::$d);
+unset($a + 1);
+unset(f());
+unset(f()[0]);
+unset($a->b());
+unset(A::B);
+isset($a, $b);
+isset($a[0]->b);
+isset(f());
+isset(1);
+empty($a);
+empty(f());
+empty(1 + 2);
+eval('1');
+eval('1', 2);
+exit(1);
+exit('a');
+exit(status: 1);
+die;
+die();
+die("x");
+exit 1;
+__halt_compiler();
+__halt_compiler;
+__halt_compiler() 1;
+__halt_compiler(1);
+declare(strict_types=1);
+declare(ticks=1) { echo 1; }
+declare(ticks=1): echo 1; enddeclare;
+declare(ticks=1, strict_types=1);
+declare(ticks=1) echo 1;
+declare(ticks);
+declare();
+declare(1=1);
+declare(ticks=1): enddeclare
+declare(ticks=1) {
+namespace A;
+namespace A\\B;
+namespace \\A;
+namespace namespace\\A;
+namespace A {}
+namespace {}
+namespace A; namespace B;
+namespace A {} namespace B {}
+namespace A; echo 1; namespace B; echo 2;
+namespace A { namespace B {} }
+namespace A {} echo 1;
+use A;
+use A\\B;
+use \\A\\B;
+use A as B;
+use A\\B as C, D\\E as F;
+use function A\\b;
+use const A\\B;
+use A\\{B, C};
+use A\\{B, C,};
+use A\\{B as C, D};
+use A\\{function b, const C};
+use function A\\{b, c};
+use const A\\{B, C};
+use A\\{B\\C, D};
+use A\\{\\B};
+use A\\{};
+use A\\{B}, C;
+use A\\B\\{C};
+use namespace\\A;
+use A, B;
+use A as ;
+use A as class;
+use A as B as C;
+function f() { use A; }
+if (1) { use A; }
+class A { use B; }
+const A = 1;
+const A = 1, B = 2;
+const A = [1];
+const A = f();
+const A;
+const A = 1,;
+const 1 = 1;
+function f() { const A = 1; }
+#[A] const B = 1;
+#[A] const B = 1, C = 2;
+const A = 1 + B::C;
+echo __LINE__, __FILE__, __DIR__, __FUNCTION__, __CLASS__, __METHOD__, __NAMESPACE__, __TRAIT__, __PROPERTY__;
+echo __LINE__::class;
+echo __CLASS__::X;
+echo __CLASS__[0];
+echo PHP_EOL[0];
+echo "abc"[0];
+echo 'abc'[0];
+echo "abc$x"[0];
+echo <<<A\nx\nA[0];
+echo [1, 2][0];
+echo array(1)[0];
+echo (1 + 2)[0];
+echo f()[0][1];
+echo $a{0};
+echo $a[];
+echo 1[0];
+echo 1.5[0];
+echo true[0];
+echo null::A;
+echo A::B::C;
+echo A::B[0];
+echo A::B->c;
+echo A::B();
+echo A::$b::$c;
+echo A::$b[0];
+echo A::$b->c;
+echo A::$b();
+echo $a::$b::$c;
+echo $a->b::c;
+echo $a->b::$c;
+echo $a?->b::c;
+echo $a?->b();
+echo $a?->b?->c();
+echo $a?->b->c;
+echo $a?->{'b'};
+echo $a?->$b;
+echo $a::{'b'}();
+echo A::{'b'};
+echo A::{'b'}();
+echo $a->{'b'}();
+echo ${'a'}->b;
+echo $$a->b;
+echo $$a['b'];
+echo ${$a['b']};
+echo $a->$b->c;
+echo $a->$b();
+echo $a->$b['c'];
+echo $a->{$b}['c'];
+echo [$a, 'b']();
+echo 'f'();
+echo "f"();
+echo (function() {})();
+echo (fn() => 1)();
+echo f()();
+echo $f()();
+echo A::b()();
+echo $a->b()();
+echo new A()();
+echo (new A)();
+echo (clone $a)->b;
+echo clone $a->b();
+echo "$a $b[0] $c->d $e[f] {$g->h()} {$i::$j} ${k}";
+echo "{$a[1][2]} {$b->c->d} {$e?->f}";
+echo "$a?->b";
+echo "$a[0][1]";
+echo "$a->b->c";
+echo "{$a}{$b}";
+echo "{$a";
+echo "{ $a}";
+echo "$";
+echo "$1";
+echo "${";
+echo "${a";
+echo "${a}";
+echo "${a[1]}";
+echo "${a->b}";
+echo "${$a}";
+echo "\\{$a}";
+echo "$a\\[0]";
+echo "\\$a";
+echo `ls`;
+echo `$a`;
+echo `{$a}`;
+echo b"x$a";
+echo b'x';
+echo B"x";
+echo "\\u{1F600}";
+echo "\\u{0}";
+echo "\\u{00000041}";
+echo "\\x4";
+echo "\\x";
+echo "\\8";
+echo "\\08";
+echo "\\400";
+echo '\\n';
+echo "\\'";
+echo <<<A\n  a\n  A;
+echo <<<'A'\na $b\nA;
+echo <<<"A"\na $b\nA;
+echo <<<A\nA;
+echo <<<A\n  a\n A;
+echo <<<A\n\ta\n\tA;
+echo <<< A\na\nA;
+echo <<<A a
+A;
+echo <<<A\n$a[0] {$b} ${c}\nA;
+echo <<<A\nA . 'x';
+echo <<<A\nx\nA, 1;
+echo [<<<A\nx\nA];
+echo f(<<<A\nx\nA);
+echo <<<A\nx\nAB\nA;
+echo <<<A\nx\n A
+A;
+$a = 1 <=> 2;
+$a = 1 <> 2;
+$a = 1 != 2 != 3;
+$a = 1 < 2 < 3;
+$a = 1 < 2 > 3;
+$a = 1 == 2 < 3;
+$a = 1 instanceof A instanceof B;
+$a = !$a instanceof A;
+$a = $a instanceof;
+$a = $a instanceof 1;
+$a = $a instanceof A::B;
+$a = $a instanceof A::$b;
+$a = $a instanceof $b->c;
+$a = $a instanceof $b['c'];
+$a = $a instanceof $b();
+$a = $a instanceof (A::class);
+$a = $a instanceof static;
+$a = $a instanceof self;
+$a = $a instanceof parent;
+$a = $a instanceof \\A;
+$a = $a instanceof namespace\\A;
+$a = $a ? $b : $c ? $d : $e;
+$a = $a ?: $b ? $c : $d;
+$a = $a ? $b : $c ?: $d;
+$a = $a ?: $b ?: $c;
+$a = $a ? $b ? $c : $d : $e;
+$a = ($a ? $b : $c) ? $d : $e;
+$a = $a ? : $b;
+$a = $a ?? $b ?? $c;
+$a = $a ?? $b ? $c : $d;
+$a ??= $b;
+$a ??= $b ??= $c;
+$a .= $b;
+$a **= 2;
+$a <<= 1;
+$a >>= 1;
+$a &= 1;
+$a |= 1;
+$a ^= 1;
+$a %= 1;
+1 += 1;
+$a + = 1;
+$a = = 1;
+$a == = 1;
+$a = 1 + + 2;
+$a = 1 - - 2;
+$a = 1 + - 2;
+$a = 1 ++ 2;
+$a = 1 -- 2;
+$a = $b ++ $c;
+$a = ++$b++;
+$a = ++++$b;
+$a = --$b--;
+$a = $b++ + ++$c;
+$a = @@$b;
+$a = !!$b;
+$a = ~~$b;
+$a = - -$b;
+$a = -(-$b);
+$a = +$b;
+$a = &$b;
+$a = &$b->c;
+$a = &$b[0];
+$a = &$b->c();
+$a = &A::$b;
+$a = &A::b();
+$a = &new A();
+$a = &"x";
+$a =& $b;
+$a = & $b;
+$a->b = &$c;
+$a[] = &$b;
+$a = [&$b, 'k' => &$c];
+$a = yield;
+$a = yield $b;
+$a = yield $k => $v;
+$a = yield from $b;
+$a = (yield $b) + 1;
+$a = yield $b + 1;
+yield yield $a;
+yield $a => yield $b;
+yield from yield from $a;
+$a = print 1;
+$a = print print 1;
+include 'a';
+include_once 'a';
+require 'a';
+require_once 'a';
+include('a') . 'b';
+$a = include 'a';
+include;
+$a = new A;
+$a = new A();
+$a = new A(1, 2);
+$a = new \\A\\B;
+$a = new namespace\\A;
+$a = new A\\B();
+$a = new $b;
+$a = new $b();
+$a = new $b->c;
+$a = new $b->c();
+$a = new $b::$c;
+$a = new $b['c'];
+$a = new ($b);
+$a = new (f())();
+$a = new A(...);
+$a = new A(...$b);
+$a = new A(b: 1);
+$a = new;
+$a = new 1;
+$a = new 'A';
+$a = new A::B;
+$a = new A::B();
+$a = new A->b;
+$a = new A()->b();
+$a = new A()?->b();
+$a = new A()::b();
+$a = new A()['x'];
+$a = new A()->b->c()->d;
+$a = new static;
+$a = new self;
+$a = new parent;
+$a = new class {};
+f(a: 1, b: 2);
+f(1, b: 2);
+f(...$a, b: 1);
+f(b: 1, ...$a);
+f(...$a, ...$b);
+f(a: ...$b);
+f(a:);
+f(1 => 2);
+f($a: 1);
+f(A::B: 1);
+f('a': 1);
+f(a : 1);
+f(a :: 1);
+f(class: 1);
+f(list: 1);
+f(fn: 1);
+f(function: 1);
+f(array: 1);
+f(static: 1);
+f(new: 1);
+f(echo: 1);
+f(__CLASS__: 1);
+f(true: 1);
+$a->f(a: 1);
+A::f(a: 1);
+new A(a: 1);
+$a?->f(...);
+strlen(...)('a');
+$f = strlen(...);
+$a = [f(...), $b->c(...)];
+$a = $b(...);
+$a = 'strlen'(...);
+$a = [$b, 'c'](...);
+$a = (function() {})(...);

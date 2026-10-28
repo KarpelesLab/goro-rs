@@ -893,6 +893,10 @@ impl<'a> Parser<'a> {
         {
             return Err(self.unexpected(&[]));
         }
+        let method_kw = !matches!(
+            self.peek_kind(),
+            T::String | T::NameQualified | T::NameFullyQualified | T::NameRelative
+        );
         let (trait_, method) = if matches!(
             self.peek_kind(),
             T::NameQualified | T::NameFullyQualified | T::NameRelative
@@ -907,7 +911,7 @@ impl<'a> Parser<'a> {
         };
         if self.at(T::Insteadof) {
             let Some(trait_) = trait_ else {
-                return Err(self.unexpected(&[T::As]));
+                return Err(self.unexpected(&[T::DoubleColon]));
             };
             self.bump();
             let insteadof = self.name_list()?;
@@ -920,8 +924,9 @@ impl<'a> Parser<'a> {
             });
         }
         if !self.at(T::As) {
-            // Observed on PHP 8.5: `A::m }` expects "as", `m }` "::".
-            let ex: &[T] = if trait_.is_some() {
+            // Observed on PHP 8.5: `A::m }` expects "as", `m }` "::" (`m`
+            // could be a trait name), a keyword method name "as".
+            let ex: &[T] = if trait_.is_some() || method_kw {
                 &[T::As]
             } else {
                 &[T::DoubleColon]

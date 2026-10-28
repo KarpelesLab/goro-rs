@@ -37,7 +37,12 @@ fn parse_errors_match_php85() {
         let got = match parse(&arena, &src) {
             Ok(_) => "OK".to_string(),
             Err(e) => format!(
-                "{}\t{}",
+                "{}{}\t{}",
+                if e.kind == goro_syntax::ErrorKind::Compile {
+                    "FATAL\t"
+                } else {
+                    ""
+                },
                 e.line,
                 e.message.replace('\\', "\\\\").replace('\n', "\\n")
             ),

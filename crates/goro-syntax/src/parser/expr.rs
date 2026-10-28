@@ -117,6 +117,31 @@ pub(crate) fn is_variable(e: &Expr<'_>) -> bool {
     )
 }
 
+/// Operand level of prefix `++`/`--` and of `unset()` items: above every
+/// binary operator and above postfix `++`/`--`.
+pub(crate) const BP_INC_OPERAND: u8 = BP_POW + 2;
+
+/// Whether a token can start a variable (including dereferenceable
+/// literals such as `"abc"[0]` and `[1][0]`).
+pub(crate) fn starts_variable(k: T) -> bool {
+    matches!(
+        k,
+        T::Variable
+            | T::Dollar
+            | T::String
+            | T::NameQualified
+            | T::NameFullyQualified
+            | T::NameRelative
+            | T::Static
+            | T::LParen
+            | T::LBracket
+            | T::Array
+            | T::ConstantEncapsedString
+            | T::DoubleQuote
+            | T::New
+    )
+}
+
 /// Whether a token can start an expression.
 pub(crate) fn starts_expr(k: T) -> bool {
     matches!(
@@ -322,7 +347,10 @@ impl<'a> Parser<'a> {
                     lhs = self.assign_rest(lhs, start)?;
                 }
                 T::Inc | T::Dec => {
-                    if paren || !is_variable(&lhs) {
+                    // Not inside the operand of a prefix `++`/`--`
+                    // (observed on PHP 8.5: `++$b++` fails at the second
+                    // `++`).
+                    if paren || !is_variable(&lhs) || min >= BP_INC_OPERAND {
                         break;
                     }
                     self.bump();
@@ -350,7 +378,7 @@ impl<'a> Parser<'a> {
                         break;
                     }
                     self.bump();
-                    let class = self.class_name_reference(true)?;
+                    let class = self.class_name_reference()?;
                     lhs = self.mk(
                         ExprKind::Instanceof {
                             expr: self.alloc(lhs),
@@ -436,28 +464,33 @@ impl<'a> Parser<'a> {
             // `$a = &$b`: the right side is a variable or `new` (observed
             // on PHP 8.5: `$a = &$b + 1` is `($a = &$b) + 1`).
             let value = if self.at(T::New) {
+                // `= &new A` expects "(" and `= &new A()` a dereference
+                // (observed on PHP 8.5).
                 let v = self.new_expr()?;
                 if matches!(v.kind, ExprKind::New { args: None, .. }) {
                     return Err(self.unexpected(&[T::LParen]));
                 }
+                if !is_variable(&v) {
+                    return Err(self.unexpected(&[
+                        T::ObjectOperator,
+                        T::NullsafeObjectOperator,
+                        T::LBracket,
+                    ]));
+                }
                 v
             } else {
-                if !matches!(
-                    self.peek_kind(),
-                    T::Variable
-                        | T::Dollar
-                        | T::String
-                        | T::NameQualified
-                        | T::NameFullyQualified
-                        | T::NameRelative
-                        | T::Static
-                        | T::LParen
-                ) {
+                if !starts_variable(self.peek_kind()) || self.at(T::New) {
                     return Err(self.unexpected(&[]));
                 }
                 let v = self.expr_bp(BP_POW + 1)?;
                 if !is_variable(&v) {
-                    return Err(self.unexpected(&[]));
+                    // Observed on PHP 8.5: `$a = &"x";` expects "->", "?->"
+                    // or "[".
+                    return Err(self.unexpected(&[
+                        T::ObjectOperator,
+                        T::NullsafeObjectOperator,
+                        T::LBracket,
+                    ]));
                 }
                 v
             };
@@ -619,7 +652,10 @@ impl<'a> Parser<'a> {
     fn pre_inc_dec(&mut self) -> PResult<Expr<'a>> {
         let start = self.pos;
         let t = self.bump();
-        let (e, paren) = self.expr_bp_p(BP_POW + 1)?;
+        if !starts_variable(self.peek_kind()) {
+            return Err(self.unexpected(&[]));
+        }
+        let (e, paren) = self.expr_bp_p(BP_INC_OPERAND)?;
         if paren {
             // `++($a)` (observed on PHP 8.5).
             return Err(self.unexpected(&[
@@ -823,7 +859,13 @@ impl<'a> Parser<'a> {
                     T::PropertyC => MagicConst::Property,
                     _ => MagicConst::Namespace,
                 };
-                self.mk(ExprKind::MagicConst(m), start)
+                let e = self.mk(ExprKind::MagicConst(m), start);
+                // Magic constants take `[`, `->` and `?->`, not `::` or a
+                // call (observed on PHP 8.5: `__LINE__::class` fails).
+                if matches!(self.peek_kind(), T::DoubleColon | T::LParen) {
+                    return Ok((e, false));
+                }
+                e
             }
             T::String | T::NameQualified | T::NameFullyQualified | T::NameRelative => {
                 self.bump();
@@ -1469,7 +1511,7 @@ impl<'a> Parser<'a> {
         ) {
             return Err(self.unexpected(&[T::Class]));
         }
-        let class = self.class_name_reference(false)?;
+        let class = self.class_name_reference()?;
         let args = if self.at(T::LParen) {
             Some(self.arguments()?)
         } else {
@@ -1494,16 +1536,13 @@ impl<'a> Parser<'a> {
     /// variable with property / static property / index accesses, or
     /// `(expr)`.
     #[inline(never)]
-    pub(crate) fn class_name_reference(&mut self, instanceof: bool) -> PResult<ClassRef<'a>> {
+    pub(crate) fn class_name_reference(&mut self) -> PResult<ClassRef<'a>> {
         let t = *self.peek();
         match t.kind {
             T::String | T::NameQualified | T::NameFullyQualified | T::NameRelative => {
                 self.bump();
                 let name = self.name_from(&t);
-                if self.at(T::DoubleColon)
-                    && !matches!(self.peek_at(1), T::Variable | T::Dollar)
-                    && !instanceof
-                {
+                if self.at(T::DoubleColon) && !matches!(self.peek_at(1), T::Variable | T::Dollar) {
                     // `new A::C` (test new_without_ctor_arguments_parentheses_constant).
                     self.bump();
                     return Err(self.unexpected(&[T::Variable, T::Dollar]));
@@ -1821,7 +1860,21 @@ impl<'a> Parser<'a> {
             loop {
                 let ustart = self.pos;
                 let by_ref = self.eat_amp();
-                let t = self.expect1(T::Variable)?;
+                if !self.at(T::Variable) {
+                    // Observed on PHP 8.5: `use ()` expects variable or
+                    // either `&` token.
+                    let ex: &[T] = if by_ref {
+                        &[T::Variable]
+                    } else {
+                        &[
+                            T::Variable,
+                            T::AmpFollowedByVarOrVararg,
+                            T::AmpNotFollowedByVarOrVararg,
+                        ]
+                    };
+                    return Err(self.unexpected(ex));
+                }
+                let t = self.bump();
                 uses.push(ClosureUse {
                     name: Ident {
                         name: &self.text(&t)[1..],
