@@ -13,7 +13,8 @@ pub fn strlen(s: &[u8], enc: Encoding) -> usize {
         return s.len() / w;
     }
     match enc {
-        Encoding::EightBit | Encoding::Iso8859_1 => s.len(),
+        Encoding::EightBit | Encoding::Iso8859_1 | Encoding::Uuencode => s.len(),
+        Encoding::Base64 | Encoding::QuotedPrintable => crate::decode(s, enc).len(),
         Encoding::Utf8 if codec::utf8_valid_up_to(s) == s.len() => {
             s.iter().filter(|&&b| (b as i8) >= -0x40).count()
         }

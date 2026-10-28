@@ -742,8 +742,32 @@ def gen_mobile():
     write("mobile.rs", body)
 
 
+def gen_html():
+    """HTML-ENTITIES: the HTML 4.01 character entity sets (W3C HTMLlat1.ent,
+    HTMLsymbol.ent, HTMLspecial.ent), in DATA_DIR/w3c."""
+    ents = {}
+    for f in ("HTMLlat1.ent", "HTMLsymbol.ent", "HTMLspecial.ent"):
+        with open(os.path.join(DATA, "w3c", f), encoding="latin-1") as fh:
+            for m in re.finditer(r'<!ENTITY\s+(\w+)\s+CDATA\s+"&#(\d+);"', fh.read()):
+                ents[m.group(1)] = int(m.group(2))
+    by_name = sorted(ents.items())
+    body = "/// (name, code point), sorted by name.\n"
+    body += "pub(crate) static BY_NAME: [(&str, u32); %d] = [\n" % len(by_name)
+    for n, cp in by_name:
+        body += '    ("%s", 0x%X),\n' % (n, cp)
+    body += "];\n\n"
+    by_cp = sorted((cp, n) for n, cp in ents.items())
+    body += "/// (code point, name), sorted by code point.\n"
+    body += "pub(crate) static BY_CP: [(u32, &str); %d] = [\n" % len(by_cp)
+    for cp, n in by_cp:
+        body += '    (0x%X, "%s"),\n' % (cp, n)
+    body += "];\n\n"
+    write("html.rs", body)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
+    gen_html()
     gen_kana()
     gen_mobile()
     gen_single()

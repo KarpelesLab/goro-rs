@@ -2,6 +2,7 @@
 
 pub(crate) mod big5;
 pub(crate) mod gb;
+pub(crate) mod html;
 pub(crate) mod kana;
 pub(crate) mod kr;
 pub(crate) mod mobile;

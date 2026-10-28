@@ -8,20 +8,18 @@
 
 use crate::Encoding;
 
-// mod base64;
 mod cjk_cn;
 mod cjk_kr;
 mod cjk_tw;
-// mod html;
+mod html;
 mod iso2022jp;
 mod japanese;
 mod macjapanese;
 mod mobile;
-// mod qprint;
 mod single;
+pub(crate) mod transform;
 mod unicode;
 mod utf7;
-// mod uuencode;
 
 pub(crate) use unicode::utf8_valid_up_to;
 
@@ -192,6 +190,7 @@ pub fn decoder(enc: Encoding) -> Box<dyn Decode> {
         Ascii | SevenBit => Box::new(single::AsciiDec),
         EightBit => Box::new(single::Latin1Dec),
         Iso8859_1 => Box::new(single::Latin1Dec),
+        HtmlEntities => Box::new(html::HtmlDec),
         Base64 | Uuencode | QuotedPrintable => Box::new(single::Latin1Dec),
         Utf7 => Box::new(utf7::Utf7Dec::new(false)),
         Utf7Imap => Box::new(utf7::Utf7Dec::new(true)),
@@ -230,6 +229,7 @@ pub fn encoder(enc: Encoding) -> Box<dyn Encode> {
         Ucs4 | Ucs4Be => Box::new(unicode::Utf32Enc::new(false, false)),
         Ucs4Le => Box::new(unicode::Utf32Enc::new(true, false)),
         Ascii | SevenBit => Box::new(single::AsciiEnc),
+        HtmlEntities => Box::new(html::HtmlEnc),
         EightBit | Iso8859_1 | Base64 | Uuencode | QuotedPrintable => Box::new(single::Latin1Enc),
         Utf7 => Box::new(utf7::Utf7Enc::new(false)),
         Utf7Imap => Box::new(utf7::Utf7Enc::new(true)),
