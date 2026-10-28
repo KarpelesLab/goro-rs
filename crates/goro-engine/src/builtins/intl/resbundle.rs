@@ -50,16 +50,12 @@ pub static MODULE: Module = Module {
         ("resourcebundle::geterrorcode", r_error_code),
         ("resourcebundle::geterrormessage", r_error_message),
         ("resourcebundle::getiterator", r_iterator),
-        ("resourcebundle::offsetget", r_offset_get),
-        ("resourcebundle::offsetexists", r_offset_exists),
-        ("resourcebundle::offsetset", r_offset_set),
-        ("resourcebundle::offsetunset", r_offset_set),
     ],
     hooks: &[("resourcebundle", hooks)],
     ..Module::EMPTY
 };
 
-const RB_CLASS: &str = r#"<?php class ResourceBundle implements IteratorAggregate, Countable, ArrayAccess {
+const RB_CLASS: &str = r#"<?php class ResourceBundle implements IteratorAggregate, Countable {
     public function __construct(?string $locale, ?string $bundle, bool $fallback = true) {}
     public static function create(?string $locale, ?string $bundle, bool $fallback = true): ?ResourceBundle {}
     public function get(string|int $index, bool $fallback = true): mixed {}
@@ -68,10 +64,6 @@ const RB_CLASS: &str = r#"<?php class ResourceBundle implements IteratorAggregat
     public function getErrorCode(): int {}
     public function getErrorMessage(): string {}
     public function getIterator(): Iterator {}
-    public function offsetGet(mixed $offset): mixed {}
-    public function offsetExists(mixed $offset): bool {}
-    public function offsetSet(mixed $offset, mixed $value): void {}
-    public function offsetUnset(mixed $offset): void {}
 }"#;
 
 /// A bundle or one of its tables or arrays.
@@ -89,6 +81,18 @@ fn hooks() -> NativeHooks {
             }
         }),
         count: Some(|_, o| Ok(with_obj::<Rb, i64>(o, |x| len(&x.v.res)).unwrap_or(0))),
+        // `$rb[k]` reads; isset(), empty() and writes are errors while `??`
+        // reads (test ext/intl/tests/resourcebundle_dimension_errors).
+        dim: Some(|vm, o, k, op| {
+            use crate::class::ObjAccess;
+            Some(match (op, k) {
+                (ObjAccess::Read | ObjAccess::Fetch, Some(k)) => dim_read(vm, o, k),
+                (ObjAccess::Read | ObjAccess::Fetch, None) => {
+                    vm.throw("Error", "Cannot apply [] to ResourceBundle object")
+                }
+                _ => vm.throw("Error", "Cannot use object of type ResourceBundle as array"),
+            })
+        }),
         ..Default::default()
     }
 }
@@ -201,10 +205,22 @@ fn element(res: &Res, idx: &Value) -> Option<Res> {
 
 fn get_impl(vm: &mut Vm, a: &Args, prefix: Option<&str>) -> R<Value> {
     let (o, off, res) = this_rb(vm, a)?;
+    get_core(vm, Some(a), &o, &res, a.val(off), prefix)
+}
+
+/// The element `idx` of `res` (with the error set when it is missing).
+fn get_core(
+    vm: &mut Vm,
+    a: Option<&Args>,
+    o: &ObjRef,
+    res: &Res,
+    idx: Value,
+    prefix: Option<&str>,
+) -> R<Value> {
+    let o = o.clone();
     reset(vm);
     super::set_obj_err::<Rb>(&o, 0, "");
-    let idx = a.val(off);
-    match element(&res, &idx) {
+    match element(res, &idx) {
         Some(e) => to_php(vm, &e),
         None => {
             let shown = match &idx {
@@ -218,7 +234,12 @@ fn get_impl(vm: &mut Vm, a: &Args, prefix: Option<&str>) -> R<Value> {
                     super::set_obj_err::<Rb>(&o, ue::U_MISSING_RESOURCE_ERROR, &msg);
                     super::fail_msg(vm, ue::U_MISSING_RESOURCE_ERROR, msg)?;
                 }
-                None => super::fail_obj::<Rb>(vm, a, &o, ue::U_MISSING_RESOURCE_ERROR, &text)?,
+                None => match a {
+                    Some(a) => {
+                        super::fail_obj::<Rb>(vm, a, &o, ue::U_MISSING_RESOURCE_ERROR, &text)?
+                    }
+                    None => super::fail_msg(vm, ue::U_MISSING_RESOURCE_ERROR, text)?,
+                },
             }
             Ok(Value::Null)
         }
@@ -229,8 +250,11 @@ fn r_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
     get_impl(vm, a, None)
 }
 
-fn r_offset_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    match a.val(0) {
+fn dim_read(vm: &mut Vm, o: &ObjRef, k: &Value) -> R<Value> {
+    let Some(res) = with_obj::<Rb, Res>(o, |x| x.v.res.clone()) else {
+        return vm.throw("Error", "Found unconstructed ResourceBundle");
+    };
+    match k.clone().into_deref() {
         Value::Null => vm.throw("Error", "Cannot apply [] to ResourceBundle object"),
         Value::Float(_) => vm.type_error("Cannot access offset of type float on ResourceBundle"),
         Value::Object(o) => {
@@ -244,16 +268,8 @@ fn r_offset_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
             vm.value_error("Index must be between -2147483648 and 2147483647")
         }
         // the dimension read of PHP's handler reports as main()
-        _ => get_impl(vm, a, Some("main")),
+        idx => get_core(vm, None, o, &res, idx, Some("main")),
     }
-}
-
-fn r_offset_exists(vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    vm.throw("Error", "Cannot use object of type ResourceBundle as array")
-}
-
-fn r_offset_set(vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    vm.throw("Error", "Cannot use object of type ResourceBundle as array")
 }
 
 fn r_count(vm: &mut Vm, a: &mut Args) -> R<Value> {
