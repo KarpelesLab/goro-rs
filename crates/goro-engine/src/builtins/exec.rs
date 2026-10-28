@@ -343,7 +343,7 @@ fn status_code(st: Option<i32>) -> i64 {
 
 fn rtrim_ws(b: &[u8]) -> &[u8] {
     let mut e = b.len();
-    while e > 0 && matches!(b[e - 1], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0) {
+    while e > 0 && matches!(b[e - 1], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c | 0) {
         e -= 1;
     }
     &b[..e]

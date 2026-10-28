@@ -1648,6 +1648,16 @@ impl Vm {
                     ),
                 );
             }
+            // ini_set()'s value names no given type (observed on PHP 8.5).
+            if i == 1
+                && fname.as_bytes() == b"ini_set"
+                && matches!(args[1], Value::Array(_) | Value::Resource(_))
+            {
+                return self.throw(
+                    "TypeError",
+                    "ini_set(): Argument #2 ($value) must be of type string|int|float|bool|null",
+                );
+            }
             // strtr()'s $from is an array with two arguments and a string
             // with three (observed on PHP 8.5).
             if i == 1 && fname.as_bytes() == b"strtr" {
