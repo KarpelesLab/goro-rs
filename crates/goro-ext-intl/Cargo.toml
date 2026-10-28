@@ -9,3 +9,4 @@ repository.workspace = true
 intl = "0.6.5"
 goro-ext-date = { path = "../goro-ext-date" }
 goro-charset = { path = "../goro-charset" }
+goro-ext-zlib = { path = "../goro-ext-zlib" }
