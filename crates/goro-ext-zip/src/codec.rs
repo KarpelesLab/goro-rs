@@ -120,9 +120,7 @@ pub fn decompress(method: u16, flags: u16, data: &[u8], size: u64) -> Result<Vec
         cm::BZIP2 => {
             dec::<compcol::bzip2::Bzip2>(data, Default::default(), cap(size)).map_err(codec_err)
         }
-        cm::ZSTD => {
-            dec::<compcol::zstd::Zstd>(data, (), cap(size)).map_err(codec_err)
-        }
+        cm::ZSTD => dec::<compcol::zstd::Zstd>(data, (), cap(size)).map_err(codec_err),
         cm::XZ => dec::<compcol::xz::Xz>(data, (), cap(size)).map_err(codec_err),
         cm::LZMA => {
             // APPNOTE 5.8.8: version (2), properties size (2), properties,
