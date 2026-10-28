@@ -1245,6 +1245,25 @@ impl Vm {
             self.give_args_vec(args);
             return Err(e);
         }
+        // Internal variadic functions take no extra named arguments, except
+        // the callers of callbacks (test Zend/tests/named_params/
+        // internal_variadics.phpt).
+        if named.as_ref().is_some_and(|n| !n.is_empty())
+            && func.scope().is_none()
+            && !matches!(
+                func.lname.as_bytes(),
+                b"call_user_func" | b"forward_static_call"
+            )
+        {
+            self.give_args_vec(args);
+            return self.throw(
+                "ArgumentCountError",
+                &format!(
+                    "{}() does not accept unknown named parameters",
+                    func.display_name()
+                ),
+            );
+        }
         self.ex.native_calls.push(super::NativeCall {
             func: func.clone(),
             args: &args as *const Vec<Value>,
@@ -1284,6 +1303,21 @@ impl Vm {
                     let p = &sig.params[i];
                     match &p.default {
                         ParamDefault::Const(v) => args[i] = v.clone(),
+                        // Optional parameters without a default (written
+                        // `= UNKNOWN` in signatures): observed on PHP 8.5,
+                        // "Argument #2 ($filter_value) must be passed
+                        // explicitly, because the default value is not known".
+                        ParamDefault::Lazy(_) if p.default_text.as_deref() == Some("UNKNOWN") => {
+                            return self.throw(
+                                "ArgumentCountError",
+                                &format!(
+                                    "{}(): Argument #{} (${}) must be passed explicitly, because the default value is not known",
+                                    fname,
+                                    i + 1,
+                                    p.name.to_string_lossy()
+                                ),
+                            );
+                        }
                         ParamDefault::Lazy(ce) => {
                             let ce = ce.clone();
                             args[i] = self.eval_const_expr(&ce, std::ptr::null())?;
@@ -2004,6 +2038,7 @@ impl Vm {
             if !magic && self.pending_arg_by_ref(i) {
                 let v = match a {
                     Value::Ref(_) => a,
+                    other if self.pending_prefers_ref() => other,
                     other => {
                         let f = self.ex.pending.last().unwrap().func.clone();
                         let pname = self
@@ -2059,6 +2094,7 @@ impl Vm {
                     let v = if self.pending_arg_by_ref(i) {
                         match a {
                             Value::Ref(_) => a.clone(),
+                            other if self.pending_prefers_ref() => other.clone(),
                             other => {
                                 let f = self.ex.pending.last().unwrap().func.clone();
                                 let pname = self
