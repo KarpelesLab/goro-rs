@@ -72,6 +72,29 @@ pub trait EntityLoader {
         system_id: &str,
         base: Option<&str>,
     ) -> Result<Vec<u8>, LoadError>;
+    /// [`EntityLoader::load`] with the document's DOCTYPE details (what
+    /// PHP passes as the user loader's `$context`).
+    fn load_with(
+        &mut self,
+        public_id: Option<&str>,
+        system_id: &str,
+        base: Option<&str>,
+        ctx: &LoadContext,
+    ) -> Result<Vec<u8>, LoadError> {
+        let _ = ctx;
+        self.load(public_id, system_id, base)
+    }
+}
+
+/// The DOCTYPE of the document an external resource is loaded for.
+#[derive(Clone, Debug, Default)]
+pub struct LoadContext {
+    /// The DOCTYPE name.
+    pub int_sub_name: Option<String>,
+    /// The external subset's system ID.
+    pub ext_sub_uri: Option<String>,
+    /// The external subset's public ID.
+    pub ext_sub_system: Option<String>,
 }
 
 /// Why an external resource could not be loaded.

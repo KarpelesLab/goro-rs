@@ -7,6 +7,7 @@ pub mod core_classes;
 pub mod core_funcs;
 pub mod ctype;
 pub mod date;
+pub mod dom;
 pub mod enums;
 pub mod exec;
 pub mod fiber;
@@ -20,6 +21,7 @@ pub mod info;
 mod info_text;
 pub mod ini;
 pub mod json;
+pub mod libxml;
 pub mod math;
 pub mod mbstring;
 pub mod misc;
@@ -39,6 +41,7 @@ pub mod uri;
 pub mod userstream;
 pub mod var;
 pub mod weakmap;
+pub mod xmlstore;
 pub mod zlib;
 
 use crate::registry::Module;
@@ -82,5 +85,6 @@ pub fn modules() -> Vec<&'static Module> {
         &filter::MODULE,
         &sodium::MODULE,
         &uri::MODULE,
+        &libxml::MODULE,
     ]
 }

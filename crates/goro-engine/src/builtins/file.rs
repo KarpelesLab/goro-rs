@@ -1432,7 +1432,7 @@ fn flock(vm: &mut Vm, a: &mut Args) -> R<Value> {
     })
 }
 
-fn read_rest(vm: &mut Vm, s: &mut Stream) -> Vec<u8> {
+pub(crate) fn read_rest(vm: &mut Vm, s: &mut Stream) -> Vec<u8> {
     let mut out = Vec::new();
     let mut buf = [0u8; 8192];
     loop {

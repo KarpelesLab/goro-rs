@@ -9,9 +9,13 @@
 //!
 //! Text is stored as UTF-8 (`String`); names are shared [`Str`] values.
 //!
-//! Memory: nodes are never freed implicitly. The embedder frees a detached
-//! subtree with [`Arena::free_subtree`] once nothing refers to it any more
-//! (and a whole document with the same call on the document node).
+//! Memory: the embedder takes *holds* on the nodes it refers to
+//! ([`Arena::hold`], [`Arena::release`]). A document lives while any node it
+//! owns is held; a detached subtree lives while any node in it is held.
+//! Releasing the last hold frees what became unreachable. Operations that
+//! free nodes (setting text content, `normalize`) keep held nodes alive as
+//! detached roots, as PHP keeps nodes a PHP object refers to.
+//! [`Arena::free_subtree`] frees an unheld detached subtree explicitly.
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -139,6 +143,9 @@ pub struct DocData {
     pub modern: bool,
     /// Content type for HTML5 documents.
     pub content_type: Option<String>,
+    /// External holds on nodes owned by this document (see
+    /// [`Arena::hold`]); not copied by clones.
+    pub holds: u32,
 }
 
 /// An XML namespace declaration (`xmlns:prefix="uri"` or `xmlns="uri"`).
@@ -513,6 +520,8 @@ pub struct Node {
     pub doc: Option<NodeId>,
     /// The source line (1-based; 0 when unknown).
     pub line: u32,
+    /// External holds on this node (see [`Arena::hold`]).
+    pub holds: u32,
 }
 
 impl Node {
@@ -526,6 +535,7 @@ impl Node {
             next: None,
             doc,
             line: 0,
+            holds: 0,
         }
     }
 }
@@ -602,6 +612,9 @@ impl DomError {
 pub struct Arena {
     nodes: Vec<Option<Node>>,
     free: Vec<u32>,
+    /// Documents whose last hold went away through an adoption (freed by
+    /// [`Arena::collect`]).
+    unheld_docs: Vec<NodeId>,
 }
 
 /// Iterator over a sibling chain.
@@ -642,6 +655,7 @@ impl Arena {
         Arena {
             nodes: vec![None],
             free: Vec::new(),
+            unheld_docs: Vec::new(),
         }
     }
 
@@ -1224,8 +1238,24 @@ impl Arena {
     /// Frees a detached subtree (children, attributes, template contents).
     /// Handles to these nodes become invalid.
     pub fn free_subtree(&mut self, n: NodeId) {
+        if !self.is_live(n) {
+            return;
+        }
+        if self.node(n).holds > 0 {
+            self.detach(n);
+            return;
+        }
         let mut stack = vec![n];
         while let Some(x) = stack.pop() {
+            // A held node survives as a detached root with its subtree (its
+            // parent and siblings are being freed: their links just go).
+            if x != n && self.is_live(x) && self.node(x).holds > 0 {
+                let node = self.node_mut(x);
+                node.parent = None;
+                node.prev = None;
+                node.next = None;
+                continue;
+            }
             let Some(node) = self.nodes[x.0.get() as usize].take() else {
                 continue;
             };
@@ -1252,6 +1282,114 @@ impl Arena {
                 stack.push(e);
             }
             self.free.push(x.0.get());
+        }
+    }
+
+    // ----- holds --------------------------------------------------------------
+
+    /// Takes a hold on `id`: it (and its document, and the detached subtree
+    /// it is in) stays alive until the matching [`Arena::release`].
+    pub fn hold(&mut self, id: NodeId) {
+        self.node_mut(id).holds += 1;
+        let d = self.doc_of(id);
+        self.doc_mut(d).holds += 1;
+    }
+
+    /// Number of holds on `id`.
+    pub fn holds(&self, id: NodeId) -> u32 {
+        self.node(id).holds
+    }
+
+    /// True if a node of the subtree at `n` (attributes and template
+    /// contents included) is held.
+    pub fn subtree_held(&self, n: NodeId) -> bool {
+        let mut stack = vec![n];
+        while let Some(x) = stack.pop() {
+            let node = self.node(x);
+            if node.holds > 0 {
+                return true;
+            }
+            let mut c = node.first_child;
+            while let Some(ch) = c {
+                stack.push(ch);
+                c = self.node(ch).next;
+            }
+            if let NodeData::Element(e) = &node.data {
+                let mut a = e.first_attr;
+                while let Some(at) = a {
+                    stack.push(at);
+                    a = self.node(at).next;
+                }
+                if let Some(t) = e.template_contents {
+                    stack.push(t);
+                }
+            }
+        }
+        false
+    }
+
+    /// Releases a hold taken with [`Arena::hold`], freeing the document when
+    /// none of its nodes is held any more, or the detached subtree `id` is
+    /// in when nothing in it is. Returns the documents freed.
+    pub fn release(&mut self, id: NodeId) -> Vec<NodeId> {
+        let node = self.node_mut(id);
+        node.holds -= 1;
+        let d = self.doc_of(id);
+        let dd = self.doc_mut(d);
+        dd.holds -= 1;
+        if dd.holds == 0 {
+            self.unheld_docs.push(d);
+            return self.collect();
+        }
+        if matches!(self.node(id).data, NodeData::Namespace(_)) {
+            if self.node(id).holds == 0 {
+                self.free_namespace_node(id);
+            }
+        } else {
+            let r = self.root(id);
+            if r != d && !self.subtree_held(r) {
+                self.free_subtree(r);
+            }
+        }
+        self.collect()
+    }
+
+    /// Frees a namespace node (XPath namespace axis results), which is not
+    /// one of its element's children.
+    pub fn free_namespace_node(&mut self, id: NodeId) {
+        if self.is_live(id)
+            && matches!(self.node(id).data, NodeData::Namespace(_))
+            && self.node(id).holds == 0
+        {
+            self.nodes[id.0.get() as usize] = None;
+            self.free.push(id.0.get());
+        }
+    }
+
+    /// Frees the documents left without holds (by adoptions moving their
+    /// held nodes elsewhere, or by [`Arena::release`]). Returns them.
+    pub fn collect(&mut self) -> Vec<NodeId> {
+        let mut freed = Vec::new();
+        while let Some(d) = self.unheld_docs.pop() {
+            if self.is_live(d)
+                && matches!(self.node(d).data, NodeData::Document(_))
+                && self.doc(d).holds == 0
+            {
+                self.free_subtree(d);
+                freed.push(d);
+            }
+        }
+        freed
+    }
+
+    /// Frees a document nothing holds (a document the embedder created and
+    /// dropped without taking holds, such as a failed parse).
+    pub fn free_document_if_unheld(&mut self, d: NodeId) -> bool {
+        if self.is_live(d) && self.doc(d).holds == 0 {
+            self.free_subtree(d);
+            true
+        } else {
+            false
         }
     }
 
@@ -1844,10 +1982,13 @@ impl Arena {
         if self.node(n).doc == Some(doc) || matches!(self.node(n).data, NodeData::Document(_)) {
             return;
         }
+        let old_doc = self.doc_of(n);
+        let mut moved = 0u32;
         let mut stack = vec![n];
         while let Some(x) = stack.pop() {
             self.node_mut(x).doc = Some(doc);
             let node = self.node(x);
+            moved += node.holds;
             let mut c = node.first_child;
             while let Some(ch) = c {
                 stack.push(ch);
@@ -1862,6 +2003,14 @@ impl Arena {
                     stack.push(at);
                     a = self.node(at).next;
                 }
+            }
+        }
+        if moved > 0 {
+            self.doc_mut(doc).holds += moved;
+            let od = self.doc_mut(old_doc);
+            od.holds -= moved;
+            if od.holds == 0 {
+                self.unheld_docs.push(old_doc);
             }
         }
     }
@@ -1881,6 +2030,7 @@ impl Arena {
             d.doctype = None;
             d.ext_subset = None;
             d.ids.clear();
+            d.holds = 0;
         }
         let is_doc = matches!(data, NodeData::Document(_));
         let copy = self.alloc(Node::new(data, if is_doc { None } else { Some(doc) }));
@@ -2147,6 +2297,9 @@ impl Arena {
             e.first_attr = None;
             e.last_attr = None;
             e.template_contents = None;
+        }
+        if let NodeData::Document(d) = &mut data {
+            d.holds = 0;
         }
         let copy = self.create(doc, data);
         self.node_mut(copy).line = node.line;

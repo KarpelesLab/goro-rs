@@ -80,8 +80,9 @@ impl Parser<'_> {
             return Ok(());
         };
         let base = self.opts.url.clone();
+        let ctx = self.load_context();
         let res = match self.loader.as_mut() {
-            Some(l) => l.load(public.as_deref(), &system, base.as_deref()),
+            Some(l) => l.load_with(public.as_deref(), &system, base.as_deref(), &ctx),
             None => Err(super::LoadError::NotFound),
         };
         let bytes = match res {
@@ -296,8 +297,9 @@ impl Parser<'_> {
 
     fn load_text(&mut self, public: Option<&str>, system: &str) -> R<Option<String>> {
         let base = self.opts.url.clone();
+        let ctx = self.load_context();
         let res = match self.loader.as_mut() {
-            Some(l) => l.load(public, system, base.as_deref()),
+            Some(l) => l.load_with(public, system, base.as_deref(), &ctx),
             None => Err(super::LoadError::NotFound),
         };
         match res {

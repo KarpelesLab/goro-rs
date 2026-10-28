@@ -2332,6 +2332,18 @@ impl<'l> Parser<'l> {
         Ok(())
     }
 
+    /// The DOCTYPE details passed to the entity loader.
+    pub(crate) fn load_context(&self) -> super::LoadContext {
+        match &self.dtd {
+            Some(d) => super::LoadContext {
+                int_sub_name: Some(d.name.to_string()),
+                ext_sub_uri: d.system_id.clone(),
+                ext_sub_system: d.public_id.clone(),
+            },
+            None => super::LoadContext::default(),
+        }
+    }
+
     fn load_external(
         &mut self,
         public: Option<&str>,
@@ -2339,8 +2351,9 @@ impl<'l> Parser<'l> {
         name: &str,
     ) -> R<Option<String>> {
         let base = self.opts.url.clone();
+        let ctx = self.load_context();
         let res = match self.loader.as_mut() {
-            Some(l) => l.load(public, system, base.as_deref()),
+            Some(l) => l.load_with(public, system, base.as_deref(), &ctx),
             None => Err(LoadError::NotFound),
         };
         match res {
