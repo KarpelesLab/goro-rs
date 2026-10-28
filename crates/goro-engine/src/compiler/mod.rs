@@ -23,6 +23,17 @@ use crate::class::ClassDecl;
 pub use decl::parse_native_sig;
 
 /// Whether a variable name is a superglobal.
+/// A string literal's bytes in the internal encoding (zend.multibyte with
+/// a non-UTF-8 internal_encoding; test ext/mbstring/tests/zend_multibyte-02).
+pub(crate) fn lit(s: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    match LITERAL_ENCODING.with(|c| c.get()) {
+        Some(e) if !s.is_ascii() => std::borrow::Cow::Owned(
+            goro_charset::convert(s, e, goro_charset::Encoding::Utf8, &Default::default()).bytes,
+        ),
+        _ => std::borrow::Cow::Borrowed(s),
+    }
+}
+
 pub fn is_superglobal_name(n: &[u8]) -> bool {
     scan::is_superglobal(n)
 }
@@ -599,7 +610,11 @@ impl<'a> Compiler<'a> {
         if params.iter().any(|p| p.ty.is_some()) {
             flags |= fflags::TYPED_PARAMS;
         }
+        let byref_mask = crate::bytecode::byref_mask(&params);
+        let direct_params = params.iter().filter(|p| !p.variadic).count() as u32;
         Ok(FuncCode {
+            byref_mask,
+            direct_params,
             name,
             class_name: self.class.as_ref().map(|c| c.name.clone()),
             file: self.file.clone(),
@@ -781,7 +796,12 @@ impl<'a> Compiler<'a> {
                             if let Some(t) = t {
                                 self.ticks = t;
                             }
+                            // Statements of a declare block do not count as
+                            // statements before a later encoding declare
+                            // (test ext/mbstring/tests/zend_multibyte-15).
+                            let first = self.past_first_stmt;
                             let r = self.top_stmts(b, hoisted, classes);
+                            self.past_first_stmt = first;
                             self.ticks = saved;
                             r?
                         }
@@ -1097,6 +1117,22 @@ impl<'a> Compiler<'a> {
                 .unwrap_or(&full)
                 .to_vec(),
         };
+        // `use Foo;` in the global namespace (test Zend/tests/bug69388).
+        if kind == UseKind::Normal
+            && self.ns.is_empty()
+            && prefix.is_none()
+            && u.alias.is_none()
+            && !full.contains(&b'\\')
+        {
+            self.notice(
+                goro_runtime::Level::Warning,
+                format!(
+                    "The use statement with non-compound name '{}' has no effect",
+                    String::from_utf8_lossy(&full)
+                ),
+                line,
+            );
+        }
         match kind {
             UseKind::Normal => {
                 let la = alias.to_ascii_lowercase();
@@ -1689,6 +1725,9 @@ impl<'a> Compiler<'a> {
                 self.f.line = c.span.line;
                 let mut names = Vec::new();
                 for n in c.types {
+                    if n.kind == NameKind::Unqualified && n.name.eq_ignore_ascii_case(b"static") {
+                        return self.err("Bad class name in the catch statement", c.span.line);
+                    }
                     let full = self.resolve_class(n);
                     let lf = full.to_ascii_lowercase();
                     if lf == b"self" || lf == b"static" || lf == b"parent" {
@@ -1852,4 +1891,8 @@ fn needs_rtd_key(cd: &goro_syntax::ast::ClassDecl) -> bool {
 thread_local! {
     /// The zend.multibyte setting for the next compilation.
     pub static ZEND_MULTIBYTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// zend.multibyte: the encoding string literals are converted to from
+    /// UTF-8 (the internal encoding).
+    pub static LITERAL_ENCODING: std::cell::Cell<Option<goro_charset::Encoding>> =
+        const { std::cell::Cell::new(None) };
 }

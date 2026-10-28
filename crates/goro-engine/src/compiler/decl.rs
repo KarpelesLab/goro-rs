@@ -45,6 +45,13 @@ pub(crate) struct FnSpec<'a> {
 
 impl<'a> Compiler<'a> {
     pub(crate) fn func_decl(&mut self, fd: &'a FunctionDecl<'a>) -> CResult<u32> {
+        if fd.name.name.eq_ignore_ascii_case(b"assert") && !self.ns.is_empty() {
+            // test Zend/tests/custom_assert_forbidden
+            return self.err(
+                "Defining a custom assert() function is not allowed, as the function has special semantics",
+                fd.span.line,
+            );
+        }
         let full = self.qualify_pub(fd.name.name);
         let name = PhpStr::intern(&full);
         let spec = FnSpec {
@@ -1049,6 +1056,22 @@ impl<'a> Compiler<'a> {
                         line,
                     );
                 }
+                if n.name == b"_" {
+                    // PHP 8.4 (RFC: Deprecations for PHP 8.4).
+                    self.notice(
+                        goro_runtime::Level::Deprecated,
+                        format!(
+                            "Using \"_\" as {} name is deprecated since 8.4",
+                            match kind {
+                                ClassKind::Interface => "an interface",
+                                ClassKind::Trait => "a trait",
+                                ClassKind::Enum => "an enum",
+                                ClassKind::Class => "a class",
+                            }
+                        ),
+                        line,
+                    );
+                }
                 let full = self.qualify_pub(n.name);
                 if let Some(imp) = self.use_class.get(&l)
                     && !imp.eq_ignore_ascii_case(&full)
@@ -1430,6 +1453,7 @@ impl<'a> Compiler<'a> {
                             flags,
                             is_interface,
                             it.span.line,
+                            p.ty.as_ref(),
                         )?;
                         let mut f = flags;
                         if default.is_some() || (ty.is_none() && flags & mflags::STATIC == 0) {
@@ -1715,6 +1739,7 @@ impl<'a> Compiler<'a> {
                                 pf,
                                 false,
                                 p.span.line,
+                                p.ty.as_ref(),
                             )?;
                             let attrs = self.attributes(p.attrs)?;
                             props.push(PropDecl {
@@ -1755,6 +1780,22 @@ impl<'a> Compiler<'a> {
                         .collect();
                     let mut rules = Vec::new();
                     for a in tu.adaptations {
+                        // tests Zend/tests/traits/static_in_trait_insteadof_*
+                        let names: Vec<&Name<'a>> = match a {
+                            TraitAdaptation::Precedence {
+                                trait_, insteadof, ..
+                            } => std::iter::once(trait_).chain(insteadof.iter()).collect(),
+                            TraitAdaptation::Alias { trait_, .. } => trait_.iter().collect(),
+                        };
+                        if names.iter().any(|n| {
+                            n.kind == NameKind::Unqualified
+                                && n.name.eq_ignore_ascii_case(b"static")
+                        }) {
+                            return self.err(
+                                "Cannot use \"static\" as trait name, as it is reserved",
+                                tu.span.line,
+                            );
+                        }
                         match a {
                             TraitAdaptation::Precedence {
                                 trait_,
@@ -1828,6 +1869,7 @@ impl<'a> Compiler<'a> {
         pflags: u32,
         iface: bool,
         line: u32,
+        ast_ty: Option<&'a Type<'a>>,
     ) -> CResult<(Option<Rc<FuncCode>>, Option<Rc<FuncCode>>, u32)> {
         let mut get = None;
         let mut set = None;
@@ -1966,7 +2008,9 @@ impl<'a> Compiler<'a> {
             let spec = FnSpec {
                 name: spec_name,
                 params,
-                ret: None,
+                // A get hook returns the property type (RFC: Property
+                // hooks; test Zend/tests/property_hooks/get_type_check).
+                ret: if is_get { ast_ty } else { None },
                 body,
                 by_ref: h.by_ref,
                 kind: FnKind::Method {

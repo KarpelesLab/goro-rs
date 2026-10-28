@@ -149,6 +149,46 @@ pub trait StreamFilter {
     fn on_close(&mut self, _vm: &mut Vm) -> R<()> {
         Ok(())
     }
+    /// `fflush()` or a seek: whatever the filter holds back (zlib: a sync
+    /// flush).
+    fn flush(&mut self, _vm: &mut Vm, _out: &mut Vec<u8>) -> R<bool> {
+        Ok(true)
+    }
+}
+
+/// Runs the write filters' flush and writes what comes out.
+pub(crate) fn flush_write_filters(vm: &mut Vm, s: &mut Stream) -> R<()> {
+    if s.write_filters.is_empty() {
+        return Ok(());
+    }
+    let mut chain = std::mem::take(&mut s.write_filters);
+    let mut cur: Vec<u8> = Vec::new();
+    let mut r = Ok(true);
+    for f in chain.iter_mut() {
+        let mut out = Vec::new();
+        if !cur.is_empty() {
+            match f.filter.filter(vm, &cur, false, &mut out) {
+                Ok(true) => {}
+                other => {
+                    r = other;
+                    break;
+                }
+            }
+        }
+        match f.filter.flush(vm, &mut out) {
+            Ok(true) => {}
+            other => {
+                r = other;
+                break;
+            }
+        }
+        cur = out;
+    }
+    s.write_filters = chain;
+    if matches!(r, Ok(true)) && !cur.is_empty() {
+        let _ = s.write_raw(vm, &cur);
+    }
+    r.map(|_| ())
 }
 
 /// Builds a filter for `name` with `params` on a side of a stream; none

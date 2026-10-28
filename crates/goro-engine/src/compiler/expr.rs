@@ -129,7 +129,7 @@ impl<'a> Compiler<'a> {
         match &e.kind {
             ExprKind::Int(i) => Some(Value::Int(*i)),
             ExprKind::Float(f) => Some(Value::Float(*f)),
-            ExprKind::String(s, _) => Some(Value::Str(PhpStr::intern(s))),
+            ExprKind::String(s, _) => Some(Value::Str(PhpStr::intern(&super::lit(s)))),
             ExprKind::Const(n) => self.const_name_value(n),
             ExprKind::MagicConst(m) => self.magic_value(*m, e.span.line),
             ExprKind::Unary { op, expr } => {
@@ -302,9 +302,15 @@ impl<'a> Compiler<'a> {
         match &e.kind {
             ExprKind::Int(i) => Ok(self.int_const(*i)),
             ExprKind::Float(f) => Ok(self.add_const(Value::Float(*f))),
-            ExprKind::String(s, _) => Ok(self.str_const(s)),
+            ExprKind::String(s, _) => Ok(self.str_const(&super::lit(s))),
             ExprKind::Interpolated(parts, _) => self.rope(parts, hint),
             ExprKind::ShellExec(parts) => {
+                // PHP 8.5 (RFC: Deprecations for PHP 8.5).
+                self.notice(
+                    goro_runtime::Level::Deprecated,
+                    "The backtick (`) operator is deprecated, use shell_exec() instead",
+                    line,
+                );
                 let s = self.rope(parts, NONE)?;
                 let name = self.name_pair(b"shell_exec");
                 let cache = self.cache();
@@ -490,6 +496,24 @@ impl<'a> Compiler<'a> {
                     self.emit(Op::ClassName { dst: d, class });
                     return Ok(d);
                 }
+                // self::X / parent::X outside a class (test
+                // Zend/tests/self_class_const_outside_class).
+                if let ClassRef::Name(n) = &cc.class
+                    && n.kind == NameKind::Unqualified
+                    && (n.name.eq_ignore_ascii_case(b"self")
+                        || n.name.eq_ignore_ascii_case(b"parent"))
+                    && self.class.is_none()
+                    && self.f.flags & (fflags::CLOSURE | fflags::CONST_EXPR | fflags::PSEUDO_MAIN)
+                        == 0
+                {
+                    return self.err(
+                        format!(
+                            "Cannot use \"{}\" when no class scope is active",
+                            String::from_utf8_lossy(&n.name.to_ascii_lowercase())
+                        ),
+                        line,
+                    );
+                }
                 let class = self.class_spec(&cc.class)?;
                 let n = self.member_name(&cc.name)?;
                 self.free_spec(class);
@@ -575,7 +599,16 @@ impl<'a> Compiler<'a> {
                 self.parent_hook_call(sc, hint, line)
             }
             ExprKind::StaticCall(sc) => self.chain_root(e, |c| {
-                let class = c.class_spec(&sc.class)?;
+                let mut class = c.class_spec(&sc.class)?;
+                // `self::m()` forwards the late static binding class (PHP
+                // manual, Late Static Bindings: forwarding calls), so it
+                // stays relative instead of naming the class.
+                if let ClassRef::Name(n) = &sc.class
+                    && n.kind == NameKind::Unqualified
+                    && n.name.eq_ignore_ascii_case(b"self")
+                {
+                    class = ClassSpec::SelfRef;
+                }
                 let n = c.member_name(&sc.name)?;
                 c.free_spec(class);
                 c.free(n);
@@ -1134,7 +1167,7 @@ impl<'a> Compiler<'a> {
             match p {
                 StrPart::Lit(s) => {
                     if !s.is_empty() {
-                        ops.push(self.str_const(s));
+                        ops.push(self.str_const(&super::lit(s)));
                     }
                 }
                 StrPart::Expr(x) => {

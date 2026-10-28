@@ -97,6 +97,18 @@ pub(crate) fn fast_arith(op: Bin, x: &Value, y: &Value) -> Option<Value> {
     }
 }
 
+/// `x === null` on defined values (PHP manual, Comparison Operators: same
+/// type and value); `None` when neither is null or a reference is involved.
+#[inline]
+fn null_identity(x: &Value, y: &Value) -> Option<bool> {
+    match (x, y) {
+        (Value::Null, v) | (v, Value::Null) if !matches!(v, Value::Ref(_)) => {
+            Some(matches!(v, Value::Null))
+        }
+        _ => None,
+    }
+}
+
 impl Vm {
     // ------------------------------------------------------------ operands
 
@@ -725,10 +737,7 @@ impl Vm {
                     cache,
                     fallback,
                 } => self.op_init_fcall(name, nargs, cache, fallback)?,
-                Op::InitDynCall { callee, nargs } => {
-                    let v = self.get(callee)?;
-                    self.init_callable_call(v, nargs)?;
-                }
+                Op::InitDynCall { callee, nargs } => self.op_init_dyn_call(callee, nargs)?,
                 Op::InitMethod {
                     obj,
                     name,
@@ -1029,6 +1038,15 @@ impl Vm {
 
     #[cold]
     pub(crate) fn binop_slow(&mut self, op: Bin, dst: Reg, a: Reg, b: Reg) -> R<()> {
+        if matches!(op, Bin::Identical | Bin::NotIdentical)
+            && let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
+            && let Some(same) = null_identity(x, y)
+        {
+            self.drop_tmp(a);
+            self.drop_tmp(b);
+            self.put_bool(dst, same == (op == Bin::Identical));
+            return Ok(());
+        }
         let x = self.get(a)?;
         let y = self.get(b)?;
         let r = self.binary_op(op, &x, &y)?;

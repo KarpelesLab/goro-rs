@@ -933,7 +933,10 @@ impl<'a> Parser<'a> {
         if let Some(f) = modifier_flag(t.kind) {
             if t.kind == T::Static || t.kind == T::Abstract {
                 return Err(self.fatal(
-                    format!("Cannot use \"{}\" as method modifier", modifier_name(f)),
+                    format!(
+                        "Cannot use \"{}\" as method modifier in trait alias",
+                        modifier_name(f)
+                    ),
                     self.tok_span(&t),
                 ));
             }

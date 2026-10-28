@@ -1,7 +1,6 @@
 //! Core functions (PHP manual: Function handling, Classes/Objects, Error
 //! handling, Misc., PHP options/info).
 
-use crate::class::TypeName;
 use std::rc::Rc;
 
 use goro_runtime::{Key, KeyRef, PhpArray, PhpStr, Value};
@@ -1039,11 +1038,13 @@ fn get_parent_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
         if c.is_none() {
             return vm.type_error(&format!(
                 "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given",
-                v.tname()
+                crate::vm::Vm::type_name_given(&v)
             ));
         }
         c
     } else {
+        // PHP 8.3 (RFC: Deprecations for PHP 8.3).
+        vm.deprecated("Calling get_parent_class() without arguments is deprecated")?;
         let p = vm.scope_ptr();
         (!p.is_null()).then(|| vm.rc_class(p))
     };
@@ -1071,7 +1072,7 @@ fn method_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
         other => {
             return vm.type_error(&format!(
                 "method_exists(): Argument #1 ($object_or_class) must be of type object|string, {} given",
-                other.tname()
+                crate::vm::Vm::type_name_given(other)
             ));
         }
     };
@@ -1092,7 +1093,7 @@ fn property_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
         other => {
             return vm.type_error(&format!(
                 "property_exists(): Argument #1 ($object_or_class) must be of type object|string, {} given",
-                other.tname()
+                crate::vm::Vm::type_name_given(other)
             ));
         }
     };
@@ -1204,7 +1205,7 @@ fn get_class_methods(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(c) = class_arg(vm, &v, true)? else {
         return vm.type_error(&format!(
             "get_class_methods(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given",
-            v.tname()
+            crate::vm::Vm::type_name_given(&v)
         ));
     };
     let scope = vm.scope_ptr();
