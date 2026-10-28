@@ -10,6 +10,7 @@ members = [
     "crates/goro-ext-date",
     "crates/goro-charset",
     "crates/goro-ext-hash",
+    "crates/goro-ext-json",
 ]
 
 [workspace.package]
