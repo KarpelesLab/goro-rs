@@ -741,7 +741,10 @@ impl Vm {
                     5 => "eval",
                     _ => "include",
                 };
-                let args = if with_args && fname != "eval" {
+                // The innermost frame (code of the included file itself
+                // running) shows no argument (observed on PHP 8.5; test
+                // sapi/cli/tests/php_cli_server_015).
+                let args = if with_args && fname != "eval" && !out.is_empty() {
                     Some(vec![Value::Str(code.file.clone())])
                 } else if with_args {
                     Some(Vec::new())
