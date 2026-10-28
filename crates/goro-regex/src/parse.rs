@@ -711,14 +711,17 @@ impl<'a> Parser<'a> {
                     if n > MAX_QUANT as u64 {
                         return self.err(E::SubpatternNumberTooBig, j);
                     }
-                    return Ok(Esc::Backref(GroupRef::num(n as u32, bs + 1)));
+                    // A reference to a missing group is reported at the
+                    // last digit (observed on PHP 8.5: \9 at 1, \93 at 2).
+                    return Ok(Esc::Backref(GroupRef::num(n as u32, j - 1)));
                 }
                 self.i = after - 1;
                 self.octal3(bs)
             }
             b'o' => {
                 if self.peek() != Some(b'{') {
-                    return self.err(E::BackslashONoBrace, after - 1);
+                    let off = if self.at_end() { after - 1 } else { after };
+                    return self.err(E::BackslashONoBrace, off);
                 }
                 self.i += 1;
                 self.braced_number(8, bs)
@@ -755,7 +758,9 @@ impl<'a> Parser<'a> {
                 self.i += 1;
                 lit((x.to_ascii_uppercase() ^ 0x40) as u32)
             }
-            b'N' if self.peek() == Some(b'{') && !self.brace_quantifier_at(self.i) => {
+            b'N' if self.peek() == Some(b'{')
+                && (in_class || !self.brace_quantifier_at(self.i)) =>
+            {
                 // \N{U+hhh} (UTF only); \N{name} is not supported. \N
                 // followed by a quantifier is \N repeated.
                 if !self.p[self.i..].starts_with(b"{U+") {
@@ -786,7 +791,10 @@ impl<'a> Parser<'a> {
             b'E' => Ok(Esc::QuoteEnd),
             b'F' | b'L' | b'l' | b'U' | b'u' => self.err(E::UnsupportedEscapeSequence, after),
             b'B' | b'R' | b'X' if in_class => self.err(E::EscapeInvalidInClass, after - 1),
-            _ if in_class && matches!(c, b'A' | b'z' | b'Z' | b'G' | b'K' | b'g' | b'k' | b'C') => {
+            // \g and \k are not special in a class (observed on PHP 8.5:
+            // /[\g]/ matches "g").
+            b'g' | b'k' if in_class => lit(c as u32),
+            _ if in_class && matches!(c, b'A' | b'z' | b'Z' | b'G' | b'K' | b'C') => {
                 self.err(E::EscapeInvalidInClass, after - 1)
             }
             b'R' => Ok(Esc::Newline),
@@ -847,6 +855,7 @@ impl<'a> Parser<'a> {
         }
         let mut v: u64 = 0;
         let mut k = 0;
+        let limit: u64 = if self.utf { 0x10ffff } else { 0xff };
         while let Some(d) = self.peek() {
             let Some(x) = (d as char).to_digit(radix) else {
                 break;
@@ -854,6 +863,11 @@ impl<'a> Parser<'a> {
             v = (v * radix as u64 + x as u64).min(1 << 40);
             self.i += 1;
             k += 1;
+            // Too large is noticed as soon as the digits exceed the limit
+            // (observed on PHP 8.5: [a-\x{ca0-9] fails after the "0").
+            if v > limit {
+                return self.err(E::CodePointTooBig, self.i);
+            }
         }
         while matches!(self.peek(), Some(b' ' | b'\t')) {
             self.i += 1;
@@ -914,7 +928,36 @@ impl<'a> Parser<'a> {
                 while matches!(self.peek(), Some(b' ' | b'\t')) {
                     self.i += 1;
                 }
-                if matches!(self.peek(), Some(b'+' | b'-' | b'0'..=b'9')) {
+                let numeric = match self.peek() {
+                    Some(b'0'..=b'9') => true,
+                    Some(b'+' | b'-') => self.peek_at(1).is_some_and(|d| d.is_ascii_digit()),
+                    _ => false,
+                };
+                if numeric {
+                    // The whole {[+-]digits} must be well formed first
+                    // (observed on PHP 8.5: \g{1 and \g{0,2} are \g syntax
+                    // errors at the \g).
+                    let mut j = self.i;
+                    let sign = matches!(self.p[j], b'+' | b'-');
+                    if sign {
+                        j += 1;
+                    }
+                    let ds = j;
+                    let mut zero = true;
+                    while j < self.p.len() && self.p[j].is_ascii_digit() {
+                        zero &= self.p[j] == b'0';
+                        j += 1;
+                    }
+                    let de = j;
+                    while j < self.p.len() && matches!(self.p[j], b' ' | b'\t') {
+                        j += 1;
+                    }
+                    if de == ds || j >= self.p.len() || self.p[j] != b'}' {
+                        return self.err(E::BackslashGSyntax, after_g);
+                    }
+                    if sign && zero {
+                        return self.err(E::ZeroRelativeReference, after_g);
+                    }
                     let r = self.signed_ref(open, b'}')?;
                     while matches!(self.peek(), Some(b' ' | b'\t')) {
                         self.i += 1;
@@ -988,7 +1031,7 @@ impl<'a> Parser<'a> {
                 }
                 Ok(GroupRef::num(
                     n as u32,
-                    if close == b'}' { self.i } else { end_off },
+                    if close == b'}' { self.i } else { end_off - 1 },
                 ))
             }
             -1 => {
@@ -1122,6 +1165,13 @@ impl<'a> Parser<'a> {
                         break;
                     }
                     self.i += 1;
+                    // Characters that cannot be part of a property name
+                    // (observed on PHP 8.5).
+                    if b >= 0x80
+                        || matches!(b, b'!' | b'"' | b'#' | b'$' | b'%' | b'{' | b'|' | b'~')
+                    {
+                        return self.err(E::MalformedUnicodeProperty, self.i);
+                    }
                 }
                 if self.at_end() {
                     return self.err(E::MalformedUnicodeProperty, self.i);
@@ -1130,11 +1180,10 @@ impl<'a> Parser<'a> {
                 self.i += 1;
             }
             Some(b) => {
-                if b >= 0x80 {
-                    self.read_char();
-                    return self.err(E::UnknownUnicodeProperty, self.i);
-                }
                 self.i += 1;
+                if !b.is_ascii_alphabetic() {
+                    return self.err(E::MalformedUnicodeProperty, self.i);
+                }
                 name = vec![b];
             }
         }
@@ -1667,7 +1716,6 @@ impl<'a> Parser<'a> {
                     self.i = save;
                 }
                 Some(nb) => {
-                    let end_start = self.i;
                     let end_char: u32 = if nb == b'\\' {
                         if self.starts_with(b"\\Q") {
                             // Range end inside \Q...\E.
@@ -1707,7 +1755,7 @@ impl<'a> Parser<'a> {
                         self.read_char()
                     };
                     if end_char < ch {
-                        return self.err(E::ClassRangeOrder, end_start);
+                        return self.err(E::ClassRangeOrder, self.i - 1);
                     }
                     if mode == CaseMode::None {
                         b.add_range(ch, end_char);
@@ -1725,6 +1773,196 @@ impl<'a> Parser<'a> {
         self.add_class_lit(b, ch, mode);
         *prev_char = Some(ch);
         Ok(())
+    }
+
+    /// Perl extended classes `(?[...])` (pcre2pattern "Perl extended
+    /// character classes"); the position is after `(?[`. Error kinds and
+    /// offsets as observed on PHP 8.5.
+    fn parse_ext_class(&mut self) -> PResult<Node> {
+        use crate::class::SetExpr;
+        fn prec(op: u8) -> u8 {
+            if op == b'&' { 2 } else { 1 }
+        }
+        fn reduce(out: &mut Vec<SetExpr>, op: u8) {
+            let b = Box::new(out.pop().unwrap());
+            let a = Box::new(out.pop().unwrap());
+            out.push(match op {
+                b'&' => SetExpr::And(a, b),
+                b'-' => SetExpr::Diff(a, b),
+                b'^' => SetExpr::Xor(a, b),
+                _ => SetExpr::Or(a, b),
+            });
+        }
+        let saved = self.o;
+        // The /xx option is always on inside (pcre2pattern).
+        self.o.extended_more = true;
+        let mut out: Vec<SetExpr> = Vec::new();
+        let mut ops: Vec<u8> = Vec::new();
+        let mut expect_operand = true;
+        let mut just_opened = true;
+        let mut depth = 0u32;
+        loop {
+            while matches!(self.peek(), Some(b' ' | b'\t')) {
+                self.i += 1;
+            }
+            let Some(c) = self.peek() else {
+                return self.err(E::MissingSquareBracket, self.p.len());
+            };
+            let operand: Option<CharSet> = match c {
+                b']' => {
+                    if depth > 0 {
+                        return self.err(E::MissingClosingParenthesis, self.i);
+                    }
+                    self.i += 1;
+                    if expect_operand {
+                        let k = if just_opened {
+                            E::ExtClassEmpty
+                        } else {
+                            E::ExtClassExpectedOperand
+                        };
+                        return self.err(k, self.i);
+                    }
+                    if self.peek() != Some(b')') {
+                        return self.err(E::ExtClassMissingParen, self.i);
+                    }
+                    self.i += 1;
+                    break;
+                }
+                b'(' => {
+                    self.i += 1;
+                    if !expect_operand {
+                        return self.err(E::ExtClassNoOperator, self.i);
+                    }
+                    ops.push(b'(');
+                    depth += 1;
+                    just_opened = true;
+                    None
+                }
+                b')' => {
+                    self.i += 1;
+                    if depth == 0 {
+                        return self.err(E::UnmatchedClosingParenthesis, self.i);
+                    }
+                    if expect_operand {
+                        let k = if just_opened {
+                            E::ExtClassEmpty
+                        } else {
+                            E::ExtClassExpectedOperand
+                        };
+                        return self.err(k, self.i);
+                    }
+                    while let Some(op) = ops.pop() {
+                        if op == b'(' {
+                            break;
+                        }
+                        reduce(&mut out, op);
+                    }
+                    depth -= 1;
+                    // A complement applies to the parenthesised operand.
+                    while ops.last() == Some(&b'!') {
+                        ops.pop();
+                        let a = out.pop().unwrap();
+                        out.push(SetExpr::Not(Box::new(a)));
+                    }
+                    expect_operand = false;
+                    just_opened = false;
+                    None
+                }
+                b'&' | b'|' | b'+' | b'-' | b'^' => {
+                    self.i += 1;
+                    if expect_operand {
+                        return self.err(E::ExtClassNoOperand, self.i);
+                    }
+                    while let Some(&top) = ops.last() {
+                        if top == b'(' || top == b'!' || prec(top) < prec(c) {
+                            break;
+                        }
+                        ops.pop();
+                        reduce(&mut out, top);
+                    }
+                    ops.push(c);
+                    expect_operand = true;
+                    just_opened = false;
+                    None
+                }
+                b'!' => {
+                    self.i += 1;
+                    if !expect_operand {
+                        return self.err(E::ExtClassNoOperator, self.i);
+                    }
+                    ops.push(b'!');
+                    just_opened = false;
+                    None
+                }
+                b'\\' => {
+                    if self.starts_with(b"\\Q") || self.starts_with(b"\\E") {
+                        self.i += 2;
+                        continue;
+                    }
+                    let mut b = ClassBuilder::new();
+                    match self.escape(true)? {
+                        Esc::Lit(ch) => {
+                            let mode = self.case_mode();
+                            self.add_class_lit(&mut b, ch, mode);
+                        }
+                        Esc::Type(t, neg) => self.add_type(&mut b, t, neg),
+                        Esc::Prop(p) => self.add_prop(&mut b, p),
+                        _ => return self.err(E::EscapeInvalidInClass, self.i - 1),
+                    }
+                    Some(b.build(false))
+                }
+                b'[' => {
+                    if let Some(end) = self.posix_syntax_at(self.i)
+                        && self.p[self.i + 1] == b':'
+                    {
+                        let mut ns = self.i + 2;
+                        let mut pneg = false;
+                        if self.p[ns] == b'^' {
+                            pneg = true;
+                            ns += 1;
+                        }
+                        let name = std::str::from_utf8(&self.p[ns..end - 2])
+                            .unwrap_or("")
+                            .to_string();
+                        if !class::POSIX_NAMES.contains(&name.as_str()) {
+                            return self.err(E::UnknownPosixClass, end);
+                        }
+                        self.i = end;
+                        let mut b = ClassBuilder::new();
+                        self.add_posix(&mut b, &name, pneg);
+                        Some(b.build(false))
+                    } else {
+                        match self.parse_class()? {
+                            Node::Set(s) => Some((*s).clone()),
+                            _ => return self.err(E::ExtClassUnexpectedChar, self.i),
+                        }
+                    }
+                }
+                _ => {
+                    self.read_char();
+                    return self.err(E::ExtClassUnexpectedChar, self.i);
+                }
+            };
+            if let Some(set) = operand {
+                if !expect_operand {
+                    return self.err(E::ExtClassNoOperator, self.i);
+                }
+                let mut e = SetExpr::Leaf(Arc::new(set));
+                while ops.last() == Some(&b'!') {
+                    ops.pop();
+                    e = SetExpr::Not(Box::new(e));
+                }
+                out.push(e);
+                expect_operand = false;
+                just_opened = false;
+            }
+        }
+        while let Some(op) = ops.pop() {
+            reduce(&mut out, op);
+        }
+        self.o = saved;
+        let expr = out.pop().unwrap();
+        Ok(Node::Set(Arc::new(expr.into_set())))
     }
 
     fn add_class_lit(&mut self, b: &mut ClassBuilder, ch: u32, mode: CaseMode) {
@@ -1843,11 +2081,15 @@ impl<'a> Parser<'a> {
         let start = self.i;
         self.i += 1;
         if self.peek() == Some(b'*')
-            && self
-                .peek_at(1)
-                .is_some_and(|b| b.is_ascii_alphabetic() || b == b':')
+            && let Some(b) = self.peek_at(1)
+            && b != b')'
         {
-            return self.parse_star(br, start);
+            if b.is_ascii_alphanumeric() || b == b'_' || b == b':' {
+                return self.parse_star(br, start);
+            }
+            // "(*" followed by anything else (observed on PHP 8.5: "(*("
+            // is a verb error at offset 2, "(*)" a quantifier error).
+            return self.err(E::VerbUnknown, self.i + 1);
         }
         if self.peek() != Some(b'?') {
             self.open_group_depth()?;
@@ -2058,6 +2300,9 @@ impl<'a> Parser<'a> {
                 );
                 Ok(())
             }
+            b'+' if !self.peek_at(1).is_some_and(|d| d.is_ascii_digit()) => {
+                self.err(E::BadRelativeReference, self.i)
+            }
             b'0'..=b'9' | b'+' | b'-'
                 if c.is_ascii_digit() || self.peek_at(1).is_some_and(|d| d.is_ascii_digit()) =>
             {
@@ -2129,6 +2374,12 @@ impl<'a> Parser<'a> {
             }
             b'C' => {
                 self.parse_callout()?;
+                Ok(())
+            }
+            b'[' => {
+                self.i += 1;
+                let n = self.parse_ext_class()?;
+                self.push_item(br, n, true);
                 Ok(())
             }
             _ => self.parse_options(br, start),
@@ -2361,6 +2612,20 @@ impl<'a> Parser<'a> {
                 self.i += 1;
                 return self.parse_condition(start, cond_open);
             }
+            if c == b'?' && self.peek_at(1) == Some(b'#') {
+                // A comment before the assertion (observed on PHP 8.5:
+                // (?(?#x)(?=a)b) is valid).
+                let Some(k) = self.p[self.i..].iter().position(|&b| b == b')') else {
+                    return self.err(E::MissingCommentClosing, self.p.len());
+                };
+                self.i += k + 1;
+                if !self.starts_with(b"(?") && !self.starts_with(b"(*") {
+                    return self.err(E::ConditionAtomicAssertionExpected, self.i);
+                }
+                let open = self.i;
+                self.i += 1;
+                return self.parse_condition(start, open);
+            }
             let kind = if c == b'?' {
                 match (self.peek_at(1), self.peek_at(2)) {
                     (Some(b'='), _) => Some((
@@ -2487,6 +2752,19 @@ impl<'a> Parser<'a> {
                 n = (n * 10 + (d - b'0') as u64).min(1 << 40);
                 self.i += 1;
             }
+            if self.at_end() {
+                return self.err(E::MissingConditionClosing, self.i);
+            }
+            // Zero is rejected before the closing parenthesis is looked at
+            // (observed on PHP 8.5: (?(0?=K) fails at the "?").
+            if n == 0 {
+                let kind = if sign == 0 {
+                    E::BadSubpatternReference
+                } else {
+                    E::ZeroRelativeReference
+                };
+                return self.err(kind, self.i);
+            }
             if self.peek() != Some(b')') {
                 if self.at_end() {
                     return self.err(E::MissingClosingParenthesis, self.p.len());
@@ -2601,18 +2879,10 @@ impl<'a> Parser<'a> {
         }
         // A bare name: R, Rdigits, DEFINE or a group name.
         let ns = self.i;
-        if !self
-            .peek()
-            .is_some_and(|b| is_word_byte(b) || (self.utf && b >= 0x80))
-        {
-            return self.err(E::ConditionAtomicAssertionExpected, cond_open);
-        }
+        let _ = cond_open;
         let name = self.read_name(ns)?;
         if self.peek() != Some(b')') {
-            if self.at_end() {
-                return self.err(E::MissingNameTerminator, self.i);
-            }
-            return self.err(E::MissingConditionClosing, self.i);
+            return self.err(E::MissingNameTerminator, self.i);
         }
         self.i += 1;
         if name == b"DEFINE" {
@@ -2652,14 +2922,34 @@ impl<'a> Parser<'a> {
             self.i += 1;
         }
         let word = self.p[ns..self.i].to_vec();
+        let name_end = self.i;
+        // Names starting with a lower case letter are alphabetic assertions
+        // (observed on PHP 8.5: "(*pLA:a)" and "(*sr)" are
+        // "(*alpha_assertion) not recognized" at the end of the name).
+        let alpha = word.first().is_some_and(|b| b.is_ascii_lowercase());
+        if alpha && self.peek() != Some(b':') {
+            return self.err(E::AlphaAssertionUnknown, name_end);
+        }
         if self.at_end() {
             return self.err(E::VerbUnknown, self.p.len());
         }
-        let next = self.p[self.i];
-        if next == b':'
-            && !word.is_empty()
-            && word.iter().all(|b| b.is_ascii_lowercase() || *b == b'_')
+        if !alpha
+            && !matches!(
+                word.as_slice(),
+                b"" | b"MARK"
+                    | b"ACCEPT"
+                    | b"FAIL"
+                    | b"F"
+                    | b"COMMIT"
+                    | b"PRUNE"
+                    | b"SKIP"
+                    | b"THEN"
+            )
         {
+            return self.err(E::VerbUnknown, name_end);
+        }
+        let next = self.p[self.i];
+        if next == b':' && alpha {
             // Alphabetic assertion or group.
             let colon = self.i;
             self.i += 1;

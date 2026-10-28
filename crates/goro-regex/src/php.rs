@@ -229,6 +229,7 @@ impl<'r, 's> GlobalMatcher<'r, 's> {
             let opts = MatchOptions {
                 notempty_atstart: self.retry_nonempty,
                 anchored: self.retry_nonempty,
+                no_utf_check: self.searcher.is_some(),
                 ..MatchOptions::default()
             };
             let (re, subject, limits) = (self.re, self.subject, self.limits);

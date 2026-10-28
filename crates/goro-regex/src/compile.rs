@@ -42,8 +42,23 @@ pub fn compile(mut parsed: Parsed, flags: crate::Flags) -> CResult<Compiled> {
         group_nodes: groups,
         lengths: HashMap::new(),
         utf: parsed.utf,
+        enclosing: Vec::new(),
     };
     r.check(&node)?;
+    // Conditional groups with more than two branches are reported after
+    // references and lookbehinds, at offset 0 (observed on PHP 8.5).
+    let mut too_many = false;
+    walk(&node, &mut |x| {
+        if let Node::Cond { cond, branches, .. } = x
+            && !matches!(cond, Condition::Define)
+            && *branches > 2
+        {
+            too_many = true;
+        }
+    });
+    if too_many {
+        return Err(CompileError::new(E::TooManyConditionBranches, 0));
+    }
     let max_lookbehind = r.max_lookbehind(&node);
 
     let size = estimate_size(&node, parsed.utf);
@@ -154,6 +169,8 @@ struct Checker<'n> {
     group_nodes: HashMap<u32, &'n Node>,
     lengths: HashMap<u32, Option<(u32, u32)>>,
     utf: bool,
+    /// Capture groups enclosing the node being checked.
+    enclosing: Vec<u32>,
 }
 
 impl Resolver<'_> {
@@ -235,12 +252,8 @@ impl Resolver<'_> {
                     Condition::Assert(a) => self.resolve(a)?,
                     _ => {}
                 }
-                if matches!(cond, Condition::Define) {
-                    if *branches > 1 {
-                        return Err(CompileError::new(E::DefineTooManyBranches, *offset + 3));
-                    }
-                } else if *branches > 2 {
-                    return Err(CompileError::new(E::TooManyConditionBranches, *offset));
+                if matches!(cond, Condition::Define) && *branches > 1 {
+                    return Err(CompileError::new(E::DefineTooManyBranches, *offset + 3));
                 }
                 self.resolve(yes)?;
                 if let Some(no) = no {
@@ -269,6 +282,15 @@ impl Checker<'_> {
             } => {
                 self.check_lookbehind(body, *offset)?;
                 self.check(body)?;
+            }
+            Node::Group {
+                kind: GroupKind::Capture(g),
+                body,
+                ..
+            } => {
+                self.enclosing.push(*g);
+                self.check(body)?;
+                self.enclosing.pop();
             }
             Node::Group { body, .. } => self.check(body)?,
             Node::Repeat { node, .. } => self.check(node)?,
@@ -387,7 +409,9 @@ impl Checker<'_> {
                 }
             }
             Node::Backref { target, .. } => {
-                if target.groups.len() != 1 {
+                // A reference to a group that contains the lookbehind has no
+                // known length (observed on PHP 8.5).
+                if target.groups.len() != 1 || self.enclosing.contains(&target.groups[0]) {
                     return None;
                 }
                 self.group_length(target.groups[0], stack)?

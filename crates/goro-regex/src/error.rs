@@ -85,6 +85,12 @@ pub enum ErrorKind {
     AlphaAssertionUnknown,
     BackslashKInLookaround,
     VariableLengthLookbehindTooLong,
+    ExtClassUnexpectedChar,
+    ExtClassEmpty,
+    ExtClassNoOperand,
+    ExtClassNoOperator,
+    ExtClassExpectedOperand,
+    ExtClassMissingParen,
     /// Invalid UTF-8 in the pattern (PCRE2's negative UTF-8 error codes).
     Utf8(Utf8Error),
     /// A matching resource problem detected at compile time (unused).
@@ -244,6 +250,20 @@ impl ErrorKind {
             }
             VariableLengthLookbehindTooLong => {
                 "branch too long in variable-length lookbehind assertion"
+            }
+            ExtClassUnexpectedChar => "unexpected character in (?[...]) extended character class",
+            ExtClassEmpty => "empty expression in extended character class",
+            ExtClassNoOperand => {
+                "unexpected operator in extended character class (no preceding operand)"
+            }
+            ExtClassNoOperator => {
+                "unexpected expression in extended character class (no preceding operator)"
+            }
+            ExtClassExpectedOperand => {
+                "expected operand after operator in extended character class"
+            }
+            ExtClassMissingParen => {
+                "terminating ] with no following closing parenthesis in (?[...]"
             }
             Utf8(e) => return format!("UTF-8 error: {}", e.message()),
             Internal => "internal error: unexpected repeat",

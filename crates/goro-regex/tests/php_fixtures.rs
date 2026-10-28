@@ -66,6 +66,18 @@ fn php85_match_all() {
         .unwrap();
 }
 
+/// Mutated (mostly invalid) patterns (tools/regex_fixtures/gen_mutate.py)
+/// and Perl extended classes (ext.php): compile errors and offsets.
+#[test]
+fn php85_mutated() {
+    std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(|| check(include_str!("fixtures/php85_mutated.txt")))
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 /// Random patterns and subjects (tools/regex_fixtures/gen_random.py) run
 /// through php85 in one batch.
 #[test]

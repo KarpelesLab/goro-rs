@@ -42,6 +42,46 @@ pub enum HighItem {
         f: fn(u32) -> bool,
         neg: bool,
     },
+    /// A set expression of an extended class `(?[...])`.
+    Expr(std::sync::Arc<SetExpr>),
+}
+
+/// Set operations of Perl extended classes (pcre2pattern "Perl extended
+/// character classes").
+#[derive(Clone, Debug)]
+pub enum SetExpr {
+    Leaf(std::sync::Arc<CharSet>),
+    Not(Box<SetExpr>),
+    And(Box<SetExpr>, Box<SetExpr>),
+    Or(Box<SetExpr>, Box<SetExpr>),
+    Diff(Box<SetExpr>, Box<SetExpr>),
+    Xor(Box<SetExpr>, Box<SetExpr>),
+}
+
+impl SetExpr {
+    pub fn eval(&self, c: u32) -> bool {
+        match self {
+            SetExpr::Leaf(s) => s.matches(c),
+            SetExpr::Not(a) => !a.eval(c),
+            SetExpr::And(a, b) => a.eval(c) && b.eval(c),
+            SetExpr::Or(a, b) => a.eval(c) || b.eval(c),
+            SetExpr::Diff(a, b) => a.eval(c) && !b.eval(c),
+            SetExpr::Xor(a, b) => a.eval(c) != b.eval(c),
+        }
+    }
+
+    /// The resolved set.
+    pub fn into_set(self) -> CharSet {
+        let mut set = CharSet::default();
+        for c in 0..256u32 {
+            if self.eval(c) {
+                set.bits[(c >> 6) as usize] |= 1 << (c & 63);
+            }
+        }
+        set.items.push(HighItem::Expr(std::sync::Arc::new(self)));
+        set.finish();
+        set
+    }
 }
 
 impl HighItem {
@@ -57,6 +97,7 @@ impl HighItem {
             HighItem::All => true,
             HighItem::NotRanges(r) => !r.iter().any(|&(lo, hi)| lo <= c && c <= hi),
             HighItem::Pred { f, neg } => f(c) != *neg,
+            HighItem::Expr(e) => e.eval(c),
         }
     }
 }
@@ -418,6 +459,9 @@ pub fn negate_item(i: &HighItem) -> HighItem {
             neg: !neg,
         },
         HighItem::Pred { f, neg } => HighItem::Pred { f: *f, neg: !neg },
+        HighItem::Expr(e) => {
+            HighItem::Expr(std::sync::Arc::new(SetExpr::Not(Box::new((**e).clone()))))
+        }
         HighItem::All => HighItem::NotRanges(vec![(0, 0x7fff_ffff)]),
         HighItem::NotRanges(r) => {
             if r.len() == 1 {

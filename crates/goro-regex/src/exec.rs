@@ -2058,11 +2058,14 @@ impl<'p, 's> Searcher<'p, 's> {
     fn check_utf(&mut self, start_offset: usize, opts: MatchOptions) -> Result<(), MatchError> {
         let s = self.vm.s;
         let prog = self.vm.prog;
+        if opts.no_utf_check {
+            // pcre2api PCRE2_NO_UTF_CHECK: no checks at all, not even of
+            // the offset (PHP passes it after the first match of a global
+            // loop, so /\C/u walks through every byte).
+            return Ok(());
+        }
         if start_offset < s.len() && s[start_offset] & 0xc0 == 0x80 {
             return Err(MatchError::BadUtf8Offset);
-        }
-        if opts.no_utf_check {
-            return Ok(());
         }
         // Check from the longest lookbehind before the start offset.
         let mut from = start_offset;
