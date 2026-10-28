@@ -132,6 +132,10 @@ thread_local! {
     static PENDING_LEN: Cell<usize> = const { Cell::new(0) };
 }
 
+/// Pending destructors on any thread: the per-instruction check is one
+/// relaxed load (the thread-local queue is only looked at when non-zero).
+static PENDING_ANY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 impl ObjRef {
     /// Creates an object of `class` with `slots` as its declared properties.
     pub fn new(class: Rc<dyn ClassInfo>, slots: Vec<Value>) -> ObjRef {
@@ -261,6 +265,7 @@ impl Drop for ObjRef {
                 let _ = PENDING.try_with(|q| {
                     q.borrow_mut().push_back(keep);
                     PENDING_LEN.with(|n| n.set(n.get() + 1));
+                    PENDING_ANY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 });
             }
         } else {
@@ -307,7 +312,7 @@ impl fmt::Debug for ObjRef {
 /// Whether objects are waiting for their destructor to run.
 #[inline]
 pub fn has_pending_destructors() -> bool {
-    PENDING_LEN.with(|n| n.get() != 0)
+    PENDING_ANY.load(std::sync::atomic::Ordering::Relaxed) != 0 && PENDING_LEN.with(|n| n.get() != 0)
 }
 
 /// Takes the next object whose destructor must run now (oldest first). The
@@ -317,6 +322,7 @@ pub fn pop_pending_destructor() -> Option<ObjRef> {
         let o = q.borrow_mut().pop_front();
         if o.is_some() {
             PENDING_LEN.with(|n| n.set(n.get() - 1));
+            PENDING_ANY.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
         o
     })

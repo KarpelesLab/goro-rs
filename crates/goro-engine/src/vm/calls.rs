@@ -1619,6 +1619,7 @@ impl Vm {
         }
         if code.flags & fflags::GENERATOR != 0 {
             let f = self.ex.frames.pop().unwrap();
+        self.ex.sync_top();
             if let Some(top) = self.ex.frames.last() {
                 self.ex.ip = top.ip as usize;
             }
@@ -1784,7 +1785,7 @@ impl Vm {
                     ty,
                     strict,
                     static_class,
-                    &called_in(&call_loc),
+                    &call_loc,
                 )?;
             }
         }
@@ -1896,7 +1897,7 @@ impl Vm {
         ty: &TypeHint,
         strict: bool,
         static_class: *const Class,
-        called_in: &str,
+        call_loc: &Option<(PhpStr, u32)>,
     ) -> R<()> {
         let slot = unsafe { &mut *base.add(i) };
         let (cell, val) = match slot.as_ref() {
@@ -1934,7 +1935,10 @@ impl Vm {
                     code.params[i].name.dname(),
                     ty.display(),
                     Vm::type_name_given(&val),
-                    called_in
+                    match call_loc {
+                        Some((f, l)) => format!(", called in {} on line {}", f.to_string_lossy(), l),
+                        None => String::new(),
+                    }
                 );
                 self.throw("TypeError", &msg)
             }
@@ -1946,12 +1950,14 @@ impl Vm {
             top.ip = self.ex.ip as u32;
         }
         self.ex.frames.push(f);
+        self.ex.sync_top();
         self.ex.ip = 0;
     }
 
     /// Removes the top frame, releasing its variables.
     pub(crate) fn pop_frame(&mut self) {
         let f = self.ex.frames.pop().expect("pop without frame");
+        self.ex.sync_top();
         if let Some(top) = self.ex.frames.last() {
             self.ex.ip = top.ip as usize;
         }
@@ -1986,6 +1992,7 @@ impl Vm {
             return self.generator_return(v);
         }
         let f = self.ex.frames.pop().unwrap();
+        self.ex.sync_top();
         if let Some(top) = self.ex.frames.last() {
             self.ex.ip = top.ip as usize;
         }
@@ -2050,7 +2057,6 @@ impl Vm {
     }
 
     pub(crate) fn verify_return(&mut self, src: Reg, implicit: bool) -> R<()> {
-        let func = self.frame().func.clone();
         let code = unsafe { &*self.frame().code };
         let Some(ty) = &code.ret_type else {
             return Ok(());
@@ -2058,8 +2064,24 @@ impl Vm {
         if ty.mask & tmask::VOID != 0 {
             return Ok(());
         }
-        let fname = self.func_display_name(&func);
+        // Fast exact matches.
+        if !implicit {
+            let ok = match (self.peek(src), ty.mask) {
+                (Some(Value::Int(_)), m) => m & tmask::INT != 0,
+                (Some(Value::Str(_)), m) => m & tmask::STRING != 0,
+                (Some(Value::Array(_)), m) => m & tmask::ARRAY != 0,
+                (Some(Value::Bool(_)), m) => m & tmask::BOOL == tmask::BOOL,
+                (Some(Value::Float(_)), m) => m & tmask::FLOAT != 0,
+                (Some(Value::Null), m) => m & tmask::NULL != 0,
+                _ => false,
+            };
+            if ok {
+                return Ok(());
+            }
+        }
+        let func = self.frame().func.clone();
         if ty.mask & tmask::NEVER != 0 {
+            let fname = self.func_display_name(&func);
             return self.type_error(&format!(
                 "{}(): never-returning function must not implicitly return",
                 fname
@@ -2091,6 +2113,7 @@ impl Vm {
                 Ok(())
             }
             Check::Fail => {
+                let fname = self.func_display_name(&func);
                 if none && ty.mask & tmask::NULL == 0 {
                     return self.type_error(&format!(
                         "{}(): Return value must be of type {}, none returned",

@@ -875,6 +875,7 @@ impl Vm {
             self.ex.stack.release(p.mark);
         }
         let mut f = self.ex.frames.pop().unwrap();
+        self.ex.sync_top();
         if let Some(top) = self.ex.frames.last() {
             self.ex.ip = top.ip as usize;
         }
@@ -966,6 +967,7 @@ impl Vm {
     pub(crate) fn generator_return(&mut self, v: Value) -> R<Option<Value>> {
         let g = self.frame().generator.clone().expect("generator frame");
         let f = self.ex.frames.pop().unwrap();
+        self.ex.sync_top();
         if let Some(top) = self.ex.frames.last() {
             self.ex.ip = top.ip as usize;
         }

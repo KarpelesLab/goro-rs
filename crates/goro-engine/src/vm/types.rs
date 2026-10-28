@@ -227,11 +227,13 @@ impl Vm {
         name: &PhpStr,
         self_class: *const Class,
     ) -> R<bool> {
-        let lname = crate::class::lower(name);
-        if lname.as_bytes() == b"self" && !self_class.is_null() {
+        // Case-insensitive name compare against lowercase class names (no
+        // allocation on this hot path: every class-typed parameter).
+        let is = |l: &[u8]| l.len() == name.len() && name.iter().zip(l).all(|(a, b)| a.to_ascii_lowercase() == *b);
+        if is(b"self") && !self_class.is_null() {
             return Ok(cls.is_subclass_of(unsafe { &*self_class }));
         }
-        if lname.as_bytes() == b"parent" && !self_class.is_null() {
+        if is(b"parent") && !self_class.is_null() {
             if let Some(p) = unsafe { &*self_class }.parent.clone() {
                 return Ok(cls.is_subclass_of(&p));
             }
@@ -241,13 +243,13 @@ impl Vm {
         // class isn't loaded, nothing is an instance of it).
         let mut c = Some(cls);
         while let Some(k) = c {
-            if k.lname == lname {
+            if is(k.lname.as_bytes()) {
                 return Ok(true);
             }
             c = k.parent.as_deref();
         }
         for i in cls.interfaces.borrow().iter() {
-            if i.lname == lname {
+            if is(i.lname.as_bytes()) {
                 return Ok(true);
             }
         }

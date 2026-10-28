@@ -65,6 +65,24 @@ impl Vm {
             None
         };
         let unit = crate::compiler::compile_program(&prog, src, file, kc_opt, None)?;
+        // Development aid: GORO_DUMP_OPS=1 prints the bytecode of user code.
+        if !file.is_empty() && std::env::var_os("GORO_DUMP_OPS").is_some() {
+            fn dump(c: &crate::bytecode::FuncCode) {
+                eprintln!("== {} ({} slots)", c.name.to_string_lossy(), c.num_slots);
+                for (i, op) in c.ops.iter().enumerate() {
+                    eprintln!("{:4} {:?}", i, op);
+                }
+                for ch in &c.children {
+                    dump(ch);
+                }
+                for cl in &c.classes {
+                    for m in &cl.methods {
+                        dump(&m.code);
+                    }
+                }
+            }
+            dump(&unit.main);
+        }
         if let Some(off) = prog.halt_compiler_offset {
             self.halt_offsets.insert(PhpStr::new(file), off as i64);
         }

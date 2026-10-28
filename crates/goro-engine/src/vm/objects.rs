@@ -26,7 +26,25 @@ pub enum PropLookup {
 }
 
 /// Inline cache flags for property instructions.
-const IC_PLAIN: u32 = 1;
+pub(crate) const IC_PLAIN: u32 = 1;
+/// A typed property: values whose type is in the mask (bits 8..) are
+/// stored without coercion.
+pub(crate) const IC_TYPED: u32 = 2;
+
+/// Whether `v` needs no coercion for a property typed with `mask`.
+#[inline(always)]
+pub(crate) fn exact_type(v: &Value, mask: u32) -> bool {
+    match v {
+        Value::Int(_) => mask & tmask::INT != 0,
+        Value::Float(_) => mask & tmask::FLOAT != 0,
+        Value::Str(_) => mask & tmask::STRING != 0,
+        Value::Bool(true) => mask & tmask::TRUE != 0,
+        Value::Bool(false) => mask & tmask::FALSE != 0,
+        Value::Array(_) => mask & tmask::ARRAY != 0,
+        Value::Null => mask & tmask::NULL != 0,
+        _ => false,
+    }
+}
 
 impl Vm {
     // ------------------------------------------------------------ sentinels
@@ -530,7 +548,18 @@ impl Vm {
                 let v = self.get(val)?;
                 let mut slots = o.obj().slots.borrow_mut();
                 let slot = &mut slots[c.a];
-                if !self.is_uninit(slot) {
+                let typed_ok = c.b & IC_TYPED == 0
+                    || (exact_type(&v, c.b >> 8) && !matches!(slot, Value::Ref(_)));
+                // An uninitialized typed property (not an unset() one,
+                // which goes through __set) takes the value directly.
+                let fresh = c.b & IC_TYPED != 0 && self.is_uninit(slot) && !self.is_unset_mark(slot);
+                if typed_ok && fresh {
+                    let old = std::mem::replace(slot, v);
+                    drop(slots);
+                    drop(old);
+                    return Ok(());
+                }
+                if typed_ok && !self.is_uninit(slot) {
                     let old = slot.assign(v);
                     drop(slots);
                     drop(old);
@@ -549,6 +578,32 @@ impl Vm {
         };
         let v = self.get(val)?;
         self.write_prop(&o, &n, v, Some(cache).filter(|_| is_const(name)))
+    }
+
+    /// Fills a property inline cache for `$o->name` read-modify-writes
+    /// from the current scope (plain or simply typed, accessible, no hooks,
+    /// not readonly).
+    pub(crate) fn prop_ic_fill(&mut self, o: &ObjRef, name: &PhpStr, cache: u32) {
+        let cls = self.class_of(o);
+        let scope = self.scope_ptr();
+        if let PropLookup::Found(p) = self.lookup_prop(&cls, name, scope) {
+            let typed = p.ty.as_ref().map(|t| (t.mask, t.classes.is_empty()));
+            if typed.is_none_or(|(m, plain)| plain && m < (1 << 24) && m & tmask::MIXED == 0)
+                && p.flags & (mflags::READONLY | mflags::VIRTUAL | mflags::SET_VISIBILITY) == 0
+                && p.set.is_none()
+                && p.get.is_none()
+            {
+                let b = match typed {
+                    None => IC_PLAIN,
+                    Some((m, _)) => IC_PLAIN | IC_TYPED | (m << 8),
+                };
+                self.code_ref().caches[cache as usize].set(Cache {
+                    key: Rc::as_ptr(&cls) as usize,
+                    a: p.slot as usize,
+                    b,
+                });
+            }
+        }
     }
 
     /// `$o->name = v`.
@@ -632,16 +687,21 @@ impl Vm {
                     let old = slot.assign(v);
                     drop(old);
                 }
+                let typed = p.ty.as_ref().map(|t| (t.mask, t.classes.is_empty()));
                 if let Some(c) = cache
-                    && p.ty.is_none()
+                    && typed.is_none_or(|(m, plain)| plain && m < (1 << 24) && m & tmask::MIXED == 0)
                     && p.flags & (mflags::READONLY | mflags::VIRTUAL | mflags::SET_VISIBILITY) == 0
                     && p.set.is_none()
                     && p.get.is_none()
                 {
+                    let b = match typed {
+                        None => IC_PLAIN,
+                        Some((m, _)) => IC_PLAIN | IC_TYPED | (m << 8),
+                    };
                     self.code_ref().caches[c as usize].set(Cache {
                         key: Rc::as_ptr(&cls) as usize,
                         a: p.slot as usize,
-                        b: IC_PLAIN,
+                        b,
                     });
                 }
                 Ok(())
@@ -1639,7 +1699,22 @@ impl Vm {
 
     // ------------------------------------------------------------ new / clone
 
-    pub(crate) fn op_new(&mut self, dst: Reg, class: ClassSpec, nargs: u32) -> R<()> {
+    pub(crate) fn op_new(&mut self, dst: Reg, class: ClassSpec, nargs: u32, cache: u32) -> R<()> {
+        if let ClassSpec::Named(_) = class {
+            // Classes are never undeclared: a resolved name stays valid.
+            let c = self.code_ref().caches[cache as usize].get();
+            if c.key == 1 {
+                let cls = self.rc_class(c.a as *const Class);
+                return self.new_object_call(dst, &cls, nargs);
+            }
+            let cls = self.resolve_class_spec(class, true)?;
+            self.code_ref().caches[cache as usize].set(Cache {
+                key: 1,
+                a: Rc::as_ptr(&cls) as usize,
+                b: 0,
+            });
+            return self.new_object_call(dst, &cls, nargs);
+        }
         let cls = self.resolve_class_spec(class, true)?;
         self.new_object_call(dst, &cls, nargs)
     }

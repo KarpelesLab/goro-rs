@@ -7,18 +7,98 @@ use goro_runtime::{PhpArray, PhpStr, Value};
 use super::{R, Slot, Unwind, Vm, frame_flags};
 use crate::bytecode::*;
 
+
+/// A slot whose value needs no drop (empty, or a scalar): it can be
+/// overwritten without running the destructor glue.
+#[inline(always)]
+pub(crate) fn holds_no_resources(s: &Slot) -> bool {
+    matches!(
+        s,
+        None | Some(Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_))
+    )
+}
+
+/// Arithmetic, bitwise and comparison operators on ints and floats without
+/// side effects (no warnings, no errors): the result, or `None` for the
+/// general path. PHP manual (Arithmetic Operators): int results that
+/// overflow become floats; `/` of ints gives an int when exact; `%` is on
+/// ints with the sign of the dividend.
+#[inline(always)]
+pub(crate) fn fast_arith(op: Bin, x: &Value, y: &Value) -> Option<Value> {
+    use Value::{Bool, Float, Int};
+    match (x, y) {
+        (Int(a), Int(b)) => {
+            let (a, b) = (*a, *b);
+            Some(match op {
+                Bin::Add => a.checked_add(b).map(Int).unwrap_or(Float(a as f64 + b as f64)),
+                Bin::Sub => a.checked_sub(b).map(Int).unwrap_or(Float(a as f64 - b as f64)),
+                Bin::Mul => a.checked_mul(b).map(Int).unwrap_or(Float(a as f64 * b as f64)),
+                Bin::Div => {
+                    if b == 0 || (a == i64::MIN && b == -1) {
+                        return None;
+                    }
+                    if a % b == 0 { Int(a / b) } else { Float(a as f64 / b as f64) }
+                }
+                Bin::Mod => {
+                    if b == 0 {
+                        return None;
+                    }
+                    if b == -1 { Int(0) } else { Int(a % b) }
+                }
+                Bin::BitAnd => Int(a & b),
+                Bin::BitOr => Int(a | b),
+                Bin::BitXor => Int(a ^ b),
+                Bin::Shl if (0..64).contains(&b) => Int(a.wrapping_shl(b as u32)),
+                Bin::Shr if (0..64).contains(&b) => Int(a >> b),
+                Bin::Lt => Bool(a < b),
+                Bin::Le => Bool(a <= b),
+                Bin::Eq | Bin::Identical => Bool(a == b),
+                Bin::Ne | Bin::NotIdentical => Bool(a != b),
+                Bin::Spaceship => Int((a > b) as i64 - (a < b) as i64),
+                _ => return None,
+            })
+        }
+        (Float(_), Float(_)) | (Int(_), Float(_)) | (Float(_), Int(_)) => {
+            let fa = match x {
+                Int(i) => *i as f64,
+                Float(f) => *f,
+                _ => unreachable!(),
+            };
+            let fb = match y {
+                Int(i) => *i as f64,
+                Float(f) => *f,
+                _ => unreachable!(),
+            };
+            Some(match op {
+                Bin::Add => Float(fa + fb),
+                Bin::Sub => Float(fa - fb),
+                Bin::Mul => Float(fa * fb),
+                Bin::Div if fb != 0.0 => Float(fa / fb),
+                Bin::Lt => Bool(fa < fb),
+                Bin::Le => Bool(fa <= fb),
+                Bin::Eq => Bool(fa == fb),
+                Bin::Ne => Bool(fa != fb),
+                Bin::Identical if matches!((x, y), (Float(_), Float(_))) => Bool(fa == fb),
+                Bin::NotIdentical if matches!((x, y), (Float(_), Float(_))) => Bool(fa != fb),
+                _ => return None,
+            })
+        }
+        _ => None,
+    }
+}
+
 impl Vm {
     // ------------------------------------------------------------ operands
 
     #[inline(always)]
     pub(crate) fn code_ref(&self) -> &FuncCode {
         // SAFETY: the running frame keeps its code alive.
-        unsafe { &*self.ex.frames.last().unwrap_unchecked().code }
+        unsafe { &*self.ex.top.code }
     }
 
     #[inline(always)]
     pub(crate) fn base(&self) -> *mut Slot {
-        unsafe { self.ex.frames.last().unwrap_unchecked().base }
+        self.ex.top.base
     }
 
     #[inline(always)]
@@ -128,21 +208,33 @@ impl Vm {
         }
         let p = self.slot_ptr(dst);
         unsafe {
+            if dst & TMP != 0 {
+                // Temporaries: no references, usually empty.
+                if holds_no_resources(&*p) {
+                    std::ptr::write(p, Some(v));
+                } else {
+                    let old = (*p).replace(v);
+                    drop(old);
+                }
+                return;
+            }
             match &mut *p {
-                Some(Value::Ref(rf)) if dst & TMP == 0 => {
+                Some(Value::Ref(rf)) => {
                     let old = rf.set(v.into_deref());
                     drop(old);
                 }
                 slot => {
-                    if slot.is_none()
-                        && dst & TMP == 0
-                        && self.frame().flags & frame_flags::ATTACHED != 0
-                    {
+                    if slot.is_none() && self.frame().flags & frame_flags::ATTACHED != 0 {
                         self.put_attached(dst, v);
                         return;
                     }
-                    let old = slot.replace(if dst & TMP == 0 { v.into_deref() } else { v });
-                    drop(old);
+                    let v = v.into_deref();
+                    if holds_no_resources(slot) {
+                        std::ptr::write(slot, Some(v));
+                    } else {
+                        let old = slot.replace(v);
+                        drop(old);
+                    }
                 }
             }
         }
@@ -275,11 +367,12 @@ impl Vm {
                                 self.put(dst, Value::Float(f));
                             }
                         }
-                    } else if let (Some(Value::Float(x)), Some(Value::Float(y))) =
-                        (self.peek(a), self.peek(b))
+                    } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
+                        && let Some(r) = fast_arith(Bin::Add, x, y)
                     {
-                        let f = x + y;
-                        self.put(dst, Value::Float(f));
+                        self.drop_tmp(a);
+                        self.drop_tmp(b);
+                        self.put(dst, r);
                     } else {
                         self.binop_slow(Bin::Add, dst, a, b)?;
                     }
@@ -294,11 +387,12 @@ impl Vm {
                                 self.put(dst, Value::Float(f));
                             }
                         }
-                    } else if let (Some(Value::Float(x)), Some(Value::Float(y))) =
-                        (self.peek(a), self.peek(b))
+                    } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
+                        && let Some(r) = fast_arith(Bin::Sub, x, y)
                     {
-                        let f = x - y;
-                        self.put(dst, Value::Float(f));
+                        self.drop_tmp(a);
+                        self.drop_tmp(b);
+                        self.put(dst, r);
                     } else {
                         self.binop_slow(Bin::Sub, dst, a, b)?;
                     }
@@ -313,11 +407,12 @@ impl Vm {
                                 self.put(dst, Value::Float(f));
                             }
                         }
-                    } else if let (Some(Value::Float(x)), Some(Value::Float(y))) =
-                        (self.peek(a), self.peek(b))
+                    } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
+                        && let Some(r) = fast_arith(Bin::Mul, x, y)
                     {
-                        let f = x * y;
-                        self.put(dst, Value::Float(f));
+                        self.drop_tmp(a);
+                        self.drop_tmp(b);
+                        self.put(dst, r);
                     } else {
                         self.binop_slow(Bin::Mul, dst, a, b)?;
                     }
@@ -328,6 +423,12 @@ impl Vm {
                     {
                         let r = x < y;
                         self.put_bool(dst, r);
+                    } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
+                        && let Some(Value::Bool(r)) = fast_arith(Bin::Lt, x, y)
+                    {
+                        self.drop_tmp(a);
+                        self.drop_tmp(b);
+                        self.put_bool(dst, r);
                     } else {
                         self.binop_slow(Bin::Lt, dst, a, b)?;
                     }
@@ -336,6 +437,12 @@ impl Vm {
                     if let (Some(Value::Int(x)), Some(Value::Int(y))) = (self.peek(a), self.peek(b))
                     {
                         let r = x <= y;
+                        self.put_bool(dst, r);
+                    } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
+                        && let Some(Value::Bool(r)) = fast_arith(Bin::Le, x, y)
+                    {
+                        self.drop_tmp(a);
+                        self.drop_tmp(b);
                         self.put_bool(dst, r);
                     } else {
                         self.binop_slow(Bin::Le, dst, a, b)?;
@@ -359,7 +466,17 @@ impl Vm {
                         self.binop_slow(Bin::Identical, dst, a, b)?;
                     }
                 }
-                Op::BinOp { op, dst, a, b } => self.binop_slow(op, dst, a, b)?,
+                Op::BinOp { op, dst, a, b } => {
+                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
+                        && let Some(r) = fast_arith(op, x, y)
+                    {
+                        self.drop_tmp(a);
+                        self.drop_tmp(b);
+                        self.put(dst, r);
+                    } else {
+                        self.binop_slow(op, dst, a, b)?
+                    }
+                }
                 Op::Unary { op, dst, a } => self.op_unary(op, dst, a)?,
                 Op::Cast { to, dst, a } => {
                     let v = self.get(a)?;
@@ -576,7 +693,12 @@ impl Vm {
                     self.put(dst, Value::Str(n));
                 }
                 Op::InstanceOf { dst, a, class } => self.op_instanceof(dst, a, class)?,
-                Op::New { dst, class, nargs } => self.op_new(dst, class, nargs)?,
+                Op::New {
+                    dst,
+                    class,
+                    nargs,
+                    cache,
+                } => self.op_new(dst, class, nargs, cache)?,
                 Op::NewAnon { dst, class, nargs } => self.op_new_anon(dst, class, nargs)?,
                 Op::Clone { dst, src } => {
                     let v = self.get(src)?;
@@ -1050,15 +1172,16 @@ impl Vm {
                     return Ok(());
                 }
             }
-        } else if op == Bin::Add
-            && let (Some(Value::Int(x)), Some(Value::Int(y))) =
-                (unsafe { &*p }.as_ref(), self.peek(src))
-            && let Some(s) = x.checked_add(*y)
+        } else if let (Some(x @ (Value::Int(_) | Value::Float(_))), Some(y)) =
+            (unsafe { &*p }.as_ref(), self.peek(src))
+            && let Some(r) = fast_arith(op, x, y)
         {
-            unsafe { *p = Some(Value::Int(s)) };
+            self.drop_tmp(src);
             if res != NONE {
-                self.put(res, Value::Int(s));
+                self.put(res, r.clone());
             }
+            // The old value is a number: nothing to drop.
+            unsafe { std::ptr::write(p, Some(r)) };
             return Ok(());
         }
         if op == Bin::Concat

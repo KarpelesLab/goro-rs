@@ -526,7 +526,93 @@ impl Vm {
         }
     }
 
+    /// `$o->p op= v` / `$o->p++` on a cached plain property holding a
+    /// number: done in place. False when the general path is needed.
+    fn prop_rmw_fast(&mut self, path: &WritePath, n: Reg, cache: u32, res: Reg) -> R<bool> {
+        let o = match path.base {
+            PathBase::This => match self.this_obj() {
+                Some(o) => o,
+                None => return Ok(false),
+            },
+            PathBase::Var(r) => match self.peek(r) {
+                Some(Value::Object(o)) => o.clone(),
+                _ => return Ok(false),
+            },
+            _ => return Ok(false),
+        };
+        if o.is_lazy() {
+            return Ok(false);
+        }
+        let mut c = self.code_ref().caches[cache as usize].get();
+        let cp = self.class_ptr_of(&o) as usize;
+        if c.key != cp {
+            let name = match self.peek(n) {
+                Some(Value::Str(s)) => s.clone(),
+                _ => return Ok(false),
+            };
+            self.prop_ic_fill(&o, &name, cache);
+            c = self.code_ref().caches[cache as usize].get();
+            if c.key != cp {
+                return Ok(false);
+            }
+        }
+        if c.b & super::objects::IC_PLAIN == 0 {
+            return Ok(false);
+        }
+        let rhs = match path.action {
+            PathAction::AssignOp(_, r) => match self.peek(r) {
+                Some(v @ (Value::Int(_) | Value::Float(_))) => Some(v.clone()),
+                _ => return Ok(false),
+            },
+            _ => None,
+        };
+        let new = {
+            let slots = o.obj().slots.borrow();
+            let cur = &slots[c.a];
+            match (&path.action, cur) {
+                (PathAction::AssignOp(op, _), Value::Int(_) | Value::Float(_)) => {
+                    match super::exec::fast_arith(*op, cur, rhs.as_ref().unwrap()) {
+                        Some(v) => (v, None),
+                        None => return Ok(false),
+                    }
+                }
+                (PathAction::IncDec(op), Value::Int(i)) => {
+                    let r = if op.is_inc() { i.checked_add(1) } else { i.checked_sub(1) };
+                    match r {
+                        Some(x) => (Value::Int(x), Some(*i)),
+                        None => return Ok(false),
+                    }
+                }
+                _ => return Ok(false),
+            }
+        };
+        let (newv, old_int) = new;
+        if c.b & super::objects::IC_TYPED != 0 && !super::objects::exact_type(&newv, c.b >> 8) {
+            return Ok(false);
+        }
+        if let PathAction::AssignOp(_, r) = path.action {
+            self.drop_tmp(r);
+        }
+        o.obj().slots.borrow_mut()[c.a] = newv.clone();
+        if res != NONE {
+            let out = match (&path.action, old_int) {
+                (PathAction::IncDec(op), Some(old)) if op.is_post() => Value::Int(old),
+                _ => newv,
+            };
+            self.put(res, out);
+        }
+        Ok(true)
+    }
+
     fn run_path(&mut self, path: &WritePath, res: Reg) -> R<()> {
+        if path.elems.len() == 1
+            && let PathElem::Prop(n, cache) = path.elems[0]
+            && n & CONST != 0
+            && matches!(path.action, PathAction::AssignOp(..) | PathAction::IncDec(_))
+            && self.prop_rmw_fast(path, n, cache, res)?
+        {
+            return Ok(());
+        }
         // Read-modify-write of an undefined variable warns first.
         if let PathBase::Var(r) = path.base
             && matches!(

@@ -274,9 +274,39 @@ pub struct ExecState {
     pub stack: SlotStack,
     pub pending: Vec<Pending>,
     pub native_calls: Vec<NativeCall>,
+    /// The top frame's slots and code (kept in sync by [`ExecState::sync_top`]
+    /// on every push/pop: the dispatch loop reads them on each operand).
+    pub top: TopFrame,
+}
+
+#[derive(Clone, Copy)]
+pub struct TopFrame {
+    pub base: *mut Slot,
+    pub code: *const FuncCode,
+}
+
+impl Default for TopFrame {
+    fn default() -> TopFrame {
+        TopFrame {
+            base: std::ptr::null_mut(),
+            code: std::ptr::null(),
+        }
+    }
 }
 
 impl ExecState {
+    /// Refreshes the cached top-frame pointers.
+    #[inline]
+    pub fn sync_top(&mut self) {
+        self.top = match self.frames.last() {
+            Some(f) => TopFrame {
+                base: f.base,
+                code: f.code,
+            },
+            None => TopFrame::default(),
+        };
+    }
+
     /// Visits every value the state holds (cycle collection of fibers).
     pub fn for_each_value(&self, visit: &mut dyn FnMut(&Value)) {
         for f in &self.frames {
@@ -582,13 +612,8 @@ impl Vm {
 
     /// The Rc of a class known by pointer (classes are kept in `classes`
     /// or `anon` lists).
+    #[inline]
     pub fn rc_class(&self, p: *const Class) -> Rc<Class> {
-        let c = unsafe { &*p };
-        if let Some(x) = self.classes.get(&c.lname)
-            && std::ptr::eq(&**x, p)
-        {
-            return x.clone();
-        }
         // SAFETY: every class is owned by an Rc kept alive by the engine;
         // reconstruct a strong handle.
         unsafe {

@@ -542,6 +542,8 @@ pub enum Op {
         dst: Reg,
         class: ClassSpec,
         nargs: u32,
+        /// Inline cache of the resolved class (named classes).
+        cache: u32,
     },
     /// Declares anonymous class template `class` and instantiates it.
     NewAnon {
