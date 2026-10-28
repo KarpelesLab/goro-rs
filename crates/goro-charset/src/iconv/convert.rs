@@ -53,8 +53,8 @@ pub fn convert(
     flags: Flags,
     input: &[u8],
 ) -> Result<Vec<u8>, ConvertError> {
-    if from.is_utf8() && to.is_utf8() && std::str::from_utf8(input).is_ok() {
-        return Ok(input.to_vec());
+    if let Some(out) = super::fast::convert(from, to, input) {
+        return Ok(out);
     }
     if let (Some(f), Some(t)) = (from.sbcs_table(), to.sbcs_table())
         && f.ident_upto == 256
@@ -138,6 +138,9 @@ pub(crate) struct Converter {
     pub enc: Encoder,
     pub flags: Flags,
     buf: Vec<u32>,
+    started: bool,
+    /// //TRANSLIT results of stateless encoders, by code point's low byte.
+    memo: Vec<Option<(u32, Vec<u8>)>>,
 }
 
 impl Converter {
@@ -147,12 +150,31 @@ impl Converter {
             enc,
             flags,
             buf: Vec::with_capacity(CHUNK),
+            started: false,
+            memo: if flags.translit {
+                vec![None; 256]
+            } else {
+                Vec::new()
+            },
         }
     }
 
     /// Converts all of `input` and closes the output.
     pub(crate) fn run(&mut self, input: &[u8], out: &mut Vec<u8>) -> Result<(), ConvertError> {
-        self.enc.start(out);
+        let used = self.feed(input, out)?;
+        if used < input.len() {
+            return Err(self.error(ConvertErrorKind::IncompleteSequence, used, out));
+        }
+        self.close(out, input.len())
+    }
+
+    /// Converts the whole characters at the start of `input`; returns how
+    /// many bytes it used (the rest starts an incomplete sequence).
+    pub(crate) fn feed(&mut self, input: &[u8], out: &mut Vec<u8>) -> Result<usize, ConvertError> {
+        if !self.started {
+            self.enc.start(out);
+            self.started = true;
+        }
         let ascii_fast = self.dec.ascii_transparent() && self.enc.ascii_transparent();
         let mut pos = 0;
         while pos < input.len() {
@@ -185,16 +207,23 @@ impl Converter {
                     self.buf.push(0xFFFD);
                     self.encode_buf(out, pos)?;
                 }
-                DecodeStatus::Incomplete => {
-                    return Err(self.error(ConvertErrorKind::IncompleteSequence, pos, out));
-                }
+                DecodeStatus::Incomplete => return Ok(pos),
             }
+        }
+        Ok(input.len())
+    }
+
+    /// The end of the input: flushes pending characters and shift states.
+    pub(crate) fn close(&mut self, out: &mut Vec<u8>, offset: usize) -> Result<(), ConvertError> {
+        if !self.started {
+            self.enc.start(out);
+            self.started = true;
         }
         self.buf.clear();
         let st = self.dec.finish(&mut self.buf);
-        self.encode_buf(out, input.len())?;
+        self.encode_buf(out, offset)?;
         if st == DecodeStatus::Incomplete {
-            return Err(self.error(ConvertErrorKind::IncompleteSequence, input.len(), out));
+            return Err(self.error(ConvertErrorKind::IncompleteSequence, offset, out));
         }
         self.enc.finish(out);
         Ok(())
@@ -223,8 +252,25 @@ impl Converter {
                     if (0xE0000..=0xE007F).contains(&cp) && self.enc.drops_tags() {
                         continue;
                     }
-                    if self.flags.translit && translit_one(&mut self.enc, cp, out) {
-                        continue;
+                    if self.flags.translit {
+                        // Stateless encoders give a code point the same
+                        // replacement every time: remember it.
+                        if self.enc.stateless() {
+                            let slot = (cp & 0xFF) as usize;
+                            if let Some((c, bytes)) = &self.memo[slot]
+                                && *c == cp
+                            {
+                                out.extend_from_slice(bytes);
+                                continue;
+                            }
+                            let before = out.len();
+                            if translit_one(&mut self.enc, cp, out) {
+                                self.memo[slot] = Some((cp, out[before..].to_vec()));
+                                continue;
+                            }
+                        } else if translit_one(&mut self.enc, cp, out) {
+                            continue;
+                        }
                     }
                     if self.flags.ignore {
                         continue;
@@ -250,6 +296,73 @@ fn translit_one(enc: &mut Encoder, cp: u32, out: &mut Vec<u8>) -> bool {
         }
     }
     enc.can_encode(u32::from(b'?')) && enc.encode(&[u32::from(b'?')], out).is_ok()
+}
+
+/// Incremental conversion, for stream filters and output handlers: input
+/// comes in pieces, and an incomplete character at the end of a piece waits
+/// for the next one.
+pub struct StreamConverter {
+    conv: Converter,
+    tail: Vec<u8>,
+}
+
+impl StreamConverter {
+    /// A converter between two charsets; `flags` are the output charset's
+    /// suffixes (see [`super::parse_charset`]).
+    pub fn new(from: Charset, to: Charset, flags: Flags) -> Self {
+        StreamConverter {
+            conv: Converter::new(from.decoder(), to.encoder(), flags),
+            tail: Vec::new(),
+        }
+    }
+
+    /// Converts the next piece of input, appending to `out`. On an error,
+    /// `out` holds what was converted before it.
+    pub fn feed(&mut self, input: &[u8], out: &mut Vec<u8>) -> Result<(), ConvertError> {
+        let data: Vec<u8> = if self.tail.is_empty() {
+            input.to_vec()
+        } else {
+            let mut d = std::mem::take(&mut self.tail);
+            d.extend_from_slice(input);
+            d
+        };
+        let mut tmp = Vec::new();
+        match self.conv.feed(&data, &mut tmp) {
+            Ok(used) => {
+                out.extend_from_slice(&tmp);
+                self.tail = data[used..].to_vec();
+                Ok(())
+            }
+            Err(mut e) => {
+                out.extend_from_slice(&e.output);
+                e.output = std::mem::take(out);
+                Err(e)
+            }
+        }
+    }
+
+    /// The end of the input: an incomplete character left is an error.
+    pub fn finish(&mut self, out: &mut Vec<u8>) -> Result<(), ConvertError> {
+        if !self.tail.is_empty() {
+            return Err(ConvertError {
+                kind: ConvertErrorKind::IncompleteSequence,
+                offset: 0,
+                output: std::mem::take(out),
+            });
+        }
+        let mut tmp = Vec::new();
+        match self.conv.close(&mut tmp, 0) {
+            Ok(()) => {
+                out.extend_from_slice(&tmp);
+                Ok(())
+            }
+            Err(mut e) => {
+                out.extend_from_slice(&e.output);
+                e.output = std::mem::take(out);
+                Err(e)
+            }
+        }
+    }
 }
 
 /// Decodes `input` to code points.

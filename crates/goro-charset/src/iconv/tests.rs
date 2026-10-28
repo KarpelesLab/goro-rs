@@ -1028,3 +1028,124 @@ fn dump_debug() {
         std::fs::write(path, lines.join("\n") + "\n").unwrap();
     }
 }
+
+/// test ext/iconv/tests/iconv_stream_filter.phpt: convert.iconv.ISO-2022-JP/EUC-JP
+/// gives the same bytes whatever the pieces the input comes in.
+#[test]
+fn phpt_stream_filter() {
+    let data = unhex("1b244224332473244b2441244f1b284269636f6e760a");
+    let (from, _) = parse_charset(b"ISO-2022-JP").unwrap();
+    let (to, flags) = parse_charset(b"EUC-JP").unwrap();
+    for piece in 1..=data.len() {
+        let mut s = StreamConverter::new(from, to, flags);
+        let mut out = Vec::new();
+        for chunk in data.chunks(piece) {
+            s.feed(chunk, &mut out).unwrap();
+        }
+        s.finish(&mut out).unwrap();
+        assert_eq!(hex(&out), "a4b3a4f3a4cba4c1a4cf69636f6e760a", "{piece}");
+    }
+    // bug76249.phpt: an odd byte left at the end of UCS-2 input.
+    let (from, _) = parse_charset(b"ucs-2").unwrap();
+    let (to, flags) = parse_charset(b"utf-8//IGNORE").unwrap();
+    let mut s = StreamConverter::new(from, to, flags);
+    let mut out = Vec::new();
+    s.feed(b"abc", &mut out).unwrap();
+    assert!(s.finish(&mut out).is_err());
+    // gh17047.phpt: UTF-16BE input "test" decodes; the second filter then sees
+    // UTF-8 bytes as UTF-16BE and fails on an odd length.
+    let (from, _) = parse_charset(b"UTF-16BE").unwrap();
+    let (to, flags) = parse_charset(b"UTF-8").unwrap();
+    let mut s = StreamConverter::new(from, to, flags);
+    let mut out = Vec::new();
+    s.feed(b"test", &mut out).unwrap();
+    s.finish(&mut out).unwrap();
+    assert_eq!(hex(&out), "e791a5e78db4");
+}
+
+/// Benchmark against PHP 8.5's iconv() (same inputs as the PHP loop in the
+/// crate's report): `cargo test --release -p goro-charset bench_iconv -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn bench_iconv() {
+    fn mk(unit: &str) -> Vec<u8> {
+        unit.repeat((1 << 20) / unit.len() + 1).into_bytes()
+    }
+    let latin = mk("Pâté façon grand-mère, élégance française à Zürich, déjà vu. ");
+    let ascii = mk("The quick brown fox jumps over the lazy dog, 0123456789. ");
+    let cjk = mk("日本語のテキストです。漢字とひらがなとカタカナ。");
+    let mut d = Vec::new();
+    let euc = iconv(b"UTF-8", b"EUC-JP", &cjk, &mut d).unwrap();
+    let latin1 = iconv(b"UTF-8", b"ISO-8859-1", &latin, &mut d).unwrap();
+    let cases: [(&str, &str, &[u8], &str); 9] = [
+        ("UTF-8", "ISO-8859-1", &latin, "utf8->latin1 (accented)"),
+        ("UTF-8", "ISO-8859-1", &ascii, "utf8->latin1 (ascii)"),
+        ("UTF-8", "UTF-16LE", &latin, "utf8->utf16le (accented)"),
+        ("UTF-8", "UTF-16LE", &cjk, "utf8->utf16le (cjk)"),
+        ("EUC-JP", "UTF-8", &euc, "eucjp->utf8"),
+        ("UTF-8", "EUC-JP", &cjk, "utf8->eucjp"),
+        ("ISO-8859-1", "UTF-8", &latin1, "latin1->utf8"),
+        ("UTF-8", "UTF-8", &cjk, "utf8->utf8 (cjk)"),
+        ("UTF-8", "ASCII//TRANSLIT", &latin, "utf8->ascii//translit"),
+    ];
+    for (f, t, s, label) in cases {
+        let mut r = iconv(f.as_bytes(), t.as_bytes(), s, &mut d).unwrap();
+        // Best of 5 rounds of 20.
+        let mut dt = f64::MAX;
+        for _ in 0..5 {
+            let t0 = std::time::Instant::now();
+            for _ in 0..20 {
+                r = iconv(f.as_bytes(), t.as_bytes(), s, &mut d).unwrap();
+            }
+            dt = dt.min(t0.elapsed().as_secs_f64() * 1000.0 / 20.0);
+        }
+        eprintln!(
+            "{label:<28} in {:7} B out {:7} B  {dt:8.3} ms  crc {:08x}",
+            s.len(),
+            r.len(),
+            crc32(&r)
+        );
+    }
+}
+
+/// The fast paths give what the general loop gives, for every charset.
+#[test]
+fn fast_paths_match_generic() {
+    use super::charset::Kind;
+    let generic = |from: Charset, to: Charset, s: &[u8]| {
+        let mut c = super::convert::Converter::new(from.decoder(), to.encoder(), Flags::default());
+        let mut out = Vec::new();
+        c.run(s, &mut out).map(|()| out).map_err(|e| e.kind)
+    };
+    let utf8 = Charset::lookup("UTF-8").unwrap();
+    for info in super::tables::names::CHARSETS.iter() {
+        let cs = Charset(info);
+        // Every BMP character the charset encodes, and some others.
+        let enc = cs.encoder();
+        let mut text = String::new();
+        for cp in 0..0x1_0400u32 {
+            if let Some(ch) = char::from_u32(cp)
+                && enc.can_encode(cp)
+            {
+                text.push(ch);
+            }
+        }
+        let fast = super::fast::convert(utf8, cs, text.as_bytes());
+        let slow = generic(utf8, cs, text.as_bytes());
+        if let Some(f) = &fast {
+            assert_eq!(Ok(f.clone()), slow, "UTF-8 -> {}", info.name);
+        }
+        if let Ok(bytes) = &slow
+            && matches!(info.kind, Kind::Table(_))
+        {
+            let back_slow = generic(cs, utf8, bytes);
+            if let Some(f) = super::fast::convert(cs, utf8, bytes) {
+                assert_eq!(Ok(f), back_slow, "{} -> UTF-8", info.name);
+            }
+        }
+        text.push('\u{10ffff}');
+        if super::fast::convert(utf8, cs, text.as_bytes()).is_some() {
+            assert!(enc.can_encode(0x10_FFFF), "{}", info.name);
+        }
+    }
+}

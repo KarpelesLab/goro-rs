@@ -313,6 +313,15 @@ impl Encoder {
         }
     }
 
+    /// Whether the bytes of a character never depend on what came before.
+    pub(crate) fn stateless(&self) -> bool {
+        match self {
+            Encoder::Ascii | Encoder::Utf8 => true,
+            Encoder::Table(e) => e.t.pairs.is_empty(),
+            _ => false,
+        }
+    }
+
     /// Whether unencodable tag characters (U+E0000-U+E007F) are dropped.
     pub(crate) fn drops_tags(&self) -> bool {
         !matches!(self, Encoder::Iso2022Jp(_) | Encoder::Iso2022Kr(_))

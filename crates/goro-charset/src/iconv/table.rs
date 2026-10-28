@@ -72,6 +72,31 @@ impl Table {
         }
     }
 
+    /// The root node's 256 entries, built on first use (fast paths).
+    pub(crate) fn root(&'static self) -> &'static [u32; 256] {
+        static CACHE: OnceLock<std::sync::Mutex<HashMap<usize, &'static [u32; 256]>>> =
+            OnceLock::new();
+        let key = self as *const Table as usize;
+        let cache = CACHE.get_or_init(Default::default);
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(r) = guard.get(&key) {
+            return r;
+        }
+        let mut root = [0u32; 256];
+        for (b, e) in root.iter_mut().enumerate() {
+            *e = self.entry(0, b as u8);
+        }
+        let r: &'static [u32; 256] = Box::leak(Box::new(root));
+        guard.insert(key, r);
+        r
+    }
+
+    /// [`Table::entry`] for the fast paths.
+    #[inline]
+    pub(crate) fn entry_at(&self, node: usize, b: u8) -> u32 {
+        self.entry(node, b)
+    }
+
     /// The character a two-byte sequence decodes to, if it is one.
     pub(crate) fn decode_pair(&self, l: u8, t: u8) -> Option<u32> {
         let e = self.entry(0, l);
@@ -384,6 +409,12 @@ impl TableEncoder {
 
     pub(crate) fn can_encode(&self, cp: u32) -> bool {
         self.lookup(cp).is_some()
+    }
+
+    /// The bytes of one character (packed), for the fast paths.
+    #[inline]
+    pub(crate) fn lookup_fast(&self, cp: u32) -> Option<u32> {
+        self.lookup(cp)
     }
 
     fn is_pair_start(&self, cp: u32) -> bool {

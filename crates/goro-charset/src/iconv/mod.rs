@@ -23,6 +23,7 @@
 
 mod charset;
 mod convert;
+mod fast;
 mod iso2022;
 mod mime;
 mod names;
@@ -39,7 +40,7 @@ mod mime_tests;
 mod tests;
 
 pub use charset::Charset;
-pub use convert::{ConvertError, ConvertErrorKind, convert};
+pub use convert::{ConvertError, ConvertErrorKind, StreamConverter, convert};
 pub use mime::{MimeEncodeOptions, MimeScheme, mime_decode, mime_decode_headers, mime_encode};
 pub use names::{Flags, parse_charset};
 pub use php::{iconv, strlen, strpos, strrpos, substr};
