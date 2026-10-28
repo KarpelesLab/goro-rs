@@ -10,6 +10,7 @@ use goro_xml::tree::{DomError, NodeData, QName};
 use super::super::libxml::PhpLoader;
 use super::xmlstore;
 use super::{legacy_error, modern_fn, s8, sv, this_node, throw_dom, with_arena, wrap_node};
+use super::document::NameCheck as NC;
 use crate::func::{Args, NativeFn};
 use crate::vm::{R, Vm};
 
@@ -205,7 +206,7 @@ fn attr_rename(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = this_node(vm, a)?;
     let ns = a.opt_str(0).map(|s| s8(&s));
     let qn = s8(&a.str(1));
-    let q = match super::document::validate_and_extract(ns.as_deref(), &qn) {
+    let q = match super::document::validate_and_extract(ns.as_deref(), &qn, NC::Modern) {
         Ok(q) => q,
         Err(e) => return throw_dom(vm, e),
     };

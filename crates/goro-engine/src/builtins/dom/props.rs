@@ -436,7 +436,8 @@ fn compute(a: &mut goro_xml::Arena, n: NodeId, name: &str, modern: bool) -> PV {
                 PV::from(e)
             }
         }
-        "actualEncoding" | "encoding" | "version" => PV::Null,
+        "actualEncoding" | "encoding" => PV::Null,
+        "version" if !is_doc => PV::Null,
         "xmlEncoding" => {
             let e = a.doc(n).encoding.clone();
             if modern {
@@ -446,7 +447,7 @@ fn compute(a: &mut goro_xml::Arena, n: NodeId, name: &str, modern: bool) -> PV {
             }
         }
         "standalone" | "xmlStandalone" => PV::B(a.doc(n).standalone == 1),
-        "xmlVersion" if is_doc => {
+        "xmlVersion" | "version" if is_doc => {
             let v = a.doc(n).version.clone();
             if modern {
                 PV::S(v.unwrap_or_else(|| "1.0".into()))
@@ -555,7 +556,7 @@ pub(crate) fn pv_value(vm: &mut Vm, o: &ObjRef, pv: PV, modern: bool) -> R<Value
             super::wrap_node(vm, id)?
         }
         PV::Node(None) => Value::Null,
-        PV::List(k) => lists::new_list(vm, k, modern)?,
+        PV::List(k) => lists::new_list_owned(vm, k, modern, Some(o.clone()))?,
         PV::Cached(k) => lists::cached_list(vm, o, k)?,
         PV::Impl => {
             let c = if modern {
@@ -606,7 +607,11 @@ pub(crate) fn set_prop(vm: &mut Vm, o: &ObjRef, name: &str, v: Value) -> R<()> {
         Value::Null => PhpStr::empty(),
         other => vm.to_php_str(other)?,
     };
-    let text = super::s8(&s);
+    let mut text = super::s8(&s);
+    if !modern && let Some(i) = text.find('\0') {
+        // Legacy values are C strings (test DOMElement_className.phpt).
+        text.truncate(i);
+    }
     match name {
         "nodeValue" => {
             super::node::set_node_value(vm, n, &text, modern)?;
@@ -664,6 +669,17 @@ pub(crate) fn debug_props(vm: &mut Vm, o: &ObjRef) -> Option<PhpArray> {
                     );
                 }
                 Ok(v) => {
+                    // A node made without a document shows no owner
+                    // document (test DOMEntityReference_predefined_free).
+                    if v.is_null()
+                        && p.name.as_bytes() == b"ownerDocument"
+                        && node_of(o).is_some_and(|n| {
+                            with_settings(n, |s| s.hidden)
+                                && with_arena(|a| !matches!(a.data(n), NodeData::Document(_)))
+                        })
+                    {
+                        continue;
+                    }
                     out.insert(Key::Str(p.name.clone()), v);
                 }
                 Err(_) => {}

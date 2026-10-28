@@ -382,6 +382,7 @@ final class XMLDocument extends \Dom\Document {
     (
         "domnodelist",
         r#"<?php
+#[\NotCloneable]
 class DOMNodeList implements \IteratorAggregate, \Countable {
     public int $length { get {} set {} }
     public function count(): int {}
@@ -392,6 +393,7 @@ class DOMNodeList implements \IteratorAggregate, \Countable {
     (
         "dom\\nodelist",
         r#"<?php namespace Dom;
+#[\NotCloneable]
 class NodeList implements \IteratorAggregate, \Countable {
     public int $length { get {} set {} }
     public function count(): int {}
@@ -402,6 +404,7 @@ class NodeList implements \IteratorAggregate, \Countable {
     (
         "domnamednodemap",
         r#"<?php
+#[\NotCloneable]
 class DOMNamedNodeMap implements \IteratorAggregate, \Countable {
     public int $length { get {} set {} }
     public function getNamedItem(string $qualifiedName): ?\DOMNode {}
@@ -414,6 +417,7 @@ class DOMNamedNodeMap implements \IteratorAggregate, \Countable {
     (
         "dom\\namednodemap",
         r#"<?php namespace Dom;
+#[\NotCloneable]
 class NamedNodeMap implements \IteratorAggregate, \Countable {
     public int $length { get {} set {} }
     public function item(int $index): ?\Dom\Attr {}
@@ -426,6 +430,7 @@ class NamedNodeMap implements \IteratorAggregate, \Countable {
     (
         "dom\\dtdnamednodemap",
         r#"<?php namespace Dom;
+#[\NotCloneable]
 class DtdNamedNodeMap implements \IteratorAggregate, \Countable {
     public int $length { get {} set {} }
     public function item(int $index): \Dom\Entity|\Dom\Notation|null {}
@@ -438,6 +443,7 @@ class DtdNamedNodeMap implements \IteratorAggregate, \Countable {
     (
         "dom\\htmlcollection",
         r#"<?php namespace Dom;
+#[\NotCloneable]
 class HTMLCollection implements \IteratorAggregate, \Countable {
     public int $length { get {} set {} }
     public function item(int $index): ?\Dom\Element {}
@@ -799,6 +805,7 @@ final class XPath {
     (
         "dom\\tokenlist",
         r#"<?php namespace Dom;
+#[\NotCloneable]
 final class TokenList implements \IteratorAggregate, \Countable {
     public int $length { get {} set {} }
     public string $value { get {} set {} }

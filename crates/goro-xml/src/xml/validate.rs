@@ -251,10 +251,12 @@ impl V<'_> {
                 if !ends.contains(&kids.len()) {
                     let mut model = String::new();
                     crate::serialize::content_model(&decl.content, &mut model);
+                    // Each name followed by a space, as the php-src tests
+                    // expect (DOMDocument_loadXML_variation2.phpt).
                     let got = if kids.is_empty() {
                         String::new()
                     } else {
-                        format!("({})", kids.join(" "))
+                        format!("({} )", kids.join(" "))
                     };
                     self.err(504, format!("Element {name} content does not follow the DTD, expecting {model}, got {got}"), line);
                 }

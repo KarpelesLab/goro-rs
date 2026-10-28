@@ -1370,6 +1370,7 @@ impl Vm {
             let scope = self.scope_ptr();
             if let PropLookup::Found(p) = self.lookup_prop(&cls, name, scope)
                 && let Some(t) = &p.ty
+                && p.flags & mflags::VIRTUAL == 0
             {
                 let cur = o.obj().slots.borrow()[p.slot as usize].clone();
                 let cur_null = cur.is_null() || self.is_uninit(&cur);

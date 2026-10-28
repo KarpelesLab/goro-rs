@@ -14,6 +14,7 @@ use super::{
     DocSettings, arg_node, legacy_error, modern_fn, node_of, opt_arg_node, s8, settings, sv,
     this_node, throw_dom, throw_dom_msg, with_arena, with_settings, wrap_node, wrap_opt,
 };
+use NameCheck as NC;
 use crate::func::{Args, NativeFn};
 use crate::vm::{R, Unwind, Vm};
 
@@ -222,17 +223,46 @@ fn create_element(vm: &mut Vm, a: &mut Args) -> R<Value> {
     wrap_node(vm, e)
 }
 
+/// How names are validated.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NameCheck {
+    /// `createElementNS()` & co. of the legacy classes.
+    Legacy,
+    /// Legacy constructors (`new DOMElement`).
+    Ctor,
+    /// `Dom\` methods (DOM Standard).
+    Modern,
+}
+
 /// Validates and extracts a namespace and qualified name (DOM Standard
 /// "validate and extract").
 pub(crate) fn validate_and_extract(
     ns: Option<&str>,
     qualified: &str,
+    mode: NameCheck,
 ) -> Result<QName, DomError> {
-    if !goro_xml::chars::is_name(qualified) {
-        return Err(DomError::InvalidCharacter);
-    }
-    if !goro_xml::chars::is_qname(qualified) {
-        return Err(DomError::Namespace);
+    let has_ns = ns.is_some_and(|s| !s.is_empty());
+    match mode {
+        // Legacy factories: a namespaced name that is not a QName is a
+        // namespace error (test dom_create_element.phpt).
+        NameCheck::Legacy if has_ns => {
+            if !goro_xml::chars::is_qname(qualified) {
+                return Err(DomError::Namespace);
+            }
+        }
+        NameCheck::Modern => {
+            if !goro_xml::chars::is_qname(qualified) {
+                return Err(DomError::InvalidCharacter);
+            }
+        }
+        _ => {
+            if !goro_xml::chars::is_name(qualified) {
+                return Err(DomError::InvalidCharacter);
+            }
+            if !goro_xml::chars::is_qname(qualified) {
+                return Err(DomError::Namespace);
+            }
+        }
     }
     let ns = ns.filter(|s| !s.is_empty());
     let (prefix, local) = match qualified.split_once(':') {
@@ -263,7 +293,7 @@ fn create_element_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let ns = a.opt_str(0).map(|s| s8(&s));
     let qn = s8(&a.str(1));
     let modern = modern_fn(a);
-    let q = match validate_and_extract(ns.as_deref(), &qn) {
+    let q = match validate_and_extract(ns.as_deref(), &qn, if modern { NC::Modern } else { NC::Legacy }) {
         Ok(q) => q,
         Err(e) if modern => return throw_dom(vm, e),
         Err(e) => return legacy_error(vm, a, d, e),
@@ -368,7 +398,7 @@ fn create_attribute_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let ns = a.opt_str(0).map(|s| s8(&s));
     let qn = s8(&a.str(1));
     let modern = modern_fn(a);
-    let q = match validate_and_extract(ns.as_deref(), &qn) {
+    let q = match validate_and_extract(ns.as_deref(), &qn, if modern { NC::Modern } else { NC::Legacy }) {
         Ok(q) => q,
         Err(e) if modern => return throw_dom(vm, e),
         Err(e) => return legacy_error(vm, a, d, e),
@@ -439,7 +469,7 @@ fn import_node(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match r {
         Ok(c) => {
             if !modern {
-                with_arena(|ar| super::element::reconcile_imported(ar, c));
+                with_arena(|ar| super::element::reconcile_imported(ar, c, d));
             }
             wrap_node(vm, c)
         }
@@ -748,15 +778,19 @@ fn check_options(vm: &mut Vm, a: &Args, i: usize) -> R<u32> {
     Ok(o as u32)
 }
 
-fn load_common(vm: &mut Vm, a: &Args, input: &[u8], flags: u32, url: String) -> R<Value> {
+fn load_common(vm: &mut Vm, a: &Args, input: &[u8], flags: u32, url: String, from_string: bool) -> R<Value> {
     let o = a.this_obj().clone();
     let cur = node_of(&o);
     let st = cur.map(settings).unwrap_or_default();
     let flags = flags | settings_flags(&st);
     let fname = a.fname();
-    let Some(d) = parse_xml(vm, &fname, input, flags, Some(url), false, Style::Dom)? else {
+    // Strings parse without a URL (errors say "Entity"); the document gets
+    // the current directory as its URL (observed on PHP 8.5).
+    let purl = if from_string { None } else { Some(url.clone()) };
+    let Some(d) = parse_xml(vm, &fname, input, flags, purl, false, Style::Dom)? else {
         return Ok(Value::Bool(false));
     };
+    with_arena(|ar| ar.doc_mut(d).url = Some(url));
     if cur.is_none() {
         set_doc_class(vm, &o, d);
     }
@@ -771,7 +805,7 @@ fn load_xml(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     let flags = check_options(vm, a, 1)?;
     let url = cwd_url(vm);
-    load_common(vm, a, src.as_bytes(), flags, url)
+    load_common(vm, a, src.as_bytes(), flags, url, true)
 }
 
 fn load(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -784,7 +818,7 @@ fn load(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return Ok(Value::Bool(false));
     };
     let url = file_url(vm, &path);
-    load_common(vm, a, &bytes, flags, url)
+    load_common(vm, a, &bytes, flags, url, false)
 }
 
 fn load_html_common(vm: &mut Vm, a: &Args, input: &[u8], flags: u32, url: Option<String>) -> R<Value> {
@@ -1055,7 +1089,7 @@ fn modern_check_options(vm: &mut Vm, a: &Args, i: usize, html: bool) -> R<u32> {
     Ok(o as u32)
 }
 
-fn modern_parse(vm: &mut Vm, a: &Args, input: &[u8], url: String) -> R<Value> {
+fn modern_parse(vm: &mut Vm, a: &Args, input: &[u8], url: String, from_string: bool) -> R<Value> {
     let flags = modern_check_options(vm, a, 1, false)?;
     let enc = a.opt_str(2).map(|s| s8(&s));
     if let Some(e) = &enc
@@ -1070,7 +1104,7 @@ fn modern_parse(vm: &mut Vm, a: &Args, input: &[u8], url: String) -> R<Value> {
     }
     let d = {
         let mut opts = ParseOptions::with_flags(opts_flags);
-        opts.url = Some(url);
+        opts.url = if from_string { None } else { Some(url.clone()) };
         opts.modern = true;
         opts.encoding_override = enc;
         let mut loader = PhpLoader::new(vm, &fname);
@@ -1086,6 +1120,7 @@ fn modern_parse(vm: &mut Vm, a: &Args, input: &[u8], url: String) -> R<Value> {
         }
         built.doc
     };
+    with_arena(|ar| ar.doc_mut(d).url = Some(url));
     with_arena(|ar| {
         let dd = ar.doc_mut(d);
         if dd.encoding.is_none() {
@@ -1101,7 +1136,7 @@ fn xml_create_from_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.fthrow(a, "ValueError", "Argument #1 ($source) must not be empty");
     }
     let url = cwd_url(vm);
-    modern_parse(vm, a, &src.as_bytes().to_vec(), url)
+    modern_parse(vm, a, &src.as_bytes().to_vec(), url, true)
 }
 
 fn xml_create_from_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1113,7 +1148,7 @@ fn xml_create_from_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.throw("Exception", &format!("Cannot open file '{path}'"));
     };
     let url = file_url(vm, &path);
-    modern_parse(vm, a, &bytes, url)
+    modern_parse(vm, a, &bytes, url, false)
 }
 
 fn html_create_empty(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1343,7 +1378,7 @@ fn impl_create_document(vm: &mut Vm, a: &mut Args) -> R<Value> {
         });
     }
     if !qn.is_empty() {
-        let q = match validate_and_extract(ns.as_deref(), &qn) {
+        let q = match validate_and_extract(ns.as_deref(), &qn, if modern { NC::Modern } else { NC::Legacy }) {
             Ok(q) => q,
             Err(e) => {
                 xmlstore::with(|s| s.free_doc_if_unheld(d));
@@ -1488,10 +1523,9 @@ pub(crate) fn set_doc_prop(
                 return readonly(vm, o, name);
             }
             let e = str_of(vm, &v)?;
-            if let Some(x) = &e
-                && goro_xml::encoding::lookup(x).is_none()
-            {
-                return vm.throw("ValueError", "Invalid document encoding");
+            match &e {
+                Some(x) if goro_xml::encoding::lookup(x).is_some() => {}
+                _ => return vm.throw("ValueError", "Invalid document encoding"),
             }
             with_arena(|ar| ar.doc_mut(d).encoding = e);
         }

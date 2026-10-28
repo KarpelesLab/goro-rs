@@ -183,7 +183,10 @@ fn do_insert(vm: &mut Vm, a: &Args, child: Option<NodeId>, op: InsertOp) -> R<Va
             Err(e) => throw_dom(vm, e),
         };
     }
+    let was_fragment = with_arena(|ar| matches!(ar.data(node), NodeData::Fragment));
     match legacy_insert(parent, node, child) {
+        // A fragment gives its first inserted node (test bug32615.phpt).
+        Ok(ins) if was_fragment && !ins.is_empty() => wrap_node(vm, ins[0]),
         Ok(_) => Ok(a.val(0)),
         Err(LegacyInsertError::Dom(e)) => legacy_error(vm, a, parent, e),
         Err(LegacyInsertError::EmptyFragment) => {
@@ -198,7 +201,7 @@ fn do_insert(vm: &mut Vm, a: &Args, child: Option<NodeId>, op: InsertOp) -> R<Va
             if !is_el {
                 return legacy_error(vm, a, parent, DomError::HierarchyRequest);
             }
-            super::element::set_attribute_node_raw(vm, a, parent, node, false)?;
+            super::element::set_attribute_node_raw(vm, a, parent, node, false, false)?;
             Ok(a.val(0))
         }
     }
@@ -468,7 +471,15 @@ fn contains(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return Ok(Value::Bool(false));
     };
     Ok(Value::Bool(with_arena(|ar| {
-        !matches!(ar.data(other), NodeData::Namespace(_)) && ar.is_inclusive_ancestor(n, other)
+        // A namespace node is where its element is (test DOMNode_contains).
+        let other = match ar.data(other) {
+            NodeData::Namespace(_) => match ar.parent(other) {
+                Some(p) => p,
+                None => return false,
+            },
+            _ => other,
+        };
+        ar.is_inclusive_ancestor(n, other)
     })))
 }
 

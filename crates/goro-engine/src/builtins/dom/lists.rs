@@ -77,9 +77,53 @@ pub struct ListObj {
     /// Holds on the root and on the items of fixed lists.
     _holds: Vec<NodeHold>,
     cache: RefCell<Option<(u64, Vec<NodeId>)>>,
+    /// The node object the collection was taken from: a document object
+    /// that loads another document takes its collections along (test
+    /// DOMDocument_item_cache_invalidation.phpt).
+    owner: Option<ObjRef>,
 }
 
-impl NativeData for ListObj {}
+impl NativeData for ListObj {
+    fn trace(&self, visit: &mut dyn FnMut(&Value)) {
+        if let Some(o) = &self.owner {
+            visit(&Value::Object(o.clone()));
+        }
+    }
+    fn clear(&mut self) {
+        self.owner = None;
+    }
+}
+
+impl ListKind {
+    fn root(&self) -> Option<NodeId> {
+        match self {
+            ListKind::Static(_) => None,
+            ListKind::Children(n)
+            | ListKind::Attrs(n)
+            | ListKind::TagName(n, _)
+            | ListKind::TagNameNS(n, _, _)
+            | ListKind::ClassName(n, _)
+            | ListKind::ChildElements(n)
+            | ListKind::Entities(n)
+            | ListKind::Notations(n)
+            | ListKind::ClassList(n) => Some(*n),
+        }
+    }
+    fn rerooted(&self, r: NodeId) -> ListKind {
+        match self.clone() {
+            ListKind::Children(_) => ListKind::Children(r),
+            ListKind::Attrs(_) => ListKind::Attrs(r),
+            ListKind::TagName(_, a) => ListKind::TagName(r, a),
+            ListKind::TagNameNS(_, a, b) => ListKind::TagNameNS(r, a, b),
+            ListKind::ClassName(_, a) => ListKind::ClassName(r, a),
+            ListKind::ChildElements(_) => ListKind::ChildElements(r),
+            ListKind::Entities(_) => ListKind::Entities(r),
+            ListKind::Notations(_) => ListKind::Notations(r),
+            ListKind::ClassList(_) => ListKind::ClassList(r),
+            k => k,
+        }
+    }
+}
 
 fn class_for(kind: &ListKind, modern: bool) -> &'static str {
     match (kind, modern) {
@@ -106,6 +150,11 @@ fn class_for(kind: &ListKind, modern: bool) -> &'static str {
 
 /// A new collection object.
 pub fn new_list(vm: &mut Vm, kind: ListKind, modern: bool) -> R<Value> {
+    new_list_owned(vm, kind, modern, None)
+}
+
+/// A new collection object taken from node object `owner`.
+pub fn new_list_owned(vm: &mut Vm, kind: ListKind, modern: bool, owner: Option<ObjRef>) -> R<Value> {
     let cls = vm
         .find_class(class_for(&kind, modern).as_bytes(), false)?
         .unwrap();
@@ -127,6 +176,7 @@ pub fn new_list(vm: &mut Vm, kind: ListKind, modern: bool) -> R<Value> {
         modern,
         _holds: holds,
         cache: RefCell::new(None),
+        owner,
     }));
     Ok(Value::Object(o))
 }
@@ -177,6 +227,10 @@ pub fn items(o: &ObjRef) -> Vec<NodeId> {
     if let ListKind::Static(v) = &l.kind {
         return v.clone();
     }
+    let kind = match (l.owner.as_ref().and_then(super::node_of), l.kind.root()) {
+        (Some(now), Some(was)) if now != was => l.kind.rerooted(now),
+        _ => l.kind.clone(),
+    };
     xmlstore::with(|s| {
         let g = s.arena.generation();
         if let Some((cg, v)) = &*l.cache.borrow()
@@ -184,7 +238,12 @@ pub fn items(o: &ObjRef) -> Vec<NodeId> {
         {
             return v.clone();
         }
-        let v = compute_items(s, &l.kind, l.modern);
+        if let Some(r) = kind.root()
+            && !s.arena.is_live(r)
+        {
+            return Vec::new();
+        }
+        let v = compute_items(s, &kind, l.modern);
         *l.cache.borrow_mut() = Some((s.arena.generation(), v.clone()));
         v
     })
