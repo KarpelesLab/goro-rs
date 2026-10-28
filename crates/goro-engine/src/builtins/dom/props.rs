@@ -502,6 +502,11 @@ pub(crate) fn get_prop(vm: &mut Vm, o: &ObjRef, name: &str) -> R<Value> {
     {
         vm.deprecated(&format!("Property DOMDocument::${name} is deprecated"))?;
     }
+    if cls.is_subclass_of(&vm.find_class(b"DOMEntity", false)?.unwrap())
+        && matches!(name, "actualEncoding" | "encoding" | "version")
+    {
+        vm.deprecated(&format!("Property DOMEntity::${name} is deprecated"))?;
+    }
     // Document settings.
     if let Some(v) = settings_prop(n, name) {
         return Ok(Value::Bool(v));
@@ -742,7 +747,10 @@ pub(crate) fn debug_props(vm: &mut Vm, o: &ObjRef) -> Option<PhpArray> {
 
 /// A property read for var_dump (no deprecations).
 fn get_prop_quiet(vm: &mut Vm, o: &ObjRef, name: &str) -> R<Value> {
-    if matches!(name, "config" | "actualEncoding") {
+    if matches!(name, "config" | "actualEncoding")
+        || (matches!(name, "encoding" | "version")
+            && node_of(o).is_some_and(|n| with_arena(|a| matches!(a.data(n), NodeData::EntityDecl(_)))))
+    {
         return Ok(Value::Null);
     }
     if node_of(o).is_none() {

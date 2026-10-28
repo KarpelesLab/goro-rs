@@ -940,9 +940,16 @@ impl Parser<'_> {
                     }
                     self.pos += 5;
                     self.require_space("'NDATA'")?;
-                    let n = self.name_or(68, "NDATA: no notation name")?;
-                    ent.notation = Some(n.to_string());
-                    ent.kind = EntityKind::ExternalGeneralUnparsed;
+                    // A missing notation name is accepted (observed on PHP
+                    // 8.5, test ext/dom/tests/DOMEntity_fields.phpt).
+                    if self.cur() == b'>' {
+                        ent.notation = Some(String::new());
+                        ent.kind = EntityKind::ExternalGeneralUnparsed;
+                    } else {
+                        let n = self.name_or(68, "NDATA: no notation name")?;
+                        ent.notation = Some(n.to_string());
+                        ent.kind = EntityKind::ExternalGeneralUnparsed;
+                    }
                 }
             }
             self.end_decl()?;

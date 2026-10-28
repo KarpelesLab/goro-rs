@@ -411,9 +411,25 @@ fn create_attribute_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Err(e) if modern => return throw_dom(vm, e),
         Err(e) => return legacy_error(vm, a, d, e),
     };
+    let mut q = q;
     if !modern && q.ns.is_some() && q.prefix.is_none() && q.ns.as_deref() != Some(XMLNS_NS) {
         // A namespaced attribute needs a prefix in libxml's model: PHP
-        // generates one (test createAttributeNS_prefix_conflicts).
+        // finds or declares one on the document element (observed on PHP
+        // 8.5, test delayed_freeing/namespace_definition_crash_in_attribute).
+        let ns = q.ns.clone().unwrap();
+        with_arena(|ar| {
+            if let Some(de) = ar.document_element(d) {
+                let p = match ar.lookup_prefix(de, &ns) {
+                    Some(p) => p,
+                    None => {
+                        let g = super::element::generated_prefix(ar, de);
+                        ar.declare_ns(de, Some(&g), &ns);
+                        g.as_str().into()
+                    }
+                };
+                q.prefix = Some(p);
+            }
+        });
     }
     let n = with_arena(|ar| ar.new_attribute(d, q, ""));
     wrap_node(vm, n)
@@ -1437,7 +1453,8 @@ fn impl_create_doctype(vm: &mut Vm, a: &mut Args) -> R<Value> {
         vm.fwarn(a, "URI must not contain percent-encoded NUL bytes")?;
         return Ok(Value::Bool(false));
     }
-    if !goro_xml::chars::is_qname(&name) {
+    // Legacy doctypes take any name (test delayed_freeing/dtd_node.phpt).
+    if modern && !goro_xml::chars::is_qname(&name) {
         let e = if modern || goro_xml::chars::is_name(&name) {
             DomError::Namespace
         } else {

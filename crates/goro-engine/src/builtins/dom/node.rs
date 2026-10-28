@@ -91,11 +91,24 @@ pub(crate) fn legacy_insert(
             // Attributes hold text and entity references (tests gh17145,
             // gh16594).
             && matches!(a.data(node), NodeData::Text(_) | NodeData::EntityRef(_)));
+        // In a node made without a document, a hierarchy error is a
+        // modification error (test delayed_freeing/direct_construction).
+        let parent_hidden = s
+            .docs
+            .get(&pdoc)
+            .and_then(|d| d.peek::<super::DocSettings>())
+            .is_some_and(|d| d.hidden);
+        let hier = if parent_hidden {
+            DomError::NoModificationAllowed
+        } else {
+            DomError::HierarchyRequest
+        };
+        let a = &mut s.arena;
         if !can_have {
-            return Err(LegacyInsertError::Dom(DomError::HierarchyRequest));
+            return Err(LegacyInsertError::Dom(hier));
         }
         if a.is_inclusive_ancestor(node, parent) {
-            return Err(LegacyInsertError::Dom(DomError::HierarchyRequest));
+            return Err(LegacyInsertError::Dom(hier));
         }
         if matches!(a.data(node), NodeData::Document(_)) {
             return Err(LegacyInsertError::Dom(DomError::HierarchyRequest));
@@ -269,8 +282,8 @@ pub(crate) fn modern_insert(
 }
 
 fn do_insert(vm: &mut Vm, a: &Args, child: Option<NodeId>, op: InsertOp) -> R<Value> {
-    let node = super::arg_node_state(vm, a, 0)?;
     let parent = this_node(vm, a)?;
+    let node = super::arg_node_state(vm, a, 0)?;
     if modern_fn(a) {
         return match modern_insert(parent, node, child) {
             Ok(_) => Ok(a.val(0)),

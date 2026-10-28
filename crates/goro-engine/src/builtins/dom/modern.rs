@@ -93,6 +93,18 @@ fn parse_in_context(vm: &mut Vm, ctx: NodeId, text: &str) -> R<NodeId> {
         let tmp = a.new_document(DocKind::Xml);
         a.doc_mut(tmp).modern = true;
         let holder = a.clone_node(ctx, tmp, false);
+        if a.is_element(ctx) {
+            let scope = in_scope(a, ctx);
+            if let Some(e) = a.element_mut(holder) {
+                e.ns_decls = scope
+                    .into_iter()
+                    .map(|(p, u)| goro_xml::tree::NsDecl {
+                        prefix: p.as_deref().map(Into::into),
+                        uri: u.as_str().into(),
+                    })
+                    .collect();
+            }
+        }
         let opts = goro_xml::xml::ParseOptions {
             modern: true,
             ..Default::default()
