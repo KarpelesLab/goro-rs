@@ -32,6 +32,7 @@ pub mod chars;
 pub mod encoding;
 pub mod error;
 pub mod html;
+pub mod html5;
 mod html4_entities;
 pub mod modern;
 pub mod reader;
