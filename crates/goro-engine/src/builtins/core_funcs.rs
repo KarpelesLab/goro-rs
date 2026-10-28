@@ -1121,7 +1121,12 @@ fn property_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return Ok(Value::Bool(true));
     }
     if let Value::Object(o) = &v {
-        return Ok(Value::Bool(o.obj().props.borrow().get_str(&p).is_some()));
+        if o.obj().props.borrow().get_str(&p).is_some() {
+            return Ok(Value::Bool(true));
+        }
+        // ArrayObject::ARRAY_AS_PROPS: the elements are properties (test
+        // ext/spl/tests/bug53515).
+        return Ok(Value::Bool(crate::builtins::spl::ao_has_prop(vm, o, &p)));
     }
     Ok(Value::Bool(false))
 }

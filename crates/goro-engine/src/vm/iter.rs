@@ -255,7 +255,12 @@ impl Vm {
         for _ in 0..32 {
             let cls = self.class_of(&cur);
             if let Some(h) = cls.native.get_iterator {
-                cur = h(self, &cur, false)?;
+                let n = h(self, &cur, false)?;
+                // A hook may only check the object and keep it.
+                if ObjRef::ptr_eq(&n, &cur) {
+                    return Ok(n);
+                }
+                cur = n;
                 continue;
             }
             let iter_cls = self.core.iterator.clone().unwrap();

@@ -323,6 +323,17 @@ impl Vm {
                         .is_some_and(|f| f.is_native())
                 {
                     let v = crate::builtins::spl::ao_isset(self, o, k)?;
+                    // empty() reads through a user offsetGet() (test
+                    // ext/spl/tests/bug66834).
+                    if empty
+                        && v.is_some()
+                        && cls
+                            .find_method(b"offsetget")
+                            .is_some_and(|f| !f.is_native())
+                    {
+                        let g = self.call_method(o, b"offsetget", vec![k.clone()])?;
+                        return Ok(!self.to_bool(&g));
+                    }
                     return Ok(match v {
                         None => empty,
                         Some(v) if empty => !self.to_bool(&v),

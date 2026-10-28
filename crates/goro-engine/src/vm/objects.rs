@@ -724,10 +724,20 @@ impl Vm {
                     );
                 }
                 self.check_set_visibility(&p, scope, o, name)?;
-                let cur_uninit = {
+                let (cur_uninit, was_unset) = {
                     let slots = o.obj().slots.borrow();
-                    self.is_uninit(&slots[p.slot as usize])
+                    let s = &slots[p.slot as usize];
+                    (self.is_uninit(s), self.is_unset_mark(s))
                 };
+                // An unset declared property takes __set like a missing one
+                // (observed on PHP 8.5; test
+                // ext/spl/tests/ArrayObject/arrayObject_setFlags_basic1).
+                if was_unset
+                    && let Some(f) = cls.magic.borrow().set.clone()
+                    && !self.guarded(o, name, 1)
+                {
+                    return self.magic_set(o, f, name, v);
+                }
                 if p.flags & mflags::READONLY != 0 {
                     if !cur_uninit && !self.readonly_clone_ok(o, &p) {
                         return self.throw(

@@ -440,6 +440,18 @@ class RecursiveIteratorIterator implements OuterIterator {
             throw new Error("The " . static::class . " instance wasn't initialized properly");
         }
     }
+    /* The user hooks; CATCH_GET_CHILD drops their exceptions (tests
+     * recursiveIteratorIterator_*_error). */
+    protected function __h_hook($m) {
+        if ($this->__flags & 16) {
+            try {
+                $this->$m();
+            } catch (Throwable $e) {
+            }
+            return;
+        }
+        $this->$m();
+    }
     protected function __h_fwd() {
         while (true) {
             $l = count($this->__its) - 1;
@@ -477,12 +489,12 @@ class RecursiveIteratorIterator implements OuterIterator {
                         continue;
                     }
                     $this->__st[$l] = 0;
-                    $this->nextElement();
+                    $this->__h_hook('nextElement');
                     return;
                 }
                 if ($st == 2) {
                     if ($this->__mode == 1 || $this->__mode == 2) {
-                        $this->nextElement();
+                        $this->__h_hook('nextElement');
                     }
                     $this->__st[$l] = $this->__mode == 1 ? 3 : 0;
                     return;
@@ -505,12 +517,12 @@ class RecursiveIteratorIterator implements OuterIterator {
                     $this->__its[] = $c;
                     $this->__st[] = 4;
                     $c->rewind();
-                    $this->beginChildren();
+                    $this->__h_hook('beginChildren');
                     continue;
                 }
             }
             if ($l > 0) {
-                $this->endChildren();
+                $this->__h_hook('endChildren');
                 array_pop($this->__its);
                 array_pop($this->__st);
             } else {

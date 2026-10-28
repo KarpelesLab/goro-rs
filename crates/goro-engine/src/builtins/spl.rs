@@ -542,6 +542,7 @@ pub static MODULE: Module = Module {
         ("splobjectstorage", os_hooks),
         ("multipleiterator", os_hooks),
         ("splfileobject", sfo_hooks),
+        ("recursiveiteratoriterator", rii_hooks),
     ],
     listed: true,
     ..Module::EMPTY
@@ -621,6 +622,9 @@ pub struct AoData {
     iter_class: PhpStr,
     /// Iteration position (hash position) for ArrayIterator.
     pos: u32,
+    /// A sort is running: the data can't change (test
+    /// ArrayObject_exchange_array_during_sorting).
+    sorting: bool,
 }
 
 impl goro_runtime::NativeData for AoData {
@@ -642,6 +646,7 @@ fn ao_hooks() -> NativeHooks {
                     flags: 0,
                     iter_class: PhpStr::from("ArrayIterator"),
                     pos: 0,
+                    sorting: false,
                 },
             )
         }),
@@ -668,6 +673,7 @@ fn ao_hooks() -> NativeHooks {
                 flags: d.flags,
                 iter_class: d.iter_class.clone(),
                 pos: d.pos,
+                sorting: false,
             });
             if let Some(d) = d {
                 set_native(to, d);
@@ -1041,6 +1047,17 @@ fn ao_offset_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Bool(arr.get(k.as_ref()).is_some()))
 }
 
+/// property_exists() on an ArrayObject with ARRAY_AS_PROPS: its elements
+/// count (test bug53515).
+pub(crate) fn ao_has_prop(vm: &mut Vm, o: &ObjRef, name: &PhpStr) -> bool {
+    if !is_ao(o) || ao_flags(o) & 2 == 0 {
+        return false;
+    }
+    ao_array(vm, o)
+        .get(Key::from_php_str(name).as_ref())
+        .is_some()
+}
+
 /// isset($o[$k]) on an internal ArrayObject: exists and is not null.
 pub(crate) fn ao_isset(vm: &mut Vm, o: &ObjRef, k: &Value) -> R<Option<Value>> {
     let key = match k {
@@ -1048,6 +1065,13 @@ pub(crate) fn ao_isset(vm: &mut Vm, o: &ObjRef, k: &Value) -> R<Option<Value>> {
         Value::Str(s) => Key::from_php_str(s),
         Value::Null => Key::Str(PhpStr::empty()),
         Value::Bool(b) => Key::Int(*b as i64),
+        Value::Array(_) | Value::Object(_) => {
+            // test ArrayObject_illegal_offset
+            return vm.type_error(&format!(
+                "Cannot access offset of type {} in isset or empty",
+                k.tname()
+            ));
+        }
         _ => vm.to_key(k, "array")?,
     };
     let arr = ao_array(vm, o);
@@ -1069,6 +1093,7 @@ fn ao_offset_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn ao_offset_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
+    ao_modifiable(vm, &o)?;
     let kv = a.val(0);
     let v = a.val(1);
     if kv.is_null() && a.has(0) {
@@ -1089,6 +1114,7 @@ fn ao_offset_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn ao_push(vm: &mut Vm, o: &ObjRef, v: Value) -> R<Value> {
+    ao_modifiable(vm, o)?;
     if let Some(p) = ao_storage_ptr(o) {
         if let Value::Array(arr) = unsafe { &mut *p }
             && arr.push(v).is_err()
@@ -1111,7 +1137,17 @@ fn ao_push(vm: &mut Vm, o: &ObjRef, v: Value) -> R<Value> {
 
 fn ao_offset_unset(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
-    let k = ao_key(vm, a, &a.val(0))?;
+    ao_modifiable(vm, &o)?;
+    let kv = a.val(0);
+    if matches!(kv, Value::Array(_) | Value::Object(_)) {
+        // test ArrayObject_illegal_offset
+        return vm.type_error(&format!(
+            "Cannot unset offset of type {} on {}",
+            kv.tname(),
+            vm.class_of(&o).name.dname()
+        ));
+    }
+    let k = ao_key(vm, a, &kv)?;
     if let Some(p) = ao_storage_ptr(&o) {
         let old = if let Value::Array(arr) = unsafe { &mut *p } {
             arr.remove(k.as_ref())
@@ -1156,15 +1192,34 @@ fn ao_set_flags(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 /// Runs an array sorting function on the data.
+/// Refuses changes while a sort runs.
+fn ao_modifiable(vm: &mut Vm, o: &ObjRef) -> R<()> {
+    let owner = ao_owner(o);
+    if with(&owner, |d: &mut AoData| d.sorting).unwrap_or(false)
+        || with(o, |d: &mut AoData| d.sorting).unwrap_or(false)
+    {
+        return vm.throw(
+            "Error",
+            "Modification of ArrayObject during sorting is prohibited",
+        );
+    }
+    Ok(())
+}
+
 fn ao_sort(vm: &mut Vm, a: &mut Args, fname: &str, extra: Option<Value>) -> R<Value> {
     let o = a.this_obj().clone();
+    ao_modifiable(vm, &o)?;
     let arr = ao_array(vm, &o);
     let r = PhpRef::new(Value::Array(arr));
     let mut args = vec![Value::Ref(r.clone())];
     if let Some(e) = extra {
         args.push(e);
     }
-    call_fn(vm, fname, args)?;
+    let owner = ao_owner(&o);
+    with(&owner, |d: &mut AoData| d.sorting = true);
+    let res = call_fn(vm, fname, args);
+    with(&owner, |d: &mut AoData| d.sorting = false);
+    res?;
     let sorted = r.get();
     if let Some(p) = ao_storage_ptr(&o) {
         let old = unsafe { std::mem::replace(&mut *p, sorted) };
@@ -1172,20 +1227,13 @@ fn ao_sort(vm: &mut Vm, a: &mut Args, fname: &str, extra: Option<Value>) -> R<Va
     } else if let Some(w) = ao_wrapped(&o)
         && let Value::Array(sa) = sorted
     {
-        // Reorder the wrapped object's properties.
+        // Reorder the wrapped object's property table (declared
+        // properties keep their slots).
         for (k, _) in sa.iter() {
-            let name = match k {
-                KeyRef::Int(i) => PhpStr::from(i.to_string()),
-                KeyRef::Str(s) => s.clone(),
-            };
-            vm.unset_prop(&w, &name)?;
+            raw_unset(vm, &w, &k.to_owned());
         }
         for (k, v) in sa.iter() {
-            let name = match k {
-                KeyRef::Int(i) => PhpStr::from(i.to_string()),
-                KeyRef::Str(s) => s.clone(),
-            };
-            vm.write_prop(&w, &name, v.deref(), None)?;
+            raw_write(vm, &w, &k.to_owned(), v.clone());
         }
     }
     Ok(Value::Bool(true))
@@ -1417,6 +1465,7 @@ fn ao_get_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn ao_exchange(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
+    ao_modifiable(vm, &o)?;
     let old = ao_array(vm, &o);
     let v = a.val(0);
     let storage = ao_input(vm, a, v, "exchangeArray")?;
@@ -1620,11 +1669,13 @@ fn rai_get_children(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 return Ok(cur);
             }
         }
-        _ => {
-            return vm.throw(
-                "InvalidArgumentException",
-                "Passed variable is not an array or object",
-            );
+        // The child is constructed from the value (test
+        // spl_iterator_getcallchildren).
+        other => {
+            return vm.type_error(&format!(
+                "ArrayIterator::__construct(): Argument #1 ($array) must be of type array, {} given",
+                Vm::type_name_given(other)
+            ));
         }
     }
     let cls = vm.class_of(&o);
@@ -3517,6 +3568,21 @@ fn sfo_hooks() -> NativeHooks {
             let cls = vm.class_of(o);
             cls.flags
                 .set(cls.flags.get() | crate::class::cflags::NOT_CLONEABLE);
+        }),
+        ..Default::default()
+    }
+}
+
+/// RecursiveIteratorIterator (spl_iterators.php): foreach over one whose
+/// constructor didn't run fails before rewind() (tests
+/// RecursiveIteratorIterator_not_initialized, bug54281).
+fn rii_hooks() -> NativeHooks {
+    NativeHooks {
+        get_iterator: Some(|vm, o, _| {
+            if vm.get_prop_raw(o, b"__its").is_null() {
+                return vm.throw("Error", "Object is not initialized");
+            }
+            Ok(o.clone())
         }),
         ..Default::default()
     }
