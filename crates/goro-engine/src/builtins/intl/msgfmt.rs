@@ -102,10 +102,9 @@ pub(crate) struct Msg {
 fn hooks() -> NativeHooks {
     NativeHooks {
         create: Some(super::numfmt::on_create),
-        clone: Some(|_, from, to| {
-            if let Some(m) = with_obj::<Msg, Msg>(from, |x| x.v.clone()) {
-                store(to, m);
-            }
+        clone: Some(|vm, from, to| match with_obj::<Msg, Msg>(from, |x| x.v.clone()) {
+            Some(m) => store(to, m),
+            None => super::timezone::clone_error(vm, "Cannot clone uninitialized MessageFormatter"),
         }),
         ..Default::default()
     }
@@ -429,7 +428,7 @@ fn m_parse(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (o, off, m) = msg_of(vm, a)?;
     reset_obj::<Msg>(vm, &o);
     let text = String::from_utf8_lossy(a.bytes(off)).into_owned();
-    match mf::parse(&m.locale, &m.pat, &text) {
+    match mf::parse(&m.locale, &m.pat, &text, &super::super::date::default_tz(vm).name()) {
         Some(v) => Ok(to_php(v)),
         None => {
             fail_obj::<Msg>(vm, a, &o, ue::U_PARSE_ERROR, "Parsing failed")?;
@@ -452,7 +451,7 @@ fn m_parse_message(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     };
     let text = String::from_utf8_lossy(a.bytes(2)).into_owned();
-    match mf::parse(&m.locale, &m.pat, &text) {
+    match mf::parse(&m.locale, &m.pat, &text, &super::super::date::default_tz(vm).name()) {
         Some(v) => Ok(to_php(v)),
         None => {
             fail(vm, a, ue::U_PARSE_ERROR, "Parsing failed")?;

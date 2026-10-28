@@ -218,9 +218,10 @@ const NF_CLASS: &str = r#"<?php class NumberFormatter {
 fn hooks() -> NativeHooks {
     NativeHooks {
         create: Some(on_create),
-        clone: Some(|_, from, to| {
-            if let Some(f) = with_obj::<NumberFormat, NumberFormat>(from, |x| x.v.clone()) {
-                store(to, f);
+        clone: Some(|vm, from, to| {
+            match with_obj::<NumberFormat, NumberFormat>(from, |x| x.v.clone()) {
+                Some(f) => store(to, f),
+                None => super::timezone::clone_error(vm, "Cannot clone uninitialized NumberFormatter"),
             }
         }),
         ..Default::default()

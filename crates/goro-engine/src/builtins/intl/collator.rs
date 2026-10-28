@@ -133,10 +133,9 @@ const COLLATOR_CLASS: &str = r#"<?php class Collator {
 fn hooks() -> crate::class::NativeHooks {
     crate::class::NativeHooks {
         create: Some(super::numfmt::on_create),
-        clone: Some(|_, from, to| {
-            if let Some(c) = with_obj::<Collator, Collator>(from, |x| x.v.clone()) {
-                store(to, c);
-            }
+        clone: Some(|vm, from, to| match with_obj::<Collator, Collator>(from, |x| x.v.clone()) {
+            Some(c) => store(to, c),
+            None => super::timezone::clone_error(vm, "Cannot clone uninitialized Collator"),
         }),
         ..Default::default()
     }

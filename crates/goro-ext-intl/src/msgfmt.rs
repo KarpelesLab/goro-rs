@@ -807,9 +807,40 @@ fn plural_keyword(locale: &str, x: f64, ordinal: bool) -> String {
     .to_string()
 }
 
+/// The date pattern of a `date`/`time` argument (ICU user guide
+/// "Formatting Messages": the short/medium/long/full styles, a pattern or
+/// a `::` skeleton; "datetime" for a date in a plain argument, which ICU
+/// shows in the short styles).
+pub fn date_pattern(locale: &str, ty: &str, style: Option<&str>) -> String {
+    use crate::datefmt;
+    let level = |s: Option<&str>| match s {
+        None | Some("medium") => Some(2),
+        Some("short") => Some(3),
+        Some("long") => Some(1),
+        Some("full") => Some(0),
+        _ => None,
+    };
+    let style = style.map(str::trim);
+    match ty {
+        "datetime" => datefmt::style_pattern(locale, 3, 3),
+        _ => match level(style) {
+            Some(l) if ty == "time" => datefmt::style_pattern(locale, -1, l),
+            Some(l) => datefmt::style_pattern(locale, l, -1),
+            None => {
+                let s = style.unwrap_or("");
+                match s.strip_prefix("::") {
+                    Some(sk) => datefmt::skeleton_pattern(locale, sk),
+                    None => s.to_string(),
+                }
+            }
+        },
+    }
+}
+
 /// Parses `text` against `pat` (`MessageFormatter::parse()`): the
-/// values of the number and string arguments in order of their names.
-pub fn parse(locale: &str, pat: &MessagePattern, text: &str) -> Option<Vec<(ArgName, MsgValue)>> {
+/// values of the number, date and string arguments in order of their
+/// names (dates read in the time zone `tz_id`).
+pub fn parse(locale: &str, pat: &MessagePattern, text: &str, tz_id: &str) -> Option<Vec<(ArgName, MsgValue)>> {
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
     let mut out: Vec<(ArgName, MsgValue)> = Vec::new();
@@ -834,6 +865,13 @@ pub fn parse(locale: &str, pat: &MessagePattern, text: &str) -> Option<Vec<(ArgN
                     MsgValue::Double(v)
                 };
                 out.push((name.clone(), val));
+            }
+            Node::Arg(name, ArgKind::Simple(t, style)) if t == "date" || t == "time" => {
+                let p = date_pattern(locale, t, style.as_deref());
+                let rest: String = chars[i..].iter().collect();
+                let (ms, end) = crate::datefmt::parse_pattern(locale, &p, &rest, tz_id)?;
+                i += rest[..end].chars().count();
+                out.push((name.clone(), MsgValue::Date(ms)));
             }
             Node::Arg(name, ArgKind::None) => {
                 // up to the next literal text

@@ -41,6 +41,7 @@ mod resbundle;
 mod spoof;
 mod timezone;
 mod translit;
+mod uchar;
 mod uconv;
 
 /// Every module of the extension (all named "intl").
@@ -61,6 +62,7 @@ pub static MODULES: &[&Module] = &[
     &translit::MODULE,
     &spoof::MODULE,
     &resbundle::MODULE,
+    &uchar::MODULE,
 ];
 
 pub static MODULE: Module = Module {

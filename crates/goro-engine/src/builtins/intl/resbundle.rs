@@ -107,7 +107,8 @@ fn open(vm: &mut Vm, a: &Args) -> R<Option<(Res, i64)>> {
     };
     let fallback = a.bool_or(2, true);
     let Some(dir) = a.opt_str(1).map(|s| s.to_string_lossy()) else {
-        return Ok(None);
+        // ICU's own data is not available: an empty root bundle
+        return Ok(Some((Res::Table(Vec::new()), 0)));
     };
     match rb::load(&dir, &locale, fallback) {
         Some(l) => Ok(Some((l.bundle.root.clone(), l.warning))),
