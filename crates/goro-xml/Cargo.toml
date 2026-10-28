@@ -1,0 +1,8 @@
+[package]
+name = "goro-xml"
+description = "XML 1.0 and HTML parsing, tree, serialization and XPath for PHP's XML extensions"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
