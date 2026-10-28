@@ -7,9 +7,6 @@ use goro_ext_hash::{
     hmac_algos, lookup, to_hex,
 };
 
-#[path = "data/phpt_vectors.rs"]
-mod phpt_vectors_data;
-
 fn hx(b: &[u8]) -> String {
     String::from_utf8(to_hex(b)).unwrap()
 }
@@ -58,17 +55,33 @@ fn check(algo: &str, data: &[u8], want: &str) {
 
 const MILLION_A: usize = 1_000_000;
 
+/// The input/digest pairs of php-src's ext/hash tests, extracted at test
+/// time by tools/gen_hash_phpt_vectors.py into the file named by
+/// $GORO_HASH_PHPT_VECTORS (not committed: see CLEANROOM.md). Skipped
+/// when the variable is unset.
 #[test]
 fn phpt_vectors() {
-    for (file, algo, parts, want) in phpt_vectors_data::VECTORS {
+    let Ok(path) = std::env::var("GORO_HASH_PHPT_VECTORS") else {
+        eprintln!("phpt_vectors: GORO_HASH_PHPT_VECTORS not set, skipped");
+        return;
+    };
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut count = 0;
+    for line in text.lines().filter(|l| !l.is_empty()) {
+        let f: Vec<&str> = line.split('\t').collect();
+        let (file, algo, parts, want) = (f[0], f[1], f[2], f[3]);
         let mut data = Vec::new();
-        for (p, n) in parts.iter() {
-            for _ in 0..*n {
-                data.extend_from_slice(p);
+        for part in parts.split(';') {
+            let (piece, n) = part.rsplit_once('*').unwrap();
+            let piece = unhex(piece);
+            for _ in 0..n.parse::<usize>().unwrap() {
+                data.extend_from_slice(&piece);
             }
         }
-        assert_eq!(h(algo, &data), *want, "{file}: {algo}");
+        assert_eq!(h(algo, &data), want, "{file}: {algo}");
+        count += 1;
     }
+    assert!(count > 1000, "only {count} vectors in {path}");
 }
 
 /// RFC 1319, 1320, 1321 appendix A.5 test suites.
