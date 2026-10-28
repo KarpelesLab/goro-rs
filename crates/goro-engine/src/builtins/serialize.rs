@@ -394,8 +394,9 @@ struct Unser<'a> {
     allowed: Option<Vec<PhpStr>>,
     max_depth: i64,
     depth: i64,
-    wakeups: Vec<ObjRef>,
-    unserializes: Vec<(ObjRef, PhpArray)>,
+    /// __unserialize() (with its data) and __wakeup() calls, in the order
+    /// objects were completed (innermost first, as PHP runs them).
+    deferred: Vec<(ObjRef, Option<PhpArray>)>,
 }
 
 enum UErr {
@@ -421,8 +422,7 @@ impl Unser<'_> {
             allowed,
             max_depth,
             depth: 0,
-            wakeups: Vec::new(),
-            unserializes: Vec::new(),
+            deferred: Vec::new(),
         }
     }
     fn peek(&self) -> Option<u8> {
@@ -715,8 +715,15 @@ impl Vm {
                 .get_ini(b"unserialize_callback_func")
                 .unwrap_or_default();
             if !cb.is_empty() {
-                self.call_value(&Value::Str(cb), vec![Value::Str(name.clone())])?;
-                return self.find_class(name, false);
+                self.call_value(&Value::Str(cb.clone()), vec![Value::Str(name.clone())])?;
+                let c = self.find_class(name, true)?;
+                if c.is_none() {
+                    self.warn(&format!(
+                        "unserialize(): Function {}() hasn't defined the class it was called for",
+                        cb.to_string_lossy()
+                    ))?;
+                }
+                return Ok(c);
             }
         }
         Ok(c)
@@ -748,7 +755,17 @@ impl Vm {
             u.pos += len;
             u.expect(b'}')?;
             let Some(cls) = cls else {
-                return Err(UErr::At(start));
+                // Observed on PHP 8.5: an incomplete object, which has no
+                // unserializer either.
+                let ic = self.find_class(b"__PHP_Incomplete_Class", false)?.unwrap();
+                let o = self.instantiate_raw(&ic)?;
+                o.obj().props.borrow_mut().insert(
+                    Key::from("__PHP_Incomplete_Class_Name"),
+                    Value::Str(name.clone()),
+                );
+                let cell = u.cell(Value::Object(o));
+                self.warn("Class __PHP_Incomplete_Class has no unserializer")?;
+                return Ok(Value::Ref(cell));
             };
             if cls.has_flag(cflags::NOT_SERIALIZABLE) {
                 return Err(self.not_allowed(&cls));
@@ -800,6 +817,19 @@ impl Vm {
             }
         };
         let cell = u.cell(Value::Object(o.clone()));
+        if let Some(c) = &cls
+            && c.find_method(b"__unserialize").is_none()
+            && c.interfaces
+                .borrow()
+                .iter()
+                .any(|i| i.lname.as_bytes() == b"serializable")
+        {
+            self.warn(&format!(
+                "Erroneous data format for unserializing '{}'",
+                c.name.dname()
+            ))?;
+            return Err(UErr::At(u.pos));
+        }
         self.depth_check(u, start)?;
         let uses_unserialize = !incomplete
             && cls
@@ -820,9 +850,9 @@ impl Vm {
         u.expect(b'}')?;
         u.depth -= 1;
         if uses_unserialize {
-            u.unserializes.push((o.clone(), data));
+            u.deferred.push((o.clone(), Some(data)));
         } else if !incomplete && cls.as_ref().unwrap().find_method(b"__wakeup").is_some() {
-            u.wakeups.push(o.clone());
+            u.deferred.push((o.clone(), None));
         }
         Ok(Value::Ref(cell))
     }
@@ -904,14 +934,23 @@ impl Vm {
             Ok(v) => self.unser_finish(v, &shared, &mut seen),
             Err(e) => return Err(e),
         };
-        let unserializes = std::mem::take(&mut u.unserializes);
-        let wakeups = std::mem::take(&mut u.wakeups);
-        for (o, d) in unserializes {
-            let d = self.unser_finish(Value::Array(d), &shared, &mut seen);
-            self.call_method(&o, b"__unserialize", vec![d])?;
-        }
-        for o in wakeups {
-            self.call_method(&o, b"__wakeup", Vec::new())?;
+        // Every value is finished before any of the calls runs.
+        let deferred: Vec<(ObjRef, Option<Value>)> = std::mem::take(&mut u.deferred)
+            .into_iter()
+            .map(|(o, d)| {
+                let d = d.map(|d| self.unser_finish(Value::Array(d), &shared, &mut seen));
+                (o, d)
+            })
+            .collect();
+        for (o, d) in deferred {
+            match d {
+                Some(d) => {
+                    self.call_method(&o, b"__unserialize", vec![d])?;
+                }
+                None => {
+                    self.call_method(&o, b"__wakeup", Vec::new())?;
+                }
+            }
         }
         Ok(v)
     }
@@ -1123,6 +1162,13 @@ impl Vm {
                 Ok(v.into_deref())
             }
             Err(UErr::At(off)) => {
+                // Objects of a failed unserialize are not destructed
+                // (bug72663).
+                for c in &u.vals {
+                    if let Value::Object(o) = c.get() {
+                        o.mark_destructor_called();
+                    }
+                }
                 if !data.is_empty() {
                     self.warn(&format!(
                         "unserialize(): Error at offset {} of {} bytes",
@@ -1132,7 +1178,14 @@ impl Vm {
                 }
                 Ok(Value::Bool(false))
             }
-            Err(UErr::Php(e)) => Err(e),
+            Err(UErr::Php(e)) => {
+                for c in &u.vals {
+                    if let Value::Object(o) = c.get() {
+                        o.mark_destructor_called();
+                    }
+                }
+                Err(e)
+            }
         }
     }
 }
