@@ -41,6 +41,7 @@ pub mod uri;
 pub mod userstream;
 pub mod var;
 pub mod weakmap;
+pub mod xml;
 pub mod xmlstore;
 pub mod zlib;
 
@@ -86,5 +87,6 @@ pub fn modules() -> Vec<&'static Module> {
         &sodium::MODULE,
         &uri::MODULE,
         &libxml::MODULE,
+        &xml::MODULE,
     ]
 }
