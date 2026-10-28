@@ -1123,6 +1123,15 @@ impl Vm {
             Value::Str(s) => s,
             _ => return self.throw("Error", "Method name must be a string"),
         };
+        if cls.is_trait() && !forwarding {
+            // PHP 8.1 (tests Zend/tests/traits/direct_static_member_access,
+            // gh_17728).
+            self.deprecated(&format!(
+                "Calling static trait method {}::{} is deprecated, it should only be called on a class using the trait",
+                cls.name.dname(),
+                n.to_string_lossy()
+            ))?;
+        }
         let cb = self.resolve_static_method(&cls, &n, true, forwarding)?;
         self.push_callee(cb, 0);
         Ok(())

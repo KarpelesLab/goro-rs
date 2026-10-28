@@ -1648,6 +1648,14 @@ impl Vm {
         write: bool,
     ) -> R<(PhpRef, Rc<crate::class::StaticProp>)> {
         self.ensure_statics(cls)?;
+        if cls.is_trait() && cls.find_static(n).is_some() {
+            // PHP 8.1 (test Zend/tests/traits/direct_static_member_access).
+            self.deprecated(&format!(
+                "Accessing static trait property {}::${} is deprecated, it should only be accessed on a class using the trait",
+                cls.name.dname(),
+                n.to_string_lossy()
+            ))?;
+        }
         let Some(sp) = cls.find_static(n) else {
             return self.throw(
                 "Error",
@@ -2017,6 +2025,17 @@ impl Vm {
                 );
             }
         };
+        // test Zend/tests/traits/constant_004
+        if cls.is_trait() && matches!(class, ClassSpec::Named(_)) && n.as_bytes() != b"class" {
+            return self.throw(
+                "Error",
+                &format!(
+                    "Cannot access trait constant {}::{} directly",
+                    cls.name.dname(),
+                    n.to_string_lossy()
+                ),
+            );
+        }
         // In constant expressions a missing constant is named as written
         // (observed on PHP 8.5: "Undefined constant self::B"), and errors
         // of class constant lookups show a "[constant expression]" frame.

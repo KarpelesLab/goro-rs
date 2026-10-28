@@ -1780,6 +1780,22 @@ impl<'a> Compiler<'a> {
                         .collect();
                     let mut rules = Vec::new();
                     for a in tu.adaptations {
+                        // tests Zend/tests/traits/static_in_trait_insteadof_*
+                        let names: Vec<&Name<'a>> = match a {
+                            TraitAdaptation::Precedence {
+                                trait_, insteadof, ..
+                            } => std::iter::once(trait_).chain(insteadof.iter()).collect(),
+                            TraitAdaptation::Alias { trait_, .. } => trait_.iter().collect(),
+                        };
+                        if names.iter().any(|n| {
+                            n.kind == NameKind::Unqualified
+                                && n.name.eq_ignore_ascii_case(b"static")
+                        }) {
+                            return self.err(
+                                "Cannot use \"static\" as trait name, as it is reserved",
+                                tu.span.line,
+                            );
+                        }
                         match a {
                             TraitAdaptation::Precedence {
                                 trait_,
