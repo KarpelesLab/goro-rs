@@ -1,5 +1,8 @@
 //! Generated character set tables (tools/charset/gen_tables.py).
 
+pub(crate) mod big5;
+pub(crate) mod gb;
+pub(crate) mod kr;
 pub(crate) mod jis;
 pub(crate) mod single;
 

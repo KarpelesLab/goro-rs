@@ -9,9 +9,9 @@
 use crate::Encoding;
 
 // mod base64;
-// mod cjk_cn;
-// mod cjk_kr;
-// mod cjk_tw;
+mod cjk_cn;
+mod cjk_kr;
+mod cjk_tw;
 // mod html;
 // mod iso2022jp;
 mod japanese;
@@ -186,6 +186,12 @@ pub fn decoder(enc: Encoding) -> Box<dyn Decode> {
         EightBit => Box::new(single::Latin1Dec),
         Iso8859_1 => Box::new(single::Latin1Dec),
         Base64 | Uuencode | QuotedPrintable => Box::new(single::Latin1Dec),
+        Gb18030 | Gb18030_2022 | EucCn | Cp936 => Box::new(cjk_cn::GbDec::new(enc)),
+        Hz => Box::new(cjk_cn::HzDec::default()),
+        EucTw => Box::new(cjk_tw::EucTwDec),
+        Big5 | Cp950 => Box::new(cjk_tw::Big5Dec::new(enc)),
+        EucKr | Uhc => Box::new(cjk_kr::KrDec::new(enc)),
+        Iso2022Kr => Box::new(cjk_kr::Iso2022KrDec::default()),
         EucJp | EucJpWin | Cp51932 | EucJp2004 => Box::new(japanese::EucJpDec::new(enc)),
         Sjis | SjisMac | Sjis2004 | Cp932 | SjisWin => Box::new(japanese::SjisDec::new(enc)),
         _ => match single::table(enc) {
@@ -210,6 +216,12 @@ pub fn encoder(enc: Encoding) -> Box<dyn Encode> {
         Ucs4Le => Box::new(unicode::Utf32Enc::new(true, false)),
         Ascii | SevenBit => Box::new(single::AsciiEnc),
         EightBit | Iso8859_1 | Base64 | Uuencode | QuotedPrintable => Box::new(single::Latin1Enc),
+        Gb18030 | Gb18030_2022 | EucCn | Cp936 => Box::new(cjk_cn::GbEnc::new(enc)),
+        Hz => Box::new(cjk_cn::HzEnc::default()),
+        EucTw => Box::new(cjk_tw::EucTwEnc),
+        Big5 | Cp950 => Box::new(cjk_tw::Big5Enc::new(enc)),
+        EucKr | Uhc => Box::new(cjk_kr::KrEnc::new(enc)),
+        Iso2022Kr => Box::new(cjk_kr::Iso2022KrEnc::default()),
         EucJp | EucJpWin | Cp51932 | EucJp2004 => Box::new(japanese::EucJpEnc::new(enc)),
         SjisMac => Box::new(macjapanese::MacEnc::new()),
         Sjis | Sjis2004 | Cp932 | SjisWin => Box::new(japanese::SjisEnc::new(enc)),

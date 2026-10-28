@@ -421,10 +421,213 @@ def gen_japanese():
     write("jis.rs", body)
 
 
+# ---------------------------------------------------------------------------
+# Chinese (GB). Two-byte tables are indexed by the GBK pointer
+# (lead - 0x81) * 190 + (trail - 0x40 - (trail > 0x7F)), as WHATWG does.
+
+
+def gbk_pointer(code):
+    lead, trail = code >> 8, code & 0xFF
+    return (lead - 0x81) * 190 + trail - (0x40 if trail < 0x7F else 0x41)
+
+
+def gbk_code(ptr):
+    lead, t = divmod(ptr, 190)
+    return ((lead + 0x81) << 8) | (t + (0x40 if t < 0x3F else 0x41))
+
+
+def in_gbk_uda(code):
+    lead, trail = code >> 8, code & 0xFF
+    return ((0xAA <= lead <= 0xAF and trail >= 0xA1) or (0xF8 <= lead <= 0xFE and trail >= 0xA1)
+            or (0xA1 <= lead <= 0xA7 and trail <= 0xA0))
+
+
+def canonical_singletons():
+    """Code points whose canonical decomposition is a single code point."""
+    m = {}
+    with open(os.path.join(DATA, "ucd", "UnicodeData.txt"), encoding="utf-8") as f:
+        for line in f:
+            p = line.split(";")
+            d = p[5].split()
+            if len(d) == 1 and not d[0].startswith("<"):
+                m[int(p[0], 16)] = int(d[0], 16)
+    return m
+
+
+def gen_chinese():
+    body = ""
+    # CP936: Microsoft's CP936.TXT; its three user-defined areas map to the
+    # Private Use Area U+E000.. in order (AAA1-AFFE, F8A1-FEFE, A140-A7A0)
+    # and its other unassigned codes to U+E766.. in code order, as Windows
+    # does (observed on PHP 8.5).
+    cp = {}
+    for code, u in read_pairs(uc("CP936.TXT")):
+        if code > 0xFF:
+            cp[gbk_pointer(code)] = u
+    nxt = 0xE000
+    for lo_lead, hi_lead, lo_t, hi_t in ((0xAA, 0xAF, 0xA1, 0xFE), (0xF8, 0xFE, 0xA1, 0xFE), (0xA1, 0xA7, 0x40, 0xA0)):
+        for lead in range(lo_lead, hi_lead + 1):
+            for t in range(lo_t, hi_t + 1):
+                if t == 0x7F:
+                    continue
+                cp[gbk_pointer((lead << 8) | t)] = nxt
+                nxt += 1
+    nxt = 0xE766
+    for ptr in range(126 * 190):
+        if ptr not in cp and not in_gbk_uda(gbk_code(ptr)):
+            cp[ptr] = nxt
+            nxt += 1
+    assert nxt == 0xE865, hex(nxt)
+    body += emit_fwd("CP936", cp, 126 * 190)
+    # The encoder also takes the CJK compatibility ideographs U+F900..U+FA2D
+    # as their canonical decompositions (UnicodeData.txt), and three
+    # look-alike symbols (observed on PHP 8.5).
+    crev = rev_of(cp)
+    for u, d in canonical_singletons().items():
+        if 0xF900 <= u <= 0xFA2D and u not in crev and d in crev:
+            crev[u] = crev[d]
+    for u, code in ((0x203E, 0xA3FE), (0x2218, 0xA1E3), (0x223C, 0xA1AB), (0xFA16, 0xD869)):
+        crev[u] = gbk_pointer(code) + 1
+    body += emit_rev("CP936_REV", crev, 0xFFFF)
+
+    # EUC-CN (GB 2312): CP936's GB 2312 rows without the GBK additions
+    # (A2A1-A2AA, A6E0-A6F5, A8BB-A8C0) and the Private Use Area, with GB
+    # 2312's own A1A4 (KATAKANA MIDDLE DOT) and A1AA (HORIZONTAL BAR)
+    # (observed on PHP 8.5).
+    gb = {}
+    for lead in list(range(0xA1, 0xAA)) + list(range(0xB0, 0xF8)):
+        for t in range(0xA1, 0xFF):
+            code = (lead << 8) | t
+            u = cp.get(gbk_pointer(code))
+            if u is None or 0xE000 <= u <= 0xF8FF:
+                continue
+            if 0xA2A1 <= code <= 0xA2AA or 0xA6E0 <= code <= 0xA6F5 or 0xA8BB <= code <= 0xA8C0:
+                continue
+            gb[(lead - 0xA1) * 94 + (t - 0xA1)] = u
+    gb[3] = 0x30FB
+    gb[9] = 0x2015
+    body += emit_fwd("GB2312", gb, 94 * 94)
+    body += emit_rev("GB2312_REV", rev_of(gb), 0xFFFF)
+
+    # GB18030-2022: the WHATWG gb18030 index and ranges. GB18030 (2005)
+    # differs in 19 two-byte codes the 2022 edition moved out of the Private
+    # Use Area; their PUA code points and standard ones swap places between
+    # the two-byte and four-byte forms (observed on PHP 8.5).
+    w = read_whatwg(os.path.join(DATA, "whatwg", "index-gb18030.txt"))
+    # A3A0 stays U+E5E5 in both editions (observed on PHP 8.5; the WHATWG
+    # index has U+3000 there).
+    w[gbk_pointer(0xA3A0)] = 0xE5E5
+    body += emit_fwd("GB18030_2022", w, 126 * 190)
+    body += emit_rev("GB18030_2022_REV", rev_of(w), 0xFFFF)
+    ranges = sorted(read_whatwg(os.path.join(DATA, "whatwg", "index-gb18030-ranges.txt")).items())
+    body += "pub(crate) static GB18030_RANGES: [(u32, u32); %d] = [\n" % len(ranges)
+    for p, u in ranges:
+        body += "    (%d, 0x%X),\n" % (p, u)
+    body += "];\n\n"
+    swaps = {0xA6D9: 0xE78D, 0xA6DA: 0xE78E, 0xA6DB: 0xE78F, 0xA6DC: 0xE790, 0xA6DD: 0xE791,
+             0xA6DE: 0xE792, 0xA6DF: 0xE793, 0xA6EC: 0xE794, 0xA6ED: 0xE795, 0xA6F3: 0xE796,
+             0xA8BC: 0xE7C7, 0xFE59: 0xE81E, 0xFE61: 0xE826, 0xFE66: 0xE82B, 0xFE67: 0xE82C,
+             0xFE6D: 0xE832, 0xFE7E: 0xE843, 0xFE90: 0xE854, 0xFEA0: 0xE864}
+    body += "/// (two-byte code, GB18030-2005 code point, GB18030-2022 code point).\n"
+    body += "pub(crate) static GB18030_2005_SWAPS: [(u16, u32, u32); %d] = [\n" % len(swaps)
+    for code, pua in sorted(swaps.items()):
+        body += "    (0x%X, 0x%X, 0x%X),\n" % (code, pua, w[gbk_pointer(code)])
+    body += "];\n\n"
+    write("gb.rs", body)
+
+
+# ---------------------------------------------------------------------------
+# Big5, CP950, EUC-TW (CNS 11643). Big5 tables are indexed by
+# (lead - first lead) * 157 + (trail - 0x40 if trail < 0x7F else trail - 0x62).
+
+
+def big5_index(code, first_lead):
+    lead, trail = code >> 8, code & 0xFF
+    return (lead - first_lead) * 157 + (trail - 0x40 if trail < 0x7F else trail - 0x62)
+
+
+def gen_taiwan():
+    body = ""
+    # BIG-5: unicode.org's BIG5.TXT, with A244 as FULLWIDTH YEN SIGN and the
+    # ETEN extensions F9D6..F9FE from CP950.TXT (observed on PHP 8.5).
+    b5 = {}
+    for code, u in read_pairs(uc("BIG5.TXT")):
+        if code > 0xFF and u != 0xFFFD:
+            b5[big5_index(code, 0xA1)] = u
+    b5[big5_index(0xA244, 0xA1)] = 0xFFE5
+    c950 = {}
+    for code, u in read_pairs(uc("CP950.TXT")):
+        if code > 0xFF:
+            c950[big5_index(code, 0x81)] = u
+    for code in range(0xF9D6, 0xF9FF):
+        b5[big5_index(code, 0xA1)] = c950[big5_index(code, 0x81)]
+    body += emit_fwd("BIG5", b5, 89 * 157)
+    body += emit_rev("BIG5_REV", rev_of(b5), 0xFFFF)
+    # CP950: Microsoft's CP950.TXT without the euro sign at A3E1, and the
+    # user-defined areas in the Private Use Area as Windows maps them:
+    # FA40-FEFE, 8E40-A0FE, 8140-8DFE, C6A1-C8FE from U+E000 in that order
+    # (observed on PHP 8.5).
+    del c950[big5_index(0xA3E1, 0x81)]
+    nxt = 0xE000
+    for lo, hi in ((0xFA, 0xFE), (0x8E, 0xA0), (0x81, 0x8D), (0xC6, 0xC8)):
+        for lead in range(lo, hi + 1):
+            for i in range(157):
+                if lead == 0xC6 and i < 63:
+                    continue
+                c950[(lead - 0x81) * 157 + i] = nxt
+                nxt += 1
+    assert nxt == 0xF849, hex(nxt)
+    body += emit_fwd("CP950", c950, 126 * 157)
+    # A2CC and A2CE duplicate A451 and A4CA; the encoder writes the latter
+    # (observed on PHP 8.5).
+    c950_rev = rev_of(c950)
+    c950_rev[0x5341] = big5_index(0xA451, 0x81) + 1
+    c950_rev[0x5345] = big5_index(0xA4CA, 0x81) + 1
+    body += emit_rev("CP950_REV", c950_rev, 0xFFFF)
+    # CNS 11643 planes 1, 2 and 14 ("0xE" in CNS11643.TXT) for EUC-TW.
+    planes = {1: {}, 2: {}, 14: {}}
+    for code, u in read_pairs(uc("CNS11643.TXT")):
+        plane = code >> 16
+        planes[plane][jis_index(code & 0xFFFF)] = u
+    cns = {}
+    for k, p in ((0, 1), (1, 2), (2, 14)):
+        for i, u in planes[p].items():
+            cns[k * 94 * 94 + i] = u
+    body += emit_fwd32("CNS", cns, 3 * 94 * 94)
+    body += emit_rev("CNS_REV", rev_of(cns))
+    write("big5.rs", body)
+
+
+def gen_korean():
+    body = ""
+    # EUC-KR: KS X 1001 (KSX1001.TXT) plus the euro and registered signs
+    # KS X 1001:1998 added at A2E6/A2E7 (observed on PHP 8.5).
+    ks = {jis_index(c): u for c, u in read_pairs(uc("KSX1001.TXT"))}
+    ks[jis_index(0x2266)] = 0x20AC
+    ks[jis_index(0x2267)] = 0x00AE
+    body += emit_fwd("KSX1001", ks, 94 * 94)
+    body += emit_rev("KSX1001_REV", rev_of(ks), 0xFFFF)
+    # UHC: Microsoft's CP949.TXT, indexed by (lead - 0x81) * 178 + trail
+    # offset (0x41-0x5A, 0x61-0x7A, 0x81-0xFE).
+    uhc = {}
+    for code, u in read_pairs(uc("CP949.TXT")):
+        if code <= 0xFF:
+            continue
+        lead, t = code >> 8, code & 0xFF
+        off = t - 0x41 if t <= 0x5A else (t - 0x61 + 26 if t <= 0x7A else t - 0x81 + 52)
+        uhc[(lead - 0x81) * 178 + off] = u
+    body += emit_fwd("UHC", uhc, 126 * 178)
+    body += emit_rev("UHC_REV", rev_of(uhc), 0xFFFF)
+    write("kr.rs", body)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     gen_single()
     gen_japanese()
+    gen_chinese()
+    gen_taiwan()
+    gen_korean()
 
 
 if __name__ == "__main__":
