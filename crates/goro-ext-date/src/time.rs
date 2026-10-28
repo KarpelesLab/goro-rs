@@ -185,6 +185,35 @@ impl DateTime {
         String::from_utf8(self.format(b"Y-m-d H:i:s.u")).unwrap_or_default()
     }
 
+    /// The zone of serialized/`__set_state` data: `timezone_type` 1, 2 or
+    /// 3 and its `timezone` string.
+    pub fn zone_from_parts(ty: i64, name: &str) -> Option<TimeZone> {
+        let z = match ty {
+            1 | 2 => TimeZone::parse(name)?,
+            3 => TimeZone::from_id(name)?,
+            _ => return None,
+        };
+        (z.kind() as i64 == ty).then_some(z)
+    }
+
+    /// `__unserialize()` / `__set_state()`: the "date" string read in the
+    /// zone given by `timezone_type`/`timezone`. `None` means "Invalid
+    /// serialization data for DateTime object".
+    pub fn from_parts(date: &[u8], ty: i64, name: &str) -> Option<DateTime> {
+        let zone = DateTime::zone_from_parts(ty, name)?;
+        let p = crate::parse::parse(date);
+        if !p.errors.is_empty() {
+            return None;
+        }
+        Some(crate::resolve::resolve(
+            &p,
+            0,
+            0,
+            &zone,
+            crate::resolve::Mode::Create,
+        ))
+    }
+
     /// `DateTime::createFromTimestamp()` with a float: rounded to the
     /// microsecond, at +00:00. `None` for a non-finite or out-of-range
     /// value ("must be a finite number between -9223372036854775808 and
