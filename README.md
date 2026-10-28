@@ -63,7 +63,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/dba (cdb, cdb_make, inifile, flatfile) / readline | 53 | 53 | 100% |
 | ext/tidy (tidy-html5 5.8.0 port) | 50 | 50 | 100% |
 | sapi/cli (incl. `php -S` and `php -a`) | 102 | 103 | 99.0% |
-| sapi/cgi (goro runs as php-cgi under a `*cgi*` name) | 22 | 23 | 95.7% |
+| sapi/cgi (goro runs as php-cgi under a `*cgi*` name) | 23 | 23 | 100% |
 | sapi/fpm (php-fpm; 7 skips need root, AppArmor or FreeBSD) | 133 | 133 | 100% |
 | PECL uuid 1.3 (`tests/pecl/uuid`) | 14 | 14 | 100% |
 | PECL mailparse 3.2 (`tests/pecl/mailparse`, 1 upstream XFAIL) | 38 | 39 | 97.4% |
@@ -208,7 +208,7 @@ Checked against PHP 8.5.4 (same output / same test results):
   symfony/yaml, finder, process; monolog, Carbon and symfony/console differ only
   on environment-dependent tests.
 - **phpstan** analyses brick/math at level 10 with PHP's exact result (still
-  ~19× slower than PHP; performance work is ongoing).
+  ~10× slower than PHP; performance work is ongoing).
 
 ## Architecture
 
