@@ -331,6 +331,14 @@ pub static MODULE: Module = Module {
             "function sha1(string $string, bool $binary = false): string",
             sha1,
         ),
+        (
+            "function md5_file(string $filename, bool $binary = false): string|false",
+            md5_file,
+        ),
+        (
+            "function sha1_file(string $filename, bool $binary = false): string|false",
+            sha1_file,
+        ),
         ("function crc32(string $string): int", crc32),
         ("function str_rot13(string $string): string", str_rot13),
         (
@@ -1906,6 +1914,43 @@ fn md5(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn sha1(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(sv(std_ext::encoding::sha1(a.bytes(0), a.bool_or(1, false))))
+}
+/// The contents of a file for md5_file()/sha1_file() (PHP manual; the
+/// messages observed on PHP 8.5).
+fn hash_file_data(vm: &mut Vm, a: &Args) -> R<Option<Vec<u8>>> {
+    let f = a.str(0);
+    if f.is_empty() {
+        return vm.value_error("Path must not be empty");
+    }
+    match std::fs::read(vm.fs_path(&f)) {
+        Ok(d) => Ok(Some(d)),
+        Err(e) => {
+            let msg = e.to_string();
+            let msg = match msg.rfind(" (os error") {
+                Some(p) => msg[..p].to_string(),
+                None => msg,
+            };
+            vm.warn(&format!(
+                "{}({}): Failed to open stream: {}",
+                a.fname(),
+                f.to_string_lossy(),
+                msg
+            ))?;
+            Ok(None)
+        }
+    }
+}
+fn md5_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(match hash_file_data(vm, a)? {
+        Some(d) => sv(std_ext::encoding::md5(&d, a.bool_or(1, false))),
+        None => Value::Bool(false),
+    })
+}
+fn sha1_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(match hash_file_data(vm, a)? {
+        Some(d) => sv(std_ext::encoding::sha1(&d, a.bool_or(1, false))),
+        None => Value::Bool(false),
+    })
 }
 fn crc32(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Int(std_ext::encoding::crc32(a.bytes(0)) as i64))
