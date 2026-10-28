@@ -1010,6 +1010,7 @@ impl Vm {
             return Ok(());
         }
         self.constants.insert(key.clone(), v);
+        crate::builtins::reflection::note_constant(self, &key);
         self.user_constants.push(key);
         Ok(())
     }

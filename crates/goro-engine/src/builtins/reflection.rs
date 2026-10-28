@@ -697,10 +697,10 @@ pub static MODULE: Module = Module {
         ("reflectionconstant::getnamespacename", gc_ns),
         ("reflectionconstant::getshortname", gc_short),
         ("reflectionconstant::getvalue", gc_value),
-        ("reflectionconstant::isdeprecated", ret_false),
-        ("reflectionconstant::getfilename", ret_false),
-        ("reflectionconstant::getextension", ret_null),
-        ("reflectionconstant::getextensionname", ret_false),
+        ("reflectionconstant::isdeprecated", gc_deprecated),
+        ("reflectionconstant::getfilename", gc_file),
+        ("reflectionconstant::getextension", gc_extension),
+        ("reflectionconstant::getextensionname", gc_extension_name),
         ("reflectionconstant::getattributes", empty_array),
         ("reflectionconstant::__tostring", gc_to_string),
         ("reflectiongenerator::__construct", g_construct),
@@ -5306,17 +5306,43 @@ fn gc_name_of(a: &Args) -> PhpStr {
         _ => PhpStr::empty(),
     })
 }
+/// Where user constants were declared (ReflectionConstant::getFileName()).
+#[derive(Default)]
+pub(crate) struct ConstMeta {
+    files: std::collections::HashMap<PhpStr, PhpStr>,
+}
+
+/// Records the file declaring a user constant (`const` or define()).
+pub(crate) fn note_constant(vm: &mut Vm, key: &PhpStr) {
+    let f = vm.cur_file();
+    if !f.is_empty() {
+        vm.ext::<ConstMeta>().files.insert(key.clone(), f);
+    }
+}
+
+/// The extension registering an internal constant.
+fn const_ext(vm: &Vm, n: &[u8]) -> Option<&'static str> {
+    if matches!(n, b"STDIN" | b"STDOUT" | b"STDERR") {
+        return Some("Core");
+    }
+    vm.modules
+        .iter()
+        .find(|m| m.constants.iter().any(|(k, _)| k.as_bytes() == n))
+        .map(|m| m.name)
+}
+
 fn gc_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
-    let n = a.str(0);
-    let n = PhpStr::new(n.strip_prefix(b"\\").unwrap_or(&n));
+    let given = a.str(0);
+    let n = PhpStr::new(given.strip_prefix(b"\\").unwrap_or(&given));
     if vm.lookup_constant(&n)?.is_none() {
         return refl_error(
             vm,
             &format!("Constant \"{}\" does not exist", n.to_string_lossy()),
         );
     }
-    vm.set_prop_raw(&o, b"name", Value::Str(n.clone()));
+    // The name property keeps the spelling given (observed on PHP 8.5).
+    vm.set_prop_raw(&o, b"name", Value::Str(given.clone()));
     set_data(&o, Refl::GlobalConst(n));
     Ok(Value::Null)
 }
@@ -5335,6 +5361,44 @@ fn gc_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = gc_name_of(a);
     Ok(vm.lookup_constant(&n)?.unwrap_or_default())
 }
+fn gc_deprecated(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let n = gc_name_of(a);
+    Ok(Value::Bool(super::misc::const_deprecation(&n).is_some()))
+}
+fn gc_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let n = normalize_const(&gc_name_of(a));
+    Ok(vm
+        .ext::<ConstMeta>()
+        .files
+        .get(&n)
+        .cloned()
+        .map(Value::Str)
+        .unwrap_or(Value::Bool(false)))
+}
+fn normalize_const(n: &[u8]) -> PhpStr {
+    crate::vm::include::normalize_const_name(n)
+}
+fn gc_ext_of(vm: &mut Vm, a: &Args) -> Option<&'static str> {
+    let n = normalize_const(&gc_name_of(a));
+    if vm.user_constants.contains(&n) {
+        return None;
+    }
+    const_ext(vm, &n)
+}
+fn gc_extension(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    match gc_ext_of(vm, a) {
+        Some(e) => Ok(Value::Object(new_refl(
+            vm,
+            "ReflectionExtension",
+            Refl::Extension(PhpStr::from(e)),
+        )?)),
+        None => Ok(Value::Null),
+    }
+}
+fn gc_extension_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(gc_ext_of(vm, a).map(Value::from).unwrap_or(Value::Bool(false)))
+}
+
 fn gc_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = gc_name_of(a);
     let v = vm.lookup_constant(&n)?.unwrap_or_default();

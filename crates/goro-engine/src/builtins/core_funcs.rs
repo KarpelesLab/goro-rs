@@ -884,6 +884,7 @@ fn define(vm: &mut Vm, a: &mut Args) -> R<Value> {
         // Objects are allowed as constant values since PHP 8.1.
     }
     vm.constants.insert(key.clone(), v);
+    super::reflection::note_constant(vm, &key);
     vm.user_constants.push(key);
     Ok(Value::Bool(true))
 }
