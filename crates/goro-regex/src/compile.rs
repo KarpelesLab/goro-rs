@@ -613,8 +613,38 @@ fn build_onepass(prog: &Prog) -> Option<OnePass> {
     let mut has_greedy = false;
     let mut depends_on_start = false;
     let mut back: Option<usize> = None;
+    // Inside a lookahead: its LookEnd and the index of its Look step.
+    let mut look: Option<(usize, usize)> = None;
+    let (mut looks, mut pre_looks) = (0u32, 0u32);
     for (pc, ins) in insts.iter().enumerate() {
+        if let Some((end, at)) = look {
+            if pc == end {
+                steps[at] = OpStep::Look((steps.len() - at - 1) as u32);
+                look = None;
+                continue;
+            }
+            let plain = match ins {
+                Inst::One(_) | Inst::Lit(_) | Inst::LitFold(_) => true,
+                Inst::Rep { greed, .. } => *greed == Greed::Possessive,
+                Inst::Assert(a) => !matches!(a, Assertion::StartOfMatch),
+                _ => false,
+            };
+            if !plain {
+                return None;
+            }
+        }
         match ins {
+            Inst::LookStart {
+                kind: LookKind::Positive,
+                end,
+            } if look.is_none() => {
+                look = Some((*end as usize, steps.len()));
+                steps.push(OpStep::Look(0));
+                looks += 1;
+                if back.is_none() {
+                    pre_looks += 1;
+                }
+            }
             Inst::One(i) => steps.push(OpStep::One(i.clone())),
             Inst::Lit(i) => steps.push(OpStep::Lit(*i)),
             Inst::LitFold(i) => steps.push(OpStep::LitFold(*i)),
@@ -746,20 +776,65 @@ fn build_onepass(prog: &Prog) -> Option<OnePass> {
     // For a backtracking leading repeat, the literal may also lie inside
     // the run: a match then starts at the beginning of the run that holds
     // an occurrence of the literal.
+    // A possessive run may also be separated from the literal by optional
+    // possessive repeats of characters neither it nor the literal match
+    // (\w+\s*=: from an "=", back over spaces, then over word characters).
+    let single = |item: &Item| match item {
+        Item::Byte(_) | Item::Byte2(..) => true,
+        Item::Set(s) => !prog.utf || s.ascii_only(),
+        _ => !prog.utf && !matches!(item, Item::Chars(_)),
+    };
+    let mut lead_mid = Vec::new();
     let lead_lit = lead_run.and_then(|i| {
-        let lit: Vec<u8> = match steps[i + 1..]
+        let mut it = steps[i + 1..]
             .iter()
-            .find(|s| !matches!(s, OpStep::Close(_)))?
-        {
-            OpStep::One(Item::Byte(b)) => vec![*b],
-            OpStep::Lit(l) => prog.lits[*l as usize].to_vec(),
-            _ => return None,
+            .enumerate()
+            .filter(|(_, s)| !matches!(s, OpStep::Close(_) | OpStep::Look(_)));
+        let mut mid = Vec::new();
+        let lit: Vec<u8> = loop {
+            match it.next()?.1 {
+                OpStep::One(Item::Byte(b)) => break vec![*b],
+                OpStep::Lit(l) => break prog.lits[*l as usize].to_vec(),
+                st @ OpStep::Rep { item, min: 0, .. }
+                    if single(item) && matches!(steps[i], OpStep::Rep { .. }) =>
+                {
+                    mid.push(st.clone())
+                }
+                _ => return None,
+            }
         };
-        match &steps[i] {
-            OpStep::Rep { item, .. } => (!item_matches_cp(item, lit[0] as u32)).then_some(lit),
+        // Each repeat must keep to its own characters.
+        let mut items: Vec<&Item> = mid
+            .iter()
+            .filter_map(|m| match m {
+                OpStep::Rep { item, .. } => Some(item),
+                _ => None,
+            })
+            .collect();
+        if let OpStep::Rep { item, .. } = &steps[i] {
+            items.push(item);
+        }
+        for (a, x) in items.iter().enumerate() {
+            for y in &items[a + 1..] {
+                if (0..256u32).any(|c| item_matches_cp(x, c) && item_matches_cp(y, c)) {
+                    return None;
+                }
+            }
+        }
+        let r = match &steps[i] {
+            OpStep::Rep { item, .. } => (!item_matches_cp(item, lit[0] as u32)
+                && mid.iter().all(|m| match m {
+                    OpStep::Rep { item: mi, .. } => !item_matches_cp(mi, lit[0] as u32),
+                    _ => false,
+                }))
+            .then_some(lit),
             OpStep::BackRep { lazy: false, .. } => Some(lit),
             _ => None,
+        };
+        if r.is_some() {
+            lead_mid = mid;
         }
+        r
     });
     let lead_finder = lead_lit
         .as_ref()
@@ -772,7 +847,10 @@ fn build_onepass(prog: &Prog) -> Option<OnePass> {
         lead_run,
         back,
         lead_lit,
+        lead_mid,
         lead_finder,
+        looks,
+        pre_looks,
     })
 }
 
@@ -784,16 +862,23 @@ struct Cx<'a> {
     last: bool,
     /// The node that follows, when known.
     follow: Option<&'a Node>,
+    /// The node after that, and whether nothing can fail after `follow`.
+    follow2: Option<&'a Node>,
+    last2: bool,
 }
 
 impl Cx<'_> {
     const NONE: Cx<'static> = Cx {
         last: false,
         follow: None,
+        follow2: None,
+        last2: false,
     };
     const END: Cx<'static> = Cx {
         last: true,
         follow: None,
+        follow2: None,
+        last2: false,
     };
 }
 
@@ -1049,9 +1134,12 @@ impl Emitter {
             let icx = if i + 1 == v.len() {
                 cx
             } else {
+                let at_end = i + 2 == v.len();
                 Cx {
                     last: false,
                     follow: Some(&v[i + 1]),
+                    follow2: if at_end { cx.follow } else { v.get(i + 2) },
+                    last2: at_end && cx.follow.is_none() && cx.last,
                 }
             };
             self.emit(&v[i], icx)?;
@@ -1340,9 +1428,13 @@ impl Emitter {
         cx: Cx<'a>,
     ) -> CResult<()> {
         let (last, next) = (cx.last, cx.follow);
+        let (next2, last2) = (cx.follow2, cx.last2);
         if let Some(item) = item_of(node, self.utf, self.ucp) {
             let mut greed = greed;
-            if greed == Greed::Greedy && !self.no_auto_possess && can_possessify(&item, next, last)
+            if greed == Greed::Greedy
+                && !self.no_auto_possess
+                && (can_possessify(&item, next, last)
+                    || through_optional(&item, next, next2, last2))
             {
                 greed = Greed::Possessive;
             }
@@ -1523,6 +1615,22 @@ fn can_possessify(item: &Item, next: Option<&Node>, last: bool) -> bool {
     }
 }
 
+/// Possessification past an optional single-character repeat: \w+\s*= is
+/// \w++\s*= when neither \s nor = can be a word character (pcre2pattern
+/// on auto-possessification).
+fn through_optional(item: &Item, next: Option<&Node>, next2: Option<&Node>, last2: bool) -> bool {
+    let Some(Node::Repeat { node, min: 0, .. }) = next else {
+        return false;
+    };
+    if !matches!(**node, Node::Char { .. } | Node::Set(_)) {
+        return false;
+    }
+    let Some(f) = node_first_chars(node) else {
+        return false;
+    };
+    disjoint(item, &f) && can_possessify(item, next2, last2)
+}
+
 /// The set of characters the node must start with (for single-character
 /// nodes and literals only).
 fn node_first_chars(n: &Node) -> Option<Vec<FirstChar>> {
@@ -1538,6 +1646,21 @@ fn node_first_chars(n: &Node) -> Option<Vec<FirstChar>> {
         }
         Node::Set(s) => Some(vec![FirstChar::Set(s.clone())]),
         Node::Seq(v) => v.first().and_then(node_first_chars),
+        // Every branch's first characters (pcre2pattern on
+        // auto-possessification; observed on PHP 8.5: /a+(?:x|yz)/ uses no
+        // backtracking frame).
+        Node::Alt(v) => {
+            let mut out = Vec::new();
+            for b in v {
+                out.extend(node_first_chars(b)?);
+            }
+            Some(out)
+        }
+        Node::Group {
+            kind: GroupKind::NonCapture | GroupKind::Atomic | GroupKind::Capture(_),
+            body,
+            ..
+        } => node_first_chars(body),
         Node::Repeat { node, min, .. } if *min > 0 => node_first_chars(node),
         _ => None,
     }
@@ -1817,11 +1940,6 @@ fn first_of(n: &Node, utf: bool, depth: u32) -> First {
             return acc;
         }
         Node::Group { kind, body, .. } => match kind {
-            GroupKind::LookAhead { negated: false, .. } => {
-                // A positive lookahead constrains the first character but we
-                // keep it simple: treat as zero-width.
-                return First::empty_nullable();
-            }
             GroupKind::LookAhead { .. } | GroupKind::LookBehind { .. } => {
                 return First::empty_nullable();
             }
@@ -1882,6 +2000,8 @@ fn literal_prefix(n: &Node, utf: bool, out: &mut Vec<u8>) -> bool {
             }
             true
         }
+        // Zero-width items do not move the start (\bfoo starts with "foo").
+        Node::Empty | Node::Assert(_) => true,
         Node::Seq(v) => {
             for c in v {
                 if !literal_prefix(c, utf, out) {
@@ -1908,6 +2028,147 @@ fn literal_prefix(n: &Node, utf: bool, out: &mut Vec<u8>) -> bool {
             }
         }
         _ => false,
+    }
+}
+
+/// The first and later literal of a sequence, as PCRE2 tracks "first" and
+/// "required" code units: `first` is unset (None), absent (Some(None)) or
+/// a literal.
+#[derive(Default, Clone, PartialEq)]
+struct LitState {
+    first: Option<Option<(u8, u8)>>,
+    req: Option<(u8, u8)>,
+}
+
+/// Feeds the mandatory items of `n` to `st`; Err for items it does not
+/// follow.
+fn lit_scan(n: &Node, utf: bool, st: &mut LitState) -> Result<(), ()> {
+    match n {
+        Node::Empty | Node::Assert(_) | Node::Keep => Ok(()),
+        Node::Char { c, caseless } => {
+            let b = char_unit(*c, *caseless, utf);
+            if st.first.is_none() {
+                st.first = Some(b);
+            } else {
+                st.req = b;
+            }
+            Ok(())
+        }
+        Node::Seq(v) => v.iter().try_for_each(|x| lit_scan(x, utf, st)),
+        Node::Alt(v) => {
+            let mut out: Option<LitState> = None;
+            for b in v {
+                let mut s = st.clone();
+                lit_scan(b, utf, &mut s)?;
+                match &out {
+                    None => out = Some(s),
+                    Some(o) if *o == s => {}
+                    Some(_) => {
+                        let first = if st.first.is_none() {
+                            Some(None)
+                        } else {
+                            st.first
+                        };
+                        out = Some(LitState { first, req: None });
+                    }
+                }
+            }
+            if let Some(o) = out {
+                *st = o;
+            }
+            Ok(())
+        }
+        Node::Group {
+            kind: GroupKind::NonCapture | GroupKind::Capture(_) | GroupKind::Atomic,
+            body,
+            ..
+        } => lit_scan(body, utf, st),
+        Node::Group {
+            kind: GroupKind::LookAhead { .. } | GroupKind::LookBehind { .. },
+            ..
+        } => Ok(()),
+        Node::Repeat { node, min, .. } => {
+            if *min > 0 {
+                lit_scan(node, utf, st)
+            } else {
+                if st.first.is_none() {
+                    st.first = Some(None);
+                }
+                Ok(())
+            }
+        }
+        Node::Set(s) if set_unit(s, utf).is_some() => {
+            let b = set_unit(s, utf);
+            if st.first.is_none() {
+                st.first = Some(b);
+            } else {
+                st.req = b;
+            }
+            Ok(())
+        }
+        Node::Set(_)
+        | Node::Dot { .. }
+        | Node::NotNewline
+        | Node::CodeUnit
+        | Node::Newline { .. }
+        | Node::Grapheme => {
+            if st.first.is_none() {
+                st.first = Some(None);
+            }
+            Ok(())
+        }
+        _ => Err(()),
+    }
+}
+
+/// A class of one character (or one letter in both cases) acts as that
+/// literal (observed on PHP 8.5: /a+[x]/ fails at once on a subject without
+/// an "x", as /a+x/ does).
+fn set_unit(s: &CharSet, utf: bool) -> Option<(u8, u8)> {
+    if !s.high_none {
+        return None;
+    }
+    let mut v = (0..256u32).filter(|&c| s.matches(c));
+    let a = v.next()?;
+    let b = v.next();
+    if v.next().is_some() || (utf && a >= 0x80) {
+        return None;
+    }
+    match b {
+        None => Some((a as u8, a as u8)),
+        Some(b)
+            if b < 0x80
+                && (a as u8).is_ascii_uppercase()
+                && (a as u8).to_ascii_lowercase() == b as u8 =>
+        {
+            Some((b as u8, a as u8))
+        }
+        _ => None,
+    }
+}
+
+/// The byte (and its other case) a literal character's last code unit is,
+/// when there is one.
+fn char_unit(c: u32, caseless: bool, utf: bool) -> Option<(u8, u8)> {
+    if c < 0x80 {
+        let b = c as u8;
+        if caseless {
+            if utf && (b.eq_ignore_ascii_case(&b'k') || b.eq_ignore_ascii_case(&b's')) {
+                return None;
+            }
+            Some((b.to_ascii_lowercase(), b.to_ascii_uppercase()))
+        } else {
+            Some((b, b))
+        }
+    } else if !utf && !caseless {
+        Some((c as u8, c as u8))
+    } else if utf && !caseless {
+        let mut v = Vec::new();
+        utf8::encode(c, &mut v);
+        let l = *v.last().unwrap();
+        Some((l, l))
+    } else {
+        None
     }
 }
 
@@ -1938,6 +2199,7 @@ fn required_byte(n: &Node, utf: bool) -> Option<(u8, u8)> {
                     None
                 }
             }
+            Node::Set(s) => set_unit(s, utf),
             Node::Seq(v) => {
                 for c in v.iter().rev() {
                     if let Some(r) = last_req(c, utf) {
@@ -1954,6 +2216,23 @@ fn required_byte(n: &Node, utf: bool) -> Option<(u8, u8)> {
                 body,
                 ..
             } => last_req(body, utf),
+            // What a positive lookahead needs is in the subject too, when
+            // the assertion has both a first and a later literal (observed
+            // on PHP 8.5: /\w+(?=ing)/ and /\w+(?=b\w*c)/ fail at once on a
+            // subject without them, /\w+(?=x)/, /\w+(?=bc*)/ and
+            // /\w+(?=\wbc)/ do not).
+            Node::Group {
+                kind: GroupKind::LookAhead { negated: false, .. },
+                body,
+                ..
+            } => {
+                let mut st = LitState::default();
+                lit_scan(body, utf, &mut st).ok()?;
+                match st.first {
+                    Some(Some(_)) => st.req,
+                    _ => None,
+                }
+            }
             Node::Repeat { node, min, .. } if *min > 0 => last_req(node, utf),
             Node::Alt(v) => {
                 let mut r: Option<(u8, u8)> = None;
@@ -2182,11 +2461,28 @@ fn start_info(n: &Node, parsed: &Parsed, flags: crate::Flags) -> StartInfo {
             let mut sets = Vec::new();
             fixed_sets(n, parsed.utf, &mut sets);
             if sets.len() >= 2 {
+                // The set least likely to occur in text: fewest members,
+                // then the rarest letters (a rough English frequency rank).
+                let rank = |b: u8| -> u32 {
+                    const COMMON: &[u8] = b" etaoinshrdlcumwfgypbvkjxqz";
+                    match COMMON.iter().position(|&c| c == b.to_ascii_lowercase()) {
+                        Some(k) => 30 - k as u32,
+                        None => 0,
+                    }
+                };
                 let (idx, cnt) = sets
                     .iter()
                     .enumerate()
-                    .map(|(i, set)| (i, set.iter().map(|w| w.count_ones()).sum::<u32>()))
-                    .min_by_key(|&(_, c)| c)
+                    .map(|(i, set)| {
+                        let n: u32 = set.iter().map(|w| w.count_ones()).sum();
+                        let f: u32 = (0..256u32)
+                            .filter(|&b| set[(b >> 6) as usize] >> (b & 63) & 1 != 0)
+                            .map(|b| rank(b as u8))
+                            .sum();
+                        (i, n, f)
+                    })
+                    .min_by_key(|&(_, n, f)| (n, f))
+                    .map(|(i, n, _)| (i, n))
                     .unwrap();
                 if cnt <= 3 {
                     let bytes: Vec<u8> = (0..256u32)

@@ -141,6 +141,25 @@ impl Default for CharSet {
 }
 
 impl CharSet {
+    /// Whether PCRE2 compiles this as a class (rather than a character
+    /// type such as \w or \p, or a negated character such as [^b]); a
+    /// greedy repeat of a class counts one more try (observed on PHP 8.5:
+    /// /[a-z]+ing/ needs one more match limit than /\w+ing/ or /[^b]+ing/).
+    pub fn pcre_class(&self) -> bool {
+        if self.op_size < 33 {
+            return false;
+        }
+        let missing: u32 = self.bits.iter().map(|w| w.count_zeros()).sum();
+        if self.high_all && (missing == 1 || missing == 2) {
+            let mut v = (0..256u32).filter(|&c| !self.lut[c as usize]);
+            let a = v.next().unwrap_or(0);
+            let b = v.next();
+            return !(b.is_none()
+                || b.is_some_and(|b| b < 0x80 && (a as u8).to_ascii_lowercase() == b as u8));
+        }
+        true
+    }
+
     #[inline(always)]
     pub fn has_byte(&self, b: u8) -> bool {
         self.lut[b as usize]

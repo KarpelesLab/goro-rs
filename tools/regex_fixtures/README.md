@@ -28,7 +28,9 @@ Random differential cases and limits:
 ```sh
 python3 gen_random.py 2 4000 > rand.txt      # seeds 1-4 were used
 php85 -d pcre.jit=0 gen.php empty.php rand.txt > rfix.txt
-# tests/fixtures/php85_random.txt is a 2500-line sample of the result.
+# tests/fixtures/php85_random.txt is a 2500-line sample of the result,
+# plus samples of gen_random.py's extended mode and of:
+python3 gen_lead.py 1 20000 > lead.txt     # one-pass fast-path shapes
 php85 limcases.php > limcases.txt
 php85 -d pcre.jit=0 limits.php limcases.txt \
     > ../../crates/goro-regex/tests/fixtures/php85_limits.txt

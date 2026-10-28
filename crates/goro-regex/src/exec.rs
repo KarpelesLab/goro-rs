@@ -977,7 +977,9 @@ impl Vm<'_, '_> {
                     if np > min_pos {
                         self.push_frame(sc, K_REP_GREEDY, e.a, min_pos, np)?;
                     } else {
-                        self.count += 1;
+                        if self.final_try_counts(e.a) {
+                            self.count += 1;
+                        }
                         if self.count > self.limits.match_limit as u64 {
                             return Err(MatchError::MatchLimit);
                         }
@@ -1087,19 +1089,49 @@ impl Vm<'_, '_> {
     /// items that cannot be followed by that byte without trying the rest
     /// of the pattern after each (counting each skipped try as PCRE2
     /// would). Returns the new count and position.
+    /// Whether the last try of a greedy repeat (at its minimum) counts
+    /// towards the match limit: only for classes (see
+    /// [`class::CharSet::pcre_class`]).
+    #[inline]
+    fn final_try_counts(&self, rep_pc: Pc) -> bool {
+        matches!(&self.prog.insts[rep_pc as usize], Inst::Rep { item: Item::Set(s), .. } if s.pcre_class())
+    }
+
+    /// The byte that must follow a single-byte repeat for the rest to
+    /// match, and what each position where it does not costs the match
+    /// limit (a retry, plus the frame of a lookahead it starts).
+    #[inline]
+    fn rep_next(&self, rep_pc: Pc) -> Option<(u8, u64)> {
+        let lit = |i: Option<&Inst>| match i {
+            Some(Inst::One(Item::Byte(b))) => Some(*b),
+            Some(Inst::Lit(i)) => Some(self.prog.lits[*i as usize][0]),
+            _ => None,
+        };
+        let insts = &self.prog.insts;
+        let (next, cost) = match insts.get(rep_pc as usize + 1) {
+            Some(Inst::LookStart {
+                kind: LookKind::Positive,
+                ..
+            }) => (lit(insts.get(rep_pc as usize + 2))?, 2),
+            i => (lit(i)?, 1),
+        };
+        let Inst::Rep { item, .. } = &insts[rep_pc as usize] else {
+            return None;
+        };
+        if !self.item_single_byte(item) {
+            return None;
+        }
+        Some((next, cost))
+    }
+
     #[inline]
     fn lazy_advance(&mut self, rep_pc: Pc, mut count: u32, mut pos: usize) -> (u32, usize) {
-        let next = match self.prog.insts.get(rep_pc as usize + 1) {
-            Some(Inst::One(Item::Byte(b))) => *b,
-            Some(Inst::Lit(i)) => self.prog.lits[*i as usize][0],
-            _ => return (count, pos),
+        let Some((next, cost)) = self.rep_next(rep_pc) else {
+            return (count, pos);
         };
         let Inst::Rep { item, max, .. } = &self.prog.insts[rep_pc as usize] else {
             return (count, pos);
         };
-        if !self.item_single_byte(item) {
-            return (count, pos);
-        }
         let start = pos;
         while count < *max && pos < self.end && self.s[pos] != next {
             match self.match_item(item, pos) {
@@ -1108,7 +1140,7 @@ impl Vm<'_, '_> {
             }
             count += 1;
         }
-        self.count += (pos - start) as u64;
+        self.count += (pos - start) as u64 * cost;
         (count, pos)
     }
 
@@ -1117,28 +1149,21 @@ impl Vm<'_, '_> {
     /// tries as PCRE2 would count its retries).
     #[inline]
     fn skip_greedy(&mut self, rep_pc: Pc, min_pos: usize, np: usize) -> Option<usize> {
-        let next = match self.prog.insts.get(rep_pc as usize + 1) {
-            Some(Inst::One(Item::Byte(b))) => *b,
-            Some(Inst::Lit(i)) => self.prog.lits[*i as usize][0],
-            _ => return Some(np),
-        };
-        let Inst::Rep { item, .. } = &self.prog.insts[rep_pc as usize] else {
+        let Some((next, cost)) = self.rep_next(rep_pc) else {
             return Some(np);
         };
-        if !self.item_single_byte(item) {
-            return Some(np);
+        if np < min_pos {
+            return None;
         }
-        let mut p = np;
-        loop {
-            if p < self.end && self.s[p] == next {
-                return Some(p);
-            }
-            if p <= min_pos {
-                return if p == min_pos { Some(p) } else { None };
-            }
-            p -= 1;
-            self.count += 1;
-        }
+        // The last position in [min_pos, np] holding the byte, or min_pos.
+        let hi = np.min(self.end.saturating_sub(1));
+        let p = if hi >= min_pos && hi < self.end {
+            memchr::memrchr(next, &self.s[min_pos..=hi]).map_or(min_pos, |k| min_pos + k)
+        } else {
+            min_pos
+        };
+        self.count += (np - p) as u64 * cost;
+        Some(p)
     }
 
     fn unwind_verb(&mut self, sc: &mut Scratch, act: VerbAct) -> Result<Step, MatchError> {
@@ -1742,14 +1767,22 @@ impl Vm<'_, '_> {
         };
         let (min, max) = (*min, *max);
         let single = self.item_single_byte(item);
-        // The first byte the rest of the pattern needs, if known.
-        let next = match op.steps.get(b + 1) {
+        let class = matches!(item, Item::Set(s) if s.pcre_class());
+        // The first byte the rest of the pattern needs, if known, and what
+        // a try where it is missing costs (plus a lookahead's frame).
+        let lit = |st: Option<&OpStep>| match st {
             Some(OpStep::One(Item::Byte(x))) => Some(*x),
             Some(OpStep::Lit(i)) => Some(self.prog.lits[*i as usize][0]),
             _ => None,
         };
-        // The first try is the repeat's own frame.
-        self.count = op.frames as u64 - 1;
+        let (next, cost) = match op.steps.get(b + 1) {
+            Some(OpStep::Look(n)) if *n > 0 => (lit(op.steps.get(b + 2)), 2),
+            st => (lit(st), 1),
+        };
+        // The first try is the repeat's own frame; the VM's count is one
+        // more when a lookahead follows the repeat (measured against it).
+        self.count =
+            op.frames as u64 - 1 + op.pre_looks as u64 + u64::from(op.looks > op.pre_looks);
         let limit = self.limits.match_limit as u64;
         let n_steps = op.steps.len();
         let finish = |me: usize, k: usize| (if k == UNSET { start } else { k }, me);
@@ -1768,17 +1801,31 @@ impl Vm<'_, '_> {
             };
             let mut e = pmax;
             loop {
-                if let Some(nb) = next {
+                if let Some(nb) = next
+                    && single
+                    && e > min_pos
+                {
+                    // The last position in [min_pos, e] holding the byte.
+                    let hi = e.min(self.end.saturating_sub(1));
+                    let ne = if hi >= min_pos {
+                        memchr::memrchr(nb, &self.s[min_pos..=hi]).map_or(min_pos, |k| min_pos + k)
+                    } else {
+                        min_pos
+                    };
+                    self.count += (e - ne) as u64 * cost;
+                    e = ne;
+                }
+                if let Some(nb) = next
+                    && !single
+                {
                     while e > min_pos && (e >= self.end || self.s[e] != nb) {
-                        e = if single {
-                            e - 1
-                        } else {
-                            utf8::prev_start(self.s, e)
-                        };
-                        self.count += 1;
+                        e = utf8::prev_start(self.s, e);
+                        self.count += cost;
                     }
                 }
-                self.count += 1;
+                if e > min_pos || class {
+                    self.count += 1;
+                }
                 if self.count > limit {
                     return Err(MatchError::MatchLimit);
                 }
@@ -1814,7 +1861,7 @@ impl Vm<'_, '_> {
                         None => break,
                     }
                     n += 1;
-                    self.count += 1;
+                    self.count += cost;
                 }
             }
             self.count += 1;
@@ -1845,7 +1892,7 @@ impl Vm<'_, '_> {
     #[allow(clippy::too_many_arguments)]
     #[inline]
     fn onepass_steps(
-        &self,
+        &mut self,
         op: &OnePass,
         from: usize,
         to: usize,
@@ -1855,9 +1902,17 @@ impl Vm<'_, '_> {
         run_end: &mut usize,
         mut keep: usize,
     ) -> Option<(usize, usize)> {
-        for (k, st) in op.steps[from..to].iter().enumerate() {
-            let k = k + from;
+        let mut k = from;
+        while k < to {
+            let st = &op.steps[k];
+            k += 1;
             match st {
+                OpStep::Look(n) => {
+                    let n = *n as usize;
+                    self.count += 1;
+                    self.onepass_steps(op, k, k + n, pos, _start, slots, run_end, keep)?;
+                    k += n;
+                }
                 OpStep::One(item) => pos = self.match_item(item, pos)?,
                 OpStep::Lit(i) => {
                     let lit = &self.prog.lits[*i as usize];
@@ -1881,7 +1936,7 @@ impl Vm<'_, '_> {
                 }
                 OpStep::Rep { item, min, max } => {
                     let (p, n) = self.scan_items(item, pos, *max);
-                    if Some(k) == op.lead_run {
+                    if Some(k - 1) == op.lead_run {
                         *run_end = p;
                     }
                     if n < *min {
@@ -2176,42 +2231,62 @@ impl<'p, 's> Searcher<'p, 's> {
         let anchored = st.anchored || opts.anchored;
         let mut p = start_offset;
         let onepass = prog.onepass.as_ref().filter(|op| {
-            limits.match_limit > op.frames
-                && limits.depth_limit > op.frames
+            limits.match_limit > op.frames + op.looks
+                && limits.depth_limit > op.frames + op.looks.min(1)
                 && (!op.has_greedy || (len as u64) < limits.match_limit as u64 / 2)
         });
         // Required byte: fail early when it is absent (pcre2pattern on the
         // "last single character that is required for a match").
         let mut req_pos: Option<usize> = None;
-        loop {
+        'scan: loop {
             if p > len || len - p < st.min_len {
                 break;
             }
-            if let Some(op) = onepass
-                && let (Some(lit), Some(li)) = (&op.lead_lit, op.lead_run)
-                && !anchored
-            {
+            'lead: {
+                let Some(op) = onepass else { break 'lead };
+                let (Some(lit), Some(li)) = (&op.lead_lit, op.lead_run) else {
+                    break 'lead;
+                };
+                if anchored {
+                    break 'lead;
+                }
                 // Find the literal, then the start of the run before it.
                 let found = match &op.lead_finder {
                     Some(f) => f.find(&s[p..]),
                     None => memchr::memchr(lit[0], &s[p..]),
                 };
-                let Some(k) = found else { break };
+                // The starts skipped must not be ones that could reach the
+                // match limit (each try of a backtracking run costs up to
+                // two).
+                let span = found.unwrap_or(len - p) as u64;
+                if op.back.is_some() && span * 2 + op.frames as u64 + 8 >= limits.match_limit as u64
+                {
+                    break 'lead;
+                }
+                let Some(k) = found else { break 'scan };
                 let q = p + k;
                 let (OpStep::Rep { item, min, .. } | OpStep::BackRep { item, min, .. }) =
                     &op.steps[li]
                 else {
                     unreachable!()
                 };
-                let mut r = q;
+                let mut e = q;
+                for m in op.lead_mid.iter().rev() {
+                    if let OpStep::Rep { item: mi, .. } = m {
+                        while e > p && self.vm.match_item(mi, e - 1).is_some() {
+                            e -= 1;
+                        }
+                    }
+                }
+                let mut r = e;
                 while r > p && self.vm.match_item(item, r - 1).is_some() {
                     r -= 1;
                 }
                 // A possessive run ends at the literal; a backtracking one may
                 // run past it and use a later occurrence.
-                if matches!(op.steps[li], OpStep::Rep { .. }) && q - r < *min as usize {
+                if matches!(op.steps[li], OpStep::Rep { .. }) && e - r < *min as usize {
                     p = q + 1;
-                    continue;
+                    continue 'scan;
                 }
                 let mut run_end = 0;
                 match self.vm.run_onepass(op, r, &mut sc.slots, &mut run_end)? {
@@ -2230,9 +2305,9 @@ impl<'p, 's> Searcher<'p, 's> {
                         // Starts inside the run can only do worse.
                         p = (q + 1).max(run_end + 1);
                         if p > len {
-                            break;
+                            break 'scan;
                         }
-                        continue;
+                        continue 'scan;
                     }
                 }
             }
@@ -2274,21 +2349,35 @@ impl<'p, 's> Searcher<'p, 's> {
                         continue;
                     }
                 } else if let Some((ai, bytes)) = &st.anchor {
-                    // Search for the rarest fixed-offset byte set.
-                    let from = p + ai;
-                    if from >= len {
-                        break;
-                    }
-                    let hay = &s[from..];
-                    let found = match bytes.as_slice() {
-                        [a] => memchr::memchr(*a, hay),
-                        [a, b] => memchr::memchr2(*a, *b, hay),
-                        [a, b, c] => memchr::memchr3(*a, *b, *c, hay),
-                        _ => None,
-                    };
-                    match found {
-                        Some(k) => p = from + k - ai,
-                        None => break,
+                    // Search for the rarest fixed-offset byte set, checking
+                    // the other sets before leaving the search.
+                    let n = st.sets.len();
+                    let mut from = p + ai;
+                    loop {
+                        if from >= len {
+                            break 'scan;
+                        }
+                        let hay = &s[from..];
+                        let found = match bytes.as_slice() {
+                            [a] => memchr::memchr(*a, hay),
+                            [a, b] => memchr::memchr2(*a, *b, hay),
+                            [a, b, c] => memchr::memchr3(*a, *b, *c, hay),
+                            _ => None,
+                        };
+                        let Some(k) = found else { break 'scan };
+                        p = from + k - ai;
+                        if p + n > len {
+                            break 'scan;
+                        }
+                        if st
+                            .sets
+                            .iter()
+                            .zip(&s[p..p + n])
+                            .all(|(set, &b)| set[(b >> 6) as usize] >> (b & 63) & 1 != 0)
+                        {
+                            break;
+                        }
+                        from = p + ai + 1;
                     }
                     if st.startline && p > 0 && !self.vm.newline_before(p) {
                         continue;

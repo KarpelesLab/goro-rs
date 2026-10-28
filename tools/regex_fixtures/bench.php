@@ -36,6 +36,14 @@ $pats = [
     'utf8_word' => '/\w+/u',
     'lazy_tag' => '/<a.*?>/',
     'not_found' => '/zzz\d+qqq/',
+    'kv_pairs' => '/(\w+)\s*=\s*"([^"]*)"/',
+    'tag_backref' => '/<(\w+)[^>]*>(.*?)<\/\1>/',
+    'ipv4ish' => '/(?:\d{1,3}\.){3}\d{1,3}/',
+    'alt_plus' => '/(?:quick|lazy|brown)+/',
+    'word_pair' => '/(\w+) (\w+)/',
+    'lookahead' => '/\b\w+(?=ing\b)/',
+    'caseless_word' => '/\bLOREM\b/i',
+    'dot_star_end' => '/^.*dog.*$/m',
 ];
 foreach ($pats as $name => $p) {
     $best = INF;

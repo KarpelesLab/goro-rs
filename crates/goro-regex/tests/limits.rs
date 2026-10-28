@@ -143,10 +143,7 @@ fn php85_minimal_limits() {
         "/(?:a|b)*c/",
         "/(?:a|b)+c/",
         "/^(a\\1?){4}$/",
-        "/(?:\\D+|<\\d+>)*[!?]/",
         "/(?:(a)|b)*/",
-        "/\\s+$/",
-        "/\\[(right)\\](((?R)|[^[]+?|\\[)*)\\[\\/\\1\\]/siU",
     ];
     let data = include_str!("fixtures/php85_limits.txt");
     let mut bad = Vec::new();

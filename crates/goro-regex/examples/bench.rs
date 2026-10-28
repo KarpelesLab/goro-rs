@@ -20,6 +20,14 @@ const PATS: &[(&str, &str)] = &[
     ("utf8_word", r"/\w+/u"),
     ("lazy_tag", "/<a.*?>/"),
     ("not_found", r"/zzz\d+qqq/"),
+    ("kv_pairs", r#"/(\w+)\s*=\s*"([^"]*)"/"#),
+    ("tag_backref", r"/<(\w+)[^>]*>(.*?)<\/\1>/"),
+    ("ipv4ish", r"/(?:\d{1,3}\.){3}\d{1,3}/"),
+    ("alt_plus", "/(?:quick|lazy|brown)+/"),
+    ("word_pair", r"/(\w+) (\w+)/"),
+    ("lookahead", r"/\b\w+(?=ing\b)/"),
+    ("caseless_word", r"/\bLOREM\b/i"),
+    ("dot_star_end", r"/^.*dog.*$/m"),
 ];
 
 fn main() {

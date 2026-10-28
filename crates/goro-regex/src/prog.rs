@@ -194,6 +194,9 @@ pub enum OpStep {
     Close(u32),
     Assert(Assertion),
     Keep,
+    /// A positive lookahead whose body is the next `n` steps (characters,
+    /// literals, possessive repeats and assertions only).
+    Look(u32),
 }
 
 /// A pattern that never needs to backtrack: a straight sequence of
@@ -218,7 +221,13 @@ pub struct OnePass {
     /// With `lead_run`: the literal that follows the run (for a possessive
     /// run, one the run cannot match).
     pub lead_lit: Option<Vec<u8>>,
+    /// Optional possessive repeats between the leading run and `lead_lit`.
+    pub lead_mid: Vec<OpStep>,
     pub lead_finder: Option<memchr::memmem::Finder<'static>>,
+    /// Lookahead steps, and those before the backtracking repeat (each
+    /// costs PCRE2 one frame while it runs).
+    pub looks: u32,
+    pub pre_looks: u32,
 }
 
 /// Start-of-match optimisation data (pcre2api: "start-up optimizations").
