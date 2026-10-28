@@ -160,6 +160,17 @@ impl Vm {
             && !self.classes.contains_key(&lower(&decl.name))
     }
 
+    /// An error about method `f`: at its line when it is in the class's
+    /// file (tests tests/classes/final_redeclare, static_mix_*).
+    fn method_err<T>(&mut self, decl: &ClassDecl, f: &Func, msg: &str) -> R<T> {
+        if let Some(c) = f.code()
+            && *c.file == *decl.file
+        {
+            return Err(self.fatal_at(msg, &decl.file, c.line_start));
+        }
+        self.link_err(decl, msg)
+    }
+
     fn link_err<T>(&mut self, decl: &ClassDecl, msg: &str) -> R<T> {
         Err(self.fatal_at(msg, &decl.file, decl.line_start))
     }
@@ -488,6 +499,35 @@ impl Vm {
                             c.name.dname()
                         ),
                     );
+                }
+                // Typed constants: covariant types (tests Zend/tests/
+                // type_declarations/typed_class_constants_inheritance_*).
+                if let Some(pt) = &prev.ty
+                    && prev.flags & mflags::PRIVATE == 0
+                    && !std::ptr::eq(prev.class, cp)
+                {
+                    let ok = match &c.ty {
+                        None => false,
+                        Some(ct) => {
+                            ct.display() == pt.display()
+                                || self.type_sub(ct, &cls, pt, unsafe { &*prev.class })?
+                                    != super::variance::Sub::No
+                        }
+                    };
+                    if !ok {
+                        let pcn = unsafe { (*prev.class).name.dname() };
+                        return self.link_err(
+                            decl,
+                            &format!(
+                                "Type of {}::{} must be compatible with {}::{} of type {}",
+                                cname,
+                                c.name.dname(),
+                                pcn,
+                                c.name.dname(),
+                                pt.display()
+                            ),
+                        );
+                    }
                 }
                 let pvis = prev.flags & mflags::VISIBILITY;
                 let nvis = c.flags & mflags::VISIBILITY;
@@ -950,6 +990,27 @@ impl Vm {
                         ),
                     );
                 }
+                // Visibility can't be reduced (tests tests/classes/
+                // property_override_*Static_*Static).
+                let pv = prev.flags & mflags::VISIBILITY;
+                let nv = p.flags & mflags::VISIBILITY;
+                if pv != mflags::PRIVATE && vis_rank(nv) > vis_rank(pv) {
+                    return self.link_err(
+                        decl,
+                        &format!(
+                            "Access level to {}::${} must be {} (as in class {}){}",
+                            cname,
+                            p.name.dname(),
+                            vis_name(pv),
+                            unsafe { (*prev.class).name.dname() },
+                            if pv == mflags::PROTECTED {
+                                " or weaker"
+                            } else {
+                                ""
+                            }
+                        ),
+                    );
+                }
                 cls.static_props.borrow_mut().retain(|s| s.name != p.name);
             }
             if cls.prop_map.borrow().contains_key(&p.name) {
@@ -1003,6 +1064,23 @@ impl Vm {
                 attrs: p.attrs.clone(),
             }));
             return Ok(());
+        }
+        // A parent's static property can't become an instance one (tests
+        // tests/classes/property_override_*Static_*).
+        if let Some(sp) = cls.find_static(&p.name)
+            && sp.flags & mflags::PRIVATE == 0
+            && !std::ptr::eq(sp.class, cp)
+        {
+            return self.link_err(
+                decl,
+                &format!(
+                    "Cannot redeclare static {}::${} as non static {}::${}",
+                    unsafe { (*sp.class).name.dname() },
+                    p.name.dname(),
+                    cname,
+                    p.name.dname()
+                ),
+            );
         }
         let existing = cls.prop_map.borrow().get(&p.name).cloned();
         let info = |slot: u32| PropInfo {
@@ -1420,10 +1498,24 @@ impl Vm {
             }
             let pcn = prev.scope().map(|c| c.name.dname()).unwrap_or_default();
             let is_ctor = ln.as_bytes() == b"__construct";
+            // A final private constructor stays final (test
+            // tests/classes/final_private_ctor).
+            if is_ctor && prev.flags & mflags::PRIVATE != 0 && prev.flags & mflags::FINAL != 0 {
+                return self.method_err(
+                    decl,
+                    &f,
+                    &format!(
+                        "Cannot override final method {}::{}()",
+                        pcn,
+                        prev.name.dname()
+                    ),
+                );
+            }
             if prev.flags & mflags::PRIVATE == 0 || prev.flags & mflags::ABSTRACT != 0 {
                 if prev.flags & mflags::FINAL != 0 {
-                    return self.link_err(
+                    return self.method_err(
                         decl,
+                        &f,
                         &format!(
                             "Cannot override final method {}::{}()",
                             pcn,
@@ -1432,8 +1524,9 @@ impl Vm {
                     );
                 }
                 if prev.flags & mflags::STATIC != 0 && f.flags & mflags::STATIC == 0 {
-                    return self.link_err(
+                    return self.method_err(
                         decl,
+                        &f,
                         &format!(
                             "Cannot make static method {}::{}() non static in class {}",
                             pcn,
@@ -1443,8 +1536,9 @@ impl Vm {
                     );
                 }
                 if prev.flags & mflags::STATIC == 0 && f.flags & mflags::STATIC != 0 {
-                    return self.link_err(
+                    return self.method_err(
                         decl,
+                        &f,
                         &format!(
                             "Cannot make non static method {}::{}() static in class {}",
                             pcn,
@@ -1454,8 +1548,9 @@ impl Vm {
                     );
                 }
                 if prev.flags & mflags::ABSTRACT == 0 && f.flags & mflags::ABSTRACT != 0 {
-                    return self.link_err(
+                    return self.method_err(
                         decl,
+                        &f,
                         &format!(
                             "Cannot make non abstract method {}::{}() abstract in class {}",
                             pcn,
@@ -1467,8 +1562,9 @@ impl Vm {
                 let pv = prev.flags & mflags::VISIBILITY;
                 let nv = f.flags & mflags::VISIBILITY;
                 if vis_rank(nv) > vis_rank(pv) && !(is_ctor && prev.flags & mflags::ABSTRACT == 0) {
-                    return self.link_err(
+                    return self.method_err(
                         decl,
+                        &f,
                         &format!(
                             "Access level to {}::{}() must be {} (as in class {}){}",
                             cname,

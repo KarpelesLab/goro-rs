@@ -41,6 +41,15 @@ impl<'a> Compiler<'a> {
         })
     }
 
+    /// A class operand that is part of an access chain: `?->` in it
+    /// short-circuits the whole chain (test Zend/tests/nullsafe_operator/001).
+    fn class_spec_chain(&mut self, c: &ClassRef<'a>) -> CResult<ClassSpec> {
+        match c {
+            ClassRef::Expr(e) => Ok(ClassSpec::Dynamic(self.chain_base(e)?)),
+            _ => self.class_spec(c),
+        }
+    }
+
     fn self_spec(&mut self) -> ClassSpec {
         match &self.class {
             // Constant expressions keep `self` (their errors name it).
@@ -441,23 +450,23 @@ impl<'a> Compiler<'a> {
                 });
                 Ok(d)
             }),
-            ExprKind::StaticProp(sp) => {
-                let class = self.class_spec(&sp.class)?;
+            ExprKind::StaticProp(sp) => self.chain_root(e, |c| {
+                let class = c.class_spec_chain(&sp.class)?;
                 let n = match &sp.name {
-                    StaticPropName::Ident(i) => self.str_const(i.name),
-                    StaticPropName::Expr(x) => self.expr(x)?,
+                    StaticPropName::Ident(i) => c.str_const(i.name),
+                    StaticPropName::Expr(x) => c.expr(x)?,
                 };
-                self.free_spec(class);
-                self.free(n);
-                let d = self.tmp();
-                self.f.line = line;
-                self.emit(Op::FetchStaticProp {
+                c.free_spec(class);
+                c.free(n);
+                let d = c.tmp();
+                c.f.line = line;
+                c.emit(Op::FetchStaticProp {
                     dst: d,
                     class,
                     name: n,
                 });
                 Ok(d)
-            }
+            }),
             ExprKind::Const(n) => {
                 if let Some(v) = self.const_name_value(n) {
                     return Ok(self.add_const(v));
@@ -611,7 +620,7 @@ impl<'a> Compiler<'a> {
                 self.parent_hook_call(sc, hint, line)
             }
             ExprKind::StaticCall(sc) => self.chain_root(e, |c| {
-                let mut class = c.class_spec(&sc.class)?;
+                let mut class = c.class_spec_chain(&sc.class)?;
                 // `self::m()` forwards the late static binding class (PHP
                 // manual, Late Static Bindings: forwarding calls), so it
                 // stays relative instead of naming the class.
@@ -876,6 +885,9 @@ impl<'a> Compiler<'a> {
                 };
                 let v = match value {
                     Some(v) => {
+                        if self.f.flags & fflags::BY_REF != 0 {
+                            self.nullsafe_ref_check(v)?;
+                        }
                         if self.f.flags & fflags::BY_REF != 0 && is_ref_capable(v) {
                             self.ref_of(v)?
                         } else {
@@ -1027,6 +1039,10 @@ impl<'a> Compiler<'a> {
     }
 
     fn nullsafe_check(&mut self, o: Reg) -> CResult<()> {
+        // `$this` is never null (its absence is an error of the fetch).
+        if o == crate::bytecode::THIS {
+            return Ok(());
+        }
         let at = self.emit(Op::JmpNull {
             c: o & !TMP | (o & TMP),
             res: NONE,
@@ -1260,6 +1276,7 @@ impl<'a> Compiler<'a> {
                 None => NONE,
             };
             if it.by_ref {
+                self.nullsafe_ref_check(&it.value)?;
                 let r = self.ref_of(&it.value)?;
                 self.free(k);
                 self.free(r);
@@ -1839,7 +1856,7 @@ impl<'a> Compiler<'a> {
                         let var = self.cv(v);
                         self.emit(Op::SendNamedVar { var, name });
                     }
-                    _ if is_ref_capable(&a.value) => {
+                    _ if is_ref_capable(&a.value) && !contains_nullsafe(&a.value) => {
                         let j = self.emit(Op::JmpNamedArgByRef { name, t: 0 });
                         let v = self.expr(&a.value)?;
                         self.free(v);
@@ -1890,7 +1907,7 @@ impl<'a> Compiler<'a> {
                     self.free(r);
                     self.emit(Op::SendRef { src: r, arg: i });
                 }
-                _ if is_ref_capable(&a.value) => {
+                _ if is_ref_capable(&a.value) && !contains_nullsafe(&a.value) => {
                     let j = self.emit(Op::JmpArgByRef { arg: i, t: 0 });
                     let v = self.expr(&a.value)?;
                     self.free(v);
@@ -2156,6 +2173,15 @@ impl<'a> Compiler<'a> {
     }
 
     /// An operand holding a reference to the place `e` names.
+    /// A reference can't be taken of a `?->` chain (tests Zend/tests/
+    /// nullsafe_operator/009, 010, 017, oss_fuzz_60011_*).
+    pub(crate) fn nullsafe_ref_check(&mut self, e: &'a Expr<'a>) -> CResult<()> {
+        if contains_nullsafe(e) {
+            return self.err("Cannot take reference of a nullsafe chain", e.span.line);
+        }
+        Ok(())
+    }
+
     pub(crate) fn ref_of(&mut self, e: &'a Expr<'a>) -> CResult<Reg> {
         match &e.kind {
             ExprKind::Variable(n) if *n != b"this" => {
@@ -2316,6 +2342,7 @@ impl<'a> Compiler<'a> {
             ExprKind::List { items, .. } | ExprKind::Array { items, .. } => {
                 if items.iter().flatten().any(|i| i.by_ref) {
                     // [&$a, $b] = $arr: destructure by reference.
+                    self.nullsafe_ref_check(value)?;
                     let r = if is_ref_capable(value) {
                         self.ref_of(value)?
                     } else {
@@ -2538,6 +2565,7 @@ impl<'a> Compiler<'a> {
 
     fn assign_ref(&mut self, target: &'a Expr<'a>, value: &'a Expr<'a>, res: Reg) -> CResult<()> {
         let line = target.span.line;
+        self.nullsafe_ref_check(value)?;
         if let ExprKind::New { .. } = &value.kind {
             return self.err("Cannot assign reference to non referenceable value", line);
         }
@@ -3014,8 +3042,10 @@ fn writes_directly(e: &Expr<'_>) -> bool {
     }
 }
 
-fn contains_nullsafe(e: &Expr<'_>) -> bool {
+pub(crate) fn contains_nullsafe(e: &Expr<'_>) -> bool {
     match &e.kind {
+        ExprKind::StaticProp(sp) => matches!(&sp.class, ClassRef::Expr(c) if contains_nullsafe(c)),
+        ExprKind::StaticCall(sc) => matches!(&sc.class, ClassRef::Expr(c) if contains_nullsafe(c)),
         ExprKind::Prop { obj, nullsafe, .. } => *nullsafe || contains_nullsafe(obj),
         ExprKind::MethodCall { obj, nullsafe, .. } => *nullsafe || contains_nullsafe(obj),
         ExprKind::Index { base, .. } => contains_nullsafe(base),
