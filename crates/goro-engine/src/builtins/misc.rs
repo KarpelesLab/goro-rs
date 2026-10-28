@@ -200,6 +200,16 @@ fn escapeshellarg(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "Argument #1 ($arg) must not contain any null bytes",
         );
     }
+    // Observed on PHP 8.5: arguments are limited to 2 MiB with the quotes.
+    if s.len() + 2 >= SHELL_ARG_MAX {
+        return vm.throw(
+            "ValueError",
+            &format!(
+                "Argument exceeds the allowed length of {} bytes",
+                SHELL_ARG_MAX
+            ),
+        );
+    }
     let mut out = Vec::with_capacity(s.len() + 2);
     out.push(b'\'');
     for &c in s {
@@ -210,8 +220,19 @@ fn escapeshellarg(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     }
     out.push(b'\'');
+    if out.len() > SHELL_ARG_MAX {
+        return vm.throw(
+            "ValueError",
+            &format!(
+                "Escaped argument exceeds the allowed length of {} bytes",
+                SHELL_ARG_MAX
+            ),
+        );
+    }
     Ok(sv(out))
 }
+
+const SHELL_ARG_MAX: usize = 2 * 1024 * 1024;
 
 fn escapeshellcmd(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let s = a.bytes(0);
@@ -220,6 +241,15 @@ fn escapeshellcmd(vm: &mut Vm, a: &mut Args) -> R<Value> {
             a,
             "ValueError",
             "Argument #1 ($command) must not contain any null bytes",
+        );
+    }
+    if s.len() + 2 >= SHELL_ARG_MAX {
+        return vm.throw(
+            "ValueError",
+            &format!(
+                "Command exceeds the allowed length of {} bytes",
+                SHELL_ARG_MAX
+            ),
         );
     }
     let mut out = Vec::with_capacity(s.len() + 8);
@@ -263,6 +293,15 @@ fn escapeshellcmd(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
             _ => out.push(c),
         }
+    }
+    if out.len() > SHELL_ARG_MAX {
+        return vm.throw(
+            "ValueError",
+            &format!(
+                "Escaped command exceeds the allowed length of {} bytes",
+                SHELL_ARG_MAX
+            ),
+        );
     }
     Ok(sv(out))
 }
@@ -587,9 +626,7 @@ pub(crate) fn const_deprecation(name: &[u8]) -> Option<&'static str> {
         b"FILE_TEXT" | b"FILE_BINARY" => FILE,
         b"CURLOPT_BINARYTRANSFER" => "8.4, as it had no effect since 5.1.2",
         b"DOM_PHP_ERR" => "8.4, as it is no longer used",
-        b"SOAP_FUNCTIONS_ALL" => {
-            "8.4, as enabling all functions is a possible security concern"
-        }
+        b"SOAP_FUNCTIONS_ALL" => "8.4, as enabling all functions is a possible security concern",
         n if n.starts_with(b"MHASH_") => "8.5, as the mhash*() functions were deprecated",
         _ => return None,
     })

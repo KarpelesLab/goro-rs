@@ -786,7 +786,9 @@ fn extract(vm: &mut Vm, a: &mut Args) -> R<Value> {
             } else {
                 name.clone()
             }),
-            3 => Some(prefixed(&prefix, name)),
+            // Observed on PHP 8.5: EXTR_PREFIX_ALL skips an empty key
+            // (EXTR_PREFIX_INVALID makes it "prefix_").
+            3 => (!name.is_empty()).then(|| prefixed(&prefix, name)),
             4 => Some(if valid_var_name(name) {
                 name.clone()
             } else {
@@ -1767,17 +1769,50 @@ fn ini_restore(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Null)
 }
 
-fn ini_get_all(vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    let mut keys: Vec<&PhpStr> = vm.ini.values.keys().collect();
+/// PHP manual: ini_get_all(); an extension's settings are those its
+/// module registers, an unknown extension is a warning.
+fn ini_get_all(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let details = a.bool_or(1, true);
+    let mut keys: Vec<PhpStr> = match a.opt_str(0) {
+        None => vm.ini.values.keys().cloned().collect(),
+        Some(ext) => {
+            let mods: Vec<_> = vm
+                .modules
+                .iter()
+                .filter(|m| m.name.as_bytes().eq_ignore_ascii_case(&ext))
+                .collect();
+            if mods.is_empty() {
+                vm.fwarn(
+                    a,
+                    &format!("Extension \"{}\" cannot be found", ext.to_string_lossy()),
+                )?;
+                return Ok(Value::Bool(false));
+            }
+            mods.iter()
+                .flat_map(|m| m.ini.iter().map(|(k, _)| PhpStr::from(*k)))
+                .collect()
+        }
+    };
     keys.sort();
+    keys.dedup();
     let mut out = PhpArray::new();
     for k in keys {
-        let v = vm.ini.values[k].clone();
+        let Some(v) = vm.ini.values.get(&k).cloned() else {
+            continue;
+        };
+        if !details {
+            out.insert(Key::Str(k), Value::Str(v));
+            continue;
+        }
+        let g = match vm.ini.originals.get(&k) {
+            Some(Some(o)) => o.clone(),
+            _ => v.clone(),
+        };
         let mut e = PhpArray::new();
-        e.insert(Key::from("global_value"), Value::Str(v.clone()));
+        e.insert(Key::from("global_value"), Value::Str(g));
         e.insert(Key::from("local_value"), Value::Str(v));
         e.insert(Key::from("access"), Value::Int(7));
-        out.insert(Key::Str(k.clone()), Value::Array(e));
+        out.insert(Key::Str(k), Value::Array(e));
     }
     Ok(Value::Array(out))
 }

@@ -819,6 +819,7 @@ fn settype(vm: &mut Vm, a: &mut Args) -> R<Value> {
         b"array" => vm.cast(crate::bytecode::CastTo::Array, v)?,
         b"object" => vm.cast(crate::bytecode::CastTo::Object, v)?,
         b"null" => Value::Null,
+        b"resource" => return vm.value_error("Cannot convert to resource type"),
         _ => {
             return vm.value_error("settype(): Argument #2 ($type) must be a valid type");
         }
@@ -969,12 +970,13 @@ impl Vm {
                         let cls = self.class_of(&o);
                         let mut mm = m.as_bytes();
                         let mut c = cls.clone();
-                        if mm.len() > 8 && mm[..8].eq_ignore_ascii_case(b"parent::") {
-                            mm = &mm[8..];
-                            match cls.parent.clone() {
-                                Some(p) => c = p,
-                                None => return false,
+                        match self.qualified_method(&cls, m.as_bytes()) {
+                            Some(Ok((q, rest))) => {
+                                c = q;
+                                mm = rest;
                             }
+                            Some(Err(_)) => return false,
+                            None => {}
                         }
                         match c.find_method(&crate::class::lower(mm)) {
                             Some(f) => {
@@ -991,12 +993,13 @@ impl Vm {
                             return false;
                         };
                         let mut m = m.as_bytes();
-                        if m.len() > 8 && m[..8].eq_ignore_ascii_case(b"parent::") {
-                            m = &m[8..];
-                            match cls.parent.clone() {
-                                Some(p) => cls = p,
-                                None => return false,
+                        match self.qualified_method(&cls, m) {
+                            Some(Ok((q, rest))) => {
+                                cls = q;
+                                m = rest;
                             }
+                            Some(Err(_)) => return false,
+                            None => {}
                         }
                         self.method_callable_static(&cls, m)
                     }

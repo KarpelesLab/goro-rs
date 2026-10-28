@@ -329,30 +329,27 @@ impl Vm {
                 };
                 match target {
                     Value::Object(o) => {
-                        let mut m = m.as_bytes();
+                        let m = m.as_bytes();
                         let cls = self.class_of(&o);
-                        // "parent::method"
-                        if m.len() > 8 && m[..8].eq_ignore_ascii_case(b"parent::") {
-                            m = &m[8..];
-                            let parent = cls.parent.clone();
-                            if let Some(p) = parent {
+                        // "parent::method", "A::method"
+                        match self.qualified_method(&cls, m) {
+                            Some(Ok((p, m))) => {
                                 let mut c = self.resolve_method(&o, &p, m, for_call)?;
                                 c.static_class = Rc::as_ptr(&cls);
-                                return Ok(c);
+                                Ok(c)
                             }
+                            Some(Err(e)) => self.throw("Error", &e),
+                            None => self.resolve_method(&o, &cls, m, for_call),
                         }
-                        self.resolve_method(&o, &cls, m, for_call)
                     }
                     Value::Str(cn) => {
                         let c = self.class_for_callable(&cn)?;
-                        let mut m = m.as_bytes();
-                        if m.len() > 8 && m[..8].eq_ignore_ascii_case(b"parent::") {
-                            m = &m[8..];
-                            if let Some(p) = c.parent.clone() {
-                                return self.resolve_static_method(&p, m, for_call, true);
-                            }
+                        let m = m.as_bytes();
+                        match self.qualified_method(&c, m) {
+                            Some(Ok((p, m))) => self.resolve_static_method(&p, m, for_call, true),
+                            Some(Err(e)) => self.throw("Error", &e),
+                            None => self.resolve_static_method(&c, m, for_call, true),
                         }
-                        self.resolve_static_method(&c, m, for_call, true)
                     }
                     _ => self.throw("Error", "Array callback must have exactly two elements"),
                 }
@@ -432,7 +429,7 @@ impl Vm {
                     Value::Object(o) => self.class_of(o).name.to_string_lossy(),
                     _ => return Ok(()),
                 };
-                if !(m.len() > 8 && m[..8].eq_ignore_ascii_case(b"parent::")) {
+                if find_double_colon(&m).is_none() {
                     return Ok(());
                 }
                 format!(
@@ -453,6 +450,49 @@ impl Vm {
             self.scope_ptr()
         };
         !p.is_null() && (r != "parent" || unsafe { (*p).parent.is_some() })
+    }
+
+    /// A class-qualified method in an array callable (`[$obj, "A::m"]`,
+    /// `["B", "parent::m"]`): the class the method is looked up in, which
+    /// must be `base` or one of its ancestors (observed on PHP 8.5: "class P
+    /// is not a subclass of B"). `None` when the name is not qualified.
+    pub(crate) fn qualified_method<'m>(
+        &mut self,
+        base: &Rc<Class>,
+        m: &'m [u8],
+    ) -> Option<Result<(Rc<Class>, &'m [u8]), String>> {
+        let p = find_double_colon(m)?;
+        let (cn, meth) = (&m[..p], &m[p + 2..]);
+        let l = crate::class::lower(cn);
+        let target = match l.as_bytes() {
+            b"parent" => match base.parent.clone() {
+                Some(c) => c,
+                None => return Some(Err("class has no parent".to_string())),
+            },
+            b"self" | b"static" => base.clone(),
+            _ => {
+                let saved = self.err.deferred.take();
+                let r = self.find_class(cn, true).ok().flatten();
+                self.err.deferred = saved;
+                match r {
+                    Some(c) => c,
+                    None => {
+                        return Some(Err(format!(
+                            "class \"{}\" not found",
+                            String::from_utf8_lossy(cn)
+                        )));
+                    }
+                }
+            }
+        };
+        if !base.is_subclass_of(&target) {
+            return Some(Err(format!(
+                "class {} is not a subclass of {}",
+                base.name.to_string_lossy(),
+                target.name.to_string_lossy()
+            )));
+        }
+        Some(Ok((target, meth)))
     }
 
     /// `$f()` takes class names literally: no self/parent/static and no
@@ -1042,10 +1082,18 @@ impl Vm {
                 match t {
                     Value::Object(o) => {
                         let cls = self.class_of(&o);
-                        method_reason(self, &cls, &m, true)
+                        match self.qualified_method(&cls, &m) {
+                            Some(Ok((c, mm))) => method_reason(self, &c, mm, true),
+                            Some(Err(e)) => e,
+                            None => method_reason(self, &cls, &m, true),
+                        }
                     }
                     Value::Str(cn) => match class_named(self, &cn) {
-                        Some(c) => method_reason(self, &c, &m, false),
+                        Some(c) => match self.qualified_method(&c, &m) {
+                            Some(Ok((q, mm))) => method_reason(self, &q, mm, false),
+                            Some(Err(e)) => e,
+                            None => method_reason(self, &c, &m, false),
+                        },
                         None => format!("class \"{}\" not found", cn.to_string_lossy()),
                     },
                     _ => "first array member is not a valid class name or object".to_string(),
