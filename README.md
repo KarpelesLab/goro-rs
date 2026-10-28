@@ -51,6 +51,14 @@ Fresh start. The previous code base is kept on the `old` branch for the
 record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
 
+php-src test suite (8.5.4), share of the tests that run: **70.3%** overall
+(Zend/tests 70.8%, tests/ 84.1%, ext 69.1%), as of 2026-10-28. Several
+extension libraries below are finished but not yet wired into the engine.
+
+- `goro-engine` and the `goro` binary: compiler and VM running PHP 8.5
+  scripts (classes, enums, closures, generators, fibers, attributes,
+  references, exceptions, output buffering, streams, SPL, Reflection,
+  serialization). Speed is currently 1.3–4.7x PHP's time on benchmarks.
 - `goro-runtime`: PHP values (16-byte `Value`, byte strings, copy-on-write
   ordered arrays, references, objects, destructor queue, cycle collector),
   conversions, comparisons and arithmetic, checked against PHP 8.5 output.
@@ -94,6 +102,15 @@ bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
   base-10⁸ limbs (Karatsuba, Knuth division) and puremp for large
   divisions and roots: faster than PHP on 20-digit operands and 4-500x
   faster at 10k-100k digits.
+- `goro-ext-gmp`: ext/gmp on puremp: every `gmp_*()` function (PHP's
+  integer-string parsing in bases 0/2-62, import/export word orders,
+  rounding modes, GMP's results for inexact `gmp_divexact()`, its
+  prime/probable-prime answers, its seeded `gmp_random_*` streams) and the
+  `GMP` class (operators, comparisons, casts, serialization, constructor),
+  with PHP's argument coercion, deprecations and error messages. Checked
+  against a 52.8k-case PHP 8.5 fixture. Single-limb fast paths
+  (Montgomery `powm`, Baillie-PSW, binary GCD) put small operations at or
+  below PHP's times; large operands run at 1.5-3.5x GMP's times.
 - `goro-ext-random`: ext/random on plain values: the Mt19937 (both
   modes), PcgOneseq128XslRr64, Xoshiro256StarStar and Secure engines with
   their seeding, jumps and serialized states, user engines through a trait,

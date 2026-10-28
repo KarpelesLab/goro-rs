@@ -6,3 +6,9 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+goro-runtime = { path = "../goro-runtime" }
+# OS entropy for the unseeded gmp_random_* state.
+goro-ext-random = { path = "../goro-ext-random" }
+# The maintainer's pure-Rust bignum crate: the integer arithmetic itself, and
+# GMP-compatible Mersenne Twister seeding for gmp_random_*.
+puremp = { version = "0.3.2", default-features = false, features = ["int", "std"] }

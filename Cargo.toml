@@ -16,6 +16,8 @@ members = [
     "crates/goro-ext-random",
     "crates/goro-ext-filter",
     "crates/goro-ext-gmp",
+    "crates/goro-ext-uri",
+    "crates/goro-ext-sodium",
 ]
 
 [workspace.package]
