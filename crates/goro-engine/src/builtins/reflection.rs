@@ -92,8 +92,8 @@ class ReflectionMethod extends ReflectionFunctionAbstract {
     public function isDestructor(): bool {}
     public function getClosure(?object $object = null): Closure {}
     public function getModifiers(): int {}
-    public function invoke(?object $object, mixed ...$args): mixed {}
-    public function invokeArgs(?object $object, array $args = []): mixed {}
+    public function invoke($object = null, mixed ...$args): mixed {}
+    public function invokeArgs($object = null, array $args = []): mixed {}
     public function getDeclaringClass(): ReflectionClass {}
     public function getPrototype(): ReflectionMethod {}
     public function hasPrototype(): bool {}
@@ -462,7 +462,7 @@ pub static MODULE: Module = Module {
         ("reflectionfunction::__construct", f_construct),
         ("reflectionfunction::__tostring", f_to_string),
         ("reflectionfunction::isanonymous", f_is_anon),
-        ("reflectionfunction::isdisabled", ret_false),
+        ("reflectionfunction::isdisabled", f_is_disabled),
         ("reflectionfunction::invoke", f_invoke),
         ("reflectionfunction::invokeargs", f_invoke_args),
         ("reflectionfunction::getclosure", f_get_closure),
@@ -483,7 +483,7 @@ pub static MODULE: Module = Module {
         ("reflectionmethod::getdeclaringclass", m_declaring),
         ("reflectionmethod::getprototype", m_prototype),
         ("reflectionmethod::hasprototype", m_has_prototype),
-        ("reflectionmethod::setaccessible", noop),
+        ("reflectionmethod::setaccessible", m_set_accessible),
         // classes
         ("reflectionclass::__construct", c_construct),
         ("reflectionobject::__construct", c_construct),
@@ -584,9 +584,9 @@ pub static MODULE: Module = Module {
         ("reflectionproperty::getmodifiers", p_modifiers),
         ("reflectionproperty::getdeclaringclass", p_declaring),
         ("reflectionproperty::getdoccomment", p_doc),
-        ("reflectionproperty::setaccessible", noop),
+        ("reflectionproperty::setaccessible", p_set_accessible),
         ("reflectionproperty::gettype", p_type),
-        ("reflectionproperty::getsettabletype", p_type),
+        ("reflectionproperty::getsettabletype", p_settable_type),
         ("reflectionproperty::hastype", p_has_type),
         ("reflectionproperty::hasdefaultvalue", p_has_default),
         ("reflectionproperty::getdefaultvalue", p_default),
@@ -910,6 +910,19 @@ macro_rules! need_class {
             }
         }
     };
+}
+
+fn f_is_disabled(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    vm.deprecated("Method ReflectionFunction::isDisabled() is deprecated since 8.0, as ReflectionFunction can no longer be constructed for disabled functions")?;
+    Ok(Value::Bool(false))
+}
+fn m_set_accessible(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    vm.deprecated("Method ReflectionMethod::setAccessible() is deprecated since 8.5, as it has no effect since PHP 8.1")?;
+    Ok(Value::Null)
+}
+fn p_set_accessible(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    vm.deprecated("Method ReflectionProperty::setAccessible() is deprecated since 8.5, as it has no effect since PHP 8.1")?;
+    Ok(Value::Null)
 }
 
 fn noop(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
@@ -1283,7 +1296,17 @@ fn fa_statics(vm: &mut Vm, a: &mut Args) -> R<Value> {
             Some(v) => v,
             None => {
                 // Not yet initialized: the initializer if constant.
-                Value::Null
+                code.ops
+                    .iter()
+                    .find_map(|op| match op {
+                        crate::bytecode::Op::StaticInit { index, src }
+                            if *index == idx && crate::bytecode::is_const(*src) =>
+                        {
+                            code.consts.get(crate::bytecode::slot_of(*src)).cloned()
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(Value::Null)
             }
         };
         out.insert(Key::Str(name), v);
@@ -1481,21 +1504,61 @@ fn render_value(vm: &mut Vm, v: &Value) -> String {
 /// Non-constant default source text, normalized the way Reflection shows
 /// expressions (`new \Foo()`).
 fn render_expr_text(t: &str) -> String {
-    let tt = t.trim();
-    if let Some(rest) = tt.strip_prefix("new ") {
-        let rest = rest.trim();
-        let (name, args) = match rest.find('(') {
-            Some(p) => (rest[..p].trim(), &rest[p..]),
-            None => (rest, "()"),
-        };
-        let name = if name.starts_with('\\') {
-            name.to_string()
-        } else {
-            format!("\\{}", name)
-        };
-        return format!("new {}{}", name, args);
+    let b = t.trim().as_bytes();
+    let mut out: Vec<u8> = Vec::new();
+    let mut i = 0;
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'\\' || c >= 0x80;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'\'' || c == b'"' {
+            let st = i;
+            i += 1;
+            while i < b.len() && b[i] != c {
+                if b[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i = (i + 1).min(b.len());
+            out.extend_from_slice(&b[st..i]);
+            continue;
+        }
+        let word_start = i == 0 || !ident(b[i - 1]);
+        if word_start
+            && b[i..].len() > 4
+            && b[i..i + 3].eq_ignore_ascii_case(b"new")
+            && b[i + 3].is_ascii_whitespace()
+        {
+            let mut j = i + 3;
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            let ns = j;
+            while j < b.len() && ident(b[j]) {
+                j += 1;
+            }
+            if j > ns {
+                let name = String::from_utf8_lossy(&b[ns..j]);
+                out.extend_from_slice(b"new ");
+                if !name.starts_with('\\') && !name.eq_ignore_ascii_case("class") {
+                    out.push(b'\\');
+                }
+                out.extend_from_slice(name.as_bytes());
+                let mut k = j;
+                while k < b.len() && b[k].is_ascii_whitespace() {
+                    k += 1;
+                }
+                if k >= b.len() || b[k] != b'(' {
+                    out.extend_from_slice(b"()");
+                }
+                i = j;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
     }
-    tt.to_string()
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn f_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1916,10 +1979,7 @@ fn visible_props(cls: &Rc<Class>) -> (Vec<PhpStr>, Vec<PhpStr>) {
         }
     }
     let mut stat: Vec<PhpStr> = Vec::new();
-    for sp in cls.static_props.borrow().iter() {
-        if sp.flags & mflags::PRIVATE != 0 && !std::ptr::eq(sp.class, cp) {
-            continue;
-        }
+    for sp in static_order(cls) {
         if !stat.contains(&sp.name) && !inst.contains(&sp.name) {
             stat.push(sp.name.clone());
         }
@@ -2241,6 +2301,25 @@ fn m_modifiers(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn m_callee(vm: &mut Vm, f: &Rc<Func>, cls: &Rc<Class>, obj: Value, fname: &str) -> R<Callee> {
+    // Observed on PHP 8.5: abstract methods are refused before the object
+    // argument is looked at.
+    if f.flags & mflags::ABSTRACT != 0 {
+        return refl_error(
+            vm,
+            &format!(
+                "Trying to invoke abstract method {}::{}()",
+                f.scope().map(|c| c.name.dname()).unwrap_or_default(),
+                f.name.dname()
+            ),
+        );
+    }
+    if !matches!(obj, Value::Null | Value::Object(_)) {
+        return vm.type_error(&format!(
+            "ReflectionMethod::{}(): Argument #1 ($object) must be of type ?object, {} given",
+            fname,
+            obj.tname()
+        ));
+    }
     if f.flags & mflags::STATIC != 0 {
         return Ok(Callee {
             func: f.clone(),
@@ -2250,6 +2329,16 @@ fn m_callee(vm: &mut Vm, f: &Rc<Func>, cls: &Rc<Class>, obj: Value, fname: &str)
             closure: None,
             magic_name: None,
         });
+    }
+    if obj.is_null() {
+        return refl_error(
+            vm,
+            &format!(
+                "Trying to invoke non static method {}::{}() without an object",
+                f.scope().map(|c| c.name.dname()).unwrap_or_default(),
+                f.name.dname()
+            ),
+        );
     }
     let Value::Object(o) = obj else {
         return vm.type_error(&format!(
@@ -2637,71 +2726,58 @@ fn prop_modifiers(flags: u32) -> i64 {
     m
 }
 
+/// Property names in getProperties() order: the class's own in
+/// declaration order (static ones included), then inherited instance and
+/// static properties (observed on PHP 8.5).
+fn prop_order(c: &Rc<Class>) -> Vec<PhpStr> {
+    let (inst, stat) = visible_props(c);
+    let cp = Rc::as_ptr(c);
+    let own = |n: &PhpStr| pinfo(c, n).is_some_and(|p| std::ptr::eq(p.class, cp));
+    let mut out: Vec<PhpStr> = Vec::new();
+    if let Some(d) = &c.decl {
+        for p in &d.props {
+            if (inst.contains(&p.name) || stat.contains(&p.name))
+                && own(&p.name)
+                && !out.contains(&p.name)
+            {
+                out.push(p.name.clone());
+            }
+        }
+    }
+    for n in inst.iter().chain(stat.iter()) {
+        if own(n) && !out.contains(n) {
+            out.push(n.clone());
+        }
+    }
+    for n in inst.iter().chain(stat.iter()) {
+        if !out.contains(n) {
+            out.push(n.clone());
+        }
+    }
+    out
+}
+
 fn c_props(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let filter = a.opt_int(0);
     let mut out = PhpArray::new();
-    let mut seen: Vec<PhpStr> = Vec::new();
-    // Own properties first, then inherited (PHP's order).
-    let props: Vec<_> = c
-        .props
-        .borrow()
-        .iter()
-        .filter(|p| p.flags & mflags::HIDDEN == 0)
-        .cloned()
-        .collect();
-    let cp = Rc::as_ptr(&c);
-    let mut ordered: Vec<_> = props
-        .iter()
-        .filter(|p| std::ptr::eq(p.class, cp))
-        .cloned()
-        .collect();
-    ordered.extend(
-        props
-            .iter()
-            .filter(|p| !std::ptr::eq(p.class, cp) && p.flags & mflags::PRIVATE == 0)
-            .cloned(),
-    );
-    for p in ordered {
-        if seen.contains(&p.name) {
-            continue;
+    for n in prop_order(&c) {
+        let Some(p) = pinfo(&c, &n) else { continue };
+        let mut m = prop_modifiers(p.flags);
+        if p.is_static {
+            m |= 16;
         }
         if let Some(fl) = filter
-            && prop_modifiers(p.flags) & fl == 0
+            && m & fl == 0
         {
             continue;
         }
-        seen.push(p.name.clone());
         let o = new_refl(
             vm,
             "ReflectionProperty",
             Refl::Prop {
                 cls: c.clone(),
-                name: p.name.clone(),
-                dynamic: false,
-            },
-        )?;
-        let _ = out.push(Value::Object(o));
-    }
-    let statics = c.static_props.borrow().clone();
-    for sp in statics {
-        if seen.contains(&sp.name)
-            || (sp.flags & mflags::PRIVATE != 0 && !std::ptr::eq(sp.class, cp))
-        {
-            continue;
-        }
-        if let Some(fl) = filter
-            && prop_modifiers(sp.flags) & fl == 0
-        {
-            continue;
-        }
-        seen.push(sp.name.clone());
-        let o = new_refl(
-            vm,
-            "ReflectionProperty",
-            Refl::Prop {
-                cls: c.clone(),
-                name: sp.name.clone(),
+                name: n,
                 dynamic: false,
             },
         )?;
@@ -2826,11 +2902,12 @@ fn c_refl_const(vm: &mut Vm, a: &mut Args) -> R<Value> {
 /// Interfaces in PHP's order (observed on PHP 8.5): the parent's, then
 /// those named in the declaration followed by the implicit ones
 /// (Stringable for `__toString()`, first for internal classes; UnitEnum and
-/// BackedEnum for enums), then the interfaces these extend.
+/// BackedEnum for enums), then for each of these, the interfaces it
+/// extends in reverse order.
 fn iface_order(c: &Rc<Class>) -> Vec<Rc<Class>> {
     let all = c.interfaces.borrow().clone();
     let mut out: Vec<Rc<Class>> = Vec::new();
-    let mut add = |out: &mut Vec<Rc<Class>>, i: &Rc<Class>| {
+    let add = |out: &mut Vec<Rc<Class>>, i: &Rc<Class>| {
         if !out.iter().any(|x| Rc::ptr_eq(x, i)) {
             out.push(i.clone());
         }
@@ -2847,13 +2924,13 @@ fn iface_order(c: &Rc<Class>) -> Vec<Rc<Class>> {
         }
     }
     let internal = c.has_flag(cflags::INTERNAL);
-    let stringable = find(b"stringable");
-    if internal && let Some(st) = &stringable {
-        add(&mut out, st);
+    let mut direct: Vec<Rc<Class>> = Vec::new();
+    if internal && let Some(st) = find(b"stringable") {
+        add(&mut direct, &st);
     }
     for n in c.direct_interfaces.borrow().iter() {
         if let Some(i) = find(n) {
-            add(&mut out, &i);
+            add(&mut direct, &i);
         }
     }
     let mut implicit: Vec<&[u8]> = Vec::new();
@@ -2866,7 +2943,15 @@ fn iface_order(c: &Rc<Class>) -> Vec<Rc<Class>> {
     }
     for n in implicit {
         if let Some(i) = find(n) {
-            add(&mut out, &i);
+            add(&mut direct, &i);
+        }
+    }
+    for i in &direct {
+        add(&mut out, i);
+    }
+    for i in &direct {
+        for k in iface_order(i).iter().rev() {
+            add(&mut out, k);
         }
     }
     for i in &all {
@@ -3101,17 +3186,39 @@ fn c_is_subclass(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = other_class(vm, &a.val(0))?;
     Ok(Value::Bool(!Rc::ptr_eq(&c, &o) && c.is_subclass_of(&o)))
 }
+/// The static properties of a class that are members: its own, then the
+/// parent's (recursively), without private ones of ancestors.
+fn static_order(c: &Rc<Class>) -> Vec<Rc<crate::class::StaticProp>> {
+    let cp = Rc::as_ptr(c);
+    let statics = c.static_props.borrow().clone();
+    let mut out: Vec<Rc<crate::class::StaticProp>> =
+        statics.iter().filter(|sp| std::ptr::eq(sp.class, cp)).cloned().collect();
+    if let Some(p) = &c.parent {
+        for sp in static_order(p) {
+            if sp.flags & mflags::PRIVATE == 0
+                && !out.iter().any(|x| x.name == sp.name)
+                && let Some(mine) = statics.iter().find(|x| x.name == sp.name)
+            {
+                out.push(mine.clone());
+            }
+        }
+    }
+    for sp in &statics {
+        if !std::ptr::eq(sp.class, cp)
+            && sp.flags & mflags::PRIVATE == 0
+            && !out.iter().any(|x| x.name == sp.name)
+        {
+            out.push(sp.clone());
+        }
+    }
+    out
+}
+
 /// Static properties visible in the class: its own first, then the
 /// non-private inherited ones (observed on PHP 8.5).
 fn static_members(vm: &mut Vm, c: &Rc<Class>, out: &mut PhpArray) -> R<()> {
     vm.ensure_statics(c)?;
-    let cp = Rc::as_ptr(c);
-    let statics = c.static_props.borrow().clone();
-    let own = statics.iter().filter(|sp| std::ptr::eq(sp.class, cp));
-    let inherited = statics
-        .iter()
-        .filter(|sp| !std::ptr::eq(sp.class, cp) && sp.flags & mflags::PRIVATE == 0);
-    for sp in own.chain(inherited) {
+    for sp in static_order(c) {
         let v = sp.cell.get();
         if !vm.is_uninit(&v) && out.get_str(&sp.name).is_none() {
             out.insert(Key::Str(sp.name.clone()), v);
@@ -3465,12 +3572,10 @@ fn p_get_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
         ));
     };
     if !vm.class_of(&o).is_subclass_of(&c) {
-        return vm.type_error(&format!(
-            "Cannot fetch property {}::${} of instance of {}",
-            c.name.dname(),
-            n.dname(),
-            vm.class_of(&o).name.dname()
-        ));
+        return refl_error(
+            vm,
+            "Given object is not an instance of the class this property was declared in",
+        );
     }
     let scope = info.map(|p| p.class).unwrap_or(Rc::as_ptr(&c));
     with_scope(vm, scope, |vm| vm.read_prop(&o, &n, false, None))
@@ -3626,7 +3731,8 @@ fn p_is_promoted(vm: &mut Vm, a: &mut Args) -> R<Value> {
     pflag(vm, a, mflags::PROMOTED)
 }
 fn p_is_final(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    pflag(vm, a, mflags::FINAL)
+    // private(set) implies final (PHP 8.4 asymmetric visibility RFC).
+    pflag(vm, a, mflags::FINAL | mflags::PRIVATE_SET)
 }
 fn p_modifiers(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, dynamic) = need_prop!(vm, a);
@@ -3670,6 +3776,28 @@ fn p_type(vm: &mut Vm, a: &mut Args) -> R<Value> {
         None => Ok(Value::Null),
     }
 }
+/// The type accepted on writes (PHP manual: getSettableType): `never` for
+/// virtual properties without a set hook, the set hook's parameter type,
+/// else the property type.
+fn p_settable_type(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (c, n, _) = need_prop!(vm, a);
+    let Some(p) = pinfo(&c, &n) else {
+        return Ok(Value::Null);
+    };
+    let set = hook_func(&c, &n, false);
+    let ty = match &set {
+        None if p.flags & mflags::VIRTUAL != 0 => Some(TypeHint {
+            mask: tmask::NEVER,
+            classes: Vec::new(),
+        }),
+        Some(h) => vm.params_of(h).first().and_then(|q| q.ty.clone()).or(p.ty.clone()),
+        None => p.ty.clone(),
+    };
+    match ty {
+        Some(t) => Ok(Value::Object(new_type(vm, t, p.class)?)),
+        None => Ok(Value::Null),
+    }
+}
 fn p_has_type(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, _) = need_prop!(vm, a);
     Ok(Value::Bool(pinfo(&c, &n).is_some_and(|p| p.ty.is_some())))
@@ -3692,7 +3820,12 @@ fn p_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let p = pinfo(&c, &n).unwrap();
     match p.default {
         Some(ce) => vm.eval_const_expr(&ce, p.class),
-        None => Ok(Value::Null),
+        None => {
+            if p.ty.is_some() || p.flags & mflags::VIRTUAL != 0 {
+                vm.deprecated("ReflectionProperty::getDefaultValue() for a property without a default value is deprecated, use ReflectionProperty::hasDefaultValue() to check if the default value exists")?;
+            }
+            Ok(Value::Null)
+        }
     }
 }
 fn p_attrs(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -3986,7 +4119,10 @@ fn par_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
         _ => {
             return refl_error(
                 vm,
-                "The parameter class is expected to be either a string, an array(class, method) or a callable object",
+                &format!(
+                    "ReflectionParameter::__construct(): Argument #1 ($function) must be a string, an array(class, method), or a callable object, {} given",
+                    a.val(0).tname()
+                ),
             );
         }
     };
@@ -4035,8 +4171,10 @@ fn par_by_ref(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Bool(p.by_ref))
 }
 fn par_by_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let (_, _, _, p) = need_param!(vm, a);
-    Ok(Value::Bool(!p.by_ref))
+    let (f, _, _, p) = need_param!(vm, a);
+    // "Prefer reference" parameters take values too (array_multisort()).
+    let prefer = f.is_native() && matches!(f.lname.as_bytes(), b"array_multisort" | b"extract");
+    Ok(Value::Bool(!p.by_ref || prefer))
 }
 fn par_func(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, c, _, _) = need_param!(vm, a);
@@ -4075,7 +4213,7 @@ fn par_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn par_get_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
     vm.deprecated("Method ReflectionParameter::getClass() is deprecated since 8.0, use ReflectionParameter::getType() instead")?;
-    let (f, _, _, p) = need_param!(vm, a);
+    let (f, cl, _, p) = need_param!(vm, a);
     let Some(t) = &p.ty else {
         return Ok(Value::Null);
     };
@@ -4084,9 +4222,31 @@ fn par_get_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     let n = t.classes[0][0].clone();
     let ln = lower(&n);
+    // A closure's scope is the one it is bound to.
+    let scope: *const Class = match &cl {
+        Some(c) => closure_cd(c, |d| d.scope).unwrap_or(std::ptr::null()),
+        None => f.scope.get(),
+    };
     let c = match ln.as_bytes() {
-        b"self" => Some(vm.rc_class(f.scope.get())),
-        b"parent" => f.scope().and_then(|c| c.parent.clone()),
+        b"self" | b"parent" if scope.is_null() => {
+            return refl_error(
+                vm,
+                &format!(
+                    "Parameter uses \"{}\" as type but function is not a class member",
+                    ln.to_string_lossy()
+                ),
+            );
+        }
+        b"self" => Some(vm.rc_class(scope)),
+        b"parent" => match vm.rc_class(scope).parent.clone() {
+            Some(p) => Some(p),
+            None => {
+                return refl_error(
+                    vm,
+                    "Parameter uses \"parent\" as type although class does not have a parent",
+                );
+            }
+        },
         _ => vm.find_class(&n, true)?,
     };
     match c {

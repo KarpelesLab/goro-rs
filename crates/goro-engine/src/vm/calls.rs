@@ -1645,9 +1645,10 @@ impl Vm {
                 );
             }
             if args[i].is_null() && !ty.allows_null() {
+                // Unions with classes too (observed on PHP 8.5:
+                // ReflectionClass|string takes "" with a deprecation).
                 let scalar = ty.mask & (tmask::BOOL | tmask::INT | tmask::FLOAT | tmask::STRING)
-                    != 0
-                    && ty.classes.is_empty();
+                    != 0;
                 if scalar && !strict {
                     self.deprecated(&format!(
                         "{}(): Passing null to parameter #{} (${}) of type {} is deprecated",
