@@ -409,6 +409,14 @@ impl Vm {
             }
             if depth == entry {
                 self.pop_frame();
+                // Destructors of the frame's objects may throw too (test
+                // Zend/tests/ex_func_null_during_property_write.phpt).
+                if goro_runtime::object::has_pending_destructors()
+                    && let Err(Unwind::Throw(e2)) = self.run_pending_destructors()
+                {
+                    self.chain_previous(&e2, ex);
+                    return Err(Unwind::Throw(e2));
+                }
                 return Err(Unwind::Throw(ex));
             }
             self.pop_frame();
@@ -1095,7 +1103,18 @@ pub fn trace_arg(v: &Value) -> String {
             format!("'{}{}'", trace_escape(head), more)
         }
         Value::Array(_) => "Array".into(),
-        Value::Object(o) => format!("Object({})", o.class_name().to_string_lossy()),
+        Value::Object(o) => {
+            // Enum cases show as Foo::Bar (test Zend/tests/enum/enum_in_stack_trace.phpt).
+            let c: &Rc<dyn goro_runtime::ClassInfo> = o.class();
+            let any: &dyn std::any::Any = &**c;
+            if let Some(cls) = any.downcast_ref::<crate::class::Class>()
+                && cls.kind == crate::class::ClassKind::Enum
+                && let Some(Value::Str(n)) = o.obj().slots.borrow().first().map(|v| v.deref())
+            {
+                return format!("{}::{}", cls.name.dname(), n.to_string_lossy());
+            }
+            format!("Object({})", o.class_name().to_string_lossy())
+        }
         Value::Resource(r) => format!("Resource id #{}", r.id()),
         Value::Ref(r) => trace_arg(&r.get()),
     }

@@ -317,10 +317,19 @@ impl Vm {
         }
         // Destructors: objects held by global variables first (in order),
         // then everything else still alive (creation order).
+        // An exception escaping a destructor at shutdown ends the calls of
+        // the remaining destructors (observed on PHP 8.5).
         let r = self.destroy_globals();
+        let mut stop = matches!(r, Err(Unwind::Throw(_)));
         self.handle_unwind(r);
         let r = self.run_pending_destructors();
+        stop |= matches!(r, Err(Unwind::Throw(_)));
         self.handle_unwind(r);
+        if stop {
+            for o in goro_runtime::object::live_objects() {
+                o.mark_destructor_called();
+            }
+        }
         if self.exit_status != 255 || true {
             for o in goro_runtime::object::live_objects() {
                 if o.needs_destructor() {
@@ -329,7 +338,14 @@ impl Vm {
                     if matches!(r, Err(Unwind::Exit)) {
                         break;
                     }
+                    let thrown = matches!(r, Err(Unwind::Throw(_)));
                     self.handle_unwind(r);
+                    if thrown {
+                        for o in goro_runtime::object::live_objects() {
+                            o.mark_destructor_called();
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -343,19 +359,46 @@ impl Vm {
     }
 
     fn destroy_globals(&mut self) -> R<()> {
-        // PHP destroys the global symbol table in order, running
-        // destructors of objects whose last reference goes away.
-        let n = self.globals.slots.len();
-        for i in 0..n {
-            let v = self.globals.slots[i].take();
-            drop(v);
-            self.run_pending_destructors()?;
+        // Global variables holding the only handle to an object are
+        // released last-declared first, repeatedly while that frees more
+        // (observed on PHP 8.5: `$a, $b, $c` objects destruct as c, b, a);
+        // the remaining objects then destruct in creation order.
+        fn sole_object(v: &Value) -> bool {
+            match v {
+                Value::Object(o) => o.refcount() == 1,
+                Value::Ref(r) if r.refcount() == 1 => {
+                    matches!(r.get(), Value::Object(o) if o.refcount() == 2)
+                }
+                _ => false,
+            }
         }
-        let dv = std::mem::take(&mut self.globals.dyn_vars);
-        for (_, v) in dv.iter() {
-            let _ = v;
+        loop {
+            let mut changed = false;
+            let keys: Vec<goro_runtime::Key> = self
+                .globals
+                .dyn_vars
+                .iter()
+                .filter(|(_, v)| sole_object(v))
+                .map(|(k, _)| k.to_owned())
+                .collect();
+            for k in keys.into_iter().rev() {
+                let v = self.globals.dyn_vars.remove(k.as_ref());
+                drop(v);
+                changed = true;
+                self.run_pending_destructors()?;
+            }
+            for i in (0..self.globals.slots.len()).rev() {
+                if self.globals.slots[i].as_ref().is_some_and(sole_object) {
+                    let v = self.globals.slots[i].take();
+                    drop(v);
+                    changed = true;
+                    self.run_pending_destructors()?;
+                }
+            }
+            if !changed {
+                break;
+            }
         }
-        drop(dv);
         self.run_pending_destructors()?;
         Ok(())
     }
