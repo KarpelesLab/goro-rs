@@ -8,6 +8,7 @@ pub mod enums;
 pub mod math;
 pub mod output;
 pub mod string;
+pub mod strmisc;
 pub mod var;
 
 use crate::registry::Module;
@@ -20,6 +21,7 @@ pub fn modules() -> Vec<&'static Module> {
         &var::MODULE,
         &output::MODULE,
         &string::MODULE,
+        &strmisc::MODULE,
         &array::MODULE,
         &math::MODULE,
     ]
