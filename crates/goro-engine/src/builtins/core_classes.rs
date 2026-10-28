@@ -474,12 +474,24 @@ fn clone_closure_data(o: &ObjRef, c: Callee) -> ClosureData {
 fn closure_debug(vm: &mut Vm, o: &ObjRef) -> Option<PhpArray> {
     let c = vm.closure_data(o)?;
     let mut a = PhpArray::new();
-    let fname = match c.func.code() {
-        Some(code) if code.flags & crate::bytecode::fflags::CLOSURE != 0 => code.name.clone(),
-        _ => PhpStr::from(c.func.display_name()),
-    };
-    a.insert(Key::from("name"), Value::Str(fname));
-    if let Some(code) = c.func.code() {
+    let real = c
+        .func
+        .code()
+        .is_some_and(|code| code.flags & crate::bytecode::fflags::CLOSURE != 0);
+    if !real {
+        // Closures of functions and methods: "function", no location
+        // (observed on PHP 8.5; tests Zend/tests/first_class_callable/*).
+        a.insert(
+            Key::from("function"),
+            Value::Str(PhpStr::from(c.func.display_name())),
+        );
+    } else {
+        a.insert(
+            Key::from("name"),
+            Value::Str(c.func.code().unwrap().name.clone()),
+        );
+    }
+    if let Some(code) = c.func.code().filter(|_| real) {
         a.insert(Key::from("file"), Value::Str(code.file.clone()));
         a.insert(Key::from("line"), Value::Int(code.line_start as i64));
         let n = o.obj().native.borrow();
@@ -492,8 +504,33 @@ fn closure_debug(vm: &mut Vm, o: &ObjRef) -> Option<PhpArray> {
                 st.insert(Key::Str(name), v.clone());
             }
         }
-        for (i, s) in cd.statics.borrow().iter().enumerate() {
-            let _ = (i, s);
+        // Static variables, with their initial value before the first call
+        // (observed on PHP 8.5).
+        for op in &code.ops {
+            if let crate::bytecode::Op::BindStatic { var, index, .. } = op {
+                let name = code
+                    .cv_names
+                    .get(*var as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                let cell = cd.statics.borrow().get(*index as usize).cloned().flatten();
+                let v = match cell {
+                    Some(r) => r.get(),
+                    None => code
+                        .ops
+                        .iter()
+                        .find_map(|op| match op {
+                            crate::bytecode::Op::StaticInit { index: i, src }
+                                if i == index && crate::bytecode::is_const(*src) =>
+                            {
+                                code.consts.get(crate::bytecode::slot_of(*src)).cloned()
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(Value::Null),
+                };
+                st.insert(Key::Str(name), v);
+            }
         }
         if !st.is_empty() {
             a.insert(Key::from("static"), Value::Array(st));
@@ -509,9 +546,6 @@ fn closure_debug(vm: &mut Vm, o: &ObjRef) -> Option<PhpArray> {
             let mut k = String::new();
             if pi.by_ref {
                 k.push('&');
-            }
-            if pi.variadic {
-                k.push_str("...");
             }
             k.push('$');
             k.push_str(&pi.name.dname());

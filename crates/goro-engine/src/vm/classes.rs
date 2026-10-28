@@ -681,21 +681,40 @@ impl Vm {
         Ok(Some(cls))
     }
 
+    /// #[\Override] on methods and properties: something above must
+    /// declare them (RFC: Marking overridden methods; PHP 8.5 for
+    /// properties; tests Zend/tests/attributes/override/*). Trait members
+    /// are checked in the classes using them.
     fn check_override_attrs(&mut self, cls: &Rc<Class>, decl: &ClassDecl) -> R<()> {
-        for m in &decl.methods {
-            if !m
-                .code
-                .attrs
-                .iter()
-                .any(|a| a.name.eq_ignore_ascii_case(b"Override"))
-            {
-                continue;
-            }
-            let ln = lower(&m.code.name);
+        if decl.kind == ClassKind::Trait {
+            return Ok(());
+        }
+        let cp = Rc::as_ptr(cls);
+        let has_override = |attrs: &[AttrInfo]| {
+            attrs.iter().any(|a| {
+                a.name
+                    .strip_prefix(b"\\")
+                    .unwrap_or(&a.name)
+                    .eq_ignore_ascii_case(b"Override")
+            })
+        };
+        let mut methods: Vec<Rc<Func>> = cls
+            .methods
+            .borrow()
+            .values()
+            .filter(|m| std::ptr::eq(m.scope.get(), cp))
+            .filter(|m| m.code().is_some_and(|c| has_override(&c.attrs)))
+            .cloned()
+            .collect();
+        methods.sort_by_key(|m| m.code().map(|c| c.line_start).unwrap_or(0));
+        for m in methods {
+            let ln = m.lname.clone();
+            let is_ctor = ln.as_bytes() == b"__construct";
             let mut found = false;
             if let Some(p) = &cls.parent
                 && let Some(pm) = p.find_method_str(&ln)
                 && pm.flags & mflags::PRIVATE == 0
+                && (!is_ctor || pm.flags & mflags::ABSTRACT != 0)
             {
                 found = true;
             }
@@ -704,13 +723,79 @@ impl Vm {
                     found = true;
                 }
             }
+            // An abstract method of a used trait (test override/016).
+            for t in cls.traits.borrow().iter() {
+                if t.find_method_str(&ln)
+                    .is_some_and(|tm| tm.flags & mflags::ABSTRACT != 0)
+                {
+                    found = true;
+                }
+            }
             if !found {
                 let msg = format!(
                     "{}::{}() has #[\\Override] attribute, but no matching parent method exists",
                     cls.name.dname(),
-                    m.code.name.dname()
+                    m.name.dname()
                 );
-                return Err(self.fatal_at(&msg, &decl.file, m.code.line_start));
+                let line = m.code().map(|c| c.line_start).unwrap_or(decl.line_start);
+                return Err(self.fatal_at(&msg, &decl.file, line));
+            }
+        }
+        let statics: Vec<PhpStr> = cls
+            .static_props
+            .borrow()
+            .iter()
+            .filter(|p| std::ptr::eq(p.class, cp) && has_override(&p.attrs))
+            .map(|p| p.name.clone())
+            .collect();
+        for n in statics {
+            let found = cls.parent.as_ref().is_some_and(|par| {
+                par.find_static(&n)
+                    .is_some_and(|sp| sp.flags & mflags::PRIVATE == 0)
+            });
+            if !found {
+                let msg = format!(
+                    "{}::${} has #[\\Override] attribute, but no matching parent property exists",
+                    cls.name.dname(),
+                    n.dname()
+                );
+                return Err(self.fatal_at(&msg, &decl.file, decl.line_start));
+            }
+        }
+        let props: Vec<Rc<PropInfo>> = cls
+            .props
+            .borrow()
+            .iter()
+            .filter(|p| std::ptr::eq(p.class, cp) && has_override(&p.attrs))
+            .cloned()
+            .collect();
+        for p in props {
+            let mut found = false;
+            if let Some(par) = &cls.parent
+                && let Some(idx) = par.prop_map.borrow().get(&p.name).map(|v| v[0])
+                && par.props.borrow()[idx as usize].flags & mflags::PRIVATE == 0
+            {
+                found = true;
+            }
+            if let Some(par) = &cls.parent
+                && par
+                    .find_static(&p.name)
+                    .is_some_and(|sp| sp.flags & mflags::PRIVATE == 0)
+            {
+                found = true;
+            }
+            for i in cls.interfaces.borrow().iter() {
+                if i.prop_map.borrow().contains_key(&p.name) {
+                    found = true;
+                }
+            }
+            if !found {
+                let msg = format!(
+                    "{}::${} has #[\\Override] attribute, but no matching parent property exists",
+                    cls.name.dname(),
+                    p.name.dname()
+                );
+                return Err(self.fatal_at(&msg, &decl.file, decl.line_start));
             }
         }
         Ok(())
