@@ -11,7 +11,10 @@
 
 pub mod civil;
 pub mod format;
+pub mod from_format;
+pub mod interval;
 pub mod parse;
+pub mod period;
 pub mod resolve;
 pub mod sun;
 pub mod time;

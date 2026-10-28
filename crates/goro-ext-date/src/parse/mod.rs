@@ -184,6 +184,15 @@ impl Parsed {
         }
     }
 
+    /// A result holding only a relative part (for intervals made by
+    /// `DateInterval::createFromDateString()`).
+    pub fn from_relative(r: Relative) -> Parsed {
+        Parsed {
+            relative: Some(r),
+            ..Default::default()
+        }
+    }
+
     /// Whether the string is an "@timestamp" with no time given after it
     /// (`modify()` then switches to its UTC offset).
     pub fn timestamp_only(&self) -> bool {
