@@ -55,8 +55,8 @@ bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
   ordered arrays, references, objects, destructor queue, cycle collector),
   conversions, comparisons and arithmetic, checked against PHP 8.5 output.
 - `goro-phpt`: the `.phpt` runner behind `goro --test` (all test sections).
-- `goro-ext-standard`: printf family, string, math, random (`mt_rand`),
-  sorting, HTML entities (WHATWG table), URL and encoding functions.
+- `goro-ext-standard`: printf family, string, math, sorting, HTML
+  entities (WHATWG table), URL and encoding functions.
 - `goro-ext-date`: date/time library with tzdata 2026e compiled from the
   IANA database: parsing (`strtotime`, `DateTime::createFromFormat`),
   formatting, intervals, periods and sunrise/sunset, checked on ~33k PHP 8.5
@@ -86,6 +86,14 @@ bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
   and enums through an engine hook trait. Checked against a 33.7k-line
   PHP 8.5 fixture; 1.25-7.6x PHP's throughput on multi-MB documents
   (iterative, so nesting depth is bounded by `$depth` only).
+- `goro-ext-random`: ext/random on plain values: the Mt19937 (both
+  modes), PcgOneseq128XslRr64, Xoshiro256StarStar and Secure engines with
+  their seeding, jumps and serialized states, user engines through a trait,
+  every `Random\Randomizer` method (γ-section `getFloat()` included), and
+  `mt_rand`/`rand`/`shuffle`/`str_shuffle`/`array_rand`/`random_int`/
+  `random_bytes`/`lcg_value`. Seeded sequences, randomness consumption and
+  error messages match PHP 8.5 on ~6.5k fixture cases; library-level
+  times are below PHP 8.5's (`examples/random_bench.rs`).
 - `goro-ext-zlib`: the zlib extension on bytes: `gz*`/`zlib_*` one-shot
   functions with PHP's buffer rounds and warnings, `deflate_*`/`inflate_*`
   contexts (flush modes, dictionaries, statuses), the gzip file layer under

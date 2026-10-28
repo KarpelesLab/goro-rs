@@ -8,7 +8,11 @@ pub mod error;
 pub mod float;
 pub mod html;
 pub mod math;
-pub mod mt_rand;
+/// `mt_rand()` and friends live in goro-ext-random; re-exported here for
+/// the string and array functions that draw from the global generator.
+pub mod mt_rand {
+    pub use goro_ext_random::mt19937::*;
+}
 pub mod natcmp;
 pub mod phonetic;
 pub mod printf;
