@@ -298,7 +298,7 @@ fn exception_create(vm: &mut Vm, o: &ObjRef) {
     let file = vm.cur_file();
     let line = vm.cur_line();
     let ignore_args = vm.ini_bool(b"zend.exception_ignore_args", false);
-    let frames = vm.backtrace(!ignore_args);
+    let frames = vm.backtrace_sealed(!ignore_args);
     let trace = vm.trace_array(&frames, false);
     vm.set_prop_raw(o, b"file", Value::Str(file));
     vm.set_prop_raw(o, b"line", Value::Int(line as i64));

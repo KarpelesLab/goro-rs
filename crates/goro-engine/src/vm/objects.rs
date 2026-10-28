@@ -2178,6 +2178,12 @@ impl Vm {
             }
             c = k.parent.as_deref();
         }
+        // A clone hook refusing the copy leaves its error deferred.
+        if self.err.defer_depth == 0
+            && let Some(e) = self.err.deferred.take()
+        {
+            return Err(e);
+        }
         if let Some(f) = cl {
             self.cloning.push(n.handle());
             let r = self.call_func_this(&f, Some(n.clone()), Vec::new());

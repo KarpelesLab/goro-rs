@@ -1025,7 +1025,11 @@ impl Vm {
         }
         // Undeclared properties keep their (mangled) names, as string keys
         // (observed on PHP 8.5: "\0*\0x" stays protected; bug55798).
-        let pkey = if owner.is_some() { name.clone() } else { bare.clone() };
+        let pkey = if owner.is_some() {
+            name.clone()
+        } else {
+            bare.clone()
+        };
         let exists = o.obj().props.borrow().get_str(&pkey).is_some();
         if !exists
             && !cls.has_flag(cflags::ALLOW_DYNAMIC)

@@ -494,7 +494,10 @@ fn mt_rand(vm: &mut Vm, a: &mut Args) -> R<Value> {
         _ => {
             let (lo, hi) = (a.int(0), a.int(1));
             let r = mt(vm).mt_rand_range(lo, hi);
-            Ok(Value::Int(sr(vm, r)?))
+            match r {
+                Ok(v) => Ok(Value::Int(v)),
+                Err(e) => Err(random_err(vm, e)),
+            }
         }
     }
 }
@@ -569,4 +572,23 @@ fn lcg_value(vm: &mut Vm, _a: &mut Args) -> R<Value> {
             return Ok(Value::Float(r));
         }
     }
+}
+
+/// A goro-ext-random error as the PHP exception it names.
+pub(crate) fn random_err(vm: &mut Vm, e: goro_ext_random::RandomError) -> crate::vm::Unwind {
+    use goro_ext_random::RandomError as E;
+    let (cls, m) = match e {
+        E::ValueError(m) => ("ValueError", m),
+        E::BrokenEngine(m) => ("Random\\BrokenRandomEngineError", m.to_string()),
+        E::RandomException(m) => ("Random\\RandomException", m),
+        E::Exception(m) => ("Exception", m),
+        E::Propagate => {
+            return vm
+                .err
+                .deferred
+                .take()
+                .unwrap_or_else(|| vm.throw_error_msg("Error", "random engine failure"));
+        }
+    };
+    vm.throw_error_msg(cls, &m)
 }

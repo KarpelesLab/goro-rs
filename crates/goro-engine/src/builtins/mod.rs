@@ -7,9 +7,10 @@ pub mod core_funcs;
 pub mod ctype;
 pub mod enums;
 pub mod exec;
-pub mod highlight;
 pub mod fiber;
 pub mod file;
+pub mod hash;
+pub mod highlight;
 pub mod info;
 mod info_text;
 pub mod ini;
@@ -38,6 +39,7 @@ pub fn modules() -> Vec<&'static Module> {
         &core_classes::MODULE,
         &var::MODULE,
         &output::MODULE,
+        &hash::MODULE,
         &info::MODULE,
         &fiber::MODULE,
         &file::MODULE,

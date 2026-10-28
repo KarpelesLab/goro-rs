@@ -49,6 +49,18 @@ pub struct TraceFrame {
     pub call_type: &'static str,
     pub object: Option<ObjRef>,
     pub args: Option<Vec<Value>>,
+    /// Positions in `args` of #[\SensitiveParameter] parameters (shown
+    /// as SensitiveParameterValue objects).
+    pub sensitive: Vec<u32>,
+}
+
+fn is_sensitive(p: &crate::bytecode::ParamInfo) -> bool {
+    p.attrs.iter().any(|a| {
+        a.name
+            .strip_prefix(b"\\")
+            .unwrap_or(&a.name)
+            .eq_ignore_ascii_case(b"SensitiveParameter")
+    })
 }
 
 impl Vm {
@@ -548,11 +560,25 @@ impl Vm {
             (Some(f.code().file.clone()), nc.line)
         };
         let scope = nc.func.scope();
-        let args = if with_args {
+        let args: Option<Vec<Value>> = if with_args {
             Some(unsafe { (*nc.args).iter().map(|v| v.deref()).collect() })
         } else {
             None
         };
+        let mut sensitive = Vec::new();
+        if let (Some(args), crate::func::FuncKind::Native { info, .. }) = (&args, &nc.func.kind)
+            && let Some(sig) = info.get()
+        {
+            for k in 0..args.len() {
+                let p = sig
+                    .params
+                    .get(k)
+                    .or_else(|| sig.params.last().filter(|p| p.variadic));
+                if p.is_some_and(is_sensitive) {
+                    sensitive.push(k as u32);
+                }
+            }
+        }
         TraceFrame {
             file,
             line,
@@ -565,6 +591,7 @@ impl Vm {
             },
             object: nc.this.clone(),
             args,
+            sensitive,
         }
     }
 
@@ -641,6 +668,7 @@ impl Vm {
                     call_type: "",
                     object: None,
                     args,
+                    sensitive: Vec::new(),
                 });
                 continue;
             }
@@ -675,6 +703,7 @@ impl Vm {
                 call_type: "",
                 object: None,
                 args: with_args.then(Vec::new),
+                sensitive: Vec::new(),
             });
         }
         // Helpers of internal classes written in PHP are not shown.
@@ -697,19 +726,27 @@ impl Vm {
         } else {
             ""
         };
+        let mut sensitive = Vec::new();
         let args = if with_args {
             let np = code.params.len();
             let mut v = Vec::new();
             let argc = f.argc as usize;
             for k in 0..argc.min(np) {
                 let x = unsafe { (*f.base.add(k)).as_ref() }.map(|x| x.deref());
+                let sens = is_sensitive(&code.params[k]);
                 if code.params[k].variadic {
                     if let Some(Value::Array(a)) = x {
                         for (_, y) in a.iter() {
+                            if sens {
+                                sensitive.push(v.len() as u32);
+                            }
                             v.push(y.deref());
                         }
                     }
                     continue;
+                }
+                if sens {
+                    sensitive.push(v.len() as u32);
                 }
                 v.push(x.unwrap_or_default());
             }
@@ -733,7 +770,36 @@ impl Vm {
             call_type,
             object: f.this.clone(),
             args,
+            sensitive,
         })
+    }
+
+    /// The call stack with #[\SensitiveParameter] arguments wrapped in
+    /// SensitiveParameterValue objects (PHP manual: SensitiveParameter;
+    /// RFC: Redacting parameters in back traces).
+    pub fn backtrace_sealed(&mut self, with_args: bool) -> Vec<TraceFrame> {
+        let mut frames = self.backtrace(with_args);
+        if frames.iter().all(|f| f.sensitive.is_empty()) {
+            return frames;
+        }
+        let Ok(Some(cls)) = self.find_class(b"SensitiveParameterValue", false) else {
+            return frames;
+        };
+        for f in frames.iter_mut() {
+            let idx = std::mem::take(&mut f.sensitive);
+            if let Some(args) = &mut f.args {
+                for i in idx {
+                    if let Some(slot) = args.get_mut(i as usize) {
+                        let v = std::mem::take(slot);
+                        if let Ok(o) = self.instantiate_raw(&cls) {
+                            self.set_prop_raw(&o, b"value", v);
+                            *slot = Value::Object(o);
+                        }
+                    }
+                }
+            }
+        }
+        frames
     }
 
     /// The trace as the array stored in exceptions / returned by

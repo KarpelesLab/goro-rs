@@ -1703,7 +1703,7 @@ fn error_clear_last(vm: &mut Vm, _a: &mut Args) -> R<Value> {
 fn debug_backtrace(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let opts = a.int_or(0, 1);
     let limit = a.int_or(1, 0);
-    let mut frames = vm.backtrace(opts & 2 == 0);
+    let mut frames = vm.backtrace_sealed(opts & 2 == 0);
     // The debug_backtrace() call itself is not part of the trace.
     if !frames.is_empty() {
         frames.remove(0);
@@ -1717,7 +1717,7 @@ fn debug_backtrace(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn debug_print_backtrace(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let opts = a.int_or(0, 0);
     let limit = a.int_or(1, 0);
-    let mut frames = vm.backtrace(opts & 2 == 0);
+    let mut frames = vm.backtrace_sealed(opts & 2 == 0);
     if !frames.is_empty() {
         frames.remove(0);
     }
