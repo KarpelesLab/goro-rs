@@ -151,6 +151,10 @@ impl Frame {
 }
 
 /// A call being prepared (between `Init*` and `DoCall`).
+///
+/// The call path writes and pops these field by field (`push_callee`,
+/// `activate`, `take_native_pending` in calls.rs): a new owning field must
+/// be handled there too.
 pub struct Pending {
     pub func: Rc<Func>,
     /// User functions: the callee's slots.
@@ -191,6 +195,9 @@ pub mod pending_flags {
     pub const MAGIC_STATIC: u32 = 8;
     /// Callable through a Closure created from a callable string/array.
     pub const VIA_CLOSURE: u32 = 16;
+    /// A user function that needs the general activation (attributes to
+    /// act on, abstract, generator, variadic, internal class code).
+    pub const SLOW: u32 = 32;
 }
 
 /// A native call in progress (for backtraces).

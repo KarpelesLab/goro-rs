@@ -138,8 +138,17 @@ impl Vm {
     // ------------------------------------------------------------ pending calls
 
     pub(crate) fn push_callee(&mut self, c: Callee, flags: u32) {
+        let mut fl = flags;
         let (base, mark, args, byref, np) = match &c.func.kind {
             FuncKind::User(code) if c.magic_name.is_none() => {
+                const SLOW: u32 = fflags::DEPRECATED
+                    | fflags::ABSTRACT
+                    | fflags::NODISCARD
+                    | fflags::GENERATOR
+                    | fflags::VARIADIC;
+                if code.flags & SLOW != 0 || code.file.is_empty() {
+                    fl |= pending_flags::SLOW;
+                }
                 let (b, m) = self.ex.stack.alloc(code.num_slots as usize);
                 (b, m, Vec::new(), code.byref_mask, code.direct_params)
             }
@@ -195,7 +204,6 @@ impl Vm {
             },
             None => &c.func.statics as *const _,
         };
-        let mut fl = flags;
         if c.magic_name.is_some() {
             fl |= pending_flags::MAGIC_CALL;
         }
@@ -1848,23 +1856,29 @@ impl Vm {
     /// Pops the pending (native) call on top, without moving it whole.
     #[inline]
     fn take_native_pending(&mut self) -> NativeParts {
-        let p = self.ex.pending.last_mut().unwrap();
-        let parts = NativeParts {
-            func: p.func.clone(),
-            args: std::mem::take(&mut p.args),
-            named: p.named_extra.take(),
-            this: p.this.take(),
-            static_class: p.static_class,
-            passed: p.passed,
-            has_named: p.has_named,
-        };
-        let extra = std::mem::take(&mut p.extra);
         let len = self.ex.pending.len();
-        self.ex.pending.truncate(len - 1);
-        if extra.capacity() != 0 {
-            self.give_args_vec(extra);
+        // SAFETY: the entry on top is read out field by field and then
+        // forgotten: every owning field is moved out or dropped here.
+        unsafe {
+            let p = self.ex.pending.as_mut_ptr().add(len - 1);
+            self.ex.pending.set_len(len - 1);
+            let parts = NativeParts {
+                func: std::ptr::read(&(*p).func),
+                args: std::ptr::read(&(*p).args),
+                named: std::ptr::read(&(*p).named_extra),
+                this: std::ptr::read(&(*p).this),
+                static_class: (*p).static_class,
+                passed: (*p).passed,
+                has_named: (*p).has_named,
+            };
+            drop(std::ptr::read(&(*p).closure));
+            drop(std::ptr::read(&(*p).magic_name));
+            let extra = std::ptr::read(&(*p).extra);
+            if extra.capacity() != 0 {
+                self.give_args_vec(extra);
+            }
+            parts
         }
-        parts
     }
 
     fn call_native_parts(&mut self, parts: NativeParts, dynamic: bool) -> R<Value> {
@@ -2237,11 +2251,6 @@ impl Vm {
     /// attributes to act on) builds the frame in place; anything else goes
     /// through [`activate_slow`](Self::activate_slow).
     pub(crate) fn activate(&mut self, ret: *mut Slot, ret_var: bool, entry: bool) -> R<()> {
-        const SLOW: u32 = fflags::DEPRECATED
-            | fflags::ABSTRACT
-            | fflags::NODISCARD
-            | fflags::GENERATOR
-            | fflags::VARIADIC;
         let len = self.ex.pending.len();
         // SAFETY: there is a pending call on top; it stays there (and keeps
         // the function and its code alive) until truncated below.
@@ -2250,14 +2259,11 @@ impl Vm {
             unreachable!()
         };
         let code: &FuncCode = unsafe { &*Rc::as_ptr(code) };
-        if code.flags & SLOW != 0
+        // Extra arguments make argc exceed np; named ones set has_named;
+        // magic trampolines take values (not here: do_call checks).
+        if p.flags & pending_flags::SLOW != 0
             || p.has_named
             || p.argc > p.np
-            || p.extra.capacity() != 0
-            || p.args.capacity() != 0
-            || p.named_extra.is_some()
-            || p.magic_name.is_some()
-            || code.file.is_empty()
             || !args_bind_simply(self, code, p.base, p.argc)
         {
             let p = self.ex.pending.pop().unwrap();
@@ -2305,6 +2311,12 @@ impl Vm {
         // field (built whole, the large struct would be copied). The
         // pending call's handles move into it; its other owning fields are
         // empty (checked above), so it is popped without a drop.
+        debug_assert!(
+            p.extra.is_empty()
+                && p.args.capacity() == 0
+                && p.named_extra.is_none()
+                && p.magic_name.is_none()
+        );
         unsafe {
             use std::ptr::addr_of_mut as at;
             let d = frames.as_mut_ptr().add(frames.len());
