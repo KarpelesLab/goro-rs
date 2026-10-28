@@ -105,6 +105,10 @@ pub struct ParseOptions {
     pub modern: bool,
     /// Load external parsed entities (with a loader).
     pub load_external_entities: bool,
+    /// SAX mode (ext/xml): report raw markup, positions and references,
+    /// and split character data at references and carriage returns as
+    /// PHP's libxml-based parser does (observed on PHP 8.5).
+    pub sax: bool,
 }
 
 impl Default for ParseOptions {
@@ -117,6 +121,7 @@ impl Default for ParseOptions {
             split_text_at_refs: false,
             modern: false,
             load_external_entities: false,
+            sax: false,
         }
     }
 }
@@ -181,4 +186,17 @@ pub trait Sink {
     /// The source line of the construct being reported (for start tags it
     /// is in [`StartTag::line`] too).
     fn set_line(&mut self, _line: u32) {}
+    /// SAX mode: the raw markup of the start tag, end tag, comment or PI
+    /// reported next.
+    fn raw(&mut self, _text: &str) {}
+    /// SAX mode: the position of the event reported next (byte offset in
+    /// the decoded input, 1-based line and column).
+    fn position(&mut self, _offset: usize, _line: u32, _column: u32) {}
+    /// SAX mode: a character reference or predefined entity reference
+    /// (`raw` as written, `value` its character).
+    fn reference(&mut self, _raw: &str, value: &str) {
+        self.text(value)
+    }
+    /// SAX mode: a reference to an undeclared entity, before the error.
+    fn undefined_entity(&mut self, _name: &str) {}
 }

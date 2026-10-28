@@ -3,6 +3,7 @@
 pub mod chars;
 pub mod encoding;
 pub mod error;
+pub mod sax;
 pub mod serialize;
 pub mod tree;
 pub mod xml;

@@ -15,6 +15,9 @@ pub struct Decoded {
     pub from: Option<Encoding>,
     /// A BOM was present.
     pub bom: bool,
+    /// Line feeds in `text` that came from a carriage return, as
+    /// `offset << 1 | 1` for CR LF and `offset << 1` for a lone CR.
+    pub cr: Vec<usize>,
 }
 
 /// The encoding signalled by a byte-order mark or the first bytes
@@ -93,6 +96,11 @@ pub fn lookup(name: &str) -> Option<Encoding> {
 
 /// Normalizes line ends (`\r\n` and `\r` become `\n`) in place.
 pub fn normalize_newlines(v: &mut Vec<u8>) {
+    normalize_newlines_tracked(v, None);
+}
+
+/// [`normalize_newlines`], recording where carriage returns were.
+pub fn normalize_newlines_tracked(v: &mut Vec<u8>, mut cr: Option<&mut Vec<usize>>) {
     let Some(first) = memchr::memchr(b'\r', v) else {
         return;
     };
@@ -101,10 +109,14 @@ pub fn normalize_newlines(v: &mut Vec<u8>) {
     while r < v.len() {
         let b = v[r];
         if b == b'\r' {
+            let crlf = r + 1 < v.len() && v[r + 1] == b'\n';
+            if let Some(c) = cr.as_deref_mut() {
+                c.push((w << 1) | crlf as usize);
+            }
             v[w] = b'\n';
             w += 1;
             r += 1;
-            if r < v.len() && v[r] == b'\n' {
+            if crlf {
                 r += 1;
             }
         } else {
@@ -177,6 +189,11 @@ pub fn decode(input: &[u8], enc: Option<Encoding>) -> Decoded {
             out.from = Some(e);
         }
     }
-    normalize_newlines(&mut out.text);
+    let mut cr = Vec::new();
+    normalize_newlines_tracked(&mut out.text, Some(&mut cr));
+    out.cr = cr;
+    if out.error_at.is_some() {
+        out.error_at = Some(out.text.len());
+    }
     out
 }

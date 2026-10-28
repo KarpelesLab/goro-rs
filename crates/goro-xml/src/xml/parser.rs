@@ -154,6 +154,14 @@ pub struct Parser<'l> {
     pub(crate) no_subset_error: bool,
     pub(crate) pe_from_internal: bool,
     pub(crate) splices: usize,
+    cr_positions: Vec<usize>,
+    utf8_chunks: bool,
+    final_pending: bool,
+    cr_next: usize,
+    text_begin: usize,
+    tag_start: usize,
+    /// Bytes before the decoded text (a byte order mark).
+    pub bom_len: usize,
 }
 
 struct RawAttr {
@@ -167,7 +175,14 @@ struct RawAttr {
 impl<'l> Parser<'l> {
     /// A parser with options and an optional loader for external resources.
     pub fn new(opts: ParseOptions, loader: Option<&'l mut dyn EntityLoader>) -> Parser<'l> {
-        let max_depth = if opts.has(opt::PARSEHUGE) { 2048 } else { 256 };
+        // ext/xml's SAX parsing has no depth limit (observed on PHP 8.5).
+        let max_depth = if opts.sax {
+            usize::MAX
+        } else if opts.has(opt::PARSEHUGE) {
+            2048
+        } else {
+            256
+        };
         Parser {
             opts,
             loader,
@@ -209,6 +224,13 @@ impl<'l> Parser<'l> {
             no_subset_error: false,
             pe_from_internal: false,
             splices: 0,
+            cr_positions: Vec::new(),
+            utf8_chunks: false,
+            final_pending: false,
+            cr_next: 0,
+            text_begin: 0,
+            tag_start: 0,
+            bom_len: 0,
         }
     }
 
@@ -256,15 +278,23 @@ impl<'l> Parser<'l> {
         }
         self.raw.extend_from_slice(input);
         if !self.decided {
-            if !is_final
-                && self.raw.len() < 1024
-                && memchr::memmem::find(&self.raw, b"?>").is_none()
+            let wait = if self.raw.starts_with(b"<?xml")
+                || b"<?xml".starts_with(&self.raw[..self.raw.len().min(5)])
             {
+                self.raw.len() < 1024 && memchr::memmem::find(&self.raw, b"?>").is_none()
+            } else {
+                self.raw.len() < 4
+            };
+            if !is_final && wait {
                 return Status::NeedMore;
             }
+            self.final_pending = false;
             if !self.decide_encoding(sink) {
                 self.phase = Phase::Done;
                 return Status::Failed;
+            }
+            if self.utf8_chunks {
+                self.decode_more(is_final);
             }
         } else {
             self.decode_more(is_final);
@@ -284,6 +314,81 @@ impl<'l> Parser<'l> {
     /// Current byte offset in the decoded input.
     pub fn current_offset(&self) -> usize {
         self.pos
+    }
+
+    /// SAX mode: reports the position of offset `p` to the sink.
+    fn emit_position(&mut self, sink: &mut dyn Sink, p: usize) {
+        let (o, l, c) = self.orig_position(p);
+        sink.position(o, l, c);
+    }
+
+    /// The position of decoded offset `p` in the original input: byte
+    /// offset, line and column as PHP's libxml-based ext/xml counts them
+    /// (CR LF is one line break, a lone CR none; observed on PHP 8.5).
+    pub fn orig_position(&mut self, p: usize) -> (usize, u32, u32) {
+        let (line, col) = self.line_col(p);
+        if self.cr_positions.is_empty() {
+            return (p + self.bom_len, line, col);
+        }
+        let idx = self.cr_positions.partition_point(|&e| (e >> 1) < p);
+        let crlf = self.cr_positions[..idx]
+            .iter()
+            .filter(|&&e| e & 1 == 1)
+            .count();
+        let lone = idx - crlf;
+        // Column: characters since the last line feed that was not a lone CR.
+        let mut start = p.min(self.buf.len());
+        let ls = loop {
+            match memchr::memrchr(b'\n', &self.buf[..start]) {
+                Some(i) => {
+                    let lone_cr = self.cr_positions.binary_search(&(i << 1)).is_ok();
+                    if lone_cr {
+                        start = i;
+                        continue;
+                    }
+                    break i + 1;
+                }
+                None => break 0,
+            }
+        };
+        let pe = p.min(self.buf.len());
+        let col = self.buf[ls..pe]
+            .iter()
+            .filter(|&&b| (b & 0xC0) != 0x80)
+            .count() as u32
+            + 1;
+        (p + crlf + self.bom_len, line - lone as u32, col)
+    }
+
+    /// The current position as [`Parser::orig_position`] gives it, with
+    /// pending character data not yet consumed.
+    pub fn sax_position(&mut self) -> (usize, u32, u32) {
+        let p = if self.text.is_empty() {
+            self.pos
+        } else {
+            self.text_begin
+        };
+        self.orig_position(p)
+    }
+
+    /// The byte offset of a 1-based line and column in the decoded input.
+    pub fn offset_of(&self, line: u32, column: u32) -> usize {
+        let mut off = 0;
+        for _ in 1..line {
+            match memchr::memchr(b'\n', &self.buf[off..]) {
+                Some(i) => off += i + 1,
+                None => return self.buf.len(),
+            }
+        }
+        let mut chars = 1;
+        while chars < column && off < self.buf.len() {
+            off += 1;
+            while off < self.buf.len() && (self.buf[off] & 0xC0) == 0x80 {
+                off += 1;
+            }
+            chars += 1;
+        }
+        off
     }
 
     fn decide_encoding(&mut self, sink: &mut dyn Sink) -> bool {
@@ -337,7 +442,26 @@ impl<'l> Parser<'l> {
                     | goro_charset::Encoding::Utf16
             )
         );
+        if matches!(enc, None | Some(goro_charset::Encoding::Utf8)) && !self.final_pending {
+            // UTF-8 can be decoded chunk by chunk.
+            if raw.starts_with(&[0xEF, 0xBB, 0xBF]) {
+                self.bom_len = 3;
+            }
+            self.raw = raw;
+            self.utf8_chunks = true;
+            return true;
+        }
         let d = crate::encoding::decode(&raw, enc);
+        if d.bom {
+            self.bom_len = if raw.starts_with(&[0xEF, 0xBB, 0xBF]) {
+                3
+            } else {
+                2
+            };
+        }
+        if self.opts.sax {
+            self.cr_positions = d.cr;
+        }
         self.buf = d.text;
         self.enc_error = d.error_at.is_some();
         true
@@ -373,7 +497,22 @@ impl<'l> Parser<'l> {
                 }
             }
         }
-        let d = crate::encoding::decode(&raw[..cut], None);
+        let d = if self.buf.is_empty() || !raw.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            crate::encoding::decode(&raw[..cut], None)
+        } else {
+            // A BOM-like sequence inside the document is data.
+            let mut d = crate::encoding::decode(&[b"x", &raw[..cut]].concat(), None);
+            d.text.remove(0);
+            for c in d.cr.iter_mut() {
+                *c -= 2;
+            }
+            d
+        };
+        if self.opts.sax {
+            let base = self.buf.len();
+            self.cr_positions
+                .extend(d.cr.iter().map(|p| (((p >> 1) + base) << 1) | (p & 1)));
+        }
         self.buf.extend_from_slice(&d.text);
         if d.error_at.is_some() {
             self.enc_error = true;
@@ -664,7 +803,7 @@ impl<'l> Parser<'l> {
             Phase::Start => {
                 if self.starts_with(b"<?xml") && is_space(self.at(self.pos + 5)) {
                     self.parse_xml_decl(sink)?;
-                } else if self.incomplete() {
+                } else if self.incomplete() && b"<?xml ".starts_with(&self.buf[self.pos..]) {
                     return Err(Halt::Incomplete);
                 }
                 self.phase = Phase::Prolog;
@@ -790,28 +929,37 @@ impl<'l> Parser<'l> {
                 }
             }
             b'&' => self.parse_reference(sink),
-            _ => self.parse_text(),
+            _ => self.parse_text(sink),
         }
     }
 
     // ----- text -----------------------------------------------------------
 
-    fn parse_text(&mut self) -> R<()> {
+    fn parse_text(&mut self, sink: &mut dyn Sink) -> R<()> {
+        if self.opts.sax && self.cr_next < self.cr_positions.len() {
+            return self.parse_text_split(sink);
+        }
+        self.parse_text_limited(usize::MAX)
+    }
+
+    /// Scans character data up to markup, a reference, or `limit`.
+    fn parse_text_limited(&mut self, limit: usize) -> R<()> {
         let start = self.pos;
         let buf = &self.buf;
-        let len = buf.len();
+        let full = buf.len();
+        let len = full.min(limit);
         let mut i = self.pos;
         while i < len {
             let b = buf[i];
             match b {
                 b'<' | b'&' => break,
                 b']' => {
-                    if i + 2 < len && buf[i + 1] == b']' && buf[i + 2] == b'>' {
+                    if i + 2 < full && buf[i + 1] == b']' && buf[i + 2] == b'>' {
                         self.text_push(start, i);
                         self.pos = i;
                         return Err(self.fatal(62, "Sequence ']]>' not allowed in content"));
                     }
-                    if i + 2 >= len && !self.final_ {
+                    if i + 2 >= full && !self.final_ {
                         break;
                     }
                     i += 1;
@@ -839,17 +987,46 @@ impl<'l> Parser<'l> {
         }
         self.text_push(start, i);
         self.pos = i;
-        if i >= len {
+        if i >= full {
             self.hit_eof.set(true);
-            if !self.final_ {
-                return Err(Halt::Incomplete).or(Ok(()));
-            }
         }
         Ok(())
     }
 
+    /// SAX mode text with carriage returns in it: character data is
+    /// reported in pieces that start at each former CR (observed on PHP 8.5).
+    fn parse_text_split(&mut self, sink: &mut dyn Sink) -> R<()> {
+        while self.cr_next < self.cr_positions.len()
+            && (self.cr_positions[self.cr_next] >> 1) < self.pos
+        {
+            self.cr_next += 1;
+        }
+        let limit = self.cr_positions.get(self.cr_next).map(|e| e >> 1);
+        match limit {
+            Some(l) if l == self.pos => {
+                // A piece starts here: flush what came before.
+                self.flush_text(sink, false);
+                self.cr_next += 1;
+                let next = self
+                    .cr_positions
+                    .get(self.cr_next)
+                    .map_or(usize::MAX, |e| e >> 1);
+                self.parse_text_until(next)
+            }
+            Some(l) => self.parse_text_until(l),
+            None => self.parse_text_until(usize::MAX),
+        }
+    }
+
+    fn parse_text_until(&mut self, limit: usize) -> R<()> {
+        self.parse_text_limited(limit)
+    }
+
     fn text_push(&mut self, start: usize, end: usize) {
         if end > start {
+            if self.text.is_empty() {
+                self.text_begin = start;
+            }
             let s = unsafe { std::str::from_utf8_unchecked(&self.buf[start..end]) };
             self.text.push_str(s);
         }
@@ -858,6 +1035,9 @@ impl<'l> Parser<'l> {
     fn flush_text(&mut self, sink: &mut dyn Sink, before_end_tag: bool) {
         if self.text.is_empty() {
             return;
+        }
+        if self.opts.sax {
+            self.emit_position(sink, self.pos);
         }
         let text = std::mem::take(&mut self.text);
         let blank = text.bytes().all(is_space);
@@ -1065,6 +1245,11 @@ impl<'l> Parser<'l> {
                                 return Err(Halt::Incomplete);
                             }
                             if !self.stopped {
+                                if self.opts.sax {
+                                    let raw = self.slice((start - 4, self.pos)).to_string();
+                                    self.emit_position(sink, self.pos);
+                                    sink.raw(&raw);
+                                }
                                 sink.comment(&text);
                             }
                             if let Some(o) = self.stack.last_mut() {
@@ -1119,6 +1304,7 @@ impl<'l> Parser<'l> {
     }
 
     fn parse_pi(&mut self, sink: &mut dyn Sink) -> R<()> {
+        self.tag_start = self.pos;
         self.pos += 2;
         let Some(r) = self.scan_name() else {
             if self.incomplete() {
@@ -1128,13 +1314,14 @@ impl<'l> Parser<'l> {
         };
         let target = self.slice(r).to_string();
         if target.eq_ignore_ascii_case("xml") {
-            if target == "xml" {
-                return Err(self.fatal(
-                    64,
-                    "XML declaration allowed only at the start of the document",
-                ));
+            if target != "xml" {
+                return Err(self.fatal(64, "Invalid PI name"));
             }
-            return Err(self.fatal(64, "Invalid PI name"));
+            // Reported, then the PI is still read (observed on PHP 8.5).
+            self.fatal(
+                64,
+                "XML declaration allowed only at the start of the document",
+            );
         }
         if target.len() > 3 && target.as_bytes()[..3].eq_ignore_ascii_case(b"xml") {
             self.warn(
@@ -1160,7 +1347,9 @@ impl<'l> Parser<'l> {
                     return Err(Halt::Incomplete);
                 }
                 self.fatal(65, format!("ParsePI: PI {target} space expected"));
-                if self.eof() {
+                if memchr::memmem::find(&self.buf[self.pos.min(self.buf.len())..], b"?>").is_none()
+                {
+                    self.pos = self.buf.len();
                     return Err(self.fatal(47, format!("ParsePI: PI {target} never end ...")));
                 }
                 return Err(Halt::Fatal);
@@ -1184,6 +1373,11 @@ impl<'l> Parser<'l> {
             }
         }
         if !self.stopped {
+            if self.opts.sax {
+                let raw = self.slice((self.tag_start, self.pos)).to_string();
+                self.emit_position(sink, self.pos);
+                sink.raw(&raw);
+            }
             sink.pi(&target, &data);
         }
         if let Some(o) = self.stack.last_mut() {
@@ -1240,6 +1434,7 @@ impl<'l> Parser<'l> {
 
     fn parse_start_tag(&mut self, sink: &mut dyn Sink) -> R<()> {
         let tag_start = self.pos;
+        self.tag_start = tag_start;
         self.pos += 1;
         let Some(nr) = self.scan_name() else {
             if self.incomplete() {
@@ -1651,6 +1846,12 @@ impl<'l> Parser<'l> {
             o.had_child = true;
         }
         sink.set_line(line);
+        if self.opts.sax && !self.stopped {
+            let raw = self.slice((self.tag_start, self.pos)).to_string();
+            let marker = self.pos - if empty { 2 } else { 1 };
+            self.emit_position(sink, marker);
+            sink.raw(&raw);
+        }
         if !self.stopped {
             sink.start_element(&StartTag {
                 name: &name,
@@ -1662,6 +1863,9 @@ impl<'l> Parser<'l> {
         }
         if empty {
             if !self.stopped {
+                if self.opts.sax {
+                    self.emit_position(sink, self.pos);
+                }
                 sink.end_element(&name);
             }
             self.ns.truncate(ns_mark);
@@ -1736,6 +1940,7 @@ impl<'l> Parser<'l> {
     }
 
     fn parse_end_tag(&mut self, sink: &mut dyn Sink) -> R<()> {
+        self.tag_start = self.pos;
         self.pos += 2;
         let r = self.scan_name();
         if self.incomplete() {
@@ -1782,6 +1987,11 @@ impl<'l> Parser<'l> {
         }
         let o = self.stack.pop().unwrap();
         if !self.stopped {
+            if self.opts.sax {
+                let raw = self.slice((self.tag_start, self.pos)).to_string();
+                self.emit_position(sink, self.pos);
+                sink.raw(&raw);
+            }
             sink.end_element(&o.name);
         }
         self.ns.truncate(o.ns_mark);
@@ -1851,8 +2061,16 @@ impl<'l> Parser<'l> {
     }
 
     fn parse_reference(&mut self, sink: &mut dyn Sink) -> R<()> {
+        let ref_start = self.pos;
         if self.at(self.pos + 1) == b'#' {
             let c = self.parse_char_ref()?;
+            if self.opts.sax {
+                self.flush_text(sink, false);
+                let raw = self.slice((ref_start, self.pos)).to_string();
+                let mut b = [0u8; 4];
+                sink.reference(&raw, c.encode_utf8(&mut b));
+                return Ok(());
+            }
             if self.opts.split_text_at_refs {
                 self.flush_text(sink, false);
             }
@@ -1878,6 +2096,13 @@ impl<'l> Parser<'l> {
         }
         self.pos += 1;
         if let Some(c) = crate::tree::predefined_entity(&name) {
+            if self.opts.sax {
+                self.flush_text(sink, false);
+                let raw = self.slice((ref_start, self.pos)).to_string();
+                let mut b = [0u8; 4];
+                sink.reference(&raw, c.encode_utf8(&mut b));
+                return Ok(());
+            }
             if self.opts.split_text_at_refs {
                 self.flush_text(sink, false);
             }
@@ -1933,6 +2158,10 @@ impl<'l> Parser<'l> {
             return Err(self.fatal(26, format!("Entity '{name}' not defined")));
         }
         let Some(ent) = self.find_entity(name, false) else {
+            if self.opts.sax {
+                self.flush_text(sink, false);
+                sink.undefined_entity(name);
+            }
             let r = self.undeclared_entity(name);
             if r.is_ok() {
                 self.flush_text(sink, false);
