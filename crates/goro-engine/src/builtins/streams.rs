@@ -501,6 +501,23 @@ fn stream_filter_remove(vm: &mut Vm, a: &mut Args) -> R<Value> {
         // SAFETY: `stream` keeps the resource alive for the call.
         let mut s = unsafe { (*cell).borrow_mut() };
         let mut gone: Vec<AttachedFilter> = Vec::new();
+        // A write filter removed is closed: what it gives back goes through
+        // the filters after it to the stream (test
+        // ext/bz2/tests/bug81092.phpt: a complete bzip2 stream).
+        if let Some(i) = s.write_filters.iter().position(|f| f.id == id) {
+            let mut f = s.write_filters.remove(i);
+            let mut out = Vec::new();
+            let ok = f.filter.filter(vm, &[], true, &mut out)?;
+            if ok && !out.is_empty() {
+                let mut rest = std::mem::take(&mut s.write_filters);
+                let r = run_chain(vm, &mut rest[i..], &out, false);
+                s.write_filters = rest;
+                if let Some(data) = r? {
+                    let _ = s.write_raw(vm, &data);
+                }
+            }
+            gone.push(f);
+        }
         let st = &mut *s;
         for chain in [&mut st.read_filters, &mut st.write_filters] {
             let mut i = 0;

@@ -3,6 +3,7 @@
 
 pub mod array;
 pub mod bcmath;
+pub mod bz2;
 pub mod core_classes;
 pub mod core_funcs;
 pub mod ctype;
@@ -50,6 +51,7 @@ pub mod xml;
 pub mod xmlreader;
 pub mod xmlstore;
 pub mod xmlwriter;
+pub mod zip;
 pub mod zlib;
 
 use crate::registry::Module;
@@ -86,6 +88,8 @@ pub fn modules() -> Vec<&'static Module> {
         &mbstring::MODULE,
         &iconv::MODULE,
         &zlib::MODULE,
+        &zip::MODULE,
+        &bz2::MODULE,
         &ctype::MODULE,
         &date::MODULE,
         &array::MODULE,

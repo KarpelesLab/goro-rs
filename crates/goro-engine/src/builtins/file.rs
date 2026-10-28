@@ -908,20 +908,27 @@ pub fn open_stream(
         .filter(|&&c| c != b'b' && c != b't')
         .copied()
         .collect::<Vec<u8>>();
+    // The first character decides, a '+' anywhere adds the other
+    // direction, the rest is ignored ("rw", "r+w"...); another first
+    // character is an invalid mode (observed on PHP 8.5).
     let mut o = std::fs::OpenOptions::new();
-    match &m[..] {
-        b"r" => o.read(true),
-        b"r+" => o.read(true).write(true),
-        b"w" => o.write(true).create(true).truncate(true),
-        b"w+" => o.read(true).write(true).create(true).truncate(true),
-        b"a" => o.append(true).create(true),
-        b"a+" => o.read(true).append(true).create(true),
-        b"x" => o.write(true).create_new(true),
-        b"x+" => o.read(true).write(true).create_new(true),
-        b"c" => o.write(true).create(true),
-        b"c+" => o.read(true).write(true).create(true),
+    let plus = m.contains(&b'+');
+    match mode.first() {
+        Some(b'r') => o.read(true).write(plus),
+        Some(b'w') => o.write(true).read(plus).create(true).truncate(true),
+        Some(b'a') => o.append(true).read(plus).create(true),
+        Some(b'x') => o.write(true).read(plus).create_new(true),
+        Some(b'c') => o.write(true).read(plus).create(true),
         _ => {
-            return vm.fthrow(a, "ValueError", "Argument #2 ($mode) must be a valid mode");
+            if !quiet {
+                vm.warn(&format!(
+                    "{}({}): Failed to open stream: `{}' is not a valid mode for fopen",
+                    fname,
+                    String::from_utf8_lossy(filename),
+                    String::from_utf8_lossy(mode)
+                ))?;
+            }
+            return Ok(None);
         }
     };
     let p = vm.fs_path(path);
@@ -2131,6 +2138,9 @@ fn is_executable(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
+    if let Some(st) = native_stat(vm, a)? {
+        return Ok(Value::Bool(st.is_some_and(|st| user_mode(&st) & 0o111 != 0)));
+    }
     Ok(Value::Bool(
         meta(vm, a).is_some_and(|m| m.is_file()) && access(vm, a, libc::X_OK),
     ))
@@ -2186,6 +2196,17 @@ stat_fn!(filegroup, "stat", m => m.gid() as i64);
 fn filetype(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
+    }
+    if let Some(st) = user_stat(vm, a, 1)? {
+        return match st {
+            Some(st) => Ok(Value::from(match user_mode(&st) & 0o170000 {
+                0o040000 => "dir",
+                0o120000 => "link",
+                0o100000 => "file",
+                _ => "unknown",
+            })),
+            None => stat_fail(vm, a, "Lstat"),
+        };
     }
     let f = a.str(0);
     match std::fs::symlink_metadata(vm.fs_path(&f)) {

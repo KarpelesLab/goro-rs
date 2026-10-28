@@ -483,8 +483,9 @@ pub struct Decoded {
 
 /// Decrypts (with `password` when the entry is encrypted) and decompresses
 /// an entry's raw data. Errors: `ER_NOPASSWD`, `ER_WRONGPASSWD`,
-/// `ER_ENCRNOTSUPP`, `ER_COMPNOTSUPP`, `ER_COMPRESSED_DATA`, `ER_EOF`,
-/// `ER_INCONS` (decoded length differs from the declared size).
+/// `ER_ENCRNOTSUPP`, `ER_COMPNOTSUPP`, `ER_COMPRESSED_DATA`, and
+/// `ER_EOF`. A decoded length other than the declared size clears
+/// [`Decoded::crc_ok`].
 pub fn decode_entry(e: &Entry, raw: &[u8], password: Option<&[u8]>) -> Result<Decoded> {
     let plain;
     let body: &[u8] = if e.is_encrypted() {
@@ -513,11 +514,10 @@ pub fn decode_entry(e: &Entry, raw: &[u8], password: Option<&[u8]>) -> Result<De
         return Err(Error::new(er::COMPNOTSUPP));
     }
     let data = codec::decompress(m, e.flags, body, e.size)?;
-    if data.len() as u64 != e.size {
-        return Err(Error::new(er::INCONS));
-    }
+    // a length that differs from the declared size fails like a CRC
+    // mismatch (test bug49072.phpt: a damaged entry gives "CRC error")
     let ae2 = e.aes.is_some_and(|a| a.version == 2) && e.method == cm::AES;
-    let crc_ok = ae2 || crate::crc::crc32(&data) == e.crc;
+    let crc_ok = data.len() as u64 == e.size && (ae2 || crate::crc::crc32(&data) == e.crc);
     Ok(Decoded { data, crc_ok })
 }
 
