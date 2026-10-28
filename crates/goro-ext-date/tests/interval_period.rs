@@ -89,6 +89,25 @@ fn iso_durations() {
             "{s}"
         );
     }
+    // two ISO dates (test bug52808.phpt)
+    let i = Interval::parse_iso(b"2008-05-11T15:30:00Z/2007-03-01T13:00:00Z").unwrap();
+    assert_eq!(fields(&i), [1, 2, 10, 2, 30, 0, 0]);
+    assert!(i.invert);
+    assert_eq!(i.days, Some(437));
+    let i = Interval::parse_iso(b"20070301T130000Z/20080511T153000Z").unwrap();
+    assert_eq!((fields(&i), i.invert), ([1, 2, 10, 2, 30, 0, 0], false));
+    assert_eq!(
+        Interval::parse_iso(b"2007-05-11T15:30:00Z/"),
+        Err("Failed to parse interval (2007-05-11T15:30:00Z/)".to_string())
+    );
+    assert_eq!(
+        Interval::parse_iso(b"2007-05-11T15:30:00Z"),
+        Err("Failed to parse interval (2007-05-11T15:30:00Z)".to_string())
+    );
+    assert_eq!(
+        Interval::parse_iso(b"2007-05-11T15:30:00Z/x"),
+        Err("Unknown or bad format (2007-05-11T15:30:00Z/x)".to_string())
+    );
 }
 
 #[test]

@@ -145,22 +145,10 @@ pub(crate) fn parse_create(vm: &mut Vm, input: &[u8], zone: &TimeZone) -> Result
     Ok(resolve::resolve(&p, n, us, zone, Mode::Create))
 }
 
-/// A DateTimeZone constructor argument, or the warning / exception text
-/// (observed on PHP 8.5: offsets beyond ±99:59 are "out of range").
+/// A DateTimeZone constructor argument, or the warning / exception text.
 pub(crate) fn parse_zone(name: &[u8]) -> Result<TimeZone, String> {
     let text = String::from_utf8_lossy(name);
-    if let Some(z) = TimeZone::parse(&text) {
-        return Ok(z);
-    }
-    let t = text.trim_start_matches([' ', '\t']);
-    let t = t.strip_prefix("GMT").unwrap_or(t);
-    if t.starts_with(['+', '-'])
-        && t.len() > 1
-        && t[1..].bytes().all(|c| c.is_ascii_digit() || c == b':')
-    {
-        return Err(format!("Timezone offset is out of range ({text})"));
-    }
-    Err(format!("Unknown or bad timezone ({text})"))
+    TimeZone::parse_checked(&text).map_err(|e| e.message(&text))
 }
 
 /// Stores the result of a mutator: in place for DateTime, on a clone for
@@ -286,44 +274,7 @@ fn date_from_data(data: &PhpArray) -> Option<DateTime> {
         Value::Str(s) => s,
         _ => return None,
     };
-    let zone = DateTime::zone_from_parts(ty, &tz.to_string_lossy())?;
-    if let Some(d) = dump_date(&date, &zone) {
-        return Some(d);
-    }
     DateTime::from_parts(&date, ty, &tz.to_string_lossy())
-}
-
-/// The "[-]Y-m-d H:i:s.uuuuuu" form var_dump() and serialize() write,
-/// read directly so that years beyond four digits round-trip (test
-/// bug75035.phpt).
-fn dump_date(s: &[u8], zone: &TimeZone) -> Option<DateTime> {
-    let t = std::str::from_utf8(s).ok()?;
-    let (neg, t) = match t.strip_prefix('-') {
-        Some(r) => (true, r),
-        None => (false, t.strip_prefix('+').unwrap_or(t)),
-    };
-    let (date, time) = t.split_once(' ')?;
-    let mut d = date.split('-');
-    let y: i64 = d.next()?.parse().ok()?;
-    let m: i64 = d.next()?.parse().ok()?;
-    let dd: i64 = d.next()?.parse().ok()?;
-    if d.next().is_some() {
-        return None;
-    }
-    let (hms, us) = time.split_once('.')?;
-    if us.len() != 6 {
-        return None;
-    }
-    let us: i64 = us.parse().ok()?;
-    let mut h = hms.split(':');
-    let hh: i64 = h.next()?.parse().ok()?;
-    let mi: i64 = h.next()?.parse().ok()?;
-    let ss: i64 = h.next()?.parse().ok()?;
-    if h.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&dd) {
-        return None;
-    }
-    let y = if neg { -y } else { y };
-    Some(DateTime::from_local(y, m, dd, hh, mi, ss, us, zone.clone()))
 }
 
 const DATE_KEYS: &[&str] = &["date", "timezone_type", "timezone"];
@@ -774,89 +725,13 @@ fn tz_set_state(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn iv_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let spec = a.str(0);
-    let r = Interval::parse_iso(&spec).or_else(|e| two_dates(&spec).unwrap_or(Err(e)));
+    let r = Interval::parse_iso(&spec);
     match r {
         Ok(iv) => {
             set_iv(vm, &o, &iv);
             Ok(Value::Null)
         }
         Err(msg) => vm.throw("DateMalformedIntervalStringException", &msg),
-    }
-}
-
-/// "YYYY-MM-DDTHH:MM:SSZ" or "YYYYMMDDTHHMMSSZ" (the ISO 8601 dates of
-/// an interval written as two dates).
-fn iso_utc_date(s: &[u8]) -> Option<DateTime> {
-    let num = |r: &[u8]| -> Option<i64> {
-        if r.is_empty() || !r.iter().all(u8::is_ascii_digit) {
-            return None;
-        }
-        std::str::from_utf8(r).ok()?.parse().ok()
-    };
-    let f = match s.len() {
-        20 if s[4] == b'-'
-            && s[7] == b'-'
-            && s[10] == b'T'
-            && s[13] == b':'
-            && s[16] == b':'
-            && s[19] == b'Z' =>
-        {
-            [
-                &s[0..4],
-                &s[5..7],
-                &s[8..10],
-                &s[11..13],
-                &s[14..16],
-                &s[17..19],
-            ]
-        }
-        16 if s[8] == b'T' && s[15] == b'Z' => [
-            &s[0..4],
-            &s[4..6],
-            &s[6..8],
-            &s[9..11],
-            &s[11..13],
-            &s[13..15],
-        ],
-        _ => return None,
-    };
-    let v: Option<Vec<i64>> = f.iter().map(|p| num(p)).collect();
-    let v = v?;
-    Some(DateTime::from_local(
-        v[0],
-        v[1],
-        v[2],
-        v[3],
-        v[4],
-        v[5],
-        0,
-        TimeZone::Offset(0),
-    ))
-}
-
-/// `new DateInterval("start/end")`: the difference between two ISO
-/// dates (test bug52808.phpt); `None` when the spec does not start with
-/// a date.
-fn two_dates(spec: &[u8]) -> Option<Result<Interval, String>> {
-    let cut = spec.iter().position(|&c| c == b'/' || c == b' ');
-    let (first, rest) = match cut {
-        Some(p) => (&spec[..p], Some(&spec[p + 1..])),
-        None => (spec, None),
-    };
-    let a = iso_utc_date(first)?;
-    let failed = || {
-        Err(format!(
-            "Failed to parse interval ({})",
-            String::from_utf8_lossy(spec)
-        ))
-    };
-    match rest {
-        None => Some(failed()),
-        Some([]) => Some(failed()),
-        Some(r) => match iso_utc_date(r) {
-            Some(b) => Some(Ok(interval::diff(&a, &b, false))),
-            None => Some(Err(interval::bad_format(spec))),
-        },
     }
 }
 
