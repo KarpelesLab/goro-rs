@@ -51,8 +51,8 @@ Fresh start. The previous code base is kept on the `old` branch for the
 record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
 
-php-src test suite (8.5.4), share of the tests that run: **84.1%** overall
-(11,112 of 13,220 tests), as of 2026-10-28. The extension libraries below are wired
+php-src test suite (8.5.4), share of the tests that run: **88.0%** overall
+(11,822 tests), as of 2026-10-28. The extension libraries below are wired
 into the engine (ext/random, mbstring, iconv, zlib, bcmath, gmp, filter,
 sodium and uri each pass 90-100% of their tests that run).
 
@@ -150,6 +150,16 @@ sodium and uri each pass 90-100% of their tests that run).
   fixture; faster than PHP 8.5 (libsodium 1.0.18) on secretbox, the
   AEADs, generichash, sign/verify, box and Argon2/scrypt
   (`examples/bench.rs` against `tests/fixtures/bench.php`).
+- `goro-ext-openssl`: ext/openssl on purecrypto: RSA/DSA/DH/EC/X25519/
+  Ed25519/X448/Ed448 keys (PKCS #1/#8, SEC 1, encrypted PEM and PBES2),
+  X.509 parsing with PHP's array and text forms, extensions from config
+  sections, CSRs, path validation and purposes, PKCS #7/CMS signing,
+  verification and encryption with S/MIME, PKCS #12, SPKAC, every cipher
+  of `openssl_get_cipher_methods()` (OCB, SIV, GCM-SIV and key wrap
+  written here), and TLS streams with the `ssl` context options on a new
+  socket layer (`stream_socket_*`, `fsockopen`). DER, PEM and the
+  OpenSSL config format are parsed here; error strings, NIDs and names
+  follow PHP 8.5's output.
 - `goro-ext-uri`: ext/uri as plain values: `Uri\Rfc3986\Uri` (strict
   RFC 3986 parsing, raw and normalized getters, withers, resolution,
   equality) and `Uri\WhatWg\Url` (the WHATWG URL parser with UTS #46 16.0

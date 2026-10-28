@@ -427,14 +427,43 @@ impl Vm {
         if by_ref {
             s.push_str("& ");
         }
-        s.push_str(&f.display_name());
+        // An abstract trait method is named after its trait, its types
+        // after the using class (test Zend/tests/traits/abstract_method_10).
+        let tr = f.from_trait.get();
+        let in_trait = f.flags & crate::class::mflags::ABSTRACT != 0 && !tr.is_null();
+        let scope_name = f.scope().map(|c| c.name.clone());
+        let show = |t: &TypeHint| -> String {
+            match (&scope_name, in_trait) {
+                (Some(n), true) => {
+                    let mut t = t.clone();
+                    for g in t.classes.iter_mut() {
+                        for c in g.iter_mut() {
+                            if c.eq_ignore_ascii_case(b"self") {
+                                *c = n.clone();
+                            }
+                        }
+                    }
+                    t.display()
+                }
+                _ => t.display(),
+            }
+        };
+        if in_trait {
+            s.push_str(&format!(
+                "{}::{}",
+                unsafe { (*tr).name.dname() },
+                f.name.dname()
+            ));
+        } else {
+            s.push_str(&f.display_name());
+        }
         s.push('(');
         for (i, p) in params.iter().enumerate() {
             if i > 0 {
                 s.push_str(", ");
             }
             if let Some(t) = &p.ty {
-                s.push_str(&t.display());
+                s.push_str(&show(t));
                 s.push(' ');
             }
             if p.by_ref {
@@ -453,7 +482,7 @@ impl Vm {
         s.push(')');
         if let Some(r) = self.ret_type_of_func(f) {
             s.push_str(": ");
-            s.push_str(&r.display());
+            s.push_str(&show(&r));
         }
         s
     }
@@ -489,6 +518,16 @@ fn sig_default(p: &ParamInfo) -> Option<String> {
             _ => "<default>".into(),
         }
     };
+    // A constant name as written (test Zend/tests/parameter_default_values/
+    // internal_declaration_error_const).
+    if let Some(t) = p.default_text.as_deref().map(str::trim)
+        && t.starts_with(|c: char| c.is_ascii_alphabetic() || c == '\\' || c == '_')
+        && !matches!(t.to_ascii_lowercase().as_str(), "null" | "true" | "false")
+        && !t.to_ascii_lowercase().starts_with("array")
+        && !matches!(p.default, ParamDefault::None)
+    {
+        return Some(t.to_string());
+    }
     match &p.default {
         ParamDefault::None => None,
         ParamDefault::Const(v) => Some(lit(v)),

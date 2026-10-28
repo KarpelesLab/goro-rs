@@ -92,7 +92,14 @@ impl Vm {
     fn declare_class_opt(&mut self, decl: &Rc<ClassDecl>) -> R<Option<Rc<Class>>> {
         let lname = lower(&decl.name);
         if let Some(prev) = self.classes.get(&lname) {
-            let _ = prev;
+            // A built-in class name (test Zend/tests/inter_06).
+            if prev.has_flag(cflags::INTERNAL) {
+                return Err(self.fatal_at(
+                    &format!("Cannot redeclare class {}", prev.name.dname()),
+                    &decl.file,
+                    decl.line_start,
+                ));
+            }
             let what = match decl.kind {
                 ClassKind::Interface => "interface",
                 ClassKind::Trait => "trait",
@@ -144,9 +151,12 @@ impl Vm {
             let l = lower(n);
             self.classes.contains_key(&l) || self.lazy_classes.contains_key(&l)
         };
-        decl.parent.as_ref().is_none_or(known)
-            && decl.interfaces.iter().all(known)
-            && decl.traits.iter().all(|t| t.traits.iter().all(known))
+        // Classes implementing interfaces or using traits, and enums, are
+        // declared when their declaration runs (observed on PHP 8.5).
+        decl.interfaces.is_empty()
+            && decl.traits.is_empty()
+            && decl.kind != ClassKind::Enum
+            && decl.parent.as_ref().is_none_or(known)
             && !self.classes.contains_key(&lower(&decl.name))
     }
 
@@ -168,6 +178,18 @@ impl Vm {
     }
 
     fn link_class_inner(&mut self, decl: &Rc<ClassDecl>, eb: bool) -> R<Option<Rc<Class>>> {
+        let saved_early = std::mem::replace(&mut self.linking_early, eb);
+        let saved_def = std::mem::replace(&mut self.link_deferred, false);
+        let r = self.link_class_body(decl, eb);
+        let deferred = std::mem::replace(&mut self.link_deferred, saved_def);
+        self.linking_early = saved_early;
+        match r {
+            Ok(Some(_)) if deferred => Ok(None),
+            r => r,
+        }
+    }
+
+    fn link_class_body(&mut self, decl: &Rc<ClassDecl>, eb: bool) -> R<Option<Rc<Class>>> {
         let cname = decl.name.dname();
         // Parent.
         let parent = match &decl.parent {
@@ -198,11 +220,7 @@ impl Vm {
                 if pc.is_enum() {
                     return self.link_err(
                         decl,
-                        &format!(
-                            "Class {} cannot extend final class {}",
-                            cname,
-                            pc.name.dname()
-                        ),
+                        &format!("Class {} cannot extend enum {}", cname, pc.name.dname()),
                     );
                 }
                 if pc.has_flag(cflags::FINAL) {
@@ -343,6 +361,118 @@ impl Vm {
         for ic in &ifaces {
             self.add_interface(&cls, ic);
         }
+        if decl.kind != ClassKind::Interface {
+            let has = |n: &[u8]| {
+                cls.interfaces
+                    .borrow()
+                    .iter()
+                    .any(|i| i.lname.as_bytes() == n)
+            };
+            let is_enum = decl.kind == ClassKind::Enum;
+            let what = if is_enum { "Enum" } else { "Class" };
+            // tests Zend/tests/enum/gh7792_*, no-*-implements-*
+            let mut seen: Vec<PhpStr> = Vec::new();
+            for n in &decl.interfaces {
+                let l = lower(n);
+                let implied = is_enum
+                    && (l.as_bytes() == b"unitenum"
+                        || (l.as_bytes() == b"backedenum" && decl.enum_backing.is_some()));
+                if seen.contains(&l) || implied {
+                    let shown = cls
+                        .interfaces
+                        .borrow()
+                        .iter()
+                        .find(|i| i.lname == l)
+                        .map(|i| i.name.dname())
+                        .unwrap_or_else(|| n.dname());
+                    return self.link_err(
+                        decl,
+                        &format!(
+                            "{} {} cannot implement previously implemented interface {}",
+                            what, cname, shown
+                        ),
+                    );
+                }
+                seen.push(l);
+            }
+            if !is_enum && !decl.file.is_empty() {
+                for (l, n) in [
+                    (&b"unitenum"[..], "UnitEnum"),
+                    (b"backedenum", "BackedEnum"),
+                ] {
+                    if has(l) {
+                        return self.link_err(
+                            decl,
+                            &format!("Non-enum class {} cannot implement interface {}", cname, n),
+                        );
+                    }
+                }
+            }
+            if is_enum && decl.enum_backing.is_none() && has(b"backedenum") {
+                return self.link_err(
+                    decl,
+                    &format!(
+                        "Non-backed enum {} cannot implement interface BackedEnum",
+                        cname
+                    ),
+                );
+            }
+            if is_enum && has(b"throwable") {
+                return self.link_err(
+                    decl,
+                    &format!("Enum {} cannot implement interface Throwable", cname),
+                );
+            }
+            if is_enum && has(b"serializable") {
+                return self.link_err(
+                    decl,
+                    &format!("Enum {} cannot implement the Serializable interface", cname),
+                );
+            }
+            if has(b"traversable")
+                && !has(b"iterator")
+                && !has(b"iteratoraggregate")
+                && !decl.file.is_empty()
+                && decl.kind != ClassKind::Interface
+                && decl.flags & cflags::ABSTRACT == 0
+                && cls
+                    .parent
+                    .as_ref()
+                    .is_none_or(|p| !p.has_flag(cflags::INTERNAL))
+            {
+                // tests Zend/tests/inheritance/bug62609, enum/gh7792_5
+                return Err(self.fatal_at(
+                    &format!(
+                        "{} {} must implement interface Traversable as part of either Iterator or IteratorAggregate",
+                        what, cname
+                    ),
+                    &PhpStr::new(b"Unknown"),
+                    0,
+                ));
+            }
+            // test Zend/tests/throwable_003
+            if has(b"throwable")
+                && !decl.file.is_empty()
+                && !cls.ancestors_have(|a| matches!(a.lname.as_bytes(), b"exception" | b"error"))
+            {
+                return self.link_err(
+                    decl,
+                    &format!(
+                        "Class {} cannot implement interface Throwable, extend Exception or Error instead",
+                        cname
+                    ),
+                );
+            }
+            if has(b"iterator") && has(b"iteratoraggregate") {
+                return self.link_err(
+                    decl,
+                    &format!(
+                        "Class {} cannot implement both Iterator and IteratorAggregate at the same time",
+                        cname
+                    ),
+                );
+            }
+        }
         // Constants.
         for c in &decl.consts {
             if let Some(prev) = cls.find_const(&c.name) {
@@ -455,6 +585,18 @@ impl Vm {
                     "Class"
                 };
                 let shown: Vec<String> = missing.iter().take(3).cloned().collect();
+                if decl.kind == ClassKind::Enum {
+                    // test Zend/tests/enum/gh7792_1
+                    let msg = format!(
+                        "Enum {} must implement {} abstract method{} ({}{})",
+                        cname,
+                        n,
+                        if n == 1 { "" } else { "s" },
+                        shown.join(", "),
+                        if n > 3 { ", ..." } else { "" }
+                    );
+                    return self.link_err(decl, &msg);
+                }
                 let msg = format!(
                     "{} {} contains {} abstract method{} and must therefore be declared abstract or implement the remaining method{} ({}{})",
                     what,
@@ -528,7 +670,7 @@ impl Vm {
             self.early_binding = true;
             let ok = self.obligations_resolvable(&obs);
             self.early_binding = false;
-            if !ok? {
+            if !ok? || self.link_deferred {
                 return Ok(None);
             }
         }
@@ -539,21 +681,40 @@ impl Vm {
         Ok(Some(cls))
     }
 
+    /// #[\Override] on methods and properties: something above must
+    /// declare them (RFC: Marking overridden methods; PHP 8.5 for
+    /// properties; tests Zend/tests/attributes/override/*). Trait members
+    /// are checked in the classes using them.
     fn check_override_attrs(&mut self, cls: &Rc<Class>, decl: &ClassDecl) -> R<()> {
-        for m in &decl.methods {
-            if !m
-                .code
-                .attrs
-                .iter()
-                .any(|a| a.name.eq_ignore_ascii_case(b"Override"))
-            {
-                continue;
-            }
-            let ln = lower(&m.code.name);
+        if decl.kind == ClassKind::Trait {
+            return Ok(());
+        }
+        let cp = Rc::as_ptr(cls);
+        let has_override = |attrs: &[AttrInfo]| {
+            attrs.iter().any(|a| {
+                a.name
+                    .strip_prefix(b"\\")
+                    .unwrap_or(&a.name)
+                    .eq_ignore_ascii_case(b"Override")
+            })
+        };
+        let mut methods: Vec<Rc<Func>> = cls
+            .methods
+            .borrow()
+            .values()
+            .filter(|m| std::ptr::eq(m.scope.get(), cp))
+            .filter(|m| m.code().is_some_and(|c| has_override(&c.attrs)))
+            .cloned()
+            .collect();
+        methods.sort_by_key(|m| m.code().map(|c| c.line_start).unwrap_or(0));
+        for m in methods {
+            let ln = m.lname.clone();
+            let is_ctor = ln.as_bytes() == b"__construct";
             let mut found = false;
             if let Some(p) = &cls.parent
                 && let Some(pm) = p.find_method_str(&ln)
                 && pm.flags & mflags::PRIVATE == 0
+                && (!is_ctor || pm.flags & mflags::ABSTRACT != 0)
             {
                 found = true;
             }
@@ -562,13 +723,79 @@ impl Vm {
                     found = true;
                 }
             }
+            // An abstract method of a used trait (test override/016).
+            for t in cls.traits.borrow().iter() {
+                if t.find_method_str(&ln)
+                    .is_some_and(|tm| tm.flags & mflags::ABSTRACT != 0)
+                {
+                    found = true;
+                }
+            }
             if !found {
                 let msg = format!(
                     "{}::{}() has #[\\Override] attribute, but no matching parent method exists",
                     cls.name.dname(),
-                    m.code.name.dname()
+                    m.name.dname()
                 );
-                return Err(self.fatal_at(&msg, &decl.file, m.code.line_start));
+                let line = m.code().map(|c| c.line_start).unwrap_or(decl.line_start);
+                return Err(self.fatal_at(&msg, &decl.file, line));
+            }
+        }
+        let statics: Vec<PhpStr> = cls
+            .static_props
+            .borrow()
+            .iter()
+            .filter(|p| std::ptr::eq(p.class, cp) && has_override(&p.attrs))
+            .map(|p| p.name.clone())
+            .collect();
+        for n in statics {
+            let found = cls.parent.as_ref().is_some_and(|par| {
+                par.find_static(&n)
+                    .is_some_and(|sp| sp.flags & mflags::PRIVATE == 0)
+            });
+            if !found {
+                let msg = format!(
+                    "{}::${} has #[\\Override] attribute, but no matching parent property exists",
+                    cls.name.dname(),
+                    n.dname()
+                );
+                return Err(self.fatal_at(&msg, &decl.file, decl.line_start));
+            }
+        }
+        let props: Vec<Rc<PropInfo>> = cls
+            .props
+            .borrow()
+            .iter()
+            .filter(|p| std::ptr::eq(p.class, cp) && has_override(&p.attrs))
+            .cloned()
+            .collect();
+        for p in props {
+            let mut found = false;
+            if let Some(par) = &cls.parent
+                && let Some(idx) = par.prop_map.borrow().get(&p.name).map(|v| v[0])
+                && par.props.borrow()[idx as usize].flags & mflags::PRIVATE == 0
+            {
+                found = true;
+            }
+            if let Some(par) = &cls.parent
+                && par
+                    .find_static(&p.name)
+                    .is_some_and(|sp| sp.flags & mflags::PRIVATE == 0)
+            {
+                found = true;
+            }
+            for i in cls.interfaces.borrow().iter() {
+                if i.prop_map.borrow().contains_key(&p.name) {
+                    found = true;
+                }
+            }
+            if !found {
+                let msg = format!(
+                    "{}::${} has #[\\Override] attribute, but no matching parent property exists",
+                    cls.name.dname(),
+                    p.name.dname()
+                );
+                return Err(self.fatal_at(&msg, &decl.file, decl.line_start));
             }
         }
         Ok(())
@@ -668,6 +895,46 @@ impl Vm {
         }
         let get = p.get.as_ref().map(|c| hook_func(c, 1, 4));
         let set = p.set.as_ref().map(|c| hook_func(c, 2, 8));
+        // A set hook's parameter accepts the property type (test
+        // Zend/tests/property_hooks/set_value_parameter_type_variance_*).
+        let mixed = TypeHint {
+            mask: tmask::MIXED,
+            classes: Vec::new(),
+        };
+        if let Some(sc) = &p.set
+            && let Some(par) = sc.params.first()
+            && let Some(at) = &par.ty
+            && at.display() != p.ty.as_ref().unwrap_or(&mixed).display()
+            && {
+                let pt = p.ty.clone().unwrap_or(mixed.clone());
+                let was = std::mem::replace(&mut self.early_binding, self.linking_early);
+                let r = self.type_sub(&pt, cls, at, cls);
+                self.early_binding = was;
+                match r? {
+                    super::variance::Sub::Yes => false,
+                    super::variance::Sub::No => true,
+                    super::variance::Sub::Unresolved(_) => {
+                        // Bound when its declaration runs.
+                        if self.linking_early {
+                            self.link_deferred = true;
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                }
+            }
+        {
+            return self.link_err(
+                decl,
+                &format!(
+                    "Type of parameter ${} of hook {}::${}::set must be compatible with property type",
+                    par.name.dname(),
+                    cname,
+                    p.name.dname()
+                ),
+            );
+        }
         if p.flags & mflags::STATIC != 0 {
             // Redeclaration of a parent static property gets its own cell.
             if let Some(prev) = cls.find_static(&p.name) {
@@ -819,51 +1086,7 @@ impl Vm {
                         ),
                     );
                 }
-                match (&prev.ty, &p.ty) {
-                    (Some(a), Some(b)) => {
-                        if a.display() != b.display()
-                            && !(a.mask & tmask::MIXED != 0 && b.mask & tmask::MIXED != 0)
-                        {
-                            let pcn = unsafe { (*prev.class).name.dname() };
-                            return self.link_err(
-                                decl,
-                                &format!(
-                                    "Type of {}::${} must be {} (as in class {})",
-                                    cname,
-                                    p.name.dname(),
-                                    a.display(),
-                                    pcn
-                                ),
-                            );
-                        }
-                    }
-                    (Some(a), None) => {
-                        let pcn = unsafe { (*prev.class).name.dname() };
-                        return self.link_err(
-                            decl,
-                            &format!(
-                                "Type of {}::${} must be {} (as in class {})",
-                                cname,
-                                p.name.dname(),
-                                a.display(),
-                                pcn
-                            ),
-                        );
-                    }
-                    (None, Some(_)) => {
-                        let pcn = unsafe { (*prev.class).name.dname() };
-                        return self.link_err(
-                            decl,
-                            &format!(
-                                "Type of {}::${} must not be defined (as in class {})",
-                                cname,
-                                p.name.dname(),
-                                pcn
-                            ),
-                        );
-                    }
-                    _ => {}
-                }
+                self.prop_type_check(cls, decl, &cname, &prev, p, set.as_ref())?;
                 self.prop_set_vis_check(decl, &cname, &prev, p)?;
                 for (mine, theirs, what) in [(&p.get, &prev.get, "get"), (&p.set, &prev.set, "set")]
                 {
@@ -970,6 +1193,161 @@ impl Vm {
                     p.name.dname()
                 ),
             );
+        }
+        Ok(())
+    }
+
+    /// The type of a redeclared property: invariant, or covariant for a
+    /// parent virtual property with only a get hook and contravariant with
+    /// only a set hook (RFC: Property hooks, "Inheritance"; tests
+    /// Zend/tests/property_hooks/type_compatibility*,
+    /// Zend/tests/type_declarations/variance/property_types_early_bind).
+    fn prop_type_check(
+        &mut self,
+        cls: &Rc<Class>,
+        decl: &ClassDecl,
+        cname: &str,
+        prev: &PropInfo,
+        p: &PropDecl,
+        set: Option<&Rc<Func>>,
+    ) -> R<()> {
+        use super::variance::Sub;
+        let pcls = unsafe { &*prev.class };
+        let pcn = pcls.name.dname();
+        let mixed = TypeHint {
+            mask: tmask::MIXED,
+            classes: Vec::new(),
+        };
+        let pt = prev.ty.clone().unwrap_or_else(|| mixed.clone());
+        let ct = p.ty.clone().unwrap_or_else(|| mixed.clone());
+        let virt = prev.flags & mflags::VIRTUAL != 0;
+        let get_only = virt && prev.get.is_some() && prev.set.is_none();
+        let set_only = virt && prev.set.is_some() && prev.get.is_none();
+        // Early binding: an unknown class defers the class to run time.
+        let sub = |vm: &mut Vm, a: &TypeHint, ac: &Class, b: &TypeHint, bc: &Class| -> R<bool> {
+            let was = std::mem::replace(&mut vm.early_binding, vm.linking_early);
+            let r = vm.type_sub(a, ac, b, bc);
+            vm.early_binding = was;
+            Ok(match r? {
+                Sub::Yes => true,
+                Sub::No => false,
+                Sub::Unresolved(_) => {
+                    if vm.linking_early {
+                        vm.link_deferred = true;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            })
+        };
+        let hook_sig = |c: &str, t: &TypeHint, get: bool| -> String {
+            if get {
+                format!("{}::${}::get(): {}", c, p.name.dname(), t.display())
+            } else {
+                format!(
+                    "{}::${}::set({} $value): void",
+                    c,
+                    p.name.dname(),
+                    t.display()
+                )
+            }
+        };
+        if get_only {
+            if prev.ty.is_some() && !sub(self, &ct, cls, &pt, pcls)? {
+                let msg = format!(
+                    "Declaration of {} must be compatible with {}",
+                    hook_sig(cname, &ct, true),
+                    hook_sig(&pcn, &pt, true)
+                );
+                return self.link_err(decl, &msg);
+            }
+        } else if set_only {
+            if p.ty.is_some() && !sub(self, &pt, pcls, &ct, cls)? {
+                let msg = format!(
+                    "Declaration of {} must be compatible with {}",
+                    hook_sig(cname, &ct, false),
+                    hook_sig(&pcn, &pt, false)
+                );
+                return self.link_err(decl, &msg);
+            }
+        } else {
+            match (&prev.ty, &p.ty) {
+                (Some(a), Some(b)) => {
+                    let same = a.display() == b.display()
+                        || (a.mask & tmask::MIXED != 0 && b.mask & tmask::MIXED != 0)
+                        || (sub(self, a, pcls, b, cls)? && sub(self, b, cls, a, pcls)?);
+                    if !same {
+                        return self.link_err(
+                            decl,
+                            &format!(
+                                "Type of {}::${} must be {} (as in class {})",
+                                cname,
+                                p.name.dname(),
+                                a.display(),
+                                pcn
+                            ),
+                        );
+                    }
+                }
+                (Some(a), None) => {
+                    return self.link_err(
+                        decl,
+                        &format!(
+                            "Type of {}::${} must be {} (as in class {})",
+                            cname,
+                            p.name.dname(),
+                            a.display(),
+                            pcn
+                        ),
+                    );
+                }
+                (None, Some(_)) => {
+                    return self.link_err(
+                        decl,
+                        &format!(
+                            "Type of {}::${} must not be defined (as in class {})",
+                            cname,
+                            p.name.dname(),
+                            pcn
+                        ),
+                    );
+                }
+                _ => {}
+            }
+        }
+        // A parent set hook with a wider parameter type: the property
+        // must accept it (test Zend/tests/property_hooks/gh15140).
+        if let Some(ps) = &prev.set
+            && let Some(pty) = ps
+                .code()
+                .and_then(|c| c.params.first())
+                .and_then(|x| x.ty.clone())
+        {
+            let cty = set
+                .and_then(|f| f.code())
+                .and_then(|c| c.params.first())
+                .and_then(|x| x.ty.clone())
+                .unwrap_or(ct.clone());
+            let shown = pty.display();
+            if p.ty.is_some() && !sub(self, &pty, pcls, &cty, cls)? {
+                let what = if pcls.is_interface() {
+                    "interface"
+                } else {
+                    "class"
+                };
+                return self.link_err(
+                    decl,
+                    &format!(
+                        "Set type of {}::${} must be supertype of {} (as in {} {})",
+                        cname,
+                        p.name.dname(),
+                        shown,
+                        what,
+                        pcn
+                    ),
+                );
+            }
         }
         Ok(())
     }
@@ -1114,8 +1492,23 @@ impl Vm {
                         child: f.clone(),
                         parent: prev.clone(),
                     });
+                    *f.proto.borrow_mut() = Some(prev.clone());
+                } else if let Some(pr) = prev.proto.borrow().clone()
+                    && (pr.flags & mflags::ABSTRACT != 0
+                        || pr.scope().is_some_and(|c| c.is_interface()))
+                {
+                    // A constructor still answers to an abstract or
+                    // interface one further up (test Zend/tests/
+                    // type_declarations/variance/abstract_constructor).
+                    self.check_signature(cls, &f, &pr, decl)?;
+                    self.obligations.push(super::variance::Obligation {
+                        child: f.clone(),
+                        parent: pr.clone(),
+                    });
+                    *f.proto.borrow_mut() = Some(pr);
+                } else {
+                    *f.proto.borrow_mut() = Some(prev.clone());
                 }
-                *f.proto.borrow_mut() = Some(prev.clone());
             }
             cls.methods.borrow_mut().insert(ln, f);
         } else {
@@ -1172,13 +1565,19 @@ impl Vm {
         if !bad {
             return Ok(());
         }
-        let fs = self.signature_string(f, fp);
-        let ps = self.signature_string(prev, pp);
+        let _ = (fp, pp);
+        let fs = self.variance_sig(f);
+        let ps = self.variance_sig(prev);
         let _ = cls;
-        self.link_err(
-            decl,
-            &format!("Declaration of {} must be compatible with {}", fs, ps),
-        )
+        let msg = format!("Declaration of {} must be compatible with {}", fs, ps);
+        // At the method's line (test Zend/tests/inheritance/
+        // constructor_abstract_grantparent).
+        if let Some(c) = f.code()
+            && *c.file == *decl.file
+        {
+            return Err(self.fatal_at(&msg, &decl.file, c.line_start));
+        }
+        self.link_err(decl, &msg)
     }
 
     pub fn signature_string(&mut self, f: &Func, params: &[ParamInfo]) -> String {
@@ -1231,14 +1630,13 @@ impl Vm {
                     }
                 };
                 if !t.is_trait() {
-                    return self.link_err(
-                        decl,
-                        &format!(
-                            "{} cannot use {} - it is not a trait",
-                            cname,
-                            t.name.dname()
-                        ),
+                    // An Error (test Zend/tests/traits/error_003).
+                    let msg = format!(
+                        "{} cannot use {} - it is not a trait",
+                        cname,
+                        t.name.dname()
                     );
+                    return self.throw("Error", &msg);
                 }
                 if !traits.iter().any(|x| Rc::ptr_eq(x, &t)) {
                     traits.push(t);
@@ -1258,32 +1656,117 @@ impl Vm {
                 self.raise(super::errors::E_USER_DEPRECATED, &text)?;
             }
         }
-        // Excluded (trait, method) pairs from insteadof.
+        // The rules' traits and methods (tests Zend/tests/traits/bug60165*,
+        // bug54441, bug61052, bug62069*, bug63219, bug64235*, error_010).
         let mut excluded: Vec<(PhpStr, PhpStr)> = Vec::new();
         for r in &rules {
-            if let TraitRule::Insteadof {
-                trait_,
-                method,
-                instead,
-            } = r
-            {
-                if !traits.iter().any(|t| t.lname == lower(trait_)) {
-                    return self.link_err(
-                        decl,
-                        &format!(
-                            "Required Trait {} wasn't added to {}",
-                            trait_.to_string_lossy(),
-                            cname
-                        ),
-                    );
+            match r {
+                TraitRule::Insteadof {
+                    trait_,
+                    method,
+                    instead,
+                } => {
+                    let t = self.rule_trait(decl, &cname, &traits, trait_)?;
+                    let lm = lower(method);
+                    if t.find_method_str(&lm).is_none() {
+                        return self.link_err(
+                            decl,
+                            &format!(
+                                "A precedence rule was defined for {}::{} but this method does not exist",
+                                t.name.dname(),
+                                method.dname()
+                            ),
+                        );
+                    }
+                    for i in instead {
+                        let ti = self.rule_trait(decl, &cname, &traits, i)?;
+                        if Rc::ptr_eq(&ti, &t) {
+                            return self.link_err(
+                                decl,
+                                &format!(
+                                    "Inconsistent insteadof definition. The method {} is to be used from {}, but {} is also on the exclude list",
+                                    method.dname(),
+                                    t.name.dname(),
+                                    t.name.dname()
+                                ),
+                            );
+                        }
+                        if excluded.iter().any(|(tn, mn)| *tn == ti.lname && *mn == lm) {
+                            return self.link_err(
+                                decl,
+                                &format!(
+                                    "Failed to evaluate a trait precedence ({}). Method of trait {} was defined to be excluded multiple times",
+                                    method.dname(),
+                                    ti.name.dname()
+                                ),
+                            );
+                        }
+                        excluded.push((ti.lname.clone(), lm.clone()));
+                    }
                 }
-                for i in instead {
-                    excluded.push((lower(i), lower(method)));
+                TraitRule::Alias {
+                    trait_,
+                    method,
+                    alias,
+                    ..
+                } => {
+                    let lm = lower(method);
+                    match trait_ {
+                        Some(tn) => {
+                            let t = self.rule_trait(decl, &cname, &traits, tn)?;
+                            if t.find_method_str(&lm).is_none() {
+                                return self.link_err(
+                                    decl,
+                                    &format!(
+                                        "An alias was defined for {}::{} but this method does not exist",
+                                        t.name.dname(),
+                                        method.dname()
+                                    ),
+                                );
+                            }
+                        }
+                        None => {
+                            let having: Vec<&Rc<Class>> = traits
+                                .iter()
+                                .filter(|t| t.find_method_str(&lm).is_some())
+                                .collect();
+                            if having.is_empty() {
+                                let msg = match alias {
+                                    Some(a) => format!(
+                                        "An alias ({}) was defined for method {}(), but this method does not exist",
+                                        a.dname(),
+                                        method.dname()
+                                    ),
+                                    None => format!(
+                                        "The modifiers of the trait method {}() are changed, but this method does not exist. Error",
+                                        method.dname()
+                                    ),
+                                };
+                                return self.link_err(decl, &msg);
+                            }
+                            if having.len() > 1 {
+                                return self.link_err(
+                                    decl,
+                                    &format!(
+                                        "An alias was defined for method {}(), which exists in both {} and {}. Use {}::{} or {}::{} to resolve the ambiguity",
+                                        method.dname(),
+                                        having[0].name.dname(),
+                                        having[1].name.dname(),
+                                        having[0].name.dname(),
+                                        method.dname(),
+                                        having[1].name.dname(),
+                                        method.dname()
+                                    ),
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
         // Collect methods.
-        let mut imported: Vec<(PhpStr, Rc<Func>, Rc<Class>)> = Vec::new();
+        // (target name, method, trait, original name)
+        let mut imported: Vec<(PhpStr, Rc<Func>, Rc<Class>, PhpStr)> = Vec::new();
         for t in &traits {
             let order = t.method_order.borrow().clone();
             for ln in order {
@@ -1300,7 +1783,7 @@ impl Vm {
                         && trait_.as_ref().is_none_or(|tn| lower(tn) == t.lname)
                     {
                         let nf = self.trait_method_copy(&m, cp, t, Some(alias.clone()), *flags);
-                        imported.push((lower(alias), nf, t.clone()));
+                        imported.push((lower(alias), nf, t.clone(), m.name.clone()));
                     }
                 }
                 if excluded.iter().any(|(tn, mn)| *tn == t.lname && *mn == ln) {
@@ -1321,7 +1804,19 @@ impl Vm {
                     }
                 }
                 let nf = self.trait_method_copy(&m, cp, t, None, vis);
-                imported.push((ln.clone(), nf, t.clone()));
+                // The same method reached through several traits (test
+                // Zend/tests/traits/bug63911).
+                let same = imported.iter().any(|(n, f, _, _)| {
+                    *n == ln
+                        && match (f.code(), nf.code()) {
+                            (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+                            _ => false,
+                        }
+                });
+                if same {
+                    continue;
+                }
+                imported.push((ln.clone(), nf, t.clone(), m.name.clone()));
             }
         }
         // Conflicts between traits.
@@ -1338,7 +1833,7 @@ impl Vm {
                         return self.link_err(decl, &format!(
                             "Trait method {}::{} has not been applied as {}::{}, because of collision with {}::{}",
                             imported[j].2.name.dname(),
-                            imported[j].1.name.dname(),
+                            imported[j].3.dname(),
                             cname,
                             imported[j].1.name.dname(),
                             imported[i].2.name.dname(),
@@ -1348,18 +1843,42 @@ impl Vm {
                 }
             }
         }
-        for (ln, f, _) in imported {
+        for (ln, f, _, _) in imported {
             let own = decl.methods.iter().any(|m| lower(&m.code.name) == ln);
-            if own {
+            let cur = cls.methods.borrow().get(&ln).cloned();
+            // An abstract trait method checks the method implementing it
+            // (tests Zend/tests/traits/abstract_method_*, gh14009_002).
+            if f.flags & mflags::ABSTRACT != 0
+                && let Some(m) = &cur
+                && m.flags & mflags::ABSTRACT == 0
+            {
+                let tn = unsafe { (*f.from_trait.get()).name.dname() };
+                if (f.flags ^ m.flags) & mflags::STATIC != 0 {
+                    let (a, b) = if f.flags & mflags::STATIC != 0 {
+                        ("static", "non static")
+                    } else {
+                        ("non static", "static")
+                    };
+                    return self.link_err(
+                        decl,
+                        &format!(
+                            "Cannot make {} method {}::{}() {} in class {}",
+                            a,
+                            tn,
+                            f.name.dname(),
+                            b,
+                            cname
+                        ),
+                    );
+                }
+                self.check_signature(cls, m, &f, decl)?;
+                self.obligations.push(super::variance::Obligation {
+                    child: m.clone(),
+                    parent: f.clone(),
+                });
                 continue;
             }
-            if f.flags & mflags::ABSTRACT != 0
-                && cls
-                    .methods
-                    .borrow()
-                    .get(&ln)
-                    .is_some_and(|m| m.flags & mflags::ABSTRACT == 0)
-            {
+            if own {
                 continue;
             }
             let prev = cls.methods.borrow().get(&ln).cloned();
@@ -1374,6 +1893,7 @@ impl Vm {
         }
         // Properties and constants of traits.
         let mut from_trait: HashMap<PhpStr, PhpStr> = HashMap::new();
+        let mut const_from_trait: HashMap<PhpStr, PhpStr> = HashMap::new();
         for t in &traits {
             let tprops: Vec<Rc<PropInfo>> = t.props.borrow().clone();
             for p in tprops {
@@ -1447,6 +1967,9 @@ impl Vm {
                             goro_runtime::compare::strict_eq(a, b)
                         }
                         (None, None) => true,
+                        // The same expression (tests Zend/tests/traits/
+                        // bug74922*).
+                        (Some(a), Some(b)) => const_code_same(a, b),
                         _ => false,
                     };
                     if prev.flags & (mflags::VISIBILITY | mflags::READONLY | mflags::STATIC)
@@ -1485,6 +2008,22 @@ impl Vm {
             }
             let tstatics: Vec<Rc<StaticProp>> = t.static_props.borrow().clone();
             for sp in tstatics {
+                // A static trait property against an instance one of the
+                // class (test Zend/tests/traits/bug60369).
+                let inst = cls
+                    .prop_map
+                    .borrow()
+                    .get(&sp.name)
+                    .map(|v| cls.props.borrow()[v[0] as usize].clone());
+                if inst.is_some_and(|p| std::ptr::eq(p.class, cp)) {
+                    return self.link_err(decl, &format!(
+                        "{} and {} define the same property (${}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
+                        cname,
+                        t.name.dname(),
+                        sp.name.dname(),
+                        cname
+                    ));
+                }
                 if cls
                     .find_static(&sp.name)
                     .is_some_and(|x| std::ptr::eq(x.class, cp))
@@ -1509,22 +2048,123 @@ impl Vm {
                     attrs: sp.attrs.clone(),
                 }));
             }
-            for c in t.consts.borrow().iter() {
-                if cls.find_const(&c.name).is_none() {
-                    let cc = Rc::new(ClassConst {
-                        name: c.name.clone(),
-                        value: RefCell::new(c.value.borrow().clone()),
-                        flags: c.flags,
-                        ty: c.ty.clone(),
-                        class: cp,
-                        doc: c.doc.clone(),
-                        attrs: c.attrs.clone(),
-                    });
-                    set_const(cls, cc);
+            let tconsts: Vec<Rc<ClassConst>> = t.consts.borrow().clone();
+            for c in tconsts {
+                // Conflicts with the class's own or another trait's
+                // constant; inherited ones are overridden (tests
+                // Zend/tests/traits/constant_0*).
+                if let Some(prev) = cls.find_const(&c.name) {
+                    let own_or_trait = std::ptr::eq(prev.class, cp);
+                    if own_or_trait {
+                        let as_ce = |s: &ConstState| match s {
+                            ConstState::Value(v) => Some(ConstExpr::Value(v.clone())),
+                            ConstState::Pending(e) => Some(e.clone()),
+                            ConstState::Evaluating => None,
+                        };
+                        let (pa, pb) = (as_ce(&prev.value.borrow()), as_ce(&c.value.borrow()));
+                        let same_val = match (pa, pb) {
+                            (Some(a), Some(b)) => self.const_expr_same(&a, &b, Rc::as_ptr(t)),
+                            _ => false,
+                        };
+                        let fl = mflags::VISIBILITY | mflags::FINAL;
+                        if prev.flags & fl != c.flags & fl
+                            || !same_val
+                            || prev.ty.as_ref().map(|t| t.display())
+                                != c.ty.as_ref().map(|t| t.display())
+                        {
+                            let first = const_from_trait
+                                .get(&c.name)
+                                .map(|n| n.dname())
+                                .unwrap_or_else(|| cname.clone());
+                            return self.link_err(decl, &format!(
+                                "{} and {} define the same constant ({}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
+                                first,
+                                t.name.dname(),
+                                c.name.dname(),
+                                cname
+                            ));
+                        }
+                        continue;
+                    }
+                    if prev.flags & mflags::FINAL != 0 {
+                        return self.link_err(
+                            decl,
+                            &format!(
+                                "{}::{} cannot override final constant {}::{}",
+                                cname,
+                                c.name.dname(),
+                                unsafe { (*prev.class).name.dname() },
+                                c.name.dname()
+                            ),
+                        );
+                    }
                 }
+                const_from_trait.insert(c.name.clone(), t.name.clone());
+                let cc = Rc::new(ClassConst {
+                    name: c.name.clone(),
+                    value: RefCell::new(c.value.borrow().clone()),
+                    flags: c.flags,
+                    ty: c.ty.clone(),
+                    class: cp,
+                    doc: c.doc.clone(),
+                    attrs: c.attrs.clone(),
+                });
+                set_const(cls, cc);
             }
         }
         Ok(())
+    }
+
+    /// Whether two constant expressions give the same value: the same
+    /// code, or equal results (test Zend/tests/traits/constant_016).
+    fn const_expr_same(&mut self, a: &ConstExpr, b: &ConstExpr, scope: *const Class) -> bool {
+        if const_code_same(a, b) {
+            return true;
+        }
+        let (Ok(x), Ok(y)) = (
+            self.eval_const_expr(a, scope),
+            self.eval_const_expr(b, scope),
+        ) else {
+            return false;
+        };
+        goro_runtime::compare::strict_eq(&x, &y)
+    }
+
+    /// A trait named by a trait rule: it must exist, be a trait and be
+    /// used by the class.
+    fn rule_trait(
+        &mut self,
+        decl: &ClassDecl,
+        cname: &str,
+        traits: &[Rc<Class>],
+        n: &PhpStr,
+    ) -> R<Rc<Class>> {
+        let Some(t) = self.find_class(n, true)? else {
+            return self.link_err(
+                decl,
+                &format!("Could not find trait {}", n.to_string_lossy()),
+            );
+        };
+        if !t.is_trait() {
+            return self.link_err(
+                decl,
+                &format!(
+                    "Class {} is not a trait, Only traits may be used in 'as' and 'insteadof' statements",
+                    t.name.dname()
+                ),
+            );
+        }
+        if !traits.iter().any(|x| Rc::ptr_eq(x, &t)) {
+            return self.link_err(
+                decl,
+                &format!(
+                    "Required Trait {} wasn't added to {}",
+                    t.name.dname(),
+                    cname
+                ),
+            );
+        }
+        Ok(t)
     }
 
     fn trait_method_copy(
@@ -1560,6 +2200,13 @@ impl Vm {
 
     fn setup_enum(&mut self, cls: &Rc<Class>, decl: &ClassDecl) -> R<()> {
         let cp = Rc::as_ptr(cls);
+        // Properties from traits (test Zend/tests/enum/traits-no-properties).
+        if !cls.props.borrow().is_empty() || !cls.static_props.borrow().is_empty() {
+            return self.link_err(
+                decl,
+                &format!("Enum {} cannot include properties", cls.name.dname()),
+            );
+        }
         // name / value properties (readonly).
         let mk = |name: &str, slot: u32, ty: TypeHint| PropInfo {
             name: PhpStr::intern(name.as_bytes()),
@@ -1643,9 +2290,17 @@ impl Vm {
             cls.methods.borrow_mut().insert(ln.clone(), f);
             cls.method_order.borrow_mut().push(ln);
         }
-        // Magic methods are not allowed on enums.
-        for m in &decl.methods {
-            let l = lower(&m.code.name);
+        // Magic methods are not allowed on enums, from traits either (test
+        // Zend/tests/enum/traits-no-__construct).
+        let own: Vec<Rc<Func>> = cls
+            .methods
+            .borrow()
+            .values()
+            .filter(|m| std::ptr::eq(m.scope.get(), cp))
+            .cloned()
+            .collect();
+        for m in &own {
+            let l = m.lname.clone();
             if matches!(
                 l.as_bytes(),
                 b"__construct"
@@ -1668,7 +2323,7 @@ impl Vm {
                     &format!(
                         "Enum {} cannot include magic method {}",
                         cls.name.dname(),
-                        m.code.name.dname()
+                        m.name.dname()
                     ),
                 );
             }
@@ -1677,10 +2332,73 @@ impl Vm {
     }
 
     /// The singleton object of an enum case.
+    /// The case values of a backed enum: each of the backing type, no two
+    /// alike (tests Zend/tests/enum/backed-duplicate-*, backed-mismatch).
+    pub fn enum_check_cases(&mut self, cls: &Rc<Class>) -> R<()> {
+        let key = Rc::as_ptr(cls) as usize;
+        if cls.enum_backing.is_none() || self.enums_checked.contains(&key) {
+            return Ok(());
+        }
+        let cases: Vec<Rc<ClassConst>> = cls
+            .consts
+            .borrow()
+            .iter()
+            .filter(|c| c.flags & mflags::CASE != 0)
+            .cloned()
+            .collect();
+        let mut seen: Vec<(Value, PhpStr)> = Vec::new();
+        for c in cases {
+            let state = c.value.borrow().clone();
+            let v = match state {
+                ConstState::Value(v) => v,
+                ConstState::Pending(ce) => {
+                    let v = self.eval_const_expr(&ce, Rc::as_ptr(cls))?;
+                    *c.value.borrow_mut() = ConstState::Value(v.clone());
+                    v
+                }
+                ConstState::Evaluating => continue,
+            };
+            let ok = match (&v, cls.enum_backing) {
+                (Value::Int(_), Some(m)) => m == tmask::INT,
+                (Value::Str(_), Some(m)) => m == tmask::STRING,
+                _ => false,
+            };
+            if !ok {
+                return self.type_error(&format!(
+                    "Enum case type {} does not match enum backing type {}",
+                    v.tname(),
+                    if cls.enum_backing == Some(tmask::INT) {
+                        "int"
+                    } else {
+                        "string"
+                    }
+                ));
+            }
+            if let Some((_, first)) = seen
+                .iter()
+                .find(|(x, _)| goro_runtime::compare::strict_eq(x, &v))
+            {
+                return self.throw(
+                    "Error",
+                    &format!(
+                        "Duplicate value in enum {} for cases {} and {}",
+                        cls.name.dname(),
+                        first.to_string_lossy(),
+                        c.name.to_string_lossy()
+                    ),
+                );
+            }
+            seen.push((v, c.name.clone()));
+        }
+        self.enums_checked.insert(key);
+        Ok(())
+    }
+
     pub fn enum_case(&mut self, cls: &Rc<Class>, name: &PhpStr) -> R<Value> {
         if let Some((_, o)) = cls.enum_cases.borrow().iter().find(|(n, _)| n == name) {
             return Ok(Value::Object(o.clone()));
         }
+        self.enum_check_cases(cls)?;
         let Some(c) = cls.find_const(name) else {
             return self.throw(
                 "Error",
@@ -1692,7 +2410,8 @@ impl Vm {
             );
         };
         let value = if cls.enum_backing.is_some() {
-            let v = match c.value.borrow().clone() {
+            let state = c.value.borrow().clone();
+            let v = match state {
                 ConstState::Value(v) => v,
                 ConstState::Pending(ce) => {
                     let v = self.eval_const_expr(&ce, Rc::as_ptr(cls))?;
@@ -1854,6 +2573,21 @@ impl Vm {
             }
             let cls = self.declare_class(decl)?;
             cls.flags.set(cls.flags.get() | cflags::INTERNAL);
+            // Closures take no dynamic properties (test Zend/tests/closures/
+            // closure_write_prop).
+            if cls.lname.as_bytes() == b"closure" {
+                cls.flags.set(cls.flags.get() | cflags::NO_DYNAMIC);
+            }
+            // tests Zend/tests/generators/clone, dynamic_properties,
+            // errors/serialize_unserialize_error
+            if cls.lname.as_bytes() == b"generator" {
+                cls.flags.set(
+                    cls.flags.get()
+                        | cflags::NO_DYNAMIC
+                        | cflags::NOT_CLONEABLE
+                        | cflags::NOT_SERIALIZABLE,
+                );
+            }
             // Stub-only markers (php-src stubs' @not-serializable).
             if cls
                 .attrs
@@ -2043,4 +2777,16 @@ fn valid_class_name(n: &[u8]) -> bool {
     !n.is_empty()
         && n.iter()
             .all(|&c| c == b'\\' || c == b'_' || c.is_ascii_alphanumeric() || c >= 0x80)
+}
+
+/// Whether two constant expressions are the same value or the same code.
+fn const_code_same(a: &ConstExpr, b: &ConstExpr) -> bool {
+    match (a, b) {
+        (ConstExpr::Value(x), ConstExpr::Value(y)) => goro_runtime::compare::strict_eq(x, y),
+        (ConstExpr::Code(x), ConstExpr::Code(y)) => {
+            format!("{:?}", x.ops) == format!("{:?}", y.ops)
+                && format!("{:?}", x.consts) == format!("{:?}", y.consts)
+        }
+        _ => false,
+    }
 }

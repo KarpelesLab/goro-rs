@@ -5,7 +5,7 @@
 use goro_ext_hash as h;
 use goro_runtime::{Key, ObjRef, PhpArray, PhpStr, Value};
 
-use crate::class::{NativeHooks, TypeName, cflags};
+use crate::class::{NativeHooks, cflags};
 use crate::func::Args;
 use crate::registry::{ConstVal, Module};
 use crate::vm::{R, Vm};
@@ -455,7 +455,7 @@ fn hash_equals(vm: &mut Vm, a: &mut Args) -> R<Value> {
                     "Argument #{} (${}) must be of type string, {} given",
                     i + 1,
                     n,
-                    v.tname()
+                    crate::vm::Vm::type_name_given(&v)
                 ),
             );
         }

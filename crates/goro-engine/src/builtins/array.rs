@@ -2019,6 +2019,35 @@ fn array_unique(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return Ok(Value::Array(out));
     }
     let n = items.len();
+    // Enum cases are uncomparable: a pairwise scan (tests Zend/tests/enum/
+    // gh9775_*).
+    if items
+        .iter()
+        .any(|(_, v)| matches!(v.deref(), Value::Object(o) if vm.class_of(&o).is_enum()))
+    {
+        let mut kept: Vec<usize> = Vec::new();
+        for i in 0..n {
+            let mut dup = false;
+            for &j in &kept {
+                if flag_compare(vm, flags, &items[j].1.deref(), &items[i].1.deref())?
+                    == Ordering::Equal
+                {
+                    dup = true;
+                    break;
+                }
+            }
+            if !dup {
+                kept.push(i);
+            }
+        }
+        let mut out = PhpArray::new();
+        for (i, (k, v)) in items.into_iter().enumerate() {
+            if kept.contains(&i) {
+                out.insert(k, deref_shared(&v));
+            }
+        }
+        return Ok(Value::Array(out));
+    }
     let mut idx: Vec<usize> = (0..n).collect();
     sort_items(vm, &mut idx, |vm, &x, &y| {
         flag_compare(vm, flags, &items[x].1.deref(), &items[y].1.deref())

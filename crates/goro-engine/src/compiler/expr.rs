@@ -129,7 +129,7 @@ impl<'a> Compiler<'a> {
         match &e.kind {
             ExprKind::Int(i) => Some(Value::Int(*i)),
             ExprKind::Float(f) => Some(Value::Float(*f)),
-            ExprKind::String(s, _) => Some(Value::Str(PhpStr::intern(s))),
+            ExprKind::String(s, _) => Some(Value::Str(PhpStr::intern(&super::lit(s)))),
             ExprKind::Const(n) => self.const_name_value(n),
             ExprKind::MagicConst(m) => self.magic_value(*m, e.span.line),
             ExprKind::Unary { op, expr } => {
@@ -299,12 +299,30 @@ impl<'a> Compiler<'a> {
 
     fn expr_inner(&mut self, e: &'a Expr<'a>, hint: Reg) -> CResult<Reg> {
         let line = e.span.line;
+        // test Zend/tests/first_class_callable/first_class_callable_012
+        if let ExprKind::MethodCall {
+            nullsafe: true,
+            args: Args::FirstClassCallable,
+            ..
+        } = &e.kind
+        {
+            return self.err(
+                "Cannot combine nullsafe operator with Closure creation",
+                line,
+            );
+        }
         match &e.kind {
             ExprKind::Int(i) => Ok(self.int_const(*i)),
             ExprKind::Float(f) => Ok(self.add_const(Value::Float(*f))),
-            ExprKind::String(s, _) => Ok(self.str_const(s)),
+            ExprKind::String(s, _) => Ok(self.str_const(&super::lit(s))),
             ExprKind::Interpolated(parts, _) => self.rope(parts, hint),
             ExprKind::ShellExec(parts) => {
+                // PHP 8.5 (RFC: Deprecations for PHP 8.5).
+                self.notice(
+                    goro_runtime::Level::Deprecated,
+                    "The backtick (`) operator is deprecated, use shell_exec() instead",
+                    line,
+                );
                 let s = self.rope(parts, NONE)?;
                 let name = self.name_pair(b"shell_exec");
                 let cache = self.cache();
@@ -490,6 +508,24 @@ impl<'a> Compiler<'a> {
                     self.emit(Op::ClassName { dst: d, class });
                     return Ok(d);
                 }
+                // self::X / parent::X outside a class (test
+                // Zend/tests/self_class_const_outside_class).
+                if let ClassRef::Name(n) = &cc.class
+                    && n.kind == NameKind::Unqualified
+                    && (n.name.eq_ignore_ascii_case(b"self")
+                        || n.name.eq_ignore_ascii_case(b"parent"))
+                    && self.class.is_none()
+                    && self.f.flags & (fflags::CLOSURE | fflags::CONST_EXPR | fflags::PSEUDO_MAIN)
+                        == 0
+                {
+                    return self.err(
+                        format!(
+                            "Cannot use \"{}\" when no class scope is active",
+                            String::from_utf8_lossy(&n.name.to_ascii_lowercase())
+                        ),
+                        line,
+                    );
+                }
                 let class = self.class_spec(&cc.class)?;
                 let n = self.member_name(&cc.name)?;
                 self.free_spec(class);
@@ -575,7 +611,16 @@ impl<'a> Compiler<'a> {
                 self.parent_hook_call(sc, hint, line)
             }
             ExprKind::StaticCall(sc) => self.chain_root(e, |c| {
-                let class = c.class_spec(&sc.class)?;
+                let mut class = c.class_spec(&sc.class)?;
+                // `self::m()` forwards the late static binding class (PHP
+                // manual, Late Static Bindings: forwarding calls), so it
+                // stays relative instead of naming the class.
+                if let ClassRef::Name(n) = &sc.class
+                    && n.kind == NameKind::Unqualified
+                    && n.name.eq_ignore_ascii_case(b"self")
+                {
+                    class = ClassSpec::SelfRef;
+                }
                 let n = c.member_name(&sc.name)?;
                 c.free_spec(class);
                 c.free(n);
@@ -819,6 +864,12 @@ impl<'a> Compiler<'a> {
                 if self.in_const_expr {
                     return self.err("Cannot use yield in a constant expression", line);
                 }
+                if self.f.flags & fflags::PSEUDO_MAIN != 0 {
+                    return self.err(
+                        "The \"yield\" expression can only be used inside a function",
+                        line,
+                    );
+                }
                 let k = match key {
                     Some(k) => self.expr(k)?,
                     None => NONE,
@@ -828,6 +879,26 @@ impl<'a> Compiler<'a> {
                         if self.f.flags & fflags::BY_REF != 0 && is_ref_capable(v) {
                             self.ref_of(v)?
                         } else {
+                            if self.f.flags & fflags::BY_REF != 0
+                                && !matches!(
+                                    v.kind,
+                                    ExprKind::Call { .. }
+                                        | ExprKind::MethodCall { .. }
+                                        | ExprKind::StaticCall(_)
+                                        | ExprKind::CallExpr { .. }
+                                )
+                            {
+                                // tests Zend/tests/generators/errors/
+                                // yield_const_by_ref_error
+                                let msg = self.add_const(Value::Str(PhpStr::intern(
+                                    b"Only variable references should be yielded by reference",
+                                )));
+                                self.f.line = line;
+                                self.emit(Op::Error {
+                                    msg: msg & !CONST,
+                                    kind: 1,
+                                });
+                            }
                             self.expr(v)?
                         }
                     }
@@ -845,6 +916,18 @@ impl<'a> Compiler<'a> {
                 Ok(d)
             }
             ExprKind::YieldFrom(x) => {
+                if self.f.flags & fflags::PSEUDO_MAIN != 0 {
+                    return self.err(
+                        "The \"yield from\" expression can only be used inside a function",
+                        line,
+                    );
+                }
+                if self.f.flags & fflags::BY_REF != 0 {
+                    return self.err(
+                        "Cannot use \"yield from\" inside a by-reference generator",
+                        line,
+                    );
+                }
                 let s = self.expr(x)?;
                 self.free(s);
                 let d = self.tmp();
@@ -1134,7 +1217,7 @@ impl<'a> Compiler<'a> {
             match p {
                 StrPart::Lit(s) => {
                     if !s.is_empty() {
-                        ops.push(self.str_const(s));
+                        ops.push(self.str_const(&super::lit(s)));
                     }
                 }
                 StrPart::Expr(x) => {
@@ -2463,8 +2546,13 @@ impl<'a> Compiler<'a> {
         }
         // `$a = &$b` between plain variables.
         if let (ExprKind::Variable(a), ExprKind::Variable(b)) = (&target.kind, &value.kind) {
-            if *a == b"this" || *b == b"this" {
+            if *a == b"this" {
                 return self.err("Cannot re-assign $this", line);
+            }
+            if *b == b"this" {
+                // `$a = &$this` takes the object (tests Zend/tests/closures/
+                // closure_020, closure_026).
+                return self.assign(target, value, res);
             }
             let dst = self.cv(a);
             let src = self.cv(b);

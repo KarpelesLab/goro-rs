@@ -409,6 +409,25 @@ impl ResRef {
     pub fn is_closed(&self) -> bool {
         self.0.data.borrow().is_none()
     }
+
+    /// A handle that does not keep the resource alive.
+    pub fn downgrade(&self) -> WeakRes {
+        WeakRes(Rc::downgrade(&self.0))
+    }
+}
+
+/// A weak handle to a resource.
+#[derive(Clone)]
+pub struct WeakRes(std::rc::Weak<Resource>);
+
+impl WeakRes {
+    pub fn upgrade(&self) -> Option<ResRef> {
+        self.0.upgrade().map(ResRef)
+    }
+
+    pub fn is_dead(&self) -> bool {
+        self.0.strong_count() == 0
+    }
 }
 
 impl fmt::Debug for ResRef {

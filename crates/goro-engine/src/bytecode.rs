@@ -1066,6 +1066,11 @@ pub struct FuncCode {
     pub cv_names: Vec<PhpStr>,
     pub params: Vec<ParamInfo>,
     pub num_required: u32,
+    /// Bit `i` (i < 63): argument `i` is passed by reference. Bit 63:
+    /// arguments from 63 on may be (see [`byref_mask`]).
+    pub byref_mask: u64,
+    /// Parameters bound to their own slots (all but a variadic one).
+    pub direct_params: u32,
     pub ret_type: Option<TypeHint>,
     pub flags: u32,
     pub try_ranges: Vec<TryRange>,
@@ -1099,6 +1104,8 @@ pub struct FuncCode {
     pub discarded_calls: Vec<u32>,
     /// Attributes of `const` statements in this code, by constant name.
     pub const_attrs: Vec<(PhpStr, u32, Rc<[AttrInfo]>)>,
+    /// Compiled inside a namespace.
+    pub in_namespace: bool,
     /// Inline caches (instruction-local, by index).
     pub caches: Box<[Cell<Cache>]>,
     /// Lazily computed name → slot map for dynamic variable access.
@@ -1115,6 +1122,27 @@ pub struct Cache {
     pub key: usize,
     pub a: usize,
     pub b: u32,
+}
+
+/// The by-reference argument mask of a parameter list (see
+/// [`FuncCode::byref_mask`]).
+#[inline]
+pub fn byref_mask(params: &[ParamInfo]) -> u64 {
+    let mut m = 0u64;
+    if params.len() > 63 {
+        m |= 1 << 63;
+    }
+    for (i, p) in params.iter().take(63).enumerate() {
+        if p.by_ref {
+            if p.variadic {
+                // This argument and all later ones.
+                m |= u64::MAX << i;
+            } else {
+                m |= 1 << i;
+            }
+        }
+    }
+    m
 }
 
 impl FuncCode {

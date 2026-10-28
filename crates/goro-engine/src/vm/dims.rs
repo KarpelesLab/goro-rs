@@ -693,7 +693,18 @@ impl Vm {
             PathBase::StaticProp(c, n) => {
                 let unset = matches!(path.action, PathAction::Unset) && path.elems.is_empty();
                 if unset {
-                    return self.throw("Error", "Attempt to unset static property");
+                    // test Zend/tests/exceptions/exception_013
+                    let cls = self.resolve_class_spec(c, true)?;
+                    let n = self.get(n)?;
+                    let n = self.to_php_str(&n)?;
+                    return self.throw(
+                        "Error",
+                        &format!(
+                            "Attempt to unset static property {}::${}",
+                            cls.name.dname(),
+                            n.to_string_lossy()
+                        ),
+                    );
                 }
                 let write = path.elems.is_empty()
                     && matches!(path.action, PathAction::Assign(_) | PathAction::BindRef(_));
@@ -945,10 +956,16 @@ impl Vm {
                     self.err.defer_depth = saved;
                     return r;
                 }
-                let mut next = match self.prop_fetch_w(&obj, &name, cache, elems.get(i + 1))? {
-                    Some(p) => p,
-                    None => return Ok(Value::Null),
+                let kind = match action {
+                    PathAction::AssignOp(..) | PathAction::IncDec(_) => 1,
+                    PathAction::Unset => 2,
+                    _ => 0,
                 };
+                let mut next =
+                    match self.prop_fetch_w(&obj, &name, cache, elems.get(i + 1), kind)? {
+                        Some(p) => p,
+                        None => return Ok(Value::Null),
+                    };
                 self.walk(&mut next, elems, ctx, i + 1)
             }
         }
@@ -1418,10 +1435,29 @@ impl Vm {
                     }
                 }
             }
-            PathAction::BindRef(_) => self.throw(
-                "Error",
-                "Cannot assign by reference to an array dimension of an object",
-            ),
+            PathAction::BindRef(_) => {
+                // An internal ArrayAccess (ArrayObject...) binds the element
+                // of its storage; appending by reference has no effect
+                // (tests ext/spl/tests/bug73686, iterator_035).
+                let internal = cls.native.dim_storage.is_some()
+                    && cls.find_method(b"offsetset").is_some_and(|f| f.is_native());
+                if internal {
+                    if key.is_some()
+                        && let Some(h) = cls.native.dim_storage
+                        && let Some(p) = h(self, o)
+                    {
+                        return self.write_elem(&mut Place::Ptr(p), key, action, value);
+                    }
+                    self.notice_msg(&format!(
+                        "Indirect modification of overloaded element of {} has no effect",
+                        cls.name.dname()
+                    ))?;
+                }
+                self.throw(
+                    "Error",
+                    "Cannot assign by reference to an array dimension of an object",
+                )
+            }
         }
     }
 

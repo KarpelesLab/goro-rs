@@ -45,6 +45,13 @@ pub(crate) struct FnSpec<'a> {
 
 impl<'a> Compiler<'a> {
     pub(crate) fn func_decl(&mut self, fd: &'a FunctionDecl<'a>) -> CResult<u32> {
+        if fd.name.name.eq_ignore_ascii_case(b"assert") && !self.ns.is_empty() {
+            // test Zend/tests/custom_assert_forbidden
+            return self.err(
+                "Defining a custom assert() function is not allowed, as the function has special semantics",
+                fd.span.line,
+            );
+        }
         let full = self.qualify_pub(fd.name.name);
         let name = PhpStr::intern(&full);
         let spec = FnSpec {
@@ -100,9 +107,23 @@ impl<'a> Compiler<'a> {
 
     pub(crate) fn closure(&mut self, cl: &'a Closure<'a>, span: Span) -> CResult<u32> {
         let name = self.closure_name(span.line);
-        for u in cl.uses {
+        for (i, u) in cl.uses.iter().enumerate() {
             if u.name.name == b"this" {
                 return self.err("Cannot use $this as lexical variable", u.span.line);
+            }
+            // tests Zend/tests/closures/closure_use_auto_global,
+            // closure_use_variable_twice
+            if super::is_superglobal_name(u.name.name) {
+                return self.err("Cannot use auto-global as lexical variable", u.span.line);
+            }
+            if cl.uses[..i].iter().any(|x| x.name.name == u.name.name) {
+                return self.err(
+                    format!(
+                        "Cannot use variable ${} twice",
+                        String::from_utf8_lossy(u.name.name)
+                    ),
+                    u.span.line,
+                );
             }
             if cl.params.iter().any(|p| p.name.name == u.name.name) {
                 return self.err(
@@ -292,6 +313,7 @@ impl<'a> Compiler<'a> {
                 if is_generator {
                     self.check_generator_return(&th, t.span().line)?;
                 }
+                self.f.ret_allows_null = th.allows_null();
                 if th.mask & (tmask::VOID | tmask::NEVER) != 0 && spec.by_ref {
                     // allowed for void? PHP: by-ref void is allowed with
                     // deprecation in 8.1 ("Returning by reference from a void
@@ -808,7 +830,12 @@ impl<'a> Compiler<'a> {
                 Ok(())
             }
             Type::Static(sp) => {
-                if !is_return {
+                // test Zend/tests/type_declarations/static_type_outside_class
+                if !is_return
+                    || (self.class.is_none()
+                        && !self.file.is_empty()
+                        && self.f.flags & fflags::CLOSURE == 0)
+                {
                     return self.err(
                         "Cannot use \"static\" when no class scope is active",
                         sp.line,
@@ -866,6 +893,40 @@ impl<'a> Compiler<'a> {
 
     // ------------------------------------------------------------ const expressions
 
+    /// Class constant and property initializers take no `new` and no
+    /// object casts (tests Zend/tests/constexpr/new_not_allowed_*,
+    /// constant_expressions_cast_object_property).
+    fn member_init_checks(&self, e: &'a Expr<'a>) -> CResult<()> {
+        let mut bad: Option<(&'static str, u32)> = None;
+        walk_expr(e, &mut |x| {
+            if bad.is_some() {
+                return;
+            }
+            match &x.kind {
+                ExprKind::New { .. } => {
+                    bad = Some((
+                        "New expressions are not supported in this context",
+                        x.span.line,
+                    ))
+                }
+                ExprKind::Cast {
+                    kind: CastKind::Object,
+                    ..
+                } => {
+                    bad = Some((
+                        "Object casts are not supported in this context",
+                        x.span.line,
+                    ))
+                }
+                _ => {}
+            }
+        });
+        match bad {
+            Some((m, l)) => self.err(m, l),
+            None => Ok(()),
+        }
+    }
+
     /// Checks that `e` is a valid constant expression.
     pub(crate) fn check_const_expr(&self, e: &'a Expr<'a>) -> CResult<()> {
         // Errors PHP finds while compiling the expression come before the
@@ -894,6 +955,31 @@ impl<'a> Compiler<'a> {
                 ExprKind::StaticCall(sc) if matches!(sc.class, ClassRef::Static(_)) => {
                     Some("\"static\" is not allowed in compile-time constants")
                 }
+                // tests Zend/tests/constexpr/constant_expressions_*_class_name_error,
+                // class_on_expression_in_constant_expression
+                ExprKind::ClassConst(cc) if matches!(cc.class, ClassRef::Static(_)) => {
+                    Some("\"static::\" is not allowed in compile-time constants")
+                }
+                ExprKind::ClassConst(cc) if matches!(cc.class, ClassRef::Expr(_)) => {
+                    let is_class = matches!(&cc.name, MemberName::Ident(i) if i.name.eq_ignore_ascii_case(b"class"));
+                    Some(if is_class {
+                        "(expression)::class cannot be used in constant expressions"
+                    } else {
+                        "Dynamic class names are not allowed in compile-time class constant references"
+                    })
+                }
+                ExprKind::New {
+                    args: Some(Args::FirstClassCallable),
+                    ..
+                } => Some("Cannot create Closure for new expression"),
+                // tests Zend/tests/first_class_callable/constexpr/error_dynamic_*
+                ExprKind::CallExpr {
+                    callee,
+                    args: Args::FirstClassCallable,
+                } => Some(match callee.kind {
+                    ExprKind::Int(_) | ExprKind::Float(_) => "Illegal function name",
+                    _ => "Cannot use dynamic function name in constant expression",
+                }),
                 _ => None,
             };
             if let Some(m) = msg {
@@ -1049,6 +1135,22 @@ impl<'a> Compiler<'a> {
                         line,
                     );
                 }
+                if n.name == b"_" {
+                    // PHP 8.4 (RFC: Deprecations for PHP 8.4).
+                    self.notice(
+                        goro_runtime::Level::Deprecated,
+                        format!(
+                            "Using \"_\" as {} name is deprecated since 8.4",
+                            match kind {
+                                ClassKind::Interface => "an interface",
+                                ClassKind::Trait => "a trait",
+                                ClassKind::Enum => "an enum",
+                                ClassKind::Class => "a class",
+                            }
+                        ),
+                        line,
+                    );
+                }
                 let full = self.qualify_pub(n.name);
                 if let Some(imp) = self.use_class.get(&l)
                     && !imp.eq_ignore_ascii_case(&full)
@@ -1195,8 +1297,27 @@ impl<'a> Compiler<'a> {
                             c.span.line,
                         );
                     }
+                    // tests Zend/tests/type_declarations/typed_class_constants_type_error4-6
+                    if let Some(Type::Named(n)) = &c.ty
+                        && n.kind == NameKind::Unqualified
+                        && matches!(
+                            &n.name.to_ascii_lowercase()[..],
+                            b"callable" | b"void" | b"never"
+                        )
+                    {
+                        return self.err(
+                            format!(
+                                "Class constant {}::{} cannot have type {}",
+                                cn,
+                                String::from_utf8_lossy(c.items[0].name.name),
+                                String::from_utf8_lossy(&n.name.to_ascii_lowercase())
+                            ),
+                            c.span.line,
+                        );
+                    }
+                    // (static is a valid constant type)
                     let ty = match &c.ty {
-                        Some(t) => Some(self.type_hint(t, false)?),
+                        Some(t) => Some(self.type_hint(t, true)?),
                         None => None,
                     };
                     let attrs = self.attributes(c.attrs)?;
@@ -1221,7 +1342,33 @@ impl<'a> Compiler<'a> {
                                 item.span.line,
                             );
                         }
-                        let value = self.const_expr(&item.value)?;
+                        self.member_init_checks(&item.value)?;
+                        let mut value = self.const_expr(&item.value)?;
+                        // A literal of the wrong type; int widens to float
+                        // (tests typed_class_constants_type_error1,
+                        // multiple_constants, type_success1).
+                        if let (Some(t), ConstExpr::Value(v)) = (&ty, &value) {
+                            if let Value::Int(i) = v
+                                && t.mask & tmask::FLOAT != 0
+                                && t.mask & tmask::INT == 0
+                            {
+                                value = ConstExpr::Value(Value::Float(*i as f64));
+                            } else if t.classes.is_empty()
+                                && t.mask & tmask::STATIC == 0
+                                && !const_fits_type(t, v)
+                            {
+                                return self.err(
+                                    format!(
+                                        "Cannot use {} as value for class constant {}::{} of type {}",
+                                        type_word(v),
+                                        cn,
+                                        String::from_utf8_lossy(item.name.name),
+                                        t.display()
+                                    ),
+                                    item.span.line,
+                                );
+                            }
+                        }
                         consts.push(ConstDecl {
                             name: PhpStr::intern(item.name.name),
                             value,
@@ -1250,22 +1397,8 @@ impl<'a> Compiler<'a> {
                                 );
                             }
                             let ce = self.const_expr(v)?;
-                            if let ConstExpr::Value(val) = &ce {
-                                let backing = cd.enum_backing.as_ref().map(|t| matches!(t, Type::Named(n) if n.name.eq_ignore_ascii_case(b"int")));
-                                match (val, backing) {
-                                    (Value::Int(_), Some(true)) | (Value::Str(_), Some(false)) => {}
-                                    _ => {
-                                        return self.err(
-                                            format!(
-                                                "Enum case type {} does not match enum backing type {}",
-                                                type_word_short(val),
-                                                if backing == Some(true) { "int" } else { "string" }
-                                            ),
-                                            ec.span.line,
-                                        );
-                                    }
-                                }
-                            }
+                            // Checked when the enum is first used (test
+                            // Zend/tests/enum/backed-mismatch).
                             Some(ce)
                         }
                         None => {
@@ -1338,6 +1471,21 @@ impl<'a> Compiler<'a> {
                             return self.err("Property hook list must not be empty", it.span.line);
                         }
                     }
+                    // tests typed_properties_017, typed_properties_109
+                    if let Some(Type::Named(n)) = &p.ty
+                        && n.kind == NameKind::Unqualified
+                        && matches!(&n.name.to_ascii_lowercase()[..], b"void" | b"never")
+                    {
+                        return self.err(
+                            format!(
+                                "Property {}::${} cannot have type {}",
+                                cn,
+                                String::from_utf8_lossy(p.props[0].name.name),
+                                String::from_utf8_lossy(&n.name.to_ascii_lowercase())
+                            ),
+                            p.span.line,
+                        );
+                    }
                     let ty = match &p.ty {
                         Some(t) => {
                             let th = self.type_hint(t, false)?;
@@ -1402,7 +1550,22 @@ impl<'a> Compiler<'a> {
                                         it.span.line,
                                     );
                                 }
+                                self.member_init_checks(d)?;
                                 let ce = self.const_expr(d)?;
+                                if let (Some(t), ConstExpr::Value(Value::Null)) = (&ty, &ce)
+                                    && !t.allows_null()
+                                    && !t.classes.iter().any(|g| g.len() > 1)
+                                {
+                                    // tests typed_properties_015, 049
+                                    return self.err(
+                                        format!(
+                                            "Default value for property of type {} may not be null. Use the nullable type ?{} to allow null default value",
+                                            t.display(),
+                                            t.display()
+                                        ),
+                                        it.span.line,
+                                    );
+                                }
                                 if let (Some(t), ConstExpr::Value(v)) = (&ty, &ce)
                                     && !const_fits_type(t, v)
                                 {
@@ -1430,6 +1593,7 @@ impl<'a> Compiler<'a> {
                             flags,
                             is_interface,
                             it.span.line,
+                            p.ty.as_ref(),
                         )?;
                         let mut f = flags;
                         if default.is_some() || (ty.is_none() && flags & mflags::STATIC == 0) {
@@ -1715,6 +1879,7 @@ impl<'a> Compiler<'a> {
                                 pf,
                                 false,
                                 p.span.line,
+                                p.ty.as_ref(),
                             )?;
                             let attrs = self.attributes(p.attrs)?;
                             props.push(PropDecl {
@@ -1755,6 +1920,22 @@ impl<'a> Compiler<'a> {
                         .collect();
                     let mut rules = Vec::new();
                     for a in tu.adaptations {
+                        // tests Zend/tests/traits/static_in_trait_insteadof_*
+                        let names: Vec<&Name<'a>> = match a {
+                            TraitAdaptation::Precedence {
+                                trait_, insteadof, ..
+                            } => std::iter::once(trait_).chain(insteadof.iter()).collect(),
+                            TraitAdaptation::Alias { trait_, .. } => trait_.iter().collect(),
+                        };
+                        if names.iter().any(|n| {
+                            n.kind == NameKind::Unqualified
+                                && n.name.eq_ignore_ascii_case(b"static")
+                        }) {
+                            return self.err(
+                                "Cannot use \"static\" as trait name, as it is reserved",
+                                tu.span.line,
+                            );
+                        }
                         match a {
                             TraitAdaptation::Precedence {
                                 trait_,
@@ -1828,6 +2009,7 @@ impl<'a> Compiler<'a> {
         pflags: u32,
         iface: bool,
         line: u32,
+        ast_ty: Option<&'a Type<'a>>,
     ) -> CResult<(Option<Rc<FuncCode>>, Option<Rc<FuncCode>>, u32)> {
         let mut get = None;
         let mut set = None;
@@ -1966,7 +2148,9 @@ impl<'a> Compiler<'a> {
             let spec = FnSpec {
                 name: spec_name,
                 params,
-                ret: None,
+                // A get hook returns the property type (RFC: Property
+                // hooks; test Zend/tests/property_hooks/get_type_check).
+                ret: if is_get { ast_ty } else { None },
                 body,
                 by_ref: h.by_ref,
                 kind: FnKind::Method {
@@ -2196,7 +2380,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn check_magic_method(
-        &self,
+        &mut self,
         cn: &str,
         lname: &[u8],
         md: &MethodDecl2<'a>,
@@ -2236,18 +2420,7 @@ impl<'a> Compiler<'a> {
                     md.span.line,
                 );
             }
-            if lname != b"__construct"
-                && lname != b"__destruct"
-                && lname != b"__clone"
-                && flags & mflags::PUBLIC == 0
-                && lname != b"__sleep"
-                && lname != b"__wakeup"
-                && lname != b"__serialize"
-                && lname != b"__unserialize"
-                && lname != b"__set_state"
-            {
-                // PHP warns: The magic method X::__get() must have public visibility
-            }
+
             if md.params.iter().any(|p| p.by_ref)
                 && matches!(
                     lname,
@@ -2263,11 +2436,108 @@ impl<'a> Compiler<'a> {
                 );
             }
         }
-        if lname == b"__construct" && flags & mflags::STATIC != 0 {
+        if matches!(lname, b"__construct" | b"__invoke") && flags & mflags::STATIC != 0 {
             return self.err(
                 format!("Method {}::{}() cannot be static", cn, mname),
                 md.span.line,
             );
+        }
+        // Visibility, parameter and return types of magic methods (tests
+        // Zend/tests/magic_methods/magic_methods_0*, return_types/0*).
+        let magic = matches!(
+            lname,
+            b"__get"
+                | b"__set"
+                | b"__isset"
+                | b"__unset"
+                | b"__call"
+                | b"__callstatic"
+                | b"__invoke"
+                | b"__tostring"
+                | b"__debuginfo"
+                | b"__serialize"
+                | b"__unserialize"
+                | b"__sleep"
+                | b"__wakeup"
+                | b"__set_state"
+        );
+        if magic && flags & mflags::PUBLIC == 0 {
+            self.notice(
+                goro_runtime::Level::Warning,
+                format!(
+                    "The magic method {}::{}() must have public visibility",
+                    cn, mname
+                ),
+                md.span.line,
+            );
+        }
+        let param_types: &[(usize, &str)] = match lname {
+            b"__get" | b"__isset" | b"__unset" | b"__set" => &[(0, "string")],
+            b"__call" | b"__callstatic" => &[(0, "string"), (1, "array")],
+            b"__unserialize" | b"__set_state" => &[(0, "array")],
+            _ => &[],
+        };
+        for &(i, want) in param_types {
+            if let Some(p) = md.params.get(i)
+                && let Some(t) = &p.ty
+            {
+                let th = self.type_hint(t, false)?;
+                let bit = if want == "string" {
+                    tmask::STRING
+                } else {
+                    tmask::ARRAY
+                };
+                if th.mask & (bit | tmask::MIXED) == 0 {
+                    return self.err(
+                        format!(
+                            "{}::{}(): Parameter #{} (${}) must be of type {} when declared",
+                            cn,
+                            mname,
+                            i + 1,
+                            String::from_utf8_lossy(p.name.name),
+                            want
+                        ),
+                        md.span.line,
+                    );
+                }
+            }
+        }
+        if let Some(rt) = md.ret {
+            if matches!(lname, b"__construct" | b"__destruct") {
+                return self.err(
+                    format!("Method {}::{}() cannot declare a return type", cn, mname),
+                    md.span.line,
+                );
+            }
+            let want: Option<&[&str]> = match lname {
+                b"__set" | b"__unset" | b"__unserialize" | b"__wakeup" | b"__clone" => {
+                    Some(&["void"])
+                }
+                b"__isset" => Some(&["bool"]),
+                b"__tostring" => Some(&["string"]),
+                b"__debuginfo" => Some(&["?array", "array"]),
+                b"__serialize" | b"__sleep" => Some(&["array"]),
+                b"__set_state" => Some(&["object"]),
+                _ => None,
+            };
+            if let Some(w) = want {
+                let th = self.type_hint(&rt, true)?;
+                let shown = th.display();
+                let ok = w.contains(&shown.as_str())
+                    || th.mask & tmask::NEVER != 0
+                    || (lname == b"__set_state"
+                        && (th.mask & tmask::STATIC != 0 || !th.classes.is_empty())
+                        && th.mask & !(tmask::STATIC | tmask::NULL) == 0);
+                if !ok {
+                    return self.err(
+                        format!(
+                            "{}::{}(): Return type must be {} when declared",
+                            cn, mname, w[0]
+                        ),
+                        md.span.line,
+                    );
+                }
+            }
         }
         if lname == b"__destruct" && flags & mflags::STATIC != 0 {
             return self.err(
@@ -2642,10 +2912,6 @@ fn type_word(v: &Value) -> &'static str {
         Value::Array(_) => "array",
         _ => "object",
     }
-}
-
-fn type_word_short(v: &Value) -> &'static str {
-    type_word(v)
 }
 
 /// Parses a native function signature (`function name(int $a = 1): int`)

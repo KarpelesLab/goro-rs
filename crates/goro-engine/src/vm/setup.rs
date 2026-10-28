@@ -24,6 +24,10 @@ impl Vm {
             trace_const_expr: false,
             deprecating: Vec::new(),
             early_binding: false,
+            gen_delegators: Vec::new(),
+            enums_checked: Default::default(),
+            linking_early: false,
+            link_deferred: false,
             obligations: Vec::new(),
             delayed_obligations: Vec::new(),
             magic_call_name: None,
@@ -246,8 +250,27 @@ impl Vm {
         g.insert(Key::from("argv"), Value::Array(args));
         g.insert(Key::from("argc"), Value::Int(argc));
         g.insert(Key::from("_SERVER"), Value::Array(server));
-        g.insert(Key::from("_ENV"), Value::Array(PhpArray::new()));
         g.insert(Key::from("_REQUEST"), Value::Array(PhpArray::new()));
+        // variables_order "E" fills $_ENV (PHP manual: variables_order;
+        // the default is "EGPCS").
+        let order = self
+            .ini
+            .values
+            .get(&PhpStr::new(b"variables_order"))
+            .map(|v| v.to_vec())
+            .unwrap_or_else(|| b"EGPCS".to_vec());
+        let mut env = PhpArray::new();
+        if order.iter().any(|c| c.eq_ignore_ascii_case(&b'E')) {
+            use std::os::unix::ffi::OsStrExt;
+            for (k, v) in std::env::vars_os() {
+                env.insert(
+                    Key::from_bytes(k.as_bytes()),
+                    Value::Str(PhpStr::new(v.as_bytes())),
+                );
+            }
+        }
+        let g = &mut self.globals.dyn_vars;
+        g.insert(Key::from("_ENV"), Value::Array(env));
         self.argv = argv.iter().map(|a| PhpStr::new(a)).collect();
     }
 
@@ -357,6 +380,7 @@ impl Vm {
             }
         }
         self.ob_end_all();
+        crate::builtins::file::close_open_streams(self);
         for m in self.modules.clone() {
             if let Some(f) = m.shutdown {
                 f(self);

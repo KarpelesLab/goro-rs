@@ -36,6 +36,10 @@ pub mod cflags {
     pub const NO_DYNAMIC: u32 = 512;
     pub const NOT_SERIALIZABLE: u32 = 1024;
     pub const NOT_CLONEABLE: u32 = 2048;
+    /// A user subclass of an internal class whose user methods may only
+    /// run once the parent constructor did (see
+    /// `builtins::spl::check_init`).
+    pub const CHECK_INIT: u32 = 1 << 30;
 }
 
 /// Member flags (methods, properties, constants).
@@ -478,6 +482,18 @@ impl Class {
                 return true;
             }
             c = p.parent.as_deref();
+        }
+        false
+    }
+
+    /// Whether this class or a parent matches `f`.
+    pub fn ancestors_have(&self, f: impl Fn(&Class) -> bool) -> bool {
+        let mut c: Option<&Class> = Some(self);
+        while let Some(x) = c {
+            if f(x) {
+                return true;
+            }
+            c = x.parent.as_deref();
         }
         false
     }

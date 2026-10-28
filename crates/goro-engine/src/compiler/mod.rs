@@ -23,6 +23,17 @@ use crate::class::ClassDecl;
 pub use decl::parse_native_sig;
 
 /// Whether a variable name is a superglobal.
+/// A string literal's bytes in the internal encoding (zend.multibyte with
+/// a non-UTF-8 internal_encoding; test ext/mbstring/tests/zend_multibyte-02).
+pub(crate) fn lit(s: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    match LITERAL_ENCODING.with(|c| c.get()) {
+        Some(e) if !s.is_ascii() => std::borrow::Cow::Owned(
+            goro_charset::convert(s, e, goro_charset::Encoding::Utf8, &Default::default()).bytes,
+        ),
+        _ => std::borrow::Cow::Borrowed(s),
+    }
+}
+
 pub fn is_superglobal_name(n: &[u8]) -> bool {
     scan::is_superglobal(n)
 }
@@ -96,6 +107,8 @@ pub(crate) struct FinCtx {
 
 /// State of the function being compiled.
 pub(crate) struct FState<'a> {
+    /// The declared return type accepts null.
+    pub ret_allows_null: bool,
     pub ops: Vec<Op>,
     pub lines: Vec<u32>,
     pub consts: Vec<Value>,
@@ -147,6 +160,7 @@ impl<'a> FState<'a> {
     pub fn new(cvs: Vec<&'a [u8]>) -> FState<'a> {
         let n = cvs.len() as u32;
         FState {
+            ret_allows_null: false,
             ops: Vec::new(),
             lines: Vec::new(),
             consts: Vec::new(),
@@ -599,7 +613,12 @@ impl<'a> Compiler<'a> {
         if params.iter().any(|p| p.ty.is_some()) {
             flags |= fflags::TYPED_PARAMS;
         }
+        let byref_mask = crate::bytecode::byref_mask(&params);
+        let direct_params = params.iter().filter(|p| !p.variadic).count() as u32;
         Ok(FuncCode {
+            in_namespace: !self.ns.is_empty(),
+            byref_mask,
+            direct_params,
             name,
             class_name: self.class.as_ref().map(|c| c.name.clone()),
             file: self.file.clone(),
@@ -781,7 +800,12 @@ impl<'a> Compiler<'a> {
                             if let Some(t) = t {
                                 self.ticks = t;
                             }
+                            // Statements of a declare block do not count as
+                            // statements before a later encoding declare
+                            // (test ext/mbstring/tests/zend_multibyte-15).
+                            let first = self.past_first_stmt;
                             let r = self.top_stmts(b, hoisted, classes);
+                            self.past_first_stmt = first;
                             self.ticks = saved;
                             r?
                         }
@@ -1063,6 +1087,9 @@ impl<'a> Compiler<'a> {
                         .push((PhpStr::from(full), s.span.line, a));
                 }
                 for c in *items {
+                    // A constant expression (PHP manual: Constants; tests
+                    // Zend/tests/first_class_callable/constexpr/error_*).
+                    self.check_const_expr(&c.value)?;
                     let full = self.qualify(c.name.name);
                     let name = self.str_const(&full);
                     let v = self.expr(&c.value)?;
@@ -1097,6 +1124,22 @@ impl<'a> Compiler<'a> {
                 .unwrap_or(&full)
                 .to_vec(),
         };
+        // `use Foo;` in the global namespace (test Zend/tests/bug69388).
+        if kind == UseKind::Normal
+            && self.ns.is_empty()
+            && prefix.is_none()
+            && u.alias.is_none()
+            && !full.contains(&b'\\')
+        {
+            self.notice(
+                goro_runtime::Level::Warning,
+                format!(
+                    "The use statement with non-compound name '{}' has no effect",
+                    String::from_utf8_lossy(&full)
+                ),
+                line,
+            );
+        }
         match kind {
             UseKind::Normal => {
                 let la = alias.to_ascii_lowercase();
@@ -1532,6 +1575,22 @@ impl<'a> Compiler<'a> {
         if self.f.flags & fflags::RETURNS_NEVER != 0 && !self.f.is_generator {
             return self.err("A never-returning function must not return", line);
         }
+        // `return;` with a return type (tests Zend/tests/type_declarations/
+        // typed_return_*without_value).
+        if e.is_none()
+            && self.f.flags & fflags::HAS_RETURN_TYPE != 0
+            && self.f.flags & fflags::RETURNS_VOID == 0
+            && !self.f.is_generator
+        {
+            return self.err(
+                if self.f.ret_allows_null {
+                    "A function with return type must return a value (did you mean \"return null;\" instead of \"return;\"?)"
+                } else {
+                    "A function with return type must return a value"
+                },
+                line,
+            );
+        }
         let val = match e {
             None => self.null_const(),
             Some(e) if by_ref && !self.f.is_generator && is_ref_capable(e) => {
@@ -1689,6 +1748,9 @@ impl<'a> Compiler<'a> {
                 self.f.line = c.span.line;
                 let mut names = Vec::new();
                 for n in c.types {
+                    if n.kind == NameKind::Unqualified && n.name.eq_ignore_ascii_case(b"static") {
+                        return self.err("Bad class name in the catch statement", c.span.line);
+                    }
                     let full = self.resolve_class(n);
                     let lf = full.to_ascii_lowercase();
                     if lf == b"self" || lf == b"static" || lf == b"parent" {
@@ -1852,4 +1914,8 @@ fn needs_rtd_key(cd: &goro_syntax::ast::ClassDecl) -> bool {
 thread_local! {
     /// The zend.multibyte setting for the next compilation.
     pub static ZEND_MULTIBYTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// zend.multibyte: the encoding string literals are converted to from
+    /// UTF-8 (the internal encoding).
+    pub static LITERAL_ENCODING: std::cell::Cell<Option<goro_charset::Encoding>> =
+        const { std::cell::Cell::new(None) };
 }

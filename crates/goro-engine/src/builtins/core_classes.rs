@@ -474,12 +474,24 @@ fn clone_closure_data(o: &ObjRef, c: Callee) -> ClosureData {
 fn closure_debug(vm: &mut Vm, o: &ObjRef) -> Option<PhpArray> {
     let c = vm.closure_data(o)?;
     let mut a = PhpArray::new();
-    let fname = match c.func.code() {
-        Some(code) if code.flags & crate::bytecode::fflags::CLOSURE != 0 => code.name.clone(),
-        _ => PhpStr::from(c.func.display_name()),
-    };
-    a.insert(Key::from("name"), Value::Str(fname));
-    if let Some(code) = c.func.code() {
+    let real = c
+        .func
+        .code()
+        .is_some_and(|code| code.flags & crate::bytecode::fflags::CLOSURE != 0);
+    if !real {
+        // Closures of functions and methods: "function", no location
+        // (observed on PHP 8.5; tests Zend/tests/first_class_callable/*).
+        a.insert(
+            Key::from("function"),
+            Value::Str(PhpStr::from(c.func.display_name())),
+        );
+    } else {
+        a.insert(
+            Key::from("name"),
+            Value::Str(c.func.code().unwrap().name.clone()),
+        );
+    }
+    if let Some(code) = c.func.code().filter(|_| real) {
         a.insert(Key::from("file"), Value::Str(code.file.clone()));
         a.insert(Key::from("line"), Value::Int(code.line_start as i64));
         let n = o.obj().native.borrow();
@@ -492,8 +504,33 @@ fn closure_debug(vm: &mut Vm, o: &ObjRef) -> Option<PhpArray> {
                 st.insert(Key::Str(name), v.clone());
             }
         }
-        for (i, s) in cd.statics.borrow().iter().enumerate() {
-            let _ = (i, s);
+        // Static variables, with their initial value before the first call
+        // (observed on PHP 8.5).
+        for op in &code.ops {
+            if let crate::bytecode::Op::BindStatic { var, index, .. } = op {
+                let name = code
+                    .cv_names
+                    .get(*var as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                let cell = cd.statics.borrow().get(*index as usize).cloned().flatten();
+                let v = match cell {
+                    Some(r) => r.get(),
+                    None => code
+                        .ops
+                        .iter()
+                        .find_map(|op| match op {
+                            crate::bytecode::Op::StaticInit { index: i, src }
+                                if i == index && crate::bytecode::is_const(*src) =>
+                            {
+                                code.consts.get(crate::bytecode::slot_of(*src)).cloned()
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(Value::Null),
+                };
+                st.insert(Key::Str(name), v);
+            }
         }
         if !st.is_empty() {
             a.insert(Key::from("static"), Value::Array(st));
@@ -509,9 +546,6 @@ fn closure_debug(vm: &mut Vm, o: &ObjRef) -> Option<PhpArray> {
             let mut k = String::new();
             if pi.by_ref {
                 k.push('&');
-            }
-            if pi.variadic {
-                k.push_str("...");
             }
             k.push('$');
             k.push_str(&pi.name.dname());
@@ -563,18 +597,34 @@ fn do_bind(vm: &mut Vm, cl: &ObjRef, new_this: Value, scope_arg: Option<Value>) 
             && !c.func.is_native()
         {
             vm.warn(&format!(
-                "Cannot bind closure to scope of internal class {}",
+                "Cannot bind closure to scope of internal class {}, this will be an error in PHP 9",
                 s.name.dname()
             ))?;
             return Ok(Value::Null);
         }
-        cd.scope = scope.as_ref().map(Rc::as_ptr).unwrap_or(std::ptr::null());
+        let new_scope = scope.as_ref().map(Rc::as_ptr).unwrap_or(std::ptr::null());
+        // Closures of functions and methods keep their scope (observed on
+        // PHP 8.5; tests Zend/tests/closures/closure_from_callable_rebinding*).
+        if cd.from_callable && !std::ptr::eq(new_scope, cd.scope) {
+            vm.warn(&format!(
+                "Cannot rebind scope of closure created from {}, this will be an error in PHP 9",
+                if c.func.scope().is_some() {
+                    "method"
+                } else {
+                    "function"
+                }
+            ))?;
+            return Ok(Value::Null);
+        }
+        cd.scope = new_scope;
         cd.called_scope = cd.scope;
     }
     match new_this {
         Value::Object(t) => {
             if is_static {
-                vm.warn("Cannot bind an instance to a static closure")?;
+                vm.warn(
+                    "Cannot bind an instance to a static closure, this will be an error in PHP 9",
+                )?;
                 return Ok(Value::Null);
             }
             if c.func.is_native() || cd.from_callable {
@@ -584,7 +634,7 @@ fn do_bind(vm: &mut Vm, cl: &ObjRef, new_this: Value, scope_arg: Option<Value>) 
                     && !vm.class_of(&t).is_subclass_of(&vm.class_of(old))
                 {
                     vm.warn(&format!(
-                        "Cannot bind method {}() to object of class {}",
+                        "Cannot bind method {}() to object of class {}, this will be an error in PHP 9",
                         c.func.display_name(),
                         vm.class_of(&t).name.dname()
                     ))?;
@@ -606,7 +656,9 @@ fn do_bind(vm: &mut Vm, cl: &ObjRef, new_this: Value, scope_arg: Option<Value>) 
                     .code()
                     .is_some_and(|code| code.flags & crate::bytecode::fflags::USES_THIS != 0)
             {
-                vm.warn("Cannot unbind $this of closure using $this")?;
+                vm.warn(
+                    "Cannot unbind $this of closure using $this, this will be an error in PHP 9",
+                )?;
                 return Ok(Value::Null);
             }
             if cd.from_callable
@@ -614,7 +666,7 @@ fn do_bind(vm: &mut Vm, cl: &ObjRef, new_this: Value, scope_arg: Option<Value>) 
                 && c.func.scope().is_some()
                 && c.func.flags & crate::class::mflags::STATIC == 0
             {
-                vm.warn("Cannot unbind $this of method")?;
+                vm.warn("Cannot unbind $this of method, this will be an error in PHP 9")?;
                 return Ok(Value::Null);
             }
             cd.this = None;
@@ -652,7 +704,15 @@ fn closure_call(vm: &mut Vm, a: &mut Args) -> R<Value> {
         .code()
         .is_some_and(|code| code.flags & crate::bytecode::fflags::STATIC_CLOSURE != 0)
     {
-        vm.warn("Cannot bind an instance to a static closure")?;
+        vm.warn("Cannot bind an instance to a static closure, this will be an error in PHP 9")?;
+        return Ok(Value::Null);
+    }
+    // test Zend/tests/closures/closure_call
+    if tc.has_flag(crate::class::cflags::INTERNAL) && !c.func.is_native() {
+        vm.warn(&format!(
+            "Cannot bind closure to scope of internal class {}, this will be an error in PHP 9",
+            tc.name.dname()
+        ))?;
         return Ok(Value::Null);
     }
     c.this = Some(t);
@@ -685,10 +745,12 @@ fn closure_invoke(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn closure_get_current(vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    for f in vm.ex.frames.iter().rev() {
-        if let Some(c) = &f.closure {
-            return Ok(Value::Object(c.clone()));
-        }
+    // The calling function only (test Zend/tests/closures/
+    // closure_get_current).
+    if let Some(f) = vm.ex.frames.last()
+        && let Some(c) = &f.closure
+    {
+        return Ok(Value::Object(c.clone()));
     }
     vm.throw("Error", "Current function is not a closure")
 }

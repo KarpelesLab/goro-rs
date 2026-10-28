@@ -22,6 +22,10 @@ const M_PROPS_REF: i64 = 6;
 const M_PROPS_VAL: i64 = 7;
 /// Properties by name, read as the loop reaches them (hooked objects).
 const M_PROPS_NAMES: i64 = 8;
+/// By reference over an ArrayIterator: the iterator's methods move it,
+/// the element is taken by reference from its storage.
+const M_ITER_REF_FIRST: i64 = 9;
+const M_ITER_REF: i64 = 10;
 
 #[inline]
 fn enc(mode: i64, data: i64) -> Value {
@@ -181,10 +185,30 @@ impl Vm {
                 }
                 if self.is_traversable(&cls) {
                     if by_ref {
-                        return self.throw(
-                            "Error",
-                            "An iterator cannot be used with foreach by reference",
-                        );
+                        // Only an ArrayIterator (reached directly or by
+                        // getIterator()) iterates by reference (tests
+                        // ext/spl/tests/ArrayObject/array_008, gh11178).
+                        let it = if crate::builtins::spl::ai_iterates_by_ref(self, &o) {
+                            o.clone()
+                        } else if cls.native.get_iterator.is_none()
+                            && !cls.is_subclass_of(self.core.iterator.as_ref().unwrap())
+                        {
+                            self.get_iterator_of(&o)?
+                        } else {
+                            o.clone()
+                        };
+                        if !crate::builtins::spl::ai_iterates_by_ref(self, &it) {
+                            return self.throw(
+                                "Error",
+                                "An iterator cannot be used with foreach by reference",
+                            );
+                        }
+                        self.call_method(&it, b"rewind", Vec::new())?;
+                        unsafe {
+                            *sa = Some(Value::Object(it));
+                            *sb = Some(enc(M_ITER_REF_FIRST, 0));
+                        }
+                        return Ok(true);
                     }
                     let it = self.get_iterator_of(&o)?;
                     if self.is_generator_obj(&it) {
@@ -381,6 +405,30 @@ impl Vm {
                 }
                 Ok(true)
             }
+            M_ITER_REF_FIRST | M_ITER_REF => {
+                let Some(Value::Object(it)) = (unsafe { (*sa).clone() }) else {
+                    return Ok(false);
+                };
+                if mode == M_ITER_REF {
+                    self.call_method(&it, b"next", Vec::new())?;
+                }
+                unsafe { *sb = Some(enc(M_ITER_REF, 0)) };
+                let valid = self.call_method(&it, b"valid", Vec::new())?;
+                if !self.to_bool(&valid) {
+                    return Ok(false);
+                }
+                let Some(r) = crate::builtins::spl::ai_current_ref(self, &it)? else {
+                    return Ok(false);
+                };
+                let p = self.slot_ptr(val);
+                let old = unsafe { (*p).replace(r) };
+                drop(old);
+                if key != NONE {
+                    let k = self.call_method(&it, b"key", Vec::new())?;
+                    self.put(key, k.into_deref());
+                }
+                Ok(true)
+            }
             M_GEN_FIRST | M_GEN => {
                 let Some(Value::Object(g)) = (unsafe { (*sa).clone() }) else {
                     return Ok(false);
@@ -491,6 +539,16 @@ impl Vm {
             return Ok(());
         };
         let p = cls.props.borrow()[idx as usize].clone();
+        if p.flags & crate::class::mflags::READONLY != 0 {
+            return self.throw(
+                "Error",
+                &format!(
+                    "Cannot acquire reference to readonly property {}::${}",
+                    cls.name.dname(),
+                    name.to_string_lossy()
+                ),
+            );
+        }
         if p.get.is_none() && p.set.is_none() {
             return Ok(());
         }
@@ -877,6 +935,8 @@ impl Vm {
                 }
             }
             Delegate::Gen(inner) => {
+                // Who delegates to the running generator, for traces.
+                self.gen_delegators.push((inner.clone(), g.clone()));
                 let r = if fresh {
                     self.gen_ensure_started(&inner)
                 } else if let Some(e) = throw {
@@ -884,6 +944,7 @@ impl Vm {
                 } else {
                     self.gen_resume(&inner, Some(send.unwrap_or_default()), None)
                 };
+                self.gen_delegators.pop();
                 if let Err(e) = r {
                     self.with_gen(g, |d| d.delegate = None);
                     if let super::Unwind::Throw(ex) = e {
@@ -1190,6 +1251,22 @@ impl Vm {
 
     pub fn gen_current(&mut self, g: &ObjRef) -> R<(Value, Value)> {
         self.gen_ensure_started(g)?;
+        let inner = self
+            .with_gen(g, |d| match (&d.state, &d.delegate) {
+                (GenState::Suspended, Some(Delegate::Gen(i))) => Some(i.clone()),
+                _ => None,
+            })
+            .flatten();
+        if let Some(inner) = inner {
+            // The shared inner generator's element (test Zend/tests/
+            // generators/yield_from_multi_tree).
+            let done = self
+                .with_gen(&inner, |d| d.state == GenState::Done)
+                .unwrap_or(true);
+            if !done {
+                return self.gen_current(&inner);
+            }
+        }
         Ok(self
             .with_gen(g, |d| {
                 if d.state == GenState::Done {
@@ -1222,13 +1299,11 @@ impl Vm {
     }
 
     pub fn gen_throw(&mut self, g: &ObjRef, e: ObjRef) -> R<Value> {
+        // A generator not started yet first runs to its first yield (PHP
+        // manual: Generator::throw).
+        self.gen_ensure_started(g)?;
         let st = self.with_gen(g, |d| d.state).unwrap();
-        if st == GenState::Created {
-            // Thrown before the first yield: the generator is closed.
-            self.with_gen(g, |d| {
-                d.state = GenState::Done;
-                d.frame = None;
-            });
+        if st == GenState::Done {
             return Err(super::Unwind::Throw(e));
         }
         self.with_gen(g, |d| d.advanced = true);
@@ -1238,6 +1313,8 @@ impl Vm {
     }
 
     pub fn gen_return_value(&mut self, g: &ObjRef) -> R<Value> {
+        // Auto-priming (test Zend/tests/generators/get_return).
+        self.gen_ensure_started(g)?;
         let (st, ret) = self.with_gen(g, |d| (d.state, d.ret.clone())).unwrap();
         match (st, ret) {
             (GenState::Done, Some(v)) => Ok(v),

@@ -76,8 +76,10 @@ fn lookup(vm: &mut Vm, a: &mut Args, try_: bool) -> R<Value> {
         .filter(|c| c.flags & mflags::CASE != 0)
         .cloned()
         .collect();
+    vm.enum_check_cases(&cls)?;
     for c in consts {
-        let cv = match c.value.borrow().clone() {
+        let state = c.value.borrow().clone();
+        let cv = match state {
             ConstState::Value(v) => v,
             ConstState::Pending(ce) => {
                 let v = vm.eval_const_expr(&ce, std::rc::Rc::as_ptr(&cls))?;

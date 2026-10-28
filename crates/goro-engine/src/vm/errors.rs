@@ -296,7 +296,10 @@ impl Vm {
                 if self.class_of(&o).is_subclass_of(&throwable) {
                     return Unwind::Throw(o);
                 }
-                self.throw_error_msg("Error", "Can only throw objects")
+                self.throw_error_msg(
+                    "Error",
+                    "Cannot throw objects that do not implement Throwable",
+                )
             }
             _ => self.throw_error_msg("Error", "Can only throw objects"),
         }
@@ -634,11 +637,31 @@ impl Vm {
         let n = ex.frames.len();
         let mut natives = ex.native_calls.len();
         let mut i = n;
+        // call_user_func() called from user code is no frame of its own:
+        // PHP compiles it to a direct call (observed on PHP 8.5; tests
+        // Zend/tests/gh16799, exceptions/bug73338).
+        let direct_cuf = |k: usize| -> bool {
+            let nc = &ex.native_calls[k];
+            let d = nc.depth as usize;
+            nc.func.scope().is_none()
+                && matches!(
+                    nc.func.lname.as_bytes(),
+                    b"call_user_func" | b"call_user_func_array"
+                )
+                && d > 0
+                && !ex.frames[d - 1].code().file.is_empty()
+                // (in a namespace an unqualified name is resolved at run time)
+                && !ex.frames[d - 1].code().in_namespace
+                && !(k > 0 && ex.native_calls[k - 1].depth as usize == d)
+        };
         loop {
             // Native calls made from frame i-1 (depth == i).
             while natives > 0 && ex.native_calls[natives - 1].depth as usize == i {
                 let nc = &ex.native_calls[natives - 1];
                 natives -= 1;
+                if direct_cuf(natives) {
+                    continue;
+                }
                 let mut e = self.native_trace_frame(ex, nc, i, with_args);
                 // Called by another internal function (call_user_func):
                 // no call site (test ReflectionFiber_notrace_2.phpt).
@@ -661,17 +684,21 @@ impl Vm {
             // (or from the engine itself: shutdown functions, fibers).
             let called_from_native =
                 natives > 0 && ex.native_calls[natives - 1].depth as usize == i;
-            let (file, line) =
-                if called_from_native || i == 0 || ex.frames[i - 1].code().file.is_empty() {
-                    (None, 0)
-                } else {
-                    let caller = &ex.frames[i - 1];
-                    let cip = caller.ip.saturating_sub(1);
-                    (
-                        Some(caller.code().file.clone()),
-                        caller.code().line_of(cip as usize),
-                    )
-                };
+            let (file, line) = if called_from_native && direct_cuf(natives - 1) {
+                (
+                    Some(ex.frames[i - 1].code().file.clone()),
+                    ex.native_calls[natives - 1].line,
+                )
+            } else if called_from_native || i == 0 || ex.frames[i - 1].code().file.is_empty() {
+                (None, 0)
+            } else {
+                let caller = &ex.frames[i - 1];
+                let cip = caller.ip.saturating_sub(1);
+                (
+                    Some(caller.code().file.clone()),
+                    caller.code().line_of(cip as usize),
+                )
+            };
             if code.flags & crate::bytecode::fflags::PSEUDO_MAIN != 0 {
                 if f.flags & frame_flags::ATTACHED == 0 {
                     continue;
@@ -701,6 +728,52 @@ impl Vm {
                     sensitive: Vec::new(),
                 });
                 continue;
+            }
+            // A generator run through `yield from`: the delegating
+            // generators follow, each called where the next one stands
+            // (tests Zend/tests/generators/gh15275-*, bug74954).
+            if let Some(gx) = &f.generator
+                && !self.gen_delegators.is_empty()
+            {
+                let mut chain: Vec<ObjRef> = Vec::new();
+                let mut cur = gx.clone();
+                while let Some((_, o)) = self
+                    .gen_delegators
+                    .iter()
+                    .rev()
+                    .find(|(inner, _)| ObjRef::ptr_eq(inner, &cur))
+                {
+                    if chain.iter().any(|c| ObjRef::ptr_eq(c, o)) {
+                        break;
+                    }
+                    chain.push(o.clone());
+                    cur = o.clone();
+                }
+                if !chain.is_empty() {
+                    let site = |k: usize| match self.generator_executing(&chain[k]) {
+                        Some((f, l)) => (Some(f), l),
+                        None => (None, 0),
+                    };
+                    let (f0, l0) = site(0);
+                    if let Some(e) = self.func_frame_entry(f, f0, l0, with_args) {
+                        out.push(e);
+                    }
+                    for k in 0..chain.len() {
+                        let (sf, sl) = if k + 1 < chain.len() {
+                            site(k + 1)
+                        } else {
+                            (file.clone(), line)
+                        };
+                        if let Some(Some(e)) = self.with_gen(&chain[k], |d| {
+                            d.frame
+                                .as_ref()
+                                .and_then(|fr| self.func_frame_entry(fr, sf.clone(), sl, with_args))
+                        }) {
+                            out.push(e);
+                        }
+                    }
+                    continue;
+                }
             }
             if let Some(e) = self.func_frame_entry(f, file, line, with_args) {
                 out.push(e);
@@ -809,6 +882,19 @@ impl Vm {
     /// RFC: Redacting parameters in back traces).
     pub fn backtrace_sealed(&mut self, with_args: bool) -> Vec<TraceFrame> {
         let mut frames = self.backtrace(with_args);
+        // Exceptions thrown by sodium functions carry no argument values
+        // (test ext/sodium/tests/sodium_error_001: "TypeErrors will not
+        // contain param values in backtrace").
+        if frames
+            .first()
+            .is_some_and(|f| f.class.is_none() && f.function.starts_with(b"sodium_"))
+        {
+            for f in frames.iter_mut() {
+                f.args = None;
+                f.sensitive.clear();
+            }
+            return frames;
+        }
         if frames.iter().all(|f| f.sensitive.is_empty()) {
             return frames;
         }
@@ -863,6 +949,10 @@ impl Vm {
 
     /// `getTraceAsString()` format.
     pub fn trace_string(&mut self, trace: &PhpArray) -> String {
+        let max_len = self
+            .get_ini(b"zend.exception_string_param_max_len")
+            .map(|v| goro_runtime::convert::str_to_int(&v).clamp(0, 1_000_000) as usize)
+            .unwrap_or(15);
         let mut out = String::new();
         let mut i = 0;
         for (_, fr) in trace.iter() {
@@ -886,10 +976,12 @@ impl Vm {
                 _ => out.push_str("[internal function]: "),
             }
             if let Some(c) = fr.get_bytes(b"class") {
+                // Anonymous class names end at their NUL (observed on PHP
+                // 8.5: "class@anonymous->m()").
                 out.push_str(
                     &c.deref()
                         .as_str()
-                        .map(|s| s.to_string_lossy())
+                        .map(crate::class::DisplayName::dname)
                         .unwrap_or_default(),
                 );
                 out.push_str(
@@ -921,7 +1013,7 @@ impl Vm {
                         out.push_str(", ");
                     }
                     first = false;
-                    out.push_str(&trace_arg(&a.deref()));
+                    out.push_str(&trace_arg_max(&a.deref(), max_len));
                 }
             }
             out.push_str(")\n");
@@ -1088,15 +1180,27 @@ fn trace_escape(s: &[u8]) -> String {
 
 /// An argument as `getTraceAsString()` prints it.
 pub fn trace_arg(v: &Value) -> String {
+    trace_arg_max(v, 15)
+}
+
+/// The same with strings cut at `max` bytes (zend.exception_string_param_max_len).
+pub fn trace_arg_max(v: &Value, max: usize) -> String {
     match v {
         Value::Null => "NULL".into(),
         Value::Bool(true) => "true".into(),
         Value::Bool(false) => "false".into(),
         Value::Int(i) => i.to_string(),
-        Value::Float(f) => goro_runtime::float_fmt::to_php_string(*f, 17),
+        Value::Float(f) => {
+            // Integral floats keep a ".0" (observed on PHP 8.5: "f(1.0)").
+            let mut s = goro_runtime::float_fmt::to_php_string(*f, 17);
+            if f.is_finite() && !s.contains(['.', 'E', 'e']) {
+                s.push_str(".0");
+            }
+            s
+        }
         Value::Str(s) => {
-            let (head, more) = if s.len() > 15 {
-                (&s[..15], "...")
+            let (head, more) = if s.len() > max {
+                (&s[..max], "...")
             } else {
                 (&s[..], "")
             };
@@ -1116,6 +1220,6 @@ pub fn trace_arg(v: &Value) -> String {
             format!("Object({})", o.class_name().to_string_lossy())
         }
         Value::Resource(r) => format!("Resource id #{}", r.id()),
-        Value::Ref(r) => trace_arg(&r.get()),
+        Value::Ref(r) => trace_arg_max(&r.get(), max),
     }
 }
