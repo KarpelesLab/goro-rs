@@ -13,3 +13,4 @@ pub mod phonetic;
 pub mod printf;
 pub mod sort;
 pub mod strings;
+pub mod url;
