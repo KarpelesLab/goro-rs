@@ -43,6 +43,10 @@ pub static MODULE: Module = Module {
             register_shutdown_function,
         ),
         (
+            "function header_register_callback(callable $callback): bool",
+            header_register_callback,
+        ),
+        (
             "function register_tick_function($callback, mixed ...$args): bool",
             register_tick_function,
         ),
@@ -305,6 +309,10 @@ pub static MODULE: Module = Module {
         (
             "function cli_get_process_title(): ?string",
             cli_get_process_title,
+        ),
+        (
+            "function ini_parse_quantity(string $shorthand): int",
+            ini_parse_quantity,
         ),
         ("function getmyuid(): int|false", getmyuid),
         ("function getmygid(): int|false", getmygid),
@@ -660,6 +668,15 @@ fn function_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = a.str(0);
     let n = n.strip_prefix(b"\\").unwrap_or(&n);
     Ok(Value::Bool(vm.functions.contains_key(&lower(n))))
+}
+
+/// PHP manual: header_register_callback(); a no-op once output was sent
+/// (test tests/basic/header_register_callback_after_output).
+fn header_register_callback(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if vm.out.written == 0 {
+        vm.header_callback = Some(a.val(0));
+    }
+    Ok(Value::Bool(true))
 }
 
 fn register_shutdown_function(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1771,6 +1788,35 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
             return Ok(Value::Bool(false));
         }
     }
+    // max_memory_limit is a startup-only setting; memory_limit is a
+    // quantity capped by it, and can't go below the memory in use (tests
+    // tests/basic/gh17951_runtime_change_*; observed on PHP 8.5).
+    if k.as_bytes() == b"max_memory_limit" {
+        return Ok(Value::Bool(false));
+    }
+    let mut v = v;
+    if k.as_bytes() == b"memory_limit" {
+        let (n, w) = crate::vm::setup::parse_quantity(&v);
+        if let Some(w) = w {
+            vm.warn(&format!("Invalid \"memory_limit\" setting. {w}"))?;
+        }
+        if let Some((cap, msg)) = super::misc::memory_limit_cap(vm, &v) {
+            if let Some(msg) = msg {
+                vm.warn(&msg)?;
+            }
+            v = cap;
+        } else if n != -1 {
+            let Value::Int(used) = memory_get_usage(vm, a)? else {
+                unreachable!()
+            };
+            if n < used {
+                vm.warn(&format!(
+                    "Failed to set memory limit to {n} bytes (Current memory usage is {used} bytes)"
+                ))?;
+                return Ok(Value::Bool(false));
+            }
+        }
+    }
     if super::misc::assert_ini_deprecated(&k, &v) {
         vm.fdeprecated(
             a,
@@ -2527,6 +2573,16 @@ fn cli_set_process_title(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     PROCESS_TITLE.with(|c| *c.borrow_mut() = Some(t));
     Ok(Value::Bool(true))
+}
+
+/// PHP manual: ini_parse_quantity().
+fn ini_parse_quantity(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let s = a.str(0);
+    let (n, w) = crate::vm::setup::parse_quantity(&s);
+    if let Some(w) = w {
+        vm.warn(&w)?;
+    }
+    Ok(Value::Int(n))
 }
 
 fn cli_get_process_title(_vm: &mut Vm, _a: &mut Args) -> R<Value> {

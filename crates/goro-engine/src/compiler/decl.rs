@@ -412,6 +412,9 @@ impl<'a> Compiler<'a> {
             }
             FnBody::Expr(e) => {
                 self.f.line = e.span.line;
+                if spec.by_ref {
+                    self.nullsafe_ref_check(e)?;
+                }
                 if spec.by_ref && super::is_ref_capable(e) {
                     let r = self.ref_of(e)?;
                     self.free(r);

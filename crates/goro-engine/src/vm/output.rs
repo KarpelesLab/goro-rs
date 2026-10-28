@@ -173,6 +173,9 @@ impl Vm {
     #[inline]
     pub fn echo(&mut self, b: &[u8]) {
         if self.out.buffers.is_empty() {
+            if self.out.written == 0 && self.header_callback.is_some() && !b.is_empty() {
+                self.send_headers();
+            }
             self.out.write_stdout(b);
             return;
         }
@@ -418,6 +421,15 @@ impl Vm {
         match r {
             Ok(p) => p.map_or(Ok(()), Err),
             Err(e) => Err(e),
+        }
+    }
+
+    /// The headers are sent: runs the header_register_callback() callback
+    /// (PHP manual), once.
+    pub fn send_headers(&mut self) {
+        if let Some(f) = self.header_callback.take() {
+            let r = self.call_value(&f, vec![]).map(|_| ());
+            self.handle_unwind(r);
         }
     }
 

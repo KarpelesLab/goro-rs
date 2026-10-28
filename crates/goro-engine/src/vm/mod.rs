@@ -502,6 +502,9 @@ pub struct Vm {
     pub disabled_wrappers: Vec<Vec<u8>>,
     pub autoloading: Vec<PhpStr>,
     pub shutdown_functions: Vec<(Value, Vec<Value>)>,
+    /// header_register_callback(): called when the headers are sent (at
+    /// the first output, or at the end of the request).
+    pub header_callback: Option<Value>,
     pub exit_status: i32,
     pub script_path: PhpStr,
     pub argv: Vec<PhpStr>,

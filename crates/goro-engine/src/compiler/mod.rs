@@ -1261,7 +1261,9 @@ impl<'a> Compiler<'a> {
 
     fn foreach_stmt(&mut self, f: &'a ForeachStmt<'a>, line: u32) -> CResult<()> {
         let iter = self.hidden_pair();
-        let src = if f.by_ref {
+        // A `?->` chain is iterated as a value (test Zend/tests/
+        // nullsafe_operator/023).
+        let src = if f.by_ref && !expr::contains_nullsafe(&f.expr) {
             self.ref_of(&f.expr)?
         } else {
             self.expr(&f.expr)?
@@ -1598,6 +1600,12 @@ impl<'a> Compiler<'a> {
                 },
                 line,
             );
+        }
+        if let Some(e) = e
+            && by_ref
+            && !self.f.is_generator
+        {
+            self.nullsafe_ref_check(e)?;
         }
         let val = match e {
             None => self.null_const(),

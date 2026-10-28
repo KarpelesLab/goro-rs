@@ -73,6 +73,7 @@ impl Vm {
             disabled_wrappers: Vec::new(),
             autoloading: Vec::new(),
             shutdown_functions: Vec::new(),
+            header_callback: None,
             exit_status: 0,
             script_path: PhpStr::empty(),
             argv: Vec::new(),
@@ -380,6 +381,7 @@ impl Vm {
             }
         }
         self.ob_end_all();
+        self.send_headers();
         crate::builtins::file::close_open_streams(self);
         for m in self.modules.clone() {
             if let Some(f) = m.shutdown {
@@ -463,17 +465,176 @@ fn ini_truthy(v: &[u8]) -> bool {
 
 /// `128M` and friends.
 pub fn parse_size(v: &[u8]) -> i64 {
-    let v = v.trim_ascii();
-    if v.is_empty() {
-        return 0;
+    parse_quantity(v).0
+}
+
+/// Shows a quantity in a warning: control and non-ASCII bytes as `\xNN`.
+fn quantity_shown(v: &[u8]) -> String {
+    let mut s = String::new();
+    for &b in v {
+        if (0x20..0x7f).contains(&b) {
+            s.push(b as char);
+        } else {
+            s.push_str(&format!("\\x{b:02X}"));
+        }
     }
-    let (num, mul) = match v.last().unwrap().to_ascii_lowercase() {
-        b'k' => (&v[..v.len() - 1], 1024),
-        b'm' => (&v[..v.len() - 1], 1024 * 1024),
-        b'g' => (&v[..v.len() - 1], 1024 * 1024 * 1024),
-        _ => (v, 1),
+    s
+}
+
+/// Parses an ini quantity (PHP manual: ini_parse_quantity(); rules
+/// observed on PHP 8.5 and in tests Zend/tests/zend_ini/*): surrounding
+/// whitespace, an optional sign, a `0x`/`0o`/`0b` prefix or a leading `0`
+/// (octal), digits, optional whitespace and a `k`/`m`/`g` multiplier
+/// (powers of 1024). Malformed input still gives a value, with the warning
+/// to emit.
+pub fn parse_quantity(v: &[u8]) -> (i64, Option<String>) {
+    let is_ws = |c: u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c');
+    let shown = || quantity_shown(v);
+    let mut start = 0;
+    while start < v.len() && is_ws(v[start]) {
+        start += 1;
+    }
+    let mut end = v.len();
+    while end > start && is_ws(v[end - 1]) {
+        end -= 1;
+    }
+    if start == end {
+        return (0, None);
+    }
+    let last = v[end - 1];
+    let shift = match last.to_ascii_lowercase() {
+        b'k' => 10,
+        b'm' => 20,
+        b'g' => 30,
+        _ => 0,
     };
-    goro_runtime::convert::str_to_int(num).saturating_mul(mul)
+    // The digits end before the multiplier.
+    let dend = if shift > 0 { end - 1 } else { end };
+    let mut p = start;
+    let neg = match v[p] {
+        b'-' => {
+            p += 1;
+            true
+        }
+        b'+' => {
+            p += 1;
+            false
+        }
+        _ => false,
+    };
+    let no_digits = || {
+        Some(format!(
+            "Invalid quantity \"{}\": no valid leading digits, interpreting as \"0\" for backwards compatibility",
+            shown()
+        ))
+    };
+    let mut base = 10u32;
+    if p < end && v[p] == b'0' && p + 1 < end {
+        let c = v[p + 1];
+        let prefix = match c.to_ascii_lowercase() {
+            b'x' => Some(16),
+            b'o' => Some(8),
+            b'b' => Some(2),
+            _ => None,
+        };
+        if let Some(b) = prefix {
+            base = b;
+            p += 2;
+            // strtoull() would take a sign, whitespace or a second prefix
+            // here (test Zend/tests/zend_ini/gh11876).
+            let eaten = p == end
+                || is_ws(v[p])
+                || v[p] == b'+'
+                || v[p] == b'-'
+                || (b != 8 && v[p] == b'0' && p + 1 < end && v[p + 1].eq_ignore_ascii_case(&c));
+            if eaten {
+                return (
+                    0,
+                    Some(format!(
+                        "Invalid quantity \"{}\": no digits after base prefix, interpreting as \"0\" for backwards compatibility",
+                        shown()
+                    )),
+                );
+            }
+        } else if c.is_ascii_digit() {
+            base = 8;
+        } else if !matches!(c.to_ascii_lowercase(), b'k' | b'm' | b'g') {
+            return (
+                0,
+                Some(format!(
+                    "Invalid prefix \"{}\", interpreting as \"0\" for backwards compatibility",
+                    quantity_shown(&v[p..p + 2])
+                )),
+            );
+        }
+    }
+    let dstart = p;
+    let mut u: u64 = 0;
+    let mut over = false;
+    while p < dend {
+        let d = match (v[p] as char).to_digit(base) {
+            Some(d) => d as u64,
+            None => break,
+        };
+        match u.checked_mul(base as u64).and_then(|x| x.checked_add(d)) {
+            Some(x) => u = x,
+            None => {
+                over = true;
+                u = u64::MAX;
+            }
+        }
+        p += 1;
+    }
+    if p == dstart {
+        return (0, no_digits());
+    }
+    let digits_end = p;
+    let mut q = p;
+    while q < dend && is_ws(v[q]) {
+        q += 1;
+    }
+    let mut warning = None;
+    let mut shift = shift;
+    if shift > 0 {
+        if q < dend {
+            let mut interp = quantity_shown(&v[..q]);
+            interp.push(last as char);
+            warning = Some(format!(
+                "Invalid quantity \"{}\", interpreting as \"{}\" for backwards compatibility",
+                shown(),
+                interp
+            ));
+        }
+    } else if q < end {
+        shift = 0;
+        warning = Some(format!(
+            "Invalid quantity \"{}\": unknown multiplier \"{}\", interpreting as \"{}\" for backwards compatibility",
+            shown(),
+            quantity_shown(&[last]),
+            quantity_shown(&v[..q])
+        ));
+    }
+    let _ = digits_end;
+    let shifted = u.wrapping_shl(shift);
+    if shift > 0 && (shifted >> shift) != u {
+        over = true;
+    }
+    let lim = if neg { 1u64 << 63 } else { i64::MAX as u64 };
+    if over || shifted > lim {
+        return (
+            shifted as i64,
+            Some(format!(
+                "Invalid quantity \"{}\": value is out of range, using overflow result for backwards compatibility",
+                shown()
+            )),
+        );
+    }
+    let val = if neg {
+        (shifted as i64).wrapping_neg()
+    } else {
+        shifted as i64
+    };
+    (val, warning)
 }
 
 /// error_reporting values may be expressions of E_* constants
