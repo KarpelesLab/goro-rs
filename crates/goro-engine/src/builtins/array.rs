@@ -546,6 +546,16 @@ fn array_merge(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     }
     let total: usize = arrays.iter().map(|x| x.len()).sum();
+    // Test GHSA-h96m-rvf9-jgm2.phpt.
+    if total >= 1 << 30 {
+        return vm.throw(
+            "Error",
+            &format!(
+                "The total number of elements must be lower than {}",
+                1u64 << 30
+            ),
+        );
+    }
     let mut out = PhpArray::with_capacity(total);
     for arr in &arrays {
         for (k, v) in arr.iter() {
@@ -1790,16 +1800,18 @@ fn do_sort(
     drop(arr);
     let mut warned = false;
     sort_items(vm, &mut items, |vm, x, y| {
-        let (p, q) = if reverse { (y, x) } else { (x, y) };
         let (pv, qv) = match by {
-            SortBy::Value => (p.1.deref(), q.1.deref()),
-            SortBy::Key => (p.0.to_value(), q.0.to_value()),
+            SortBy::Value => (x.1.deref(), y.1.deref()),
+            SortBy::Key => (x.0.to_value(), y.0.to_value()),
         };
-        if user {
-            user_cmp(vm, a, &cb, pv, qv, &mut warned)
+        let o = if user {
+            user_cmp(vm, a, &cb, pv, qv, &mut warned)?
         } else {
-            flag_compare(vm, flags, &pv, &qv)
-        }
+            flag_compare(vm, flags, &pv, &qv)?
+        };
+        // Reverse sorts negate the comparison (test
+        // sort/rsort_variation9.phpt: uncomparable arrays).
+        Ok(if reverse { o.reverse() } else { o })
     })?;
     let out = if keep_keys {
         PhpArray::from_pairs(items)
