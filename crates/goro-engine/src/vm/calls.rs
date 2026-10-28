@@ -152,6 +152,9 @@ pub struct PreparedCall {
     /// A user function or closure that can be entered directly (no
     /// trampoline, nothing the general activation must handle).
     direct: bool,
+    /// The closure's data (direct closures): the closure object, which
+    /// `callee` holds, keeps it in place.
+    cd: *const ClosureData,
 }
 
 impl PreparedCall {
@@ -160,6 +163,7 @@ impl PreparedCall {
             value,
             callee: None,
             direct: false,
+            cd: std::ptr::null(),
         }
     }
 
@@ -3386,6 +3390,16 @@ impl Vm {
                     }
                     FuncKind::Native { .. } => false,
                 };
+            if pc.direct
+                && let Some(cl) = &c.closure
+            {
+                let n = cl.obj().native.borrow();
+                let any: Option<&dyn std::any::Any> = n.as_ref().map(|b| &**b as _);
+                match any.and_then(|a| a.downcast_ref::<ClosureData>()) {
+                    Some(cd) => pc.cd = cd,
+                    None => pc.direct = false,
+                }
+            }
             pc.callee = Some(c);
         }
         let args = args.into_iter();
@@ -3399,7 +3413,7 @@ impl Vm {
             if n < 64 && n as u32 <= code.direct_params && code.byref_mask & ((1u64 << n) - 1) == 0
             {
                 let c = c.clone();
-                return self.call_direct(c, args);
+                return self.call_direct(c, pc.cd, args);
             }
         }
         let c = c.clone();
@@ -3412,7 +3426,12 @@ impl Vm {
     /// Enters a user function from Rust without a pending call: the
     /// arguments go straight into the callee's slots. Arguments needing
     /// coercion or checks take the general path.
-    fn call_direct<I: Iterator<Item = Value>>(&mut self, c: Callee, args: I) -> R<Value> {
+    fn call_direct<I: Iterator<Item = Value>>(
+        &mut self,
+        c: Callee,
+        cd: *const ClosureData,
+        args: I,
+    ) -> R<Value> {
         // Diagnostics queued by a write path come out before user code runs.
         if !self.err.queued.is_empty() {
             self.flush_deferred()?;
@@ -3431,7 +3450,19 @@ impl Vm {
             unsafe { std::ptr::write(base.add(argc as usize), Some(a.into_deref())) };
             argc += 1;
         }
-        let statics = closure_statics(&c, base);
+        let statics = if cd.is_null() {
+            closure_statics(&c, base)
+        } else {
+            // SAFETY: see `PreparedCall::cd`.
+            let cd = unsafe { &*cd };
+            for (k, (inner, _, _)) in code.uses.iter().enumerate() {
+                if let Some(Some(v)) = cd.captured.get(k) {
+                    // SAFETY: the callee's fresh slots.
+                    unsafe { *base.add(*inner as usize) = Some(v.clone()) };
+                }
+            }
+            &cd.statics
+        };
         if !args_bind_simply(self, code, base, argc) {
             let mut v = Vec::with_capacity(argc as usize);
             for i in 0..n {
