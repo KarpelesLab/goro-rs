@@ -500,10 +500,76 @@ pub fn diff(a: &DateTime, b: &DateTime, absolute: bool) -> Interval {
     iv = wall_diff(&l1, &l2, invert);
     if iv.y == 0 && iv.m == 0 && iv.d == 0 {
         elapsed(&mut iv);
+    } else if same_zone && matches!(hi.zone, TimeZone::Id(_)) {
+        dst_adjust(&mut iv, lo, hi, &l2);
     }
     iv.invert = invert && !absolute;
     iv.days = Some(full_days(&l1, &l2));
     iv
+}
+
+/// The DST corrections of a same-zone `diff()` spanning a day or more,
+/// whose wall clock difference is `iv` (observed on PHP 8.5):
+///
+/// * across a spring-forward transition, when `hi`'s date at the start's
+///   time of day (the wall time `iv`'s hours, minutes and seconds before
+///   `hi`) is not after the gap's start, the time part is the time elapsed
+///   from that moment, read with the offset before the gap, to `hi`
+///   (Amman, 2017-03-01 to 2017-03-31, whose midnight starts DST, is 30
+///   days: test bug52480.phpt; New York 2010-03-13 00:00 to 03-14 03:00
+///   EDT is 1 day 2 hours, 02:30 to 03:00 EDT is 1 day 30 minutes);
+/// * when `hi` falls in the first pass of a fall-back overlap (New York
+///   2010-11-07 01:00-01:59 EDT), a day goes into the hours, which read
+///   24 (2010-11-06 01:30 EDT to 11-07 01:30 EDT is 0 days 24 hours:
+///   tests rfc-datetime_and_daylight_saving_time-type3-bd1/bd2.phpt;
+///   10-07 01:30 is 1 month, -1 day, 24 hours).
+fn dst_adjust(iv: &mut Interval, lo: &DateTime, hi: &DateTime, l2: &LocalTime) {
+    let zone = &hi.zone;
+    let off_hi = zone.offset_at(hi.ts);
+    // both corrections go by the DST flags: Dublin, whose winter GMT is
+    // the DST time, has neither (observed on PHP 8.5)
+    let hi_dst = zone.state_at(hi.ts).is_dst;
+    // fall-back overlap, first pass: the offset drops within the
+    // difference after `hi` (only from a start at the same offset: from
+    // EST in March to 01:30 EDT in November is the wall clock difference)
+    let later = zone.offset_at(hi.ts.saturating_add(3 * 3600));
+    if later < off_hi
+        && zone.offset_at(hi.ts.saturating_add((off_hi - later) as i64)) == later
+        && zone.offset_at(lo.ts) == off_hi
+        && zone.local_to_ts(l2.local_secs()) == hi.ts
+        && hi_dst
+    {
+        iv.d -= 1;
+        iv.h = 24;
+        return;
+    }
+    const US: i64 = 1_000_000;
+    let part = ((iv.h * 60 + iv.i) * 60 + iv.s) * US + iv.us;
+    let mid_wall = l2.local_secs() as i128 * US as i128 + l2.us as i128 - part as i128;
+    let mid_secs = mid_wall.div_euclid(US as i128) as i64;
+    // the offset before the gap, and whether the moment read with it is
+    // not after the gap's start
+    let off_mid = zone.offset_at(mid_secs.saturating_sub(off_hi as i64).saturating_sub(1));
+    if off_mid >= off_hi
+        || zone.offset_at(mid_secs.saturating_sub(off_mid as i64).saturating_sub(1)) != off_mid
+    {
+        return;
+    }
+    let mid_ts = mid_wall - off_mid as i128 * US as i128;
+    let mid_secs = mid_ts.div_euclid(US as i128) as i64;
+    if !hi_dst || zone.state_at(mid_secs.saturating_sub(1)).is_dst {
+        return;
+    }
+    let e = hi.ts as i128 * US as i128 + hi.us as i128 - mid_ts;
+    if !(0..86_400 * US as i128).contains(&e) {
+        return;
+    }
+    let e = e as i64;
+    iv.us = e % US;
+    let secs = e / US;
+    iv.s = secs % 60;
+    iv.i = secs / 60 % 60;
+    iv.h = secs / 3600;
 }
 
 /// Field-wise wall clock difference `b - a` (b not earlier), borrowing.
