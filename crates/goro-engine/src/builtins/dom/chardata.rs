@@ -328,6 +328,54 @@ pub(crate) fn dtd_nodes(s: &mut xmlstore::Store, dt: NodeId, entities: bool) -> 
     out
 }
 
+/// The declaration node of the entity an entity reference names (the
+/// reference's only child as PHP shows it; none once the doctype is gone:
+/// tests entity_reference_stale_*.phpt).
+pub(crate) fn entity_decl_of(s: &mut xmlstore::Store, eref: NodeId) -> Option<NodeId> {
+    let NodeData::EntityRef(name) = s.arena.data(eref).clone() else {
+        return None;
+    };
+    let doc = s.arena.doc_of(eref);
+    if let Some(c) = goro_xml::tree::predefined_entity(&name) {
+        // The predefined entities have declarations of their own (test
+        // DOMEntityReference_predefined_free.phpt).
+        let key = (doc, true, format!("#predefined:{name}"));
+        let existing = s
+            .doc_ext(doc)
+            .get::<DtdNodes>()
+            .map
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| *v)
+            .filter(|&v| s.arena.is_live(v));
+        if let Some(v) = existing {
+            return Some(v);
+        }
+        let decl = goro_xml::tree::EntityDecl {
+            name: name.clone(),
+            kind: goro_xml::tree::EntityKind::Predefined,
+            value: Some(c.to_string()),
+            orig: None,
+            public_id: None,
+            system_id: None,
+            notation: None,
+            checked: true,
+        };
+        let id = s.arena.create(doc, NodeData::EntityDecl(Box::new(decl)));
+        s.doc_ext(doc).get::<DtdNodes>().map.push((key, id));
+        return Some(id);
+    }
+    let dt = s
+        .arena
+        .doc(doc)
+        .doctype
+        .filter(|&d| s.arena.is_live(d) && s.arena.parent(d) == Some(doc))?;
+    let nodes = dtd_nodes(s, dt, true);
+    nodes
+        .into_iter()
+        .find(|&n| matches!(s.arena.data(n), NodeData::EntityDecl(e) if e.name == name))
+}
+
 /// Loads and attaches the external subset of document `d` (for
 /// `validate()` on a document parsed without it). False on failure.
 pub(crate) fn load_external_subset(

@@ -256,6 +256,10 @@ fn compute_items(s: &mut xmlstore::Store, kind: &ListKind, modern: bool) -> Vec<
             if !a.is_live(*n) {
                 return Vec::new();
             }
+            if matches!(a.data(*n), NodeData::EntityRef(_)) {
+                return super::chardata::entity_decl_of(s, *n).into_iter().collect();
+            }
+            let a = &mut s.arena;
             match a.data(*n) {
                 NodeData::Element(_)
                 | NodeData::Document(_)

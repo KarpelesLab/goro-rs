@@ -517,6 +517,35 @@ pub(crate) fn get_prop(vm: &mut Vm, o: &ObjRef, name: &str) -> R<Value> {
 }
 
 fn xmlstore_compute(n: NodeId, name: &str, modern: bool) -> PV {
+    let is_ref = with_arena(|a| matches!(a.data(n), NodeData::EntityRef(_)));
+    if is_ref {
+        match name {
+            "firstChild" | "lastChild" => {
+                return PV::Node(super::xmlstore::with(|s| {
+                    super::chardata::entity_decl_of(s, n)
+                }));
+            }
+            "textContent" => {
+                if modern {
+                    return PV::Null;
+                }
+                let v = super::xmlstore::with(|s| {
+                    // A detached reference shows no text (test
+                    // delayed_freeing/entity_reference.phpt).
+                    if !s.arena.is_connected(n) {
+                        return None;
+                    }
+                    let d = super::chardata::entity_decl_of(s, n)?;
+                    match s.arena.data(d) {
+                        NodeData::EntityDecl(e) => e.value.clone(),
+                        _ => None,
+                    }
+                });
+                return PV::S(v.unwrap_or_default());
+            }
+            _ => {}
+        }
+    }
     with_arena(|a| {
         let hidden_owner = name == "ownerDocument";
         let pv = compute(a, n, name, modern);
