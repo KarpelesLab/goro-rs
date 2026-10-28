@@ -72,10 +72,8 @@ pub static MODULE: Module = Module {
             "function posix_isatty($file_descriptor): bool",
             stream_isatty,
         ),
-        (
-            "function stream_set_blocking($stream, bool $enable): bool",
-            ret_true,
-        ),
+        // stream_set_blocking() and the stream_context_*() functions are in
+        // builtins/sockets.rs.
         (
             "function stream_set_write_buffer($stream, int $size): int",
             ret_zero,
@@ -87,22 +85,6 @@ pub static MODULE: Module = Module {
         (
             "function set_file_buffer($stream, int $size): int",
             ret_zero,
-        ),
-        (
-            "function stream_context_create(?array $options = null, ?array $params = null)",
-            stream_context_create,
-        ),
-        (
-            "function stream_context_get_default(?array $options = null)",
-            stream_context_create,
-        ),
-        (
-            "function stream_context_set_option($context, array|string $wrapper_or_options, ?string $option_name = null, mixed $value = UNKNOWN): bool",
-            ret_true,
-        ),
-        (
-            "function stream_context_get_options($stream_or_context): array",
-            empty_array,
         ),
         ("function stream_get_wrappers(): array", stream_get_wrappers),
         ("function stream_is_local($stream): bool", ret_true),
@@ -428,7 +410,11 @@ impl Stream {
     /// A pipe or socket from proc_open()/popen() (made without a wrapper):
     /// reads return what is available, it is not seekable.
     pub fn is_pipe(&self) -> bool {
-        matches!(self.backing, Backing::File(_)) && self.wrapper.is_empty()
+        match &self.backing {
+            Backing::File(_) => self.wrapper.is_empty(),
+            Backing::Native(n) => n.is_socket(),
+            _ => false,
+        }
     }
 
     pub fn read_some(&mut self, vm: &mut Vm, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -1080,6 +1066,20 @@ fn fread(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 Err(e) if got == 0 && e.to_string() == "stream filter failed" => {
                     return Ok(Value::Bool(false));
                 }
+                // a socket read timing out with nothing read (observed on
+                // PHP 8.5)
+                Err(e) if got == 0 && e.kind() == std::io::ErrorKind::TimedOut => {
+                    return Ok(Value::Bool(false));
+                }
+                // a failed socket read (a refused UDP datagram; test
+                // ext/standard/tests/network/bug20134.phpt)
+                Err(e)
+                    if got == 0
+                        && matches!(&s.backing, Backing::Native(n) if n.is_socket())
+                        && e.kind() != std::io::ErrorKind::WouldBlock =>
+                {
+                    return Ok(Value::Bool(false));
+                }
                 Err(_) => break,
             }
         }
@@ -1125,6 +1125,15 @@ fn read_line(vm: &mut Vm, s: &mut Stream, max: Option<usize>) -> Option<Vec<u8>>
                 if b[0] == b'\n' {
                     break;
                 }
+            }
+            // a non-blocking or timed-out socket read is not the end
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
             }
             _ => {
                 s.eof = true;
@@ -1491,6 +1500,15 @@ fn read_rest(vm: &mut Vm, s: &mut Stream) -> Vec<u8> {
     let mut buf = [0u8; 8192];
     loop {
         match s.read_some(vm, &mut buf) {
+            // a non-blocking or timed-out socket has more to come
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return out;
+            }
             Ok(0) | Err(_) => break,
             Ok(n) => out.extend_from_slice(&buf[..n]),
         }
@@ -1512,6 +1530,27 @@ fn stream_get_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
         if off >= 0 {
             do_seek(vm, s, off, 0);
         }
+        // Sockets and pipes: read up to the length only, never past it
+        // (test ext/openssl/tests/gh10495.phpt).
+        if let Some(l) = len
+            && l >= 0
+            && s.is_pipe()
+        {
+            let mut data = vec![0u8; l as usize];
+            let mut got = 0;
+            while got < data.len() {
+                match s.read_some(vm, &mut data[got..]) {
+                    Ok(0) => {
+                        s.eof = true;
+                        break;
+                    }
+                    Ok(n) => got += n,
+                    Err(_) => break,
+                }
+            }
+            data.truncate(got);
+            return Ok(Value::Str(PhpStr::from(data)));
+        }
         let mut data = read_rest(vm, s);
         if let Some(l) = len
             && l >= 0
@@ -1530,11 +1569,22 @@ fn stream_get_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
     })
 }
 
-fn stream_get_meta_data(vm: &mut Vm, a: &mut Args) -> R<Value> {
+pub(crate) fn stream_get_meta_data(vm: &mut Vm, a: &mut Args) -> R<Value> {
     with_stream(vm, a, 0, |_vm, s| {
         let mut m = PhpArray::new();
         m.insert(Key::from("timed_out"), Value::Bool(false));
-        m.insert(Key::from("blocked"), Value::Bool(true));
+        // a pipe set non-blocking by stream_set_blocking() (test
+        // ext/standard/tests/streams/bug72853.phpt)
+        let blocked = match &s.backing {
+            Backing::File(f) if s.is_pipe() => {
+                use std::os::unix::io::AsRawFd;
+                // SAFETY: F_GETFL on an open descriptor.
+                let fl = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_GETFL) };
+                fl < 0 || fl & libc::O_NONBLOCK == 0
+            }
+            _ => true,
+        };
+        m.insert(Key::from("blocked"), Value::Bool(blocked));
         let eof = match &s.backing {
             Backing::Memory { data, pos } => *pos >= data.len() && s.eof || *pos >= data.len(),
             _ => s.eof,
@@ -1566,6 +1616,9 @@ fn stream_get_meta_data(vm: &mut Vm, a: &mut Args) -> R<Value> {
         if !nowrap {
             m.insert(Key::from("uri"), Value::Str(s.uri.clone()));
         }
+        if let Backing::Native(n) = &s.backing {
+            n.meta(&mut m);
+        }
         Ok(Value::Array(m))
     })
 }
@@ -1587,13 +1640,6 @@ fn stream_isatty(vm: &mut Vm, a: &mut Args) -> R<Value> {
         };
         Ok(Value::Bool(unsafe { libc::isatty(fd) } == 1))
     })
-}
-
-fn stream_context_create(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Resource(ResRef::new(
-        PhpStr::intern(b"stream-context"),
-        Box::new(()),
-    )))
 }
 
 fn stream_get_wrappers(vm: &mut Vm, _a: &mut Args) -> R<Value> {
@@ -2230,9 +2276,6 @@ fn ret_false(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 }
 fn ret_zero(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Int(0))
-}
-fn empty_array(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Array(PhpArray::new()))
 }
 
 fn realpath(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -3329,7 +3372,14 @@ impl Vm {
                 if t_b == dir_b || (t_b.starts_with(dir_b) && t_b.get(dir_b.len()) == Some(&b'/')) {
                     return true;
                 }
-            } else if t_b.starts_with(dir_b) {
+            } else if t_b.starts_with(dir_b)
+                && (t_b.len() == dir_b.len()
+                    || t_b[dir_b.len()] == b'/'
+                    // an existing directory is a directory, not a name
+                    // prefix (test ext/openssl/tests/gh9310.phpt: basedir
+                    // ".../gh9310" refuses ".../gh9310.crt")
+                    || !dir.is_dir())
+            {
                 return true;
             }
         }
