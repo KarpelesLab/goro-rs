@@ -92,7 +92,7 @@ class ReflectionMethod extends ReflectionFunctionAbstract {
     public function isDestructor(): bool {}
     public function getClosure(?object $object = null): Closure {}
     public function getModifiers(): int {}
-    public function invoke($object = null, mixed ...$args): mixed {}
+    public function invoke($object, mixed ...$args): mixed {}
     public function invokeArgs($object = null, array $args = []): mixed {}
     public function getDeclaringClass(): ReflectionClass {}
     public function getPrototype(): ReflectionMethod {}
@@ -107,15 +107,8 @@ class ReflectionClass implements Reflector {
     const SKIP_INITIALIZATION_ON_SERIALIZE = 8;
     const SKIP_DESTRUCTOR = 16;
     public string $name = "";
+    private function __clone(): void {}
     public function __construct(object|string $objectOrClass) {}
-    public function newLazyGhost(callable $initializer, int $options = 0): object {}
-    public function newLazyProxy(callable $factory, int $options = 0): object {}
-    public function resetAsLazyGhost(object $object, callable $initializer, int $options = 0): void {}
-    public function resetAsLazyProxy(object $object, callable $factory, int $options = 0): void {}
-    public function initializeLazyObject(object $object): object {}
-    public function isUninitializedLazyObject(object $object): bool {}
-    public function markLazyObjectAsInitialized(object $object): object {}
-    public function getLazyInitializer(object $object): ?callable {}
     public function __toString(): string {}
     public function getName(): string {}
     public function isInternal(): bool {}
@@ -155,6 +148,14 @@ class ReflectionClass implements Reflector {
     public function newInstance(mixed ...$args): object {}
     public function newInstanceWithoutConstructor(): object {}
     public function newInstanceArgs(array $args = []): ?object {}
+    public function newLazyGhost(callable $initializer, int $options = 0): object {}
+    public function newLazyProxy(callable $factory, int $options = 0): object {}
+    public function resetAsLazyGhost(object $object, callable $initializer, int $options = 0): void {}
+    public function resetAsLazyProxy(object $object, callable $factory, int $options = 0): void {}
+    public function initializeLazyObject(object $object): object {}
+    public function isUninitializedLazyObject(object $object): bool {}
+    public function markLazyObjectAsInitialized(object $object): object {}
+    public function getLazyInitializer(object $object): ?callable {}
     public function getParentClass(): ReflectionClass|false {}
     public function isSubclassOf(ReflectionClass|string $class): bool {}
     public function getStaticProperties(): array {}
@@ -1394,7 +1395,7 @@ fn f_get_closure(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Object(o))
 }
 
-fn param_string(vm: &mut Vm, p: &ParamInfo, i: usize, required: bool) -> String {
+fn param_string(vm: &mut Vm, p: &ParamInfo, i: usize, required: bool, internal: bool) -> String {
     let mut s = format!(
         "Parameter #{} [ <{}> ",
         i,
@@ -1412,6 +1413,14 @@ fn param_string(vm: &mut Vm, p: &ParamInfo, i: usize, required: bool) -> String 
     }
     s.push('$');
     s.push_str(&p.name.to_string_lossy());
+    // Internal functions show their declared default text ("null",
+    // "<default>" when it has none: observed on PHP 8.5).
+    if internal && let Some(d) = &p.default_text {
+        s.push_str(" = ");
+        s.push_str(if d == "UNKNOWN" { "<default>" } else { d });
+        s.push_str(" ]");
+        return s;
+    }
     let names_const = p.default_text.as_deref().is_some_and(text_has_name);
     match (&p.default, &p.default_text) {
         (ParamDefault::Const(v), t) if !names_const || t.is_none() => {
@@ -1787,7 +1796,7 @@ fn func_string(
     if !params.is_empty() || ret.is_some() {
         s.push_str(&format!("\n{}  - Parameters [{}] {{\n", indent, params.len()));
         for (i, p) in params.iter().enumerate() {
-            let ps = param_string(vm, p, i, i < nreq);
+            let ps = param_string(vm, p, i, i < nreq, internal);
             s.push_str(&format!("{}    {}\n", indent, ps));
         }
         s.push_str(&format!("{}  }}\n", indent));
@@ -1809,10 +1818,23 @@ fn func_string(
 /// extending classes may still omit them), except in final classes and
 /// for constructors (observed on PHP 8.5).
 fn is_tentative(f: &Func) -> bool {
+    // Methods added in PHP 8.0 and later, and magic methods, have real
+    // return types (PHP manual changelogs).
+    const REAL: &[&str] = &[
+        "__clone", "__tostring", "__construct", "isenum", "isreadonly", "getattributes",
+        "newlazyghost", "newlazyproxy", "resetaslazyghost", "resetaslazyproxy",
+        "initializelazyobject", "isuninitializedlazyobject", "marklazyobjectasinitialized",
+        "getlazyinitializer", "hastentativereturntype", "gettentativereturntype",
+        "getclosureusedvariables", "getclosurecalledclass", "ispromoted", "hasdefaultvalue",
+        "getdefaultvalue", "isenumcase", "hastype", "gettype", "isvirtual", "hashooks",
+        "gethooks", "hashook", "gethook", "getsettabletype", "getrawvalue", "setrawvalue",
+        "islazy", "skiplazyinitialization", "setrawvaluewithoutlazyinitialization",
+        "isprivateset", "isprotectedset", "getmangledname", "isdynamic",
+    ];
     f.scope().is_some_and(|c| {
         c.has_flag(cflags::INTERNAL)
             && !c.has_flag(cflags::FINAL)
-            && f.lname.as_bytes() != b"__construct"
+            && !REAL.contains(&f.lname.to_string_lossy().as_ref())
     })
 }
 
@@ -1895,7 +1917,8 @@ fn prop_string(vm: &mut Vm, cls: &Class, name: &PhpStr, dynamic: bool, indent: &
     }
     s.push_str(&format!(" ${}", name.to_string_lossy()));
     let hooked = p.has_hooks.0 || p.has_hooks.1;
-    if !hooked && p.flags & (mflags::VIRTUAL | mflags::PROMOTED) == 0 {
+    let internal_typed = cls.has_flag(cflags::INTERNAL) && p.ty.is_some();
+    if !hooked && !internal_typed && p.flags & (mflags::VIRTUAL | mflags::PROMOTED) == 0 {
         match &p.default {
             Some(ce) => {
                 let v = vm.eval_const_expr(ce, p.class)?;
@@ -2370,7 +2393,7 @@ fn m_callee(vm: &mut Vm, f: &Rc<Func>, cls: &Rc<Class>, obj: Value, fname: &str)
         return vm.type_error(&format!(
             "ReflectionMethod::{}(): Argument #1 ($object) must be of type ?object, {} given",
             fname,
-            obj.tname()
+            Vm::type_name_given(&obj)
         ));
     }
     if f.flags & mflags::STATIC != 0 {
@@ -2712,6 +2735,12 @@ fn c_get_prop(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if let Some(p) = n.windows(2).position(|w| w == b"::") {
         let c2 = class_arg(vm, &Value::Str(PhpStr::new(&n[..p])))?;
         let pn = PhpStr::new(&n[p + 2..]);
+        if !has_member_prop(&c2, &pn) {
+            return refl_error(
+                vm,
+                &format!("Property {}::${} does not exist", c2.name.dname(), pn.dname()),
+            );
+        }
         if !c.is_subclass_of(&c2) {
             return refl_error(
                 vm,
@@ -4330,7 +4359,8 @@ fn par_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
         FuncKind::User(c) => c.num_required as usize,
         FuncKind::Native { .. } => vm.native_sig(&f).num_required as usize,
     };
-    Ok(Value::Str(PhpStr::from(param_string(vm, &p, i, i < nreq))))
+    let internal = func_internal(&f) && !is_closure_invoke(&f);
+    Ok(Value::Str(PhpStr::from(param_string(vm, &p, i, i < nreq, internal))))
 }
 fn par_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (_, _, _, p) = need_param!(vm, a);
