@@ -53,6 +53,16 @@ impl Vm {
         // References: the second time a cell is seen, `R:n;`.
         if let Value::Ref(r) = v {
             if r.refcount() > 1 {
+                // A reference to an object already written points at the
+                // object (serialization_objects_015: R:1).
+                if let Value::Object(o) = &r.get()
+                    && let Some(&n) = s.objs.get(&o.handle())
+                    && !s.refs.contains_key(&r.addr())
+                {
+                    s.refs.insert(r.addr(), n);
+                    s.out.extend_from_slice(format!("R:{};", n).as_bytes());
+                    return Ok(());
+                }
                 if let Some(&n) = s.refs.get(&r.addr()) {
                     // `R:` takes no value number (counting_of_references).
                     s.out.extend_from_slice(format!("R:{};", n).as_bytes());
@@ -211,6 +221,12 @@ impl Vm {
                 d.options & crate::vm::lazy::SKIP_INITIALIZATION_ON_SERIALIZE != 0
             })
             .unwrap_or(false);
+        // __sleep() runs before the properties are read (it may set some:
+        // gh12265b).
+        let sleep = match cls.find_method(b"__sleep") {
+            Some(f) => Some(self.call_func_this(&f, Some(o.clone()), Vec::new())?),
+            None => None,
+        };
         let props = if skip_init {
             self.plain_props_array(o, true)
         } else {
@@ -238,8 +254,7 @@ impl Vm {
         } else {
             (name, props)
         };
-        let selected: PhpArray = if let Some(f) = cls.find_method(b"__sleep") {
-            let r = self.call_func_this(&f, Some(o.clone()), Vec::new())?;
+        let selected: PhpArray = if let Some(r) = sleep {
             let bad_sleep = format!(
                 "serialize(): {}::__sleep() should return an array only containing the names of instance-variables to serialize",
                 cls.name.dname()
@@ -276,7 +291,30 @@ impl Vm {
                         break;
                     }
                 }
-                if !found {
+                // Declared but uninitialized typed properties are skipped
+                // silently (sleep_uninitialized_typed_prop).
+                let declared = {
+                    let bare = match n.first() {
+                        Some(0) => n
+                            .iter()
+                            .skip(1)
+                            .position(|&c| c == 0)
+                            .map(|p| PhpStr::new(&n[p + 2..]))
+                            .unwrap_or(n.clone()),
+                        _ => n.clone(),
+                    };
+                    let map = cls.prop_map.borrow();
+                    let props = cls.props.borrow();
+                    map.get(&bare).is_some_and(|idxs| {
+                        idxs.iter().any(|&i| {
+                            let p = &props[i as usize];
+                            p.ty.is_some()
+                                && (p.flags & mflags::PRIVATE == 0
+                                    || std::ptr::eq(p.class, Rc::as_ptr(&cls)))
+                        })
+                    })
+                };
+                if !found && !declared {
                     self.warn(&format!(
                         "serialize(): \"{}\" returned as member variable from __sleep() but does not exist",
                         n.to_string_lossy()
@@ -440,6 +478,35 @@ impl Unser<'_> {
         self.expect(b'"')?;
         Ok(s)
     }
+    /// A count read inside an object header (`O:..:"name":N:{`, `C:..:N:{`):
+    /// errors are reported where the parse stopped (observed on PHP 8.5).
+    fn count(&mut self) -> UR<(bool, usize)> {
+        let mut neg = false;
+        if matches!(self.peek(), Some(b'+') | Some(b'-')) {
+            neg = self.peek() == Some(b'-');
+            self.pos += 1;
+        }
+        let st = self.pos;
+        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+            self.pos += 1;
+        }
+        if self.pos == st {
+            return Err(UErr::At(if self.peek() == Some(b':') {
+                self.pos + 1
+            } else {
+                self.pos
+            }));
+        }
+        let n = std::str::from_utf8(&self.d[st..self.pos])
+            .ok()
+            .and_then(|t| t.parse::<usize>().ok())
+            .ok_or(UErr::At(self.pos))?;
+        if self.peek() != Some(b':') {
+            return Err(UErr::At(self.pos));
+        }
+        Ok((neg, n))
+    }
+
     fn cell(&mut self, v: Value) -> PhpRef {
         let c = PhpRef::new(v);
         self.vals.push(c.clone());
@@ -486,7 +553,11 @@ impl Vm {
             b'i' => {
                 let (neg, d) = u.num(b';', true, start)?;
                 let txt = std::str::from_utf8(&d).unwrap_or("0");
-                let full = if neg { format!("-{}", txt) } else { txt.to_string() };
+                let full = if neg {
+                    format!("-{}", txt)
+                } else {
+                    txt.to_string()
+                };
                 match full.parse::<i64>() {
                     Ok(i) => Value::Int(i),
                     Err(_) => {
@@ -663,7 +734,12 @@ impl Vm {
         u.expect(b':')?;
         let cls = self.unser_class(u, &name)?;
         if t == b'C' {
-            let len = u.len(b':', u.pos)?;
+            let (_, len) = u.count()?;
+            let at = u.pos;
+            u.pos += 1;
+            if len > u.d.len() {
+                return Err(UErr::At(at));
+            }
             u.expect(b'{')?;
             if u.pos + len > u.d.len() {
                 return Err(UErr::At(start));
@@ -686,26 +762,16 @@ impl Vm {
             }
             return Ok(Value::Ref(cell));
         }
-        let cstart = u.pos;
-        // The property count is read after the class name: a missing ':'
-        // is reported where it was expected (bug74111).
-        let (neg, digits) = u.num(b':', true, cstart).map_err(|_| {
-            let mut p = cstart;
-            if matches!(u.d.get(p), Some(b'+') | Some(b'-')) {
-                p += 1;
-            }
-            while u.d.get(p).is_some_and(|c| c.is_ascii_digit()) {
-                p += 1;
-            }
-            UErr::At(p)
-        })?;
-        if neg && digits.iter().any(|&c| c != b'0') {
-            return Err(UErr::At(u.pos - 1));
+        let (neg, n) = u.count()?;
+        let at = u.pos;
+        if neg && n != 0 {
+            return Err(UErr::At(at));
         }
-        let n: usize = std::str::from_utf8(&digits)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .ok_or(UErr::At(cstart))?;
+        // More properties than bytes left (unserialize_large).
+        if n > u.d.len() - u.pos {
+            return Err(UErr::At(at));
+        }
+        u.pos += 1;
         u.expect(b'{')?;
         let (o, incomplete) = match &cls {
             Some(c) => {
@@ -784,7 +850,10 @@ impl Vm {
                 }
             }
             Value::Array(a) => {
-                if !a.iter().any(|(_, x)| matches!(x, Value::Ref(_) | Value::Array(_) | Value::Object(_))) {
+                if !a
+                    .iter()
+                    .any(|(_, x)| matches!(x, Value::Ref(_) | Value::Array(_) | Value::Object(_)))
+                {
                     return Value::Array(a);
                 }
                 let mut out = PhpArray::new();
@@ -986,19 +1055,37 @@ impl Vm {
             Some(Value::Array(a)) => {
                 let mut v = Vec::new();
                 for (_, x) in a.iter() {
-                    match x.deref() {
-                        Value::Str(s) => v.push(s),
-                        _ => {
-                            return self.type_error("unserialize(): Option \"allowed_classes\" must be an array of class names, int given");
+                    let x = x.deref();
+                    let name = match &x {
+                        Value::Str(s) => s.clone(),
+                        Value::Object(_) => self.to_php_str(&x)?,
+                        other => {
+                            return self.type_error(&format!(
+                                "unserialize(): Option \"allowed_classes\" must be an array of class names, {} given",
+                                Vm::type_name_given(other)
+                            ));
                         }
+                    };
+                    // Observed on PHP 8.5: names must look like class names.
+                    let valid = name.iter().all(|&c| {
+                        c.is_ascii_alphanumeric() || c == b'_' || c == b'\\' || c >= 0x80
+                    });
+                    if !valid {
+                        // The name is shown up to a NUL byte.
+                        let shown = name.split(|&c| c == 0).next().unwrap_or(&[]);
+                        return self.value_error(&format!(
+                            "unserialize(): Option \"allowed_classes\" must be an array of class names, \"{}\" given",
+                            String::from_utf8_lossy(shown)
+                        ));
                     }
+                    v.push(name);
                 }
                 Some(v)
             }
             Some(other) => {
                 return self.type_error(&format!(
-                    "unserialize(): Option \"allowed_classes\" must be an array or of type bool, {} given",
-                    crate::class::TypeName::tname(&other.deref())
+                    "unserialize(): Option \"allowed_classes\" must be of type array|bool, {} given",
+                    Vm::type_name_given(&other.deref())
                 ));
             }
         };
