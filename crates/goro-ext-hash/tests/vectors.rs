@@ -7,6 +7,7 @@ use goro_ext_hash::{
     hmac_algos, lookup, to_hex,
 };
 
+#[path = "data/phpt_vectors.rs"]
 mod phpt_vectors_data;
 
 fn hx(b: &[u8]) -> String {

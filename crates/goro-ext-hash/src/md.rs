@@ -239,7 +239,9 @@ impl Engine for Md4 {
     fn update(&mut self, data: &[u8]) {
         let used = add_bits(&mut self.count, data.len(), 64);
         let h = &mut self.h;
-        self.b.absorb(used, data, true, |blk| md4_compress(h, blk));
+        self.b.absorb(used, data, true, |blks| {
+            blks.iter().for_each(|b| md4_compress(h, b))
+        });
     }
 
     fn finish(&mut self, out: &mut [u8]) {
@@ -299,53 +301,55 @@ const MD5_T: [u32; 64] = [
 
 #[inline(always)]
 pub(crate) fn md5_compress(h: &mut [u32; 4], block: &[u8; 64]) {
+    let (words, _) = block.as_chunks::<4>();
     let mut x = [0u32; 16];
-    for (i, w) in x.iter_mut().enumerate() {
-        *w = le32(&block[i * 4..]);
+    for (w, b) in x.iter_mut().zip(words) {
+        *w = u32::from_le_bytes(*b);
     }
     let [mut a, mut b, mut c, mut d] = *h;
+    // The message word and constant are added first, off the critical
+    // path through the previous step's result; reading the constants
+    // through an opaque reference keeps the compiler from moving the
+    // constant additions after the round function.
+    let t: &[u32; 64] = std::hint::black_box(&MD5_T);
     macro_rules! step {
-        ($fun:expr, $a:ident, $b:ident, $c:ident, $d:ident, $k:expr, $s:expr, $i:expr) => {
-            $a = $b.wrapping_add(
-                $a.wrapping_add($fun($b, $c, $d))
-                    .wrapping_add(x[$k])
-                    .wrapping_add(MD5_T[$i])
-                    .rotate_left($s),
-            );
+        (F, $a:ident, $b:ident, $c:ident, $d:ident, $k:expr, $s:expr, $i:expr) => {
+            $a = $a.wrapping_add(x[$k].wrapping_add(t[$i]));
+            $a = $a.wrapping_add($d ^ ($b & ($c ^ $d)));
+            $a = $a.rotate_left($s).wrapping_add($b);
+        };
+        (G, $a:ident, $b:ident, $c:ident, $d:ident, $k:expr, $s:expr, $i:expr) => {
+            $a = $a.wrapping_add(x[$k].wrapping_add(t[$i]));
+            $a = $a.wrapping_add(!$d & $c);
+            $a = $a.wrapping_add($d & $b);
+            $a = $a.rotate_left($s).wrapping_add($b);
+        };
+        (H, $a:ident, $b:ident, $c:ident, $d:ident, $k:expr, $s:expr, $i:expr) => {
+            $a = $a.wrapping_add(x[$k].wrapping_add(t[$i]));
+            $a = $a.wrapping_add($b ^ ($c ^ $d));
+            $a = $a.rotate_left($s).wrapping_add($b);
+        };
+        (I, $a:ident, $b:ident, $c:ident, $d:ident, $k:expr, $s:expr, $i:expr) => {
+            $a = $a.wrapping_add(x[$k].wrapping_add(t[$i]));
+            $a = $a.wrapping_add($c ^ ($b | !$d));
+            $a = $a.rotate_left($s).wrapping_add($b);
         };
     }
-    let ff = |b: u32, c: u32, d: u32| d ^ (b & (c ^ d));
-    let gg = |b: u32, c: u32, d: u32| c ^ (d & (b ^ c));
-    let hh = |b: u32, c: u32, d: u32| b ^ c ^ d;
-    let ii = |b: u32, c: u32, d: u32| c ^ (b | !d);
-    for r in 0..4 {
-        let i = r * 4;
-        step!(ff, a, b, c, d, i, 7, i);
-        step!(ff, d, a, b, c, i + 1, 12, i + 1);
-        step!(ff, c, d, a, b, i + 2, 17, i + 2);
-        step!(ff, b, c, d, a, i + 3, 22, i + 3);
+    macro_rules! round {
+        ($f:ident, $base:expr, $k:expr, $s:expr) => {
+            for r in 0..4 {
+                let i = $base + r * 4;
+                step!($f, a, b, c, d, $k(i), $s[0], i);
+                step!($f, d, a, b, c, $k(i + 1), $s[1], i + 1);
+                step!($f, c, d, a, b, $k(i + 2), $s[2], i + 2);
+                step!($f, b, c, d, a, $k(i + 3), $s[3], i + 3);
+            }
+        };
     }
-    for r in 0..4 {
-        let i = 16 + r * 4;
-        step!(gg, a, b, c, d, (5 * i + 1) % 16, 5, i);
-        step!(gg, d, a, b, c, (5 * (i + 1) + 1) % 16, 9, i + 1);
-        step!(gg, c, d, a, b, (5 * (i + 2) + 1) % 16, 14, i + 2);
-        step!(gg, b, c, d, a, (5 * (i + 3) + 1) % 16, 20, i + 3);
-    }
-    for r in 0..4 {
-        let i = 32 + r * 4;
-        step!(hh, a, b, c, d, (3 * i + 5) % 16, 4, i);
-        step!(hh, d, a, b, c, (3 * (i + 1) + 5) % 16, 11, i + 1);
-        step!(hh, c, d, a, b, (3 * (i + 2) + 5) % 16, 16, i + 2);
-        step!(hh, b, c, d, a, (3 * (i + 3) + 5) % 16, 23, i + 3);
-    }
-    for r in 0..4 {
-        let i = 48 + r * 4;
-        step!(ii, a, b, c, d, (7 * i) % 16, 6, i);
-        step!(ii, d, a, b, c, (7 * (i + 1)) % 16, 10, i + 1);
-        step!(ii, c, d, a, b, (7 * (i + 2)) % 16, 15, i + 2);
-        step!(ii, b, c, d, a, (7 * (i + 3)) % 16, 21, i + 3);
-    }
+    round!(F, 0, |i: usize| i, [7, 12, 17, 22]);
+    round!(G, 16, |i: usize| (5 * i + 1) % 16, [5, 9, 14, 20]);
+    round!(H, 32, |i: usize| (3 * i + 5) % 16, [4, 11, 16, 23]);
+    round!(I, 48, |i: usize| (7 * i) % 16, [6, 10, 15, 21]);
     h[0] = h[0].wrapping_add(a);
     h[1] = h[1].wrapping_add(b);
     h[2] = h[2].wrapping_add(c);
@@ -383,8 +387,8 @@ impl Engine for Md5 {
         }
         self.hi = self.hi.wrapping_add((len >> 29) as u32);
         let h = &mut self.h;
-        self.b.absorb((saved & 0x3f) as usize, data, false, |blk| {
-            md5_compress(h, blk)
+        self.b.absorb((saved & 0x3f) as usize, data, false, |blks| {
+            blks.iter().for_each(|b| md5_compress(h, b))
         });
     }
 

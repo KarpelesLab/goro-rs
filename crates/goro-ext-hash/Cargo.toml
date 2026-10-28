@@ -6,4 +6,4 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
-purecrypto = { version = "0.10", default-features = false, features = ["hash"] }
+purecrypto = { version = "0.10", default-features = false, features = ["hash", "std"] }

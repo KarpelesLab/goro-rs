@@ -5,7 +5,7 @@
 //! Serialized layout observed on PHP 8.5: eight state words, the 64-bit
 //! bit count (low word first) and the 128-byte buffer.
 
-use crate::engine::{BlockBuf, Engine, Field, Kind, Val, clone_box, f, le32};
+use crate::engine::{BlockBuf, Engine, Field, Kind, Val, clone_box, f};
 use crate::md::add_bits;
 
 pub(crate) const HAVAL_LAYOUT: &[Field] = &[
@@ -78,32 +78,63 @@ fn fk(k: usize, x6: u32, x5: u32, x4: u32, x3: u32, x2: u32, x1: u32, x0: u32) -
     }
 }
 
-fn compress(h: &mut [u32; 8], block: &[u8; 128], passes: usize) {
-    let mut w = [0u32; 32];
-    for (i, x) in w.iter_mut().enumerate() {
-        *x = le32(&block[i * 4..]);
+/// One step of pass `K` (of `P` passes) whose position in its group of
+/// eight is `S`: the registers rotate by one each step, so that
+/// x_i = t[(i - S) mod 8] and the step updates x_7.
+#[inline(always)]
+fn step<const P: usize, const K: usize, const S: usize>(t: &mut [u32; 8], w: u32, kc: u32) {
+    let x = |i: usize| t[(i + 8 - S) % 8];
+    let a = [x(6), x(5), x(4), x(3), x(2), x(1), x(0)];
+    // PHI lists, for each of f's (x6..x0) arguments, which x feeds it.
+    let perm = &PHI[P - 3][K];
+    let sel = |n: usize| a[6 - perm[n]];
+    let v = fk(K, sel(0), sel(1), sel(2), sel(3), sel(4), sel(5), sel(6));
+    let target = (15 - S) % 8;
+    t[target] = v
+        .rotate_right(7)
+        .wrapping_add(t[target].rotate_right(11))
+        .wrapping_add(w)
+        .wrapping_add(kc);
+}
+
+#[inline(always)]
+fn pass<const P: usize, const K: usize>(t: &mut [u32; 8], w: &[u32; 32]) {
+    for g in 0..4 {
+        let j = 8 * g;
+        step::<P, K, 0>(t, w[ORDER[K][j]], KC[K][j]);
+        step::<P, K, 1>(t, w[ORDER[K][j + 1]], KC[K][j + 1]);
+        step::<P, K, 2>(t, w[ORDER[K][j + 2]], KC[K][j + 2]);
+        step::<P, K, 3>(t, w[ORDER[K][j + 3]], KC[K][j + 3]);
+        step::<P, K, 4>(t, w[ORDER[K][j + 4]], KC[K][j + 4]);
+        step::<P, K, 5>(t, w[ORDER[K][j + 5]], KC[K][j + 5]);
+        step::<P, K, 6>(t, w[ORDER[K][j + 6]], KC[K][j + 6]);
+        step::<P, K, 7>(t, w[ORDER[K][j + 7]], KC[K][j + 7]);
     }
+}
+
+fn compress_p<const P: usize>(h: &mut [u32; 8], block: &[u8; 128]) {
+    let (words, _) = block.as_chunks::<4>();
+    let w: [u32; 32] = std::array::from_fn(|i| u32::from_le_bytes(words[i]));
     let mut t = *h;
-    let phi = &PHI[passes - 3];
-    for k in 0..passes {
-        let perm = &phi[k];
-        for j in 0..32 {
-            // x_i = t[(i - j) mod 8]
-            let x = |i: usize| t[(i + 8 - (j % 8)) % 8];
-            let a = [x(6), x(5), x(4), x(3), x(2), x(1), x(0)];
-            let sel = |n: usize| a[6 - perm[n]];
-            // perm lists the x index for each of f's (x6..x0) arguments.
-            let v = fk(k, sel(0), sel(1), sel(2), sel(3), sel(4), sel(5), sel(6));
-            let target = (7 + 8 - (j % 8)) % 8;
-            t[target] = v
-                .rotate_right(7)
-                .wrapping_add(t[target].rotate_right(11))
-                .wrapping_add(w[ORDER[k][j]])
-                .wrapping_add(KC[k][j]);
-        }
+    pass::<P, 0>(&mut t, &w);
+    pass::<P, 1>(&mut t, &w);
+    pass::<P, 2>(&mut t, &w);
+    if P >= 4 {
+        pass::<P, 3>(&mut t, &w);
+    }
+    if P == 5 {
+        pass::<P, 4>(&mut t, &w);
     }
     for i in 0..8 {
         h[i] = h[i].wrapping_add(t[i]);
+    }
+}
+
+fn compress(h: &mut [u32; 8], block: &[u8; 128], passes: usize) {
+    match passes {
+        3 => compress_p::<3>(h, block),
+        4 => compress_p::<4>(h, block),
+        _ => compress_p::<5>(h, block),
     }
 }
 
@@ -196,7 +227,9 @@ impl Engine for Haval {
     fn update(&mut self, data: &[u8]) {
         let used = add_bits(&mut self.count, data.len(), 128);
         let (h, p) = (&mut self.h, self.passes);
-        self.b.absorb(used, data, true, |blk| compress(h, blk, p));
+        self.b.absorb(used, data, true, |blks| {
+            blks.iter().for_each(|b| compress(h, b, p))
+        });
     }
 
     fn finish(&mut self, out: &mut [u8]) {

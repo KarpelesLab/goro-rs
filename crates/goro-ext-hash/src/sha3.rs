@@ -57,35 +57,124 @@ const RHO: [u32; 25] = {
     out
 };
 
-pub(crate) fn keccak_f(a: &mut [u64; 25]) {
-    for &rc in RC.iter() {
-        // theta
-        let mut c = [0u64; 5];
-        for x in 0..5 {
-            c[x] = a[x] ^ a[x + 5] ^ a[x + 10] ^ a[x + 15] ^ a[x + 20];
-        }
-        for x in 0..5 {
-            let d = c[(x + 4) % 5] ^ c[(x + 1) % 5].rotate_left(1);
-            for y in 0..5 {
-                a[x + 5 * y] ^= d;
-            }
-        }
-        // rho and pi
-        let mut b = [0u64; 25];
-        for x in 0..5 {
-            for y in 0..5 {
-                b[y + 5 * ((2 * x + 3 * y) % 5)] = a[x + 5 * y].rotate_left(RHO[x + 5 * y]);
-            }
-        }
-        // chi
-        for y in 0..5 {
-            for x in 0..5 {
-                a[x + 5 * y] = b[x + 5 * y] ^ (!b[(x + 1) % 5 + 5 * y] & b[(x + 2) % 5 + 5 * y]);
-            }
-        }
-        // iota
-        a[0] ^= rc;
+/// Keccak-f[1600], unrolled over named lanes (theta, rho, pi, chi, iota).
+#[rustfmt::skip]
+/// Keccak-f[1600], with BMI1's and-not when the CPU has it.
+pub(crate) fn keccak_f(state: &mut [u64; 25]) {
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("bmi1") {
+        // SAFETY: BMI1 was detected.
+        unsafe { keccak_f_bmi1(state) };
+        return;
     }
+    keccak_f_generic(state);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "bmi1")]
+#[allow(unsafe_code)]
+unsafe fn keccak_f_bmi1(state: &mut [u64; 25]) {
+    keccak_f_generic(state);
+}
+
+/// The permutation, unrolled over named lanes (FIPS 202 theta, rho, pi,
+/// chi and iota).
+#[inline(always)]
+fn keccak_f_generic(state: &mut [u64; 25]) {
+    let [
+        mut a0,
+        mut a1,
+        mut a2,
+        mut a3,
+        mut a4,
+        mut a5,
+        mut a6,
+        mut a7,
+        mut a8,
+        mut a9,
+        mut a10,
+        mut a11,
+        mut a12,
+        mut a13,
+        mut a14,
+        mut a15,
+        mut a16,
+        mut a17,
+        mut a18,
+        mut a19,
+        mut a20,
+        mut a21,
+        mut a22,
+        mut a23,
+        mut a24,
+    ] = *state;
+    for &rc in RC.iter() {
+        let c0 = a0 ^ a5 ^ a10 ^ a15 ^ a20;
+        let c1 = a1 ^ a6 ^ a11 ^ a16 ^ a21;
+        let c2 = a2 ^ a7 ^ a12 ^ a17 ^ a22;
+        let c3 = a3 ^ a8 ^ a13 ^ a18 ^ a23;
+        let c4 = a4 ^ a9 ^ a14 ^ a19 ^ a24;
+        let d0 = c4 ^ c1.rotate_left(1);
+        let d1 = c0 ^ c2.rotate_left(1);
+        let d2 = c1 ^ c3.rotate_left(1);
+        let d3 = c2 ^ c4.rotate_left(1);
+        let d4 = c3 ^ c0.rotate_left(1);
+        let b0 = (a0 ^ d0).rotate_left(RHO[0]);
+        let b16 = (a5 ^ d0).rotate_left(RHO[5]);
+        let b7 = (a10 ^ d0).rotate_left(RHO[10]);
+        let b23 = (a15 ^ d0).rotate_left(RHO[15]);
+        let b14 = (a20 ^ d0).rotate_left(RHO[20]);
+        let b10 = (a1 ^ d1).rotate_left(RHO[1]);
+        let b1 = (a6 ^ d1).rotate_left(RHO[6]);
+        let b17 = (a11 ^ d1).rotate_left(RHO[11]);
+        let b8 = (a16 ^ d1).rotate_left(RHO[16]);
+        let b24 = (a21 ^ d1).rotate_left(RHO[21]);
+        let b20 = (a2 ^ d2).rotate_left(RHO[2]);
+        let b11 = (a7 ^ d2).rotate_left(RHO[7]);
+        let b2 = (a12 ^ d2).rotate_left(RHO[12]);
+        let b18 = (a17 ^ d2).rotate_left(RHO[17]);
+        let b9 = (a22 ^ d2).rotate_left(RHO[22]);
+        let b5 = (a3 ^ d3).rotate_left(RHO[3]);
+        let b21 = (a8 ^ d3).rotate_left(RHO[8]);
+        let b12 = (a13 ^ d3).rotate_left(RHO[13]);
+        let b3 = (a18 ^ d3).rotate_left(RHO[18]);
+        let b19 = (a23 ^ d3).rotate_left(RHO[23]);
+        let b15 = (a4 ^ d4).rotate_left(RHO[4]);
+        let b6 = (a9 ^ d4).rotate_left(RHO[9]);
+        let b22 = (a14 ^ d4).rotate_left(RHO[14]);
+        let b13 = (a19 ^ d4).rotate_left(RHO[19]);
+        let b4 = (a24 ^ d4).rotate_left(RHO[24]);
+        a0 = b0 ^ (!b1 & b2);
+        a1 = b1 ^ (!b2 & b3);
+        a2 = b2 ^ (!b3 & b4);
+        a3 = b3 ^ (!b4 & b0);
+        a4 = b4 ^ (!b0 & b1);
+        a5 = b5 ^ (!b6 & b7);
+        a6 = b6 ^ (!b7 & b8);
+        a7 = b7 ^ (!b8 & b9);
+        a8 = b8 ^ (!b9 & b5);
+        a9 = b9 ^ (!b5 & b6);
+        a10 = b10 ^ (!b11 & b12);
+        a11 = b11 ^ (!b12 & b13);
+        a12 = b12 ^ (!b13 & b14);
+        a13 = b13 ^ (!b14 & b10);
+        a14 = b14 ^ (!b10 & b11);
+        a15 = b15 ^ (!b16 & b17);
+        a16 = b16 ^ (!b17 & b18);
+        a17 = b17 ^ (!b18 & b19);
+        a18 = b18 ^ (!b19 & b15);
+        a19 = b19 ^ (!b15 & b16);
+        a20 = b20 ^ (!b21 & b22);
+        a21 = b21 ^ (!b22 & b23);
+        a22 = b22 ^ (!b23 & b24);
+        a23 = b23 ^ (!b24 & b20);
+        a24 = b24 ^ (!b20 & b21);
+        a0 ^= rc;
+    }
+    *state = [
+        a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19,
+        a20, a21, a22, a23, a24,
+    ];
 }
 
 #[derive(Clone)]
@@ -122,6 +211,18 @@ impl Engine for Sha3 {
             if self.pos == self.rate {
                 keccak_f(&mut self.a);
                 self.pos = 0;
+            }
+        }
+        // Whole blocks.
+        if self.pos == 0 {
+            let lanes = self.rate / 8;
+            while data.len() >= self.rate {
+                let (words, _) = data[..self.rate].as_chunks::<8>();
+                for (lane, w) in self.a[..lanes].iter_mut().zip(words) {
+                    *lane ^= u64::from_le_bytes(*w);
+                }
+                keccak_f(&mut self.a);
+                data = &data[self.rate..];
             }
         }
         // Whole lanes.

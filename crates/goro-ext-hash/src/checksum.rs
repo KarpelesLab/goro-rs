@@ -184,13 +184,39 @@ impl Crc32 {
     }
 }
 
+static FOLD_B: crate::crc_fold::Consts = crate::crc_fold::reflected(0x1_04c1_1db7);
+static FOLD_C: crate::crc_fold::Consts = crate::crc_fold::reflected(0x1_1edc_6f41);
+static FOLD_BZIP: crate::crc_fold::Consts = crate::crc_fold::normal(0x1_04c1_1db7);
+
+impl Crc32 {
+    fn table_update(&self, c: u32, data: &[u8]) -> u32 {
+        match self.kind {
+            CrcKind::Bzip => crc_normal(&CRC32_BZIP, c, data),
+            CrcKind::B => crc_reflected(&CRC32B, c, data),
+            CrcKind::C => crc_reflected(&CRC32C, c, data),
+        }
+    }
+}
+
 impl Engine for Crc32 {
     fn update(&mut self, data: &[u8]) {
-        self.c = match self.kind {
-            CrcKind::Bzip => crc_normal(&CRC32_BZIP, self.c, data),
-            CrcKind::B => crc_reflected(&CRC32B, self.c, data),
-            CrcKind::C => crc_reflected(&CRC32C, self.c, data),
-        };
+        #[cfg(target_arch = "x86_64")]
+        if data.len() >= 256 && crate::crc_fold::available() {
+            let n = data.len() & !15;
+            // SAFETY: the CPU has PCLMULQDQ and SSE4.1; `n` is a multiple
+            // of 16 and at least 64.
+            let rest = unsafe {
+                match self.kind {
+                    CrcKind::Bzip => crate::crc_fold::fold_normal(self.c, &data[..n], &FOLD_BZIP),
+                    CrcKind::B => crate::crc_fold::fold_reflected(self.c, &data[..n], &FOLD_B),
+                    CrcKind::C => crate::crc_fold::fold_reflected(self.c, &data[..n], &FOLD_C),
+                }
+            };
+            let c = self.table_update(0, &rest);
+            self.c = self.table_update(c, &data[n..]);
+            return;
+        }
+        self.c = self.table_update(self.c, data);
     }
     fn finish(&mut self, out: &mut [u8]) {
         let v = !self.c;
@@ -331,5 +357,29 @@ impl Engine for Joaat {
     fn import(&mut self, v: &[Val]) -> bool {
         self.h = v[0].u32();
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The folding path agrees with the byte tables for every length and
+    /// starting register.
+    #[test]
+    fn folding_matches_tables() {
+        let data: Vec<u8> = (0..3000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 11) as u8)
+            .collect();
+        for kind in [CrcKind::Bzip, CrcKind::B, CrcKind::C] {
+            for len in [256, 257, 271, 272, 300, 511, 512, 1000, 2999] {
+                for start in [0u32, !0, 0x1234_5678] {
+                    let mut e = Crc32 { c: start, kind };
+                    e.update(&data[..len]);
+                    let t = Crc32 { c: start, kind }.table_update(start, &data[..len]);
+                    assert_eq!(e.c, t, "{kind:?} {len} {start:x}");
+                }
+            }
+        }
     }
 }

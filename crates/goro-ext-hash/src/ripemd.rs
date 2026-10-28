@@ -56,9 +56,10 @@ const K: [u32; 5] = [0x00000000, 0x5a827999, 0x6ed9eba1, 0x8f1bbcdc, 0xa953fd4e]
 const KP160: [u32; 5] = [0x50a28be6, 0x5c4dd124, 0x6d703ef3, 0x7a6d76e9, 0x00000000];
 const KP128: [u32; 4] = [0x50a28be6, 0x5c4dd124, 0x6d703ef3, 0x00000000];
 
+/// The round function of round `R` (0 to 4).
 #[inline(always)]
-fn fun(j: usize, x: u32, y: u32, z: u32) -> u32 {
-    match j / 16 {
+fn fun<const R: usize>(x: u32, y: u32, z: u32) -> u32 {
+    match R {
         0 => x ^ y ^ z,
         1 => (x & y) | (!x & z),
         2 => (x | !y) ^ z,
@@ -75,53 +76,69 @@ fn words(block: &[u8; 64]) -> [u32; 16] {
     x
 }
 
-/// The two parallel lines of RIPEMD-128/256 (64 steps); `swap` exchanges
-/// a chaining word after each round for RIPEMD-256.
-fn lines128(l: &mut [u32; 4], r: &mut [u32; 4], x: &[u32; 16], swap: bool) {
+/// Sixteen steps of round `L` of the left line and `RR` of the right one
+/// (RIPEMD-128/256: four rounds, the right line runs them backwards).
+#[inline(always)]
+fn round4<const L: usize, const RR: usize>(l: &mut [u32; 4], r: &mut [u32; 4], x: &[u32; 16]) {
     let [mut a, mut b, mut c, mut d] = *l;
     let [mut ap, mut bp, mut cp, mut dp] = *r;
-    for j in 0..64 {
+    for k in 0..16 {
+        let j = 16 * L + k;
         let t = a
-            .wrapping_add(fun(j, b, c, d))
+            .wrapping_add(fun::<L>(b, c, d))
             .wrapping_add(x[R[j]])
-            .wrapping_add(K[j / 16])
+            .wrapping_add(K[L])
             .rotate_left(S[j]);
         a = d;
         d = c;
         c = b;
         b = t;
         let t = ap
-            .wrapping_add(fun(63 - j, bp, cp, dp))
+            .wrapping_add(fun::<RR>(bp, cp, dp))
             .wrapping_add(x[RP[j]])
-            .wrapping_add(KP128[j / 16])
+            .wrapping_add(KP128[L])
             .rotate_left(SP[j]);
         ap = dp;
         dp = cp;
         cp = bp;
         bp = t;
-        if swap {
-            match j {
-                15 => std::mem::swap(&mut a, &mut ap),
-                31 => std::mem::swap(&mut b, &mut bp),
-                47 => std::mem::swap(&mut c, &mut cp),
-                63 => std::mem::swap(&mut d, &mut dp),
-                _ => {}
-            }
-        }
     }
     *l = [a, b, c, d];
     *r = [ap, bp, cp, dp];
 }
 
-/// The two parallel lines of RIPEMD-160/320 (80 steps).
-fn lines160(l: &mut [u32; 5], r: &mut [u32; 5], x: &[u32; 16], swap: bool) {
+/// The two parallel lines of RIPEMD-128/256 (64 steps); `swap` exchanges
+/// a chaining word after each round for RIPEMD-256.
+fn lines128(l: &mut [u32; 4], r: &mut [u32; 4], x: &[u32; 16], swap: bool) {
+    round4::<0, 3>(l, r, x);
+    if swap {
+        std::mem::swap(&mut l[0], &mut r[0]);
+    }
+    round4::<1, 2>(l, r, x);
+    if swap {
+        std::mem::swap(&mut l[1], &mut r[1]);
+    }
+    round4::<2, 1>(l, r, x);
+    if swap {
+        std::mem::swap(&mut l[2], &mut r[2]);
+    }
+    round4::<3, 0>(l, r, x);
+    if swap {
+        std::mem::swap(&mut l[3], &mut r[3]);
+    }
+}
+
+/// Sixteen steps of round `L` (left) and `RR` (right) of RIPEMD-160/320.
+#[inline(always)]
+fn round5<const L: usize, const RR: usize>(l: &mut [u32; 5], r: &mut [u32; 5], x: &[u32; 16]) {
     let [mut a, mut b, mut c, mut d, mut e] = *l;
     let [mut ap, mut bp, mut cp, mut dp, mut ep] = *r;
-    for j in 0..80 {
+    for k in 0..16 {
+        let j = 16 * L + k;
         let t = a
-            .wrapping_add(fun(j, b, c, d))
+            .wrapping_add(fun::<L>(b, c, d))
             .wrapping_add(x[R[j]])
-            .wrapping_add(K[j / 16])
+            .wrapping_add(K[L])
             .rotate_left(S[j])
             .wrapping_add(e);
         a = e;
@@ -130,9 +147,9 @@ fn lines160(l: &mut [u32; 5], r: &mut [u32; 5], x: &[u32; 16], swap: bool) {
         c = b;
         b = t;
         let t = ap
-            .wrapping_add(fun(79 - j, bp, cp, dp))
+            .wrapping_add(fun::<RR>(bp, cp, dp))
             .wrapping_add(x[RP[j]])
-            .wrapping_add(KP160[j / 16])
+            .wrapping_add(KP160[L])
             .rotate_left(SP[j])
             .wrapping_add(ep);
         ap = ep;
@@ -140,19 +157,34 @@ fn lines160(l: &mut [u32; 5], r: &mut [u32; 5], x: &[u32; 16], swap: bool) {
         dp = cp.rotate_left(10);
         cp = bp;
         bp = t;
-        if swap {
-            match j {
-                15 => std::mem::swap(&mut b, &mut bp),
-                31 => std::mem::swap(&mut d, &mut dp),
-                47 => std::mem::swap(&mut a, &mut ap),
-                63 => std::mem::swap(&mut c, &mut cp),
-                79 => std::mem::swap(&mut e, &mut ep),
-                _ => {}
-            }
-        }
     }
     *l = [a, b, c, d, e];
     *r = [ap, bp, cp, dp, ep];
+}
+
+/// The two parallel lines of RIPEMD-160/320 (80 steps); for RIPEMD-320
+/// the words B, D, A, C, E are exchanged after rounds 1 to 5.
+fn lines160(l: &mut [u32; 5], r: &mut [u32; 5], x: &[u32; 16], swap: bool) {
+    round5::<0, 4>(l, r, x);
+    if swap {
+        std::mem::swap(&mut l[1], &mut r[1]);
+    }
+    round5::<1, 3>(l, r, x);
+    if swap {
+        std::mem::swap(&mut l[3], &mut r[3]);
+    }
+    round5::<2, 2>(l, r, x);
+    if swap {
+        std::mem::swap(&mut l[0], &mut r[0]);
+    }
+    round5::<3, 1>(l, r, x);
+    if swap {
+        std::mem::swap(&mut l[2], &mut r[2]);
+    }
+    round5::<4, 0>(l, r, x);
+    if swap {
+        std::mem::swap(&mut l[4], &mut r[4]);
+    }
 }
 
 fn compress(h: &mut [u32; 10], words_n: usize, block: &[u8; 64]) {
@@ -246,7 +278,9 @@ impl Engine for Ripemd {
     fn update(&mut self, data: &[u8]) {
         let used = add_bits(&mut self.count, data.len(), 64);
         let (h, n) = (&mut self.h, self.n);
-        self.b.absorb(used, data, true, |blk| compress(h, n, blk));
+        self.b.absorb(used, data, true, |blks| {
+            blks.iter().for_each(|b| compress(h, n, b))
+        });
     }
 
     fn finish(&mut self, out: &mut [u8]) {

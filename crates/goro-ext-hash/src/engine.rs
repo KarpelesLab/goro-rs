@@ -230,15 +230,15 @@ impl<const B: usize> BlockBuf<B> {
         BlockBuf { buf: [0; B] }
     }
 
-    /// Absorbs `data` given `used` pending bytes; calls `compress` for each
-    /// complete block. Returns the new pending count.
+    /// Absorbs `data` given `used` pending bytes; calls `compress` with
+    /// runs of complete blocks. Returns the new pending count.
     #[inline]
     pub(crate) fn absorb(
         &mut self,
         used: usize,
         mut data: &[u8],
         copy_first: bool,
-        mut compress: impl FnMut(&[u8; B]),
+        mut compress: impl FnMut(&[[u8; B]]),
     ) -> usize {
         let mut used = used % B;
         if used != 0 || (copy_first && data.len() >= B) {
@@ -248,15 +248,14 @@ impl<const B: usize> BlockBuf<B> {
                 return used + data.len();
             }
             self.buf[used..].copy_from_slice(&data[..take]);
-            compress(&self.buf);
+            compress(std::slice::from_ref(&self.buf));
             data = &data[take..];
             used = 0;
         }
-        let (chunks, chunks_rest) = data.as_chunks::<B>();
-        for block in chunks {
-            compress(block);
+        let (blocks, rest) = data.as_chunks::<B>();
+        if !blocks.is_empty() {
+            compress(blocks);
         }
-        let rest = chunks_rest;
         self.buf[used..used + rest.len()].copy_from_slice(rest);
         used + rest.len()
     }

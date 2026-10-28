@@ -2,7 +2,7 @@
 """Port the input/digest pairs of php-src's ext/hash tests into Rust.
 
 Reads the .phpt files (black-box tests: their --EXPECT-- sections are the
-required output) and writes crates/goro-ext-hash/tests/phpt_vectors_data.rs.
+required output) and writes crates/goro-ext-hash/tests/data/phpt_vectors.rs.
 Two test shapes are understood:
 
   * scripts made only of ``echo hash('algo', <expr>)`` lines, paired in
@@ -13,7 +13,7 @@ Two test shapes are understood:
 <expr> may be a quoted literal, str_repeat(<literal>, n), or a
 concatenation of those. Anything else is skipped.
 
-Usage: gen_hash_phpt_vectors.py PHP_TESTS_DIR > crates/goro-ext-hash/tests/phpt_vectors_data.rs
+Usage: gen_hash_phpt_vectors.py PHP_TESTS_DIR > crates/goro-ext-hash/tests/data/phpt_vectors.rs
 """
 import os
 import re

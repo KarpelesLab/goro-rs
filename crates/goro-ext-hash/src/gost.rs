@@ -153,14 +153,47 @@ fn to64(w: &[u32; 8]) -> [u64; 4] {
     o
 }
 
-/// PSI applied `n` times on a vector of sixteen 16-bit words.
-#[inline]
-fn psi(y: &mut [u16; 16], n: usize) {
-    for _ in 0..n {
-        let x = y[0] ^ y[1] ^ y[2] ^ y[3] ^ y[12] ^ y[15];
-        y.copy_within(1.., 0);
-        y[15] = x;
+/// PSI^n as a linear map: `PSI_POW[n][i]` has bit j set when input word j
+/// is XORed into output word i (computed by applying PSI symbolically).
+const fn psi_masks(n: usize) -> [u16; 16] {
+    let mut m = [0u16; 16];
+    let mut i = 0;
+    while i < 16 {
+        m[i] = 1 << i;
+        i += 1;
     }
+    let mut k = 0;
+    while k < n {
+        let x = m[0] ^ m[1] ^ m[2] ^ m[3] ^ m[12] ^ m[15];
+        let mut i = 0;
+        while i < 15 {
+            m[i] = m[i + 1];
+            i += 1;
+        }
+        m[15] = x;
+        k += 1;
+    }
+    m
+}
+
+const PSI12: [u16; 16] = psi_masks(12);
+const PSI1: [u16; 16] = psi_masks(1);
+const PSI61: [u16; 16] = psi_masks(61);
+
+/// Applies a PSI power given by its masks.
+#[inline(always)]
+fn psi(y: &[u16; 16], masks: &[u16; 16]) -> [u16; 16] {
+    let mut out = [0u16; 16];
+    for i in 0..16 {
+        let mut v = 0u16;
+        for j in 0..16 {
+            if masks[i] & (1 << j) != 0 {
+                v ^= y[j];
+            }
+        }
+        out[i] = v;
+    }
+    out
 }
 
 fn to16(w: &[u32; 8]) -> [u16; 16] {
@@ -206,19 +239,17 @@ pub(crate) fn step(t: &Tables, h: &mut [u32; 8], m: &[u32; 8]) {
         s[2 * i + 1] = hi;
     }
     // chi = PSI^61(H xor PSI(M xor PSI^12(S)))
-    let mut y = to16(&s);
-    psi(&mut y, 12);
+    let mut y = psi(&to16(&s), &PSI12);
     let ms = to16(m);
     for i in 0..16 {
         y[i] ^= ms[i];
     }
-    psi(&mut y, 1);
+    let mut y = psi(&y, &PSI1);
     let hs = to16(h);
     for i in 0..16 {
         y[i] ^= hs[i];
     }
-    psi(&mut y, 61);
-    *h = from16(&y);
+    *h = from16(&psi(&y, &PSI61));
 }
 
 #[derive(Clone)]

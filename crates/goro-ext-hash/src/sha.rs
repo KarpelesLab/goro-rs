@@ -58,6 +58,32 @@ pub(crate) fn sha1_compress(h: &mut [u32; 5], block: &[u8; 64]) {
     h[4] = h[4].wrapping_add(e);
 }
 
+/// SHA-1 over whole blocks, with the SHA extensions when available.
+fn sha1_blocks(h: &mut [u32; 5], blocks: &[[u8; 64]]) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::shani::available() {
+        // SAFETY: the CPU has the required extensions.
+        unsafe { crate::shani::sha1_blocks(h, blocks) };
+        return;
+    }
+    for b in blocks {
+        sha1_compress(h, b);
+    }
+}
+
+/// SHA-256 over whole blocks, with the SHA extensions when available.
+fn sha256_blocks(h: &mut [u32; 8], blocks: &[[u8; 64]]) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::shani::available() {
+        // SAFETY: the CPU has the required extensions.
+        unsafe { crate::shani::sha256_blocks(h, blocks) };
+        return;
+    }
+    for b in blocks {
+        sha256_compress(h, b);
+    }
+}
+
 /// The MD-strengthening padding for a 64-byte block with a big-endian
 /// 64-bit bit count.
 fn pad64_be(bits: u64, used: usize, p: &mut [u8; 72]) -> usize {
@@ -88,7 +114,7 @@ impl Engine for Sha1 {
     fn update(&mut self, data: &[u8]) {
         let used = add_bits(&mut self.count, data.len(), 64);
         let h = &mut self.h;
-        self.b.absorb(used, data, true, |blk| sha1_compress(h, blk));
+        self.b.absorb(used, data, true, |blks| sha1_blocks(h, blks));
     }
 
     fn finish(&mut self, out: &mut [u8]) {
@@ -218,7 +244,7 @@ impl Engine for Sha256 {
         let used = add_bits(&mut self.count, data.len(), 64);
         let h = &mut self.h;
         self.b
-            .absorb(used, data, true, |blk| sha256_compress(h, blk));
+            .absorb(used, data, true, |blks| sha256_blocks(h, blks));
     }
 
     fn finish(&mut self, out: &mut [u8]) {
@@ -412,8 +438,9 @@ impl Engine for Sha512 {
         self.count[0] = lo;
         self.count[1] = self.count[1].wrapping_add((data.len() as u64) >> 61);
         let h = &mut self.h;
-        self.b
-            .absorb(used, data, true, |blk| sha512_compress(h, blk));
+        self.b.absorb(used, data, true, |blks| {
+            blks.iter().for_each(|b| sha512_compress(h, b))
+        });
     }
 
     fn finish(&mut self, out: &mut [u8]) {
@@ -449,5 +476,32 @@ impl Engine for Sha512 {
         self.count = [v[8].u64(), v[9].u64()];
         self.b.buf.copy_from_slice(v[10].bytes());
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The SHA-extension paths agree with the portable compressions.
+    #[test]
+    fn hardware_matches_portable() {
+        let blocks: Vec<[u8; 64]> = (0..9u32)
+            .map(|k| std::array::from_fn(|i| ((i as u32 + 1) * 131 + k * 7919) as u8))
+            .collect();
+        let mut a = Sha256::new_256().h;
+        let mut b = a;
+        sha256_blocks(&mut a, &blocks);
+        for blk in &blocks {
+            sha256_compress(&mut b, blk);
+        }
+        assert_eq!(a, b);
+        let mut a = Sha1::new().h;
+        let mut b = a;
+        sha1_blocks(&mut a, &blocks);
+        for blk in &blocks {
+            sha1_compress(&mut b, blk);
+        }
+        assert_eq!(a, b);
     }
 }

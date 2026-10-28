@@ -17,6 +17,7 @@
 #![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
 mod checksum;
+mod crc_fold;
 mod engine;
 mod gost;
 mod haval;
@@ -25,11 +26,13 @@ mod murmur;
 mod ripemd;
 mod sha;
 mod sha3;
+mod shani;
 mod snefru;
 mod tables;
 mod tiger;
 mod whirlpool;
 mod xxh;
+mod xxh3_lanes;
 
 use engine::{Engine, Field};
 pub use engine::{SerInput, SerVal, StateArray};
@@ -963,10 +966,13 @@ pub fn digest(
 }
 
 /// One-shot digests through purecrypto for the algorithms it provides.
+/// MD5, SHA-3, MD2 and Whirlpool stay on the local engines, which
+/// measured faster.
 fn fast_digest(algo: &Algo, data: &[u8]) -> Option<Vec<u8>> {
     use purecrypto::hash as pc;
     Some(match algo.kind {
-        Kind::Md5 => pc::md5(data).to_vec(),
+        Kind::Md4 => pc::md4(data).to_vec(),
+        Kind::Ripemd(160) => pc::ripemd160(data).to_vec(),
         Kind::Sha1 => pc::sha1(data).to_vec(),
         Kind::Sha224 => pc::sha224(data).to_vec(),
         Kind::Sha256 => pc::sha256(data).to_vec(),

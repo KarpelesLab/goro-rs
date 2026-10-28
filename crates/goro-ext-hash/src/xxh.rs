@@ -452,29 +452,6 @@ impl Xxh3 {
         }
     }
 
-    fn stripes_per_block(&self) -> usize {
-        (self.secret.len() - 64) / 8
-    }
-
-    #[inline]
-    fn accumulate(acc: &mut [u64; 8], stripe: &[u8], secret: &[u8]) {
-        for i in 0..8 {
-            let lane = le64(&stripe[i * 8..]);
-            let v = lane ^ le64(&secret[i * 8..]);
-            acc[i ^ 1] = acc[i ^ 1].wrapping_add(lane);
-            acc[i] = acc[i].wrapping_add((v & 0xffff_ffff).wrapping_mul(v >> 32));
-        }
-    }
-
-    fn scramble(acc: &mut [u64; 8], secret: &[u8]) {
-        for i in 0..8 {
-            let mut a = acc[i];
-            a ^= a >> 47;
-            a ^= le64(&secret[i * 8..]);
-            acc[i] = a.wrapping_mul(P32_1 as u64);
-        }
-    }
-
     /// Accumulates every stripe of `data` that has at least one byte after
     /// it; returns the unconsumed tail (1 to 64 bytes when `data` is not
     /// empty).
@@ -483,18 +460,12 @@ impl Xxh3 {
             return data;
         }
         let n = (data.len() - 1) / 64;
-        let spb = self.stripes_per_block();
-        for s in 0..n {
-            let stripe = &data[s * 64..s * 64 + 64];
-            let off = self.stripe_in_block * 8;
-            Self::accumulate(&mut self.acc, stripe, &self.secret[off..]);
-            self.stripe_in_block += 1;
-            if self.stripe_in_block == spb {
-                let sl = self.secret.len();
-                Self::scramble(&mut self.acc, &self.secret[sl - 64..]);
-                self.stripe_in_block = 0;
-            }
-        }
+        self.stripe_in_block = crate::xxh3_lanes::stripes(
+            &mut self.acc,
+            &data[..n * 64],
+            &self.secret,
+            self.stripe_in_block,
+        );
         if n > 0 {
             self.last.copy_from_slice(&data[(n - 1) * 64..n * 64]);
         }
@@ -703,14 +674,8 @@ impl Engine for Xxh3 {
             data = &data[need..];
             let b = std::mem::take(&mut self.buf);
             // `b` is one full stripe and more input follows.
-            let off = self.stripe_in_block * 8;
-            Self::accumulate(&mut self.acc, &b, &self.secret[off..]);
-            self.stripe_in_block += 1;
-            if self.stripe_in_block == self.stripes_per_block() {
-                let sl = self.secret.len();
-                Self::scramble(&mut self.acc, &self.secret[sl - 64..]);
-                self.stripe_in_block = 0;
-            }
+            self.stripe_in_block =
+                crate::xxh3_lanes::stripes(&mut self.acc, &b, &self.secret, self.stripe_in_block);
             self.last.copy_from_slice(&b);
             self.buf = b;
             self.buf.clear();
@@ -729,7 +694,7 @@ impl Engine for Xxh3 {
             tail[64 - n..].copy_from_slice(&self.buf);
             let mut acc = self.acc;
             let sl = self.secret.len();
-            Self::accumulate(&mut acc, &tail, &self.secret[sl - 71..]);
+            crate::xxh3_lanes::accumulate(&mut acc, &tail, &self.secret[sl - 71..]);
             let lo = Self::final_merge(&acc, self.total.wrapping_mul(P64_1), &self.secret[11..]);
             let hi = if self.wide {
                 Self::final_merge(
