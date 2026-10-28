@@ -6,3 +6,25 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+purecrypto = { version = "0.10", default-features = false, features = [
+    "std",
+    "hash",
+    "cipher",
+    "kdf",
+    "bignum",
+    "rng",
+    "rsa",
+    "der",
+    "dh",
+    "dsa",
+    "ec",
+    "legacy-ec",
+    "ec-custom",
+    "ed25519-table",
+    "ed448-table",
+    "p256-table",
+    "x509",
+    "pkcs12",
+    "tls",
+    "linux-getrandom",
+] }

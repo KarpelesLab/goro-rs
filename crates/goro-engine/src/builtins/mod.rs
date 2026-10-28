@@ -23,6 +23,7 @@ pub mod json;
 pub mod math;
 pub mod mbstring;
 pub mod misc;
+pub mod openssl;
 pub mod output;
 pub mod password;
 pub mod pcre;
@@ -82,5 +83,6 @@ pub fn modules() -> Vec<&'static Module> {
         &filter::MODULE,
         &sodium::MODULE,
         &uri::MODULE,
+        &openssl::MODULE,
     ]
 }
