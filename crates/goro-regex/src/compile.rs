@@ -21,7 +21,7 @@ const MAX_VARLOOKBEHIND: u32 = 255;
 const MAX_LOOKBEHIND: u32 = 65535;
 /// PCRE2 built with LINK_SIZE=2 limits compiled patterns to 64K code units;
 /// our estimate of PCRE2's compiled size is checked against this.
-const MAX_PATTERN_SIZE: usize = 65535;
+const MAX_PATTERN_SIZE: usize = 65536;
 
 pub struct Compiled {
     pub prog: Prog,
@@ -77,9 +77,10 @@ pub fn compile(mut parsed: Parsed, flags: crate::Flags) -> CResult<Compiled> {
     }
     let max_lookbehind = r.max_lookbehind(&node);
 
-    let size = estimate_size(&node, parsed.utf);
+    // 7: the enclosing bracket, its end and OP_END.
+    let size = estimate_size(&node, parsed.utf) + 7;
     if size > MAX_PATTERN_SIZE {
-        return Err(CompileError::new(E::PatternTooLarge, 0));
+        return Err(CompileError::new(E::PatternTooLarge, parsed.pattern_len));
     }
 
     let mut em = Emitter {
@@ -474,41 +475,36 @@ fn contains_code_unit(n: &Node) -> bool {
     found
 }
 
-/// A rough estimate of PCRE2's compiled code size (in code units) for the
-/// "regular expression is too large" check.
+/// PCRE2's compiled size of a node in code units (LINK_SIZE 2), for the
+/// "regular expression is too large" check. The rules reproduce the
+/// limits observed on PHP 8.5: 32764 literal characters, (a){1,3855},
+/// (?:ab|cd){3854}, ([a-z]){1598}, (a|b|c){1,2427}, ...
 fn estimate_size(n: &Node, utf: bool) -> usize {
+    fn char_len(c: u32, utf: bool) -> usize {
+        if !utf || c < 0x80 {
+            1
+        } else if c < 0x800 {
+            2
+        } else if c < 0x10000 {
+            3
+        } else {
+            4
+        }
+    }
     match n {
         Node::Empty => 0,
-        Node::Char { c, .. } => {
-            if utf {
-                1 + if *c < 0x80 {
-                    1
-                } else if *c < 0x800 {
-                    2
-                } else if *c < 0x10000 {
-                    3
-                } else {
-                    4
-                }
-            } else {
-                2
-            }
-        }
+        Node::Char { c, .. } => 1 + char_len(*c, utf),
         Node::Dot { .. }
         | Node::NotNewline
         | Node::CodeUnit
         | Node::Newline { .. }
         | Node::Grapheme => 1,
-        Node::Set(s) => {
-            if s.high_none || s.high_all {
-                33
-            } else {
-                40 + 4 * (s.ranges.len() + s.items.len())
-            }
-        }
+        Node::Set(s) => s.op_size as usize,
         Node::Assert(_) | Node::Keep => 1,
         Node::Seq(v) => v.iter().map(|c| estimate_size(c, utf)).sum(),
-        Node::Alt(v) => v.iter().map(|c| estimate_size(c, utf) + 3).sum::<usize>() + 3,
+        Node::Alt(v) => {
+            v.iter().map(|c| estimate_size(c, utf)).sum::<usize>() + 3 * (v.len().max(1) - 1)
+        }
         Node::Group { kind, body, .. } => {
             let b = estimate_size(body, utf);
             match kind {
@@ -518,6 +514,8 @@ fn estimate_size(n: &Node, utf: bool) -> usize {
         }
         Node::Repeat { node, min, max, .. } => {
             let b = estimate_size(node, utf);
+            let (min, max) = (*min as usize, max.map(|m| m as usize));
+            let class = matches!(&**node, Node::Set(s) if s.op_size >= 33);
             let single = matches!(
                 **node,
                 Node::Char { .. }
@@ -526,14 +524,47 @@ fn estimate_size(n: &Node, utf: bool) -> usize {
                     | Node::CodeUnit
                     | Node::Set(_)
             );
-            if single {
-                b + 4
-            } else {
-                let copies = match max {
-                    Some(m) => (*m).max(1) as usize,
-                    None => (*min).max(1) as usize,
+            if class {
+                // The class followed by a repeat opcode.
+                return b + if max.is_none() && min <= 1 || max == Some(1) {
+                    1
+                } else {
+                    5
                 };
-                copies.saturating_mul(b + 1)
+            }
+            if single {
+                // Repeat opcodes replace a character's opcode; a type such
+                // as \d or . is preceded by one; counts take two more
+                // units; {n,m} needs an exact part and an upto part.
+                let b = if matches!(**node, Node::Char { .. }) {
+                    b
+                } else {
+                    b + 1
+                };
+                return match (min, max) {
+                    (0 | 1, None) | (0, Some(1)) => b,
+                    (_, Some(m)) if m == min => b + 2,
+                    (0, Some(_)) => b + 2,
+                    (_, Some(_)) => 2 * (b + 2),
+                    (_, None) => (b + 2) + b,
+                };
+            }
+            // Groups are replicated: mandatory copies, then one optional
+            // copy (BRAZERO, a wrapping bracket and the group) per extra
+            // repetition; an unbounded repeat ends in a looping copy.
+            match max {
+                None => {
+                    if min == 0 {
+                        1 + b
+                    } else {
+                        min.saturating_mul(b)
+                    }
+                }
+                Some(m) => {
+                    let mandatory = min.saturating_mul(b);
+                    let optional = (m - min).saturating_mul(1 + 3 + b + 3);
+                    mandatory.saturating_add(optional)
+                }
             }
         }
         Node::Backref { .. } => 3,
@@ -543,7 +574,10 @@ fn estimate_size(n: &Node, utf: bool) -> usize {
                 Condition::Assert(a) => estimate_size(a, utf),
                 _ => 3,
             };
-            c + 6 + estimate_size(yes, utf) + no.as_ref().map_or(0, |n| estimate_size(n, utf) + 3)
+            3 + c
+                + estimate_size(yes, utf)
+                + no.as_ref().map_or(0, |n| estimate_size(n, utf) + 3)
+                + 3
         }
         Node::ScanSubstring { body, .. } => estimate_size(body, utf) + 8,
         Node::Verb { name, .. } => 1 + name.as_ref().map_or(0, |n| n.len() + 2),

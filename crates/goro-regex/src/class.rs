@@ -120,6 +120,9 @@ pub struct CharSet {
     /// Membership of code points 0..=255 as a lookup table (filled by
     /// `finish`).
     pub lut: [bool; 256],
+    /// PCRE2's compiled size of the item (1 for \d and friends, 3 for
+    /// \p, 33 for a class bitmap, more with characters above 255).
+    pub op_size: u16,
 }
 
 impl Default for CharSet {
@@ -132,6 +135,7 @@ impl Default for CharSet {
             high_all: false,
             high_none: true,
             lut: [false; 256],
+            op_size: 33,
         }
     }
 }
@@ -428,8 +432,13 @@ impl ClassBuilder {
             high_all: false,
             high_none: true,
             lut: [false; 256],
+            op_size: 33,
         };
         set.finish();
+        if !set.high_none && !set.high_all {
+            // An extended class: header, bitmap, then its items.
+            set.op_size = (4 + 32 + 7 * set.ranges.len() + 3 * set.items.len()).min(60000) as u16;
+        }
         set
     }
 }

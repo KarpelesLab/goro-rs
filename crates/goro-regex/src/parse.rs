@@ -65,6 +65,7 @@ pub struct Parsed {
     pub turkish: bool,
     pub has_cr_lf: bool,
     pub has_ext_class: bool,
+    pub pattern_len: usize,
 }
 
 /// Escapes recognised by [`Parser::escape`].
@@ -596,12 +597,16 @@ impl<'a> Parser<'a> {
             Esc::Type(t, neg) => {
                 let mut b = ClassBuilder::new();
                 self.add_type(&mut b, t, neg);
-                self.push_item(br, Node::Set(Arc::new(b.build(false))), true);
+                let mut set = b.build(false);
+                set.op_size = 1;
+                self.push_item(br, Node::Set(Arc::new(set)), true);
             }
             Esc::Prop(p) => {
                 let mut b = ClassBuilder::new();
                 self.add_prop(&mut b, p);
-                self.push_item(br, Node::Set(Arc::new(b.build(false))), true);
+                let mut set = b.build(false);
+                set.op_size = 3;
+                self.push_item(br, Node::Set(Arc::new(set)), true);
             }
             Esc::NotNewline => self.push_item(br, Node::NotNewline, true),
             Esc::Newline => self.push_item(
@@ -3253,6 +3258,7 @@ pub fn parse(pattern: &[u8], cfg: &ParseConfig) -> Result<Parsed, CompileError> 
         has_ext_class: false,
     };
     let mut out = Parsed {
+        pattern_len: pattern.len(),
         node: Node::Empty,
         ncap: 0,
         names: Vec::new(),
