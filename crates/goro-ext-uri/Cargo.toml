@@ -1,0 +1,8 @@
+[package]
+name = "goro-ext-uri"
+description = "PHP uri extension: RFC 3986 and WHATWG URL parsing (Uri\\Rfc3986\\Uri, Uri\\WhatWg\\Url)"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]

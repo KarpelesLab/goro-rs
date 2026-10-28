@@ -1,0 +1,8 @@
+[package]
+name = "goro-ext-sodium"
+description = "PHP sodium extension: sodium_crypto_* on purecrypto"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
