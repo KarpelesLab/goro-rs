@@ -1643,6 +1643,47 @@ fn ai_entry(vm: &mut Vm, o: &ObjRef) -> Option<(u32, Value, Value)> {
     }
 }
 
+/// Whether `foreach` by reference can go over `o`: an ArrayIterator
+/// whose current() is the internal one (observed on PHP 8.5: an
+/// overriding current() makes it "An iterator cannot be used with foreach
+/// by reference").
+pub(crate) fn ai_iterates_by_ref(vm: &mut Vm, o: &ObjRef) -> bool {
+    let cls = vm.class_of(o);
+    is_ao(o)
+        && is_subclass_named(&cls, b"arrayiterator")
+        && cls
+            .find_method(b"current")
+            .is_some_and(|f| f.code().is_none())
+}
+
+/// The current element of an ArrayIterator, by reference into its storage
+/// (a property of a wrapped object, by name).
+pub(crate) fn ai_current_ref(vm: &mut Vm, o: &ObjRef) -> R<Option<Value>> {
+    let Some((p, k, _)) = ai_entry(vm, o) else {
+        return Ok(None);
+    };
+    if let Some(ptr) = ao_storage_ptr(o) {
+        // SAFETY: the storage slot lives in the owner's native data, which
+        // nothing replaces while this runs.
+        if let Value::Array(a) = unsafe { &mut *ptr }
+            && let Some(v) = a.make_mut().value_at_mut(p)
+        {
+            return Ok(Some(Value::Ref(v.make_ref())));
+        }
+        return Ok(None);
+    }
+    let Some(w) = ao_wrapped(o) else {
+        return Ok(None);
+    };
+    let name = match k {
+        Value::Str(s) => s,
+        Value::Int(i) => PhpStr::from(i.to_string()),
+        _ => return Ok(None),
+    };
+    let r = vm.prop_action(&w, &name, 0, crate::bytecode::PathAction::MakeRef, None)?;
+    Ok(Some(r))
+}
+
 fn ai_rewind(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     ai_set_pos(a.this_obj(), 0);
     Ok(Value::Null)

@@ -1383,10 +1383,29 @@ impl Vm {
                     }
                 }
             }
-            PathAction::BindRef(_) => self.throw(
-                "Error",
-                "Cannot assign by reference to an array dimension of an object",
-            ),
+            PathAction::BindRef(_) => {
+                // An internal ArrayAccess (ArrayObject...) binds the element
+                // of its storage; appending by reference has no effect
+                // (tests ext/spl/tests/bug73686, iterator_035).
+                let internal = cls.native.dim_storage.is_some()
+                    && cls.find_method(b"offsetset").is_some_and(|f| f.is_native());
+                if internal {
+                    if key.is_some()
+                        && let Some(h) = cls.native.dim_storage
+                        && let Some(p) = h(self, o)
+                    {
+                        return self.write_elem(&mut Place::Ptr(p), key, action, value);
+                    }
+                    self.notice_msg(&format!(
+                        "Indirect modification of overloaded element of {} has no effect",
+                        cls.name.dname()
+                    ))?;
+                }
+                self.throw(
+                    "Error",
+                    "Cannot assign by reference to an array dimension of an object",
+                )
+            }
         }
     }
 
