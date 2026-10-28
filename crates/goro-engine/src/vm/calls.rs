@@ -138,6 +138,10 @@ impl Vm {
     // ------------------------------------------------------------ pending calls
 
     pub(crate) fn push_callee(&mut self, c: Callee, flags: u32) {
+        if c.closure.is_none() && c.magic_name.is_none() && !c.func.is_native() {
+            self.push_user(c.func, c.this, c.static_class, c.scope, flags);
+            return;
+        }
         let mut fl = flags;
         let (base, mark, args, byref, np) = match &c.func.kind {
             FuncKind::User(code) if c.magic_name.is_none() => {
@@ -229,6 +233,60 @@ impl Vm {
             at!((*d).closure).write(c.closure);
             at!((*d).flags).write(fl);
             at!((*d).magic_name).write(c.magic_name);
+            at!((*d).statics).write(statics);
+            at!((*d).has_named).write(false);
+            at!((*d).passed).write(0);
+            at!((*d).byref).write(byref);
+            at!((*d).np).write(np);
+            v.set_len(v.len() + 1);
+        }
+    }
+
+    /// [`push_callee`](Self::push_callee) of a user function or method
+    /// (not a closure, not a magic trampoline).
+    #[inline]
+    fn push_user(
+        &mut self,
+        func: Rc<Func>,
+        this: Option<ObjRef>,
+        static_class: *const Class,
+        scope: *const Class,
+        flags: u32,
+    ) {
+        let FuncKind::User(code) = &func.kind else {
+            unreachable!()
+        };
+        const SLOW: u32 = fflags::DEPRECATED
+            | fflags::ABSTRACT
+            | fflags::NODISCARD
+            | fflags::GENERATOR
+            | fflags::VARIADIC;
+        let mut fl = flags;
+        if code.flags & SLOW != 0 || code.file.is_empty() {
+            fl |= pending_flags::SLOW;
+        }
+        let (base, mark) = self.ex.stack.alloc(code.num_slots as usize);
+        let (byref, np) = (code.byref_mask, code.direct_params);
+        let statics = &func.statics as *const RefCell<Vec<Option<PhpRef>>>;
+        let v = &mut self.ex.pending;
+        v.reserve(1);
+        // SAFETY: as in push_callee.
+        unsafe {
+            use std::ptr::addr_of_mut as at;
+            let d = v.as_mut_ptr().add(v.len());
+            at!((*d).func).write(func);
+            at!((*d).base).write(base);
+            at!((*d).mark).write(mark);
+            at!((*d).args).write(Vec::new());
+            at!((*d).argc).write(0);
+            at!((*d).extra).write(Vec::new());
+            at!((*d).named_extra).write(None);
+            at!((*d).this).write(this);
+            at!((*d).static_class).write(static_class);
+            at!((*d).scope).write(scope);
+            at!((*d).closure).write(None);
+            at!((*d).flags).write(fl);
+            at!((*d).magic_name).write(None);
             at!((*d).statics).write(statics);
             at!((*d).has_named).write(false);
             at!((*d).passed).write(0);
@@ -2902,8 +2960,14 @@ impl Vm {
             let base = f.base;
             let mark = f.mark;
             for i in 0..n {
-                let old = unsafe { (*base.add(i)).take() };
-                drop(old);
+                // SAFETY: the frame's slots.
+                let s = unsafe { &mut *base.add(i) };
+                if super::exec::holds_no_resources(s) {
+                    unsafe { std::ptr::write(s, None) };
+                } else {
+                    let old = s.take();
+                    drop(old);
+                }
             }
             self.ex.stack.release(mark);
             self.ex.frames.truncate(len - 1);
@@ -2941,6 +3005,8 @@ impl Vm {
                             drop(old);
                         }
                     }
+                } else if super::exec::holds_no_resources(&*ret) {
+                    std::ptr::write(ret, Some(v));
                 } else {
                     let old = (*ret).replace(v);
                     drop(old);
