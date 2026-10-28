@@ -453,11 +453,11 @@ pub static MODULE: Module = Module {
         ("reflectionfunctionabstract::getreturntype", fa_ret),
         (
             "reflectionfunctionabstract::hastentativereturntype",
-            ret_false,
+            fa_has_tentative,
         ),
         (
             "reflectionfunctionabstract::gettentativereturntype",
-            ret_null,
+            fa_tentative,
         ),
         ("reflectionfunctionabstract::getattributes", fa_attrs),
         ("reflectionfunction::__construct", f_construct),
@@ -1342,10 +1342,31 @@ fn ret_type_of(vm: &mut Vm, f: &Func) -> Option<TypeHint> {
 }
 fn fa_has_ret(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, _, _) = need_func!(vm, a);
-    Ok(Value::Bool(ret_type_of(vm, &f).is_some()))
+    Ok(Value::Bool(
+        !is_tentative(&f) && ret_type_of(vm, &f).is_some(),
+    ))
+}
+fn fa_has_tentative(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (f, _, _) = need_func!(vm, a);
+    Ok(Value::Bool(
+        is_tentative(&f) && ret_type_of(vm, &f).is_some(),
+    ))
+}
+fn fa_tentative(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (f, _, _) = need_func!(vm, a);
+    if !is_tentative(&f) {
+        return Ok(Value::Null);
+    }
+    match ret_type_of(vm, &f) {
+        Some(t) => Ok(Value::Object(new_type(vm, t, f.scope.get())?)),
+        None => Ok(Value::Null),
+    }
 }
 fn fa_ret(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, _, _) = need_func!(vm, a);
+    if is_tentative(&f) {
+        return Ok(Value::Null);
+    }
     match ret_type_of(vm, &f) {
         Some(t) => Ok(Value::Object(new_type(vm, t, f.scope.get())?)),
         None => Ok(Value::Null),
@@ -1628,7 +1649,11 @@ fn func_ext(vm: &Vm, f: &Func) -> Option<&'static str> {
 fn class_ext(vm: &Vm, c: &Class) -> &'static str {
     vm.modules
         .iter()
-        .find(|m| m.classes.iter().any(|(l, _)| l.as_bytes() == c.lname.as_bytes()))
+        .find(|m| {
+            m.classes
+                .iter()
+                .any(|(l, _)| l.as_bytes() == c.lname.as_bytes())
+        })
         .map(|m| m.name)
         .unwrap_or("Core")
 }
@@ -1672,7 +1697,11 @@ fn func_string(
 ) -> String {
     let internal = func_internal(f);
     let mut s = String::new();
-    doc_text(&mut s, indent, code_of(f).and_then(|c| c.doc_comment.as_ref()));
+    doc_text(
+        &mut s,
+        indent,
+        code_of(f).and_then(|c| c.doc_comment.as_ref()),
+    );
     let kind = if cls.is_some() {
         "Method"
     } else if closure.is_some() {
@@ -1781,7 +1810,11 @@ fn func_string(
                 names.push(code.cv_names[*inner as usize].to_string_lossy());
             }
         });
-        s.push_str(&format!("\n{}  - Bound Variables [{}] {{\n", indent, names.len()));
+        s.push_str(&format!(
+            "\n{}  - Bound Variables [{}] {{\n",
+            indent,
+            names.len()
+        ));
         for (i, n) in names.iter().enumerate() {
             s.push_str(&format!("{}      Variable #{} [ ${} ]\n", indent, i, n));
         }
@@ -1794,7 +1827,11 @@ fn func_string(
     };
     let ret = ret_type_of(vm, f);
     if !params.is_empty() || ret.is_some() {
-        s.push_str(&format!("\n{}  - Parameters [{}] {{\n", indent, params.len()));
+        s.push_str(&format!(
+            "\n{}  - Parameters [{}] {{\n",
+            indent,
+            params.len()
+        ));
         for (i, p) in params.iter().enumerate() {
             let ps = param_string(vm, p, i, i < nreq, internal);
             s.push_str(&format!("{}    {}\n", indent, ps));
@@ -1821,15 +1858,45 @@ fn is_tentative(f: &Func) -> bool {
     // Methods added in PHP 8.0 and later, and magic methods, have real
     // return types (PHP manual changelogs).
     const REAL: &[&str] = &[
-        "__clone", "__tostring", "__construct", "isenum", "isreadonly", "getattributes",
-        "newlazyghost", "newlazyproxy", "resetaslazyghost", "resetaslazyproxy",
-        "initializelazyobject", "isuninitializedlazyobject", "marklazyobjectasinitialized",
-        "getlazyinitializer", "hastentativereturntype", "gettentativereturntype",
-        "getclosureusedvariables", "getclosurecalledclass", "ispromoted", "hasdefaultvalue",
-        "getdefaultvalue", "isenumcase", "hastype", "gettype", "isvirtual", "hashooks",
-        "gethooks", "hashook", "gethook", "getsettabletype", "getrawvalue", "setrawvalue",
-        "islazy", "skiplazyinitialization", "setrawvaluewithoutlazyinitialization",
-        "isprivateset", "isprotectedset", "getmangledname", "isdynamic",
+        "__clone",
+        "__tostring",
+        "__construct",
+        "isenum",
+        "isreadonly",
+        "getattributes",
+        "newlazyghost",
+        "newlazyproxy",
+        "resetaslazyghost",
+        "resetaslazyproxy",
+        "initializelazyobject",
+        "isuninitializedlazyobject",
+        "marklazyobjectasinitialized",
+        "getlazyinitializer",
+        "hastentativereturntype",
+        "gettentativereturntype",
+        "getclosureusedvariables",
+        "getclosurecalledclass",
+        "ispromoted",
+        "hasdefaultvalue",
+        "getdefaultvalue",
+        "isenumcase",
+        "hastype",
+        "gettype",
+        "isvirtual",
+        "hashooks",
+        "gethooks",
+        "hashook",
+        "gethook",
+        "getsettabletype",
+        "getrawvalue",
+        "setrawvalue",
+        "islazy",
+        "skiplazyinitialization",
+        "setrawvaluewithoutlazyinitialization",
+        "isprivateset",
+        "isprotectedset",
+        "getmangledname",
+        "isdynamic",
     ];
     f.scope().is_some_and(|c| {
         c.has_flag(cflags::INTERNAL)
@@ -1843,20 +1910,63 @@ fn is_tentative(f: &Func) -> bool {
 /// registers with the standard library.
 fn core_function(name: &[u8]) -> bool {
     const CORE: &[&str] = &[
-        "zend_version", "func_num_args", "func_get_arg", "func_get_args", "strlen", "strcmp",
-        "strncmp", "strcasecmp", "strncasecmp", "error_reporting", "define", "defined",
-        "get_class", "get_called_class", "get_parent_class", "method_exists",
-        "property_exists", "class_exists", "interface_exists", "trait_exists", "enum_exists",
-        "function_exists", "class_alias", "get_included_files", "get_required_files",
-        "is_subclass_of", "is_a", "get_class_vars", "get_object_vars",
-        "get_mangled_object_vars", "get_class_methods", "trigger_error", "user_error",
-        "set_error_handler", "restore_error_handler", "set_exception_handler",
-        "restore_exception_handler", "get_declared_classes", "get_declared_traits",
-        "get_declared_interfaces", "get_defined_functions", "get_defined_vars",
-        "get_resource_type", "get_resource_id", "get_resources", "get_loaded_extensions",
-        "get_defined_constants", "debug_backtrace", "debug_print_backtrace",
-        "extension_loaded", "get_extension_funcs", "gc_mem_caches", "gc_collect_cycles",
-        "gc_enabled", "gc_enable", "gc_disable", "gc_status",
+        "zend_version",
+        "func_num_args",
+        "func_get_arg",
+        "func_get_args",
+        "strlen",
+        "strcmp",
+        "strncmp",
+        "strcasecmp",
+        "strncasecmp",
+        "error_reporting",
+        "define",
+        "defined",
+        "get_class",
+        "get_called_class",
+        "get_parent_class",
+        "method_exists",
+        "property_exists",
+        "class_exists",
+        "interface_exists",
+        "trait_exists",
+        "enum_exists",
+        "function_exists",
+        "class_alias",
+        "get_included_files",
+        "get_required_files",
+        "is_subclass_of",
+        "is_a",
+        "get_class_vars",
+        "get_object_vars",
+        "get_mangled_object_vars",
+        "get_class_methods",
+        "trigger_error",
+        "user_error",
+        "set_error_handler",
+        "restore_error_handler",
+        "set_exception_handler",
+        "restore_exception_handler",
+        "get_declared_classes",
+        "get_declared_traits",
+        "get_declared_interfaces",
+        "get_defined_functions",
+        "get_defined_vars",
+        "get_resource_type",
+        "get_resource_id",
+        "get_resources",
+        "get_loaded_extensions",
+        "get_defined_constants",
+        "debug_backtrace",
+        "debug_print_backtrace",
+        "extension_loaded",
+        "get_extension_funcs",
+        "gc_mem_caches",
+        "gc_collect_cycles",
+        "gc_enabled",
+        "gc_enable",
+        "gc_disable",
+        "gc_status",
     ];
     CORE.iter().any(|c| c.as_bytes().eq_ignore_ascii_case(name))
 }
@@ -1949,7 +2059,12 @@ fn prop_string(vm: &mut Vm, cls: &Class, name: &PhpStr, dynamic: bool, indent: &
 }
 
 /// A class constant line (`Constant [ public int X ] { 1 }`).
-fn const_string(vm: &mut Vm, cls: &Rc<Class>, k: &crate::class::ClassConst, indent: &str) -> R<String> {
+fn const_string(
+    vm: &mut Vm,
+    cls: &Rc<Class>,
+    k: &crate::class::ClassConst,
+    indent: &str,
+) -> R<String> {
     let v = if k.flags & mflags::CASE != 0 {
         vm.enum_case(cls, &k.name)?
     } else {
@@ -2007,14 +2122,25 @@ fn visible_props(cls: &Rc<Class>) -> (Vec<PhpStr>, Vec<PhpStr>) {
         .cloned()
         .collect();
     let mut inst: Vec<PhpStr> = Vec::new();
+    for p in props.iter().filter(|p| std::ptr::eq(p.class, cp)) {
+        if !inst.contains(&p.name) {
+            inst.push(p.name.clone());
+        }
+    }
+    if let Some(parent) = &cls.parent {
+        for n in visible_props(parent).0 {
+            if !inst.contains(&n)
+                && props.iter().any(|p| {
+                    p.name == n && p.flags & mflags::PRIVATE == 0 && !std::ptr::eq(p.class, cp)
+                })
+            {
+                inst.push(n);
+            }
+        }
+    }
     for p in props
         .iter()
-        .filter(|p| std::ptr::eq(p.class, cp))
-        .chain(
-            props
-                .iter()
-                .filter(|p| !std::ptr::eq(p.class, cp) && p.flags & mflags::PRIVATE == 0),
-        )
+        .filter(|p| !std::ptr::eq(p.class, cp) && p.flags & mflags::PRIVATE == 0)
     {
         if !inst.contains(&p.name) {
             inst.push(p.name.clone());
@@ -2034,8 +2160,11 @@ fn visible_props(cls: &Rc<Class>) -> (Vec<PhpStr>, Vec<PhpStr>) {
 fn const_order(cls: &Rc<Class>) -> Vec<Rc<crate::class::ClassConst>> {
     let all = cls.consts.borrow().clone();
     let cp = Rc::as_ptr(cls);
-    let mut out: Vec<Rc<crate::class::ClassConst>> =
-        all.iter().filter(|k| std::ptr::eq(k.class, cp)).cloned().collect();
+    let mut out: Vec<Rc<crate::class::ClassConst>> = all
+        .iter()
+        .filter(|k| std::ptr::eq(k.class, cp))
+        .cloned()
+        .collect();
     if let Some(p) = &cls.parent {
         for k in const_order(p) {
             if let Some(mine) = all.iter().find(|x| x.name == k.name)
@@ -2077,7 +2206,11 @@ fn class_string(vm: &mut Vm, cls: &Rc<Class>, obj: Option<&ObjRef>) -> R<String>
         s.push_str("user");
     }
     s.push_str("> ");
-    let hooked = cls.props.borrow().iter().any(|p| p.get.is_some() || p.set.is_some());
+    let hooked = cls
+        .props
+        .borrow()
+        .iter()
+        .any(|p| p.get.is_some() || p.set.is_some());
     if vm.is_traversable(cls) || hooked {
         s.push_str("<iterateable> ");
     }
@@ -2132,7 +2265,10 @@ fn class_string(vm: &mut Vm, cls: &Rc<Class>, obj: Option<&ObjRef>) -> R<String>
     }
     let consts = const_order(cls);
     if cls.is_enum() {
-        let cases: Vec<_> = consts.iter().filter(|k| k.flags & mflags::CASE != 0).collect();
+        let cases: Vec<_> = consts
+            .iter()
+            .filter(|k| k.flags & mflags::CASE != 0)
+            .collect();
         s.push_str(&format!("\n  - Enum cases [{}] {{\n", cases.len()));
         for k in cases {
             s.push_str(&format!("    Case {}", k.name.to_string_lossy()));
@@ -2149,7 +2285,10 @@ fn class_string(vm: &mut Vm, cls: &Rc<Class>, obj: Option<&ObjRef>) -> R<String>
         }
         s.push_str("  }\n");
     }
-    let plain: Vec<_> = consts.iter().filter(|k| k.flags & mflags::CASE == 0).collect();
+    let plain: Vec<_> = consts
+        .iter()
+        .filter(|k| k.flags & mflags::CASE == 0)
+        .collect();
     s.push_str(&format!("\n  - Constants [{}] {{\n", plain.len()));
     for k in plain {
         s.push_str(&const_string(vm, cls, k, "    ")?);
@@ -2170,8 +2309,9 @@ fn class_string(vm: &mut Vm, cls: &Rc<Class>, obj: Option<&ObjRef>) -> R<String>
             f.flags & mflags::PRIVATE == 0 || f.scope().is_some_and(|d| std::ptr::eq(d, &**cls))
         })
         .collect();
-    let (st, inst_m): (Vec<_>, Vec<_>) =
-        methods.into_iter().partition(|f| f.flags & mflags::STATIC != 0);
+    let (st, inst_m): (Vec<_>, Vec<_>) = methods
+        .into_iter()
+        .partition(|f| f.flags & mflags::STATIC != 0);
     let section = |vm: &mut Vm, s: &mut String, title: &str, list: &[Rc<Func>]| {
         s.push_str(&format!("\n  - {} [{}] {{\n", title, list.len()));
         for (i, f) in list.iter().enumerate() {
@@ -2199,7 +2339,10 @@ fn class_string(vm: &mut Vm, cls: &Rc<Class>, obj: Option<&ObjRef>) -> R<String>
                 dynamic.push(name);
             }
         }
-        s.push_str(&format!("\n  - Dynamic properties [{}] {{\n", dynamic.len()));
+        s.push_str(&format!(
+            "\n  - Dynamic properties [{}] {{\n",
+            dynamic.len()
+        ));
         for n in &dynamic {
             s.push_str(&format!(
                 "    Property [ <dynamic> public ${} ]\n",
@@ -2738,7 +2881,11 @@ fn c_get_prop(vm: &mut Vm, a: &mut Args) -> R<Value> {
         if !has_member_prop(&c2, &pn) {
             return refl_error(
                 vm,
-                &format!("Property {}::${} does not exist", c2.name.dname(), pn.dname()),
+                &format!(
+                    "Property {}::${} does not exist",
+                    c2.name.dname(),
+                    pn.dname()
+                ),
             );
         }
         if !c.is_subclass_of(&c2) {
@@ -3301,8 +3448,11 @@ fn c_is_subclass(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn static_order(c: &Rc<Class>) -> Vec<Rc<crate::class::StaticProp>> {
     let cp = Rc::as_ptr(c);
     let statics = c.static_props.borrow().clone();
-    let mut out: Vec<Rc<crate::class::StaticProp>> =
-        statics.iter().filter(|sp| std::ptr::eq(sp.class, cp)).cloned().collect();
+    let mut out: Vec<Rc<crate::class::StaticProp>> = statics
+        .iter()
+        .filter(|sp| std::ptr::eq(sp.class, cp))
+        .cloned()
+        .collect();
     if let Some(p) = &c.parent {
         for sp in static_order(p) {
             if sp.flags & mflags::PRIVATE == 0
@@ -3350,6 +3500,11 @@ fn c_get_static(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match c.find_static(&n) {
         Some(sp) => {
             let v = sp.cell.get();
+            // An uninitialized property gives the default when one is
+            // passed (test gh12856).
+            if vm.is_uninit(&v) && a.has(1) {
+                return Ok(a.val(1));
+            }
             if vm.is_uninit(&v) {
                 return vm.throw(
                     "Error",
@@ -3462,7 +3617,22 @@ fn c_is_iterable(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn c_implements(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
-    let i = other_class(vm, &a.val(0))?;
+    let v = a.val(0);
+    let i = match &v {
+        Value::Object(_) => other_class(vm, &v)?,
+        _ => {
+            let n = vm.to_php_str(&v)?;
+            match vm.find_class(&n, true)? {
+                Some(i) => i,
+                None => {
+                    return refl_error(
+                        vm,
+                        &format!("Interface \"{}\" does not exist", n.to_string_lossy()),
+                    );
+                }
+            }
+        }
+    };
     if !i.is_interface() {
         return refl_error(vm, &format!("{} is not an interface", i.name.dname()));
     }
@@ -3728,7 +3898,9 @@ fn p_set_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
             a.val(1)
         } else {
-            vm.deprecated("Calling ReflectionProperty::setValue() with a single argument is deprecated")?;
+            vm.deprecated(
+                "Calling ReflectionProperty::setValue() with a single argument is deprecated",
+            )?;
             a.val(0)
         };
         let sp = c.find_static(&n).unwrap();
@@ -3966,7 +4138,11 @@ fn p_settable_type(vm: &mut Vm, a: &mut Args) -> R<Value> {
             mask: tmask::NEVER,
             classes: Vec::new(),
         }),
-        Some(h) => vm.params_of(h).first().and_then(|q| q.ty.clone()).or(p.ty.clone()),
+        Some(h) => vm
+            .params_of(h)
+            .first()
+            .and_then(|q| q.ty.clone())
+            .or(p.ty.clone()),
         None => p.ty.clone(),
     };
     match ty {
@@ -3991,6 +4167,7 @@ fn p_has_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn p_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, dynamic) = need_prop!(vm, a);
     if dynamic {
+        vm.deprecated("ReflectionProperty::getDefaultValue() for a property without a default value is deprecated, use ReflectionProperty::hasDefaultValue() to check if the default value exists")?;
         return Ok(Value::Null);
     }
     let p = pinfo(&c, &n).unwrap();
@@ -4360,7 +4537,13 @@ fn par_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
         FuncKind::Native { .. } => vm.native_sig(&f).num_required as usize,
     };
     let internal = func_internal(&f) && !is_closure_invoke(&f);
-    Ok(Value::Str(PhpStr::from(param_string(vm, &p, i, i < nreq, internal))))
+    Ok(Value::Str(PhpStr::from(param_string(
+        vm,
+        &p,
+        i,
+        i < nreq,
+        internal,
+    ))))
 }
 fn par_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (_, _, _, p) = need_param!(vm, a);
@@ -5216,10 +5399,26 @@ fn item_ext(module: &'static str, kind: Item, name: &str) -> &'static str {
     let core = match kind {
         Item::Func => core_function(name.as_bytes()),
         Item::Const => {
-            ["E_", "PHP_", "ZEND_", "DEBUG_BACKTRACE_", "UPLOAD_ERR_", "PEAR_"]
-                .iter()
-                .any(|p| name.starts_with(p))
-                || matches!(name, "DEFAULT_INCLUDE_PATH" | "TRUE" | "FALSE" | "NULL" | "STDIN" | "STDOUT" | "STDERR")
+            [
+                "E_",
+                "PHP_",
+                "ZEND_",
+                "DEBUG_BACKTRACE_",
+                "UPLOAD_ERR_",
+                "PEAR_",
+            ]
+            .iter()
+            .any(|p| name.starts_with(p))
+                || matches!(
+                    name,
+                    "DEFAULT_INCLUDE_PATH"
+                        | "TRUE"
+                        | "FALSE"
+                        | "NULL"
+                        | "STDIN"
+                        | "STDOUT"
+                        | "STDERR"
+                )
         }
         Item::Ini => !matches!(
             name,
@@ -5476,7 +5675,9 @@ fn gc_extension(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
 }
 fn gc_extension_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    Ok(gc_ext_of(vm, a).map(Value::from).unwrap_or(Value::Bool(false)))
+    Ok(gc_ext_of(vm, a)
+        .map(Value::from)
+        .unwrap_or(Value::Bool(false)))
 }
 
 fn gc_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
