@@ -1821,7 +1821,7 @@ pub(crate) fn set_doc_prop(
             let b = vm.to_bool(&v);
             with_arena(|ar| ar.doc_mut(d).standalone = if b { 1 } else { 0 });
         }
-        "documentURI" => {
+        "documentURI" | "URL" => {
             let e = str_of(vm, &v)?;
             with_arena(|ar| ar.doc_mut(d).url = e);
         }

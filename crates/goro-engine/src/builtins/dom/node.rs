@@ -374,6 +374,13 @@ fn replace_child(vm: &mut Vm, a: &mut Args) -> R<Value> {
         {
             return Err(DomError::HierarchyRequest);
         }
+        // Attributes hold only text and entity references (test
+        // replaceChild_attribute_validation.phpt).
+        if matches!(ar.data(parent), NodeData::Attribute(_))
+            && !matches!(ar.data(node), NodeData::Text(_) | NodeData::EntityRef(_))
+        {
+            return Err(DomError::HierarchyRequest);
+        }
         if ar.parent(child) != Some(parent) {
             return Err(DomError::NotFound);
         }
@@ -881,6 +888,16 @@ pub(crate) fn set_text_content(vm: &mut Vm, n: NodeId, text: &str) -> R<()> {
     with_arena(|ar| {
         if !matches!(ar.data(n), NodeData::Document(_) | NodeData::Doctype(_)) {
             ar.set_text_content(n, text);
+            // Modern elements keep an empty text node (observed on PHP
+            // 8.5; test modern/spec/textContent_edge_cases.phpt).
+            if text.is_empty()
+                && matches!(ar.data(n), NodeData::Element(_) | NodeData::Fragment)
+                && ar.doc(ar.doc_of(n)).modern
+            {
+                let d = ar.doc_of(n);
+                let t = ar.new_text(d, "");
+                ar.raw_append(n, t);
+            }
         }
     });
     Ok(())

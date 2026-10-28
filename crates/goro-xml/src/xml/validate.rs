@@ -394,7 +394,15 @@ fn run(arena: &Arena, doc: NodeId, timing: Timing) -> Vec<XmlError> {
     if v.subsets.is_empty() {
         match timing {
             Timing::AfterParse => v.err(522, "no DTD found!".into(), 0),
-            Timing::DuringParse => v.err(522, "Validation failed: no DTD found !".into(), 1),
+            Timing::DuringParse => {
+                // Recorded without a newline and not displayed by PHP
+                // (observed on PHP 8.5; test
+                // ext/dom/tests/modern/xml/XMLDocument_fromString_03.phpt).
+                v.err(522, "Validation failed: no DTD found !".into(), 1);
+                if let Some(e) = v.out.last_mut() {
+                    e.message.pop();
+                }
+            }
         }
         return v.out;
     }

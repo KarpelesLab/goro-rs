@@ -258,7 +258,9 @@ pub fn report(
         return Ok(());
     }
     for e in errors {
-        if suppressed(e, flags) {
+        // The parse-time "no DTD found" error is only recorded (observed
+        // on PHP 8.5).
+        if suppressed(e, flags) || (e.domain == Domain::Valid && e.code == 522 && !e.message.ends_with('\n')) {
             continue;
         }
         show(vm, fname, e, style, input)?;

@@ -587,8 +587,18 @@ fn list_dim(
         DimKey::Index(i) => items(o).get(i as usize).copied(),
         DimKey::Name(name) => {
             let v = items(o);
+            // HTML elements' attribute maps match names case-insensitively
+            // as getNamedItem() does (test
+            // modern/spec/NamedNodeMap_getNamedItem.phpt).
+            let html_el = match list_of(o) {
+                Some((ListKind::Attrs(el), _)) if modern => Some(el),
+                _ => None,
+            };
             with_arena(|ar| {
-                if is_collection {
+                if let Some(el) = html_el.filter(|&el| super::props::html_upper(ar, el)) {
+                    let lower = name.to_ascii_lowercase();
+                    ar.attrs(el).find(|&at| ar.qname(at).is_some_and(|q| q.is(&lower)))
+                } else if is_collection {
                     v.into_iter().find(|&n| {
                         ar.get_attribute(n, "id").as_deref() == Some(name.as_str())
                             || (ar.element(n).is_some_and(|e| {
