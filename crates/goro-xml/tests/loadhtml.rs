@@ -7,10 +7,13 @@ use goro_xml::Arena;
 use goro_xml::html::{HtmlSaveOptions, parse_html, save_html};
 use goro_xml::serialize::{SaveOptions, save_xml};
 
+/// Input, flags, errors, saveHTML, saveXML.
+type Case = (Vec<u8>, u32, Vec<String>, Option<Vec<u8>>, Option<Vec<u8>>);
+
 #[test]
 fn loadhtml_fixtures() {
     let text = fixture("loadhtml.out");
-    let mut cases: Vec<(Vec<u8>, u32, Vec<String>, Option<Vec<u8>>, Option<Vec<u8>>)> = Vec::new();
+    let mut cases: Vec<Case> = Vec::new();
     for line in text.lines() {
         let (tag, rest) = line.split_once(' ').unwrap_or((line, ""));
         match tag {

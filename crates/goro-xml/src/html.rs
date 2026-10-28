@@ -448,7 +448,7 @@ impl<'a> Tokenizer<'a> {
                 let end = memchr::memchr(b'>', &self.b[lt..]).map_or(self.b.len(), |o| lt + o);
                 let text = &self.s[lt + 2..end];
                 self.pos = (end + 1).min(self.b.len());
-                return Some(Token::Comment(text.to_string()));
+                Some(Token::Comment(text.to_string()))
             }
             Some(b'?') => {
                 let end = memchr::memchr(b'>', &self.b[lt..]).map_or(self.b.len(), |o| lt + o);
@@ -531,10 +531,11 @@ impl<'a> Tokenizer<'a> {
                     system = Some(s);
                 }
             }
-        } else if words.len() >= 6 && words[..6].eq_ignore_ascii_case("SYSTEM") {
-            if let Some((s, _)) = lit(&words[6..]) {
-                system = Some(s);
-            }
+        } else if words.len() >= 6
+            && words[..6].eq_ignore_ascii_case("SYSTEM")
+            && let Some((s, _)) = lit(&words[6..])
+        {
+            system = Some(s);
         }
         Token::Doctype {
             name,

@@ -8,8 +8,10 @@ use goro_xml::tree::{NodeId, QName};
 use goro_xml::xml::{ParseOptions, build};
 
 fn parse(arena: &mut Arena, s: &str) -> NodeId {
-    let mut po = ParseOptions::default();
-    po.modern = true;
+    let po = ParseOptions {
+        modern: true,
+        ..Default::default()
+    };
     let b = build(arena, s.as_bytes(), &po, None);
     assert!(b.ok, "{:?}", b.errors);
     arena.doc_mut(b.doc).modern = true;

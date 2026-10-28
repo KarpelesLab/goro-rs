@@ -114,5 +114,5 @@ fn loadxml_fixtures() {
         }
     }
     eprintln!("loadxml: {}/{} pass", all.len() - fails, all.len());
-    assert!(fails <= 0, "{fails} fixture cases differ");
+    assert!(fails == 0, "{fails} fixture cases differ");
 }

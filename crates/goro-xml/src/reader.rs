@@ -715,9 +715,11 @@ impl XmlReader {
     }
 
     fn save(&self, n: NodeId, shallow: bool) -> String {
-        let mut o = SaveOptions::default();
-        o.fixup_ns = true;
-        o.shallow = shallow;
+        let o = SaveOptions {
+            fixup_ns: true,
+            shallow,
+            ..Default::default()
+        };
         to_string(&self.arena, n, &o)
     }
 

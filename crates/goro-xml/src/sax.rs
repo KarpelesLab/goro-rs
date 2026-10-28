@@ -607,10 +607,12 @@ impl SaxParser {
             return false;
         }
         if self.parser.is_none() {
-            let mut po = ParseOptions::default();
-            po.sax = true;
-            po.split_text_at_refs = true;
-            po.namespaces = self.ns_separator.is_some();
+            let mut po = ParseOptions {
+                sax: true,
+                split_text_at_refs: true,
+                namespaces: self.ns_separator.is_some(),
+                ..Default::default()
+            };
             if self.options.parse_huge {
                 po.flags |= opt::PARSEHUGE;
             }

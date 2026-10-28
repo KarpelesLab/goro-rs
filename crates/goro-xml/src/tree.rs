@@ -1011,13 +1011,11 @@ impl Arena {
                 NodeData::Element(_) | NodeData::Fragment => {
                     self.collect_text(n, out, expand_entities)
                 }
-                NodeData::EntityRef(name) => {
-                    if expand_entities {
-                        if node.first_child.is_some() {
-                            self.collect_text(n, out, true);
-                        } else if let Some(v) = self.entity_value(self.doc_of(n), name) {
-                            out.push_str(&v);
-                        }
+                NodeData::EntityRef(name) if expand_entities => {
+                    if node.first_child.is_some() {
+                        self.collect_text(n, out, true);
+                    } else if let Some(v) = self.entity_value(self.doc_of(n), name) {
+                        out.push_str(&v);
                     }
                 }
                 _ => {}

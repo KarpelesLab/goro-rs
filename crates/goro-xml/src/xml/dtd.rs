@@ -490,9 +490,9 @@ impl Parser<'_> {
                 continue;
             }
             if self.buf[i..].starts_with(b"<!--") {
-                match memchr::memmem::find(&self.buf[i + 4..], b"-->") {
-                    Some(o) => i += 4 + o + 3,
-                    None => return None,
+                {
+                    let o = memchr::memmem::find(&self.buf[i + 4..], b"-->")?;
+                    i += 4 + o + 3
                 }
                 continue;
             }

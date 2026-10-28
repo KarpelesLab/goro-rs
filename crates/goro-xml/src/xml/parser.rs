@@ -1104,8 +1104,8 @@ impl<'l> Parser<'l> {
     fn parse_xml_decl(&mut self, sink: &mut dyn Sink) -> R<()> {
         self.pos += 5;
         self.skip_spaces();
-        let version;
-        if self.starts_with(b"version") {
+
+        let version = if self.starts_with(b"version") {
             self.pos += 7;
             self.skip_spaces();
             if self.cur() != b'=' {
@@ -1120,14 +1120,14 @@ impl<'l> Parser<'l> {
             if v != "1.0" {
                 self.warn(Domain::Parser, 97, format!("Unsupported version '{v}'"));
             }
-            version = Some(v);
+            Some(v)
         } else {
             if self.incomplete() {
                 return Err(Halt::Incomplete);
             }
             self.fatal(96, "Malformed declaration expecting version");
             return Err(self.fatal(65, "Blank needed here"));
-        }
+        };
         let had_space = self.skip_spaces();
         let mut encoding = None;
         if self.starts_with(b"encoding") {
@@ -1790,6 +1790,7 @@ impl<'l> Parser<'l> {
             }
         };
         if self.opts.namespaces {
+            #[allow(clippy::needless_range_loop)]
             for i in 0..attrs.len() {
                 let local = attrs[i].name.local.clone();
                 if let Some((p, l)) = split_qname(&local) {
@@ -2063,7 +2064,7 @@ impl<'l> Parser<'l> {
         if v > 0x10FFFF {
             return Err(self.halt(
                 9,
-                format!("xmlParseCharRef: character reference out of bounds"),
+                "xmlParseCharRef: character reference out of bounds".to_string(),
             ));
         }
         match char::from_u32(v) {
@@ -2453,7 +2454,7 @@ impl<'l> Parser<'l> {
         out: &mut String,
         depth: usize,
     ) -> R<bool> {
-        if depth > 40 || self.entity_stack.iter().any(|n| *n == e.name) {
+        if depth > 40 || self.entity_stack.contains(&e.name) {
             self.halt(89, "Detected an entity reference loop");
             return Ok(false);
         }

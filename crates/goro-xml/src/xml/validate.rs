@@ -77,10 +77,10 @@ impl V<'_> {
         for c in self.arena.children(el) {
             match self.arena.data(c) {
                 NodeData::Element(e) => v.push(e.name.qualified()),
-                NodeData::Text(t) | NodeData::CData(t) => {
-                    if !t.bytes().all(crate::chars::is_space) {
-                        v.push("CDATA".into());
-                    }
+                NodeData::Text(t) | NodeData::CData(t)
+                    if !t.bytes().all(crate::chars::is_space) =>
+                {
+                    v.push("CDATA".into());
                 }
                 _ => {}
             }

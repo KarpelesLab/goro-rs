@@ -333,16 +333,14 @@ impl Ctx<'_> {
                     self.out.push_str("-->");
                 }
             }
-            NodeData::Pi { target, data } => {
-                if self.in_set(n) {
-                    self.out.push_str("<?");
-                    self.out.push_str(target);
-                    if !data.is_empty() {
-                        self.out.push(' ');
-                        self.out.push_str(data);
-                    }
-                    self.out.push_str("?>");
+            NodeData::Pi { target, data } if self.in_set(n) => {
+                self.out.push_str("<?");
+                self.out.push_str(target);
+                if !data.is_empty() {
+                    self.out.push(' ');
+                    self.out.push_str(data);
                 }
+                self.out.push_str("?>");
             }
             _ => {}
         }
