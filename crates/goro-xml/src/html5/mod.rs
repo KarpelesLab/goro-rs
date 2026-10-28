@@ -377,3 +377,76 @@ pub fn parse_fragment(
         errors,
     }
 }
+
+/// Tokenizer access for the html5lib-tests tokenizer runner (not a stable
+/// API).
+#[doc(hidden)]
+pub mod testing {
+    use super::tokenizer::{State, Token, Tokenizer, preprocess};
+
+    /// A token as html5lib-tests describes it.
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum TestToken {
+        /// name, public id, system id, correctness (not force-quirks).
+        Doctype(Option<String>, Option<String>, Option<String>, bool),
+        /// name, attributes, self-closing.
+        StartTag(String, Vec<(String, String)>, bool),
+        /// name.
+        EndTag(String),
+        /// data.
+        Comment(String),
+        /// data (adjacent character tokens merged).
+        Character(String),
+    }
+
+    /// Tokenizes `input` from the named initial state ("Data state",
+    /// "PLAINTEXT state", "RCDATA state", "RAWTEXT state", "Script data
+    /// state", "CDATA section state") with the WHATWG behaviour.
+    pub fn tokenize(input: &str, state: &str, last_start_tag: Option<&str>) -> Vec<TestToken> {
+        let mut t = Tokenizer::new(preprocess(input.to_string()));
+        t.standard = true;
+        t.state = match state {
+            "PLAINTEXT state" => State::PlainText,
+            "RCDATA state" => State::RcData,
+            "RAWTEXT state" => State::RawText,
+            "Script data state" => State::ScriptData,
+            "CDATA section state" => State::CdataSection,
+            _ => State::Data,
+        };
+        if let Some(l) = last_start_tag {
+            t.set_last_start_tag(l);
+        }
+        let mut out: Vec<TestToken> = Vec::new();
+        loop {
+            match t.next_token() {
+                Token::Eof { .. } => break,
+                Token::Text { text, .. } => {
+                    if let Some(TestToken::Character(s)) = out.last_mut() {
+                        s.push_str(&text);
+                    } else {
+                        out.push(TestToken::Character(text));
+                    }
+                }
+                Token::Comment { text, .. } => out.push(TestToken::Comment(text)),
+                Token::Doctype(d) => out.push(TestToken::Doctype(
+                    d.name,
+                    d.public_id,
+                    d.system_id,
+                    !d.force_quirks,
+                )),
+                Token::Tag(tag) => {
+                    if tag.end {
+                        out.push(TestToken::EndTag(tag.name));
+                    } else {
+                        out.push(TestToken::StartTag(
+                            tag.name,
+                            tag.attrs.into_iter().map(|a| (a.name, a.value)).collect(),
+                            tag.self_closing,
+                        ));
+                    }
+                }
+            }
+        }
+        out
+    }
+}

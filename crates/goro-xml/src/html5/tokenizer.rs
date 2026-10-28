@@ -371,6 +371,12 @@ impl Tokenizer {
         &self.input
     }
 
+    /// Sets the last start tag name (tokenizer tests).
+    pub fn set_last_start_tag(&mut self, name: &str) {
+        self.last_start_tag.clear();
+        self.last_start_tag.extend_from_slice(name.as_bytes());
+    }
+
     /// Records an error, except the ones PHP never reports (observed on PHP
     /// 8.5: end-of-file errors, `duplicate-attribute`,
     /// `end-tag-with-attributes`, `end-tag-with-trailing-solidus`,
@@ -617,7 +623,11 @@ impl Tokenizer {
             Some((len, value)) => {
                 let last_semicolon = rest[len - 1] == b';';
                 let end = self.pos + len;
-                let next = self.input.get(scan_end).copied();
+                let next = if self.standard {
+                    rest.get(len).copied()
+                } else {
+                    self.input.get(scan_end).copied()
+                };
                 if self.in_attr()
                     && !last_semicolon
                     && next.is_some_and(|c| c == b'=' || c.is_ascii_alphanumeric())
