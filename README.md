@@ -51,8 +51,8 @@ Fresh start. The previous code base is kept on the `old` branch for the
 record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
 
-php-src test suite (8.5.4), share of the tests that run: **70.3%** overall
-(Zend/tests 70.8%, tests/ 84.1%, ext 69.1%), as of 2026-10-28. Several
+php-src test suite (8.5.4), share of the tests that run: **76.1%** overall
+(9,390 tests), as of 2026-10-28. Several
 extension libraries below are finished but not yet wired into the engine.
 
 - `goro-engine` and the `goro` binary: compiler and VM running PHP 8.5
@@ -138,3 +138,25 @@ extension libraries below are finished but not yet wired into the engine.
   IP range boundaries, every Unicode letter and number for
   FILTER_FLAG_EMAIL_UNICODE); common validators take 7-80 ns, 1.2-5.7x
   faster than PHP 8.5's filter_var() (`examples/filter_bench.rs`).
+- `goro-ext-sodium`: ext/sodium: all 110 `sodium_*()` functions (AEGIS
+  included) and the `SODIUM_*` constants, with PHP's argument checks,
+  messages, warnings and state strings (BLAKE2b and secretstream states
+  byte-compatible with PHP's). purecrypto for ChaCha20/Poly1305, the AEADs,
+  SHA-512, SipHash, scrypt and Ristretto255; Salsa20/XSalsa20 (AVX2 and
+  AVX-512), BLAKE2b, Argon2 (AVX2, prefetching, huge pages), X25519 and
+  variable-time Ed25519 verification written here. Checked against the
+  specifications' vectors, the ext/sodium tests and a 4.7k-case PHP 8.5
+  fixture; faster than PHP 8.5 (libsodium 1.0.18) on secretbox, the
+  AEADs, generichash, sign/verify, box and Argon2/scrypt
+  (`examples/bench.rs` against `tests/fixtures/bench.php`).
+- `goro-ext-uri`: ext/uri as plain values: `Uri\Rfc3986\Uri` (strict
+  RFC 3986 parsing, raw and normalized getters, withers, resolution,
+  equality) and `Uri\WhatWg\Url` (the WHATWG URL parser with UTS #46 16.0
+  IDNA, PHP's validation-error list and contexts, withers sharing the
+  error list as PHP does, ASCII/Unicode serializations), the exception
+  messages, `__serialize`/`__unserialize`/`__debugInfo` shapes and a
+  FILTER_VALIDATE_URL hook. Checked against PHP 8.5 fixtures (13.6k
+  RFC 3986 cases, 8.7k WHATWG parses, 5.4k withers, every code point
+  through IDNA) and the WPT url, toascii, IdnaTestV2 and setters data.
+  Parsing typical URLs takes 25-50 ns (RFC 3986) and 60-145 ns (WHATWG),
+  below PHP 8.5's 105-215 ns (`examples/uri_bench.rs`).
