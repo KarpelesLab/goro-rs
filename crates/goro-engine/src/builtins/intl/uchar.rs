@@ -51,6 +51,7 @@ pub static MODULE: Module = Module {
         ("intlchar::getcombiningclass", c_ccc),
         ("intlchar::getunicodeversion", c_unicode_version),
         ("intlchar::charage", c_age),
+        ("intlchar::enumchartypes", c_enum_types),
     ],
     hooks: &[("intllistformatter", list_hooks)],
     ..Module::EMPTY
@@ -144,6 +145,7 @@ const CHAR_CLASS: &str = r#"<?php class IntlChar {
     public static function getCombiningClass(int|string $codepoint): ?int {}
     public static function getUnicodeVersion(): array {}
     public static function charAge(int|string $codepoint): ?array {}
+    public static function enumCharTypes(callable $callback): void {}
 }"#;
 
 // ---------------------------------------------------------------- list
@@ -464,4 +466,29 @@ fn c_age(vm: &mut Vm, a: &mut Args) -> R<Value> {
             [x as i64, y as i64, 0, 0].into_iter().map(Value::Int),
         ))
     }))
+}
+
+/// `enumCharTypes()`: the callback gets each run of code points of one
+/// general category (start, end exclusive, category).
+fn c_enum_types(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let cb = a.val(0);
+    let cat = |cp: u32| char::from_u32(cp).map_or(18, |c| category_number(u::general_category(c)));
+    let mut start = 0u32;
+    let mut cur = cat(0);
+    for cp in 1..=0x110000u32 {
+        let c = if cp == 0x110000 { -1 } else { cat(cp) };
+        if c != cur {
+            vm.call_value(
+                &cb,
+                vec![
+                    Value::Int(start as i64),
+                    Value::Int(cp as i64),
+                    Value::Int(cur),
+                ],
+            )?;
+            start = cp;
+            cur = c;
+        }
+    }
+    Ok(Value::Null)
 }
