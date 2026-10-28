@@ -781,7 +781,7 @@ fn two_dates(spec: &[u8]) -> Option<Result<Interval, String>> {
     };
     match rest {
         None => Some(failed()),
-        Some(r) if r.is_empty() => Some(failed()),
+        Some([]) => Some(failed()),
         Some(r) => match iso_utc_date(r) {
             Some(b) => Some(Ok(interval::diff(&a, &b, false))),
             None => Some(Err(interval::bad_format(spec))),
