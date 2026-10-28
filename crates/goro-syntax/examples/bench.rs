@@ -171,9 +171,20 @@ fn main() {
         let t0 = Instant::now();
         let mut keep = Vec::with_capacity(sources.len());
         for (s, arena) in sources.iter().zip(&arenas) {
-            if let Ok(p) = parse_with(arena, s, ParseOptions::default()) {
-                keep.push(p);
-                ok += 1;
+            match parse_with(arena, s, ParseOptions::default()) {
+                Err(e) if std::env::var_os("BENCH_ERRORS").is_some() => {
+                    eprintln!(
+                        "{} @{} | {:?}",
+                        e.message,
+                        e.line,
+                        String::from_utf8_lossy(&s[..s.len().min(80)])
+                    )
+                }
+                Err(_) => {}
+                Ok(p) => {
+                    keep.push(p);
+                    ok += 1;
+                }
             }
         }
         best_parse = best_parse.min(t0.elapsed().as_secs_f64());
