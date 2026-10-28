@@ -658,7 +658,9 @@ impl Vm {
                 if unset {
                     return self.throw("Error", "Attempt to unset static property");
                 }
-                let (r, sp) = self.static_prop_ref(c, n)?;
+                let write = path.elems.is_empty()
+                    && matches!(path.action, PathAction::Assign(_) | PathAction::BindRef(_));
+                let (r, sp) = self.static_prop_ref(c, n, write)?;
                 static_cell = Some(r);
                 static_decl = Some(sp);
             }
@@ -765,7 +767,16 @@ impl Vm {
             PathBase::StaticProp(..) => {
                 let r = static_cell.clone().unwrap();
                 if path.elems.is_empty() {
-                    let v = ctx.value.clone();
+                    let mut v = ctx.value.clone();
+                    // A typed property's own type comes first ("Cannot
+                    // assign X to property A::$p of type T").
+                    if let (PathAction::Assign(_), Some(sp), Some(x)) =
+                        (path.action, &static_decl, v.as_ref())
+                        && sp.ty.is_some()
+                    {
+                        let x = x.clone().into_deref();
+                        v = Some(self.typed_static_ref_value(sp, x)?);
+                    }
                     // `A::$x =& $y` rebinds the property's storage.
                     if let (PathAction::BindRef(_), Some(Value::Ref(src)), Some(sp)) =
                         (path.action, &v, &static_decl)

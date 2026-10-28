@@ -299,7 +299,10 @@ impl<'a> Compiler<'a> {
                     if th.mask & tmask::VOID != 0 {
                         self.notice(
                             goro_runtime::Level::Deprecated,
-                            "Returning by reference from a void function is deprecated",
+                            format!(
+                                "{}(): Returning by reference from a void function is deprecated",
+                                self.f.method_name.to_string_lossy()
+                            ),
                             spec.span.line,
                         );
                     }
@@ -865,6 +868,41 @@ impl<'a> Compiler<'a> {
 
     /// Checks that `e` is a valid constant expression.
     pub(crate) fn check_const_expr(&self, e: &'a Expr<'a>) -> CResult<()> {
+        // Errors PHP finds while compiling the expression come before the
+        // constant-expression check (tests Zend/tests/bug70912.phpt,
+        // ast/gh21072.phpt, constexpr/gh9138.phpt, class_name/*).
+        let mut early: Option<(&'static str, u32)> = None;
+        walk_expr(e, &mut |x| {
+            if early.is_some() {
+                return;
+            }
+            let msg = match &x.kind {
+                ExprKind::Index { index: None, .. } => Some("Cannot use [] for reading"),
+                ExprKind::Cast {
+                    kind: CastKind::Unset,
+                    ..
+                } => Some("The (unset) cast is no longer supported"),
+                ExprKind::Array { items, .. } if items.iter().any(|i| i.is_none()) => {
+                    Some("Cannot use empty array elements in arrays")
+                }
+                ExprKind::ClassConst(cc)
+                    if matches!(cc.class, ClassRef::Static(_))
+                        && matches!(&cc.name, MemberName::Ident(i) if i.name.eq_ignore_ascii_case(b"class")) =>
+                {
+                    Some("static::class cannot be used for compile-time class name resolution")
+                }
+                ExprKind::StaticCall(sc) if matches!(sc.class, ClassRef::Static(_)) => {
+                    Some("\"static\" is not allowed in compile-time constants")
+                }
+                _ => None,
+            };
+            if let Some(m) = msg {
+                early = Some((m, x.span.line));
+            }
+        });
+        if let Some((m, line)) = early {
+            return self.err(m, line);
+        }
         if !const_expr_ok(e) {
             return self.err(
                 "Constant expression contains invalid operations",
@@ -946,29 +984,85 @@ impl<'a> Compiler<'a> {
             goro_syntax::ast::ClassKind::Enum => ClassKind::Enum,
         };
         let line = cd.span.line;
+        // Names that can't be used (messages observed on PHP 8.5).
+        let special = |n: &Name| {
+            n.kind == NameKind::Unqualified
+                && matches!(
+                    &n.name.to_ascii_lowercase()[..],
+                    b"self" | b"parent" | b"static"
+                )
+        };
+        if let Some(e) = &cd.extends
+            && special(e)
+        {
+            return self.err(
+                format!(
+                    "Cannot use \"{}\" as class name, as it is reserved",
+                    String::from_utf8_lossy(e.name)
+                ),
+                line,
+            );
+        }
+        for i in cd.implements.iter() {
+            if special(i) {
+                return self.err(
+                    format!(
+                        "Cannot use \"{}\" as interface name, as it is reserved",
+                        String::from_utf8_lossy(i.name)
+                    ),
+                    line,
+                );
+            }
+        }
+        for m in cd.members.iter() {
+            if let ClassMember::TraitUse(tu) = m {
+                for t in tu.traits.iter() {
+                    if special(t) {
+                        return self.err(
+                            format!(
+                                "Cannot use \"{}\" as trait name, as it is reserved",
+                                String::from_utf8_lossy(t.name)
+                            ),
+                            line,
+                        );
+                    }
+                }
+            }
+        }
         let parent = cd.extends.as_ref().map(|n| self.resolve_class(n));
         let name: Vec<u8> = match &cd.name {
             Some(n) => {
                 let l = n.name.to_ascii_lowercase();
-                if matches!(&l[..], b"self" | b"parent" | b"static") {
+                if matches!(&l[..], b"self" | b"parent" | b"static") || is_reserved_type_name(&l) {
+                    let what = match kind {
+                        ClassKind::Class => "a class",
+                        ClassKind::Interface => "an interface",
+                        ClassKind::Trait => "a trait",
+                        ClassKind::Enum => "an enum",
+                    };
                     return self.err(
                         format!(
-                            "Cannot use '{}' as class name as it is reserved",
-                            String::from_utf8_lossy(n.name)
+                            "Cannot use \"{}\" as {} name as it is reserved",
+                            String::from_utf8_lossy(n.name),
+                            what
                         ),
                         line,
                     );
                 }
-                if is_reserved_type_name(&l) {
+                let full = self.qualify_pub(n.name);
+                if let Some(imp) = self.use_class.get(&l)
+                    && !imp.eq_ignore_ascii_case(&full)
+                {
                     return self.err(
                         format!(
-                            "Cannot use '{}' as class name as it is reserved",
-                            String::from_utf8_lossy(n.name)
+                            "Cannot redeclare class {} (previously declared as local import)",
+                            String::from_utf8_lossy(&full)
                         ),
                         line,
                     );
                 }
-                self.qualify_pub(n.name)
+                self.declared_classes.insert(full.to_ascii_lowercase());
+                full
             }
             None => {
                 // "class@anonymous" + NUL + file:line$n (observed on PHP 8.5).
@@ -2317,6 +2411,7 @@ pub fn parse_native_sig(
         file: PhpStr::empty(),
         ns: Vec::new(),
         use_class: Default::default(),
+        declared_classes: Default::default(),
         use_func: Default::default(),
         use_const: Default::default(),
         class: None,
@@ -2326,6 +2421,9 @@ pub fn parse_native_sig(
         anon_count: 0,
         src: &src,
         known_const: kc,
+        ticks: 0,
+        past_first_stmt: true,
+        zend_multibyte: false,
         in_const_expr: false,
         in_chain: false,
         nullsafe_jumps: Vec::new(),

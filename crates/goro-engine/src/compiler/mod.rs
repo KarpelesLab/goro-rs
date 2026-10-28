@@ -32,6 +32,9 @@ pub fn is_superglobal_name(n: &[u8]) -> bool {
 pub struct CompileError {
     pub message: String,
     pub line: u32,
+    /// Diagnostics raised by the compilation before the error (shown
+    /// first).
+    pub notices: Vec<CompileNotice>,
 }
 
 pub type CResult<T> = Result<T, CompileError>;
@@ -193,6 +196,8 @@ pub struct Compiler<'a> {
     pub(crate) file: PhpStr,
     pub(crate) ns: Vec<u8>,
     pub(crate) use_class: HashMap<Vec<u8>, Vec<u8>>,
+    /// Classes declared at the top of this file (lower-case full names).
+    pub(crate) declared_classes: std::collections::HashSet<Vec<u8>>,
     pub(crate) use_func: HashMap<Vec<u8>, Vec<u8>>,
     pub(crate) use_const: HashMap<Vec<u8>, Vec<u8>>,
     pub(crate) class: Option<ClassCtx>,
@@ -203,6 +208,12 @@ pub struct Compiler<'a> {
     pub(crate) src: &'a [u8],
     /// Constants known at compile time (internal constants), for folding.
     pub(crate) known_const: Option<&'a dyn Fn(&[u8]) -> Option<Value>>,
+    /// `declare(ticks=N)` in effect (0: none).
+    pub(crate) ticks: u32,
+    /// A statement other than declare() was compiled at the top level.
+    pub(crate) past_first_stmt: bool,
+    /// The zend.multibyte setting.
+    pub zend_multibyte: bool,
     /// Inside a const expression (initializer).
     pub(crate) in_const_expr: bool,
     /// Compiling the base of a member access chain.
@@ -225,6 +236,7 @@ pub fn compile_program<'a>(
         file: PhpStr::new(file),
         ns: Vec::new(),
         use_class: HashMap::new(),
+        declared_classes: Default::default(),
         use_func: HashMap::new(),
         use_const: HashMap::new(),
         class: None,
@@ -234,6 +246,9 @@ pub fn compile_program<'a>(
         anon_count: 0,
         src,
         known_const,
+        ticks: 0,
+        past_first_stmt: false,
+        zend_multibyte: ZEND_MULTIBYTE.with(|c| c.get()),
         in_const_expr: false,
         in_chain: false,
         nullsafe_jumps: Vec::new(),
@@ -249,6 +264,7 @@ pub fn compile_program<'a>(
         return Err(CompileError {
             message: e.message.clone(),
             line: e.line,
+            notices: Vec::new(),
         });
     }
     for n in &prog.notices {
@@ -265,8 +281,15 @@ pub fn compile_program<'a>(
     c.f.line = 1;
     let mut hoisted = Vec::new();
     let mut classes = Vec::new();
-    c.check_strict_types(prog.stmts)?;
-    c.top_stmts(prog.stmts, &mut hoisted, &mut classes)?;
+    let r = (|| -> CResult<()> {
+        c.check_strict_types(prog.stmts)?;
+        c.check_namespaces(prog.stmts)?;
+        c.top_stmts(prog.stmts, &mut hoisted, &mut classes)
+    })();
+    if let Err(mut e) = r {
+        e.notices = std::mem::take(&mut c.notices);
+        return Err(e);
+    }
     // Implicit `return 1` of a file (include's result).
     let one = c.int_const(1);
     c.emit(Op::Return { src: one });
@@ -287,6 +310,7 @@ pub fn compile_program<'a>(
 impl<'a> Compiler<'a> {
     pub(crate) fn err<T>(&self, msg: impl Into<String>, line: u32) -> CResult<T> {
         Err(CompileError {
+            notices: Vec::new(),
             message: msg.into(),
             line,
         })
@@ -614,6 +638,61 @@ impl<'a> Compiler<'a> {
 
     // ------------------------------------------------------------ statements
 
+    /// Namespace placement rules (messages observed on PHP 8.5).
+    fn check_namespaces(&mut self, stmts: &'a [Stmt<'a>]) -> CResult<()> {
+        let mut style: Option<bool> = None;
+        let mut code_before = false;
+        let mut first = true;
+        for s in stmts {
+            match &s.kind {
+                StmtKind::Namespace { body, .. } => {
+                    let bracketed = body.is_some();
+                    if let Some(b) = style
+                        && b != bracketed
+                    {
+                        return self.err(
+                            "Cannot mix bracketed namespace declarations with unbracketed namespace declarations",
+                            s.span.line,
+                        );
+                    }
+                    if code_before && style.is_none() {
+                        return self.err(
+                            "Namespace declaration statement has to be the very first statement or after any declare call in the script",
+                            s.span.line,
+                        );
+                    }
+                    style = Some(bracketed);
+                }
+                StmtKind::Declare(_) | StmtKind::Nop | StmtKind::HaltCompiler { .. } => {}
+                StmtKind::InlineHtml(t) if first && is_shebang_or_empty(t) => {}
+                _ => {
+                    if style == Some(true) {
+                        return self.err("No code may exist outside of namespace {}", s.span.line);
+                    }
+                    code_before = true;
+                }
+            }
+            first = false;
+        }
+        if style == Some(true) && code_before {
+            // Code before the first bracketed namespace.
+            for s in stmts {
+                match &s.kind {
+                    StmtKind::Namespace { .. } => break,
+                    StmtKind::Declare(_) | StmtKind::Nop | StmtKind::HaltCompiler { .. } => {}
+                    StmtKind::InlineHtml(t) if is_shebang_or_empty(t) => {}
+                    _ => {
+                        return self.err(
+                            "Namespace declaration statement has to be the very first statement or after any declare call in the script",
+                            s.span.line,
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn check_strict_types(&mut self, stmts: &'a [Stmt<'a>]) -> CResult<()> {
         let mut first = true;
         for s in stmts {
@@ -690,30 +769,75 @@ impl<'a> Compiler<'a> {
                     }
                 }
                 StmtKind::Declare(d) => {
-                    self.declare_directives(d, s.span.line)?;
+                    let t = self.declare_directives(d, s.span.line)?;
                     match d.body {
-                        DeclareBody::None => {}
+                        DeclareBody::None => {
+                            if let Some(t) = t {
+                                self.ticks = t;
+                            }
+                        }
                         DeclareBody::Block(b) | DeclareBody::Alt(b) => {
-                            self.top_stmts(b, hoisted, classes)?
+                            let saved = self.ticks;
+                            if let Some(t) = t {
+                                self.ticks = t;
+                            }
+                            let r = self.top_stmts(b, hoisted, classes);
+                            self.ticks = saved;
+                            r?
                         }
                     }
                 }
                 StmtKind::HaltCompiler { .. } => break,
-                _ => self.stmt(s)?,
+                _ => {
+                    self.past_first_stmt = true;
+                    self.stmt(s)?
+                }
             }
         }
         Ok(())
     }
 
-    fn declare_directives(&mut self, d: &'a DeclareStmt<'a>, line: u32) -> CResult<()> {
+    /// Applies declare() directives; returns the `ticks` value they set.
+    fn declare_directives(&mut self, d: &'a DeclareStmt<'a>, line: u32) -> CResult<Option<u32>> {
+        let mut ticks = None;
         for (k, v) in d.directives {
             if k.name.eq_ignore_ascii_case(b"ticks") {
-                if !matches!(v.kind, ExprKind::Int(_)) {
-                    // PHP requires a literal.
+                // Messages observed on PHP 8.5.
+                match v.kind {
+                    ExprKind::Int(n) => ticks = Some(n.max(0) as u32),
+                    _ => return self.err("declare(ticks) value must be a literal", line),
                 }
             } else if k.name.eq_ignore_ascii_case(b"encoding") {
-                if !matches!(v.kind, ExprKind::String(..)) {
-                    return self.err("Encoding must be a literal", line);
+                match &v.kind {
+                    ExprKind::String(..) => {
+                        if !self.zend_multibyte {
+                            self.notice(
+                                goro_runtime::Level::Warning,
+                                "declare(encoding=...) ignored because Zend multibyte feature is turned off by settings".to_string(),
+                                line,
+                            );
+                        }
+                        if self.past_first_stmt || self.f.flags & fflags::PSEUDO_MAIN == 0 {
+                            return self.err(
+                                "Encoding declaration pragma must be the very first statement in the script",
+                                line,
+                            );
+                        }
+                    }
+                    ExprKind::Int(n) => self.notice(
+                        goro_runtime::Level::Warning,
+                        format!("Unsupported encoding [{}]", n),
+                        line,
+                    ),
+                    ExprKind::Float(f) => self.notice(
+                        goro_runtime::Level::Warning,
+                        format!(
+                            "Unsupported encoding [{}]",
+                            goro_runtime::float_fmt::to_php_string(*f, 14)
+                        ),
+                        line,
+                    ),
+                    _ => return self.err("Encoding must be a literal", line),
                 }
             } else if k.name.eq_ignore_ascii_case(b"strict_types") {
             } else {
@@ -724,7 +848,7 @@ impl<'a> Compiler<'a> {
                 );
             }
         }
-        Ok(())
+        Ok(ticks)
     }
 
     pub(crate) fn block(&mut self, b: Block<'a>) -> CResult<()> {
@@ -735,6 +859,25 @@ impl<'a> Compiler<'a> {
     }
 
     pub(crate) fn stmt(&mut self, s: &'a Stmt<'a>) -> CResult<()> {
+        self.stmt_inner(s)?;
+        if self.ticks > 0
+            && !matches!(
+                s.kind,
+                StmtKind::Function(_)
+                    | StmtKind::Class(_)
+                    | StmtKind::Nop
+                    | StmtKind::Declare(_)
+                    | StmtKind::Block(_)
+                    | StmtKind::Label(_)
+            )
+        {
+            let every = self.ticks;
+            self.emit(Op::Tick { every });
+        }
+        Ok(())
+    }
+
+    fn stmt_inner(&mut self, s: &'a Stmt<'a>) -> CResult<()> {
         self.f.line = s.span.line;
         match &s.kind {
             StmtKind::Expr(e) => self.expr_stmt(e)?,
@@ -852,11 +995,24 @@ impl<'a> Compiler<'a> {
                 self.f.labels.insert(l.name, (h, path));
             }
             StmtKind::Declare(d) => {
-                self.declare_directives(d, s.span.line)?;
+                let t = self.declare_directives(d, s.span.line)?;
                 match d.body {
-                    DeclareBody::None => {}
-                    DeclareBody::Block(b) | DeclareBody::Alt(b) => self.block(b)?,
+                    DeclareBody::None => {
+                        if let Some(t) = t {
+                            self.ticks = t;
+                        }
+                    }
+                    DeclareBody::Block(b) | DeclareBody::Alt(b) => {
+                        let saved = self.ticks;
+                        if let Some(t) = t {
+                            self.ticks = t;
+                        }
+                        let r = self.block(b);
+                        self.ticks = saved;
+                        r?
+                    }
                 }
+                return Ok(());
             }
             StmtKind::Function(fd) => {
                 let idx = self.func_decl(fd)?;
@@ -948,6 +1104,23 @@ impl<'a> Compiler<'a> {
                             "Cannot use {} as {} because '{}' is a special class name",
                             String::from_utf8_lossy(&full),
                             String::from_utf8_lossy(&alias),
+                            String::from_utf8_lossy(&alias)
+                        ),
+                        line,
+                    );
+                }
+                let mut local = self.ns.clone();
+                if !local.is_empty() {
+                    local.push(b'\\');
+                }
+                local.extend_from_slice(&alias);
+                if self.declared_classes.contains(&local.to_ascii_lowercase())
+                    && !local.eq_ignore_ascii_case(&full)
+                {
+                    return self.err(
+                        format!(
+                            "Cannot use {} as {} because the name is already in use",
+                            String::from_utf8_lossy(&full),
                             String::from_utf8_lossy(&alias)
                         ),
                         line,
@@ -1460,7 +1633,14 @@ impl<'a> Compiler<'a> {
                     implicit,
                 });
             }
-            self.emit(Op::Return { src: val });
+            if self.f.flags & fflags::BY_REF != 0 {
+                // A by-reference function returning no variable: "Only
+                // variable references should be returned by reference"
+                // (test Zend/tests/return_ref_none.phpt).
+                self.emit(Op::ReturnRef { src: val });
+            } else {
+                self.emit(Op::Return { src: val });
+            }
         }
     }
 
@@ -1665,4 +1845,9 @@ fn needs_rtd_key(cd: &goro_syntax::ast::ClassDecl) -> bool {
             .members
             .iter()
             .any(|m| matches!(m, goro_syntax::ast::ClassMember::TraitUse(_)))
+}
+
+thread_local! {
+    /// The zend.multibyte setting for the next compilation.
+    pub static ZEND_MULTIBYTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }

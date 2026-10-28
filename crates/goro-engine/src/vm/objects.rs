@@ -1374,11 +1374,12 @@ impl Vm {
         &mut self,
         class: ClassSpec,
         name: Reg,
+        write: bool,
     ) -> R<(PhpRef, Rc<crate::class::StaticProp>)> {
         let cls = self.resolve_class_spec(class, true)?;
         let n = self.get(name)?;
         let n = self.to_php_str(&n)?;
-        self.find_static_prop_entry(&cls, &n)
+        self.find_static_prop_entry_ex(&cls, &n, write)
     }
 
     pub fn find_static_prop(&mut self, cls: &Rc<Class>, n: &PhpStr) -> R<PhpRef> {
@@ -1412,6 +1413,17 @@ impl Vm {
         &mut self,
         cls: &Rc<Class>,
         n: &PhpStr,
+    ) -> R<(PhpRef, Rc<crate::class::StaticProp>)> {
+        self.find_static_prop_entry_ex(cls, n, false)
+    }
+
+    /// `write`: a plain assignment, which an uninitialized typed property
+    /// accepts.
+    pub fn find_static_prop_entry_ex(
+        &mut self,
+        cls: &Rc<Class>,
+        n: &PhpStr,
+        write: bool,
     ) -> R<(PhpRef, Rc<crate::class::StaticProp>)> {
         self.ensure_statics(cls)?;
         let Some(sp) = cls.find_static(n) else {
@@ -1452,7 +1464,7 @@ impl Vm {
                 ),
             );
         }
-        if self.is_uninit(&sp.cell.borrow().borrow()) {
+        if !write && self.is_uninit(&sp.cell.borrow().borrow()) {
             return self.throw(
                 "Error",
                 &format!(
@@ -1760,7 +1772,16 @@ impl Vm {
                 let _ = v;
             }
         }
-        let cls = self.resolve_class_spec(class, true)?;
+        let cls = if self.code_ref().flags & crate::bytecode::fflags::CONST_EXPR != 0 {
+            // Its errors show the constant expression's frame too (test
+            // Zend/tests/type_declarations/typed_properties_022.phpt).
+            let saved = std::mem::replace(&mut self.trace_const_expr, true);
+            let r = self.resolve_class_spec(class, true);
+            self.trace_const_expr = saved;
+            r?
+        } else {
+            self.resolve_class_spec(class, true)?
+        };
         let n = self.get(name)?;
         let n = match n {
             Value::Str(s) => s,

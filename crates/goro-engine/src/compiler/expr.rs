@@ -505,6 +505,28 @@ impl<'a> Compiler<'a> {
                 });
                 Ok(d)
             }
+            // `(NAME)(...)` calls the constant's value (PHP 8.5 constants may
+            // hold closures: test Zend/tests/closures/closure_const_expr).
+            ExprKind::Call { name, args }
+                if self.src[name.span.end as usize..]
+                    .iter()
+                    .find(|c| !c.is_ascii_whitespace())
+                    == Some(&b')')
+                    && name.kind != NameKind::FullyQualified =>
+            {
+                let callee: &'a Expr<'a> = Box::leak(Box::new(Expr {
+                    kind: ExprKind::Const(*name),
+                    span: name.span,
+                }));
+                self.chain_root(e, |c| {
+                    let f = c.expr(callee)?;
+                    c.free(f);
+                    let nargs = args.as_slice().len() as u32;
+                    c.f.line = line;
+                    c.emit(Op::InitDynCall { callee: f, nargs });
+                    c.finish_call(args, hint, line)
+                })
+            }
             ExprKind::Call { name, args } => self.chain_root(e, |c| c.call(name, args, hint, line)),
             ExprKind::CallExpr { callee, args } => self.chain_root(e, |c| {
                 let f = c.chain_base(callee)?;
@@ -1914,6 +1936,7 @@ impl<'a> Compiler<'a> {
                 if contains_nullsafe(e) {
                     return self.err("Can't use nullsafe operator in write context", e.span.line);
                 }
+                self.check_builtin_write(e)?;
                 let v = self.expr(e)?;
                 Ok(LPath {
                     base: PathBase::Tmp(v),
@@ -2379,6 +2402,7 @@ impl<'a> Compiler<'a> {
             // source).
             self.ref_of(value)?
         } else if is_call {
+            self.check_builtin_write(value)?;
             let v = self.expr(value)?;
             // A function result: by-reference functions return references;
             // others produce the notice at run time.
@@ -2405,6 +2429,13 @@ impl<'a> Compiler<'a> {
             self.free(h);
         } else {
             self.bind_ref_to(target, r)?;
+            if is_call && is_tmp(r) {
+                // Drop the temporary's handle at once (a by-value result
+                // bound after its notice is not shared).
+                self.emit(Op::Free {
+                    slot: r & SLOT_MASK,
+                });
+            }
         }
         Ok(())
     }
@@ -2826,4 +2857,47 @@ fn fold_binary(op: BinaryOp, a: &Value, b: &Value) -> Option<Value> {
         BinaryOp::Pipe => return None,
     };
     if d.notices.is_empty() { Some(r) } else { None }
+}
+
+impl<'a> Compiler<'a> {
+    /// The functions PHP evaluates specially at compile time cannot be
+    /// used in write context (observed on PHP 8.5: "Cannot use result of
+    /// built-in function in write context").
+    fn check_builtin_write(&self, e: &'a Expr<'a>) -> CResult<()> {
+        let ExprKind::Call { name, args } = &e.kind else {
+            return Ok(());
+        };
+        let global = match name.kind {
+            NameKind::FullyQualified => true,
+            NameKind::Unqualified => self.ns.is_empty(),
+            _ => false,
+        };
+        if !global || matches!(args, Args::FirstClassCallable) {
+            return Ok(());
+        }
+        let list = args.as_slice();
+        if list.iter().any(|a| a.unpack || a.name.is_some()) {
+            return Ok(());
+        }
+        let n = list.len();
+        let special = match &name.name.to_ascii_lowercase()[..] {
+            b"strlen" | b"is_null" | b"is_bool" | b"is_int" | b"is_long" | b"is_integer"
+            | b"is_float" | b"is_double" | b"is_string" | b"is_array" | b"is_object"
+            | b"is_resource" | b"is_scalar" | b"boolval" | b"intval" | b"floatval"
+            | b"doubleval" | b"strval" | b"defined" | b"gettype" => n == 1,
+            b"count" | b"sizeof" => n == 1,
+            b"get_class" => n <= 1,
+            b"get_called_class" | b"func_num_args" | b"func_get_args" => n == 0,
+            b"array_key_exists" => n == 2,
+            b"sprintf" => n >= 1,
+            _ => false,
+        };
+        if special {
+            return self.err(
+                "Cannot use result of built-in function in write context",
+                e.span.line,
+            );
+        }
+        Ok(())
+    }
 }

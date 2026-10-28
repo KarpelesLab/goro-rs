@@ -238,7 +238,8 @@ impl Vm {
             match val {
                 Some(v) => {
                     let (val, r) = match &v {
-                        Value::Ref(rf) => (rf.get(), rf.refcount() > 1),
+                        // The entry holds one handle of its own.
+                        Value::Ref(rf) => (rf.get(), rf.refcount() > 2),
                         v => (v.clone(), false),
                     };
                     if let Err(e) = self.var_dump_into(out, &val, indent + 2, r) {

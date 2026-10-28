@@ -644,6 +644,11 @@ pub enum Op {
     DeclareClass {
         class: u32,
     },
+    /// After a statement under `declare(ticks=N)`: run the tick functions
+    /// every N statements.
+    Tick {
+        every: u32,
+    },
     DeclareConst {
         name: Reg,
         val: Reg,

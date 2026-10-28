@@ -384,7 +384,14 @@ impl Vm {
                     ),
                 }
             }
-            _ => self.throw("Error", "Value not callable"),
+            other => {
+                // Observed on PHP 8.5: "Value of type int is not callable".
+                let msg = format!(
+                    "Value of type {} is not callable",
+                    other.type_name_for_error()
+                );
+                self.throw("Error", &msg)
+            }
         }
     }
 
