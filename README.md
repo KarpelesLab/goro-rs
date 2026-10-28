@@ -161,3 +161,14 @@ sodium and uri each pass 90-100% of their tests that run).
   through IDNA) and the WPT url, toascii, IdnaTestV2 and setters data.
   Parsing typical URLs takes 25-50 ns (RFC 3986) and 60-145 ns (WHATWG),
   below PHP 8.5's 105-215 ns (`examples/uri_bench.rs`).
+- `goro-xml`: the XML core for ext/dom, simplexml, ext/xml, xmlreader and
+  xmlwriter (not yet wired): XML 1.0 + namespaces parser with PHP's libxml
+  error codes, messages and positions, DTDs, entities, LIBXML_* options and
+  DTD validation; an arena node tree for `DOMDocument` and `Dom\`; legacy
+  `saveXML`/`saveHTML` and the `Dom\` (DOM Parsing) serializers; the
+  legacy HTML parser of `loadHTML`; a WHATWG HTML5 parser/serializer for
+  `Dom\HTMLDocument`; XPath 1.0, CSS selectors, C14N, XInclude; ext/xml's
+  event API, XMLReader and XMLWriter. W3C XML conformance suite:
+  1946/1974 well-formedness verdicts (the rest are namespace errors libxml
+  only warns about); html5lib-tests: 1756/1756 tree construction,
+  7016/7016 tokenizer. Fixtures recorded on PHP 8.5 in `tests/fixtures`.
