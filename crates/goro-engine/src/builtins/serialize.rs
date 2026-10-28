@@ -1023,7 +1023,12 @@ impl Vm {
             drop(old);
             return Ok(());
         }
-        if !cls.has_flag(cflags::ALLOW_DYNAMIC)
+        // Undeclared properties keep their (mangled) names, as string keys
+        // (observed on PHP 8.5: "\0*\0x" stays protected; bug55798).
+        let pkey = if owner.is_some() { name.clone() } else { bare.clone() };
+        let exists = o.obj().props.borrow().get_str(&pkey).is_some();
+        if !exists
+            && !cls.has_flag(cflags::ALLOW_DYNAMIC)
             && cls.lname.as_bytes() != b"__php_incomplete_class"
             && !self.class_allows_dynamic(&cls)
         {
@@ -1033,11 +1038,7 @@ impl Vm {
                 bare.dname()
             ))?;
         }
-        let old = o
-            .obj()
-            .props
-            .borrow_mut()
-            .insert(Key::from_php_str(&bare), v);
+        let old = o.obj().props.borrow_mut().insert(Key::Str(pkey), v);
         drop(old);
         Ok(())
     }
