@@ -334,6 +334,11 @@ impl Vm {
                 )
             }
             PropLookup::Dynamic => {
+                if let Some(h) = cls.native.prop
+                    && let Some(r) = h(self, o, name, crate::class::ObjAccess::Read)
+                {
+                    return r;
+                }
                 let v = o.obj().props.borrow().get_str(name).cloned();
                 match v {
                     Some(v) => Ok(v.into_deref()),
@@ -522,6 +527,17 @@ impl Vm {
             }
             PropLookup::Hidden(_) => return self.magic_isset(o, &cls, name, empty),
             PropLookup::Dynamic => {
+                if let Some(h) = cls.native.prop {
+                    let op = if empty {
+                        crate::class::ObjAccess::Empty
+                    } else {
+                        crate::class::ObjAccess::Isset
+                    };
+                    if let Some(r) = h(self, o, name, op) {
+                        let v = r?;
+                        return Ok(self.to_bool(&v));
+                    }
+                }
                 let v = o.obj().props.borrow().get_str(name).cloned();
                 match v {
                     Some(v) => Some(v.into_deref()),
@@ -901,6 +917,11 @@ impl Vm {
                 )
             }
             PropLookup::Dynamic => {
+                if let Some(h) = cls.native.prop
+                    && let Some(r) = h(self, o, name, crate::class::ObjAccess::Write(v.clone()))
+                {
+                    return r.map(|_| ());
+                }
                 if let Some(h) = cls.native.dyn_prop
                     && let Some(r) = h(self, o, name, crate::class::DynPropOp::Write)
                 {
@@ -1294,6 +1315,9 @@ impl Vm {
                 )
             }
             PropLookup::Dynamic => {
+                if cls.native.prop.is_some() {
+                    return Ok(None);
+                }
                 if let Some(h) = cls.native.dyn_prop
                     && let Some(r) = h(self, o, name, crate::class::DynPropOp::Write)
                 {
@@ -1460,6 +1484,11 @@ impl Vm {
                 )
             }
             PropLookup::Dynamic => {
+                if let Some(h) = cls.native.prop
+                    && let Some(r) = h(self, o, name, crate::class::ObjAccess::Unset)
+                {
+                    return r.map(|_| ());
+                }
                 if let Some(h) = cls.native.dyn_prop
                     && let Some(r) = h(self, o, name, crate::class::DynPropOp::Unset)
                 {
