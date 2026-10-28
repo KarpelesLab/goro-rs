@@ -369,7 +369,15 @@ fn eval(name: &str, a: &[V], d: &mut Vec<Diag>) -> Option<R> {
 
 #[test]
 fn strings_fixture() {
-    let data = include_str!("fixtures/strings.txt");
+    check(include_str!("fixtures/strings.txt"));
+}
+
+#[test]
+fn strings2_fixture() {
+    check(include_str!("fixtures/strings2.txt"));
+}
+
+fn check(data: &str) {
     let mut failures = Vec::new();
     let mut by_func: std::collections::BTreeMap<&str, (usize, usize)> = Default::default();
     for line in data.lines() {

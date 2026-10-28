@@ -199,7 +199,8 @@ pub fn metaphone(s: &[u8], max_phonemes: i64) -> Result<Vec<u8>, StdError> {
                 }
             }
             b'B' => {
-                if !(prev == b'M' && next == 0) {
+                // Observed on PHP 8.5: B after M is silent anywhere ("number" is NMR).
+                if prev != b'M' {
                     out.push(b'B');
                 }
             }
