@@ -188,21 +188,25 @@ impl Vm {
     /// scalars (the hot operands of sends, returns and assignments).
     #[inline(always)]
     pub(crate) fn get_hot(&mut self, r: Reg) -> R<Value> {
-        let p = self.slot_ptr(r);
         if r & (CONST | TMP) == TMP {
+            let p = self.slot_ptr(r);
             return Ok(match unsafe { (*p).take() } {
                 Some(Value::Ref(rf)) => rf.get(),
                 Some(v) => v,
                 None => Value::Null,
             });
         }
-        if r & CONST == 0 {
-            match unsafe { &*p } {
-                Some(Value::Int(i)) => return Ok(Value::Int(*i)),
-                Some(Value::Float(f)) => return Ok(Value::Float(*f)),
-                Some(Value::Bool(b)) => return Ok(Value::Bool(*b)),
-                _ => {}
-            }
+        let v: Option<&Value> = if r & CONST == 0 {
+            unsafe { (*self.slot_ptr(r)).as_ref() }
+        } else {
+            Some(unsafe { self.code_ref().consts.get_unchecked((r & !CONST) as usize) })
+        };
+        match v {
+            Some(Value::Int(i)) => return Ok(Value::Int(*i)),
+            Some(Value::Float(f)) => return Ok(Value::Float(*f)),
+            Some(Value::Bool(b)) => return Ok(Value::Bool(*b)),
+            Some(Value::Null) => return Ok(Value::Null),
+            _ => {}
         }
         self.get(r)
     }
@@ -324,6 +328,9 @@ impl Vm {
         unsafe {
             match &mut *p {
                 Some(Value::Int(x)) => *x = i,
+                s if dst != NONE && dst & TMP != 0 && holds_no_resources(s) => {
+                    std::ptr::write(p, Some(Value::Int(i)))
+                }
                 _ => self.put(dst, Value::Int(i)),
             }
         }
@@ -335,6 +342,9 @@ impl Vm {
         unsafe {
             match &mut *p {
                 Some(Value::Bool(x)) => *x = b,
+                s if dst != NONE && dst & TMP != 0 && holds_no_resources(s) => {
+                    std::ptr::write(p, Some(Value::Bool(b)))
+                }
                 _ => self.put(dst, Value::Bool(b)),
             }
         }
@@ -411,13 +421,20 @@ impl Vm {
                 }
                 Op::Copy { dst, src } => {
                     let v = if src & (CONST | TMP) == TMP {
-                        self.get_raw(src)
+                        // A temporary moves (with its reference, if any).
+                        unsafe { (*self.slot_ptr(src)).take() }.unwrap_or_default()
                     } else {
-                        self.get(src)?
+                        self.get_hot(src)?
                     };
                     let p = self.slot_ptr(dst);
-                    let old = unsafe { (*p).replace(v) };
-                    drop(old);
+                    unsafe {
+                        if holds_no_resources(&*p) {
+                            std::ptr::write(p, Some(v));
+                        } else {
+                            let old = (*p).replace(v);
+                            drop(old);
+                        }
+                    }
                 }
                 Op::AssignRef { dst, src } => self.assign_ref_vars(dst, src)?,
                 Op::BindRef { dst, src } => {
