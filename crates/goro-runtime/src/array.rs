@@ -213,6 +213,7 @@ enum Store {
 
 const A_MAY_CYCLE: u8 = 1;
 const A_GC_BUFFERED: u8 = 2;
+const A_LITERAL: u8 = 4;
 const N_HAS_INT: u8 = 1;
 const N_FULL: u8 = 2;
 
@@ -474,6 +475,21 @@ impl ArrayData {
 
     pub(crate) fn may_cycle(&self) -> bool {
         self.flags.get() & A_MAY_CYCLE != 0
+    }
+
+    /// Marks this array as a compile-time literal (an immutable constant
+    /// array shared by every evaluation of the expression). Literals are
+    /// leaves for the cycle collector and are not counted as collected
+    /// (observed on PHP 8.5: a literal `[1, 2]` inside a garbage cycle is not
+    /// counted by `gc_collect_cycles()`, a runtime-built one is). The flag is
+    /// dropped when a write separates a copy.
+    pub fn mark_literal(&self) {
+        self.flags.set(self.flags.get() | A_LITERAL);
+    }
+
+    /// Whether this array is a compile-time literal ([`Self::mark_literal`]).
+    pub fn is_literal(&self) -> bool {
+        self.flags.get() & A_LITERAL != 0
     }
 
     // ------------------------------------------------------------ lookup

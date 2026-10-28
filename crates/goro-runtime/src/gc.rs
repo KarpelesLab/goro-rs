@@ -140,7 +140,10 @@ impl Node {
 
 fn node_of(v: &Value) -> Option<Node> {
     match v {
-        Value::Array(a) => a.rc().map(|rc| Node::Arr(rc.clone())),
+        Value::Array(a) => a
+            .rc()
+            .filter(|rc| !rc.is_literal())
+            .map(|rc| Node::Arr(rc.clone())),
         Value::Ref(r) => Some(Node::Ref(r.0.clone())),
         Value::Object(o) => Some(Node::Obj(o.0.clone())),
         _ => None,

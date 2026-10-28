@@ -54,18 +54,17 @@ pub trait Ctx {
         o.obj().props.borrow().clone()
     }
 
-    /// `$a <=> $b` where at least one operand is an object. Return -1, 0 or
-    /// 1 (1 also for "uncomparable"). Default: equal only to itself.
-    fn object_compare(&mut self, a: &Value, b: &Value) -> PhpResult<i32> {
-        match (a, b) {
-            (Value::Object(x), Value::Object(y)) if ObjRef::ptr_eq(x, y) => Ok(0),
-            _ => Ok(1),
-        }
+    /// `$a <=> $b` where at least one operand is an object: -1, 0 or 1 (1
+    /// also for "uncomparable"). `None` (the default) uses
+    /// [`compare::default_object_compare`](crate::compare::default_object_compare).
+    fn object_compare(&mut self, _a: &Value, _b: &Value) -> Option<PhpResult<i32>> {
+        None
     }
 
-    /// `$a == $b` where at least one operand is an object.
-    fn object_loose_eq(&mut self, a: &Value, b: &Value) -> PhpResult<bool> {
-        Ok(self.object_compare(a, b)? == 0)
+    /// `$a == $b` where at least one operand is an object. `None` (the
+    /// default) means `object_compare(a, b) == 0`.
+    fn object_loose_eq(&mut self, _a: &Value, _b: &Value) -> Option<PhpResult<bool>> {
+        None
     }
 
     /// Operator overloading for internal classes (GMP and friends). `None`

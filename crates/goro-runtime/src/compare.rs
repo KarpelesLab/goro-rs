@@ -63,28 +63,23 @@ pub fn cmp_bytes(a: &[u8], b: &[u8]) -> i32 {
 /// otherwise byte-wise.
 pub fn cmp_strings(a: &[u8], b: &[u8]) -> i32 {
     if let (Some(x), Some(y)) = (numeric_value(a), numeric_value(b)) {
-        // Integer strings of which one overflowed to float compare as
-        // strings when their float values are equal, so distinct big
-        // integers stay distinct (observed on PHP 8.5:
-        // "9223372036854775807" < "9223372036854775808").
-        let overflowed = |n: Number, s: &[u8]| matches!(n, Number::Float(_)) && is_int_syntax(s);
-        if (overflowed(x, a) || overflowed(y, b))
-            && is_int_syntax(a)
-            && is_int_syntax(b)
-            && x.to_f64() == y.to_f64()
-        {
-            return cmp_bytes(trim_ws(a), trim_ws(b));
+        // Numeric strings whose values are equal only because of float
+        // overflow compare as strings, so distinct big integers stay
+        // distinct (observed on PHP 8.5: "9223372036854775807" <
+        // "9223372036854775808", "1e1000" != "1e1001").
+        if x.to_f64() == y.to_f64() {
+            let int_overflow =
+                |n: Number, s: &[u8]| matches!(n, Number::Float(_)) && is_int_syntax(s);
+            let both_int_syntax = is_int_syntax(a) && is_int_syntax(b);
+            if (both_int_syntax && (int_overflow(x, a) || int_overflow(y, b)))
+                || x.to_f64().is_infinite()
+            {
+                return cmp_bytes(a, b);
+            }
         }
         return cmp_num(x, y);
     }
     cmp_bytes(a, b)
-}
-
-fn trim_ws(s: &[u8]) -> &[u8] {
-    let ws = crate::numeric::is_php_whitespace;
-    let start = s.iter().position(|c| !ws(*c)).unwrap_or(s.len());
-    let end = s.iter().rposition(|c| !ws(*c)).map_or(start, |e| e + 1);
-    &s[start..end]
 }
 
 fn is_int_syntax(s: &[u8]) -> bool {
@@ -151,9 +146,14 @@ pub fn compare(a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<i32> {
         (_, Bool(y)) => cmp_bool(to_bool_quiet(a), *y),
         (Null, Str(s)) => cmp_bytes(b"", s),
         (Str(s), Null) => cmp_bytes(s, b""),
-        (Object(_), _) | (_, Object(_)) => return ctx.object_compare(a, b),
         (Null, _) => cmp_bool(false, to_bool_quiet(b)),
         (_, Null) => cmp_bool(to_bool_quiet(a), false),
+        (Object(_), _) | (_, Object(_)) => {
+            return match ctx.object_compare(a, b) {
+                Some(r) => r,
+                None => default_object_compare(a, b, ctx),
+            };
+        }
         // NAN is uncomparable with any string (observed on PHP 8.5).
         (Float(x), Str(_)) | (Str(_), Float(x)) if x.is_nan() => 1,
         (Int(x), Str(s)) => cmp_num_str(Number::Int(*x), s, ctx),
@@ -171,6 +171,67 @@ pub fn compare(a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<i32> {
             return compare(a, &Int(y.id()), ctx);
         }
     })
+}
+
+/// PHP's comparison for objects without comparison handlers: an object
+/// equals itself; objects of the same class compare property by property;
+/// compared with an int or float the object converts to 1 with a notice
+/// (observed on PHP 8.5: "Object of class stdClass could not be converted to
+/// int"); anything else is uncomparable.
+pub fn default_object_compare(a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<i32> {
+    use Value::*;
+    let num_notice = |o: &crate::object::ObjRef, float: bool, ctx: &mut dyn Ctx| {
+        ctx.notice(
+            crate::error::Level::Notice,
+            format!(
+                "Object of class {} could not be converted to {}",
+                o.class_name().to_string_lossy(),
+                if float { "float" } else { "int" }
+            ),
+        );
+    };
+    match (a, b) {
+        (Object(x), Object(y)) => {
+            if crate::object::ObjRef::ptr_eq(x, y) {
+                return Ok(0);
+            }
+            if !std::rc::Rc::ptr_eq(x.class(), y.class()) {
+                return Ok(1);
+            }
+            let (sx, sy) = (
+                x.obj().slots.borrow().clone(),
+                y.obj().slots.borrow().clone(),
+            );
+            for (u, v) in sx.iter().zip(sy.iter()) {
+                let c = compare(u, v, ctx)?;
+                if c != 0 {
+                    return Ok(c);
+                }
+            }
+            let (px, py) = (
+                x.obj().props.borrow().clone(),
+                y.obj().props.borrow().clone(),
+            );
+            compare_arrays(&px, &py, ctx)
+        }
+        (Object(o), Int(i)) => {
+            num_notice(o, false, ctx);
+            Ok(ord(1.cmp(i)))
+        }
+        (Int(i), Object(o)) => {
+            num_notice(o, false, ctx);
+            Ok(ord(i.cmp(&1)))
+        }
+        (Object(o), Float(f)) => {
+            num_notice(o, true, ctx);
+            Ok(cmp_f64(1.0, *f))
+        }
+        (Float(f), Object(o)) => {
+            num_notice(o, true, ctx);
+            Ok(cmp_f64(*f, 1.0))
+        }
+        _ => Ok(1),
+    }
 }
 
 /// Array `<=>`: fewer elements is smaller; otherwise compared element by
@@ -223,7 +284,10 @@ pub fn loose_eq(a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<bool> {
             if matches!(a, Null) || matches!(b, Null) {
                 return Ok(false);
             }
-            return ctx.object_loose_eq(a, b);
+            if let Some(r) = ctx.object_loose_eq(a, b) {
+                return r;
+            }
+            return Ok(compare(a, b, ctx)? == 0);
         }
         _ => compare(a, b, ctx)? == 0,
     })

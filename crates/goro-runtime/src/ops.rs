@@ -280,25 +280,25 @@ fn int_operand(v: &Value, ctx: &mut dyn Ctx) -> Option<i64> {
     }
 }
 
-/// Implicit conversion of a float-like numeric string to int (observed on
-/// PHP 8.5: `Implicit conversion from float-string "1.5" to int loses
-/// precision`).
+/// Implicit conversion of a float-like numeric string to int: saturating,
+/// with a deprecation when the value is not an integer in range (observed
+/// on PHP 8.5: `"1.5" % 2` raises `Implicit conversion from float-string
+/// "1.5" to int loses precision`; `"1e100" % 3` is `PHP_INT_MAX % 3`).
 fn float_string_to_int(s: &[u8], f: f64, ctx: &mut dyn Ctx) -> i64 {
-    if f.is_finite() && (-crate::convert::TWO63..crate::convert::TWO63).contains(&f) {
-        let i = f as i64;
-        if i as f64 != f {
-            ctx.notice(
-                Level::Deprecated,
-                format!(
-                    "Implicit conversion from float-string \"{}\" to int loses precision",
-                    String::from_utf8_lossy(s)
-                ),
-            );
-        }
-        i
-    } else {
-        float_to_int_implicit(f, ctx)
+    let i = crate::convert::float_to_int_saturating(f);
+    let exact = f.is_finite()
+        && (-crate::convert::TWO63..crate::convert::TWO63).contains(&f)
+        && i as f64 == f;
+    if !exact {
+        ctx.notice(
+            Level::Deprecated,
+            format!(
+                "Implicit conversion from float-string \"{}\" to int loses precision",
+                String::from_utf8_lossy(s)
+            ),
+        );
     }
+    i
 }
 
 fn int_operands(op: BinOp, a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<(i64, i64)> {
