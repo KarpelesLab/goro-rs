@@ -164,6 +164,8 @@ pub enum Special {
     CalledClass,
     /// `$this` as a value.
     This,
+    /// `$this` or null (isset($this)).
+    ThisQuiet,
     /// `$GLOBALS` as a value (read-only copy).
     Globals,
 }

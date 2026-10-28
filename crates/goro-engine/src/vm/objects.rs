@@ -4,6 +4,7 @@
 //! PHP manual: Properties, Visibility, Overloading (magic methods),
 //! Property hooks, Readonly properties, Class constants, Object cloning.
 
+use crate::class::{DisplayName, TypeName};
 use std::rc::Rc;
 
 use goro_runtime::{Key, KeyRef, ObjRef, PhpArray, PhpRef, PhpStr, Value};
@@ -149,7 +150,7 @@ impl Vm {
     }
 
     fn prop_class_name(p: &PropInfo) -> String {
-        unsafe { (*p.class).name.to_string_lossy() }
+        unsafe { (*p.class).name.dname() }
     }
 
     // ------------------------------------------------------------ reads
@@ -188,7 +189,7 @@ impl Vm {
                                 let t = match &other {
                                     Value::Bool(true) => "true".to_string(),
                                     Value::Bool(false) => "false".to_string(),
-                                    v => v.type_name_for_error(),
+                                    v => v.tname(),
                                 };
                                 let n = self.to_php_str(&n)?;
                                 self.warn(&format!(
@@ -248,7 +249,7 @@ impl Vm {
                         "Error",
                         &format!(
                             "Property {}::${} is write-only",
-                            cls.name.to_string_lossy(),
+                            cls.name.dname(),
                             name.to_string_lossy()
                         ),
                     );
@@ -275,7 +276,7 @@ impl Vm {
                     if !quiet {
                         self.warn(&format!(
                             "Undefined property: {}::${}",
-                            cls.name.to_string_lossy(),
+                            cls.name.dname(),
                             name.to_string_lossy()
                         ))?;
                     }
@@ -302,7 +303,7 @@ impl Vm {
                     &format!(
                         "Cannot access {} property {}::${}",
                         Self::vis_word(&p),
-                        cls.name.to_string_lossy(),
+                        cls.name.dname(),
                         name.to_string_lossy()
                     ),
                 )
@@ -324,7 +325,7 @@ impl Vm {
                         if !quiet {
                             self.warn(&format!(
                                 "Undefined property: {}::${}",
-                                cls.name.to_string_lossy(),
+                                cls.name.dname(),
                                 name.to_string_lossy()
                             ))?;
                         }
@@ -496,7 +497,7 @@ impl Vm {
                             let t = match &other {
                                 Value::Bool(true) => "true".to_string(),
                                 Value::Bool(false) => "false".to_string(),
-                                v => v.type_name_for_error(),
+                                v => v.tname(),
                             };
                             return self.throw(
                                 "Error",
@@ -556,7 +557,7 @@ impl Vm {
                         "Error",
                         &format!(
                             "Property {}::${} is read-only",
-                            cls.name.to_string_lossy(),
+                            cls.name.dname(),
                             name.to_string_lossy()
                         ),
                     );
@@ -572,7 +573,7 @@ impl Vm {
                             "Error",
                             &format!(
                                 "Cannot modify readonly property {}::${}",
-                                cls.name.to_string_lossy(),
+                                cls.name.dname(),
                                 name.to_string_lossy()
                             ),
                         );
@@ -592,7 +593,7 @@ impl Vm {
                                 "Error",
                                 &format!(
                                     "Cannot initialize readonly property {}::${} from {}",
-                                    cls.name.to_string_lossy(),
+                                    cls.name.dname(),
                                     name.to_string_lossy(),
                                     self.scope_desc(scope)
                                 ),
@@ -639,7 +640,7 @@ impl Vm {
                         "Error",
                         &format!(
                             "Cannot modify protected readonly property {}::${}",
-                            cls.name.to_string_lossy(),
+                            cls.name.dname(),
                             name.to_string_lossy()
                         ),
                     );
@@ -649,7 +650,7 @@ impl Vm {
                     &format!(
                         "Cannot access {} property {}::${}",
                         Self::vis_word(&p),
-                        cls.name.to_string_lossy(),
+                        cls.name.dname(),
                         name.to_string_lossy()
                     ),
                 )
@@ -716,7 +717,7 @@ impl Vm {
         } else {
             ""
         };
-        let cname = unsafe { (*dc).name.to_string_lossy() };
+        let cname = unsafe { (*dc).name.dname() };
         let _ = ro;
         self.throw(
             "Error",
@@ -750,7 +751,7 @@ impl Vm {
                 "Error",
                 &format!(
                     "Cannot create dynamic property {}::${}",
-                    cls.name.to_string_lossy(),
+                    cls.name.dname(),
                     name.to_string_lossy()
                 ),
             );
@@ -758,7 +759,7 @@ impl Vm {
         if !self.allows_dynamic(cls) {
             self.deprecated(&format!(
                 "Creation of dynamic property {}::${} is deprecated",
-                cls.name.to_string_lossy(),
+                cls.name.dname(),
                 name.to_string_lossy()
             ))?;
         }
@@ -791,9 +792,9 @@ impl Vm {
             Check::Coerced(c) => Ok(c),
             Check::Fail => self.type_error(&format!(
                 "Cannot assign {} to property {}::${} of type {}",
-                v.type_name_for_error(),
+                v.tname(),
                 Self::prop_class_name(p),
-                p.name.to_string_lossy(),
+                p.name.dname(),
                 t.display()
             )),
         }
@@ -823,18 +824,16 @@ impl Vm {
             }
             PathAction::AssignOp(op, _) => {
                 let rhs = value.unwrap();
-                if let Some(ptr) = self.prop_ptr(o, name, true)? {
-                    if op == Bin::Concat {
-                        let p = deref_ptr(ptr);
-                        if let (Value::Str(s), Value::Str(r)) = (unsafe { &mut *p }, &rhs) {
-                            s.push_bytes(r);
-                            return Ok(unsafe { (*p).clone() });
-                        }
+                // In-place append to an existing plain string property.
+                if op == Bin::Concat
+                    && let Value::Str(r) = &rhs
+                    && let Some(p) = self.existing_plain_prop(o, name)
+                {
+                    let p = deref_ptr(p);
+                    if let Value::Str(s) = unsafe { &mut *p } {
+                        s.push_bytes(r);
+                        return Ok(unsafe { (*p).clone() });
                     }
-                    let old = unsafe { (*deref_ptr(ptr)).clone() };
-                    let new = self.binary_op(op, &old, &rhs)?;
-                    self.write_prop(o, name, new.clone(), None)?;
-                    return Ok(new);
                 }
                 let old = self.read_prop(o, name, false, None)?;
                 let new = self.binary_op(op, &old, &rhs)?;
@@ -854,7 +853,7 @@ impl Vm {
                     let cls = self.class_of(o);
                     self.notice_msg(&format!(
                         "Indirect modification of overloaded property {}::${} has no effect",
-                        cls.name.to_string_lossy(),
+                        cls.name.dname(),
                         name.to_string_lossy()
                     ))?;
                     Ok(Value::Ref(PhpRef::new(v)))
@@ -880,6 +879,36 @@ impl Vm {
         }
     }
 
+    /// Pointer to an initialized, accessible property without hooks, type
+    /// or readonly constraints (in-place updates).
+    fn existing_plain_prop(&mut self, o: &ObjRef, name: &PhpStr) -> Option<*mut Value> {
+        let cls = self.class_of(o);
+        let scope = self.scope_ptr();
+        match self.lookup_prop(&cls, name, scope) {
+            PropLookup::Found(p) => {
+                if p.get.is_some()
+                    || p.set.is_some()
+                    || p.flags & (mflags::READONLY | mflags::VIRTUAL) != 0
+                    || p.ty.is_some()
+                {
+                    return None;
+                }
+                let slots = o.obj().slots.as_ptr();
+                let slot = unsafe { &mut (&mut *slots)[p.slot as usize] };
+                if self.is_uninit(slot) {
+                    return None;
+                }
+                Some(slot as *mut Value)
+            }
+            PropLookup::Dynamic => {
+                let props = o.obj().props.as_ptr();
+                let p = unsafe { (*props).get_mut(KeyRef::Str(name)) }?;
+                Some(p as *mut Value)
+            }
+            PropLookup::Hidden(_) => None,
+        }
+    }
+
     /// Pointer to a property's storage for in-place modification (creating
     /// a dynamic property as null). `None` when access goes through magic
     /// methods or hooks.
@@ -898,7 +927,7 @@ impl Vm {
                             "Error",
                             &format!(
                                 "Cannot modify readonly property {}::${}",
-                                cls.name.to_string_lossy(),
+                                cls.name.dname(),
                                 name.to_string_lossy()
                             ),
                         );
@@ -927,7 +956,7 @@ impl Vm {
                         if rmw {
                             self.warn(&format!(
                                 "Undefined property: {}::${}",
-                                cls.name.to_string_lossy(),
+                                cls.name.dname(),
                                 name.to_string_lossy()
                             ))?;
                         }
@@ -945,7 +974,7 @@ impl Vm {
                     &format!(
                         "Cannot access {} property {}::${}",
                         Self::vis_word(&p),
-                        cls.name.to_string_lossy(),
+                        cls.name.dname(),
                         name.to_string_lossy()
                     ),
                 )
@@ -959,7 +988,7 @@ impl Vm {
                     if rmw {
                         self.warn(&format!(
                             "Undefined property: {}::${}",
-                            cls.name.to_string_lossy(),
+                            cls.name.dname(),
                             name.to_string_lossy()
                         ))?;
                     }
@@ -1022,7 +1051,7 @@ impl Vm {
                 if !matches!(v, Value::Object(_)) && !next_is_prop {
                     self.notice_msg(&format!(
                         "Indirect modification of overloaded property {}::${} has no effect",
-                        cls.name.to_string_lossy(),
+                        cls.name.dname(),
                         name.to_string_lossy()
                     ))?;
                 }
@@ -1041,7 +1070,7 @@ impl Vm {
                         "Error",
                         &format!(
                             "Cannot unset hooked property {}::${}",
-                            cls.name.to_string_lossy(),
+                            cls.name.dname(),
                             name.to_string_lossy()
                         ),
                     );
@@ -1053,7 +1082,7 @@ impl Vm {
                             "Error",
                             &format!(
                                 "Cannot unset readonly property {}::${}",
-                                cls.name.to_string_lossy(),
+                                cls.name.dname(),
                                 name.to_string_lossy()
                             ),
                         );
@@ -1081,7 +1110,7 @@ impl Vm {
                     &format!(
                         "Cannot access {} property {}::${}",
                         Self::vis_word(&p),
-                        cls.name.to_string_lossy(),
+                        cls.name.dname(),
                         name.to_string_lossy()
                     ),
                 )
@@ -1123,7 +1152,7 @@ impl Vm {
                 "Error",
                 &format!(
                     "Access to undeclared static property {}::${}",
-                    cls.name.to_string_lossy(),
+                    cls.name.dname(),
                     n.to_string_lossy()
                 ),
             );
@@ -1151,7 +1180,7 @@ impl Vm {
                 &format!(
                     "Cannot access {} property {}::${}",
                     w,
-                    cls.name.to_string_lossy(),
+                    cls.name.dname(),
                     n.to_string_lossy()
                 ),
             );
@@ -1161,7 +1190,7 @@ impl Vm {
                 "Error",
                 &format!(
                     "Typed static property {}::${} must not be accessed before initialization",
-                    unsafe { (*sp.class).name.to_string_lossy() },
+                    unsafe { (*sp.class).name.dname() },
                     n.to_string_lossy()
                 ),
             );
@@ -1243,8 +1272,10 @@ impl Vm {
             ClassSpec::SelfRef => {
                 let p = self.scope_ptr();
                 if p.is_null() {
-                    return self
-                        .throw("Error", "Cannot use \"self\" when no class scope is active");
+                    return self.throw(
+                        "Error",
+                        "Cannot access \"self\" when no class scope is active",
+                    );
                 }
                 Ok(self.rc_class(p))
             }
@@ -1253,7 +1284,7 @@ impl Vm {
                 if p.is_null() {
                     return self.throw(
                         "Error",
-                        "Cannot use \"parent\" when no class scope is active",
+                        "Cannot access \"parent\" when no class scope is active",
                     );
                 }
                 match unsafe { (*p).parent.clone() } {
@@ -1269,7 +1300,7 @@ impl Vm {
                 if p.is_null() {
                     return self.throw(
                         "Error",
-                        "Cannot use \"static\" when no class scope is active",
+                        "Cannot access \"static\" when no class scope is active",
                     );
                 }
                 Ok(self.rc_class(p))
@@ -1303,12 +1334,39 @@ impl Vm {
                     _ => self.throw(
                         "Error",
                         "Cannot use value of type {} as class name"
-                            .replace("{}", &v.type_name_for_error())
+                            .replace("{}", &v.tname())
                             .as_str(),
                     ),
                 }
             }
         }
+    }
+
+    /// `X::class` for special classes ("Cannot use" messages).
+    pub fn resolve_class_name_spec(&mut self, spec: ClassSpec) -> R<Rc<Class>> {
+        let (p, word) = match spec {
+            ClassSpec::SelfRef => (self.scope_ptr(), "self"),
+            ClassSpec::Parent => (self.scope_ptr(), "parent"),
+            ClassSpec::Static => (self.static_class_ptr(), "static"),
+            other => return self.resolve_class_spec(other, false),
+        };
+        if p.is_null() {
+            return self.throw(
+                "Error",
+                &format!("Cannot use \"{}\" when no class scope is active", word),
+            );
+        }
+        let c = self.rc_class(p);
+        if word == "parent" {
+            return match c.parent.clone() {
+                Some(pc) => Ok(pc),
+                None => self.throw(
+                    "Error",
+                    "Cannot use \"parent\" when current class scope has no parent",
+                ),
+            };
+        }
+        Ok(c)
     }
 
     fn resolve_class_spec_quiet(&mut self, spec: ClassSpec) -> R<Option<Rc<Class>>> {
@@ -1425,7 +1483,7 @@ impl Vm {
                     "Error",
                     &format!(
                         "Cannot use value of type {} as class constant name",
-                        other.type_name_for_error()
+                        other.tname()
                     ),
                 );
             }
@@ -1445,7 +1503,7 @@ impl Vm {
                 "Error",
                 &format!(
                     "Undefined constant {}::{}",
-                    cls.name.to_string_lossy(),
+                    cls.name.dname(),
                     n.to_string_lossy()
                 ),
             );
@@ -1472,7 +1530,7 @@ impl Vm {
                     &format!(
                         "Cannot access {} constant {}::{}",
                         w,
-                        cls.name.to_string_lossy(),
+                        cls.name.dname(),
                         n.to_string_lossy()
                     ),
                 );
@@ -1484,7 +1542,7 @@ impl Vm {
         if c.flags & mflags::DEPRECATED != 0 {
             self.deprecated(&format!(
                 "Constant {}::{} is deprecated",
-                cls.name.to_string_lossy(),
+                cls.name.dname(),
                 n.to_string_lossy()
             ))?;
         }
@@ -1496,13 +1554,13 @@ impl Vm {
         match st {
             ConstState::Value(v) => Ok(v),
             ConstState::Evaluating => {
-                let cn = unsafe { (*c.class).name.to_string_lossy() };
+                let cn = unsafe { (*c.class).name.dname() };
                 self.throw(
                     "Error",
                     &format!(
                         "Cannot declare self-referencing constant {}::{}",
                         cn,
-                        c.name.to_string_lossy()
+                        c.name.dname()
                     ),
                 )
             }
@@ -1521,12 +1579,12 @@ impl Vm {
                                 }
                                 Check::Fail => {
                                     *c.value.borrow_mut() = ConstState::Pending(ce);
-                                    let cn = unsafe { (*c.class).name.to_string_lossy() };
+                                    let cn = unsafe { (*c.class).name.dname() };
                                     return self.type_error(&format!(
                                         "Cannot assign {} to class constant {}::{} of type {}",
-                                        v.type_name_for_error(),
+                                        v.tname(),
                                         cn,
-                                        c.name.to_string_lossy(),
+                                        c.name.dname(),
                                         t.display()
                                     ));
                                 }
@@ -1583,7 +1641,7 @@ impl Vm {
                         &format!(
                             "Call to {} {}::__construct() from {}",
                             vis,
-                            cls.name.to_string_lossy(),
+                            cls.name.dname(),
                             self.scope_desc(scope)
                         ),
                     );
@@ -1639,7 +1697,7 @@ impl Vm {
             };
             return self.throw(
                 "Error",
-                &format!("Cannot instantiate {} {}", what, cls.name.to_string_lossy()),
+                &format!("Cannot instantiate {} {}", what, cls.name.dname()),
             );
         }
         self.instantiate_raw(cls)
@@ -1688,9 +1746,9 @@ impl Vm {
                             Check::Fail => {
                                 return self.type_error(&format!(
                                     "Cannot assign {} to property {}::${} of type {}",
-                                    x.type_name_for_error(),
+                                    x.tname(),
                                     Self::prop_class_name(p),
-                                    p.name.to_string_lossy(),
+                                    p.name.dname(),
                                     t.display()
                                 ));
                             }
@@ -1738,7 +1796,7 @@ impl Vm {
                 "Error",
                 &format!(
                     "Trying to clone an uncloneable object of class {}",
-                    cls.name.to_string_lossy()
+                    cls.name.dname()
                 ),
             );
         }
@@ -1756,7 +1814,7 @@ impl Vm {
                     &format!(
                         "Call to {} {}::__clone() from {}",
                         vis,
-                        cls.name.to_string_lossy(),
+                        cls.name.dname(),
                         self.scope_desc(scope)
                     ),
                 );
@@ -1797,7 +1855,7 @@ impl Vm {
         let Value::Object(o) = v else {
             return self.type_error(&format!(
                 "clone(): Argument #1 ($object) must be of type object, {} given",
-                v.type_name_for_error()
+                v.tname()
             ));
         };
         let n = self.clone_object(&o)?;

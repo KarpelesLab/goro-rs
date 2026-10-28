@@ -112,8 +112,15 @@ impl Vm {
             Some(m) => (true, m.to_string()),
             None => (false, e.message),
         };
-        if is_parse && throw {
-            match self.create_exception("ParseError", &msg, 0) {
+        // eval() throws compile errors too; include only parse errors.
+        let throw_compile = throw && self.compiling_eval;
+        if (is_parse && throw) || throw_compile {
+            let class = if is_parse {
+                "ParseError"
+            } else {
+                "CompileError"
+            };
+            match self.create_exception(class, &msg, 0) {
                 Ok(o) => {
                     self.set_prop_raw(&o, b"file", Value::Str(PhpStr::new(file)));
                     self.set_prop_raw(&o, b"line", Value::Int(e.line as i64));
@@ -326,7 +333,12 @@ impl Vm {
     fn run_attached(&mut self, src: &[u8], file: &[u8], eval: bool, what: &str) -> R<Value> {
         let unit = match self.compile_source(src, file, eval) {
             Ok(u) => u,
-            Err(e) => return Err(self.compile_error(e, file, true)),
+            Err(e) => {
+                self.compiling_eval = eval;
+                let u = self.compile_error(e, file, true);
+                self.compiling_eval = false;
+                return Err(u);
+            }
         };
         let main = unit.main.clone();
         self.units.push(main.clone());

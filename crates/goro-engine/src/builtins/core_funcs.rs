@@ -1,6 +1,7 @@
 //! Core functions (PHP manual: Function handling, Classes/Objects, Error
 //! handling, Misc., PHP options/info).
 
+use crate::class::{DisplayName, TypeName};
 use std::rc::Rc;
 
 use goro_runtime::{Key, KeyRef, PhpArray, PhpStr, Value};
@@ -382,6 +383,8 @@ pub static MODULE: Module = Module {
     ],
     constants: &[
         ("PHP_EOL", ConstVal::Str("\n")),
+        ("INF", ConstVal::Float(f64::INFINITY)),
+        ("NAN", ConstVal::Float(f64::NAN)),
         ("PHP_INT_MAX", ConstVal::Int(i64::MAX)),
         ("PHP_INT_MIN", ConstVal::Int(i64::MIN)),
         ("PHP_INT_SIZE", ConstVal::Int(8)),
@@ -718,7 +721,7 @@ fn compact(vm: &mut Vm, a: &mut Args) -> R<Value> {
             other => {
                 vm.warn(&format!(
                     "compact(): Argument #1 must be string or array of strings, {} given",
-                    other.type_name_for_error()
+                    other.tname()
                 ))?;
             }
         }
@@ -998,6 +1001,7 @@ fn get_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
                     "get_class() without arguments must be called from within a class",
                 );
             }
+            vm.deprecated("Calling get_class() without arguments is deprecated")?;
             Ok(Value::Str(unsafe { (*p).name.clone() }))
         }
     }
@@ -1043,7 +1047,7 @@ fn method_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
         other => {
             return vm.type_error(&format!(
                 "method_exists(): Argument #1 ($object_or_class) must be of type object|string, {} given",
-                other.type_name_for_error()
+                other.tname()
             ));
         }
     };
@@ -1064,7 +1068,7 @@ fn property_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
         other => {
             return vm.type_error(&format!(
                 "property_exists(): Argument #1 ($object_or_class) must be of type object|string, {} given",
-                other.type_name_for_error()
+                other.tname()
             ));
         }
     };
@@ -1143,7 +1147,7 @@ fn get_class_methods(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(c) = class_arg(vm, &v, true)? else {
         return vm.type_error(&format!(
             "get_class_methods(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given",
-            v.type_name_for_error()
+            v.tname()
         ));
     };
     let scope = vm.scope_ptr();
@@ -1211,7 +1215,7 @@ fn class_list_arg(vm: &mut Vm, a: &mut Args, fname: &str) -> R<Option<Rc<Class>>
         other => vm.type_error(&format!(
             "{}(): Argument #1 ($object_or_class) must be of type object|string, {} given",
             fname,
-            other.type_name_for_error()
+            other.tname()
         )),
     }
 }

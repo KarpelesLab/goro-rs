@@ -1,6 +1,7 @@
 //! Enum methods: `cases()`, `from()`, `tryFrom()` (PHP manual:
 //! Enumerations, Backed enumerations).
 
+use crate::class::{DisplayName, TypeName};
 use goro_runtime::{PhpArray, Value};
 
 use crate::class::{ConstState, mflags};
@@ -50,7 +51,7 @@ fn lookup(vm: &mut Vm, a: &mut Args, try_: bool) -> R<Value> {
             } else {
                 return vm.type_error(&format!(
                     "{}::{}(): Argument #1 ($value) must be of type int, string given",
-                    cls.name.to_string_lossy(),
+                    cls.name.dname(),
                     if try_ { "tryFrom" } else { "from" }
                 ));
             }
@@ -62,7 +63,7 @@ fn lookup(vm: &mut Vm, a: &mut Args, try_: bool) -> R<Value> {
                 return vm
                     .type_error(&format!(
                         "{}::{}(): Argument #1 ($value) must be of type int, float given",
-                        cls.name.to_string_lossy(),
+                        cls.name.dname(),
                         if try_ { "tryFrom" } else { "from" }
                     ))
                     .or_else(|e: crate::vm::Unwind| {
@@ -100,12 +101,12 @@ fn lookup(vm: &mut Vm, a: &mut Args, try_: bool) -> R<Value> {
     let shown = match &key {
         Value::Str(s) => format!("\"{}\"", s.to_string_lossy()),
         Value::Int(i) => i.to_string(),
-        other => other.type_name_for_error(),
+        other => other.tname(),
     };
     vm.value_error(&format!(
         "{} is not a valid backing value for enum {}",
         shown,
-        enum_display(&cls.name.to_string_lossy())
+        enum_display(&cls.name.dname())
     ))
 }
 

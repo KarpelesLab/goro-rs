@@ -1,6 +1,7 @@
 //! `foreach` and generators (PHP manual: foreach, Generators, Iterator,
 //! IteratorAggregate).
 
+use crate::class::{DisplayName, TypeName};
 use std::rc::Rc;
 
 use goro_runtime::{Key, KeyRef, ObjRef, PhpArray, PhpRef, Value};
@@ -219,7 +220,7 @@ impl Vm {
             other => {
                 self.warn(&format!(
                     "foreach() argument must be of type array|object, {} given",
-                    other.type_name_for_error()
+                    other.tname()
                 ))?;
                 Ok(false)
             }
@@ -252,7 +253,7 @@ impl Vm {
                             "Exception",
                             &format!(
                                 "Objects returned by {}::getIterator() must be traversable or implement interface Iterator",
-                                cls.name.to_string_lossy()
+                                cls.name.dname()
                             ),
                         );
                     }

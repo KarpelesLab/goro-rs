@@ -87,6 +87,9 @@ impl Vm {
             halt_offsets: HashMap::new(),
             dump_stack: Vec::new(),
             weakrefs: HashMap::new(),
+            compiling_eval: false,
+            ex_parents: Vec::new(),
+            fiber_stack: Vec::new(),
         };
         for m in modules {
             vm.register_module(m);

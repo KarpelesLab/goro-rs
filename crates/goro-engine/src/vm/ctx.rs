@@ -1,6 +1,7 @@
 //! The engine as the runtime's [`Ctx`]: diagnostics, object conversions
 //! and comparisons that need user code.
 
+use crate::class::{DisplayName, TypeName};
 use goro_runtime::numeric::Number;
 use goro_runtime::ops::BinOp;
 use goro_runtime::{Ctx, Key, Level, ObjRef, PhpArray, PhpError, PhpResult, PhpStr, Value};
@@ -175,8 +176,8 @@ impl Vm {
                         "Error",
                         &format!(
                             "{}::__toString(): Return value must be of type string, {} returned",
-                            cls.name.to_string_lossy(),
-                            v.type_name_for_error()
+                            cls.name.dname(),
+                            v.tname()
                         ),
                     ),
                 }
@@ -185,7 +186,7 @@ impl Vm {
                 "Error",
                 &format!(
                     "Object of class {} could not be converted to string",
-                    cls.name.to_string_lossy()
+                    cls.name.dname()
                 ),
             ),
         }
@@ -330,7 +331,7 @@ impl Vm {
                 func,
                 n,
                 pname,
-                v.type_name_for_error()
+                v.tname()
             )),
         }
     }
@@ -368,7 +369,7 @@ impl Vm {
                 }
                 self.type_error(&format!(
                     "count(): Argument #1 ($value) must be of type Countable|array, {} given",
-                    cls.name.to_string_lossy()
+                    cls.name.dname()
                 ))
             }
             Value::Ref(r) => {
@@ -377,7 +378,7 @@ impl Vm {
             }
             other => self.type_error(&format!(
                 "count(): Argument #1 ($value) must be of type Countable|array, {} given",
-                other.type_name_for_error()
+                other.tname()
             )),
         }
     }

@@ -1,5 +1,6 @@
 //! Output control functions (PHP manual: Output Control) and flush().
 
+use crate::class::{DisplayName, TypeName};
 use goro_runtime::{Key, PhpArray, PhpStr, Value};
 
 use crate::func::Args;
@@ -99,7 +100,7 @@ fn no_buffer(vm: &mut Vm, what: &str, verb: &str) -> R<Value> {
 fn check_flag(vm: &mut Vm, what: &str, verb: &str, flag: i64) -> R<bool> {
     let b = vm.out.buffers.last().unwrap();
     if b.flags & flag == 0 {
-        let n = b.name.to_string_lossy();
+        let n = b.name.dname();
         vm.notice_msg(&format!(
             "{}(): Failed to {} buffer of {} (0)",
             what, verb, n

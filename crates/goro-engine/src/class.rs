@@ -408,3 +408,32 @@ pub fn lower_intern(b: &[u8]) -> PhpStr {
         PhpStr::intern(b)
     }
 }
+
+/// Names as PHP prints them in messages: up to a NUL byte (anonymous class
+/// names continue with the file and line after a NUL).
+pub trait DisplayName {
+    fn dname(&self) -> String;
+}
+
+impl DisplayName for PhpStr {
+    fn dname(&self) -> String {
+        let b = self.as_bytes();
+        let cut = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+        String::from_utf8_lossy(&b[..cut]).into_owned()
+    }
+}
+
+/// The type of a value for error messages ("int", "Foo", "class@anonymous").
+pub trait TypeName {
+    fn tname(&self) -> String;
+}
+
+impl TypeName for Value {
+    fn tname(&self) -> String {
+        match self {
+            Value::Object(o) => o.class_name().dname(),
+            Value::Ref(r) => r.get().tname(),
+            v => v.type_name_for_error(),
+        }
+    }
+}

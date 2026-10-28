@@ -275,6 +275,23 @@ pub struct ExecState {
     pub native_calls: Vec<NativeCall>,
 }
 
+impl ExecState {
+    /// Visits every value the state holds (cycle collection of fibers).
+    pub fn for_each_value(&self, visit: &mut dyn FnMut(&Value)) {
+        for f in &self.frames {
+            let n = f.code().num_slots as usize;
+            for i in 0..n {
+                if let Some(v) = unsafe { (*f.base.add(i)).as_ref() } {
+                    visit(v);
+                }
+            }
+            if let Some(t) = &f.this {
+                visit(&Value::Object(t.clone()));
+            }
+        }
+    }
+}
+
 /// The global scope's variables.
 pub struct Globals {
     pub code: Option<Rc<FuncCode>>,
@@ -314,6 +331,9 @@ pub struct ErrorState {
     /// An exception thrown by an error handler during a runtime operation
     /// (reported through `Ctx::notice`, which can't fail).
     pub deferred: Option<Unwind>,
+    /// Diagnostics wait in `queued` while this is non-zero.
+    pub defer_depth: u32,
+    pub queued: Vec<(i64, String, PhpStr, u32)>,
 }
 
 /// Classes and functions the engine refers to directly.
@@ -413,6 +433,12 @@ pub struct Vm {
     pub dump_stack: Vec<usize>,
     /// WeakReference objects by target handle.
     pub weakrefs: HashMap<u32, (goro_runtime::WeakObj, goro_runtime::WeakObj)>,
+    /// Compiling eval() code (compile errors are thrown).
+    pub compiling_eval: bool,
+    /// Execution states of the resumers of running fibers.
+    pub ex_parents: Vec<ExecState>,
+    /// Running fibers, innermost last.
+    pub fiber_stack: Vec<ObjRef>,
 }
 
 pub mod resources {
@@ -462,6 +488,7 @@ impl Vm {
         }
         match self.ex.frames.last() {
             Some(f) => f.code().file.clone(),
+            None if self.shutting_down => PhpStr::from("[no active file]"),
             None => self.script_path.clone(),
         }
     }

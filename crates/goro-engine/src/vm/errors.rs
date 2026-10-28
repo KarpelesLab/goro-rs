@@ -1,6 +1,7 @@
 //! Diagnostics (PHP manual: Error Handling and Logging), exceptions and
 //! their dispatch to handlers, backtraces.
 
+use crate::class::{DisplayName, TypeName};
 use std::rc::Rc;
 
 use goro_runtime::{ErrorKind, Key, ObjRef, PhpArray, PhpError, PhpStr, Value};
@@ -23,7 +24,7 @@ pub const E_STRICT: i64 = 2048;
 pub const E_RECOVERABLE_ERROR: i64 = 4096;
 pub const E_DEPRECATED: i64 = 8192;
 pub const E_USER_DEPRECATED: i64 = 16384;
-pub const E_ALL: i64 = 32767;
+pub const E_ALL: i64 = 30719;
 
 pub fn level_label(level: i64) -> &'static str {
     match level {
@@ -73,6 +74,12 @@ impl Vm {
     }
 
     pub fn raise_at(&mut self, level: i64, msg: &str, file: PhpStr, line: u32) -> R<()> {
+        // While a write path holds pointers into arrays, user error
+        // handlers can't run (they could free them): queue the diagnostic.
+        if self.err.defer_depth > 0 {
+            self.err.queued.push((level, msg.to_string(), file, line));
+            return Ok(());
+        }
         let msg_s = PhpStr::from(msg);
         self.err.last = Some((level, msg_s.clone(), file.clone(), line as i64));
         // User error handler (called regardless of error_reporting).
@@ -159,6 +166,20 @@ impl Vm {
         }
         self.exit_status = 255;
         Unwind::Fatal
+    }
+
+    /// Raises the diagnostics queued while handlers couldn't run.
+    pub fn flush_deferred(&mut self) -> R<()> {
+        let saved = std::mem::replace(&mut self.err.defer_depth, 0);
+        let q = std::mem::take(&mut self.err.queued);
+        let mut r = Ok(());
+        for (level, msg, file, line) in q {
+            if r.is_ok() {
+                r = self.raise_at(level, &msg, file, line);
+            }
+        }
+        self.err.defer_depth = saved;
+        r
     }
 
     /// An exception was pending from a callback that could not fail.
@@ -425,7 +446,7 @@ impl Vm {
                 self.var_export_into(&mut out, v, 0).ok();
                 format!("Unhandled match case {}", String::from_utf8_lossy(&out))
             }
-            _ => format!("Unhandled match case of type {}", v.type_name_for_error()),
+            _ => format!("Unhandled match case of type {}", v.tname()),
         }
     }
 
@@ -434,68 +455,86 @@ impl Vm {
     /// The call stack, innermost call first.
     pub fn backtrace(&self, with_args: bool) -> Vec<TraceFrame> {
         let mut out = Vec::new();
-        let n = self.ex.frames.len();
-        let mut natives = self.ex.native_calls.len();
+        self.backtrace_ex(&self.ex, with_args, &mut out);
+        // Inside a fiber: the resumers' stacks follow.
+        for ex in self.ex_parents.iter().rev() {
+            self.backtrace_ex(ex, with_args, &mut out);
+        }
+        out
+    }
+
+    fn native_trace_frame(
+        &self,
+        ex: &super::ExecState,
+        nc: &super::NativeCall,
+        i: usize,
+        with_args: bool,
+    ) -> TraceFrame {
+        let (file, line) = if i == 0 {
+            (None, 0)
+        } else {
+            let f = &ex.frames[i - 1];
+            (Some(f.code().file.clone()), nc.line)
+        };
+        let scope = nc.func.scope();
+        let args = if with_args {
+            Some(unsafe { (*nc.args).iter().map(|v| v.deref()).collect() })
+        } else {
+            None
+        };
+        TraceFrame {
+            file,
+            line,
+            function: nc.func.name.clone(),
+            class: scope.map(|c| c.name.clone()),
+            call_type: if scope.is_some() {
+                if nc.this.is_some() { "->" } else { "::" }
+            } else {
+                ""
+            },
+            object: nc.this.clone(),
+            args,
+        }
+    }
+
+    fn backtrace_ex(&self, ex: &super::ExecState, with_args: bool, out: &mut Vec<TraceFrame>) {
+        let n = ex.frames.len();
+        let mut natives = ex.native_calls.len();
         let mut i = n;
         loop {
             // Native calls made from frame i-1 (depth == i).
-            while natives > 0 && self.ex.native_calls[natives - 1].depth as usize == i {
-                let nc = &self.ex.native_calls[natives - 1];
+            while natives > 0 && ex.native_calls[natives - 1].depth as usize == i {
+                let nc = &ex.native_calls[natives - 1];
                 natives -= 1;
-                let (file, line) = if i == 0 {
-                    (None, 0)
-                } else {
-                    let f = &self.ex.frames[i - 1];
-                    (Some(f.code().file.clone()), nc.line)
-                };
-                let scope = nc.func.scope();
-                let args = if with_args {
-                    Some(unsafe { (*nc.args).iter().map(|v| v.deref()).collect() })
-                } else {
-                    None
-                };
-                out.push(TraceFrame {
-                    file,
-                    line,
-                    function: nc.func.name.clone(),
-                    class: scope.map(|c| c.name.clone()),
-                    call_type: if scope.is_some() {
-                        if nc.this.is_some() { "->" } else { "::" }
-                    } else {
-                        ""
-                    },
-                    object: nc.this.clone(),
-                    args,
-                });
+                out.push(self.native_trace_frame(ex, nc, i, with_args));
             }
-            if i <= 1 {
+            if i == 0 {
                 break;
             }
             i -= 1;
-            let f = &self.ex.frames[i];
+            let f = &ex.frames[i];
             let code = f.code();
             if f.flags & frame_flags::GLOBAL != 0 {
                 continue;
             }
-            // Call site: in the caller frame, unless called from a native.
+            // Call site: in the caller frame, unless called from a native
+            // (or from the engine itself: shutdown functions, fibers).
             let called_from_native =
-                natives > 0 && self.ex.native_calls[natives - 1].depth as usize == i;
-            let (file, line) = if called_from_native || f.flags & frame_flags::DTOR != 0 && false {
+                natives > 0 && ex.native_calls[natives - 1].depth as usize == i;
+            let (file, line) = if called_from_native || i == 0 {
                 (None, 0)
             } else {
-                let caller = &self.ex.frames[i - 1];
-                let cip = if i == n - 1 + 1 {
-                    0
-                } else {
-                    caller.ip.saturating_sub(1)
-                };
+                let caller = &ex.frames[i - 1];
+                let cip = caller.ip.saturating_sub(1);
                 (
                     Some(caller.code().file.clone()),
                     caller.code().line_of(cip as usize),
                 )
             };
             if code.flags & crate::bytecode::fflags::PSEUDO_MAIN != 0 {
-                // include / eval frame
+                if f.flags & frame_flags::ATTACHED == 0 {
+                    continue;
+                }
                 let fname = match f.line_hint {
                     2 => "include_once",
                     3 => "require",
@@ -521,6 +560,9 @@ impl Vm {
                 });
                 continue;
             }
+            if code.flags & crate::bytecode::fflags::CONST_EXPR != 0 {
+                continue;
+            }
             let scope = f.func.scope();
             let is_closure = code.flags & crate::bytecode::fflags::CLOSURE != 0;
             let class = if is_closure {
@@ -542,20 +584,16 @@ impl Vm {
                 let mut v = Vec::new();
                 let argc = f.argc as usize;
                 for k in 0..argc.min(np) {
+                    let x = unsafe { (*f.base.add(k)).as_ref() }.map(|x| x.deref());
                     if code.params[k].variadic {
-                        if let Some(Value::Array(a)) =
-                            unsafe { (*f.base.add(k)).as_ref() }.map(|x| x.deref())
-                        {
-                            for (_, x) in a.iter() {
-                                v.push(x.deref());
+                        if let Some(Value::Array(a)) = x {
+                            for (_, y) in a.iter() {
+                                v.push(y.deref());
                             }
                         }
                         continue;
                     }
-                    let x = unsafe { (*f.base.add(k)).as_ref() }
-                        .map(|x| x.deref())
-                        .unwrap_or_default();
-                    v.push(x);
+                    v.push(x.unwrap_or_default());
                 }
                 for x in &f.extra_args {
                     v.push(x.deref());
@@ -579,8 +617,6 @@ impl Vm {
                 args,
             });
         }
-        let _ = slot_of;
-        out
     }
 
     /// The trace as the array stored in exceptions / returned by
@@ -701,10 +737,33 @@ impl Vm {
                 Err(_) => return,
             }
         }
+        // Parse and compile errors that nobody caught are reported as such.
+        let cls = self.class_of(&ex);
+        let is_parse = self.instance_of_lname(&cls, b"parseerror");
+        if is_parse || self.instance_of_lname(&cls, b"compileerror") {
+            let msg = self.get_prop_raw(&ex, b"message");
+            let msg = msg
+                .as_str()
+                .map(|s| s.to_string_lossy())
+                .unwrap_or_default();
+            let file = self.get_prop_raw(&ex, b"file");
+            let file = file.as_str().cloned().unwrap_or_default();
+            let line = match self.get_prop_raw(&ex, b"line") {
+                Value::Int(n) => n as u32,
+                _ => 0,
+            };
+            let level = if is_parse { E_PARSE } else { E_COMPILE_ERROR };
+            self.err.last = Some((level, PhpStr::from(msg.clone()), file.clone(), line as i64));
+            if self.ini.error_reporting & level != 0 {
+                self.display_error(level, &msg, &file, line);
+            }
+            self.exit_status = 255;
+            return;
+        }
         let s = match self.exception_to_string(&ex) {
             Ok(s) => s,
             Err(Unwind::Throw(_)) => {
-                let cls = self.class_of(&ex).name.to_string_lossy();
+                let cls = self.class_of(&ex).name.dname();
                 format!("{} (exception thrown in __toString)", cls)
             }
             Err(_) => return,
@@ -765,7 +824,7 @@ impl Vm {
             Some(other) => {
                 return self.type_error(&format!(
                     "exit(): Argument #1 ($status) must be of type string|int, {} given",
-                    other.type_name_for_error()
+                    other.tname()
                 ));
             }
         }

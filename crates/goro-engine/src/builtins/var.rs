@@ -2,6 +2,7 @@
 //! gettype/settype, is_*, intval & co (PHP manual: Variable handling
 //! functions; output formats observed on PHP 8.5).
 
+use crate::class::{DisplayName, TypeName};
 use goro_runtime::{Key, KeyRef, ObjRef, PhpArray, PhpStr, Value};
 
 use crate::func::Args;
@@ -106,8 +107,9 @@ impl Vm {
                 out.extend_from_slice(b"\"\n");
             }
             Value::Array(a) => {
+                // An array can only contain itself through a reference.
                 let id = a.data() as *const _ as usize;
-                if self.dump_stack.contains(&id) {
+                if is_ref && self.dump_stack.contains(&id) {
                     out.extend_from_slice(format!("{}*RECURSION*\n", pad).as_bytes());
                     return Ok(());
                 }
@@ -124,11 +126,17 @@ impl Vm {
                             out.extend_from_slice(b"\"]=>\n");
                         }
                     }
-                    let (val, r) = match x {
-                        Value::Ref(rf) => (rf.get(), rf.refcount() > 1),
-                        v => (v.clone(), false),
+                    let (val, r, via_ref) = match x {
+                        Value::Ref(rf) => (rf.get(), rf.refcount() > 1, true),
+                        v => (v.clone(), false, false),
                     };
-                    let res = self.var_dump_into(out, &val, indent + 2, r);
+                    let res = if via_ref && !r {
+                        // A reference only this array holds: still checked
+                        // for recursion.
+                        self.var_dump_ref_elem(out, &val, indent + 2)
+                    } else {
+                        self.var_dump_into(out, &val, indent + 2, r)
+                    };
                     if res.is_err() {
                         self.dump_stack.pop();
                         return res;
@@ -165,6 +173,17 @@ impl Vm {
         Ok(())
     }
 
+    fn var_dump_ref_elem(&mut self, out: &mut Vec<u8>, v: &Value, indent: usize) -> R<()> {
+        if let Value::Array(a) = v {
+            let id = a.data() as *const _ as usize;
+            if self.dump_stack.contains(&id) {
+                out.extend_from_slice(format!("{}*RECURSION*\n", " ".repeat(indent)).as_bytes());
+                return Ok(());
+            }
+        }
+        self.var_dump_into(out, v, indent, false)
+    }
+
     fn var_dump_object(
         &mut self,
         out: &mut Vec<u8>,
@@ -176,9 +195,7 @@ impl Vm {
         let cls = self.class_of(o);
         if cls.is_enum() {
             let name = self.get_prop_raw(o, b"name");
-            out.extend_from_slice(
-                format!("{}{}enum({}::", pad, amp, cls.name.to_string_lossy()).as_bytes(),
-            );
+            out.extend_from_slice(format!("{}{}enum({}::", pad, amp, cls.name.dname()).as_bytes());
             out.extend_from_slice(name.as_str().map(|s| s.as_bytes()).unwrap_or(b""));
             out.extend_from_slice(b")\n");
             return Ok(());
@@ -191,7 +208,7 @@ impl Vm {
         let entries = self.debug_entries(o)?;
         let count = entries.iter().filter(|e| e.2.is_some()).count();
         out.extend_from_slice(format!("{}{}object(", pad, amp).as_bytes());
-        out.extend_from_slice(&cls.name);
+        out.extend_from_slice(cls.name.dname().as_bytes());
         out.extend_from_slice(format!(")#{} ({}) {{\n", o.handle(), count).as_bytes());
         self.dump_stack.push(id);
         for (label, ty, val) in entries {
@@ -318,12 +335,12 @@ impl Vm {
                 let cls = self.class_of(o);
                 let id = o.handle() as usize | (1 << 62);
                 if self.dump_stack.contains(&id) {
-                    out.extend_from_slice(&cls.name);
+                    out.extend_from_slice(cls.name.dname().as_bytes());
                     out.extend_from_slice(b" Object\n *RECURSION*");
                     return Ok(());
                 }
                 let pad = " ".repeat(indent);
-                out.extend_from_slice(&cls.name);
+                out.extend_from_slice(cls.name.dname().as_bytes());
                 out.extend_from_slice(format!(" Object\n{}(\n", pad).as_bytes());
                 let entries = if cls.is_enum() {
                     let mut e = vec![(b"name".to_vec(), Some(self.get_prop_raw(o, b"name")))];
@@ -430,7 +447,7 @@ impl Vm {
                 }
                 if cls.is_enum() {
                     out.push(b'\\');
-                    out.extend_from_slice(&cls.name);
+                    out.extend_from_slice(cls.name.dname().as_bytes());
                     out.extend_from_slice(b"::");
                     let n = self.get_prop_raw(o, b"name");
                     out.extend_from_slice(n.as_str().map(|s| s.as_bytes()).unwrap_or(b""));
@@ -441,7 +458,7 @@ impl Vm {
                     out.extend_from_slice(b"(object) array(\n");
                 } else {
                     out.push(b'\\');
-                    out.extend_from_slice(&cls.name);
+                    out.extend_from_slice(cls.name.dname().as_bytes());
                     out.extend_from_slice(b"::__set_state(array(\n");
                 }
                 let props = self.object_props_array(o, true);
@@ -565,7 +582,7 @@ impl Vm {
                 let cls = self.class_of(o);
                 let entries = self.debug_entries(o)?;
                 out.extend_from_slice(format!("{}object(", pad).as_bytes());
-                out.extend_from_slice(&cls.name);
+                out.extend_from_slice(cls.name.dname().as_bytes());
                 out.extend_from_slice(
                     format!(
                         ")#{} ({}) refcount({}){{\n",
@@ -750,7 +767,7 @@ fn get_debug_type(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 let cut = n.iter().position(|&c| c == 0).unwrap_or(n.len());
                 String::from_utf8_lossy(&n[..cut]).into_owned()
             } else {
-                c.name.to_string_lossy()
+                c.name.dname()
             }
         }
         v => v.debug_type(),
@@ -1005,7 +1022,7 @@ impl Vm {
                 let t = a.get_int(0).map(|x| x.deref()).unwrap_or_default();
                 let m = a.get_int(1).map(|x| x.deref()).unwrap_or_default();
                 let cn = match &t {
-                    Value::Object(o) => self.class_of(o).name.to_string_lossy(),
+                    Value::Object(o) => self.class_of(o).name.dname(),
                     Value::Str(s) => s.to_string_lossy(),
                     _ => return PhpStr::from("Array"),
                 };
@@ -1017,7 +1034,7 @@ impl Vm {
             }
             Value::Object(o) => {
                 let c = self.class_of(o);
-                PhpStr::from(format!("{}::__invoke", c.name.to_string_lossy()))
+                PhpStr::from(format!("{}::__invoke", c.name.dname()))
             }
             Value::Array(_) => PhpStr::from("Array"),
             other => {
@@ -1128,7 +1145,7 @@ fn get_resource_type(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Value::Resource(r) => Ok(Value::Str(r.res().kind.borrow().clone())),
         v => vm.type_error(&format!(
             "get_resource_type(): Argument #1 ($resource) must be of type resource, {} given",
-            v.type_name_for_error()
+            v.tname()
         )),
     }
 }
@@ -1138,7 +1155,7 @@ fn get_resource_id(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Value::Resource(r) => Ok(Value::Int(r.id())),
         v => vm.type_error(&format!(
             "get_resource_id(): Argument #1 ($resource) must be of type resource, {} given",
-            v.type_name_for_error()
+            v.tname()
         )),
     }
 }

@@ -1,6 +1,7 @@
 //! Calls: callee resolution, argument passing, frame activation and
 //! return, callables, closures and static variables.
 
+use crate::class::{DisplayName, TypeName};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -271,6 +272,12 @@ impl Vm {
     pub(crate) fn init_callable_call(&mut self, v: Value, nargs: u32) -> R<()> {
         let _ = nargs;
         let c = self.resolve_callable(&v, true)?;
+        if c.func.is_native() && is_scope_introspecting(&c.func.lname) {
+            return self.throw(
+                "Error",
+                &format!("Cannot call {}() dynamically", c.func.name.dname()),
+            );
+        }
         self.push_callee(c, 0);
         Ok(())
     }
@@ -365,7 +372,7 @@ impl Vm {
                     None => self.throw(
                         "Error",
                         "Object of type {} is not callable"
-                            .replace("{}", &cls.name.to_string_lossy())
+                            .replace("{}", &cls.name.dname())
                             .as_str(),
                     ),
                 }
@@ -484,8 +491,8 @@ impl Vm {
                 &format!(
                     "Call to {} method {}::{}() from {}",
                     vis,
-                    cls.name.to_string_lossy(),
-                    m.name.to_string_lossy(),
+                    cls.name.dname(),
+                    m.name.dname(),
                     from
                 ),
             );
@@ -505,7 +512,7 @@ impl Vm {
             "Error",
             &format!(
                 "Call to undefined method {}::{}()",
-                cls.name.to_string_lossy(),
+                cls.name.dname(),
                 String::from_utf8_lossy(name)
             ),
         )
@@ -527,7 +534,7 @@ impl Vm {
         if scope.is_null() {
             "global scope".to_string()
         } else {
-            format!("scope {}", unsafe { (*scope).name.to_string_lossy() })
+            format!("scope {}", unsafe { (*scope).name.dname() })
         }
     }
 
@@ -597,8 +604,8 @@ impl Vm {
                     &format!(
                         "Call to {} method {}::{}() from {}",
                         vis,
-                        cls.name.to_string_lossy(),
-                        m.name.to_string_lossy(),
+                        cls.name.dname(),
+                        m.name.dname(),
                         from
                     ),
                 );
@@ -644,8 +651,8 @@ impl Vm {
                 "Error",
                 &format!(
                     "Non-static method {}::{}() cannot be called statically",
-                    cls.name.to_string_lossy(),
-                    m.name.to_string_lossy()
+                    cls.name.dname(),
+                    m.name.dname()
                 ),
             );
         }
@@ -679,7 +686,7 @@ impl Vm {
             "Error",
             &format!(
                 "Call to undefined method {}::{}()",
-                cls.name.to_string_lossy(),
+                cls.name.dname(),
                 String::from_utf8_lossy(name)
             ),
         )
@@ -711,11 +718,7 @@ impl Vm {
                             };
                             return self.throw(
                                 "Error",
-                                &format!(
-                                    "Call to a member function {}() on {}",
-                                    n,
-                                    other.type_name_for_error()
-                                ),
+                                &format!("Call to a member function {}() on {}", n, other.tname()),
                             );
                         }
                     }
@@ -800,7 +803,7 @@ impl Vm {
         let pname = ps
             .get(arg as usize)
             .or(ps.last())
-            .map(|p| p.name.to_string_lossy())
+            .map(|p| p.name.dname())
             .unwrap_or_default();
         self.throw(
             "Error",
@@ -817,7 +820,7 @@ impl Vm {
         if let FuncKind::User(c) = &f.kind
             && c.flags & fflags::CLOSURE != 0
         {
-            return c.name.to_string_lossy();
+            return c.name.dname();
         }
         f.display_name()
     }
@@ -1105,7 +1108,11 @@ impl Vm {
     }
 
     /// Runs a native function on the pending call's arguments.
-    fn call_native_pending(&mut self, mut p: Pending) -> R<Value> {
+    fn call_native_pending(&mut self, p: Pending) -> R<Value> {
+        self.call_native_pending_ex(p, false)
+    }
+
+    fn call_native_pending_ex(&mut self, mut p: Pending, dynamic: bool) -> R<Value> {
         let func = p.func.clone();
         let FuncKind::Native { handler, .. } = &func.kind else {
             unreachable!()
@@ -1123,6 +1130,13 @@ impl Vm {
         if let Err(e) = self.prepare_native_args(&func, &sig, &mut args, passed, has_named) {
             self.give_args_vec(args);
             return Err(e);
+        }
+        if dynamic && is_scope_introspecting(&func.lname) {
+            self.give_args_vec(args);
+            return self.throw(
+                "Error",
+                &format!("Cannot call {}() dynamically", func.name.dname()),
+            );
         }
         self.ex.native_calls.push(super::NativeCall {
             func: func.clone(),
@@ -1177,7 +1191,7 @@ impl Vm {
                                     "{}(): Argument #{} (${}) not passed",
                                     fname,
                                     i + 1,
-                                    p.name.to_string_lossy()
+                                    p.name.dname()
                                 ),
                             );
                         }
@@ -1201,7 +1215,7 @@ impl Vm {
                         "{}(): Argument #{} (${}) not passed",
                         fname,
                         n + 1,
-                        p.name.to_string_lossy()
+                        p.name.dname()
                     ),
                 );
             }
@@ -1244,7 +1258,7 @@ impl Vm {
                         "{}(): Passing null to parameter #{} (${}) of type {} is deprecated",
                         fname,
                         i + 1,
-                        p.name.to_string_lossy(),
+                        p.name.dname(),
                         ty.display()
                     ))?;
                     args[i] = if ty.mask & tmask::STRING != 0 {
@@ -1269,9 +1283,9 @@ impl Vm {
                             "{}(): Argument #{} (${}) must be of type {}, {} given",
                             fname,
                             i + 1,
-                            p.name.to_string_lossy(),
+                            p.name.dname(),
                             ty.display(),
-                            args[i].type_name_for_error()
+                            args[i].tname()
                         ),
                     );
                 }
@@ -1280,9 +1294,10 @@ impl Vm {
         Ok(())
     }
 
-    /// Activates a user function: checks arguments and pushes its frame.
-    /// For generator functions, the frame goes into a Generator object
-    /// written to `ret`.
+    /// Activates a user function: pushes its frame and binds the arguments
+    /// (count, defaults, types: errors are raised from inside the callee,
+    /// as PHP does). For generator functions, the frame goes into a
+    /// Generator object written to `ret`.
     pub(crate) fn activate(
         &mut self,
         mut p: Pending,
@@ -1295,8 +1310,6 @@ impl Vm {
             unreachable!()
         };
         let code: &FuncCode = code;
-        let np = code.params.len();
-        let base = p.base;
         if code.flags & fflags::DEPRECATED != 0 {
             let what = if func.scope().is_some() {
                 "Method"
@@ -1304,7 +1317,10 @@ impl Vm {
                 "Function"
             };
             let msg = self.deprecated_message(code, what, &func);
-            self.deprecated(&msg)?;
+            if let Err(e) = self.deprecated(&msg) {
+                self.discard_pending(p);
+                return Err(e);
+            }
         }
         if code.flags & fflags::ABSTRACT != 0 {
             let r = self.throw(
@@ -1314,10 +1330,111 @@ impl Vm {
             self.discard_pending(p);
             return r;
         }
-        // Arguments: count, defaults, types.
-        let argc = p.argc;
         let strict = self.caller_strict();
-        let mut failure: Option<Unwind> = None;
+        let call_loc = if entry || self.ex.frames.is_empty() {
+            None
+        } else {
+            Some((self.cur_file(), self.cur_line()))
+        };
+        let argc = p.argc;
+        let mut flags = 0;
+        if entry {
+            flags |= frame_flags::ENTRY;
+        }
+        if ret_var {
+            flags |= RET_VAR;
+        }
+        if p.flags & pending_flags::NEW != 0 {
+            flags |= frame_flags::CTOR;
+        }
+        let scope = if p.closure.is_some() {
+            p.scope
+        } else {
+            func.scope.get()
+        };
+        let extra = std::mem::take(&mut p.extra);
+        let named_extra = p.named_extra.take();
+        let has_named = p.has_named;
+        let static_class = p.static_class;
+        let frame = Frame {
+            code: code as *const FuncCode,
+            func: func.clone(),
+            ip: 0,
+            base: p.base,
+            this: p.this.take(),
+            static_class,
+            scope,
+            ret,
+            argc,
+            extra_args: Vec::new(),
+            dyn_vars: None,
+            closure: p.closure.take(),
+            generator: None,
+            flags,
+            mark: p.mark,
+            statics: p.statics,
+            owner: 0,
+            pending_base: self.ex.pending.len() as u32,
+            native_base: self.ex.native_calls.len() as u32,
+            line_hint: 0,
+        };
+        let Pending { args, .. } = p;
+        self.give_args_vec(args);
+        self.push_frame(frame);
+        let saved_loc = self
+            .loc_override
+            .replace((code.file.clone(), code.line_start));
+        let r = self.bind_args(
+            &func,
+            code,
+            argc,
+            extra,
+            named_extra,
+            has_named,
+            strict,
+            static_class,
+            call_loc,
+        );
+        self.loc_override = saved_loc;
+        if let Err(e) = r {
+            self.pop_frame();
+            return Err(e);
+        }
+        if code.flags & fflags::GENERATOR != 0 {
+            let f = self.ex.frames.pop().unwrap();
+            if let Some(top) = self.ex.frames.last() {
+                self.ex.ip = top.ip as usize;
+            }
+            let g = self.create_generator(f)?;
+            if !ret.is_null() {
+                let old = unsafe { (*ret).replace(Value::Object(g)) };
+                drop(old);
+            }
+        }
+        Ok(())
+    }
+
+    /// Binds the arguments in the new frame's slots: defaults of missing
+    /// parameters, type checks, variadics, closure `use` variables.
+    #[allow(clippy::too_many_arguments)]
+    fn bind_args(
+        &mut self,
+        func: &Rc<Func>,
+        code: &FuncCode,
+        argc: u32,
+        mut extra: Vec<Value>,
+        named_extra: Option<PhpArray>,
+        has_named: bool,
+        strict: bool,
+        static_class: *const Class,
+        call_loc: Option<(PhpStr, u32)>,
+    ) -> R<()> {
+        let np = code.params.len();
+        let base = self.frame().base;
+        let called_in = |loc: &Option<(PhpStr, u32)>| match loc {
+            Some((f, l)) => format!(", called in {} on line {}", f.to_string_lossy(), l),
+            None => String::new(),
+        };
         for i in 0..np {
             let param = &code.params[i];
             if param.variadic {
@@ -1344,55 +1461,57 @@ impl Vm {
                     ParamDefault::Code => continue,
                     ParamDefault::Lazy(ce) => {
                         let ce = ce.clone();
-                        match self.eval_const_expr(&ce, func.scope.get()) {
-                            Ok(v) => *slot = Some(v),
-                            Err(e) => {
-                                failure = Some(e);
-                                break;
-                            }
-                        }
+                        let v = self.eval_const_expr(&ce, func.scope.get())?;
+                        unsafe { *base.add(i) = Some(v) };
                         continue;
                     }
                     ParamDefault::None => {
-                        let fname = self.func_display_name(&func);
-                        let msg = if p.has_named {
+                        let fname = self.func_display_name(func);
+                        let msg = if has_named {
                             format!(
                                 "{}(): Argument #{} (${}) not passed",
                                 fname,
                                 i + 1,
-                                param.name.to_string_lossy()
+                                param.name.dname()
                             )
                         } else {
                             let exact = code.num_required as usize == np
                                 && code.flags & fflags::VARIADIC == 0;
+                            let passed = match &call_loc {
+                                Some((f, l)) => format!(
+                                    "{} passed in {} on line {}",
+                                    argc,
+                                    f.to_string_lossy(),
+                                    l
+                                ),
+                                None => format!("{} passed", argc),
+                            };
                             format!(
-                                "Too few arguments to function {}(), {} passed in {} on line {} and {} {} expected",
+                                "Too few arguments to function {}(), {} and {} {} expected",
                                 fname,
-                                argc,
-                                self.cur_file().to_string_lossy(),
-                                self.cur_line(),
+                                passed,
                                 if exact { "exactly" } else { "at least" },
                                 code.num_required
                             )
                         };
-                        failure = Some(self.throw_error_msg("ArgumentCountError", &msg));
-                        break;
+                        return self.throw("ArgumentCountError", &msg);
                     }
                 }
             }
-            if let Some(ty) = &param.ty
-                && let Err(e) = self.check_param(&func, code, base, i, ty, strict, p.static_class)
-            {
-                failure = Some(e);
-                break;
+            if let Some(ty) = &param.ty {
+                self.check_param(
+                    func,
+                    code,
+                    base,
+                    i,
+                    ty,
+                    strict,
+                    static_class,
+                    &called_in(&call_loc),
+                )?;
             }
         }
-        if let Some(e) = failure {
-            self.discard_pending(p);
-            return Err(e);
-        }
         // Variadics and extra arguments.
-        let mut extra = std::mem::take(&mut p.extra);
         if code.flags & fflags::VARIADIC != 0 {
             let vi = np - 1;
             let param = &code.params[vi];
@@ -1402,39 +1521,35 @@ impl Vm {
                 if let Some(ty) = &param.ty
                     && !param.by_ref
                 {
-                    match self.check_type(&v, ty, strict, func.scope.get(), p.static_class) {
-                        Ok(Check::Ok) => {}
-                        Ok(Check::Coerced(c)) => v = c,
-                        Ok(Check::Fail) => {
+                    match self.check_type(&v, ty, strict, func.scope.get(), static_class)? {
+                        Check::Ok => {}
+                        Check::Coerced(c) => v = c,
+                        Check::Fail => {
                             let msg = format!(
-                                "{}(): Argument #{} must be of type {}, {} given, called in {} on line {}",
-                                self.func_display_name(&func),
+                                "{}(): Argument #{} must be of type {}, {} given{}",
+                                self.func_display_name(func),
                                 vi + k + 1,
                                 ty.display(),
-                                v.type_name_for_error(),
-                                self.cur_file().to_string_lossy(),
-                                self.cur_line()
+                                v.tname(),
+                                called_in(&call_loc)
                             );
-                            self.discard_pending(p);
                             return self.throw("TypeError", &msg);
-                        }
-                        Err(e) => {
-                            self.discard_pending(p);
-                            return Err(e);
                         }
                     }
                 }
                 let _ = arr.push(v);
             }
-            if let Some(na) = p.named_extra.take() {
+            if let Some(na) = named_extra {
                 for (k, v) in na.iter() {
                     arr.insert(k.to_owned(), v.clone());
                 }
             }
             unsafe { *base.add(vi) = Some(Value::Array(arr)) };
+        } else {
+            self.frame_mut().extra_args = extra;
         }
         // Closure `use` variables.
-        if let Some(cl) = &p.closure
+        if let Some(cl) = self.frame().closure.clone()
             && !code.uses.is_empty()
         {
             let n = cl.obj().native.borrow();
@@ -1449,54 +1564,6 @@ impl Vm {
                 }
             }
         }
-        let mut flags = 0;
-        if entry {
-            flags |= frame_flags::ENTRY;
-        }
-        if ret_var {
-            flags |= RET_VAR;
-        }
-        if p.flags & pending_flags::NEW != 0 {
-            flags |= frame_flags::CTOR;
-        }
-        let scope = if p.closure.is_some() {
-            p.scope
-        } else {
-            func.scope.get()
-        };
-        let frame = Frame {
-            code: code as *const FuncCode,
-            func: func.clone(),
-            ip: 0,
-            base,
-            this: p.this.take(),
-            static_class: p.static_class,
-            scope,
-            ret,
-            argc,
-            extra_args: extra,
-            dyn_vars: None,
-            closure: p.closure.take(),
-            generator: None,
-            flags,
-            mark: p.mark,
-            statics: p.statics,
-            owner: 0,
-            pending_base: self.ex.pending.len() as u32,
-            native_base: self.ex.native_calls.len() as u32,
-            line_hint: 0,
-        };
-        let Pending { args, .. } = p;
-        self.give_args_vec(args);
-        if code.flags & fflags::GENERATOR != 0 {
-            let g = self.create_generator(frame)?;
-            if !ret.is_null() {
-                let old = unsafe { (*ret).replace(Value::Object(g)) };
-                drop(old);
-            }
-            return Ok(());
-        }
-        self.push_frame(frame);
         Ok(())
     }
 
@@ -1552,6 +1619,7 @@ impl Vm {
         ty: &TypeHint,
         strict: bool,
         static_class: *const Class,
+        called_in: &str,
     ) -> R<()> {
         let slot = unsafe { &mut *base.add(i) };
         let (cell, val) = match slot.as_ref() {
@@ -1568,10 +1636,7 @@ impl Vm {
             (Value::Float(_), m) if m & tmask::FLOAT != 0 => return Ok(()),
             _ => {}
         }
-        // Deprecations from coercion are reported at the function.
-        self.loc_override = Some((code.file.clone(), code.line_start));
         let r = self.check_type(&val, ty, strict, func.scope.get(), static_class);
-        self.loc_override = None;
         match r? {
             Check::Ok => Ok(()),
             Check::Coerced(c) => {
@@ -1586,14 +1651,13 @@ impl Vm {
             }
             Check::Fail => {
                 let msg = format!(
-                    "{}(): Argument #{} (${}) must be of type {}, {} given, called in {} on line {}",
+                    "{}(): Argument #{} (${}) must be of type {}, {} given{}",
                     self.func_display_name(func),
                     i + 1,
-                    code.params[i].name.to_string_lossy(),
+                    code.params[i].name.dname(),
                     ty.display(),
-                    val.type_name_for_error(),
-                    self.cur_file().to_string_lossy(),
-                    self.cur_line()
+                    val.tname(),
+                    called_in
                 );
                 self.throw("TypeError", &msg)
             }
@@ -1699,9 +1763,9 @@ impl Vm {
                     "{}(): Argument #{} (${}) must be of type {}, {} given",
                     self.func_display_name(&func),
                     param + 1,
-                    code.params[param as usize].name.to_string_lossy(),
+                    code.params[param as usize].name.dname(),
                     ty.display(),
-                    v.type_name_for_error()
+                    v.tname()
                 );
                 self.throw("TypeError", &msg)
             }
@@ -1737,7 +1801,15 @@ impl Vm {
                 // The compiler puts constants in a temporary first.
                 if src & CONST == 0 {
                     let p = self.slot_ptr(src);
-                    unsafe { *p = Some(c) };
+                    unsafe {
+                        match &*p {
+                            Some(Value::Ref(r)) => {
+                                let old = r.set(c);
+                                drop(old);
+                            }
+                            _ => *p = Some(c),
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -1753,7 +1825,7 @@ impl Vm {
                     "{}(): Return value must be of type {}, {} returned",
                     fname,
                     ty.display(),
-                    v.type_name_for_error()
+                    v.tname()
                 ))
             }
         }
@@ -1790,12 +1862,33 @@ impl Vm {
 
     /// Calls method `lname` on an object (no visibility checks).
     pub fn call_method(&mut self, o: &ObjRef, lname: &[u8], args: Vec<Value>) -> R<Value> {
+        self.call_method_raw(o, lname, args).map(|v| v.into_deref())
+    }
+
+    /// Like [`call_method`](Self::call_method), keeping a reference
+    /// returned by a by-reference method.
+    pub fn call_method_raw(&mut self, o: &ObjRef, lname: &[u8], args: Vec<Value>) -> R<Value> {
         let cls = self.class_of(o);
         match cls.find_method(lname) {
-            Some(f) => self.call_func_this(&f, Some(o.clone()), args),
+            Some(f) => {
+                let static_class = self.class_ptr_of(o);
+                let c = Callee {
+                    func: f.clone(),
+                    this: if f.flags & mflags::STATIC != 0 {
+                        None
+                    } else {
+                        Some(o.clone())
+                    },
+                    static_class,
+                    scope: f.scope.get(),
+                    closure: None,
+                    magic_name: None,
+                };
+                self.call_callee_raw(c, args)
+            }
             None => {
                 let c = self.resolve_method(o, &cls, lname, true)?;
-                self.call_callee(c, args)
+                self.call_callee_raw(c, args)
             }
         }
     }
@@ -1803,6 +1896,10 @@ impl Vm {
     /// Calls a resolved callee with positional arguments; by-reference
     /// parameters get the given references (or a warning for values).
     pub fn call_callee(&mut self, c: Callee, args: Vec<Value>) -> R<Value> {
+        self.call_callee_raw(c, args).map(|v| v.into_deref())
+    }
+
+    pub fn call_callee_raw(&mut self, c: Callee, args: Vec<Value>) -> R<Value> {
         let magic = c.magic_name.is_some();
         self.push_callee(c, 0);
         let mut named: Vec<(PhpStr, Value)> = Vec::new();
@@ -1816,7 +1913,7 @@ impl Vm {
                         let pname = self
                             .params_of(&f)
                             .get(i as usize)
-                            .map(|p| p.name.to_string_lossy())
+                            .map(|p| p.name.dname())
                             .unwrap_or_default();
                         let msg = format!(
                             "{}(): Argument #{} (${}) must be passed by reference, value given",
@@ -1871,7 +1968,7 @@ impl Vm {
                                 let pname = self
                                     .params_of(&f)
                                     .get(i as usize)
-                                    .map(|p| p.name.to_string_lossy())
+                                    .map(|p| p.name.dname())
                                     .unwrap_or_default();
                                 let msg = format!(
                                     "{}(): Argument #{} (${}) must be passed by reference, value given",
@@ -1908,6 +2005,23 @@ impl Vm {
 
     /// Makes the pending call on top as an entry call and runs it.
     fn finish_rust_call(&mut self) -> R<Value> {
+        // Diagnostics queued by a write path come out before user code runs.
+        if !self.err.queued.is_empty()
+            && let Err(e) = self.flush_deferred()
+        {
+            let p = self.ex.pending.pop().unwrap();
+            self.discard_pending(p);
+            return Err(e);
+        }
+        let saved = std::mem::replace(&mut self.err.defer_depth, 0);
+        let saved_loc = self.loc_override.take();
+        let r = self.finish_rust_call_inner();
+        self.loc_override = saved_loc;
+        self.err.defer_depth = saved;
+        r
+    }
+
+    fn finish_rust_call_inner(&mut self) -> R<Value> {
         let p = self.ex.pending.pop().unwrap();
         if p.magic_name.is_some() {
             return self.call_magic_pending(p);
@@ -1924,7 +2038,7 @@ impl Vm {
                 }
                 self.run()
             }
-            FuncKind::Native { .. } => self.call_native_pending(p),
+            FuncKind::Native { .. } => self.call_native_pending_ex(p, true),
         }
     }
 
@@ -2116,14 +2230,11 @@ impl Vm {
             let msg = match prev.code() {
                 Some(pc) => format!(
                     "Cannot redeclare function {}() (previously declared in {}:{})",
-                    code.name.to_string_lossy(),
+                    code.name.dname(),
                     pc.file.to_string_lossy(),
                     pc.line_start
                 ),
-                None => format!(
-                    "Cannot redeclare function {}()",
-                    code.name.to_string_lossy()
-                ),
+                None => format!("Cannot redeclare function {}()", code.name.dname()),
             };
             let line = code.line_start;
             let file = code.file.clone();
@@ -2138,4 +2249,18 @@ impl Vm {
 
 fn find_double_colon(s: &[u8]) -> Option<usize> {
     s.windows(2).position(|w| w == b"::")
+}
+
+/// Functions that read or write the caller's variables can't be called
+/// dynamically (observed on PHP 8.5: "Cannot call compact() dynamically").
+pub fn is_scope_introspecting(lname: &[u8]) -> bool {
+    matches!(
+        lname,
+        b"compact"
+            | b"extract"
+            | b"get_defined_vars"
+            | b"func_get_args"
+            | b"func_get_arg"
+            | b"func_num_args"
+    )
 }

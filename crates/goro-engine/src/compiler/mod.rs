@@ -119,6 +119,8 @@ pub(crate) struct FState<'a> {
     pub is_static_method: bool,
     pub uses: Vec<(u32, u32, bool)>,
     pub loop_free_stack: Vec<Reg>,
+    /// Variables the pre-pass didn't see (hidden slots).
+    pub extra_cvs: Vec<(&'a [u8], Reg)>,
 }
 
 impl<'a> FState<'a> {
@@ -159,6 +161,7 @@ impl<'a> FState<'a> {
             is_static_method: false,
             uses: Vec::new(),
             loop_free_stack: Vec::new(),
+            extra_cvs: Vec::new(),
         }
     }
 }
@@ -430,8 +433,15 @@ impl<'a> Compiler<'a> {
         if let Some(i) = self.f.cvs.iter().position(|n| *n == name) {
             return i as u32;
         }
-        // Not found by the pre-pass (should not happen): add one.
-        panic!("variable ${} not scanned", String::from_utf8_lossy(name));
+        // Not found by the pre-pass (superglobals reached through a path
+        // that has no special form): a hidden slot.
+        if let Some(&(n, s)) = self.f.extra_cvs.iter().find(|(n, _)| *n == name) {
+            let _ = n;
+            return s;
+        }
+        let s = self.hidden();
+        self.f.extra_cvs.push((name, s));
+        s
     }
 
     pub(crate) fn has_cv(&self, name: &[u8]) -> Option<Reg> {
@@ -1246,6 +1256,12 @@ impl<'a> Compiler<'a> {
             None => self.null_const(),
             Some(e) if by_ref && !self.f.is_generator && is_ref_capable(e) => {
                 let r = self.ref_of(e)?;
+                if self.f.flags & fflags::HAS_RETURN_TYPE != 0 {
+                    self.emit(Op::VerifyReturn {
+                        src: r & !TMP,
+                        implicit: false,
+                    });
+                }
                 if !self.f.finallys.is_empty()
                     || !self.f.loop_free_stack.is_empty()
                     || self.has_loop_frees()
@@ -1261,15 +1277,33 @@ impl<'a> Compiler<'a> {
                 self.emit(Op::ReturnRef { src: r });
                 return Ok(());
             }
-            Some(e) => {
-                if self.f.flags & fflags::RETURNS_VOID == 0
-                    && self.f.flags & fflags::HAS_RETURN_TYPE != 0
-                    && !self.f.is_generator
-                {
-                    // checked by VerifyReturn
+            Some(e) if by_ref && !self.f.is_generator => {
+                // Not a variable: returned by reference with a notice.
+                let mut v = self.expr(e)?;
+                if self.f.flags & fflags::HAS_RETURN_TYPE != 0 {
+                    if is_const(v) {
+                        let t = self.tmp();
+                        self.emit(Op::Copy { dst: t, src: v });
+                        v = t;
+                    }
+                    self.emit(Op::VerifyReturn {
+                        src: v & !TMP,
+                        implicit: false,
+                    });
                 }
-                self.expr(e)?
+                if !self.f.finallys.is_empty() || self.has_loop_frees() {
+                    let h = self.hidden();
+                    self.emit(Op::Copy { dst: h, src: v });
+                    self.free(v);
+                    self.finish_return(h, true, line)?;
+                    return Ok(());
+                }
+                self.free(v);
+                self.f.line = line;
+                self.emit(Op::ReturnRef { src: v });
+                return Ok(());
             }
+            Some(e) => self.expr(e)?,
         };
         if !self.f.finallys.is_empty() || self.has_loop_frees() {
             let h = self.hidden();

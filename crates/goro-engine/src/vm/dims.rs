@@ -4,6 +4,7 @@
 //! Behaviour from the PHP manual (Arrays, Strings: "String access and
 //! modification by character", ArrayAccess) and observed on PHP 8.5.
 
+use crate::class::{DisplayName, TypeName};
 use std::rc::Rc;
 
 use goro_runtime::{Key, ObjRef, PhpArray, PhpRef, PhpStr, Value};
@@ -36,6 +37,17 @@ impl Place {
             Place::Temp(b) => &mut **b as *mut Value,
         }
     }
+}
+
+/// Operands of a write path being walked.
+struct WalkCtx {
+    keys: Vec<Option<Value>>,
+    /// Keys in variables, read when the walk reaches them.
+    lazy: Vec<Reg>,
+    names: Vec<Option<PhpStr>>,
+    value: Option<Value>,
+    value_lazy: Reg,
+    action: PathAction,
 }
 
 pub(crate) fn key_desc(k: &Key) -> String {
@@ -128,15 +140,12 @@ impl Vm {
                         let t = match other {
                             Value::Bool(true) => "true".to_string(),
                             Value::Bool(false) => "false".to_string(),
-                            v => v.type_name_for_error(),
+                            v => v.tname(),
                         };
                         self.warn(&format!("Trying to access array offset on {}", t))?;
                     }
                     DimMode::List => {
-                        self.warn(&format!(
-                            "Cannot use {} as array",
-                            other.type_name_for_error()
-                        ))?;
+                        self.warn(&format!("Cannot use {} as array", other.tname()))?;
                     }
                     DimMode::Is => {}
                 }
@@ -211,7 +220,7 @@ impl Vm {
                 }
                 return self.type_error(&format!(
                     "Cannot access offset of type {} on string",
-                    other.type_name_for_error()
+                    other.tname()
                 ));
             }
         }))
@@ -222,10 +231,7 @@ impl Vm {
         if !self.implements_array_access(&cls) {
             return self.throw(
                 "Error",
-                &format!(
-                    "Cannot use object of type {} as array",
-                    cls.name.to_string_lossy()
-                ),
+                &format!("Cannot use object of type {} as array", cls.name.dname()),
             );
         }
         if mode == DimMode::Is {
@@ -263,7 +269,7 @@ impl Vm {
                     Value::Array(_) | Value::Object(_) => {
                         return self.type_error(&format!(
                             "Cannot access offset of type {} in isset or empty",
-                            k.type_name_for_error()
+                            k.tname()
                         ));
                     }
                     _ => self.to_key(k, "array")?,
@@ -306,10 +312,7 @@ impl Vm {
                 if !self.implements_array_access(&cls) {
                     return self.throw(
                         "Error",
-                        &format!(
-                            "Cannot use object of type {} as array",
-                            cls.name.to_string_lossy()
-                        ),
+                        &format!("Cannot use object of type {} as array", cls.name.dname()),
                     );
                 }
                 let e = self.call_method(o, b"offsetexists", vec![k.clone()])?;
@@ -484,7 +487,7 @@ impl Vm {
         };
         let mut place = Place::Ptr(self.var_place(var));
         let elem = if kv.is_null() { None } else { Some(kv) };
-        let r = self.write_elem(&mut place, elem, &[], PathAction::Assign(NONE), Some(v))?;
+        let r = self.write_elem(&mut place, elem, PathAction::Assign(NONE), Some(v))?;
         self.put(res, r);
         Ok(())
     }
@@ -512,10 +515,22 @@ impl Vm {
     }
 
     fn run_path(&mut self, path: &WritePath, res: Reg) -> R<()> {
-        // Evaluate operands first (keys, value) in order.
+        // Read-modify-write of an undefined variable warns first.
+        if let PathBase::Var(r) = path.base
+            && matches!(
+                path.action,
+                PathAction::AssignOp(..) | PathAction::IncDec(_)
+            )
+            && !path.elems.is_empty()
+            && self.peek(r).is_none()
+        {
+            self.undefined_var(r)?;
+        }
+        // Operands: temporaries now (they were computed in order); variables
+        // are read when the walk reaches them, as PHP does.
         let mut keys: Vec<Option<Value>> = Vec::with_capacity(path.elems.len());
+        let mut lazy: Vec<Reg> = Vec::with_capacity(path.elems.len());
         let mut names: Vec<Option<PhpStr>> = Vec::with_capacity(path.elems.len());
-        // The base.
         let mut base_tmp: Option<Value> = None;
         let mut base_name: Option<PhpStr> = None;
         let mut static_cell: Option<PhpRef> = None;
@@ -542,12 +557,19 @@ impl Vm {
         for e in path.elems.iter() {
             match e {
                 PathElem::Dim(k) => {
-                    let v = self.get(*k)?;
-                    keys.push(Some(v));
+                    if *k & (CONST | TMP) == 0 {
+                        keys.push(None);
+                        lazy.push(*k);
+                    } else {
+                        let v = self.get(*k)?;
+                        keys.push(Some(v));
+                        lazy.push(NONE);
+                    }
                     names.push(None);
                 }
                 PathElem::Append => {
                     keys.push(None);
+                    lazy.push(NONE);
                     names.push(None);
                 }
                 PathElem::Prop(n, _) => {
@@ -557,21 +579,31 @@ impl Vm {
                         other => self.to_php_str(&other)?,
                     };
                     keys.push(None);
+                    lazy.push(NONE);
                     names.push(Some(s));
                 }
             }
         }
-        let value = match path.action {
-            PathAction::Assign(v) | PathAction::AssignOp(_, v) => Some(self.get(v)?),
-            PathAction::BindRef(v) => Some(self.get_raw(v)),
-            _ => None,
+        // The value.
+        let (value, value_lazy) = match path.action {
+            PathAction::Assign(v) | PathAction::AssignOp(_, v) => (Some(self.get(v)?), NONE),
+            PathAction::BindRef(v) => (Some(self.get_raw(v)), NONE),
+            _ => (None, NONE),
+        };
+        let ctx = WalkCtx {
+            keys,
+            lazy,
+            names,
+            value,
+            value_lazy,
+            action: path.action,
         };
         // Resolve the base place.
         let mut place = match path.base {
             PathBase::Var(r) => {
                 if path.elems.is_empty() {
-                    // Whole-variable actions.
-                    return self.var_action(r, path.action, value, res);
+                    let v = ctx.value.clone();
+                    return self.var_action(r, path.action, v, res);
                 }
                 Place::Ptr(self.var_place(r))
             }
@@ -583,21 +615,21 @@ impl Vm {
             }
             PathBase::Tmp(_) => {
                 let v = base_tmp.take().unwrap();
-                if path.elems.is_empty() {
+                if path.elems.is_empty()
+                    && let PathAction::MakeRef = path.action
+                {
                     // `&f()`: a reference to a function result.
-                    if let PathAction::MakeRef = path.action {
-                        let r = match v {
-                            Value::Ref(r) => r,
-                            other => {
-                                self.notice_msg("Only variables should be assigned by reference")?;
-                                PhpRef::new(other)
-                            }
-                        };
-                        let p = self.slot_ptr(res);
-                        let old = unsafe { (*p).replace(Value::Ref(r)) };
-                        drop(old);
-                        return Ok(());
-                    }
+                    let r = match v {
+                        Value::Ref(r) => r,
+                        other => {
+                            self.notice_msg("Only variables should be assigned by reference")?;
+                            PhpRef::new(other)
+                        }
+                    };
+                    let p = self.slot_ptr(res);
+                    let old = unsafe { (*p).replace(Value::Ref(r)) };
+                    drop(old);
+                    return Ok(());
                 }
                 match v {
                     Value::Ref(r) => Place::Ptr(r.borrow_mut_ptr()),
@@ -607,34 +639,36 @@ impl Vm {
             PathBase::VarVar(_) => {
                 let n = base_name.take().unwrap();
                 if path.elems.is_empty() {
-                    return self.var_var_action(&n, path.action, value, res);
+                    let v = ctx.value.clone();
+                    return self.var_var_action(&n, path.action, v, res);
                 }
                 Place::Ptr(self.var_var_place(&n)?)
             }
             PathBase::Global(_) => {
                 let n = global_name.take().unwrap();
                 if path.elems.is_empty() {
-                    return self.global_action(&n, path.action, value, res);
+                    let v = ctx.value.clone();
+                    return self.global_action(&n, path.action, v, res);
                 }
                 Place::Ptr(self.global_place(&n))
             }
             PathBase::StaticProp(..) => {
                 let r = static_cell.clone().unwrap();
                 if path.elems.is_empty() {
-                    return self.cell_action(&r, path.action, value, res);
+                    let v = ctx.value.clone();
+                    return self.cell_action(&r, path.action, v, res);
                 }
                 Place::Ptr(r.borrow_mut_ptr())
             }
         };
-        let r = self.walk(
-            &mut place,
-            &path.elems,
-            &keys,
-            &names,
-            0,
-            path.action,
-            value,
-        )?;
+        let mut ctx = ctx;
+        self.err.defer_depth += 1;
+        let r = self.walk(&mut place, &path.elems, &mut ctx, 0);
+        self.err.defer_depth -= 1;
+        if self.err.defer_depth == 0 && !self.err.queued.is_empty() {
+            self.flush_deferred()?;
+        }
+        let r = r?;
         if res != NONE {
             let p = self.slot_ptr(res);
             let old = unsafe { (*p).replace(r) };
@@ -643,66 +677,73 @@ impl Vm {
         Ok(())
     }
 
+    fn walk_key(&mut self, ctx: &WalkCtx, i: usize) -> R<Option<Value>> {
+        if ctx.lazy[i] != NONE {
+            return Ok(Some(self.get(ctx.lazy[i])?));
+        }
+        Ok(ctx.keys[i].clone())
+    }
+
+    fn walk_value(&mut self, ctx: &mut WalkCtx) -> R<Option<Value>> {
+        if ctx.value_lazy != NONE {
+            let v = self.get(ctx.value_lazy)?;
+            ctx.value_lazy = NONE;
+            ctx.value = Some(v);
+        }
+        Ok(ctx.value.clone())
+    }
+
     /// Walks the remaining path from `place`.
-    #[allow(clippy::too_many_arguments)]
     fn walk(
         &mut self,
         place: &mut Place,
         elems: &[PathElem],
-        keys: &[Option<Value>],
-        names: &[Option<PhpStr>],
+        ctx: &mut WalkCtx,
         i: usize,
-        action: PathAction,
-        value: Option<Value>,
     ) -> R<Value> {
         let last = i + 1 == elems.len();
+        let action = ctx.action;
         match elems[i] {
             PathElem::Dim(_) | PathElem::Append => {
-                let key = keys[i].clone();
+                let key = self.walk_key(ctx, i)?;
                 if last {
-                    return self.write_elem(place, key, &[], action, value);
+                    let value = self.walk_value(ctx)?;
+                    return self.write_elem(place, key, action, value);
                 }
                 // Intermediate: fetch the element for writing.
+                let rmw = matches!(action, PathAction::AssignOp(..) | PathAction::IncDec(_));
                 let mut next =
-                    match self.dim_fetch_w(place, key, matches!(action, PathAction::Unset))? {
+                    match self.dim_fetch_w(place, key, matches!(action, PathAction::Unset), rmw)? {
                         Some(p) => p,
                         None => return Ok(Value::Null),
                     };
-                self.walk(&mut next, elems, keys, names, i + 1, action, value)
+                self.walk(&mut next, elems, ctx, i + 1)
             }
             PathElem::Prop(_, cache) => {
-                let name = names[i].clone().unwrap();
-                let cur = unsafe { &mut *place.ptr() };
-                let cur = deref_ptr(cur);
+                let name = ctx.names[i].clone().unwrap();
+                let cur = deref_ptr(place.ptr());
                 let obj = match unsafe { &*cur } {
                     Value::Object(o) => o.clone(),
                     other => {
+                        if last && matches!(action, PathAction::Unset) {
+                            return Ok(Value::Null);
+                        }
                         let t = match other {
                             Value::Null => "null".to_string(),
                             Value::Bool(true) => "true".to_string(),
                             Value::Bool(false) => "false".to_string(),
-                            v => v.type_name_for_error(),
+                            v => v.tname(),
                         };
-                        let verb = if last {
-                            match action {
-                                PathAction::Assign(_) => "assign",
-                                PathAction::Unset => {
-                                    return Ok(Value::Null);
-                                }
-                                _ => "modify",
+                        let what = match (last, action) {
+                            (true, PathAction::Assign(_)) | (true, PathAction::AssignOp(..)) => {
+                                "assign"
                             }
-                        } else {
-                            "modify"
+                            (true, PathAction::IncDec(_)) => "increment/decrement",
+                            _ => "modify",
                         };
-                        let what = match action {
-                            PathAction::IncDec(_) if last => "increment/decrement",
-                            _ => verb,
-                        };
-                        let what = if what == "increment/decrement" {
-                            "increment/decrement"
-                        } else {
-                            what
-                        };
+                        if last {
+                            let _ = self.walk_value(ctx)?;
+                        }
                         return self.throw(
                             "Error",
                             &format!(
@@ -715,14 +756,51 @@ impl Vm {
                     }
                 };
                 if last {
-                    return self.prop_action(&obj, &name, cache, action, value);
+                    let value = self.walk_value(ctx)?;
+                    // No array pointers are held here: handlers may run.
+                    if !self.err.queued.is_empty() {
+                        self.flush_deferred()?;
+                    }
+                    let saved = std::mem::replace(&mut self.err.defer_depth, 0);
+                    let r = self.prop_action(&obj, &name, cache, action, value);
+                    self.err.defer_depth = saved;
+                    return r;
                 }
                 let mut next = match self.prop_fetch_w(&obj, &name, cache, elems.get(i + 1))? {
                     Some(p) => p,
                     None => return Ok(Value::Null),
                 };
-                self.walk(&mut next, elems, keys, names, i + 1, action, value)
+                self.walk(&mut next, elems, ctx, i + 1)
             }
+        }
+    }
+
+    /// Prepares `place` as an array container for writing: auto-vivifies
+    /// null and false. `None` when the write must stop (unset of something
+    /// missing, or a user error handler replaced the container).
+    fn array_container(&mut self, cur: *mut Value, for_unset: bool) -> R<Option<()>> {
+        match unsafe { &*cur } {
+            Value::Array(_) => Ok(Some(())),
+            Value::Null => {
+                if for_unset {
+                    return Ok(None);
+                }
+                unsafe { *cur = Value::Array(PhpArray::new()) };
+                Ok(Some(()))
+            }
+            Value::Bool(false) => {
+                if for_unset {
+                    return Ok(None);
+                }
+                self.deprecated("Automatic conversion of false to array is deprecated")?;
+                // An error handler may have changed the variable.
+                if !matches!(unsafe { &*cur }, Value::Bool(false)) {
+                    return Ok(None);
+                }
+                unsafe { *cur = Value::Array(PhpArray::new()) };
+                Ok(Some(()))
+            }
+            _ => Ok(Some(())),
         }
     }
 
@@ -733,33 +811,19 @@ impl Vm {
         place: &mut Place,
         key: Option<Value>,
         for_unset: bool,
+        rmw: bool,
     ) -> R<Option<Place>> {
         let cur = deref_ptr(place.ptr());
-        match unsafe { &mut *cur } {
-            Value::Array(_) => {}
-            Value::Null => {
-                if for_unset {
-                    return Ok(None);
-                }
-                unsafe { *cur = Value::Array(PhpArray::new()) };
-            }
-            Value::Bool(false) => {
-                if for_unset {
-                    return Ok(None);
-                }
-                self.deprecated("Automatic conversion of false to array is deprecated")?;
-                unsafe { *cur = Value::Array(PhpArray::new()) };
-            }
+        match unsafe { &*cur } {
+            Value::Array(_) | Value::Null | Value::Bool(false) => {}
             Value::Str(s) => {
                 if for_unset {
                     return self.throw("Error", "Cannot unset string offsets");
                 }
-                if s.is_empty() {
-                    unsafe { *cur = Value::Array(PhpArray::new()) };
-                } else {
-                    let _ = key;
+                if !s.is_empty() {
                     return self.throw("Error", "Cannot use string offset as an array");
                 }
+                unsafe { *cur = Value::Array(PhpArray::new()) };
             }
             Value::Object(o) => {
                 let o = o.clone();
@@ -767,21 +831,18 @@ impl Vm {
                 if !self.implements_array_access(&cls) {
                     return self.throw(
                         "Error",
-                        &format!(
-                            "Cannot use object of type {} as array",
-                            cls.name.to_string_lossy()
-                        ),
+                        &format!("Cannot use object of type {} as array", cls.name.dname()),
                     );
                 }
                 let k = key.unwrap_or(Value::Null);
-                let v = self.call_method(&o, b"offsetget", vec![k])?;
+                let v = self.call_method_raw(&o, b"offsetget", vec![k])?;
                 return Ok(Some(match v {
                     Value::Ref(r) => Place::Ptr(r.borrow_mut_ptr()),
                     Value::Object(_) => Place::Temp(Box::new(v)),
                     other => {
                         self.notice_msg(&format!(
                             "Indirect modification of overloaded element of {} has no effect",
-                            cls.name.to_string_lossy()
+                            cls.name.dname()
                         ))?;
                         Place::Temp(Box::new(other))
                     }
@@ -794,24 +855,34 @@ impl Vm {
                 return self.throw("Error", "Cannot use a scalar value as an array");
             }
         }
-        let Value::Array(a) = (unsafe { &mut *cur }) else {
-            unreachable!()
+        // The key first: its conversion may warn.
+        let k = match key {
+            None => None,
+            Some(k) => Some(self.to_key(&k, "array")?),
         };
-        let slot: *mut Value = match key {
+        if self.array_container(cur, for_unset)?.is_none() {
+            return Ok(None);
+        }
+        let Value::Array(a) = (unsafe { &mut *cur }) else {
+            return Ok(None);
+        };
+        let slot: *mut Value = match k {
             None => match a.make_mut().push_entry() {
                 Ok(s) => s as *mut Value,
                 Err(e) => return Err(self.php_error(e.to_error())),
             },
             Some(k) => {
-                let k = self.to_key(&k, "array")?;
-                let Value::Array(a) = (unsafe { &mut *cur }) else {
-                    unreachable!()
-                };
-                if for_unset {
-                    if a.get(k.as_ref()).is_none() {
+                if a.get(k.as_ref()).is_none() {
+                    if for_unset {
                         return Ok(None);
                     }
+                    if rmw {
+                        self.warn(&format!("Undefined array key {}", key_desc(&k)))?;
+                    }
                 }
+                let Value::Array(a) = (unsafe { &mut *cur }) else {
+                    return Ok(None);
+                };
                 a.entry(k) as *mut Value
             }
         };
@@ -823,40 +894,20 @@ impl Vm {
         &mut self,
         place: &mut Place,
         key: Option<Value>,
-        _rest: &[PathElem],
         action: PathAction,
         value: Option<Value>,
     ) -> R<Value> {
         let cur = deref_ptr(place.ptr());
-        // Containers that aren't arrays.
-        match unsafe { &mut *cur } {
-            Value::Array(_) => {}
-            Value::Null => {
-                if let PathAction::Unset = action {
-                    return Ok(Value::Null);
-                }
-                unsafe { *cur = Value::Array(PhpArray::new()) };
-            }
-            Value::Bool(false) => {
-                if let PathAction::Unset = action {
-                    return Ok(Value::Null);
-                }
-                self.deprecated("Automatic conversion of false to array is deprecated")?;
-                unsafe { *cur = Value::Array(PhpArray::new()) };
-            }
-            Value::Str(s) => {
-                if s.is_empty() && !matches!(action, PathAction::Unset) && false {
-                    unsafe { *cur = Value::Array(PhpArray::new()) };
-                } else {
-                    return self.string_offset_write(cur, key, action, value);
-                }
-            }
+        let is_unset = matches!(action, PathAction::Unset);
+        match unsafe { &*cur } {
+            Value::Array(_) | Value::Null | Value::Bool(false) => {}
+            Value::Str(_) => return self.string_offset_write(cur, key, action, value),
             Value::Object(o) => {
                 let o = o.clone();
                 return self.array_access_write(&o, key, action, value);
             }
             _ => {
-                if let PathAction::Unset = action {
+                if is_unset {
                     return self.throw("Error", "Cannot unset offset in a non-array variable");
                 }
                 return self.throw("Error", "Cannot use a scalar value as an array");
@@ -866,12 +917,24 @@ impl Vm {
             None => None,
             Some(k) => Some(self.to_key(&k, "array")?),
         };
-        let Value::Array(a) = (unsafe { &mut *cur }) else {
-            unreachable!()
-        };
+        if self.array_container(cur, is_unset)?.is_none() {
+            return Ok(Value::Null);
+        }
+        if !matches!(unsafe { &*cur }, Value::Array(_)) {
+            return Ok(Value::Null);
+        }
+        macro_rules! arr {
+            () => {
+                match unsafe { &mut *cur } {
+                    Value::Array(a) => a,
+                    _ => return Ok(Value::Null),
+                }
+            };
+        }
         match action {
             PathAction::Assign(_) => {
                 let v = value.unwrap();
+                let a = arr!();
                 match k {
                     None => {
                         if a.push(v.clone()).is_err() {
@@ -890,12 +953,13 @@ impl Vm {
             }
             PathAction::Unset => {
                 if let Some(k) = k {
-                    let old = a.remove(k.as_ref());
+                    let old = arr!().remove(k.as_ref());
                     drop(old);
                 }
                 Ok(Value::Null)
             }
-            PathAction::MakeRef => {
+            PathAction::MakeRef | PathAction::FetchW => {
+                let a = arr!();
                 let slot = match k {
                     None => match a.make_mut().push_entry() {
                         Ok(s) => s,
@@ -910,6 +974,7 @@ impl Vm {
                     Value::Ref(r) => r,
                     other => PhpRef::new(other),
                 };
+                let a = arr!();
                 match k {
                     None => {
                         if a.push(Value::Ref(r.clone())).is_err() {
@@ -926,46 +991,27 @@ impl Vm {
                 }
                 Ok(Value::Ref(r))
             }
-            PathAction::AssignOp(op, _) => {
-                let rhs = value.unwrap();
-                let (slot, missing) = match k {
+            PathAction::AssignOp(_, _) | PathAction::IncDec(_) => {
+                if let Some(key) = &k {
+                    let missing = arr!().get(key.as_ref()).is_none();
+                    if missing {
+                        self.warn(&format!("Undefined array key {}", key_desc(key)))?;
+                    }
+                }
+                let a = arr!();
+                let slot: *mut Value = match k {
                     None => match a.make_mut().push_entry() {
-                        Ok(s) => (s as *mut Value, false),
+                        Ok(s) => s as *mut Value,
                         Err(e) => return Err(self.php_error(e.to_error())),
                     },
-                    Some(ref key) => {
-                        let missing = a.get(key.as_ref()).is_none();
-                        (a.entry(key.clone()) as *mut Value, missing)
-                    }
+                    Some(key) => a.entry(key) as *mut Value,
                 };
-                if missing {
-                    self.warn(&format!(
-                        "Undefined array key {}",
-                        key_desc(k.as_ref().unwrap())
-                    ))?;
+                match action {
+                    PathAction::AssignOp(op, _) => self.rmw_slot(slot, op, value.unwrap()),
+                    PathAction::IncDec(op) => self.incdec_slot(slot, op),
+                    _ => unreachable!(),
                 }
-                self.rmw_slot(slot, op, rhs)
             }
-            PathAction::IncDec(op) => {
-                let (slot, missing) = match k {
-                    None => match a.make_mut().push_entry() {
-                        Ok(s) => (s as *mut Value, false),
-                        Err(e) => return Err(self.php_error(e.to_error())),
-                    },
-                    Some(ref key) => {
-                        let missing = a.get(key.as_ref()).is_none();
-                        (a.entry(key.clone()) as *mut Value, missing)
-                    }
-                };
-                if missing {
-                    self.warn(&format!(
-                        "Undefined array key {}",
-                        key_desc(k.as_ref().unwrap())
-                    ))?;
-                }
-                self.incdec_slot(slot, op)
-            }
-            PathAction::FetchW => Ok(Value::Null),
         }
     }
 
@@ -1055,7 +1101,7 @@ impl Vm {
             other => {
                 return self.type_error(&format!(
                     "Cannot access offset of type {} on string",
-                    other.type_name_for_error()
+                    other.tname()
                 ));
             }
         };
@@ -1105,10 +1151,7 @@ impl Vm {
         if !self.implements_array_access(&cls) {
             return self.throw(
                 "Error",
-                &format!(
-                    "Cannot use object of type {} as array",
-                    cls.name.to_string_lossy()
-                ),
+                &format!("Cannot use object of type {} as array", cls.name.dname()),
             );
         }
         let k = key.clone().unwrap_or(Value::Null);
@@ -1143,7 +1186,7 @@ impl Vm {
                     other => {
                         self.notice_msg(&format!(
                             "Indirect modification of overloaded element of {} has no effect",
-                            cls.name.to_string_lossy()
+                            cls.name.dname()
                         ))?;
                         Ok(Value::Ref(PhpRef::new(other)))
                     }

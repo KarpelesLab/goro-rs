@@ -4,6 +4,7 @@
 pub mod core_classes;
 pub mod core_funcs;
 pub mod enums;
+pub mod fiber;
 pub mod output;
 pub mod var;
 
@@ -16,5 +17,6 @@ pub fn modules() -> Vec<&'static Module> {
         &core_classes::MODULE,
         &var::MODULE,
         &output::MODULE,
+        &fiber::MODULE,
     ]
 }

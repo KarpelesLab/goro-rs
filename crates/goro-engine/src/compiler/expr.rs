@@ -490,6 +490,12 @@ impl<'a> Compiler<'a> {
                 args,
                 nullsafe,
             } => self.chain_root(e, |c| {
+                if let MemberName::Expr(x) = name
+                    && let Some(v) = c.const_value(x)
+                    && !matches!(v, Value::Str(_))
+                {
+                    return c.err("Method name must be a string", line);
+                }
                 let o = c.obj_operand(obj)?;
                 if *nullsafe {
                     c.nullsafe_check(o)?;
@@ -1319,7 +1325,7 @@ impl<'a> Compiler<'a> {
                     let t = self.tmp();
                     self.emit(Op::Special {
                         dst: t,
-                        what: Special::This,
+                        what: Special::ThisQuiet,
                     });
                     self.free(t);
                     self.emit(Op::Isset { dst: d, src: t });
@@ -1604,7 +1610,7 @@ impl<'a> Compiler<'a> {
                 seen_named = true;
                 let name = self.str_const(n.name);
                 match &a.value.kind {
-                    ExprKind::Variable(v) if *v != b"this" => {
+                    ExprKind::Variable(v) if *v != b"this" && !is_superglobal(v) => {
                         let var = self.cv(v);
                         self.emit(Op::SendNamedVar { var, name });
                     }
@@ -1641,9 +1647,23 @@ impl<'a> Compiler<'a> {
                 );
             }
             match &a.value.kind {
-                ExprKind::Variable(v) if *v != b"this" => {
+                ExprKind::Variable(v) if *v != b"this" && !is_superglobal(v) => {
                     let var = self.cv(v);
                     self.emit(Op::SendVar { var, arg: i });
+                }
+                ExprKind::Index { index: None, .. } => {
+                    // `f($a[])`: only valid for by-reference parameters.
+                    let j = self.emit(Op::JmpArgByRef { arg: i, t: 0 });
+                    let msg =
+                        self.add_const(Value::Str(PhpStr::intern(b"Cannot use [] for reading")));
+                    self.emit(Op::Error {
+                        msg: msg & !CONST,
+                        kind: 0,
+                    });
+                    self.patch_here(j);
+                    let r = self.ref_of(&a.value)?;
+                    self.free(r);
+                    self.emit(Op::SendRef { src: r, arg: i });
                 }
                 _ if is_ref_capable(&a.value) => {
                     let j = self.emit(Op::JmpArgByRef { arg: i, t: 0 });

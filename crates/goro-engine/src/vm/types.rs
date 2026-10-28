@@ -1,6 +1,7 @@
 //! Type declarations: checks and coercions (PHP manual: Type declarations,
 //! "Coercive typing with union types"; observed on PHP 8.5).
 
+use crate::class::{DisplayName, TypeName};
 use goro_runtime::numeric::{Numericness, parse_numeric};
 use goro_runtime::{PhpStr, Value};
 
@@ -263,6 +264,6 @@ impl Vm {
     /// The type of a value as PHP names it in type errors ("int",
     /// "string", "Foo", "null").
     pub fn type_name_given(v: &Value) -> String {
-        v.type_name_for_error()
+        v.tname()
     }
 }

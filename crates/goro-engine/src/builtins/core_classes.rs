@@ -3,6 +3,7 @@
 //! WeakReference / WeakMap. Declarations follow the PHP manual's class
 //! synopses.
 
+use crate::class::{DisplayName, TypeName};
 use std::rc::Rc;
 
 use goro_runtime::{Key, ObjRef, PhpArray, PhpStr, Value};
@@ -112,6 +113,10 @@ pub static MODULE: Module = Module {
         (
             "unhandledmatcherror",
             exception_class!("UnhandledMatchError", "Error"),
+        ),
+        (
+            "assertionerror",
+            exception_class!("AssertionError", "Error"),
         ),
         (
             "requestparsingerror",
@@ -327,8 +332,10 @@ fn error_exc_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if a.has(2) {
         vm.set_prop_raw(&o, b"severity", a.val(2));
     }
+    // A file name given resets the line unless one is given too.
     if a.has(3) && !a.val(3).is_null() {
         vm.set_prop_raw(&o, b"file", a.val(3));
+        vm.set_prop_raw(&o, b"line", Value::Int(0));
     }
     if a.has(4) && !a.val(4).is_null() {
         vm.set_prop_raw(&o, b"line", a.val(4));
@@ -407,15 +414,9 @@ fn exc_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
         };
         let ts = vm.trace_string(&trace);
         let head = if msg.is_empty() {
-            format!("{} in {}:{}", cls.name.to_string_lossy(), file, line)
+            format!("{} in {}:{}", cls.name.dname(), file, line)
         } else {
-            format!(
-                "{}: {} in {}:{}",
-                cls.name.to_string_lossy(),
-                msg,
-                file,
-                line
-            )
+            format!("{}: {} in {}:{}", cls.name.dname(), msg, file, line)
         };
         if i == 0 {
             out = format!("{}\nStack trace:\n{}", head, ts);
@@ -506,7 +507,7 @@ fn closure_debug(vm: &mut Vm, o: &ObjRef) -> Option<PhpArray> {
                 k.push_str("...");
             }
             k.push('$');
-            k.push_str(&pi.name.to_string_lossy());
+            k.push_str(&pi.name.dname());
             let opt = !matches!(pi.default, crate::bytecode::ParamDefault::None) || pi.variadic;
             p.insert(
                 Key::Str(PhpStr::from(k)),
@@ -556,7 +557,7 @@ fn do_bind(vm: &mut Vm, cl: &ObjRef, new_this: Value, scope_arg: Option<Value>) 
         {
             vm.warn(&format!(
                 "Cannot bind closure to scope of internal class {}",
-                s.name.to_string_lossy()
+                s.name.dname()
             ))?;
             return Ok(Value::Null);
         }
@@ -578,7 +579,7 @@ fn do_bind(vm: &mut Vm, cl: &ObjRef, new_this: Value, scope_arg: Option<Value>) 
                     vm.warn(&format!(
                         "Cannot bind method {}() to object of class {}",
                         c.func.display_name(),
-                        vm.class_of(&t).name.to_string_lossy()
+                        vm.class_of(&t).name.dname()
                     ))?;
                     return Ok(Value::Null);
                 }

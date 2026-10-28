@@ -479,7 +479,13 @@ impl Vm {
                     }
                 }
                 Op::ReturnRef { src } => {
-                    let v = self.get_raw(src);
+                    let mut v = self.get_raw(src);
+                    if !matches!(v, Value::Ref(_)) {
+                        self.notice_msg(
+                            "Only variable references should be returned by reference",
+                        )?;
+                        v = Value::Ref(goro_runtime::PhpRef::new(v));
+                    }
                     if let Some(v) = self.do_return(v, true)? {
                         return Ok(v);
                     }
@@ -565,7 +571,7 @@ impl Vm {
                     cache,
                 } => self.op_class_const(dst, class, name, cache)?,
                 Op::ClassName { dst, class } => {
-                    let c = self.resolve_class_spec(class, false)?;
+                    let c = self.resolve_class_name_spec(class)?;
                     let n = c.name.clone();
                     self.put(dst, Value::Str(n));
                 }
@@ -1221,12 +1227,18 @@ impl Vm {
                     );
                 }
             },
+            Special::ThisQuiet => match self.this_obj() {
+                Some(o) => Value::Object(o),
+                None => Value::Null,
+            },
             Special::StaticClass | Special::CalledClass => {
                 let p = self.static_class_ptr();
                 if p.is_null() {
                     if what == Special::CalledClass {
-                        self.warn("get_called_class() must be called from within a class")?;
-                        return Ok(Value::Bool(false));
+                        return Err(self.throw_error_msg(
+                            "Error",
+                            "get_called_class() must be called from within a class",
+                        ));
                     }
                     return Err(self.throw_error_msg(
                         "Error",

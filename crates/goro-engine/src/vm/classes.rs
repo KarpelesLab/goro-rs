@@ -4,6 +4,7 @@
 //! PHP manual: Objects (Inheritance, Abstract classes, Interfaces, Traits,
 //! Enumerations), Autoloading classes. Error messages observed on PHP 8.5.
 
+use crate::class::{DisplayName, TypeName};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -72,7 +73,7 @@ impl Vm {
                 &format!(
                     "Cannot declare {} {}, because the name is already in use",
                     what,
-                    decl.name.to_string_lossy()
+                    decl.name.dname()
                 ),
                 &decl.file,
                 decl.line_start,
@@ -101,7 +102,7 @@ impl Vm {
     }
 
     fn link_class(&mut self, decl: &Rc<ClassDecl>) -> R<Rc<Class>> {
-        let cname = decl.name.to_string_lossy();
+        let cname = decl.name.dname();
         // Parent.
         let parent = match &decl.parent {
             Some(p) => {
@@ -118,18 +119,14 @@ impl Vm {
                         &format!(
                             "Class {} cannot extend interface {}",
                             cname,
-                            pc.name.to_string_lossy()
+                            pc.name.dname()
                         ),
                     );
                 }
                 if pc.is_trait() {
                     return self.link_err(
                         decl,
-                        &format!(
-                            "Class {} cannot extend trait {}",
-                            cname,
-                            pc.name.to_string_lossy()
-                        ),
+                        &format!("Class {} cannot extend trait {}", cname, pc.name.dname()),
                     );
                 }
                 if pc.is_enum() {
@@ -138,7 +135,7 @@ impl Vm {
                         &format!(
                             "Class {} cannot extend final class {}",
                             cname,
-                            pc.name.to_string_lossy()
+                            pc.name.dname()
                         ),
                     );
                 }
@@ -148,7 +145,7 @@ impl Vm {
                         &format!(
                             "Class {} cannot extend final class {}",
                             cname,
-                            pc.name.to_string_lossy()
+                            pc.name.dname()
                         ),
                     );
                 }
@@ -165,7 +162,7 @@ impl Vm {
                             a,
                             cname,
                             b,
-                            pc.name.to_string_lossy()
+                            pc.name.dname()
                         ),
                     );
                 }
@@ -192,7 +189,7 @@ impl Vm {
                         &format!(
                             "{} cannot implement {} - it is not an interface",
                             cname,
-                            ic.name.to_string_lossy()
+                            ic.name.dname()
                         ),
                     );
                 }
@@ -201,7 +198,7 @@ impl Vm {
                     &format!(
                         "{} cannot implement {} - it is not an interface",
                         cname,
-                        ic.name.to_string_lossy()
+                        ic.name.dname()
                     ),
                 );
             }
@@ -284,28 +281,28 @@ impl Vm {
         for c in &decl.consts {
             if let Some(prev) = cls.find_const(&c.name) {
                 if prev.flags & mflags::FINAL != 0 && !std::ptr::eq(prev.class, cp) {
-                    let pcn = unsafe { (*prev.class).name.to_string_lossy() };
+                    let pcn = unsafe { (*prev.class).name.dname() };
                     return self.link_err(
                         decl,
                         &format!(
                             "{}::{} cannot override final constant {}::{}",
                             cname,
-                            c.name.to_string_lossy(),
+                            c.name.dname(),
                             pcn,
-                            c.name.to_string_lossy()
+                            c.name.dname()
                         ),
                     );
                 }
                 let pvis = prev.flags & mflags::VISIBILITY;
                 let nvis = c.flags & mflags::VISIBILITY;
                 if vis_rank(nvis) > vis_rank(pvis) && prev.flags & mflags::PRIVATE == 0 {
-                    let pcn = unsafe { (*prev.class).name.to_string_lossy() };
+                    let pcn = unsafe { (*prev.class).name.dname() };
                     return self.link_err(
                         decl,
                         &format!(
                             "Access level to {}::{} must be {} (as in class {}){}",
                             cname,
-                            c.name.to_string_lossy(),
+                            c.name.dname(),
                             vis_name(pvis),
                             pcn,
                             if pvis == mflags::PROTECTED {
@@ -366,10 +363,8 @@ impl Vm {
                 if m.flags & mflags::ABSTRACT != 0 {
                     missing.push(format!(
                         "{}::{}",
-                        m.scope()
-                            .map(|c| c.name.to_string_lossy())
-                            .unwrap_or_default(),
-                        m.name.to_string_lossy()
+                        m.scope().map(|c| c.name.dname()).unwrap_or_default(),
+                        m.name.dname()
                     ));
                 }
             }
@@ -426,8 +421,8 @@ impl Vm {
             if !found {
                 let msg = format!(
                     "{}::{}() has #[\\Override] attribute, but no matching parent method exists",
-                    cls.name.to_string_lossy(),
-                    m.code.name.to_string_lossy()
+                    cls.name.dname(),
+                    m.code.name.dname()
                 );
                 return Err(self.fatal_at(&msg, &decl.file, m.code.line_start));
             }
@@ -493,7 +488,7 @@ impl Vm {
 
     fn add_prop(&mut self, cls: &Rc<Class>, decl: &ClassDecl, p: &PropDecl) -> R<()> {
         let cp = Rc::as_ptr(cls);
-        let cname = cls.name.to_string_lossy();
+        let cname = cls.name.dname();
         let get = p.get.as_ref().map(|c| {
             let f = Rc::new(Func::user(c.clone(), mflags::PUBLIC));
             f.scope.set(cp);
@@ -512,10 +507,10 @@ impl Vm {
                         decl,
                         &format!(
                             "Cannot redeclare non static {}::${} as static {}::${}",
-                            unsafe { (*prev.class).name.to_string_lossy() },
-                            p.name.to_string_lossy(),
+                            unsafe { (*prev.class).name.dname() },
+                            p.name.dname(),
                             cname,
-                            p.name.to_string_lossy()
+                            p.name.dname()
                         ),
                     );
                 }
@@ -526,16 +521,16 @@ impl Vm {
                 let idx = cls.prop_map.borrow()[&p.name][0];
                 let prev = &props[idx as usize];
                 if prev.flags & mflags::PRIVATE == 0 {
-                    let pcn = unsafe { (*prev.class).name.to_string_lossy() };
+                    let pcn = unsafe { (*prev.class).name.dname() };
                     drop(props);
                     return self.link_err(
                         decl,
                         &format!(
                             "Cannot redeclare non static {}::${} as static {}::${}",
                             pcn,
-                            p.name.to_string_lossy(),
+                            p.name.dname(),
                             cname,
-                            p.name.to_string_lossy()
+                            p.name.dname()
                         ),
                     );
                 }
@@ -595,10 +590,10 @@ impl Vm {
                     decl,
                     &format!(
                         "Cannot redeclare static {}::${} as non static {}::${}",
-                        unsafe { (*prev.class).name.to_string_lossy() },
-                        p.name.to_string_lossy(),
+                        unsafe { (*prev.class).name.dname() },
+                        p.name.dname(),
                         cname,
-                        p.name.to_string_lossy()
+                        p.name.dname()
                     ),
                 );
             }
@@ -612,9 +607,9 @@ impl Vm {
                         &format!(
                             "Access level to {}::${} must be {} (as in class {}){}",
                             cname,
-                            p.name.to_string_lossy(),
+                            p.name.dname(),
                             vis_name(pv),
-                            unsafe { (*prev.class).name.to_string_lossy() },
+                            unsafe { (*prev.class).name.dname() },
                             if pv == mflags::PROTECTED {
                                 " or weaker"
                             } else {
@@ -624,7 +619,7 @@ impl Vm {
                     );
                 }
                 if prev.flags & mflags::READONLY != p.flags & mflags::READONLY {
-                    let pcn = unsafe { (*prev.class).name.to_string_lossy() };
+                    let pcn = unsafe { (*prev.class).name.dname() };
                     let (a, b) = if prev.flags & mflags::READONLY != 0 {
                         ("readonly", "non-readonly")
                     } else {
@@ -636,21 +631,21 @@ impl Vm {
                             "Cannot redeclare {} property {}::${} as {} {}::${}",
                             a,
                             pcn,
-                            p.name.to_string_lossy(),
+                            p.name.dname(),
                             b,
                             cname,
-                            p.name.to_string_lossy()
+                            p.name.dname()
                         ),
                     );
                 }
                 if prev.flags & mflags::FINAL != 0 {
-                    let pcn = unsafe { (*prev.class).name.to_string_lossy() };
+                    let pcn = unsafe { (*prev.class).name.dname() };
                     return self.link_err(
                         decl,
                         &format!(
                             "Cannot override final property {}::${}",
                             pcn,
-                            p.name.to_string_lossy()
+                            p.name.dname()
                         ),
                     );
                 }
@@ -659,13 +654,13 @@ impl Vm {
                         if a.display() != b.display()
                             && !(a.mask & tmask::MIXED != 0 && b.mask & tmask::MIXED != 0)
                         {
-                            let pcn = unsafe { (*prev.class).name.to_string_lossy() };
+                            let pcn = unsafe { (*prev.class).name.dname() };
                             return self.link_err(
                                 decl,
                                 &format!(
                                     "Type of {}::${} must be {} (as in class {})",
                                     cname,
-                                    p.name.to_string_lossy(),
+                                    p.name.dname(),
                                     a.display(),
                                     pcn
                                 ),
@@ -673,26 +668,26 @@ impl Vm {
                         }
                     }
                     (Some(a), None) => {
-                        let pcn = unsafe { (*prev.class).name.to_string_lossy() };
+                        let pcn = unsafe { (*prev.class).name.dname() };
                         return self.link_err(
                             decl,
                             &format!(
                                 "Type of {}::${} must be {} (as in class {})",
                                 cname,
-                                p.name.to_string_lossy(),
+                                p.name.dname(),
                                 a.display(),
                                 pcn
                             ),
                         );
                     }
                     (None, Some(_)) => {
-                        let pcn = unsafe { (*prev.class).name.to_string_lossy() };
+                        let pcn = unsafe { (*prev.class).name.dname() };
                         return self.link_err(
                             decl,
                             &format!(
                                 "Type of {}::${} must not be defined (as in class {})",
                                 cname,
-                                p.name.to_string_lossy(),
+                                p.name.dname(),
                                 pcn
                             ),
                         );
@@ -712,7 +707,7 @@ impl Vm {
             if std::ptr::eq(prev.class, cp) {
                 return self.link_err(
                     decl,
-                    &format!("Cannot redeclare {}::${}", cname, p.name.to_string_lossy()),
+                    &format!("Cannot redeclare {}::${}", cname, p.name.dname()),
                 );
             }
             // Shadows a parent's private property: new slot.
@@ -738,7 +733,7 @@ impl Vm {
     /// Adds (or overrides with) method `f`, checking inheritance rules.
     fn add_method(&mut self, cls: &Rc<Class>, f: Rc<Func>, decl: &ClassDecl) -> R<()> {
         let ln = f.lname.clone();
-        let cname = cls.name.to_string_lossy();
+        let cname = cls.name.dname();
         let prev = cls.methods.borrow().get(&ln).cloned();
         if let Some(prev) = prev {
             let pscope = prev.scope.get();
@@ -746,10 +741,7 @@ impl Vm {
                 // Same class (trait method vs own method): own wins.
                 return Ok(());
             }
-            let pcn = prev
-                .scope()
-                .map(|c| c.name.to_string_lossy())
-                .unwrap_or_default();
+            let pcn = prev.scope().map(|c| c.name.dname()).unwrap_or_default();
             let is_ctor = ln.as_bytes() == b"__construct";
             if prev.flags & mflags::PRIVATE == 0 || prev.flags & mflags::ABSTRACT != 0 {
                 if prev.flags & mflags::FINAL != 0 {
@@ -758,7 +750,7 @@ impl Vm {
                         &format!(
                             "Cannot override final method {}::{}()",
                             pcn,
-                            prev.name.to_string_lossy()
+                            prev.name.dname()
                         ),
                     );
                 }
@@ -768,7 +760,7 @@ impl Vm {
                         &format!(
                             "Cannot make static method {}::{}() non static in class {}",
                             pcn,
-                            prev.name.to_string_lossy(),
+                            prev.name.dname(),
                             cname
                         ),
                     );
@@ -779,7 +771,7 @@ impl Vm {
                         &format!(
                             "Cannot make non static method {}::{}() static in class {}",
                             pcn,
-                            prev.name.to_string_lossy(),
+                            prev.name.dname(),
                             cname
                         ),
                     );
@@ -790,7 +782,7 @@ impl Vm {
                         &format!(
                             "Cannot make non abstract method {}::{}() abstract in class {}",
                             pcn,
-                            prev.name.to_string_lossy(),
+                            prev.name.dname(),
                             cname
                         ),
                     );
@@ -803,7 +795,7 @@ impl Vm {
                         &format!(
                             "Access level to {}::{}() must be {} (as in class {}){}",
                             cname,
-                            f.name.to_string_lossy(),
+                            f.name.dname(),
                             vis_name(pv),
                             pcn,
                             if pv == mflags::PROTECTED {
@@ -903,7 +895,7 @@ impl Vm {
                 s.push_str("...");
             }
             s.push('$');
-            s.push_str(&p.name.to_string_lossy());
+            s.push_str(&p.name.dname());
             if let Some(d) = &p.default_text {
                 s.push_str(" = ");
                 s.push_str(d);
@@ -923,7 +915,7 @@ impl Vm {
 
     fn use_traits(&mut self, cls: &Rc<Class>, decl: &ClassDecl) -> R<()> {
         let cp = Rc::as_ptr(cls);
-        let cname = cls.name.to_string_lossy();
+        let cname = cls.name.dname();
         let mut traits: Vec<Rc<Class>> = Vec::new();
         let mut rules: Vec<TraitRule> = Vec::new();
         for tu in &decl.traits {
@@ -941,7 +933,7 @@ impl Vm {
                         &format!(
                             "{} cannot use {} - it is not a trait",
                             cname,
-                            t.name.to_string_lossy()
+                            t.name.dname()
                         ),
                     );
                 }
@@ -1031,12 +1023,12 @@ impl Vm {
                     if !own && !a_abs && !b_abs {
                         return self.link_err(decl, &format!(
                             "Trait method {}::{} has not been applied as {}::{}, because of collision with {}::{}",
-                            imported[j].2.name.to_string_lossy(),
-                            imported[j].1.name.to_string_lossy(),
+                            imported[j].2.name.dname(),
+                            imported[j].1.name.dname(),
                             cname,
-                            imported[j].1.name.to_string_lossy(),
-                            imported[i].2.name.to_string_lossy(),
-                            imported[i].1.name.to_string_lossy()
+                            imported[j].1.name.dname(),
+                            imported[i].2.name.dname(),
+                            imported[i].1.name.dname()
                         ));
                     }
                 }
@@ -1085,12 +1077,12 @@ impl Vm {
                         || prev.ty.as_ref().map(|t| t.display())
                             != p.ty.as_ref().map(|t| t.display())
                     {
-                        let pcn = unsafe { (*prev.class).name.to_string_lossy() };
+                        let pcn = unsafe { (*prev.class).name.dname() };
                         return self.link_err(decl, &format!(
                             "{} and {} define the same property (${}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
                             pcn,
-                            t.name.to_string_lossy(),
-                            p.name.to_string_lossy(),
+                            t.name.dname(),
+                            p.name.dname(),
                             cname
                         ));
                     }
@@ -1261,7 +1253,7 @@ impl Vm {
             {
                 return self.link_err(
                     decl,
-                    &format!("Cannot redeclare {}::{}()", cls.name.to_string_lossy(), n),
+                    &format!("Cannot redeclare {}::{}()", cls.name.dname(), n),
                 );
             }
             let f = Rc::new(Func::native(
@@ -1299,8 +1291,8 @@ impl Vm {
                     decl,
                     &format!(
                         "Enum {} cannot include magic method {}",
-                        cls.name.to_string_lossy(),
-                        m.code.name.to_string_lossy()
+                        cls.name.dname(),
+                        m.code.name.dname()
                     ),
                 );
             }
@@ -1318,7 +1310,7 @@ impl Vm {
                 "Error",
                 &format!(
                     "Undefined constant {}::{}",
-                    cls.name.to_string_lossy(),
+                    cls.name.dname(),
                     name.to_string_lossy()
                 ),
             );
@@ -1341,7 +1333,7 @@ impl Vm {
             if !ok {
                 return self.type_error(&format!(
                     "Enum case type {} does not match enum backing type {}",
-                    v.type_name_for_error(),
+                    v.tname(),
                     if cls.enum_backing == Some(tmask::INT) {
                         "int"
                     } else {
