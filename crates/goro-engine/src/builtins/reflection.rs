@@ -3507,7 +3507,7 @@ fn static_order(c: &Rc<Class>) -> Vec<Rc<crate::class::StaticProp>> {
 fn static_members(vm: &mut Vm, c: &Rc<Class>, out: &mut PhpArray) -> R<()> {
     vm.ensure_statics(c)?;
     for sp in static_order(c) {
-        let v = sp.cell.get();
+        let v = sp.cell.borrow().get();
         if !vm.is_uninit(&v) && out.get_str(&sp.name).is_none() {
             out.insert(Key::Str(sp.name.clone()), v);
         }
@@ -3527,7 +3527,7 @@ fn c_get_static(vm: &mut Vm, a: &mut Args) -> R<Value> {
     vm.ensure_statics(&c)?;
     match c.find_static(&n) {
         Some(sp) => {
-            let v = sp.cell.get();
+            let v = sp.cell.borrow().get();
             // An uninitialized property gives the default when one is
             // passed (test gh12856).
             if vm.is_uninit(&v) && a.has(1) {
@@ -3573,7 +3573,7 @@ fn set_static_checked(
                 return vm.type_error(&format!(
                     "Cannot assign {} to {}property {}::${} of type {}",
                     v.tname(),
-                    if sp.cell.refcount() > 1 {
+                    if sp.cell.borrow().refcount() > 1 {
                         "reference held by "
                     } else {
                         ""
@@ -3586,8 +3586,8 @@ fn set_static_checked(
         }
     }
     // A reference bound to typed properties keeps their types.
-    let v = vm.typed_ref_value(&sp.cell, v)?;
-    let old = sp.cell.set(v);
+    let v = vm.typed_ref_value(&sp.cell.borrow().clone(), v)?;
+    let old = sp.cell.borrow().set(v);
     drop(old);
     Ok(())
 }
@@ -3783,7 +3783,7 @@ fn pinfo(cls: &Class, name: &PhpStr) -> Option<PInfo> {
                 s.init
                     .borrow()
                     .clone()
-                    .or_else(|| Some(ConstExpr::Value(s.cell.get())))
+                    .or_else(|| Some(ConstExpr::Value(s.cell.borrow().get())))
             }),
         has_hooks: (false, false),
         slot: None,
@@ -3886,7 +3886,7 @@ fn p_get_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
     {
         vm.ensure_statics(&c)?;
         let sp = c.find_static(&n).unwrap();
-        let v = sp.cell.get();
+        let v = sp.cell.borrow().get();
         if vm.is_uninit(&v) {
             return vm.throw(
                 "Error",
@@ -4035,7 +4035,7 @@ fn p_is_init(vm: &mut Vm, a: &mut Args) -> R<Value> {
         && p.is_static
     {
         vm.ensure_statics(&c)?;
-        let v = c.find_static(&n).unwrap().cell.get();
+        let v = c.find_static(&n).unwrap().cell.borrow().get();
         return Ok(Value::Bool(!vm.is_uninit(&v)));
     }
     let Some(o) = a.obj(0) else {

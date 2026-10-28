@@ -641,6 +641,7 @@ impl Vm {
         let mut base_tmp: Option<Value> = None;
         let mut base_name: Option<PhpStr> = None;
         let mut static_cell: Option<PhpRef> = None;
+        let mut static_decl: Option<Rc<crate::class::StaticProp>> = None;
         let mut global_name: Option<PhpStr> = None;
         match path.base {
             PathBase::Tmp(r) => base_tmp = Some(self.get_raw(r)),
@@ -657,7 +658,9 @@ impl Vm {
                 if unset {
                     return self.throw("Error", "Attempt to unset static property");
                 }
-                static_cell = Some(self.static_prop_ref(c, n)?);
+                let (r, sp) = self.static_prop_ref(c, n)?;
+                static_cell = Some(r);
+                static_decl = Some(sp);
             }
             _ => {}
         }
@@ -763,6 +766,27 @@ impl Vm {
                 let r = static_cell.clone().unwrap();
                 if path.elems.is_empty() {
                     let v = ctx.value.clone();
+                    // `A::$x =& $y` rebinds the property's storage.
+                    if let (PathAction::BindRef(_), Some(Value::Ref(src)), Some(sp)) =
+                        (path.action, &v, &static_decl)
+                    {
+                        let src = src.clone();
+                        if sp.ty.is_some() {
+                            let cur = src.get();
+                            let cur = self.typed_static_ref_value(sp, cur)?;
+                            let old = src.set(cur);
+                            drop(old);
+                        }
+                        *sp.cell.borrow_mut() = src.clone();
+                        // Re-register a typed property's reference.
+                        let _ = self.find_static_prop_entry(&self.rc_class(sp.class), &sp.name)?;
+                        if res != NONE {
+                            let p = self.slot_ptr(res);
+                            let old = unsafe { (*p).replace(Value::Ref(src)) };
+                            drop(old);
+                        }
+                        return Ok(());
+                    }
                     return self.cell_action(&r, path.action, v, res);
                 }
                 Place::Ptr(r.borrow_mut_ptr())
@@ -1391,8 +1415,11 @@ impl Vm {
     ) -> R<()> {
         let r = match action {
             PathAction::Assign(_) => {
-                let v = value.unwrap();
-                let old = cell.set(v.clone().into_deref());
+                let mut v = value.unwrap().into_deref();
+                if cell.is_typed() {
+                    v = self.typed_ref_value(cell, v)?;
+                }
+                let old = cell.set(v.clone());
                 drop(old);
                 v
             }

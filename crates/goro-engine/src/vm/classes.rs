@@ -593,7 +593,7 @@ impl Vm {
                 flags: p.flags,
                 ty: p.ty.clone(),
                 class: cp,
-                cell: PhpRef::new(init.0),
+                cell: RefCell::new(PhpRef::new(init.0)),
                 init: RefCell::new(init.1),
                 doc: p.doc.clone(),
                 attrs: p.attrs.clone(),
@@ -1157,14 +1157,14 @@ impl Vm {
                 let v = if init_now.is_some() {
                     Value::Null
                 } else {
-                    sp.cell.get()
+                    sp.cell.borrow().get()
                 };
                 cls.static_props.borrow_mut().push(Rc::new(StaticProp {
                     name: sp.name.clone(),
                     flags: sp.flags,
                     ty: sp.ty.clone(),
                     class: cp,
-                    cell: PhpRef::new(v),
+                    cell: RefCell::new(PhpRef::new(v)),
                     init: RefCell::new(init_now),
                     doc: sp.doc.clone(),
                     attrs: sp.attrs.clone(),
@@ -1451,7 +1451,7 @@ impl Vm {
                 let r = self.eval_const_expr(&ce, sp.class);
                 match r {
                     Ok(v) => {
-                        let old = sp.cell.set(v);
+                        let old = sp.cell.borrow().set(v);
                         drop(old);
                     }
                     Err(e) => {

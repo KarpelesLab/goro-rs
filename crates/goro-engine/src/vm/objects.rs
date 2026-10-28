@@ -1350,14 +1350,49 @@ impl Vm {
 
     // ------------------------------------------------------------ static properties
 
-    pub(crate) fn static_prop_ref(&mut self, class: ClassSpec, name: Reg) -> R<PhpRef> {
+    pub(crate) fn static_prop_ref(
+        &mut self,
+        class: ClassSpec,
+        name: Reg,
+    ) -> R<(PhpRef, Rc<crate::class::StaticProp>)> {
         let cls = self.resolve_class_spec(class, true)?;
         let n = self.get(name)?;
         let n = self.to_php_str(&n)?;
-        self.find_static_prop(&cls, &n)
+        self.find_static_prop_entry(&cls, &n)
     }
 
     pub fn find_static_prop(&mut self, cls: &Rc<Class>, n: &PhpStr) -> R<PhpRef> {
+        self.find_static_prop_entry(cls, n).map(|(r, _)| r)
+    }
+
+    /// A value bound to a typed static property by reference, checked
+    /// against its type ("Cannot assign X to property A::$p of type T").
+    pub(crate) fn typed_static_ref_value(
+        &mut self,
+        sp: &crate::class::StaticProp,
+        v: Value,
+    ) -> R<Value> {
+        let Some(t) = &sp.ty else { return Ok(v) };
+        let strict = self.caller_strict();
+        match self.check_type(&v, t, strict, sp.class, sp.class)? {
+            crate::vm::types::Check::Ok => Ok(v),
+            crate::vm::types::Check::Coerced(c) => Ok(c),
+            crate::vm::types::Check::Fail => self.type_error(&format!(
+                "Cannot assign {} to property {}::${} of type {}",
+                Vm::type_name_given(&v),
+                unsafe { (*sp.class).name.dname() },
+                sp.name.dname(),
+                t.display()
+            )),
+        }
+    }
+
+    /// The storage of a static property and its declaration.
+    pub fn find_static_prop_entry(
+        &mut self,
+        cls: &Rc<Class>,
+        n: &PhpStr,
+    ) -> R<(PhpRef, Rc<crate::class::StaticProp>)> {
         self.ensure_statics(cls)?;
         let Some(sp) = cls.find_static(n) else {
             return self.throw(
@@ -1397,7 +1432,7 @@ impl Vm {
                 ),
             );
         }
-        if self.is_uninit(&sp.cell.borrow()) {
+        if self.is_uninit(&sp.cell.borrow().borrow()) {
             return self.throw(
                 "Error",
                 &format!(
@@ -1409,7 +1444,7 @@ impl Vm {
         }
         // References to typed static properties are typed references.
         if let Some(t) = &sp.ty
-            && !sp.cell.is_typed()
+            && !sp.cell.borrow().is_typed()
         {
             let pi = Rc::new(PropInfo {
                 name: sp.name.clone(),
@@ -1423,9 +1458,10 @@ impl Vm {
                 attrs: sp.attrs.clone(),
                 default: None,
             });
-            self.type_ref(&sp.cell, &pi, None);
+            self.type_ref(&sp.cell.borrow().clone(), &pi, None);
         }
-        Ok(sp.cell.clone())
+        let r = sp.cell.borrow().clone();
+        Ok((r, sp))
     }
 
     pub(crate) fn op_isset_static_prop(
@@ -1465,7 +1501,7 @@ impl Vm {
                 if !visible {
                     empty
                 } else {
-                    let v = sp.cell.get();
+                    let v = sp.cell.borrow().get();
                     if self.is_uninit(&v) {
                         empty
                     } else if empty {
@@ -1718,9 +1754,39 @@ impl Vm {
                 );
             }
         };
+        // In constant expressions a missing constant is named as written
+        // (observed on PHP 8.5: "Undefined constant self::B"), and errors
+        // of class constant lookups show a "[constant expression]" frame.
+        let const_expr = self.code_ref().flags & crate::bytecode::fflags::CONST_EXPR != 0;
+        if const_expr {
+            let saved = std::mem::replace(&mut self.trace_const_expr, true);
+            let r = self.class_const_in_expr(class, &cls, &n);
+            self.trace_const_expr = saved;
+            let v = r?;
+            self.put(dst, v);
+            return Ok(());
+        }
         let v = self.class_constant(&cls, &n)?;
         self.put(dst, v);
         Ok(())
+    }
+
+    fn class_const_in_expr(&mut self, class: ClassSpec, cls: &Rc<Class>, n: &PhpStr) -> R<Value> {
+        if matches!(class, ClassSpec::SelfRef | ClassSpec::Parent)
+            && !n.as_bytes().eq_ignore_ascii_case(b"class")
+            && cls.find_const(&n).is_none()
+        {
+            let w = if matches!(class, ClassSpec::SelfRef) {
+                "self"
+            } else {
+                "parent"
+            };
+            return self.throw(
+                "Error",
+                &format!("Undefined constant {}::{}", w, n.to_string_lossy()),
+            );
+        }
+        self.class_constant(cls, n)
     }
 
     /// `Cls::NAME`.

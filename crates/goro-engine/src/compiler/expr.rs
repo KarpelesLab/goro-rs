@@ -43,7 +43,10 @@ impl<'a> Compiler<'a> {
 
     fn self_spec(&mut self) -> ClassSpec {
         match &self.class {
-            Some(c) if !c.is_trait && self.f.flags & fflags::CLOSURE == 0 => {
+            // Constant expressions keep `self` (their errors name it).
+            Some(c)
+                if !c.is_trait && self.f.flags & (fflags::CLOSURE | fflags::CONST_EXPR) == 0 =>
+            {
                 let n = c.name.clone();
                 ClassSpec::Named(self.name_pair(&n))
             }

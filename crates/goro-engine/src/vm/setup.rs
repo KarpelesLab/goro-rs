@@ -21,6 +21,7 @@ impl Vm {
             arg_pool: Vec::new(),
             functions: HashMap::new(),
             disabled_functions: HashMap::new(),
+            trace_const_expr: false,
             user_functions: Vec::new(),
             classes: HashMap::new(),
             class_order: Vec::new(),

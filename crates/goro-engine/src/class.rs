@@ -204,7 +204,8 @@ pub struct StaticProp {
     pub flags: u32,
     pub ty: Option<TypeHint>,
     pub class: *const Class,
-    pub cell: PhpRef,
+    /// The storage; a reference assignment (`A::$x =& $y`) rebinds it.
+    pub cell: RefCell<PhpRef>,
     pub init: RefCell<Option<ConstExpr>>,
     pub doc: Option<PhpStr>,
     pub attrs: Rc<[AttrInfo]>,

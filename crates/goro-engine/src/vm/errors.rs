@@ -654,7 +654,21 @@ impl Vm {
     ) -> Option<TraceFrame> {
         let code = f.code();
         if code.flags & crate::bytecode::fflags::CONST_EXPR != 0 {
-            return None;
+            // Errors of class constant lookups in constant expressions show
+            // the expression as a frame (test
+            // Zend/tests/constants/bug41633_2.phpt; observed on PHP 8.5).
+            if !self.trace_const_expr {
+                return None;
+            }
+            return Some(TraceFrame {
+                file,
+                line,
+                function: PhpStr::from("[constant expression]"),
+                class: None,
+                call_type: "",
+                object: None,
+                args: with_args.then(Vec::new),
+            });
         }
         // Helpers of internal classes written in PHP are not shown.
         if code.file.is_empty() && f.func.name.starts_with(b"__h_") {

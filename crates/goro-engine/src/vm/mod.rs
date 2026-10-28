@@ -400,6 +400,9 @@ pub struct Vm {
     /// Functions removed by disable_functions (internal classes written in
     /// PHP still reach them).
     pub disabled_functions: HashMap<PhpStr, Rc<Func>>,
+    /// A class constant lookup of a constant expression runs: its errors'
+    /// traces show the expression's frame.
+    pub trace_const_expr: bool,
     /// User functions in declaration order (get_defined_functions).
     pub user_functions: Vec<PhpStr>,
     pub classes: HashMap<PhpStr, Rc<Class>>,

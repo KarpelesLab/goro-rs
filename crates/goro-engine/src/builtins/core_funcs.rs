@@ -1125,7 +1125,10 @@ fn property_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
             })
             .unwrap_or(false)
     };
-    if declared || c.find_static(&p).is_some_and(|s| own_or_visible(s.flags, s.class)) {
+    if declared
+        || c.find_static(&p)
+            .is_some_and(|s| own_or_visible(s.flags, s.class))
+    {
         return Ok(Value::Bool(true));
     }
     if let Value::Object(o) = &v {
@@ -1185,7 +1188,7 @@ fn get_class_vars(vm: &mut Vm, a: &mut Args) -> R<Value> {
             || std::ptr::eq(sp.class, scope)
             || (!scope.is_null() && sp.flags & mflags::PROTECTED != 0);
         if visible {
-            let v = sp.cell.get();
+            let v = sp.cell.borrow().get();
             if !vm.is_uninit(&v) {
                 out.insert(Key::Str(sp.name.clone()), v);
             }

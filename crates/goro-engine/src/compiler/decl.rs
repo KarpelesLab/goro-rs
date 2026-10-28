@@ -2250,7 +2250,9 @@ pub fn parse_native_sig(
     // Reserved words (PHP 8.5's clone()) cannot be parsed as function
     // names: the name is not needed here.
     let sig_text = match (sig.find("function "), sig.find('(')) {
-        (Some(f), Some(p)) if f < p && crate::registry::sig_name(sig).eq_ignore_ascii_case("clone") => {
+        (Some(f), Some(p))
+            if f < p && crate::registry::sig_name(sig).eq_ignore_ascii_case("clone") =>
+        {
             format!("{}function __clone_fn{}", &sig[..f], &sig[p..])
         }
         _ => sig.to_string(),

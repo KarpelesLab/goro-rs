@@ -687,7 +687,7 @@ impl Vm {
                     cache,
                 } => self.op_assign_prop(obj, name, val, cache)?,
                 Op::FetchStaticProp { dst, class, name } => {
-                    let r = self.static_prop_ref(class, name)?;
+                    let (r, _) = self.static_prop_ref(class, name)?;
                     let v = r.get();
                     self.put(dst, v);
                 }
