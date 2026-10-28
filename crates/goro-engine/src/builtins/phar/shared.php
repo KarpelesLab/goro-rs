@@ -76,7 +76,9 @@
             }
             $iterator->next();
         }
-        $this->__h_save();
+        if ($out) {
+            $this->__h_save();
+        }
         return $out;
     }
     private function __h_checkWrite() {}

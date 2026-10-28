@@ -124,7 +124,7 @@ fn open(vm: &mut Vm, a: &Args, url: &[u8], mode: &[u8], quiet: bool) -> R<Option
         }
         return match read_entry(vm, &s, &inner) {
             Ok(data) => Ok(Some(Stream::new(
-                Backing::Native(Box::new(PharRead { data, pos: 0 })),
+                Backing::Native(Box::new(PharRead::new(vm, &s, &inner, data))),
                 mode,
                 url,
                 "phar",
@@ -217,9 +217,43 @@ fn open(vm: &mut Vm, a: &Args, url: &[u8], mode: &[u8], quiet: bool) -> R<Option
 struct PharRead {
     data: Vec<u8>,
     pos: usize,
+    s: Shared,
+    st: Option<PhpArray>,
+}
+
+impl PharRead {
+    fn new(vm: &mut Vm, s: &Shared, inner: &[u8], data: Vec<u8>) -> PharRead {
+        let st = {
+            let ro = !s.borrow().is_data && readonly(vm);
+            let l = s.borrow();
+            stat_entry(&l, inner).map(|mut st| {
+                if ro && let Some(Value::Int(m)) = st.get_bytes(b"mode").cloned() {
+                    st.insert(Key::from("mode"), Value::Int(m & !0o222));
+                }
+                st
+            })
+        };
+        s.borrow_mut().open_writes += 1;
+        PharRead {
+            data,
+            pos: 0,
+            s: s.clone(),
+            st,
+        }
+    }
+}
+
+impl Drop for PharRead {
+    fn drop(&mut self) {
+        let mut l = self.s.borrow_mut();
+        l.open_writes = l.open_writes.saturating_sub(1);
+    }
 }
 
 impl NativeStream for PharRead {
+    fn stat(&self) -> Option<PhpArray> {
+        self.st.clone()
+    }
     fn read(&mut self, _vm: &mut Vm, out: &mut [u8]) -> std::io::Result<usize> {
         let n = out.len().min(self.data.len().saturating_sub(self.pos));
         out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
@@ -727,7 +761,9 @@ fn opendir(vm: &mut Vm, a: &Args, url: &[u8]) -> R<Option<Vec<Vec<u8>>>> {
         drop(l);
         return dfail(vm, &unknown);
     }
-    let mut names = l.a.list_dir(&inner);
+    // names longer than a path can be are left out (test
+    // GHSA-jqcx-ccgc-xwhv.phpt)
+    let mut names: Vec<Vec<u8>> = l.a.list_dir(&inner).into_iter().filter(|n| n.len() < 4096).collect();
     // mounted directories show at the root
     for (m, _) in &l.mounts {
         let parent = match m.iter().rposition(|&c| c == b'/') {

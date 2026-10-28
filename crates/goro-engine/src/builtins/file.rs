@@ -762,6 +762,9 @@ pub fn open_stream(
     quiet: bool,
 ) -> R<Option<Stream>> {
     let fname = a.fname();
+    if let Some(p) = super::streams::rewrite_path(vm, filename) {
+        return open_stream(vm, a, &p, mode, quiet);
+    }
     if let Some(cls) = super::userstream::wrapper_for(vm, filename) {
         return super::userstream::open(vm, a, &cls, filename, mode, quiet);
     }
@@ -965,12 +968,40 @@ pub fn open_stream(
     }
 }
 
+/// A relative path found on include_path in a stream wrapper's directory
+/// (`phar://...` entries; PHP manual: fopen, use_include_path).
+fn wrapper_include_path(vm: &mut Vm, f: &[u8]) -> Option<PhpStr> {
+    if f.starts_with(b"/") || f.windows(3).any(|w| w == b"://") {
+        return None;
+    }
+    let ip = vm.ini.include_path.to_vec();
+    for d in super::streams::split_include_path(&ip) {
+        if !d.windows(3).any(|w| w == b"://") {
+            continue;
+        }
+        let Some(op) = super::streams::wrapper_for(vm, &d).and_then(|w| w.url_stat) else {
+            continue;
+        };
+        let mut c = d.clone();
+        c.push(b'/');
+        c.extend_from_slice(f.strip_prefix(b"./").unwrap_or(f));
+        if matches!(op(vm, &c, 2), Ok(Some(_))) {
+            return Some(PhpStr::from(c));
+        }
+    }
+    None
+}
+
 fn fopen(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let f = a.str(0);
     let m = a.str(1);
     if f.is_empty() {
         return vm.fthrow(a, "ValueError", "Argument #1 ($filename) cannot be empty");
     }
+    let f = match a.bool_or(2, false).then(|| wrapper_include_path(vm, &f)).flatten() {
+        Some(p) if !vm.fs_path(&f).exists() => p,
+        _ => f,
+    };
     match open_stream(vm, a, &f, &m, false)? {
         Some(s) => Ok(Value::Resource(new_stream_res(s))),
         None => Ok(Value::Bool(false)),
@@ -1409,6 +1440,11 @@ fn stat_array(m: &std::fs::Metadata) -> PhpArray {
 
 fn fstat(vm: &mut Vm, a: &mut Args) -> R<Value> {
     with_stream(vm, a, 0, |vm, s| {
+        if let Backing::Native(n) = &s.backing
+            && let Some(st) = n.stat()
+        {
+            return Ok(Value::Array(stat_from_user(&st)));
+        }
         if matches!(s.backing, Backing::User { .. }) {
             return Ok(
                 match super::userstream::simple(vm, s, b"stream_stat", Vec::new())? {
@@ -1719,6 +1755,10 @@ fn file_get_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if f.is_empty() {
         return vm.fthrow(a, "ValueError", "Argument #1 ($filename) cannot be empty");
     }
+    let f = match a.bool_or(1, false).then(|| wrapper_include_path(vm, &f)).flatten() {
+        Some(p) if !vm.fs_path(&f).exists() => p,
+        _ => f,
+    };
     let off = a.int_or(3, 0);
     let len = a.opt_int(4);
     if let Some(l) = len
@@ -1841,6 +1881,10 @@ fn file(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn readfile(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let f = a.str(0);
+    let f = match a.bool_or(1, false).then(|| wrapper_include_path(vm, &f)).flatten() {
+        Some(p) if !vm.fs_path(&f).exists() => p,
+        _ => f,
+    };
     let Some(mut s) = open_stream(vm, a, &f, b"rb", false)? else {
         return Ok(Value::Bool(false));
     };
@@ -2028,6 +2072,10 @@ fn rmdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
 /// when the wrapper reports no file.
 fn user_stat(vm: &mut Vm, a: &Args, flags: i64) -> R<Option<Option<PhpArray>>> {
     let f = a.str(0);
+    let f = match super::streams::rewrite_path(vm, &f) {
+        Some(p) => PhpStr::from(p),
+        None => f,
+    };
     let Some(cls) = super::userstream::wrapper_for(vm, &f) else {
         if let Some(op) = super::streams::wrapper_for(vm, &f).and_then(|w| w.url_stat) {
             return Ok(Some(op(vm, &f, flags)?.map(|st| stat_from_user(&st))));

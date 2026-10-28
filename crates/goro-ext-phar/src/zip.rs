@@ -459,7 +459,7 @@ pub fn write(a: &mut Archive, now: u32, sign: &sig::Signer) -> Result<Vec<u8>, S
     }
     let comment = a.metadata.clone().unwrap_or_default();
     match a.sig_type {
-        Some(t) if !a.is_data => {
+        Some(t) => {
             let mut signed = out.clone();
             for it in &items {
                 central(&mut signed, it);

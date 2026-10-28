@@ -487,6 +487,15 @@ fn add_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
             ),
         );
     };
+    // the file's permissions (test bug77022.phpt)
+    let real = super::abs_path(vm, &f);
+    if let Some(perms) = file_perms(&real) {
+        let mut e = Entry::file(&name, data, 0, perms);
+        e.flags = perms;
+        s.borrow_mut().a.put(e);
+        save(vm, &s)?;
+        return Ok(Value::Null);
+    }
     put_file(vm, &s, &name, data)?;
     Ok(Value::Null)
 }
@@ -938,13 +947,8 @@ fn set_stub(vm: &mut Vm, a: &mut Args) -> R<Value> {
         };
         return vm.throw("PharException", &msg);
     };
-    s.borrow_mut().a.stub = if format == Format::Phar {
-        norm
-    } else {
-        // tar/zip keep the stub as given, up to __HALT_COMPILER();
-        let end = goro_ext_phar::stub::find_halt(&stub).unwrap_or(stub.len());
-        stub[..end].to_vec()
-    };
+    let _ = format;
+    s.borrow_mut().a.stub = norm;
     save(vm, &s)?;
     Ok(Value::Bool(true))
 }
@@ -996,7 +1000,7 @@ fn set_default_stub(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn set_signature_algorithm(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let (s, p) = this_phar(vm, a)?;
+    let (s, _) = this_phar(vm, a)?;
     check_write(
         vm,
         &s,
@@ -1009,19 +1013,6 @@ fn set_signature_algorithm(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "Unknown signature algorithm specified",
         );
     };
-    if p.is_data && s.borrow().a.format != Format::Phar {
-        let what = if s.borrow().a.format == Format::Zip {
-            "zip"
-        } else {
-            "tar"
-        };
-        return vm.throw(
-            "UnexpectedValueException",
-            &format!(
-                "Cannot set signature algorithm, not possible with {what}-based phar archives"
-            ),
-        );
-    }
     {
         let mut l = s.borrow_mut();
         l.a.sig_type = Some(t);
@@ -1129,14 +1120,23 @@ fn decompress_files(vm: &mut Vm, a: &mut Args) -> R<Value> {
 /// The file name of a converted archive: the base name before its
 /// extension, then `ext`.
 fn converted_name(key: &[u8], ext: &[u8]) -> Vec<u8> {
+    // the archive extensions at the end go (test bug74196.phpt:
+    // "x.1.2.3.phar.tar.gz" decompresses to "x.1.2.3.phar.tar")
     let slash = key.iter().rposition(|&c| c == b'/').map_or(0, |p| p + 1);
-    let base = &key[slash..];
-    let dot = base
-        .iter()
-        .skip(1)
-        .position(|&c| c == b'.')
-        .map_or(base.len(), |p| p + 1);
-    let mut out = key[..slash + dot].to_vec();
+    let mut end = key.len();
+    loop {
+        let base = &key[slash..end];
+        let Some(d) = base.iter().rposition(|&c| c == b'.').filter(|&d| d > 0) else {
+            break;
+        };
+        let comp = base[d + 1..].to_ascii_lowercase();
+        if matches!(&comp[..], b"phar" | b"tar" | b"zip" | b"tgz" | b"tbz" | b"gz" | b"bz2") {
+            end = slash + d;
+        } else {
+            break;
+        }
+    }
+    let mut out = key[..end].to_vec();
     if !ext.starts_with(b".") {
         out.push(b'.');
     }
@@ -1690,7 +1690,10 @@ fn map_phar(vm: &mut Vm, a: &mut Args) -> R<Value> {
         hint: None,
     };
     // a tar or zip runs the stub inside it
-    let tarzip = goro_ext_phar::zip::looks_like_zip(&data) || goro_ext_phar::tar::looks_like_tar(&data);
+    let tarzip = goro_ext_phar::zip::looks_like_zip(&data)
+        || goro_ext_phar::tar::looks_like_tar(&data)
+        || data.starts_with(b"BZh")
+        || data.starts_with(b"\x1f\x8b");
     let parsed = if tarzip {
         goro_ext_phar::Archive::parse(&key, &data, &opts)
     } else {
@@ -1790,7 +1793,32 @@ fn mount(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Null)
 }
 
-fn mung_server(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
+/// Phar::mungServer(): which $_SERVER entries a web phar rewrites; the
+/// list is checked (tests frontcontroller18-20), nothing else happens on
+/// the CLI.
+fn mung_server(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    const WHICH: &str = "expecting an array of any of these strings: PHP_SELF, REQUEST_URI, SCRIPT_FILENAME, SCRIPT_NAME";
+    let arr = a.array(0);
+    if arr.is_empty() {
+        return vm.throw(
+            "PharException",
+            &format!("No values passed to Phar::mungServer(), {WHICH}"),
+        );
+    }
+    if arr.len() > 4 {
+        return vm.throw(
+            "PharException",
+            &format!("Too many values passed to Phar::mungServer(), {WHICH}"),
+        );
+    }
+    for (_, v) in arr.iter() {
+        if !matches!(v.deref(), Value::Str(_)) {
+            return vm.throw(
+                "PharException",
+                &format!("Non-string value passed to Phar::mungServer(), {WHICH}"),
+            );
+        }
+    }
     Ok(Value::Null)
 }
 

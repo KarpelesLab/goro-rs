@@ -112,7 +112,7 @@ pub fn parse(fname: &[u8], data: &[u8], opts: &ParseOptions) -> Result<Archive, 
         let ty = h[156];
         let start = p + 512;
         let padded = size.div_ceil(512) * 512;
-        if start + size > data.len() {
+        if start + padded > data.len() {
             return Err(corrupt(fname, "truncated"));
         }
         let body = data[start..start + size].to_vec();
@@ -188,6 +188,31 @@ pub fn parse(fname: &[u8], data: &[u8], opts: &ParseOptions) -> Result<Archive, 
         }
         a.put(e);
     }
+    // symbolic links read as their target (test tar/links4.phpt)
+    let syms: Vec<(Vec<u8>, Vec<u8>)> = a
+        .entries()
+        .iter()
+        .filter(|e| e.link.is_some() && !links.iter().any(|(n, _)| n == &e.name))
+        .map(|e| (e.name.clone(), e.link.clone().unwrap()))
+        .collect();
+    for (name, target) in syms {
+        let t = if target.starts_with(b"/") {
+            target.clone()
+        } else {
+            let mut d = match name.iter().rposition(|&c| c == b'/') {
+                Some(p) => name[..=p].to_vec(),
+                None => Vec::new(),
+            };
+            d.extend_from_slice(&target);
+            d
+        };
+        let t = norm(&t);
+        if let Some(src) = a.get(&t).map(|e| e.raw.clone())
+            && let Some(e) = a.get_mut(&name)
+        {
+            e.set_contents(src);
+        }
+    }
     // hard links take their target's contents
     for (name, target) in links {
         let mut t = target.clone();
@@ -262,6 +287,21 @@ pub fn parse(fname: &[u8], data: &[u8], opts: &ParseOptions) -> Result<Archive, 
         a.stub = DEFAULT_STUB.to_vec();
     }
     Ok(a)
+}
+
+/// A path with `.` and `..` resolved, without a leading slash.
+fn norm(p: &[u8]) -> Vec<u8> {
+    let mut parts: Vec<&[u8]> = Vec::new();
+    for seg in p.split(|&c| c == b'/') {
+        match seg {
+            b"" | b"." => {}
+            b".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    parts.join(&b'/')
 }
 
 /// A ustar header.
@@ -434,7 +474,7 @@ pub fn write(a: &mut Archive, now: u32, sign: &sig::Signer) -> Result<Vec<u8>, S
         push(&mut out, &fname, &path, 0, 0, b'0', &m, b"")?;
     }
     match a.sig_type {
-        Some(t) if !a.is_data => {
+        Some(t) => {
             let s = sig::make(t, &out, sign)?;
             let b = sig::bin(t, &s);
             push(

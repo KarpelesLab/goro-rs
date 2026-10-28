@@ -47,13 +47,58 @@ pub static MODULE: Module = Module {
 fn init(vm: &mut Vm) {
     super::streams::register_wrapper(vm, "phar", &wrapper::WRAPPER);
     super::streams::register_include_filter(vm, include_filter);
+    super::streams::register_path_hook(vm, path_hook);
+}
+
+/// Phar::interceptFileFuncs(): a relative path names a file of the running
+/// archive when it has one (next to the running file, then at its root).
+fn path_hook(vm: &mut Vm, p: &[u8]) -> Option<Vec<u8>> {
+    if !state(vm).intercept {
+        return None;
+    }
+    let (key, inner) = running(vm)?;
+    let s = state(vm).archives.get(&key).cloned()?;
+    let dir = match inner.iter().rposition(|&c| c == b'/') {
+        Some(i) => inner[..i].to_vec(),
+        None => Vec::new(),
+    };
+    for base in [dir, Vec::new()] {
+        let mut cand = base.clone();
+        if !cand.is_empty() {
+            cand.push(b'/');
+        }
+        cand.extend_from_slice(p);
+        let cand = norm_inner(&cand);
+        let l = s.borrow();
+        if l.a.get(&cand).is_some() || l.a.is_dir(&cand) && !cand.is_empty() {
+            let mut u = b"phar://".to_vec();
+            u.extend_from_slice(&key);
+            u.push(b'/');
+            u.extend_from_slice(&cand);
+            return Some(u);
+        }
+    }
+    None
 }
 
 /// Including a tar- or zip-based phar runs its stub (PHP manual: Phar,
 /// "tar and zip based phars").
 pub(crate) fn include_filter(_vm: &mut Vm, path: &[u8], src: &[u8]) -> Option<Vec<u8>> {
+    // a compressed phar runs decompressed (test tar/tar_bz2.phpt)
+    let plain;
+    let compressed = src.starts_with(b"BZh") || src.starts_with(b"\x1f\x8b");
+    let src = if src.starts_with(b"BZh") {
+        plain = goro_ext_phar::bunzip2(src)?;
+        &plain[..]
+    } else if src.starts_with(b"\x1f\x8b") {
+        plain = goro_ext_phar::gunzip(src)?;
+        &plain[..]
+    } else {
+        src
+    };
     if !goro_ext_phar::zip::looks_like_zip(src) && !goro_ext_phar::tar::looks_like_tar(src) {
-        return None;
+        // a decompressed phar-format file runs as it is
+        return compressed.then(|| src.to_vec());
     }
     let opts = ParseOptions::default();
     let a = Archive::parse(path, src, &opts).ok()?;
@@ -106,7 +151,7 @@ pub struct Loaded {
     pub private_key: Option<Vec<u8>>,
     /// Phar::mount(): (path inside, external path).
     pub mounts: Vec<(Vec<u8>, Vec<u8>)>,
-    /// Write streams open on entries.
+    /// Streams open on entries.
     pub open_writes: usize,
 }
 

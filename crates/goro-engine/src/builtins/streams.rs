@@ -158,6 +158,11 @@ pub trait NativeStream {
     fn wrapper_data(&self) -> Option<Value> {
         None
     }
+    /// fstat(): a stat array in a user wrapper's shape, if the stream has
+    /// one.
+    fn stat(&self) -> Option<PhpArray> {
+        None
+    }
 }
 
 /// A stream wrapper implemented in Rust. The path operations are optional
@@ -286,6 +291,7 @@ pub struct StreamRegistry {
     /// stream_filter_register(): (name or `family.*`, class name).
     user_filters: Vec<(Vec<u8>, PhpStr)>,
     include_filters: Vec<IncludeFilter>,
+    path_hooks: Vec<PathHook>,
 }
 
 /// Registers a stream wrapper for `scheme` (lower case, without `://`).
@@ -297,6 +303,28 @@ pub fn register_wrapper(vm: &mut Vm, scheme: &str, w: &'static NativeWrapper) {
 
 /// Splits include_path on ':' but not inside a URL's "scheme://"
 /// (PHP manual: include_path; "phar://" entries).
+/// Rewrites a relative path a file function opens (phar's
+/// interceptFileFuncs: relative to the running archive); none keeps it.
+pub type PathHook = fn(&mut Vm, &[u8]) -> Option<Vec<u8>>;
+
+/// Registers a path hook.
+pub fn register_path_hook(vm: &mut Vm, f: PathHook) {
+    vm.ext::<StreamRegistry>().path_hooks.push(f);
+}
+
+/// A relative path as the path hooks rewrite it.
+pub(crate) fn rewrite_path(vm: &mut Vm, p: &[u8]) -> Option<Vec<u8>> {
+    if p.is_empty() || p.starts_with(b"/") || p.windows(3).any(|w| w == b"://") {
+        return None;
+    }
+    let reg = vm.ext::<StreamRegistry>();
+    if reg.path_hooks.is_empty() {
+        return None;
+    }
+    let hs = reg.path_hooks.clone();
+    hs.into_iter().find_map(|f| f(vm, p))
+}
+
 pub fn split_include_path(p: &[u8]) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     let mut cur = Vec::new();
