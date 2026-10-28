@@ -618,7 +618,8 @@ mod tests {
                 is_data: !f.contains(".phar"),
                 ..Default::default()
             };
-            let a = Archive::parse(f.as_bytes(), &data, &opts).unwrap_or_else(|e| panic!("{f}: {e}"));
+            let a =
+                Archive::parse(f.as_bytes(), &data, &opts).unwrap_or_else(|e| panic!("{f}: {e}"));
             assert_eq!(a.len(), n, "{f}");
             let mut b = a.clone();
             let out = b.serialize(0, &|_, _| Err("no".into())).unwrap();

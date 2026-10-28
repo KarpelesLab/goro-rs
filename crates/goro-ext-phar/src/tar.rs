@@ -307,6 +307,7 @@ fn header(
     Some(h)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push(
     out: &mut Vec<u8>,
     fname: &[u8],

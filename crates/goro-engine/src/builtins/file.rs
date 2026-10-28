@@ -2139,7 +2139,9 @@ fn is_executable(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return Ok(Value::Bool(false));
     }
     if let Some(st) = native_stat(vm, a)? {
-        return Ok(Value::Bool(st.is_some_and(|st| user_mode(&st) & 0o111 != 0)));
+        return Ok(Value::Bool(
+            st.is_some_and(|st| user_mode(&st) & 0o111 != 0),
+        ));
     }
     Ok(Value::Bool(
         meta(vm, a).is_some_and(|m| m.is_file()) && access(vm, a, libc::X_OK),

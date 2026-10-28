@@ -33,6 +33,7 @@ pub mod output;
 pub mod password;
 pub mod pcntl;
 pub mod pcre;
+pub mod phar;
 pub mod random;
 pub mod reflection;
 pub mod serialize;
@@ -91,6 +92,7 @@ pub fn modules() -> Vec<&'static Module> {
         &zlib::MODULE,
         &zip::MODULE,
         &bz2::MODULE,
+        &phar::MODULE,
         &ctype::MODULE,
         &date::MODULE,
         &array::MODULE,

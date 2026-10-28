@@ -93,8 +93,8 @@ fn decode_errno(e: compcol::Error, head: &[u8]) -> i64 {
     // the header is checked byte by byte: a short input that already
     // differs is a bad magic (test 005.phpt: bzdecompress("1"))
     let n = head.len().min(4);
-    let prefix_ok = head[..n.min(3)] == b"BZh"[..n.min(3)]
-        && (n < 4 || (b'1'..=b'9').contains(&head[3]));
+    let prefix_ok =
+        head[..n.min(3)] == b"BZh"[..n.min(3)] && (n < 4 || (b'1'..=b'9').contains(&head[3]));
     match e {
         compcol::Error::BadHeader if !good_magic(head) => BZ_DATA_ERROR_MAGIC,
         compcol::Error::UnexpectedEnd if !prefix_ok => BZ_DATA_ERROR_MAGIC,
@@ -125,10 +125,7 @@ pub fn compress(data: &[u8], level: i64) -> Vec<u8> {
             break;
         }
     }
-    loop {
-        let Ok((p, st)) = enc.finish(&mut buf) else {
-            break;
-        };
+    while let Ok((p, st)) = enc.finish(&mut buf) {
         out.extend_from_slice(&buf[..p.written]);
         if st == Status::StreamEnd || (p.written == 0 && st != Status::OutputFull) {
             break;
@@ -219,10 +216,7 @@ enum Inner {
 }
 
 /// Runs `f` on the stream inside a stream resource.
-fn on_res<T>(
-    r: &ResRef,
-    f: impl FnOnce(&mut Stream) -> std::io::Result<T>,
-) -> std::io::Result<T> {
+fn on_res<T>(r: &ResRef, f: impl FnOnce(&mut Stream) -> std::io::Result<T>) -> std::io::Result<T> {
     let data = r.res().data.borrow();
     let cell = data
         .as_ref()

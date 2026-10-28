@@ -75,7 +75,7 @@ pub fn unix_to_dos(t: u32) -> (u16, u16) {
     if y < 1980 {
         return (0, 0x21);
     }
-    let time = ((secs / 3600) << 11 | ((secs / 60) % 60) << 5 | (secs % 60) / 2) as u16;
+    let time = (((secs / 3600) << 11) | (((secs / 60) % 60) << 5) | ((secs % 60) / 2)) as u16;
     let date = (((y - 1980) << 9) | (m << 5) | d) as u16;
     (time, date)
 }
