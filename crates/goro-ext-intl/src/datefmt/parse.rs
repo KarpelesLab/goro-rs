@@ -362,7 +362,13 @@ fn field(
         'G' => {
             let mut cands = Vec::new();
             for w in [3, 4, 5] {
-                for e in 0..=1 {
+                let max_era = match sy.cal_type {
+                    crate::calendar::CalType::Japanese => {
+                        crate::datefmt::supplemental::JAPANESE_ERAS.len() as i32 - 1
+                    }
+                    _ => 1,
+                };
+                for e in 0..=max_era {
                     if let Some(s) = format::era_name(sy, w, e) {
                         cands.push((s.to_string(), e));
                     }

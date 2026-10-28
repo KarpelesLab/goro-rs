@@ -126,9 +126,14 @@ pub struct Symbols {
 impl Symbols {
     pub fn new(locale: &str, cal_type: CalType) -> Symbols {
         let loc = Loc::resolve(locale);
-        let lang = locale.split('_').next().unwrap_or("en");
-        let numbers =
-            intl::number::default_numbering_system(if lang.is_empty() { "en" } else { lang });
+        // the locale's default numbering system (CLDR numbers
+        // defaultNumberingSystem, by the full locale: ar_EG uses arab)
+        let tag = if locale.is_empty() {
+            "en".to_string()
+        } else {
+            locale.replace('_', "-")
+        };
+        let numbers = intl::number::default_numbering_system(&tag);
         Symbols {
             loc,
             locale: locale.to_string(),
