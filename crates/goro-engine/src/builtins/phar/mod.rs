@@ -40,6 +40,7 @@ pub static MODULE: Module = Module {
         ("phar.cache_list", ""),
     ],
     init: Some(init),
+    startup_ini: Some(startup_ini),
     on_ini_set: Some(on_ini_set),
     ..Module::EMPTY
 };
@@ -110,13 +111,26 @@ pub(crate) fn include_filter(_vm: &mut Vm, path: &[u8], src: &[u8]) -> Option<Ve
 /// not off (PHP manual: "This setting can only be unset in php.ini due to
 /// security reasons"; test ini_set.phpt).
 fn on_ini_set(vm: &mut Vm, name: &[u8], value: &[u8]) -> R<bool> {
-    if name == b"phar.readonly" || name == b"phar.require_hash" {
-        let cur = ini_bool(vm, name);
-        if cur && !parse_bool(value) && !vm.ext::<PharState>().startup {
-            return Ok(false);
+    let st = vm.ext::<PharState>();
+    let sys_on = match name {
+        b"phar.readonly" => !st.sys_readonly_off,
+        b"phar.require_hash" => !st.sys_require_hash_off,
+        _ => return Ok(true),
+    };
+    Ok(!(sys_on && !parse_bool(value)))
+}
+
+/// The settings php.ini (or -d) gave: only they can turn the checks off.
+fn startup_ini(vm: &mut Vm, settings: &[(Vec<u8>, Vec<u8>)]) {
+    for (k, v) in settings {
+        let off = !parse_bool(v);
+        let st = vm.ext::<PharState>();
+        match &k[..] {
+            b"phar.readonly" => st.sys_readonly_off = off,
+            b"phar.require_hash" => st.sys_require_hash_off = off,
+            _ => {}
         }
     }
-    Ok(true)
 }
 
 fn parse_bool(v: &[u8]) -> bool {
@@ -165,8 +179,9 @@ pub struct PharState {
     pub aliases: HashMap<Vec<u8>, Vec<u8>>,
     /// Phar::interceptFileFuncs() was called.
     pub intercept: bool,
-    /// Startup settings are being applied.
-    pub startup: bool,
+    /// php.ini turned phar.readonly / phar.require_hash off.
+    pub sys_readonly_off: bool,
+    pub sys_require_hash_off: bool,
 }
 
 pub(crate) fn state(vm: &mut Vm) -> &mut PharState {

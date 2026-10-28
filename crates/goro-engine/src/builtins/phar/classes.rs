@@ -206,6 +206,19 @@ fn new_info(vm: &mut Vm, a: &Args, key: &[u8], inner: &[u8]) -> R<Value> {
     Ok(Value::Object(obj))
 }
 
+/// Why a local name can't be used: a double slash or a `..` component
+/// (tests phar_offset_get_error.phpt, addfuncs.phpt, phar_copy.phpt).
+fn bad_path(raw: &[u8]) -> Option<&'static str> {
+    let r = raw.strip_prefix(b"/").unwrap_or(raw);
+    if r.windows(2).any(|w| w == b"//") {
+        return Some("contains double slash");
+    }
+    if r.split(|&c| c == b'/').any(|c| c == b"..") {
+        return Some("contains upper directory reference");
+    }
+    None
+}
+
 /// Characters an alias can't have (test phar_setalias2, badalias tests).
 fn bad_alias(al: &[u8]) -> bool {
     al.iter().any(|c| matches!(c, b'/' | b'\\' | b':' | b';'))
@@ -513,7 +526,29 @@ fn offset_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
             ),
         );
     }
+    if let Some(why) = bad_path(&raw) {
+        return vm.throw(
+            "BadMethodCallException",
+            &format!(
+                "Entry {} does not exist and cannot be created: phar error: invalid path \"{}\" {}",
+                raw.to_string_lossy(),
+                raw.to_string_lossy(),
+                why
+            ),
+        );
+    }
     let n = local_name(&raw);
+    if s.borrow().open_writes > 0 && s.borrow().a.get(&n).is_some() {
+        return vm.throw(
+            "BadMethodCallException",
+            &format!(
+                "Entry {} does not exist and cannot be created: phar error: file \"{}\" in phar \"{}\" cannot be opened for writing, readable file pointers are open",
+                lossy(&n),
+                lossy(&n),
+                fmt_name(&s)
+            ),
+        );
+    }
     if n == b".phar/stub.php" {
         return vm.throw(
             "BadMethodCallException",
@@ -570,6 +605,14 @@ fn offset_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (s, p) = this_phar(vm, a)?;
     let raw = vm.to_php_str(&a.val(0))?;
     let n = local_name(&raw);
+    if goro_ext_phar::is_meta_name(&n)
+        && !matches!(&n[..], b".phar/stub.php" | b".phar/alias.txt" | b".phar/signature.bin")
+    {
+        return vm.throw(
+            "BadMethodCallException",
+            "Cannot directly get any files or directories in magic \".phar\" directory",
+        );
+    }
     let ok = {
         let l = s.borrow();
         !goro_ext_phar::is_meta_name(&n)
@@ -624,7 +667,12 @@ fn offset_unset(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn delete(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (s, _) = this_phar(vm, a)?;
-    check_write(vm, &s, "BadMethodCallException", RO)?;
+    check_write(
+        vm,
+        &s,
+        "BadMethodCallException",
+        "Cannot write out phar archive, phar is read-only",
+    )?;
     let n = local_name(a.bytes(0));
     remove_entry(vm, a, &s, &n, true)?;
     Ok(Value::Bool(true))
@@ -648,8 +696,23 @@ fn copy(vm: &mut Vm, a: &mut Args) -> R<Value> {
         vm,
         &s,
         "UnexpectedValueException",
-        "Cannot copy \"\" to \"\", phar is read-only",
+        &format!(
+            "Cannot copy \"{}\" to \"{}\", phar is read-only",
+            lossy(a.bytes(0)),
+            lossy(a.bytes(1))
+        ),
     )?;
+    if bad_path(a.bytes(1)).is_some() {
+        return vm.throw(
+            "UnexpectedValueException",
+            &format!(
+                "file \"{}\" contains invalid characters upper directory reference, cannot be copied from \"{}\" in phar {}",
+                lossy(a.bytes(1)),
+                lossy(a.bytes(0)),
+                fmt_name(&s)
+            ),
+        );
+    }
     let from = local_name(a.bytes(0));
     let to = local_name(a.bytes(1));
     let fail = |vm: &mut Vm, why: &str| -> R<Value> {
@@ -894,6 +957,17 @@ fn set_stub(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.throw(
             "UnexpectedValueException",
             &format!("A Phar stub cannot be set in a plain {what} archive"),
+        );
+    }
+    if !matches!(a.val(0), Value::Resource(_) | Value::Str(_)) {
+        let other = a.val(0);
+        return vm.throw(
+            "TypeError",
+            &format!(
+                "{}(): Argument #1 ($stub) must be of type string, {} given",
+                a.fname(),
+                Vm::type_name_given(&other)
+            ),
         );
     }
     check_write(

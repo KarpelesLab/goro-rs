@@ -96,6 +96,11 @@ fn fail(vm: &mut Vm, a: &Args, url: &[u8], quiet: bool, msg: &str) -> R<Option<S
 }
 
 fn open(vm: &mut Vm, a: &Args, url: &[u8], mode: &[u8], quiet: bool) -> R<Option<Stream>> {
+    // a query part is no part of the path (test create_path_error.phpt)
+    let url = match url.iter().position(|&c| c == b'?') {
+        Some(q) => &url[..q],
+        None => url,
+    };
     let (abs, inner) = match split_url(vm, url) {
         Ok(x) => x,
         Err(m) => return fail(vm, a, url, quiet, &m),
@@ -156,10 +161,22 @@ fn open(vm: &mut Vm, a: &Args, url: &[u8], mode: &[u8], quiet: bool) -> R<Option
         Ok(s) => s,
         Err(m) => return fail(vm, a, url, quiet, &m),
     };
+    if std::str::from_utf8(&inner).is_err() {
+        return fail(
+            vm,
+            a,
+            url,
+            quiet,
+            &format!(
+                "phar error: invalid path \"{}\" contains illegal character",
+                lossy(&inner)
+            ),
+        );
+    }
     if inner.is_empty() || goro_ext_phar::is_meta_name(&inner) {
         let m = if inner.is_empty() {
             format!(
-                "phar error: file \"\" in phar \"{}\" cannot be empty",
+                "phar error: file \"\" in phar \"{}\" must not be empty",
                 lossy(&abs)
             )
         } else {
