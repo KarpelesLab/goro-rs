@@ -1500,43 +1500,157 @@ fn render_expr_text(t: &str) -> String {
 
 fn f_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, c, m) = need_func!(vm, a);
-    let params = vm.params_of(&f).to_vec();
-    let nreq = match &f.kind {
-        FuncKind::User(code) => code.num_required as usize,
-        FuncKind::Native { .. } => vm.native_sig(&f).num_required as usize,
-    };
+    let s = func_string(vm, &f, m.as_ref(), c.as_ref(), "");
+    Ok(Value::Str(PhpStr::from(s)))
+}
+
+// ---------------------------------------------------------------- __toString layouts
+//
+// The layouts of Reflection*::__toString() (observed on PHP 8.5 and in
+// the ext/reflection/tests expectations): nested members are indented by
+// four spaces per level, sections are "- Name [count] {" ... "}".
+
+/// The extension of an internal function or method, as Reflection names
+/// it (`<internal:ext>`); `None` for engine-provided methods of user
+/// classes (enum `cases()`...).
+fn func_ext(vm: &Vm, f: &Func) -> Option<&'static str> {
+    if let Some(c) = f.scope() {
+        if c.has_flag(cflags::INTERNAL) {
+            return Some(class_ext(vm, c));
+        }
+        return None;
+    }
+    if core_function(&f.name) {
+        return Some("Core");
+    }
+    let n = f.name.to_string_lossy();
+    Some(
+        vm.modules
+            .iter()
+            .find(|m| {
+                m.functions
+                    .iter()
+                    .any(|(s, _)| crate::registry::sig_name(s).eq_ignore_ascii_case(&n))
+            })
+            .map(|m| m.name)
+            .unwrap_or("Core"),
+    )
+}
+
+fn class_ext(vm: &Vm, c: &Class) -> &'static str {
+    vm.modules
+        .iter()
+        .find(|m| m.classes.iter().any(|(l, _)| l.as_bytes() == c.lname.as_bytes()))
+        .map(|m| m.name)
+        .unwrap_or("Core")
+}
+
+fn func_internal(f: &Func) -> bool {
+    f.is_native() || f.scope().is_some_and(|c| c.has_flag(cflags::INTERNAL))
+}
+
+fn func_deprecated(f: &Func) -> bool {
+    code_of(f).is_some_and(|c| c.flags & fflags::DEPRECATED != 0)
+}
+
+/// The root of a method's prototype chain.
+fn proto_root(f: &Func) -> Option<Rc<Func>> {
+    let mut root = f.proto.borrow().clone()?;
+    loop {
+        let next = root.proto.borrow().clone();
+        match next {
+            Some(n) => root = n,
+            None => return Some(root),
+        }
+    }
+}
+
+fn doc_text(out: &mut String, indent: &str, doc: Option<&PhpStr>) {
+    if let Some(d) = doc {
+        out.push_str(indent);
+        out.push_str(&d.to_string_lossy());
+        out.push('\n');
+    }
+}
+
+/// Function, method or closure (`cls`: the class reflected through, for
+/// the inherits/overwrites tags).
+fn func_string(
+    vm: &mut Vm,
+    f: &Rc<Func>,
+    cls: Option<&Rc<Class>>,
+    closure: Option<&ObjRef>,
+    indent: &str,
+) -> String {
+    let internal = func_internal(f);
     let mut s = String::new();
-    let kind = if m.is_some() {
+    doc_text(&mut s, indent, code_of(f).and_then(|c| c.doc_comment.as_ref()));
+    let kind = if cls.is_some() {
         "Method"
-    } else if c.is_some() {
+    } else if closure.is_some() && code_of(f).is_some_and(|c| c.flags & fflags::CLOSURE != 0) {
         "Closure"
     } else {
         "Function"
     };
-    let internal = f.is_native();
-    s.push_str(&format!(
-        "{} [ <{}> ",
-        kind,
-        if internal {
-            "internal:standard"
-        } else {
-            "user"
+    let mut tag = if internal {
+        let ext = func_ext(vm, f);
+        match (func_deprecated(f), ext) {
+            (true, Some(e)) => format!("internal, deprecated:{}", e),
+            (true, None) => "internal, deprecated".to_string(),
+            (false, Some(e)) => format!("internal:{}", e),
+            (false, None) => "internal".to_string(),
         }
-    ));
-    if m.is_some() {
-        let mods = method_modifiers(&f);
-        let names: Vec<&str> = [
-            (mods & 64 != 0, "abstract"),
-            (mods & 32 != 0, "final"),
-            (mods & 16 != 0, "static"),
-        ]
-        .iter()
-        .filter(|x| x.0)
-        .map(|x| x.1)
-        .collect();
-        for n in names {
-            s.push_str(n);
-            s.push(' ');
+    } else if func_deprecated(f) {
+        "user, deprecated".to_string()
+    } else {
+        "user".to_string()
+    };
+    if let Some(c) = cls {
+        let decl = f.scope();
+        let ctor = f.lname.as_bytes() == b"__construct";
+        match decl {
+            Some(d) if !std::ptr::eq(d, &**c) => {
+                tag.push_str(&format!(", inherits {}", d.name.dname()));
+            }
+            _ => {
+                if let Some(p) = &c.parent
+                    && let Some(pm) = p.find_method(&f.lname)
+                    && pm.flags & mflags::PRIVATE == 0
+                    && let Some(pd) = pm.scope()
+                {
+                    tag.push_str(&format!(", overwrites {}", pd.name.dname()));
+                }
+            }
+        }
+        let root = proto_root(f).or_else(|| {
+            c.interfaces
+                .borrow()
+                .iter()
+                .find_map(|i| i.find_method(&f.lname))
+                .filter(|m| !std::ptr::eq(Rc::as_ptr(m), Rc::as_ptr(f)))
+        });
+        if let Some(root) = root
+            && let Some(rc) = root.scope()
+            && (!ctor || rc.is_interface() || root.flags & mflags::ABSTRACT != 0)
+        {
+            tag.push_str(&format!(", prototype {}", rc.name.dname()));
+        }
+        if ctor {
+            tag.push_str(", ctor");
+        }
+    }
+    s.push_str(&format!("{}{} [ <{}> ", indent, kind, tag));
+    if cls.is_some() {
+        let mods = method_modifiers(f);
+        let abs = mods & 64 != 0 || f.scope().is_some_and(|c| c.is_interface());
+        if abs {
+            s.push_str("abstract ");
+        }
+        if mods & 32 != 0 {
+            s.push_str("final ");
+        }
+        if mods & 16 != 0 {
+            s.push_str("static ");
         }
         s.push_str(if mods & 4 != 0 {
             "private"
@@ -1549,31 +1663,452 @@ fn f_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     } else {
         s.push_str("function ");
     }
-    s.push_str(&func_name(&f, c.is_some()).to_string_lossy());
+    let by_ref = match &f.kind {
+        FuncKind::User(c) => c.flags & fflags::BY_REF != 0,
+        FuncKind::Native { .. } => vm.native_sig(f).by_ref_return,
+    };
+    if by_ref {
+        s.push('&');
+    }
+    s.push_str(&func_name(f, closure.is_some()).to_string_lossy());
     s.push_str(" ] {\n");
-    if let Some(code) = code_of(&f)
+    if let Some(code) = code_of(f)
         && !internal
     {
         s.push_str(&format!(
-            "  @@ {} {} - {}\n",
+            "{}  @@ {} {} - {}\n",
+            indent,
             code.file.to_string_lossy(),
             code.line_start,
             code.line_end
         ));
     }
-    if !params.is_empty() {
-        s.push_str(&format!("\n  - Parameters [{}] {{\n", params.len()));
+    // Bound variables of a closure.
+    if let (Some(c), Some(code)) = (closure, code_of(f))
+        && !code.uses.is_empty()
+    {
+        let mut names = Vec::new();
+        closure_cd(c, |_| {
+            for (inner, _, _) in code.uses.iter() {
+                names.push(code.cv_names[*inner as usize].to_string_lossy());
+            }
+        });
+        s.push_str(&format!("\n{}  - Bound Variables [{}] {{\n", indent, names.len()));
+        for (i, n) in names.iter().enumerate() {
+            s.push_str(&format!("{}      Variable #{} [ ${} ]\n", indent, i, n));
+        }
+        s.push_str(&format!("{}  }}\n", indent));
+    }
+    let params = vm.params_of(f).to_vec();
+    let nreq = match &f.kind {
+        FuncKind::User(code) => code.num_required as usize,
+        FuncKind::Native { .. } => vm.native_sig(f).num_required as usize,
+    };
+    let ret = ret_type_of(vm, f);
+    if !params.is_empty() || ret.is_some() || internal {
+        s.push_str(&format!("\n{}  - Parameters [{}] {{\n", indent, params.len()));
         for (i, p) in params.iter().enumerate() {
             let ps = param_string(vm, p, i, i < nreq);
-            s.push_str(&format!("    {}\n", ps));
+            s.push_str(&format!("{}    {}\n", indent, ps));
+        }
+        s.push_str(&format!("{}  }}\n", indent));
+    }
+    if let Some(t) = ret {
+        let word = if is_tentative(f) {
+            "Tentative return"
+        } else {
+            "Return"
+        };
+        s.push_str(&format!("{}  - {} [ {} ]\n", indent, word, t.display()));
+    }
+    s.push_str(indent);
+    s.push_str("}\n");
+    s
+}
+
+/// Return types of methods of internal classes are "tentative" (PHP 8.1:
+/// extending classes may still omit them), except in final classes and
+/// for constructors (observed on PHP 8.5).
+fn is_tentative(f: &Func) -> bool {
+    f.scope().is_some_and(|c| {
+        c.has_flag(cflags::INTERNAL)
+            && !c.has_flag(cflags::FINAL)
+            && f.lname.as_bytes() != b"__construct"
+    })
+}
+
+/// PHP's "Core" functions (the engine's built-in functions, PHP manual:
+/// Function handling, Classes/Objects, Error handling...), which goro
+/// registers with the standard library.
+fn core_function(name: &[u8]) -> bool {
+    const CORE: &[&str] = &[
+        "zend_version", "func_num_args", "func_get_arg", "func_get_args", "strlen", "strcmp",
+        "strncmp", "strcasecmp", "strncasecmp", "error_reporting", "define", "defined",
+        "get_class", "get_called_class", "get_parent_class", "method_exists",
+        "property_exists", "class_exists", "interface_exists", "trait_exists", "enum_exists",
+        "function_exists", "class_alias", "get_included_files", "get_required_files",
+        "is_subclass_of", "is_a", "get_class_vars", "get_object_vars",
+        "get_mangled_object_vars", "get_class_methods", "trigger_error", "user_error",
+        "set_error_handler", "restore_error_handler", "set_exception_handler",
+        "restore_exception_handler", "get_declared_classes", "get_declared_traits",
+        "get_declared_interfaces", "get_defined_functions", "get_defined_vars",
+        "get_resource_type", "get_resource_id", "get_resources", "get_loaded_extensions",
+        "get_defined_constants", "debug_backtrace", "debug_print_backtrace",
+        "extension_loaded", "get_extension_funcs", "gc_mem_caches", "gc_collect_cycles",
+        "gc_enabled", "gc_enable", "gc_disable", "gc_status",
+    ];
+    CORE.iter().any(|c| c.as_bytes().eq_ignore_ascii_case(name))
+}
+
+/// A property line (`Property [ public int $x = 1 ]`).
+fn prop_string(vm: &mut Vm, cls: &Class, name: &PhpStr, dynamic: bool, indent: &str) -> R<String> {
+    let mut s = String::new();
+    let p = match pinfo(cls, name) {
+        Some(p) if !dynamic => p,
+        _ => {
+            return Ok(format!(
+                "{}Property [ <dynamic> public ${} ]\n",
+                indent,
+                name.to_string_lossy()
+            ));
+        }
+    };
+    doc_text(&mut s, indent, p.doc.as_ref());
+    s.push_str(indent);
+    s.push_str("Property [ ");
+    let mut m = prop_modifiers(p.flags);
+    if prop_abstract(cls, name) {
+        m |= 64;
+    }
+    if m & 64 != 0 {
+        s.push_str("abstract ");
+    }
+    if m & 32 != 0 {
+        s.push_str("final ");
+    }
+    s.push_str(if m & 4 != 0 {
+        "private"
+    } else if m & 2 != 0 {
+        "protected"
+    } else {
+        "public"
+    });
+    if m & 4096 != 0 && m & 4 == 0 {
+        s.push_str(" private(set)");
+    } else if m & 2048 != 0 && m & 6 == 0 {
+        s.push_str(" protected(set)");
+    }
+    if p.is_static {
+        s.push_str(" static");
+    }
+    if m & 128 != 0 {
+        s.push_str(" readonly");
+    }
+    if m & 512 != 0 {
+        s.push_str(" virtual");
+    }
+    if let Some(t) = &p.ty {
+        s.push(' ');
+        s.push_str(&t.display());
+    }
+    s.push_str(&format!(" ${}", name.to_string_lossy()));
+    let hooked = p.has_hooks.0 || p.has_hooks.1;
+    if !hooked && p.flags & (mflags::VIRTUAL | mflags::PROMOTED) == 0 {
+        match &p.default {
+            Some(ce) => {
+                let v = vm.eval_const_expr(ce, p.class)?;
+                if !vm.is_uninit(&v) {
+                    s.push_str(" = ");
+                    s.push_str(&render_value(vm, &v));
+                }
+            }
+            None if p.ty.is_none() => s.push_str(" = NULL"),
+            None => {}
+        }
+    }
+    if hooked {
+        s.push_str(" {");
+        for get in [true, false] {
+            if let Some(h) = hook_func(cls, name, get) {
+                s.push(' ');
+                if h.flags & mflags::FINAL != 0 {
+                    s.push_str("final ");
+                }
+                s.push_str(if get { "get;" } else { "set;" });
+            }
+        }
+        s.push_str(" }");
+    }
+    s.push_str(" ]\n");
+    Ok(s)
+}
+
+/// A class constant line (`Constant [ public int X ] { 1 }`).
+fn const_string(vm: &mut Vm, cls: &Rc<Class>, k: &crate::class::ClassConst, indent: &str) -> R<String> {
+    let v = if k.flags & mflags::CASE != 0 {
+        vm.enum_case(cls, &k.name)?
+    } else {
+        vm.eval_class_const(k)?
+    };
+    let vis = if k.flags & mflags::PRIVATE != 0 {
+        "private"
+    } else if k.flags & mflags::PROTECTED != 0 {
+        "protected"
+    } else {
+        "public"
+    };
+    let ty = match (&k.ty, &v) {
+        (Some(t), _) => t.display(),
+        (None, Value::Object(o)) => vm.class_of(o).name.dname(),
+        (None, v) => crate::builtins::var::type_name(v)
+            .replace("integer", "int")
+            .replace("boolean", "bool")
+            .replace("double", "float")
+            .replace("NULL", "null"),
+    };
+    let mut val = Vec::new();
+    match &v {
+        Value::Array(_) => val.extend_from_slice(b"Array"),
+        Value::Object(_) => val.extend_from_slice(b"Object"),
+        other => vm.append_to_string(&mut val, other)?,
+    }
+    let mut s = String::new();
+    doc_text(&mut s, indent, k.doc.as_ref());
+    s.push_str(&format!(
+        "{}Constant [ {}{} {} {} ] {{ {} }}\n",
+        indent,
+        if k.flags & mflags::FINAL != 0 {
+            "final "
+        } else {
+            ""
+        },
+        vis,
+        ty,
+        k.name.to_string_lossy(),
+        String::from_utf8_lossy(&val)
+    ));
+    Ok(s)
+}
+
+/// The visible members of a class, in Reflection's order: own first,
+/// then inherited; private members of ancestors are left out.
+fn visible_props(cls: &Rc<Class>) -> (Vec<PhpStr>, Vec<PhpStr>) {
+    let cp = Rc::as_ptr(cls);
+    let props: Vec<_> = cls
+        .props
+        .borrow()
+        .iter()
+        .filter(|p| p.flags & mflags::HIDDEN == 0)
+        .cloned()
+        .collect();
+    let mut inst: Vec<PhpStr> = Vec::new();
+    for p in props
+        .iter()
+        .filter(|p| std::ptr::eq(p.class, cp))
+        .chain(
+            props
+                .iter()
+                .filter(|p| !std::ptr::eq(p.class, cp) && p.flags & mflags::PRIVATE == 0),
+        )
+    {
+        if !inst.contains(&p.name) {
+            inst.push(p.name.clone());
+        }
+    }
+    let mut stat: Vec<PhpStr> = Vec::new();
+    for sp in cls.static_props.borrow().iter() {
+        if sp.flags & mflags::PRIVATE != 0 && !std::ptr::eq(sp.class, cp) {
+            continue;
+        }
+        if !stat.contains(&sp.name) && !inst.contains(&sp.name) {
+            stat.push(sp.name.clone());
+        }
+    }
+    (inst, stat)
+}
+
+/// Constants in Reflection's order: the class's own, then inherited ones
+/// in the parent's order, then those of interfaces.
+fn const_order(cls: &Rc<Class>) -> Vec<Rc<crate::class::ClassConst>> {
+    let all = cls.consts.borrow().clone();
+    let cp = Rc::as_ptr(cls);
+    let mut out: Vec<Rc<crate::class::ClassConst>> =
+        all.iter().filter(|k| std::ptr::eq(k.class, cp)).cloned().collect();
+    if let Some(p) = &cls.parent {
+        for k in const_order(p) {
+            if let Some(mine) = all.iter().find(|x| x.name == k.name)
+                && !out.iter().any(|x| x.name == k.name)
+            {
+                out.push(mine.clone());
+            }
+        }
+    }
+    for k in &all {
+        if !out.iter().any(|x| x.name == k.name) {
+            out.push(k.clone());
+        }
+    }
+    out
+}
+
+fn class_string(vm: &mut Vm, cls: &Rc<Class>, obj: Option<&ObjRef>) -> R<String> {
+    let internal = cls.has_flag(cflags::INTERNAL);
+    let mut s = String::new();
+    doc_text(&mut s, "", cls.doc.as_ref());
+    let kind = if obj.is_some() {
+        "Object of class"
+    } else if cls.is_interface() {
+        "Interface"
+    } else if cls.is_trait() {
+        "Trait"
+    } else if cls.is_enum() {
+        "Enum"
+    } else {
+        "Class"
+    };
+    s.push_str(kind);
+    s.push_str(" [ <");
+    if internal {
+        s.push_str("internal:");
+        s.push_str(class_ext(vm, cls));
+    } else {
+        s.push_str("user");
+    }
+    s.push_str("> ");
+    let hooked = cls.props.borrow().iter().any(|p| p.get.is_some() || p.set.is_some());
+    if vm.is_traversable(cls) || hooked {
+        s.push_str("<iterateable> ");
+    }
+    let word = if cls.is_interface() {
+        "interface"
+    } else if cls.is_trait() {
+        "trait"
+    } else if cls.is_enum() {
+        "enum"
+    } else {
+        if cls.has_flag(cflags::ABSTRACT) {
+            s.push_str("abstract ");
+        }
+        if cls.has_flag(cflags::FINAL) {
+            s.push_str("final ");
+        }
+        if cls.has_flag(cflags::READONLY) {
+            s.push_str("readonly ");
+        }
+        "class"
+    };
+    s.push_str(word);
+    s.push(' ');
+    s.push_str(&String::from_utf8_lossy(&cls.name));
+    if cls.is_enum()
+        && let Some(b) = cls.enum_backing
+    {
+        s.push_str(if b == tmask::INT { ": int" } else { ": string" });
+    }
+    if let Some(p) = &cls.parent {
+        s.push_str(&format!(" extends {}", p.name.dname()));
+    }
+    let ifs: Vec<String> = iface_order(cls).iter().map(|i| i.name.dname()).collect();
+    if !ifs.is_empty() {
+        s.push_str(if cls.is_interface() {
+            " extends "
+        } else {
+            " implements "
+        });
+        s.push_str(&ifs.join(", "));
+    }
+    s.push_str(" ] {\n");
+    if let Some(f) = &cls.file
+        && !internal
+    {
+        s.push_str(&format!(
+            "  @@ {} {}-{}\n",
+            f.to_string_lossy(),
+            cls.line_start,
+            cls.line_end
+        ));
+    }
+    let consts = const_order(cls);
+    if cls.is_enum() {
+        let cases: Vec<_> = consts.iter().filter(|k| k.flags & mflags::CASE != 0).collect();
+        s.push_str(&format!("\n  - Enum cases [{}] {{\n", cases.len()));
+        for k in cases {
+            s.push_str(&format!("    Case {}", k.name.to_string_lossy()));
+            if cls.enum_backing.is_some() {
+                let case = vm.enum_case(cls, &k.name)?;
+                if let Value::Object(o) = &case {
+                    let v = vm.get_prop_raw(o, b"value");
+                    let mut b = Vec::new();
+                    vm.append_to_string(&mut b, &v)?;
+                    s.push_str(&format!(" = {}", String::from_utf8_lossy(&b)));
+                }
+            }
+            s.push('\n');
         }
         s.push_str("  }\n");
     }
-    if let Some(t) = ret_type_of(vm, &f) {
-        s.push_str(&format!("  - Return [ {} ]\n", t.display()));
+    let plain: Vec<_> = consts.iter().filter(|k| k.flags & mflags::CASE == 0).collect();
+    s.push_str(&format!("\n  - Constants [{}] {{\n", plain.len()));
+    for k in plain {
+        s.push_str(&const_string(vm, cls, k, "    ")?);
     }
+    s.push_str("  }\n");
+    let (inst, stat) = visible_props(cls);
+    s.push_str(&format!("\n  - Static properties [{}] {{\n", stat.len()));
+    for n in &stat {
+        s.push_str(&prop_string(vm, cls, n, false, "    ")?);
+    }
+    s.push_str("  }\n");
+    let order = cls.method_order.borrow().clone();
+    let methods: Vec<Rc<Func>> = order
+        .iter()
+        .filter_map(|ln| cls.methods.borrow().get(ln).cloned())
+        .filter(|f| {
+            // Private methods of ancestors are not members.
+            f.flags & mflags::PRIVATE == 0 || f.scope().is_some_and(|d| std::ptr::eq(d, &**cls))
+        })
+        .collect();
+    let (st, inst_m): (Vec<_>, Vec<_>) =
+        methods.into_iter().partition(|f| f.flags & mflags::STATIC != 0);
+    let section = |vm: &mut Vm, s: &mut String, title: &str, list: &[Rc<Func>]| {
+        s.push_str(&format!("\n  - {} [{}] {{\n", title, list.len()));
+        for (i, f) in list.iter().enumerate() {
+            if i > 0 {
+                s.push('\n');
+            }
+            s.push_str(&func_string(vm, f, Some(cls), None, "    "));
+        }
+        s.push_str("  }\n");
+    };
+    section(vm, &mut s, "Static methods", &st);
+    s.push_str(&format!("\n  - Properties [{}] {{\n", inst.len()));
+    for n in &inst {
+        s.push_str(&prop_string(vm, cls, n, false, "    ")?);
+    }
+    s.push_str("  }\n");
+    if let Some(o) = obj {
+        let mut dynamic = Vec::new();
+        for (k, _) in o.obj().props.borrow().iter() {
+            let name = match k {
+                goro_runtime::KeyRef::Str(s) => s.clone(),
+                goro_runtime::KeyRef::Int(i) => PhpStr::from(i.to_string()),
+            };
+            if !cls.prop_map.borrow().contains_key(&name) {
+                dynamic.push(name);
+            }
+        }
+        s.push_str(&format!("\n  - Dynamic properties [{}] {{\n", dynamic.len()));
+        for n in &dynamic {
+            s.push_str(&format!(
+                "    Property [ <dynamic> public ${} ]\n",
+                n.to_string_lossy()
+            ));
+        }
+        s.push_str("  }\n");
+    }
+    section(vm, &mut s, "Methods", &inst_m);
     s.push_str("}\n");
-    Ok(Value::Str(PhpStr::from(s)))
+    Ok(s)
 }
 
 // ---------------------------------------------------------------- methods
@@ -1601,6 +2136,9 @@ fn find_method_in(vm: &mut Vm, cls: &Rc<Class>, name: &[u8]) -> R<Rc<Func>> {
 fn m_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let first = a.val(0);
+    if !a.has(1) || a.val(1).is_null() {
+        vm.deprecated("Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead")?;
+    }
     let (cls, mname) = if a.has(1) && !a.val(1).is_null() {
         (class_arg(vm, &first)?, a.str(1))
     } else {
@@ -1619,9 +2157,7 @@ fn m_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
         }
     };
-    if a.has(1) && a.val(1).is_null() {
-        vm.deprecated("Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead")?;
-    }
+
     let f = find_method_in(vm, &cls, &mname)?;
     vm.set_prop_raw(&o, b"name", Value::Str(f.name.clone()));
     let cn = f.scope().map(|c| c.name.clone()).unwrap_or_default();
@@ -1880,47 +2416,8 @@ fn this_object(a: &Args) -> Option<ObjRef> {
 
 fn c_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let cls = need_class!(vm, a);
-    let kind = if cls.is_interface() {
-        "Interface"
-    } else if cls.is_trait() {
-        "Trait"
-    } else if cls.is_enum() {
-        "Enum"
-    } else {
-        "Class"
-    };
-    let mut s = format!(
-        "{} [ <{}> {}class {}",
-        kind,
-        if cls.has_flag(cflags::INTERNAL) {
-            "internal:Core"
-        } else {
-            "user"
-        },
-        if cls.has_flag(cflags::ABSTRACT) {
-            "abstract "
-        } else if cls.has_flag(cflags::FINAL) {
-            "final "
-        } else {
-            ""
-        },
-        cls.name.dname()
-    );
-    if let Some(p) = &cls.parent {
-        s.push_str(&format!(" extends {}", p.name.dname()));
-    }
-    s.push_str(" ] {\n");
-    if let Some(f) = &cls.file
-        && !cls.has_flag(cflags::INTERNAL)
-    {
-        s.push_str(&format!(
-            "  @@ {} {}-{}\n",
-            f.to_string_lossy(),
-            cls.line_start,
-            cls.line_end
-        ));
-    }
-    s.push_str("}\n");
+    let obj = this_object(a);
+    let s = class_string(vm, &cls, obj.as_ref())?;
     Ok(Value::Str(PhpStr::from(s)))
 }
 
@@ -2027,6 +2524,10 @@ fn c_methods(vm: &mut Vm, a: &mut Args) -> R<Value> {
         {
             continue;
         }
+        // Private methods of ancestors are not listed (observed on PHP 8.5).
+        if f.flags & mflags::PRIVATE != 0 && !f.scope().is_some_and(|d| std::ptr::eq(d, &*c)) {
+            continue;
+        }
         let o = new_refl(
             vm,
             "ReflectionMethod",
@@ -2042,7 +2543,7 @@ fn c_methods(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn c_has_prop(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let n = a.str(0);
-    if c.prop_map.borrow().contains_key(&n) || c.find_static(&n).is_some() {
+    if has_member_prop(&c, &n) {
         return Ok(Value::Bool(true));
     }
     // ReflectionObject also sees dynamic properties.
@@ -2077,7 +2578,7 @@ fn c_get_prop(vm: &mut Vm, a: &mut Args) -> R<Value> {
             },
         )?));
     }
-    if c.prop_map.borrow().contains_key(&n) || c.find_static(&n).is_some() {
+    if has_member_prop(&c, &n) {
         return Ok(Value::Object(new_refl(
             vm,
             "ReflectionProperty",
@@ -2304,7 +2805,10 @@ fn c_const(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 vm.eval_class_const(&k)
             }
         }
-        None => Ok(Value::Bool(false)),
+        None => {
+            vm.deprecated("ReflectionClass::getConstant() for a non-existent constant is deprecated, use ReflectionClass::hasConstant() to check if the constant exists")?;
+            Ok(Value::Bool(false))
+        }
     }
 }
 fn c_refl_const(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2319,10 +2823,62 @@ fn c_refl_const(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Refl::Const { cls: c, name: n },
     )?))
 }
+/// Interfaces in PHP's order (observed on PHP 8.5): the parent's, then
+/// those named in the declaration followed by the implicit ones
+/// (Stringable for `__toString()`, first for internal classes; UnitEnum and
+/// BackedEnum for enums), then the interfaces these extend.
+fn iface_order(c: &Rc<Class>) -> Vec<Rc<Class>> {
+    let all = c.interfaces.borrow().clone();
+    let mut out: Vec<Rc<Class>> = Vec::new();
+    let mut add = |out: &mut Vec<Rc<Class>>, i: &Rc<Class>| {
+        if !out.iter().any(|x| Rc::ptr_eq(x, i)) {
+            out.push(i.clone());
+        }
+    };
+    let find = |n: &[u8]| {
+        let l = lower(n.strip_prefix(b"\\").unwrap_or(n));
+        all.iter().find(|i| i.lname == l).cloned()
+    };
+    if let Some(p) = &c.parent {
+        for i in iface_order(p) {
+            if let Some(i) = all.iter().find(|x| Rc::ptr_eq(x, &i)) {
+                add(&mut out, i);
+            }
+        }
+    }
+    let internal = c.has_flag(cflags::INTERNAL);
+    let stringable = find(b"stringable");
+    if internal && let Some(st) = &stringable {
+        add(&mut out, st);
+    }
+    for n in c.direct_interfaces.borrow().iter() {
+        if let Some(i) = find(n) {
+            add(&mut out, &i);
+        }
+    }
+    let mut implicit: Vec<&[u8]> = Vec::new();
+    if !internal {
+        implicit.push(b"stringable");
+    }
+    if c.is_enum() {
+        implicit.push(b"unitenum");
+        implicit.push(b"backedenum");
+    }
+    for n in implicit {
+        if let Some(i) = find(n) {
+            add(&mut out, &i);
+        }
+    }
+    for i in &all {
+        add(&mut out, i);
+    }
+    out
+}
+
 fn c_interfaces(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let mut out = PhpArray::new();
-    let ifs = c.interfaces.borrow().clone();
+    let ifs = iface_order(&c);
     for i in ifs {
         let o = new_refl(vm, "ReflectionClass", Refl::Class(i.clone()))?;
         out.insert(Key::Str(i.name.clone()), Value::Object(o));
@@ -2332,10 +2888,7 @@ fn c_interfaces(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn c_interface_names(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     Ok(Value::Array(PhpArray::from_values(
-        c.interfaces
-            .borrow()
-            .iter()
-            .map(|i| Value::Str(i.name.clone())),
+        iface_order(&c).iter().map(|i| Value::Str(i.name.clone())),
     )))
 }
 fn c_is_interface(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2548,16 +3101,29 @@ fn c_is_subclass(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = other_class(vm, &a.val(0))?;
     Ok(Value::Bool(!Rc::ptr_eq(&c, &o) && c.is_subclass_of(&o)))
 }
-fn c_static_props(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let c = need_class!(vm, a);
-    vm.ensure_statics(&c)?;
-    let mut out = PhpArray::new();
-    for sp in c.static_props.borrow().iter() {
+/// Static properties visible in the class: its own first, then the
+/// non-private inherited ones (observed on PHP 8.5).
+fn static_members(vm: &mut Vm, c: &Rc<Class>, out: &mut PhpArray) -> R<()> {
+    vm.ensure_statics(c)?;
+    let cp = Rc::as_ptr(c);
+    let statics = c.static_props.borrow().clone();
+    let own = statics.iter().filter(|sp| std::ptr::eq(sp.class, cp));
+    let inherited = statics
+        .iter()
+        .filter(|sp| !std::ptr::eq(sp.class, cp) && sp.flags & mflags::PRIVATE == 0);
+    for sp in own.chain(inherited) {
         let v = sp.cell.get();
-        if !vm.is_uninit(&v) {
+        if !vm.is_uninit(&v) && out.get_str(&sp.name).is_none() {
             out.insert(Key::Str(sp.name.clone()), v);
         }
     }
+    Ok(())
+}
+
+fn c_static_props(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let c = need_class!(vm, a);
+    let mut out = PhpArray::new();
+    static_members(vm, &c, &mut out)?;
     Ok(Value::Array(out))
 }
 fn c_get_static(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2628,23 +3194,30 @@ fn c_set_static(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn c_default_props(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
-    vm.ensure_statics(&c)?;
     let mut out = PhpArray::new();
-    for sp in c.static_props.borrow().iter() {
-        let v = sp.cell.get();
-        if !vm.is_uninit(&v) {
-            out.insert(Key::Str(sp.name.clone()), v);
-        }
-    }
+    static_members(vm, &c, &mut out)?;
     let defaults = vm.class_defaults(&c)?;
-    for p in c.props.borrow().iter() {
-        let v = &defaults[p.slot as usize];
-        if vm.is_uninit(v) || p.flags & mflags::HIDDEN != 0 {
+    let (inst, _) = visible_props(&c);
+    for n in inst {
+        let Some(slot) = pinfo(&c, &n).and_then(|p| p.slot) else {
+            continue;
+        };
+        let v = &defaults[slot as usize];
+        if vm.is_uninit(v) {
             continue;
         }
-        out.insert(Key::Str(p.name.clone()), v.clone());
+        out.insert(Key::Str(n), v.clone());
     }
     Ok(Value::Array(out))
+}
+
+/// Whether the class has the property as a member (private properties of
+/// ancestors are not).
+fn has_member_prop(c: &Rc<Class>, n: &PhpStr) -> bool {
+    match pinfo(c, n) {
+        Some(p) => p.flags & mflags::PRIVATE == 0 || std::ptr::eq(p.class, Rc::as_ptr(c)),
+        None => false,
+    }
 }
 fn c_is_iterable(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
@@ -2782,7 +3355,7 @@ fn p_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let v = a.val(0);
     let cls = class_arg(vm, &v)?;
     let n = a.str(1);
-    let dynamic = if cls.prop_map.borrow().contains_key(&n) || cls.find_static(&n).is_some() {
+    let dynamic = if has_member_prop(&cls, &n) {
         false
     } else if let Value::Object(obj) = &v
         && obj.obj().props.borrow().get_str(&n).is_some()
@@ -2819,32 +3392,7 @@ fn p_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn p_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, dynamic) = need_prop!(vm, a);
-    let s = match pinfo(&c, &n) {
-        Some(p) if !dynamic => {
-            let vis = if p.flags & mflags::PRIVATE != 0 {
-                "private"
-            } else if p.flags & mflags::PROTECTED != 0 {
-                "protected"
-            } else {
-                "public"
-            };
-            let mut s = format!(
-                "Property [ {}{}",
-                vis,
-                if p.is_static { " static" } else { "" }
-            );
-            if p.flags & mflags::READONLY != 0 {
-                s.push_str(" readonly");
-            }
-            if let Some(t) = &p.ty {
-                s.push(' ');
-                s.push_str(&t.display());
-            }
-            s.push_str(&format!(" ${} ]\n", n.to_string_lossy()));
-            s
-        }
-        _ => format!("Property [ <dynamic> public ${} ]\n", n.to_string_lossy()),
-    };
+    let s = prop_string(vm, &c, &n, dynamic, "")?;
     Ok(Value::Str(PhpStr::from(s)))
 }
 fn p_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -3068,7 +3616,8 @@ fn p_is_dynamic(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Bool(dynamic))
 }
 fn p_is_abstract(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    pflag(vm, a, mflags::ABSTRACT)
+    let (c, n, _) = need_prop!(vm, a);
+    Ok(Value::Bool(prop_abstract(&c, &n)))
 }
 fn p_is_virtual(vm: &mut Vm, a: &mut Args) -> R<Value> {
     pflag(vm, a, mflags::VIRTUAL)
@@ -3088,6 +3637,9 @@ fn p_modifiers(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut m = prop_modifiers(p.flags);
     if p.is_static {
         m |= 16;
+    }
+    if prop_abstract(&c, &n) {
+        m |= 64;
     }
     Ok(Value::Int(m))
 }
@@ -3156,6 +3708,17 @@ fn p_has_hooks(vm: &mut Vm, a: &mut Args) -> R<Value> {
         pinfo(&c, &n).is_some_and(|p| p.has_hooks.0 || p.has_hooks.1),
     ))
 }
+/// A property with an abstract hook (in an interface or declared
+/// `abstract`) is abstract.
+fn prop_abstract(c: &Class, n: &PhpStr) -> bool {
+    pinfo(c, n).is_some_and(|p| p.flags & mflags::ABSTRACT != 0)
+        || [true, false].iter().any(|&g| {
+            hook_func(c, n, g).is_some_and(|f| {
+                f.flags & mflags::ABSTRACT != 0 || f.scope().is_some_and(|k| k.is_interface())
+            })
+        })
+}
+
 fn hook_func(c: &Class, n: &PhpStr, get: bool) -> Option<Rc<Func>> {
     let map = c.prop_map.borrow();
     let idxs = map.get(n)?;
@@ -3269,42 +3832,7 @@ fn cc_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn cc_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n) = need_const!(vm, a);
     let k = c.find_const(&n).unwrap();
-    let v = if k.flags & mflags::CASE != 0 {
-        vm.enum_case(&c, &n)?
-    } else {
-        vm.eval_class_const(&k)?
-    };
-    let vis = if k.flags & mflags::PRIVATE != 0 {
-        "private"
-    } else if k.flags & mflags::PROTECTED != 0 {
-        "protected"
-    } else {
-        "public"
-    };
-    let ty = match &v {
-        Value::Object(_) => "object".to_string(),
-        v => crate::builtins::var::type_name(v)
-            .replace("integer", "int")
-            .replace("boolean", "bool"),
-    };
-    let mut val = Vec::new();
-    match &v {
-        Value::Array(_) => val.extend_from_slice(b"Array"),
-        Value::Object(_) => val.extend_from_slice(b"Object"),
-        other => vm.append_to_string(&mut val, other)?,
-    }
-    let s = format!(
-        "Constant [ {}{} {} {} ] {{ {} }}\n",
-        if k.flags & mflags::FINAL != 0 {
-            "final "
-        } else {
-            ""
-        },
-        vis,
-        ty,
-        n.to_string_lossy(),
-        String::from_utf8_lossy(&val)
-    );
+    let s = const_string(vm, &c, &k, "")?;
     Ok(Value::Str(PhpStr::from(s)))
 }
 fn cc_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
