@@ -1908,6 +1908,24 @@ impl Vm {
             });
             cls.methods.borrow_mut().insert(ln, nf);
         }
+        // Native property hooks: a `"class::$"` handler runs the get and
+        // set hooks of every hooked property the class declares (internal
+        // classes computing their properties, such as ext/dom's; the
+        // handler tells them apart by the hook's name, `C::$prop::get`).
+        let mut key = cls.lname.to_vec();
+        key.extend_from_slice(b"::$");
+        if let Some(h) = self.native_methods.get(&PhpStr::from(key)).copied() {
+            let mut props = cls.props.borrow_mut();
+            for p in props.iter_mut() {
+                if !std::ptr::eq(p.class, cp) || (p.get.is_none() && p.set.is_none()) {
+                    continue;
+                }
+                let mut np = (**p).clone();
+                np.get = p.get.as_ref().map(|f| native_twin(f, h, cp));
+                np.set = p.set.as_ref().map(|f| native_twin(f, h, cp));
+                *p = Rc::new(np);
+            }
+        }
         // Native hooks.
         if let Some(h) = self.native_hooks.get(&cls.lname).copied() {
             let hooks = h();
@@ -1923,6 +1941,35 @@ impl Vm {
         }
         self.finish_class(cls);
     }
+}
+
+/// A native function standing for the user function `f` (same name,
+/// signature and flags), run by `h`.
+fn native_twin(f: &Rc<Func>, h: crate::func::NativeFn, cp: *const Class) -> Rc<Func> {
+    let code = f.code().unwrap().clone();
+    let info = std::cell::OnceCell::new();
+    let _ = info.set(Rc::new(crate::func::NativeSig {
+        params: code.params.clone(),
+        ret: code.ret_type.clone(),
+        num_required: code.num_required,
+        by_ref_return: code.flags & fflags::BY_REF != 0,
+        variadic: code.flags & fflags::VARIADIC != 0,
+        ret_text: code.ret_type.as_ref().map(|t| t.display()),
+    }));
+    Rc::new(Func {
+        name: f.name.clone(),
+        lname: f.lname.clone(),
+        kind: FuncKind::Native {
+            handler: h,
+            sig: "",
+            info,
+        },
+        flags: f.flags & !mflags::ABSTRACT,
+        scope: Cell::new(cp),
+        from_trait: Cell::new(std::ptr::null()),
+        statics: RefCell::new(Vec::new()),
+        proto: RefCell::new(None),
+    })
 }
 
 pub(crate) fn copy_hooks(h: &NativeHooks) -> NativeHooks {

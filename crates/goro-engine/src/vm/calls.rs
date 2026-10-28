@@ -761,7 +761,11 @@ impl Vm {
     }
 
     fn method_callee(&self, m: Rc<Func>, this: Option<ObjRef>, cls: &Rc<Class>) -> Callee {
-        let is_static = m.flags & mflags::STATIC != 0;
+        // A static native method called on an object still sees it, so
+        // internal methods that work both ways can tell (PHP manual:
+        // XMLReader::open() and XMLReader::XML() "can be called statically"
+        // or on an instance).
+        let is_static = m.flags & mflags::STATIC != 0 && !m.is_native();
         Callee {
             scope: m.scope.get(),
             func: m,
@@ -981,7 +985,7 @@ impl Vm {
                     Rc::increment_strong_count(fp);
                     Rc::from_raw(fp)
                 };
-                let is_static = f.flags & mflags::STATIC != 0;
+                let is_static = f.flags & mflags::STATIC != 0 && !f.is_native();
                 let cb = Callee {
                     scope: f.scope.get(),
                     func: f,
