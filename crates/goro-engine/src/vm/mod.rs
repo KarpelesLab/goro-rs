@@ -167,8 +167,6 @@ pub struct Pending {
     pub scope: *const Class,
     pub closure: Option<ObjRef>,
     pub flags: u32,
-    /// `new`: the object being constructed.
-    pub new_obj: Option<ObjRef>,
     /// `__call` / `__callStatic` trampolines: the called name.
     pub magic_name: Option<PhpStr>,
     /// Statics of the callee (closures have their own).
@@ -177,6 +175,12 @@ pub struct Pending {
     pub has_named: bool,
     /// Bit set of parameters passed (for named arguments), first 64.
     pub passed: u64,
+    /// Which arguments go by reference ([`crate::bytecode::byref_mask`];
+    /// 0 for magic trampolines, which take values).
+    pub byref: u64,
+    /// User functions: parameters with their own slot (arguments past
+    /// them are extra or variadic).
+    pub np: u32,
 }
 
 pub mod pending_flags {
@@ -206,6 +210,9 @@ pub struct SlotStack {
     chunks: Vec<Box<[Slot]>>,
     cur: usize,
     top: usize,
+    /// Start and length of the current chunk (`chunks[cur]`).
+    cur_ptr: *mut Slot,
+    cur_len: usize,
 }
 
 impl Default for SlotStack {
@@ -216,10 +223,14 @@ impl Default for SlotStack {
 
 impl SlotStack {
     pub fn new() -> SlotStack {
+        let mut first = new_chunk(CHUNK);
+        let cur_ptr = first.as_mut_ptr();
         SlotStack {
-            chunks: vec![new_chunk(CHUNK)],
+            chunks: vec![first],
             cur: 0,
             top: 0,
+            cur_ptr,
+            cur_len: CHUNK,
         }
     }
 
@@ -230,25 +241,37 @@ impl SlotStack {
             chunk: self.cur as u32,
             top: self.top as u32,
         };
-        if self.top + n > self.chunks[self.cur].len() {
-            self.cur += 1;
-            if self.cur == self.chunks.len() {
-                self.chunks.push(new_chunk(CHUNK.max(n)));
-            } else if self.chunks[self.cur].len() < n {
-                self.chunks[self.cur] = new_chunk(n);
-            }
-            self.top = 0;
+        if self.top + n > self.cur_len {
+            self.next_chunk(n);
         }
-        let p = unsafe { self.chunks[self.cur].as_mut_ptr().add(self.top) };
+        // SAFETY: `top + n` is within the current chunk.
+        let p = unsafe { self.cur_ptr.add(self.top) };
         self.top += n;
         (p, mark)
+    }
+
+    #[cold]
+    fn next_chunk(&mut self, n: usize) {
+        self.cur += 1;
+        if self.cur == self.chunks.len() {
+            self.chunks.push(new_chunk(CHUNK.max(n)));
+        } else if self.chunks[self.cur].len() < n {
+            self.chunks[self.cur] = new_chunk(n);
+        }
+        self.top = 0;
+        self.cur_ptr = self.chunks[self.cur].as_mut_ptr();
+        self.cur_len = self.chunks[self.cur].len();
     }
 
     /// Releases everything allocated since `mark`. The slots must already
     /// be cleared.
     #[inline]
     pub fn release(&mut self, mark: StackMark) {
-        self.cur = mark.chunk as usize;
+        if mark.chunk as usize != self.cur {
+            self.cur = mark.chunk as usize;
+            self.cur_ptr = self.chunks[self.cur].as_mut_ptr();
+            self.cur_len = self.chunks[self.cur].len();
+        }
         self.top = mark.top as usize;
     }
 

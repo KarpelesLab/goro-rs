@@ -138,23 +138,56 @@ impl Vm {
     // ------------------------------------------------------------ pending calls
 
     pub(crate) fn push_callee(&mut self, c: Callee, flags: u32) {
-        let (base, mark, args) = match &c.func.kind {
+        let (base, mark, args, byref, np) = match &c.func.kind {
             FuncKind::User(code) if c.magic_name.is_none() => {
                 let (b, m) = self.ex.stack.alloc(code.num_slots as usize);
-                (b, m, Vec::new())
+                (b, m, Vec::new(), code.byref_mask, code.direct_params)
             }
-            _ => (
+            FuncKind::User(_) => (
                 std::ptr::null_mut(),
                 StackMark::default(),
                 self.take_args_vec(),
+                0,
+                0,
             ),
+            FuncKind::Native { info, .. } => {
+                let byref = if c.magic_name.is_some() {
+                    0
+                } else {
+                    match info.get() {
+                        Some(sig) => byref_mask(&sig.params),
+                        None => byref_mask(&self.native_sig(&c.func).params),
+                    }
+                };
+                (
+                    std::ptr::null_mut(),
+                    StackMark::default(),
+                    self.take_args_vec(),
+                    byref,
+                    0,
+                )
+            }
         };
+        // Closures have their own statics, and their `use` variables go
+        // into the callee's slots now.
         let statics: *const RefCell<Vec<Option<PhpRef>>> = match &c.closure {
             Some(cl) => match cl.obj().native.borrow().as_ref() {
                 Some(n) => {
                     let any: &dyn std::any::Any = &**n;
                     match any.downcast_ref::<ClosureData>() {
-                        Some(cd) => &cd.statics as *const _,
+                        Some(cd) => {
+                            if !base.is_null()
+                                && let FuncKind::User(code) = &c.func.kind
+                            {
+                                for (k, (inner, _, _)) in code.uses.iter().enumerate() {
+                                    if let Some(Some(v)) = cd.captured.get(k) {
+                                        // SAFETY: the callee's fresh slots.
+                                        unsafe { *base.add(*inner as usize) = Some(v.clone()) };
+                                    }
+                                }
+                            }
+                            &cd.statics as *const _
+                        }
                         None => &c.func.statics as *const _,
                     }
                 }
@@ -166,25 +199,35 @@ impl Vm {
         if c.magic_name.is_some() {
             fl |= pending_flags::MAGIC_CALL;
         }
-        self.ex.pending.push(Pending {
-            func: c.func,
-            base,
-            mark,
-            args,
-            argc: 0,
-            extra: Vec::new(),
-            named_extra: None,
-            this: c.this,
-            static_class: c.static_class,
-            scope: c.scope,
-            closure: c.closure,
-            flags: fl,
-            new_obj: None,
-            magic_name: c.magic_name,
-            statics,
-            has_named: false,
-            passed: 0,
-        });
+        // Written in place, field by field (the struct is large: built
+        // whole, it would be copied).
+        let v = &mut self.ex.pending;
+        v.reserve(1);
+        // SAFETY: capacity reserved; every field is written before the
+        // length covers the entry.
+        unsafe {
+            use std::ptr::addr_of_mut as at;
+            let d = v.as_mut_ptr().add(v.len());
+            at!((*d).func).write(c.func);
+            at!((*d).base).write(base);
+            at!((*d).mark).write(mark);
+            at!((*d).args).write(args);
+            at!((*d).argc).write(0);
+            at!((*d).extra).write(Vec::new());
+            at!((*d).named_extra).write(None);
+            at!((*d).this).write(c.this);
+            at!((*d).static_class).write(c.static_class);
+            at!((*d).scope).write(c.scope);
+            at!((*d).closure).write(c.closure);
+            at!((*d).flags).write(fl);
+            at!((*d).magic_name).write(c.magic_name);
+            at!((*d).statics).write(statics);
+            at!((*d).has_named).write(false);
+            at!((*d).passed).write(0);
+            at!((*d).byref).write(byref);
+            at!((*d).np).write(np);
+            v.set_len(v.len() + 1);
+        }
     }
 
     /// Drops a pending call that won't be made.
@@ -243,9 +286,13 @@ impl Vm {
         }
     }
 
+    #[inline]
     pub(crate) fn pending_arg_by_ref(&mut self, arg: u32) -> bool {
         let p = self.ex.pending.last().unwrap();
-        if p.magic_name.is_some() {
+        if arg < 63 {
+            return p.byref >> arg & 1 != 0;
+        }
+        if p.byref >> 63 == 0 {
             return false;
         }
         let f = p.func.clone();
@@ -330,6 +377,28 @@ impl Vm {
         };
         self.push_callee(Callee::func(func), 0);
         Ok(())
+    }
+
+    /// `InitDynCall`: a call of the callable in register `r`.
+    pub(crate) fn op_init_dyn_call(&mut self, r: Reg, nargs: u32) -> R<()> {
+        // Closures, without copying the value.
+        if let Some(Value::Object(o)) = self.peek(r) {
+            let o = o.clone();
+            if let Some(c) = self.closure_data(&o) {
+                drop(o);
+                self.drop_tmp(r);
+                if c.func.is_native() && is_scope_introspecting(&c.func.lname) {
+                    return self.throw(
+                        "Error",
+                        &format!("Cannot call {}() dynamically", c.func.name.dname()),
+                    );
+                }
+                self.push_callee(c, 0);
+                return Ok(());
+            }
+        }
+        let v = self.get(r)?;
+        self.init_callable_call(v, nargs)
     }
 
     /// Prepares a call of a callable value (`$f()`, `call_user_func`...).
@@ -1112,11 +1181,44 @@ impl Vm {
         nargs: u32,
         cache: u32,
     ) -> R<()> {
-        let _ = (nargs, cache);
+        let _ = nargs;
         let forwarding = matches!(
             class,
             ClassSpec::SelfRef | ClassSpec::Parent | ClassSpec::Static
         );
+        // Inline cache: (class, public method) of a constant name. Names
+        // resolve to the same class for the rest of the request.
+        let cacheable = is_const(name) && !matches!(class, ClassSpec::Dynamic(_));
+        if cacheable {
+            let c = self.code_ref().caches[cache as usize].get();
+            if c.key != 0 {
+                let cls_ptr: *const Class = match class {
+                    ClassSpec::Named(_) => c.key as *const Class,
+                    ClassSpec::SelfRef => self.scope_ptr(),
+                    ClassSpec::Parent => {
+                        let s = self.scope_ptr();
+                        if s.is_null() {
+                            s
+                        } else {
+                            unsafe { (*s).parent.as_ref() }.map_or(std::ptr::null(), Rc::as_ptr)
+                        }
+                    }
+                    _ => self.static_class_ptr(),
+                };
+                if cls_ptr as usize == c.key {
+                    let fp = c.a as *const Func;
+                    // SAFETY: methods live as long as their class.
+                    let f = unsafe {
+                        Rc::increment_strong_count(fp);
+                        Rc::from_raw(fp)
+                    };
+                    if let Some(cb) = self.cached_static_callee(f, cls_ptr, forwarding) {
+                        self.push_callee(cb, 0);
+                        return Ok(());
+                    }
+                }
+            }
+        }
         let cls = self.resolve_class_spec(class, true)?;
         let n = self.get(name)?;
         let n = match n {
@@ -1124,8 +1226,65 @@ impl Vm {
             _ => return self.throw("Error", "Method name must be a string"),
         };
         let cb = self.resolve_static_method(&cls, &n, true, forwarding)?;
+        if cacheable
+            && cb.magic_name.is_none()
+            && cb.closure.is_none()
+            && cb.func.flags & mflags::PUBLIC != 0
+            && cb.func.flags & mflags::ABSTRACT == 0
+            && cls
+                .find_method_str(&crate::class::lower(&n))
+                .is_some_and(|m| Rc::ptr_eq(&m, &cb.func))
+        {
+            self.code_ref().caches[cache as usize].set(Cache {
+                key: Rc::as_ptr(&cls) as usize,
+                a: Rc::as_ptr(&cb.func) as usize,
+                b: 0,
+            });
+        }
         self.push_callee(cb, 0);
         Ok(())
+    }
+
+    /// The callee of a cached `C::m()` (public, not abstract `m` found in
+    /// class `cls`), as [`resolve_static_method`](Self::resolve_static_method)
+    /// would give it; `None` when it would raise an error.
+    fn cached_static_callee(
+        &mut self,
+        m: Rc<Func>,
+        cls: *const Class,
+        forwarding: bool,
+    ) -> Option<Callee> {
+        // SAFETY: `cls` is a live class (the cache key matched it).
+        let cls_ref = unsafe { &*cls };
+        if m.flags & mflags::STATIC != 0 {
+            let cur = self.static_class_ptr();
+            let sc = if forwarding && !cur.is_null() && unsafe { &*cur }.is_subclass_of(cls_ref) {
+                cur
+            } else {
+                cls
+            };
+            return Some(Callee {
+                scope: m.scope.get(),
+                func: m,
+                this: None,
+                static_class: sc,
+                closure: None,
+                magic_name: None,
+            });
+        }
+        let t = self.this_obj()?;
+        let tc = self.class_ptr_of(&t);
+        if unsafe { &*tc }.is_subclass_of(cls_ref) {
+            return Some(Callee {
+                scope: m.scope.get(),
+                func: m,
+                this: Some(t),
+                static_class: tc,
+                closure: None,
+                magic_name: None,
+            });
+        }
+        None
     }
 
     // ------------------------------------------------------------ sending
@@ -1281,14 +1440,8 @@ impl Vm {
         let p = self.ex.pending.last_mut().unwrap();
         p.argc = p.argc.max(arg + 1);
         if !p.base.is_null() {
-            let code = match &p.func.kind {
-                FuncKind::User(c) => c,
-                _ => unreachable!(),
-            };
-            let np = code.params.len();
-            let i = arg as usize;
-            if i < np && !code.params[i].variadic {
-                let old = unsafe { (*p.base.add(i)).replace(v) };
+            if arg < p.np {
+                let old = unsafe { (*p.base.add(arg as usize)).replace(v) };
                 drop(old);
             } else {
                 p.extra.push(v);
@@ -1515,13 +1668,20 @@ impl Vm {
     /// `DoCall`: makes the pending call. User functions get a frame (the
     /// loop continues in it); natives run now.
     pub(crate) fn do_call(&mut self, dst: Reg) -> R<Option<Value>> {
-        let p = self.ex.pending.pop().expect("DoCall without pending call");
         let ret = if dst == NONE {
             std::ptr::null_mut()
         } else {
             self.slot_ptr(dst)
         };
         let ret_var = dst != NONE && dst & TMP == 0;
+        let top = self.ex.pending.last().expect("DoCall without pending call");
+        if top.flags & (pending_flags::NO_CTOR | pending_flags::MAGIC_CALL) == 0
+            && let FuncKind::User(_) = &top.func.kind
+        {
+            self.activate(ret, ret_var, false)?;
+            return Ok(None);
+        }
+        let p = self.ex.pending.pop().unwrap();
         if p.flags & pending_flags::NO_CTOR != 0 {
             self.discard_pending(p);
             return Ok(None);
@@ -1535,7 +1695,7 @@ impl Vm {
         }
         match &p.func.kind {
             FuncKind::User(_) => {
-                self.activate(p, ret, ret_var, false)?;
+                self.activate_slow(p, ret, ret_var, false)?;
                 Ok(None)
             }
             FuncKind::Native { .. } => {
@@ -1919,7 +2079,117 @@ impl Vm {
     /// (count, defaults, types: errors are raised from inside the callee,
     /// as PHP does). For generator functions, the frame goes into a
     /// Generator object written to `ret`.
-    pub(crate) fn activate(
+    ///
+    /// The call is the pending call on top. The common case (positional
+    /// arguments matching the parameters, types matching exactly, no
+    /// attributes to act on) builds the frame in place; anything else goes
+    /// through [`activate_slow`](Self::activate_slow).
+    pub(crate) fn activate(&mut self, ret: *mut Slot, ret_var: bool, entry: bool) -> R<()> {
+        const SLOW: u32 = fflags::DEPRECATED
+            | fflags::ABSTRACT
+            | fflags::NODISCARD
+            | fflags::GENERATOR
+            | fflags::VARIADIC;
+        let len = self.ex.pending.len();
+        // SAFETY: there is a pending call on top; it stays there (and keeps
+        // the function and its code alive) until truncated below.
+        let p: &Pending = unsafe { &*self.ex.pending.as_ptr().add(len - 1) };
+        let FuncKind::User(code) = &p.func.kind else {
+            unreachable!()
+        };
+        let code: &FuncCode = unsafe { &*Rc::as_ptr(code) };
+        if code.flags & SLOW != 0
+            || p.has_named
+            || p.argc > p.np
+            || p.extra.capacity() != 0
+            || p.args.capacity() != 0
+            || p.named_extra.is_some()
+            || p.magic_name.is_some()
+            || code.file.is_empty()
+            || !args_bind_simply(self, code, p.base, p.argc)
+        {
+            let p = self.ex.pending.pop().unwrap();
+            return self.activate_slow(p, ret, ret_var, entry);
+        }
+        let base = p.base;
+        // Defaults of parameters not passed (constants: the others are
+        // computed by the prologue).
+        for i in p.argc as usize..code.params.len() {
+            let param = &code.params[i];
+            if let ParamDefault::Const(v) = &param.default {
+                let mut v = v.clone();
+                if let Some(ty) = &param.ty
+                    && let Value::Int(n) = v
+                    && ty.mask & tmask::FLOAT != 0
+                    && ty.mask & tmask::INT == 0
+                {
+                    v = Value::Float(n as f64);
+                }
+                unsafe { *base.add(i) = Some(v) };
+            }
+        }
+        let mut flags = 0;
+        if entry {
+            flags |= frame_flags::ENTRY;
+        }
+        if ret_var {
+            flags |= RET_VAR;
+        }
+        if p.flags & pending_flags::NEW != 0 {
+            flags |= frame_flags::CTOR;
+        }
+        let scope = if p.closure.is_some() {
+            p.scope
+        } else {
+            p.func.scope.get()
+        };
+        if let Some(top) = self.ex.frames.last_mut() {
+            top.ip = self.ex.ip as u32;
+        }
+        let native_base = self.ex.native_calls.len() as u32;
+        let frames = &mut self.ex.frames;
+        frames.reserve(1);
+        // SAFETY: capacity reserved; the frame is written in place field by
+        // field (built whole, the large struct would be copied). The
+        // pending call's handles move into it; its other owning fields are
+        // empty (checked above), so it is popped without a drop.
+        unsafe {
+            use std::ptr::addr_of_mut as at;
+            let d = frames.as_mut_ptr().add(frames.len());
+            at!((*d).code).write(code as *const FuncCode);
+            at!((*d).func).write(std::ptr::read(&p.func));
+            at!((*d).ip).write(0);
+            at!((*d).base).write(base);
+            at!((*d).this).write(std::ptr::read(&p.this));
+            at!((*d).static_class).write(p.static_class);
+            at!((*d).scope).write(scope);
+            at!((*d).ret).write(ret);
+            at!((*d).argc).write(p.argc);
+            at!((*d).extra_args).write(Vec::new());
+            at!((*d).dyn_vars).write(None);
+            at!((*d).closure).write(std::ptr::read(&p.closure));
+            at!((*d).generator).write(None);
+            at!((*d).flags).write(flags);
+            at!((*d).mark).write(p.mark);
+            at!((*d).statics).write(p.statics);
+            at!((*d).owner).write(0);
+            at!((*d).pending_base).write((len - 1) as u32);
+            at!((*d).native_base).write(native_base);
+            at!((*d).line_hint).write(0);
+            frames.set_len(frames.len() + 1);
+            self.ex.pending.set_len(len - 1);
+        }
+        self.ex.top = super::TopFrame {
+            base,
+            code: code as *const FuncCode,
+        };
+        self.ex.ip = 0;
+        Ok(())
+    }
+
+    /// [`activate`](Self::activate) in general: argument count errors,
+    /// coercions, named and extra arguments, variadics, generators.
+    pub(crate) fn activate_slow(
         &mut self,
         mut p: Pending,
         ret: *mut Slot,
@@ -2281,22 +2551,7 @@ impl Vm {
         } else {
             self.frame_mut().extra_args = extra;
         }
-        // Closure `use` variables.
-        if !code.uses.is_empty()
-            && let Some(cl) = self.frame().closure.clone()
-        {
-            let n = cl.obj().native.borrow();
-            if let Some(n) = n.as_ref() {
-                let any: &dyn std::any::Any = &**n;
-                if let Some(cd) = any.downcast_ref::<ClosureData>() {
-                    for (k, (inner, _, _)) in code.uses.iter().enumerate() {
-                        if let Some(Some(v)) = cd.captured.get(k) {
-                            unsafe { *base.add(*inner as usize) = Some(v.clone()) };
-                        }
-                    }
-                }
-            }
-        }
+        // (Closure `use` variables were bound by push_callee.)
         Ok(())
     }
 
@@ -2467,19 +2722,45 @@ impl Vm {
     /// `return`: pops the frame and delivers the value. `Some(v)` when the
     /// frame was an entry frame (the Rust caller gets `v`).
     pub(crate) fn do_return(&mut self, v: Value, by_ref: bool) -> R<Option<Value>> {
-        if self.frame().flags & frame_flags::GENERATOR != 0 {
+        let len = self.ex.frames.len();
+        // SAFETY: a frame is running.
+        let f = unsafe { &mut *self.ex.frames.as_mut_ptr().add(len - 1) };
+        let flags = f.flags;
+        if flags & frame_flags::GENERATOR != 0 {
             return self.generator_return(v);
         }
-        let f = self.ex.frames.pop().unwrap();
-        self.ex.sync_top();
-        if let Some(top) = self.ex.frames.last() {
-            self.ex.ip = top.ip as usize;
-        }
         let ret = f.ret;
-        let flags = f.flags;
         // Deliver before releasing locals (as PHP copies the value first).
         let v = if by_ref { v } else { v.into_deref() };
-        self.release_frame(f);
+        if flags & (frame_flags::ATTACHED | frame_flags::OWN_SLOTS) == 0 {
+            // Released in place: the locals, then the frame's handles.
+            let n = f.code().num_slots as usize;
+            let base = f.base;
+            let mark = f.mark;
+            for i in 0..n {
+                let old = unsafe { (*base.add(i)).take() };
+                drop(old);
+            }
+            self.ex.stack.release(mark);
+            self.ex.frames.truncate(len - 1);
+            match self.ex.frames.last() {
+                Some(top) => {
+                    self.ex.top = super::TopFrame {
+                        base: top.base,
+                        code: top.code,
+                    };
+                    self.ex.ip = top.ip as usize;
+                }
+                None => self.ex.top = super::TopFrame::default(),
+            }
+        } else {
+            let f = self.ex.frames.pop().unwrap();
+            self.ex.sync_top();
+            if let Some(top) = self.ex.frames.last() {
+                self.ex.ip = top.ip as usize;
+            }
+            self.release_frame(f);
+        }
         if flags & frame_flags::ENTRY != 0 {
             return Ok(Some(v));
         }
@@ -2808,7 +3089,8 @@ impl Vm {
                 let ret = &mut result as *mut Slot;
                 let is_gen = p.func.code().is_some_and(|c| c.is_generator());
                 let depth = self.ex.frames.len();
-                self.activate(p, ret, false, true)?;
+                self.ex.pending.push(p);
+                self.activate(ret, false, true)?;
                 if is_gen || self.ex.frames.len() == depth {
                     return Ok(result.unwrap_or_default());
                 }
@@ -3211,6 +3493,55 @@ impl Vm {
 }
 
 /// `__call` / `__callStatic`.
+/// Whether the arguments in `base` bind without work: every parameter is
+/// passed (or has a default the frame fills in: a constant, or prologue
+/// code), and each value matches its parameter's type exactly. Pure (no
+/// diagnostics, no autoloading): anything else is left to the general
+/// path.
+#[inline]
+fn args_bind_simply(vm: &Vm, code: &FuncCode, base: *mut Slot, argc: u32) -> bool {
+    for (i, param) in code.params.iter().enumerate() {
+        if (i as u32) >= argc {
+            match &param.default {
+                ParamDefault::Const(_) if !param.by_ref => {}
+                ParamDefault::Code => {}
+                _ => return false,
+            }
+            continue;
+        }
+        let Some(ty) = &param.ty else { continue };
+        let m = ty.mask;
+        let ok = match unsafe { &*base.add(i) } {
+            _ if m & tmask::MIXED != 0 => true,
+            Some(Value::Int(_)) => m & tmask::INT != 0,
+            Some(Value::Str(_)) => m & tmask::STRING != 0,
+            Some(Value::Float(_)) => m & tmask::FLOAT != 0,
+            Some(Value::Array(_)) => m & (tmask::ARRAY | tmask::ITERABLE) != 0,
+            Some(Value::Bool(true)) => m & tmask::TRUE != 0,
+            Some(Value::Bool(false)) => m & tmask::FALSE != 0,
+            Some(Value::Null) => m & tmask::NULL != 0,
+            Some(Value::Object(o)) => {
+                m & tmask::OBJECT != 0 || {
+                    // SAFETY: an object's class outlives it.
+                    let cls = unsafe { &*vm.class_ptr_of(o) };
+                    ty.classes.iter().any(|t| {
+                        t.len() == 1 && {
+                            let n = t[0].as_bytes();
+                            let n = n.strip_prefix(b"\\").unwrap_or(n);
+                            cls.name.as_bytes().eq_ignore_ascii_case(n)
+                        }
+                    })
+                }
+            }
+            _ => false,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
 fn is_magic_call(f: &Func) -> bool {
     matches!(f.lname.as_bytes(), b"__call" | b"__callstatic")
 }

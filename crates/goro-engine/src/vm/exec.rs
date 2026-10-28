@@ -725,10 +725,7 @@ impl Vm {
                     cache,
                     fallback,
                 } => self.op_init_fcall(name, nargs, cache, fallback)?,
-                Op::InitDynCall { callee, nargs } => {
-                    let v = self.get(callee)?;
-                    self.init_callable_call(v, nargs)?;
-                }
+                Op::InitDynCall { callee, nargs } => self.op_init_dyn_call(callee, nargs)?,
                 Op::InitMethod {
                     obj,
                     name,
