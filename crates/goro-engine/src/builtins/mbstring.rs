@@ -807,6 +807,25 @@ fn char_range(n: usize, start: i64, len: Option<i64>) -> (usize, usize) {
 
 fn mb_substr(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let e = enc_arg(vm, a, 3)?;
+    // Test gh16360.phpt.
+    for (i, v, name) in [
+        (1usize, Some(a.int(1)), "start"),
+        (2, a.opt_int(2), "length"),
+    ] {
+        if v == Some(i64::MIN) {
+            return vm.fthrow(
+                a,
+                "ValueError",
+                &format!(
+                    "Argument #{} (${}) must be between {} and {}",
+                    i + 1,
+                    name,
+                    i64::MIN + 1,
+                    i64::MAX
+                ),
+            );
+        }
+    }
     let s = a.str(0);
     let chars = decode(e.kind, &s);
     let (st, en) = char_range(chars.len(), a.int(1), a.opt_int(2));
@@ -955,10 +974,12 @@ fn str_common(vm: &mut Vm, a: &mut Args, ci: bool, rev: bool) -> R<Value> {
         n = n.into_iter().map(fold_cp).collect();
     }
     let p = if rev {
+        // Observed on PHP 8.5: an empty needle is found at the end.
         if n.is_empty() {
-            return Ok(Value::Bool(false));
+            Some(h.len())
+        } else {
+            rfind_seq(&h, &n, usize::MAX)
         }
-        rfind_seq(&h, &n, usize::MAX)
     } else {
         find_seq(&h, &n, 0)
     };
@@ -1061,6 +1082,53 @@ fn titlecase(c: char, out: &mut String, simple: bool) {
     }
 }
 
+/// Whether the capital sigma at `idx` is word-final: a cased letter
+/// before it and none after it, looking through at most 63 case-ignorable
+/// characters each way (observed on PHP 8.5; test mb_strtolower_basic.phpt).
+fn final_sigma(chars: &[char], idx: usize) -> bool {
+    let mut before = false;
+    let mut k = idx;
+    let mut n = 0;
+    while k > 0 && n <= 63 {
+        k -= 1;
+        let c = chars[k];
+        if is_case_ignorable(c) {
+            n += 1;
+            continue;
+        }
+        before = is_cased(c);
+        break;
+    }
+    if !before {
+        return false;
+    }
+    let mut k = idx + 1;
+    let mut n = 0;
+    while k < chars.len() && n <= 63 {
+        let c = chars[k];
+        if is_case_ignorable(c) {
+            n += 1;
+            k += 1;
+            continue;
+        }
+        return !is_cased(c);
+    }
+    true
+}
+
+fn full_lower(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    for (i, &c) in chars.iter().enumerate() {
+        if c == '\u{3A3}' {
+            out.push(if final_sigma(&chars, i) { 'ς' } else { 'σ' });
+        } else {
+            out.extend(c.to_lowercase());
+        }
+    }
+    out
+}
+
 fn convert_case(s: &str, mode: i64) -> String {
     let simple = mode >= 4;
     match mode & 3 {
@@ -1091,7 +1159,7 @@ fn convert_case(s: &str, mode: i64) -> String {
                     })
                     .collect()
             } else {
-                s.to_lowercase()
+                full_lower(s)
             }
         }
         3 => {
@@ -1119,11 +1187,7 @@ fn convert_case(s: &str, mode: i64) -> String {
                     if in_word && c == '\u{3A3}' && !simple {
                         // Final sigma (Unicode SpecialCasing; test
                         // mb_convert_case_various_mode.phpt).
-                        let next_cased = chars[idx + 1..]
-                            .iter()
-                            .find(|&&x| !is_case_ignorable(x))
-                            .is_some_and(|&x| is_cased(x));
-                        out.push(if next_cased { 'σ' } else { 'ς' });
+                        out.push(if final_sigma(&chars, idx) { 'ς' } else { 'σ' });
                     } else if in_word {
                         if simple {
                             let mut l = c.to_lowercase();
@@ -1232,6 +1296,12 @@ fn mb_str_split(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let chars = decode(e.kind, &s);
     let mut out = PhpArray::new();
     for chunk in chars.chunks(len as usize) {
+        if e.kind != Kind::Utf8 && chunk.iter().any(|c| c.cp.is_none()) {
+            // Test mb_str_split_utf8_utf16.phpt.
+            let b = encode_all(vm, e.kind, chunk.iter().map(|c| c.cp));
+            let _ = out.push(sv(b));
+            continue;
+        }
         let b0 = chunk[0].start;
         let last = chunk[chunk.len() - 1];
         let _ = out.push(Value::from(&s[b0..last.start + last.len]));
@@ -1252,7 +1322,9 @@ fn width(cp: u32) -> usize {
         (0x23F3, 0x23F3),
         (0x25FD, 0x25FE),
         (0x2614, 0x2615),
+        (0x2630, 0x2637),
         (0x2648, 0x2653),
+        (0x268A, 0x268F),
         (0x267F, 0x267F),
         (0x2693, 0x2693),
         (0x26A1, 0x26A1),
@@ -1338,9 +1410,20 @@ fn mb_strimwidth(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if start < 0 || start > n {
         return vm.fthrow(a, "ValueError", "Argument #2 ($start) is out of range");
     }
-    let w = a.int(2);
+    let mut w = a.int(2);
     if w < 0 {
-        return vm.fthrow(a, "ValueError", "Argument #3 ($width) is out of range");
+        vm.fdeprecated(
+            a,
+            "passing a negative integer to argument #3 ($width) is deprecated",
+        )?;
+        let tw: i64 = chars[start as usize..]
+            .iter()
+            .map(|c| c.cp.map_or(1, width) as i64)
+            .sum();
+        w += tw;
+        if w < 0 {
+            return vm.fthrow(a, "ValueError", "Argument #3 ($width) is out of range");
+        }
     }
     let marker = if a.has(3) { a.str(3) } else { PhpStr::empty() };
     let mw: usize = cps(e.kind, &marker)
@@ -1617,7 +1700,11 @@ fn mb_substitute_character(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
         Value::Int(i) => {
             if !(0..=0x10FFFF).contains(&i) || (0xD800..0xE000).contains(&i) {
-                return bad(vm, a);
+                return vm.fthrow(
+                    a,
+                    "ValueError",
+                    "Argument #1 ($substitute_character) is not a valid codepoint",
+                );
             }
             vm.ext::<MbState>().sub = Sub::Char(i as u32);
             Ok(Value::Bool(true))
@@ -1954,6 +2041,28 @@ fn mb_parse_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
         .get_ini(b"arg_separator.input")
         .unwrap_or_else(|| PhpStr::from("&"));
     let arr = super::string::parse_query(a.bytes(0), &seps);
+    // Keys and values are checked against the internal encoding (test
+    // mb_parse_str_error.phpt: invalid bytes become "?").
+    let k = internal(vm).kind;
+    fn scrub(vm: &mut Vm, k: Kind, arr: &PhpArray) -> PhpArray {
+        let mut out = PhpArray::new();
+        for (key, v) in arr.iter() {
+            let key = match key {
+                goro_runtime::KeyRef::Str(s) => {
+                    Key::from_php_str(&PhpStr::from(encode_all(vm, k, cps(k, s).into_iter())))
+                }
+                goro_runtime::KeyRef::Int(i) => Key::Int(i),
+            };
+            let v = match v.deref() {
+                Value::Str(s) => sv(encode_all(vm, k, cps(k, &s).into_iter())),
+                Value::Array(inner) => Value::Array(scrub(vm, k, &inner)),
+                other => other,
+            };
+            out.insert(key, v);
+        }
+        out
+    }
+    let arr = scrub(vm, k, &arr);
     a.set_ref(1, Value::Array(arr));
     Ok(Value::Bool(true))
 }
