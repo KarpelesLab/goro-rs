@@ -54,7 +54,7 @@ pub static MODULE: Module = Module {
         ),
         (
             "iteratoraggregate",
-            "<?php interface IteratorAggregate extends Traversable { public function getIterator(): Iterator; }",
+            "<?php interface IteratorAggregate extends Traversable { public function getIterator(): Traversable; }",
         ),
         (
             "arrayaccess",
@@ -568,7 +568,21 @@ fn do_bind(vm: &mut Vm, cl: &ObjRef, new_this: Value, scope_arg: Option<Value>) 
             ))?;
             return Ok(Value::Null);
         }
-        cd.scope = scope.as_ref().map(Rc::as_ptr).unwrap_or(std::ptr::null());
+        let new_scope = scope.as_ref().map(Rc::as_ptr).unwrap_or(std::ptr::null());
+        // Closures of functions and methods keep their scope (observed on
+        // PHP 8.5; tests Zend/tests/closures/closure_from_callable_rebinding*).
+        if cd.from_callable && !std::ptr::eq(new_scope, cd.scope) {
+            vm.warn(&format!(
+                "Cannot rebind scope of closure created from {}, this will be an error in PHP 9",
+                if c.func.scope().is_some() {
+                    "method"
+                } else {
+                    "function"
+                }
+            ))?;
+            return Ok(Value::Null);
+        }
+        cd.scope = new_scope;
         cd.called_scope = cd.scope;
     }
     match new_this {
@@ -584,7 +598,7 @@ fn do_bind(vm: &mut Vm, cl: &ObjRef, new_this: Value, scope_arg: Option<Value>) 
                     && !vm.class_of(&t).is_subclass_of(&vm.class_of(old))
                 {
                     vm.warn(&format!(
-                        "Cannot bind method {}() to object of class {}",
+                        "Cannot bind method {}() to object of class {}, this will be an error in PHP 9",
                         c.func.display_name(),
                         vm.class_of(&t).name.dname()
                     ))?;
@@ -606,7 +620,9 @@ fn do_bind(vm: &mut Vm, cl: &ObjRef, new_this: Value, scope_arg: Option<Value>) 
                     .code()
                     .is_some_and(|code| code.flags & crate::bytecode::fflags::USES_THIS != 0)
             {
-                vm.warn("Cannot unbind $this of closure using $this")?;
+                vm.warn(
+                    "Cannot unbind $this of closure using $this, this will be an error in PHP 9",
+                )?;
                 return Ok(Value::Null);
             }
             if cd.from_callable
@@ -614,7 +630,7 @@ fn do_bind(vm: &mut Vm, cl: &ObjRef, new_this: Value, scope_arg: Option<Value>) 
                 && c.func.scope().is_some()
                 && c.func.flags & crate::class::mflags::STATIC == 0
             {
-                vm.warn("Cannot unbind $this of method")?;
+                vm.warn("Cannot unbind $this of method, this will be an error in PHP 9")?;
                 return Ok(Value::Null);
             }
             cd.this = None;

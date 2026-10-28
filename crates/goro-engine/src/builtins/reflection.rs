@@ -1871,7 +1871,7 @@ fn func_string(
 /// Return types of methods of internal classes are "tentative" (PHP 8.1:
 /// extending classes may still omit them), except in final classes and
 /// for constructors (observed on PHP 8.5).
-fn is_tentative(f: &Func) -> bool {
+pub(crate) fn is_tentative(f: &Func) -> bool {
     // Methods added in PHP 8.0 and later, and magic methods, have real
     // return types (PHP manual changelogs).
     const REAL: &[&str] = &[
@@ -2592,7 +2592,7 @@ fn m_callee(vm: &mut Vm, f: &Rc<Func>, cls: &Rc<Class>, obj: Value, fname: &str)
         return vm.type_error(&format!(
             "ReflectionMethod::{}(): Argument #1 ($object) must be of type object, {} given",
             fname,
-            obj.tname()
+            crate::vm::Vm::type_name_given(&obj)
         ));
     };
     let oc = vm.class_of(&o);
@@ -4525,7 +4525,7 @@ fn par_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 vm,
                 &format!(
                     "ReflectionParameter::__construct(): Argument #1 ($function) must be a string, an array(class, method), or a callable object, {} given",
-                    a.val(0).tname()
+                    crate::vm::Vm::type_name_given(&a.val(0))
                 ),
             );
         }

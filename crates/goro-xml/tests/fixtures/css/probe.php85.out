@@ -1,0 +1,105 @@
+string(3) "Div"
+"div"                        => 1 div
+"DIV"                        => 1 div
+"Div"                        => 1 div
+"*"                          => 15 html,head,body,div,p,svg,foreignObject,circle,input,select,option,option,a,a,Div
+"p[LANG]"                    => 1 p
+"p[lang=\"en-us\"]"          => 1 p
+"p[title=\"X\"]"             => 0 
+"p[lang|=en]"                => 1 p
+"circle"                     => 1 circle
+"CIRCLE"                     => 0 
+"foreignObject"              => 1 foreignObject
+"foreignobject"              => 0 
+"[viewBox]"                  => 1 circle
+"[viewbox]"                  => 0 
+"#Main"                      => 1 div
+"#main"                      => 0 
+".A"                         => 1 div
+".a"                         => 0 
+"div.b"                      => 1 div
+":checked"                   => 2 input,option
+"option:checked"             => 1 option
+":link"                      => 1 a
+"a:not([href])"              => 1 a
+"p:first-child"              => 1 p
+":nth-child(2n of p)"        => 0 
+"p:only-child"               => 0 
+":root"                      => 1 html
+"html:root"                  => 1 html
+"div > p"                    => 1 p
+"div>p"                      => 1 p
+"div  p"                     => 1 p
+"p ~ svg"                    => 1 svg
+"p + svg"                    => 1 svg
+":is(p, svg)"                => 2 p,svg
+":where(p)"                  => 1 p
+":has(> p)"                  => 1 div
+"div:has(p, a)"              => 1 div
+":not(p, div)"               => 13 html,head,body,svg,foreignObject,circle,input,select,option,option,a,a,Div
+"*|div"                      => 1 div
+"svg|circle"                 => 1 circle
+"|p"                         => 1 p
+":nth-child( 2n + 1 )"       => 8 html,head,div,p,foreignObject,input,option,a
+":nth-child(odd)"            => 8 html,head,div,p,foreignObject,input,option,a
+":nth-child(-n+3)"           => 12 html,head,body,div,p,svg,foreignObject,circle,input,option,option,Div
+":nth-child(+5)"             => 1 a
+""                           => DOMException 12 Invalid selector (Selectors. Unexpected token: END-OF-FILE)
+" "                          => DOMException 12 Invalid selector (Selectors. Unexpected token: END-OF-FILE)
+","                          => DOMException 12 Invalid selector (Selectors. Unexpected token: ,)
+"div,"                       => DOMException 12 Invalid selector (Selectors. Unexpected token: END-OF-FILE)
+",div"                       => DOMException 12 Invalid selector (Selectors. Unexpected token: ,)
+"div["                       => DOMException 12 Invalid selector (Selectors. Unexpected token: END-OF-FILE)
+"div[a"                      => DOMException 12 Invalid selector (Selectors. Unexpected token: END-OF-FILE)
+"div[a=]"                    => DOMException 12 Invalid selector (Selectors. Unexpected token: ])
+"div[a=\"b\" x]"             => DOMException 12 Invalid selector (Selectors. Unexpected token: x)
+"div[a=\"b\" I]"             => DOMException 12 Invalid selector (Selectors. Unexpected token: I)
+"div >"                      => DOMException 12 Invalid selector (Selectors. Unexpected token: END-OF-FILE)
+"> div"                      => DOMException 12 Invalid selector (Selectors. Unexpected token: >)
+"div >> p"                   => DOMException 12 Invalid selector (Selectors. Unexpected token: >)
+":unknown"                   => DOMException 12 Invalid selector (Selectors. Unexpected token: unknown)
+"::unknown"                  => DOMException 12 Invalid selector (Selectors. Unexpected token: unknown)
+":nth-child(foo)"            => DOMException 12 Invalid selector (Selectors. Unexpected token: foo)
+":nth-child()"               => DOMException 12 Invalid selector (Selectors. Pseudo function can't be empty: nth-child())
+":not()"                     => DOMException 12 Invalid selector (Selectors. Pseudo function can't be empty: not())
+":is()"                      => DOMException 12 Invalid selector (Selectors. Pseudo function can't be empty: is())
+":has()"                     => DOMException 12 Invalid selector (Selectors. Pseudo function can't be empty: has())
+"#1"                         => 0 
+"#"                          => DOMException 12 Invalid selector (Selectors. Unexpected token: #)
+"."                          => DOMException 12 Invalid selector (Selectors. Unexpected token: END-OF-FILE)
+".1"                         => DOMException 12 Invalid selector (Selectors. Unexpected token: 0.1)
+"a b c"                      => 0 
+"div:hover"                  => 0 
+":focus"                     => 0 
+"p::before"                  => DOMException 12 Invalid selector (Selectors. Not supported: before)
+"::before"                   => DOMException 12 Invalid selector (Selectors. Not supported: before)
+":first-line"                => DOMException 12 Invalid selector (Selectors. Unexpected token: first-line)
+"a:not(:hover)"              => 2 a,a
+"div ! p"                    => DOMException 12 Invalid selector (Selectors. Unexpected token: !)
+"div{"                       => DOMException 12 Invalid selector (Selectors. Unexpected token: {)
+"p:nth-of-type(1)"           => 1 p
+":empty"                     => 5 head,foreignObject,circle,input,Div
+"p::"                        => DOMException 12 Invalid selector (Selectors. Unexpected token: END-OF-FILE)
+":"                          => DOMException 12 Invalid selector (Selectors. Unexpected token: END-OF-FILE)
+"["                          => DOMException 12 Invalid selector (Selectors. Unexpected token: END-OF-FILE)
+"]"                          => DOMException 12 Invalid selector (Selectors. Unexpected token: ])
+"("                          => DOMException 12 Invalid selector (Selectors. Unexpected token: ()
+"a)"                         => DOMException 12 Invalid selector (Selectors. Unexpected token: ))
+"\"a\""                      => DOMException 12 Invalid selector (Selectors. Unexpected token: "a")
+"p:lang(en)"                 => DOMException 12 Invalid selector (Selectors. Not supported: lang)
+":host"                      => DOMException 12 Invalid selector (Selectors. Unexpected token: host)
+":defined"                   => DOMException 12 Invalid selector (Selectors. Unexpected token: defined)
+":scope > p"                 => DOMException 12 Invalid selector (Selectors. Not supported: scope)
+"[a~=]"                      => DOMException 12 Invalid selector (Selectors. Unexpected token: ])
+"[|a]"                       => 0 
+"[*|a]"                      => DOMException 12 Invalid selector (Selectors. Unexpected token: *)
+"a\\:b"                      => 0 
+"\\31 a"                     => 0 
+":NTH-CHILD(1)"              => 6 html,head,div,p,foreignObject,option
+":FIRST-CHILD"               => 6 html,head,div,p,foreignObject,option
+"DIV:not(P)"                 => 1 div
+XML div                  => 1
+XML DIV                  => 1
+XML p[LANG]              => 0
+XML p[lang="en"]         => 0
+XML p[lang="en" s]       => 0

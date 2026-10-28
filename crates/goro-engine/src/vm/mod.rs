@@ -36,6 +36,7 @@ pub mod objects;
 pub mod output;
 pub mod setup;
 pub mod types;
+pub mod variance;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -151,6 +152,10 @@ impl Frame {
 }
 
 /// A call being prepared (between `Init*` and `DoCall`).
+///
+/// The call path writes and pops these field by field (`push_callee`,
+/// `activate`, `take_native_pending` in calls.rs): a new owning field must
+/// be handled there too.
 pub struct Pending {
     pub func: Rc<Func>,
     /// User functions: the callee's slots.
@@ -167,8 +172,6 @@ pub struct Pending {
     pub scope: *const Class,
     pub closure: Option<ObjRef>,
     pub flags: u32,
-    /// `new`: the object being constructed.
-    pub new_obj: Option<ObjRef>,
     /// `__call` / `__callStatic` trampolines: the called name.
     pub magic_name: Option<PhpStr>,
     /// Statics of the callee (closures have their own).
@@ -177,6 +180,12 @@ pub struct Pending {
     pub has_named: bool,
     /// Bit set of parameters passed (for named arguments), first 64.
     pub passed: u64,
+    /// Which arguments go by reference ([`crate::bytecode::byref_mask`];
+    /// 0 for magic trampolines, which take values).
+    pub byref: u64,
+    /// User functions: parameters with their own slot (arguments past
+    /// them are extra or variadic).
+    pub np: u32,
 }
 
 pub mod pending_flags {
@@ -187,6 +196,9 @@ pub mod pending_flags {
     pub const MAGIC_STATIC: u32 = 8;
     /// Callable through a Closure created from a callable string/array.
     pub const VIA_CLOSURE: u32 = 16;
+    /// A user function that needs the general activation (attributes to
+    /// act on, abstract, generator, variadic, internal class code).
+    pub const SLOW: u32 = 32;
 }
 
 /// A native call in progress (for backtraces).
@@ -206,6 +218,9 @@ pub struct SlotStack {
     chunks: Vec<Box<[Slot]>>,
     cur: usize,
     top: usize,
+    /// Start and length of the current chunk (`chunks[cur]`).
+    cur_ptr: *mut Slot,
+    cur_len: usize,
 }
 
 impl Default for SlotStack {
@@ -216,10 +231,14 @@ impl Default for SlotStack {
 
 impl SlotStack {
     pub fn new() -> SlotStack {
+        let mut first = new_chunk(CHUNK);
+        let cur_ptr = first.as_mut_ptr();
         SlotStack {
-            chunks: vec![new_chunk(CHUNK)],
+            chunks: vec![first],
             cur: 0,
             top: 0,
+            cur_ptr,
+            cur_len: CHUNK,
         }
     }
 
@@ -230,25 +249,37 @@ impl SlotStack {
             chunk: self.cur as u32,
             top: self.top as u32,
         };
-        if self.top + n > self.chunks[self.cur].len() {
-            self.cur += 1;
-            if self.cur == self.chunks.len() {
-                self.chunks.push(new_chunk(CHUNK.max(n)));
-            } else if self.chunks[self.cur].len() < n {
-                self.chunks[self.cur] = new_chunk(n);
-            }
-            self.top = 0;
+        if self.top + n > self.cur_len {
+            self.next_chunk(n);
         }
-        let p = unsafe { self.chunks[self.cur].as_mut_ptr().add(self.top) };
+        // SAFETY: `top + n` is within the current chunk.
+        let p = unsafe { self.cur_ptr.add(self.top) };
         self.top += n;
         (p, mark)
+    }
+
+    #[cold]
+    fn next_chunk(&mut self, n: usize) {
+        self.cur += 1;
+        if self.cur == self.chunks.len() {
+            self.chunks.push(new_chunk(CHUNK.max(n)));
+        } else if self.chunks[self.cur].len() < n {
+            self.chunks[self.cur] = new_chunk(n);
+        }
+        self.top = 0;
+        self.cur_ptr = self.chunks[self.cur].as_mut_ptr();
+        self.cur_len = self.chunks[self.cur].len();
     }
 
     /// Releases everything allocated since `mark`. The slots must already
     /// be cleared.
     #[inline]
     pub fn release(&mut self, mark: StackMark) {
-        self.cur = mark.chunk as usize;
+        if mark.chunk as usize != self.cur {
+            self.cur = mark.chunk as usize;
+            self.cur_ptr = self.chunks[self.cur].as_mut_ptr();
+            self.cur_len = self.chunks[self.cur].len();
+        }
         self.top = mark.top as usize;
     }
 
@@ -409,6 +440,19 @@ pub struct Vm {
     /// being evaluated: their item's own deprecation is not raised again
     /// (a constant whose message is itself).
     pub deprecating: Vec<usize>,
+    /// Classes are being bound early (when a file is loaded): variance
+    /// checks needing unknown classes defer the class to run time.
+    pub early_binding: bool,
+    /// The class being linked is bound early.
+    pub(crate) linking_early: bool,
+    /// Its binding waits for run time (a check needed an unknown class).
+    pub(crate) link_deferred: bool,
+    /// Variance checks of the class being linked.
+    pub(crate) obligations: Vec<variance::Obligation>,
+    /// Variance checks waiting for a class being autoloaded (lowercase
+    /// name, check, declaring class).
+    pub(crate) delayed_obligations:
+        Vec<(PhpStr, variance::Obligation, Rc<crate::class::ClassDecl>)>,
     /// The method name a `__call`/`__callStatic` call is about to run for.
     pub magic_call_name: Option<PhpStr>,
     /// register_tick_function(): (callable, arguments).

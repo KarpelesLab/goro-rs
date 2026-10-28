@@ -2344,7 +2344,7 @@ fn dll_index(vm: &mut Vm, a: &Args, v: &Value, method: &str) -> R<i64> {
             vm.type_error(&format!(
                 "SplDoublyLinkedList::{}(): Argument #1 ($index) must be of type int, {} given",
                 method,
-                other.tname()
+                crate::vm::Vm::type_name_given(other)
             ))
         }
     }
@@ -3346,7 +3346,7 @@ fn obj_arg(vm: &mut Vm, a: &Args, i: usize, method: &str) -> R<ObjRef> {
             "SplObjectStorage::{}(): Argument #{} ($object) must be of type object, {} given",
             method,
             i + 1,
-            other.tname()
+            crate::vm::Vm::type_name_given(&other)
         )),
     }
 }
@@ -3378,7 +3378,7 @@ fn other_storage(vm: &mut Vm, a: &Args, method: &str) -> R<ObjRef> {
         _ => vm.type_error(&format!(
             "SplObjectStorage::{}(): Argument #1 ($storage) must be of type SplObjectStorage, {} given",
             method,
-            a.val(0).tname()
+            crate::vm::Vm::type_name_given(&a.val(0))
         )),
     }
 }

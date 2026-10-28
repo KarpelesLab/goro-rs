@@ -430,6 +430,18 @@ impl Class {
         false
     }
 
+    /// Whether this class or a parent matches `f`.
+    pub fn ancestors_have(&self, f: impl Fn(&Class) -> bool) -> bool {
+        let mut c: Option<&Class> = Some(self);
+        while let Some(x) = c {
+            if f(x) {
+                return true;
+            }
+            c = x.parent.as_deref();
+        }
+        false
+    }
+
     pub fn find_method(&self, lname: &[u8]) -> Option<Rc<Func>> {
         self.methods.borrow().get(&PhpStr::new(lname)).cloned()
     }

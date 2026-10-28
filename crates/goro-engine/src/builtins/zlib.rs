@@ -585,10 +585,8 @@ fn include_path_file(vm: &Vm, name: &[u8]) -> Vec<u8> {
             return p;
         }
     }
-    if vm.fs_path(name).exists() {
-        return name.to_vec();
-    }
-    // then the script's directory (test gzopen_variation4.phpt)
+    // then the script's directory, then the working directory (test
+    // gzopen_variation4.phpt)
     let dir = super::file::dirname_bytes(&vm.script_path);
     let mut p = dir;
     p.push(b'/');
@@ -947,6 +945,10 @@ impl StreamFilter for DeflateF {
             goro_ext_zlib::filter::FilterFlush::None
         };
         out.extend(self.0.filter(input, fl));
+        Ok(true)
+    }
+    fn flush(&mut self, _vm: &mut Vm, out: &mut Vec<u8>) -> R<bool> {
+        out.extend(self.0.filter(&[], goro_ext_zlib::filter::FilterFlush::Inc));
         Ok(true)
     }
 }

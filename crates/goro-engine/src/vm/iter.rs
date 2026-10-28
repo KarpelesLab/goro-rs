@@ -491,6 +491,16 @@ impl Vm {
             return Ok(());
         };
         let p = cls.props.borrow()[idx as usize].clone();
+        if p.flags & crate::class::mflags::READONLY != 0 {
+            return self.throw(
+                "Error",
+                &format!(
+                    "Cannot acquire reference to readonly property {}::${}",
+                    cls.name.dname(),
+                    name.to_string_lossy()
+                ),
+            );
+        }
         if p.get.is_none() && p.set.is_none() {
             return Ok(());
         }

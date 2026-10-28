@@ -1,0 +1,64 @@
+createElementNS: "<?xml version=\"1.0\"?>\n<p:root xmlns:p=\"urn:a\" xmlns:x=\"urn:x\" xmlns:q=\"urn:b\" xmlns:default=\"urn:c\" x:attr=\"1\" p:attr2=\"2\"><p:child\/><q:child xmlns:q=\"urn:b\" xmlns=\"urn:y\" attr3=\"3\"\/><default:plain xmlns=\"urn:c\"><nons\/><\/default:plain><\/p:root>\n"
+nodepaths: "\/p:root \/p:root\/p:child \/p:root\/q:child \/p:root\/default:plain \/p:root\/default:plain\/nons \/p:root\/@x:attr"
+lookup: "urn:a 'urn:c' p true"
+text-append-merge: 2
+text-insert-merge: 3
+normalize: array (
+  0 => 1,
+  1 => 'zab',
+)
+split: array (
+  0 => 2,
+  1 => 'z',
+  2 => 'ab',
+)
+fragment: array (
+  0 => 3,
+  1 => '<a>1</a>text<b/>',
+)
+import-ns: "<default:plain xmlns=\"urn:c\"><nons><r xmlns=\"urn:d\" xmlns:k=\"urn:k\"><k:s a=\"1\">t<\/k:s><u\/><\/r><\/nons><\/default:plain>"
+adopt-ns: "<?xml version=\"1.0\"?>\n<other><k:s xmlns:k=\"urn:k\" a=\"1\">t<\/k:s><\/other>\n"
+wrongdoc: array (
+  0 => 4,
+  1 => 'Wrong Document Error',
+)
+clone-ns: "<q:child xmlns:q=\"urn:b\" xmlns=\"urn:y\" attr3=\"3\"\/>"
+
+Notice: DOMDocument::loadXML(): xmlns: URI u is not absolute in Entity, line: 1 in /home/magicaltux/projects/goro-rs/.claude/worktrees/agent-a4b3cf2e3fac40b95/crates/goro-xml/tests/fixtures/domops.php on line 41
+gebtn: "3 1 3 2"
+paths2: "\/r\/*[3]\/* \/r\/*[3]"
+paths3: "\/r\/text()[1] \/r\/comment() \/r\/processing-instruction('p') \/r\/text()[2] \/r\/text()[3] \/r\/e \/r\/text()[4]"
+textContent-set: "<r>new&lt;&amp;&gt;<\/r>"
+attrs: "<r a=\"x\" c=\"3\"\/>"
+xmlns-setattr: array (
+  0 => '<r a="x" c="3" xmlns:foo="urn:foo"/>',
+  1 => NULL,
+  2 => 3,
+)
+xmlns-setattrns: array (
+  0 => '<r xmlns:bar="urn:bar" a="x" c="3" xmlns:foo="urn:foo"/>',
+  1 => 3,
+)
+detached-import: "<?xml version=\"1.0\"?>\n<p:a xmlns:p=\"urn:p\"\/>\n"
+getElementById-noDTD: "NULL"
+getElementById-setId: "a"
+xmlid: "a"
+replace: "<root><c>3<\/c><b>2<\/b><\/root>"
+compare: "n\/a"
+emptytext: array (
+  0 => '<r></r>',
+  1 => 1,
+)
+badcomment: "<r><!--x--y--><\/r>"
+cdata-split: "<r><!--x--y--><![CDATA[a]]]]><![CDATA[>b]]><\/r>"
+pi-empty: "<r><!--x--y--><![CDATA[a]]]]><![CDATA[>b]]><?pi ?><\/r>"
+entref: array (
+  0 => 5,
+  1 => 'e',
+  2 => 'val',
+  3 => 1,
+)
+createEntityRef: array (
+  0 => '<r>&e;&e;</r>',
+  1 => 'valval',
+)

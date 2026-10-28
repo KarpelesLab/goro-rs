@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 
 use goro_runtime::{Key, PhpArray, PhpStr, ResRef, Value};
 
-use crate::class::TypeName;
 use crate::func::Args;
 use crate::registry::{ConstVal, Module};
 use crate::vm::{R, Vm};
@@ -597,10 +596,55 @@ impl Stream {
 }
 
 pub fn new_stream_res(s: Stream) -> ResRef {
-    ResRef::new(
+    let r = ResRef::new(
         PhpStr::intern(b"stream"),
         Box::new(std::cell::RefCell::new(s)),
-    )
+    );
+    OPEN_STREAMS.with(|l| {
+        let mut l = l.borrow_mut();
+        if l.len() >= 64 && l.len().is_power_of_two() {
+            l.retain(|w| !w.is_dead());
+        }
+        l.push(r.downgrade());
+    });
+    r
+}
+
+thread_local! {
+    /// The streams opened, to close them at the end of the request.
+    static OPEN_STREAMS: std::cell::RefCell<Vec<goro_runtime::object::WeakRes>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Closes the streams still open at the end of the request, so that
+/// their write filters finish (observed on PHP 8.5: zlib.deflate output
+/// is complete without fclose()).
+pub fn close_open_streams(vm: &mut Vm) {
+    let list = OPEN_STREAMS.with(|l| std::mem::take(&mut *l.borrow_mut()));
+    for w in list {
+        let Some(r) = w.upgrade() else {
+            continue;
+        };
+        let data = r.res().data.borrow();
+        let Some(d) = data.as_ref() else {
+            continue;
+        };
+        let Some(cell) = d.downcast_ref::<std::cell::RefCell<Stream>>() else {
+            continue;
+        };
+        let Ok(mut s) = cell.try_borrow_mut() else {
+            continue;
+        };
+        if s.write_filters.is_empty() {
+            continue;
+        }
+        let r = super::streams::close_stream(vm, &mut s);
+        if let Err(e) = r {
+            drop(s);
+            drop(data);
+            vm.handle_unwind(Err(e));
+        }
+    }
 }
 
 /// STDIN, STDOUT and STDERR (created first: resource ids 1, 2, 3).
@@ -655,7 +699,7 @@ pub fn with_stream<T>(
             &format!(
                 "Argument #{} ($stream) must be of type resource, {} given",
                 i + 1,
-                v.tname()
+                crate::vm::Vm::type_name_given(&v)
             ),
         );
     };
@@ -945,7 +989,7 @@ fn fclose(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "TypeError",
             &format!(
                 "Argument #1 ($stream) must be of type resource, {} given",
-                v.tname()
+                crate::vm::Vm::type_name_given(&v)
             ),
         );
     };
@@ -1164,6 +1208,7 @@ fn feof(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn fflush(vm: &mut Vm, a: &mut Args) -> R<Value> {
     with_stream(vm, a, 0, |vm, s| {
+        super::streams::flush_write_filters(vm, s)?;
         match &mut s.backing {
             Backing::File(f) => {
                 let _ = f.flush();
@@ -1211,6 +1256,15 @@ fn do_seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> bool {
     }
     s.eof = false;
     s.pending.clear();
+    // Seeking flushes the write filters (observed on PHP 8.5).
+    if !s.write_filters.is_empty()
+        && let Err(e) = super::streams::flush_write_filters(vm, s)
+    {
+        if vm.err.deferred.is_none() {
+            vm.err.deferred = Some(e);
+        }
+        return false;
+    }
     match &mut s.backing {
         Backing::File(f) => {
             let w = match whence {

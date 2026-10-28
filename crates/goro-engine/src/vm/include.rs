@@ -16,6 +16,23 @@ use crate::func::Func;
 /// Stack the parser may use (it runs on the engine's large thread stack).
 pub const PARSER_STACK: usize = 512 << 20;
 
+/// The __halt_compiler() data offset of the original source, from the one
+/// of its converted form (the keyword is ASCII in both).
+fn halt_offset_in(orig: &[u8], conv: &[u8], off: usize) -> usize {
+    let kw = b"__halt_compiler";
+    let find_all = |s: &[u8]| -> Vec<usize> {
+        (0..s.len().saturating_sub(kw.len() - 1))
+            .filter(|&i| s[i..i + kw.len()].eq_ignore_ascii_case(kw))
+            .collect()
+    };
+    let c = find_all(conv);
+    let o = find_all(orig);
+    match c.iter().rposition(|&p| p < off) {
+        Some(n) if n < o.len() => o[n] + (off - c[n]),
+        _ => off,
+    }
+}
+
 impl Vm {
     // ------------------------------------------------------------ compiling
 
@@ -26,6 +43,42 @@ impl Vm {
         file: &[u8],
         eval: bool,
     ) -> Result<Unit, crate::compiler::CompileError> {
+        // zend.multibyte: the script is read in zend.script_encoding and
+        // its literals turned into internal_encoding (PHP manual: Runtime
+        // Configuration, zend.multibyte; tests ext/mbstring/tests/
+        // zend_multibyte-*).
+        let mb = self.ini_bool(b"zend.multibyte", false);
+        let mut converted: Option<Vec<u8>> = None;
+        let mut lit_enc = None;
+        if mb {
+            let first = |v: Option<PhpStr>| -> Option<goro_charset::Encoding> {
+                let v = v?;
+                let n = v.split(|&c| c == b',').next()?.trim_ascii().to_vec();
+                goro_charset::Encoding::from_name(&n)
+            };
+            let se = first(self.get_ini(b"zend.script_encoding"));
+            let ie = first(self.get_ini(b"internal_encoding"))
+                .or_else(|| first(self.get_ini(b"mbstring.internal_encoding")))
+                .unwrap_or(goro_charset::Encoding::Utf8);
+            if let Some(se) = se {
+                if se != goro_charset::Encoding::Utf8 {
+                    converted = Some(
+                        goro_charset::convert(
+                            src,
+                            goro_charset::Encoding::Utf8,
+                            se,
+                            &Default::default(),
+                        )
+                        .bytes,
+                    );
+                }
+                if ie != goro_charset::Encoding::Utf8 {
+                    lit_enc = Some(ie);
+                }
+            }
+        }
+        let orig_src = src;
+        let src: &[u8] = converted.as_deref().unwrap_or(src);
         let arena = goro_syntax::Arena::new();
         // The AST borrows the source; keep a copy alive for the call.
         let opts = goro_syntax::ParseOptions {
@@ -70,9 +123,11 @@ impl Vm {
         } else {
             None
         };
-        let mb = self.ini_bool(b"zend.multibyte", false);
         crate::compiler::ZEND_MULTIBYTE.with(|c| c.set(mb));
-        let unit = crate::compiler::compile_program(&prog, src, file, kc_opt, None)?;
+        let was = crate::compiler::LITERAL_ENCODING.with(|c| c.replace(lit_enc));
+        let unit = crate::compiler::compile_program(&prog, src, file, kc_opt, None);
+        crate::compiler::LITERAL_ENCODING.with(|c| c.set(was));
+        let unit = unit?;
         // Development aid: GORO_DUMP_OPS=1 prints the bytecode of user code.
         if !file.is_empty() && std::env::var_os("GORO_DUMP_OPS").is_some() {
             fn dump(c: &crate::bytecode::FuncCode) {
@@ -92,6 +147,11 @@ impl Vm {
             dump(&unit.main);
         }
         if let Some(off) = prog.halt_compiler_offset {
+            let off = if converted.is_some() {
+                halt_offset_in(orig_src, src, off as usize) as u32
+            } else {
+                off
+            };
             self.halt_offsets.insert(PhpStr::new(file), off as i64);
         }
         Ok(unit)
@@ -120,7 +180,7 @@ impl Vm {
         for &i in &unit.toplevel_classes {
             let decl = unit.main.classes[i as usize].clone();
             if self.can_early_bind(&decl) {
-                self.declare_class(&decl)?;
+                self.early_bind_class(&decl)?;
             }
         }
         Ok(())

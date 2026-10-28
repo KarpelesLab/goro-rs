@@ -334,6 +334,7 @@ impl Vm {
                 )
             }
             PropLookup::Dynamic => {
+                self.static_as_instance(&cls, name)?;
                 let v = o.obj().props.borrow().get_str(name).cloned();
                 match v {
                     Some(v) => Ok(v.into_deref()),
@@ -430,6 +431,69 @@ impl Vm {
                 name.to_string_lossy()
             ),
         )
+    }
+
+    /// The object held by a readonly or asymmetric-visibility property.
+    fn restricted_object(&mut self, o: &ObjRef, name: &PhpStr) -> Option<Value> {
+        let cls = self.class_of(o);
+        if let PropLookup::Found(p) = self.lookup_prop(&cls, name, self.scope_ptr())
+            && p.flags & (mflags::READONLY | mflags::SET_VISIBILITY) != 0
+        {
+            let v = o.obj().slots.borrow()[p.slot as usize].clone().into_deref();
+            if let Value::Object(_) = v {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    /// `$o->p++`, `$o->p .= x` on an initialized readonly property fail
+    /// before the operation (test Zend/tests/readonly_props/
+    /// readonly_containing_object).
+    fn readonly_rmw_check(&mut self, o: &ObjRef, name: &PhpStr) -> R<()> {
+        let cls = self.class_of(o);
+        if let PropLookup::Found(p) = self.lookup_prop(&cls, name, self.scope_ptr())
+            && p.flags & mflags::READONLY != 0
+            && !self.is_uninit(&o.obj().slots.borrow()[p.slot as usize])
+            && !self.readonly_clone_ok(o, &p)
+        {
+            return self.throw(
+                "Error",
+                &format!(
+                    "Cannot modify readonly property {}::${}",
+                    cls.name.dname(),
+                    name.to_string_lossy()
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    /// `$o->x` naming a static property visible here (tests
+    /// Zend/tests/bug30820, bug76860).
+    fn static_as_instance(&mut self, cls: &Class, name: &PhpStr) -> R<()> {
+        if cls.static_props.borrow().is_empty() {
+            return Ok(());
+        }
+        // __get/__set take the access instead (test Zend/tests/objects/
+        // objects_024).
+        {
+            let m = cls.magic.borrow();
+            if m.get.is_some() || m.set.is_some() {
+                return Ok(());
+            }
+        }
+        let Some(sp) = cls.find_static(name) else {
+            return Ok(());
+        };
+        if sp.flags & mflags::PRIVATE != 0 && !std::ptr::eq(sp.class, self.scope_ptr()) {
+            return Ok(());
+        }
+        self.notice_msg(&format!(
+            "Accessing static property {}::${} as non static",
+            cls.name.dname(),
+            name.to_string_lossy()
+        ))
     }
 
     fn in_hook(&self, o: &ObjRef, p: &PropInfo) -> bool {
@@ -791,7 +855,6 @@ impl Vm {
                         ),
                     );
                 }
-                self.check_set_visibility(&p, scope, o, name)?;
                 let (cur_uninit, was_unset) = {
                     let slots = o.obj().slots.borrow();
                     let s = &slots[p.slot as usize];
@@ -806,40 +869,18 @@ impl Vm {
                 {
                     return self.magic_set(o, f, name, v);
                 }
-                if p.flags & mflags::READONLY != 0 {
-                    if !cur_uninit && !self.readonly_clone_ok(o, &p) {
-                        return self.throw(
-                            "Error",
-                            &format!(
-                                "Cannot modify readonly property {}::${}",
-                                cls.name.dname(),
-                                name.to_string_lossy()
-                            ),
-                        );
-                    }
-                    if !std::ptr::eq(scope, p.class)
-                        && p.flags & (mflags::PUBLIC_SET | mflags::PROTECTED_SET) == 0
-                    {
-                        let sc = if scope.is_null() {
-                            None
-                        } else {
-                            Some(unsafe { &*scope })
-                        };
-                        let ok = p.flags & mflags::PROTECTED_SET != 0
-                            && sc.is_some_and(|s| s.is_subclass_of(unsafe { &*p.class }));
-                        if !ok {
-                            return self.throw(
-                                "Error",
-                                &format!(
-                                    "Cannot initialize readonly property {}::${} from {}",
-                                    cls.name.dname(),
-                                    name.to_string_lossy(),
-                                    self.scope_desc(scope)
-                                ),
-                            );
-                        }
-                    }
+                if p.flags & mflags::READONLY != 0 && !cur_uninit && !self.readonly_clone_ok(o, &p)
+                {
+                    return self.throw(
+                        "Error",
+                        &format!(
+                            "Cannot modify readonly property {}::${}",
+                            cls.name.dname(),
+                            name.to_string_lossy()
+                        ),
+                    );
                 }
+                self.check_set_visibility(&p, scope, o, name, "modify")?;
                 let v = match &p.ty {
                     Some(t) => self.coerce_prop(&p, t, v, &cls)?,
                     None => v,
@@ -901,6 +942,7 @@ impl Vm {
                 )
             }
             PropLookup::Dynamic => {
+                self.static_as_instance(&cls, name)?;
                 if let Some(h) = cls.native.dyn_prop
                     && let Some(r) = h(self, o, name, crate::class::DynPropOp::Write)
                 {
@@ -939,8 +981,14 @@ impl Vm {
         scope: *const Class,
         _o: &ObjRef,
         name: &PhpStr,
+        verb: &str,
     ) -> R<()> {
-        let sv = p.flags & mflags::SET_VISIBILITY;
+        let mut sv = p.flags & mflags::SET_VISIBILITY;
+        // readonly is implicitly protected(set) (RFC: Asymmetric
+        // Visibility v2).
+        if sv == 0 && p.flags & mflags::READONLY != 0 && p.flags & mflags::PUBLIC != 0 {
+            sv = mflags::PROTECTED_SET;
+        }
         if sv == 0 || sv & mflags::PUBLIC_SET != 0 {
             return Ok(());
         }
@@ -962,18 +1010,19 @@ impl Vm {
         } else {
             "protected(set)"
         };
-        let ro = if p.flags & mflags::READONLY != 0 {
+        let ro = if p.flags & mflags::READONLY != 0 && sv & mflags::PROTECTED_SET != 0 {
             " readonly"
         } else {
             ""
         };
         let cname = unsafe { (*dc).name.dname() };
-        let _ = ro;
         self.throw(
             "Error",
             &format!(
-                "Cannot modify {} property {}::${} from {}",
+                "Cannot {} {}{} property {}::${} from {}",
+                verb,
                 word,
+                ro,
                 cname,
                 name.to_string_lossy(),
                 self.scope_desc(scope)
@@ -1091,6 +1140,7 @@ impl Vm {
                 Ok(new)
             }
             PathAction::IncDec(op) => {
+                self.readonly_rmw_check(o, name)?;
                 let old = self.read_prop(o, name, false, None)?;
                 let new = self.incdec_value(op, &old)?;
                 self.write_prop(o, name, new.clone(), None)?;
@@ -1100,6 +1150,14 @@ impl Vm {
                 if let Some(v) = self.hooked_fetch_w(o, name, false)? =>
             {
                 Ok(v)
+            }
+            PathAction::MakeRef | PathAction::FetchW
+                if let Some(v) = self.restricted_object(o, name) =>
+            {
+                // A reference to the object of a readonly or asymmetric
+                // property: allowed, and does not rebind it (test
+                // Zend/tests/readonly_props/readonly_containing_object).
+                Ok(Value::Ref(PhpRef::new(v)))
             }
             PathAction::MakeRef | PathAction::FetchW => match self.prop_ptr(o, name, false)? {
                 Some(p) => {
@@ -1235,19 +1293,31 @@ impl Vm {
                     return Ok(None);
                 }
                 if p.flags & mflags::READONLY != 0 {
-                    let init = !self.is_uninit(&o.obj().slots.borrow()[p.slot as usize]);
-                    if init || !std::ptr::eq(scope, p.class) {
+                    // Write fetches and references: never (observed on
+                    // PHP 8.5; tests Zend/tests/readonly_props/*).
+                    if rmw
+                        && p.ty.is_some()
+                        && self.is_uninit(&o.obj().slots.borrow()[p.slot as usize])
+                    {
                         return self.throw(
                             "Error",
                             &format!(
-                                "Cannot modify readonly property {}::${}",
-                                cls.name.dname(),
+                                "Typed property {}::${} must not be accessed before initialization",
+                                Self::prop_class_name(&p),
                                 name.to_string_lossy()
                             ),
                         );
                     }
+                    return self.throw(
+                        "Error",
+                        &format!(
+                            "Cannot indirectly modify readonly property {}::${}",
+                            cls.name.dname(),
+                            name.to_string_lossy()
+                        ),
+                    );
                 }
-                self.check_set_visibility(&p, scope, o, name)?;
+                self.check_set_visibility(&p, scope, o, name, "indirectly modify")?;
                 let slots = o.obj().slots.as_ptr();
                 let slot = unsafe { &mut (&mut *slots)[p.slot as usize] };
                 if self.is_uninit(slot) {
@@ -1327,11 +1397,12 @@ impl Vm {
         name: &PhpStr,
         _cache: u32,
         next: Option<&PathElem>,
+        kind: u8,
     ) -> R<Option<super::dims::Place>> {
         if o.is_lazy()
             && let Some(t) = self.lazy_route(o, name, super::lazy::LazyAccess::Write)?
         {
-            return self.prop_fetch_w(&t, name, _cache, next);
+            return self.prop_fetch_w(&t, name, _cache, next, kind);
         }
         let next_is_prop = matches!(next, Some(PathElem::Prop(..)));
         let cls = self.class_of(o);
@@ -1340,6 +1411,7 @@ impl Vm {
             let scope = self.scope_ptr();
             if let PropLookup::Found(p) = self.lookup_prop(&cls, name, scope)
                 && let Some(t) = &p.ty
+                && p.flags & mflags::READONLY == 0
             {
                 let cur = o.obj().slots.borrow()[p.slot as usize].clone();
                 let cur_null = cur.is_null() || self.is_uninit(&cur);
@@ -1368,6 +1440,29 @@ impl Vm {
         }
         if let Some(v) = self.hooked_fetch_w(o, name, true)? {
             return Ok(Some(super::dims::Place::Temp(Box::new(v))));
+        }
+        // An object in a readonly property may be modified itself.
+        if let PropLookup::Found(p) = self.lookup_prop(&cls, name, self.scope_ptr())
+            && p.flags & (mflags::READONLY | mflags::SET_VISIBILITY) != 0
+        {
+            let v = o.obj().slots.borrow()[p.slot as usize].clone();
+            // (kind: 0 write, 1 read-write, 2 unset)
+            if self.is_uninit(&v) && kind == 2 {
+                return Ok(None);
+            }
+            if next_is_prop && kind == 1 && p.ty.is_some() && self.is_uninit(&v) {
+                return self.throw(
+                    "Error",
+                    &format!(
+                        "Typed property {}::${} must not be accessed before initialization",
+                        Self::prop_class_name(&p),
+                        name.to_string_lossy()
+                    ),
+                );
+            }
+            if let Value::Object(_) = v.deref() {
+                return Ok(Some(super::dims::Place::Temp(Box::new(v.into_deref()))));
+            }
         }
         match self.prop_ptr(o, name, false)? {
             Some(p) => Ok(Some(super::dims::Place::Ptr(p))),
@@ -1407,19 +1502,6 @@ impl Vm {
                         ),
                     );
                 }
-                if p.flags & mflags::READONLY != 0 {
-                    let init = !self.is_uninit(&o.obj().slots.borrow()[p.slot as usize]);
-                    if init || !std::ptr::eq(scope, p.class) {
-                        return self.throw(
-                            "Error",
-                            &format!(
-                                "Cannot unset readonly property {}::${}",
-                                cls.name.dname(),
-                                name.to_string_lossy()
-                            ),
-                        );
-                    }
-                }
                 // An unset declared property takes __unset like a missing
                 // one (observed on PHP 8.5; test ext/spl/tests/bug45622).
                 if self.is_unset_mark(&o.obj().slots.borrow()[p.slot as usize])
@@ -1431,6 +1513,29 @@ impl Vm {
                         self.call_func_this(&f, Some(o.clone()), vec![Value::Str(name.clone())]);
                     self.prop_guards.pop();
                     return r.map(|_| ());
+                }
+                let init = !self.is_uninit(&o.obj().slots.borrow()[p.slot as usize]);
+                let ro = p.flags & mflags::READONLY != 0;
+                if ro && init && !self.readonly_clone_ok(o, &p) {
+                    return self.throw(
+                        "Error",
+                        &format!(
+                            "Cannot unset readonly property {}::${}",
+                            cls.name.dname(),
+                            name.to_string_lossy()
+                        ),
+                    );
+                }
+                self.check_set_visibility(&p, scope, o, name, "unset")?;
+                if ro && !std::ptr::eq(scope, p.class) {
+                    return self.throw(
+                        "Error",
+                        &format!(
+                            "Cannot unset readonly property {}::${}",
+                            cls.name.dname(),
+                            name.to_string_lossy()
+                        ),
+                    );
                 }
                 let mark = self.unset_value();
                 let mut slots = o.obj().slots.borrow_mut();
@@ -1543,6 +1648,14 @@ impl Vm {
         write: bool,
     ) -> R<(PhpRef, Rc<crate::class::StaticProp>)> {
         self.ensure_statics(cls)?;
+        if cls.is_trait() && cls.find_static(n).is_some() {
+            // PHP 8.1 (test Zend/tests/traits/direct_static_member_access).
+            self.deprecated(&format!(
+                "Accessing static trait property {}::${} is deprecated, it should only be accessed on a class using the trait",
+                cls.name.dname(),
+                n.to_string_lossy()
+            ))?;
+        }
         let Some(sp) = cls.find_static(n) else {
             return self.throw(
                 "Error",
@@ -1912,6 +2025,17 @@ impl Vm {
                 );
             }
         };
+        // test Zend/tests/traits/constant_004
+        if cls.is_trait() && matches!(class, ClassSpec::Named(_)) && n.as_bytes() != b"class" {
+            return self.throw(
+                "Error",
+                &format!(
+                    "Cannot access trait constant {}::{} directly",
+                    cls.name.dname(),
+                    n.to_string_lossy()
+                ),
+            );
+        }
         // In constant expressions a missing constant is named as written
         // (observed on PHP 8.5: "Undefined constant self::B"), and errors
         // of class constant lookups show a "[constant expression]" frame.

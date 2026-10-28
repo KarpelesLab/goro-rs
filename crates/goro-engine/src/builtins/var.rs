@@ -2,7 +2,7 @@
 //! gettype/settype, is_*, intval & co (PHP manual: Variable handling
 //! functions; output formats observed on PHP 8.5).
 
-use crate::class::{DisplayName, TypeName};
+use crate::class::DisplayName;
 use goro_runtime::{Key, KeyRef, ObjRef, PhpArray, PhpStr, Value};
 
 use crate::func::Args;
@@ -312,7 +312,7 @@ impl Vm {
                 label.extend_from_slice(b"\":private");
             }
             if self.is_uninit(v) {
-                if self.is_unset_mark(v) || p.ty.is_none() {
+                if p.ty.is_none() {
                     continue;
                 }
                 out.push((label, p.ty.as_ref().unwrap().display(), None));
@@ -591,6 +591,7 @@ impl Vm {
                     Some(refcount.unwrap_or(a.refcount()))
                 };
                 let packed = if a.data().is_packed() { " packed" } else { "" };
+                let id = a.data() as *const _ as usize;
                 match rc {
                     None => out.extend_from_slice(
                         format!("{}array({}){} interned {{\n", pad, a.len(), packed).as_bytes(),
@@ -618,10 +619,29 @@ impl Vm {
                                     .as_bytes(),
                             );
                             let inner = r.get();
-                            self.zval_dump_into(out, &inner, indent + 4, None, false)?;
+                            // An array holding itself through a reference
+                            // (observed on PHP 8.5).
+                            if let Value::Array(ia) = &inner
+                                && (ia.data() as *const _ as usize == id
+                                    || self.dump_stack.contains(&(ia.data() as *const _ as usize)))
+                            {
+                                out.extend_from_slice(
+                                    format!("{}    *RECURSION*\n", pad).as_bytes(),
+                                );
+                            } else {
+                                self.dump_stack.push(id);
+                                let r = self.zval_dump_into(out, &inner, indent + 4, None, false);
+                                self.dump_stack.pop();
+                                r?;
+                            }
                             out.extend_from_slice(format!("{}  }}\n", pad).as_bytes());
                         }
-                        x => self.zval_dump_into(out, x, indent + 2, None, false)?,
+                        x => {
+                            self.dump_stack.push(id);
+                            let r = self.zval_dump_into(out, x, indent + 2, None, false);
+                            self.dump_stack.pop();
+                            r?;
+                        }
                     }
                 }
                 out.extend_from_slice(format!("{}}}\n", pad).as_bytes());
@@ -1239,7 +1259,7 @@ fn get_resource_type(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Value::Resource(r) => Ok(Value::Str(r.res().kind.borrow().clone())),
         v => vm.type_error(&format!(
             "get_resource_type(): Argument #1 ($resource) must be of type resource, {} given",
-            v.tname()
+            crate::vm::Vm::type_name_given(&v)
         )),
     }
 }
@@ -1249,7 +1269,7 @@ fn get_resource_id(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Value::Resource(r) => Ok(Value::Int(r.id())),
         v => vm.type_error(&format!(
             "get_resource_id(): Argument #1 ($resource) must be of type resource, {} given",
-            v.tname()
+            crate::vm::Vm::type_name_given(&v)
         )),
     }
 }

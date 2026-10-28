@@ -1,0 +1,241 @@
+1 div 3                                       => 0.3333333333333333
+2 div 3                                       => 0.6666666666666666
+1 div 0                                       => INF
+-1 div 0                                      => -INF
+0 div 0                                       => NAN
+-0                                            => -0.0
+0 * -1                                        => -0.0
+1 - 1                                         => 0.0
+string(1 div 3)                               => '0.333333333333333'
+string(2 div 3)                               => '0.666666666666667'
+string(1 div 0)                               => 'Infinity'
+string(-1 div 0)                              => '-Infinity'
+string(0 div 0)                               => 'NaN'
+string(0 * -1)                                => '0'
+string(0.1 + 0.2)                             => '0.3'
+string(1e21)                                  => '1e+21'
+string(123456789012345678901234567890)        => '1.23456789012346e+29'
+string(1000000)                               => '1000000'
+string(100000000000000000000)                 => '1e+20'
+string(1000000000000000000000)                => '1e+21'
+string(12345678901234567890)                  => '1.23456789012346e+19'
+string(0.000001)                              => '1e-06'
+string(0.0000001)                             => '1e-07'
+string(1.5)                                   => '1.5'
+string(-1.5)                                  => '-1.5'
+string(3.14159265358979)                      => '3.14159265358979'
+string(1 div 7)                               => '0.142857142857143'
+string(2.5 * 4)                               => '10'
+string(100 div 3)                             => '33.3333333333333'
+string(1e-10 * 3)                             => '3e-10'
+string(0.1)                                   => '0.1'
+string(123.456)                               => '123.456'
+string(-0.5)                                  => '-0.5'
+string(9007199254740993)                      => '9.00719925474099e+15'
+string(4.35)                                  => '4.35'
+string(1.0)                                   => '1'
+string(5e-324 * 1)                            => '0'
+0.1 + 0.2                                     => 0.30000000000000004
+1e21                                          => 1.0E+21
+123456789012345678901234567890                => 1.2345678901234566E+29
+number("  12  ")                              => 12.0
+number("1e3")                                 => 1000.0
+number("abc")                                 => NAN
+number("-")                                   => NAN
+number(".5")                                  => 0.5
+number("5.")                                  => 5.0
+number("+5")                                  => NAN
+round(2.5)                                    => 3.0
+round(-2.5)                                   => -2.0
+round(-0.4)                                   => -0.0
+string(round(-0.4))                           => '0'
+floor(-1.5)                                   => -2.0
+ceiling(-0.5)                                 => -0.0
+string(ceiling(-0.5))                         => '0'
+round(1 div 0)                                => INF
+substring("12345", 1.5, 2.6)                  => '234'
+substring("12345", 0, 3)                      => '12'
+substring("12345", 0 div 0, 3)                => ''
+substring("12345", 1, 0 div 0)                => ''
+substring("12345", -42, 1 div 0)              => '12345'
+substring("12345", -1 div 0, 1 div 0)         => ''
+substring-before("1999/04/01","/")            => '1999'
+substring-after("1999/04/01","19")            => '99/04/01'
+translate("bar","abc","ABC")                  => 'BAr'
+translate("--aaa--","abc-","ABC")             => 'AAA'
+normalize-space("  a  b   c ")                => 'a b c'
+concat("a", 1, true())                        => 'a1true'
+string(true())                                => 'true'
+contains("abc", "")                           => true
+starts-with("abc", "ab")                      => true
+string-length("héllo")                       => 5.0
+count(//x)                                    => 2.0
+sum(//x)                                      => 3.5
+sum(//y)                                      => NAN
+string(//x)                                   => '1'
+string(//x/@n)                                => '1'
+boolean("")                                   => false
+boolean("0")                                  => true
+boolean(0)                                    => false
+boolean(//nothing)                            => false
+not(1)                                        => false
+true() = 1                                    => true
+"1" = 1                                       => true
+//x = 1                                       => true
+//x = "2.5"                                   => true
+//x != 1                                      => true
+//x < //x                                     => true
+//x > 2                                       => true
+local-name(//a:z)                             => 'z'
+name(//a:z)                                   => 'a:z'
+namespace-uri(//a:z)                          => 'urn:a'
+local-name()                                  => 'root'
+name()                                        => 'root'
+lang("en")                                    => false
+id("foo")                                     => nodelist(0)
+1 = 1 = 1                                     => true
+- - 1                                         => 1.0
+3 mod 2                                       => 1.0
+-3 mod 2                                      => -1.0
+3 mod -2                                      => 1.0
+5.5 mod 2                                     => 1.5
+1 mod 0                                       => NAN
+2 + 3 * 4                                     => 14.0
+(2 + 3) * 4                                   => 20.0
+10 div 4 div 5                                => 0.5
+//x[1]                                        => nodelist(1)
+//x[last()]                                   => nodelist(1)
+//x[position() = 2]/@n                        => nodelist(1)
+count(//x[@n > 1])                            => 1.0
+count(//*)                                    => 5.0
+count(//node())                               => 8.0
+count(//text())                               => 3.0
+count(/)                                      => 1.0
+count(//@*)                                   => 2.0
+count(//namespace::*)                         => 10.0
+count(/descendant-or-self::node())            => 9.0
+count(//x/following-sibling::*)               => 3.0
+count(//y/preceding::*)                       => 2.0
+count(//x/ancestor::*)                        => 1.0
+count(//x/..)                                 => 1.0
+count(//x/self::x)                            => 2.0
+string(//x[2]/preceding-sibling::x)           => '1'
+name(//*[2])                                  => 'x'
+string(number(//y))                           => 'NaN'
+---- errors ----
+//[                       => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+1+                        => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+-                         => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+foo(                      => false
+    ERR level=2 code=1209 col=0 line=0 msg="Unregistered function: foo\n"
+foo()                     => false
+    ERR level=2 code=1209 col=0 line=0 msg="Unregistered function: foo\n"
+unknown:foo()             => false
+    ERR level=2 code=1219 col=0 line=0 msg="Undefined namespace prefix: unknown\n"
+x:y                       => false
+    ERR level=2 code=1219 col=0 line=0 msg="Undefined namespace prefix: x\n"
+//x:y                     => false
+    ERR level=2 code=1219 col=0 line=0 msg="Undefined namespace prefix: x\n"
+//@                       => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+1 1                       => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+"abc                      => false
+    ERR level=2 code=1202 col=0 line=0 msg="Unfinished literal\n"
+'abc                      => false
+    ERR level=2 code=1202 col=0 line=0 msg="Unfinished literal\n"
+//x[                      => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+//x]                      => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+()                        => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+$var                      => false
+    ERR level=2 code=1205 col=0 line=0 msg="Undefined variable: var\n"
+count()                   => false
+    ERR level=2 code=1212 col=0 line=0 msg="Invalid number of arguments\n"
+count(1,2)                => false
+    ERR level=2 code=1212 col=0 line=0 msg="Invalid number of arguments\n"
+string(1,2)               => false
+    ERR level=2 code=1212 col=0 line=0 msg="Invalid number of arguments\n"
+substring("a")            => false
+    ERR level=2 code=1212 col=0 line=0 msg="Invalid number of arguments\n"
+/..                       => 'nodelist(0)'
+//x/following::           => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+child::                   => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+foo::x                    => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+@@x                       => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+processing-instruction(1) => false
+    ERR level=2 code=1203 col=0 line=0 msg="Start of literal\n"
+node(1)                   => false
+    ERR level=2 code=1208 col=0 line=0 msg="Missing closing curly brace\n"
+..[1]                     => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+. .                       => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+1 + + 1                   => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+concat("a")               => false
+    ERR level=2 code=1212 col=0 line=0 msg="Invalid number of arguments\n"
+php:function("x")         => false
+    ERR level=2 code=1219 col=0 line=0 msg="Undefined namespace prefix: php\n"
+&                         => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+!x                        => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+1 div                     => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+mod 1                     => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+//x | 1                   => false
+    ERR level=2 code=1211 col=0 line=0 msg="Invalid type\n"
+1 | //x                   => false
+    ERR level=2 code=1211 col=0 line=0 msg="Invalid type\n"
+count(1)                  => false
+    ERR level=2 code=1211 col=0 line=0 msg="Invalid type\n"
+sum("a")                  => false
+    ERR level=2 code=1211 col=0 line=0 msg="Invalid type\n"
+name(1)                   => false
+    ERR level=2 code=1211 col=0 line=0 msg="Invalid type\n"
+boolean()                 => false
+    ERR level=2 code=1212 col=0 line=0 msg="Invalid number of arguments\n"
+//x[name()=]              => false
+    ERR level=2 code=1207 col=0 line=0 msg="Invalid expression\n"
+---- warnings displayed ----
+
+Warning: DOMXPath::evaluate(): Invalid expression in /tmp/claude-1000/goro-work/xml2/probe_xp.php on line 52
+
+Warning: DOMXPath::query(): Invalid expression in /tmp/claude-1000/goro-work/xml2/probe_xp.php on line 53
+
+Warning: DOMXPath::evaluate(): Unregistered function: foo in /tmp/claude-1000/goro-work/xml2/probe_xp.php on line 54
+
+Warning: DOMXPath::evaluate(): Undefined namespace prefix: x in /tmp/claude-1000/goro-work/xml2/probe_xp.php on line 55
+
+Warning: DOMXPath::query(): Invalid type in /tmp/claude-1000/goro-work/xml2/probe_xp.php on line 56
+object(DOMNodeList)#3 (1) {
+  ["length"]=>
+  int(0)
+}
+---- modern ----
+
+Warning: Dom\XPath::evaluate(): Invalid expression in /tmp/claude-1000/goro-work/xml2/probe_xp.php on line 62
+Error: Could not evaluate XPath expression
+
+Warning: Dom\XPath::evaluate(): Undefined namespace prefix: x in /tmp/claude-1000/goro-work/xml2/probe_xp.php on line 63
+Error: Could not evaluate XPath expression
+
+Warning: Dom\XPath::query(): Invalid type in /tmp/claude-1000/goro-work/xml2/probe_xp.php on line 64
+Error: Could not evaluate XPath expression
+float(1)
+
+Warning: Dom\XPath::evaluate(): Undefined namespace prefix: a in /tmp/claude-1000/goro-work/xml2/probe_xp.php on line 66
+Error: Could not evaluate XPath expression
+DOMException: The namespace axis is not well-defined in the living DOM specification. Use Dom\Element::getInScopeNamespaces() or Dom\Element::getDescendantNamespaces() instead.
+float(2)

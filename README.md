@@ -51,8 +51,8 @@ Fresh start. The previous code base is kept on the `old` branch for the
 record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
 
-php-src test suite (8.5.4), share of the tests that run: **81.3%** overall
-(10,745 tests), as of 2026-10-28. The extension libraries below are wired
+php-src test suite (8.5.4), share of the tests that run: **85.4%** overall
+(11,294 tests), as of 2026-10-28. The extension libraries below are wired
 into the engine (ext/random, mbstring, iconv, zlib, bcmath, gmp, filter,
 sodium and uri each pass 90-100% of their tests that run).
 
@@ -161,3 +161,14 @@ sodium and uri each pass 90-100% of their tests that run).
   through IDNA) and the WPT url, toascii, IdnaTestV2 and setters data.
   Parsing typical URLs takes 25-50 ns (RFC 3986) and 60-145 ns (WHATWG),
   below PHP 8.5's 105-215 ns (`examples/uri_bench.rs`).
+- `goro-xml`: the XML core for ext/dom, simplexml, ext/xml, xmlreader and
+  xmlwriter (not yet wired): XML 1.0 + namespaces parser with PHP's libxml
+  error codes, messages and positions, DTDs, entities, LIBXML_* options and
+  DTD validation; an arena node tree for `DOMDocument` and `Dom\`; legacy
+  `saveXML`/`saveHTML` and the `Dom\` (DOM Parsing) serializers; the
+  legacy HTML parser of `loadHTML`; a WHATWG HTML5 parser/serializer for
+  `Dom\HTMLDocument`; XPath 1.0, CSS selectors, C14N, XInclude; ext/xml's
+  event API, XMLReader and XMLWriter. W3C XML conformance suite:
+  1946/1974 well-formedness verdicts (the rest are namespace errors libxml
+  only warns about); html5lib-tests: 1756/1756 tree construction,
+  7016/7016 tokenizer. Fixtures recorded on PHP 8.5 in `tests/fixtures`.

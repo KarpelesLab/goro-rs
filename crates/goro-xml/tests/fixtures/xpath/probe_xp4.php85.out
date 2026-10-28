@@ -1,0 +1,46 @@
+count(/node())                                     => 3.0
+count(//@*)                                        => 2.0
+count(//namespace::*)                              => 6.0
+count(//text())                                    => 3.0
+string(//text()[2])                                => 'u'
+name(/node()[1])                                   => 'pi'
+name(//namespace::*[1])                            => 'xml'
+local-name(//namespace::*[1])                      => 'xml'
+string(//namespace::*[1])                          => 'http://www.w3.org/XML/1998/namespace'
+count(//*[local-name()="r"]/namespace::*)          => 3.0
+name(//*[1]/namespace::*[2])                       => 'p'
+name(//*[1]/namespace::*[3])                       => ''
+count(//*[local-name()="c"]/namespace::*)          => 3.0
+name(//@*[1])                                      => 'p:a'
+namespace-uri(//@*[1])                             => 'urn:p'
+count(//*/attribute::*)                            => 2.0
+local-name(/)                                      => ''
+name(/)                                            => ''
+string(/)                                          => 'tuv'
+count(/r)                                          => 0.0
+count(/*)                                          => 1.0
+--- modern XML ---
+count(//@*)                                        => 4.0
+count(//namespace::*)                              => 2.0
+name(//@*[1])                                      => 'xmlns'
+name(/*)                                           => 'r'
+count(//*[name()="r"])                             => 1.0
+count(//*[local-name()="r"])                       => 1.0
+--- modern HTML ---
+count(//@*)                                        => 4.0
+count(//namespace::*)                              => 6.0
+name(//*[local-name()="svg"]/@*[1])                => 'xmlns:xlink'
+count(//p)                                         => 0.0
+count(//*[name()="p"])                             => 1.0
+name(//*[local-name()="p"])                        => 'p'
+count(/node())                                     => 1.0
+name(/node()[1])                                   => 'html'
+count(//*[local-name()="use"]/namespace::*)        => 1.0
+name(//*[local-name()="use"]/namespace::*[1])      => 'xml'
+name(//*[local-name()="use"]/namespace::*[2])      => ''
+name(//*[local-name()="use"]/namespace::*[3])      => ''
+--- legacy HTML ---
+count(//p)                                         => 1.0
+name(/node()[1])                                   => 'html'
+count(/node())                                     => 1.0
+count(//namespace::*)                              => 3.0
