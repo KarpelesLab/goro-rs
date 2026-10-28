@@ -107,17 +107,28 @@ pub(crate) fn opt<P: Pat>(a: P) -> impl Pat {
     }
 }
 
-/// Zero or more repetitions of a pattern (each repetition must consume).
-pub(crate) fn star<P: Pat>(a: P) -> impl Pat {
-    fn go<P: Pat>(a: &P, s: &[u8], p: usize, k: &mut dyn FnMut(usize)) {
+/// Zero or more bytes from a set (iterative: long runs of separators must
+/// not recurse).
+pub(crate) fn many(chars: &'static [u8]) -> impl Pat {
+    move |s: &[u8], p: usize, k: &mut dyn FnMut(usize)| {
         k(p);
-        a.ends(s, p, &mut |e| {
-            if e > p {
-                go(a, s, e, k);
-            }
-        });
+        let mut q = p;
+        while q < s.len() && chars.contains(&s[q]) {
+            q += 1;
+            k(q);
+        }
     }
-    move |s: &[u8], p: usize, k: &mut dyn FnMut(usize)| go(&a, s, p, k)
+}
+
+/// One or more bytes from a set.
+pub(crate) fn many1(chars: &'static [u8]) -> impl Pat {
+    move |s: &[u8], p: usize, k: &mut dyn FnMut(usize)| {
+        let mut q = p;
+        while q < s.len() && chars.contains(&s[q]) {
+            q += 1;
+            k(q);
+        }
+    }
 }
 
 /// Two patterns in sequence.

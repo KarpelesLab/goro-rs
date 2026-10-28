@@ -94,9 +94,23 @@ pub(crate) fn tz() -> impl Pat {
     )
 }
 
+/// ([_/-][A-Za-z]+)+, every end reported, scanning iteratively (a long
+/// identifier must not recurse once per part).
 fn plus_ident() -> impl Pat {
-    let part = || seq!(set(b"_/-"), rep(is_alpha, 1, usize::MAX));
-    seq2(part(), star(part()))
+    move |s: &[u8], p: usize, k: &mut dyn FnMut(usize)| {
+        let mut q = p;
+        while q < s.len() && matches!(s[q], b'_' | b'/' | b'-') {
+            let mut e = q + 1;
+            if e >= s.len() || !s[e].is_ascii_alphabetic() {
+                break;
+            }
+            while e < s.len() && s[e].is_ascii_alphabetic() {
+                e += 1;
+                k(e);
+            }
+            q = e;
+        }
+    }
 }
 
 /// tzcorrection: "GMT"? [+-] hour24 ":"? minute? (seconds observed on
@@ -504,17 +518,17 @@ fn iso8601long() -> impl Pat {
 fn datenoyear() -> impl Pat {
     seq!(
         monthtext(),
-        star(set(b" .\t-")),
+        many(b" .\t-"),
         day_digits(),
         alt!(
-            seq!(set(b",.stndrh\t "), star(set(b",.stndrh\t "))),
+            seq!(set(b",.stndrh\t "), many(b",.stndrh\t ")),
             peek(|_| false, true)
         )
     )
 }
 
 fn plus_set(chars: &'static [u8]) -> impl Pat {
-    seq!(set(chars), star(set(chars)))
+    many1(chars)
 }
 
 fn day_digits() -> impl Pat {
@@ -667,27 +681,20 @@ pub(crate) fn match_rule(rule: Rule, s: &[u8], p: usize) -> Option<usize> {
         GnuDateShort => seq!(year(), set(b"-"), month(), set(b"-"), day()).longest(s, p),
         PointedDate4 => seq!(day(), set(b".\t-"), month(), set(b".-"), year4()).longest(s, p),
         PointedDate2 => seq!(day(), set(b".\t"), month(), set(b"."), year2()).longest(s, p),
-        DateFull => seq!(
-            day(),
-            star(set(b" \t.-")),
-            monthtext(),
-            star(set(b" \t.-")),
-            year()
-        )
-        .longest(s, p),
-        DateNoDay => seq!(monthtext(), star(set(b" .\t-")), year4()).longest(s, p),
-        DateNoDayRev => seq!(year4(), star(set(b" .\t-")), monthtext()).longest(s, p),
+        DateFull => seq!(day(), many(b" \t.-"), monthtext(), many(b" \t.-"), year()).longest(s, p),
+        DateNoDay => seq!(monthtext(), many(b" .\t-"), year4()).longest(s, p),
+        DateNoDayRev => seq!(year4(), many(b" .\t-"), monthtext()).longest(s, p),
         // PHP manual: m ([ .\t-])* dd [,.stndrh\t ]+ y
         DateTextual => seq!(
             monthtext(),
-            star(set(b" .\t-")),
+            many(b" .\t-"),
             day_digits(),
             plus_set(b",.stndrh\t "),
             year()
         )
         .longest(s, p),
         DateNoYear => datenoyear().longest(s, p),
-        DateNoYearRev => seq!(day(), star(set(b" .\t-")), monthtext()).longest(s, p),
+        DateNoYearRev => seq!(day(), many(b" .\t-"), monthtext()).longest(s, p),
         DateNoColon => seq!(year4(), monthlz(), daylz()).longest(s, p),
         XmlRpc => seq!(
             year4(),
