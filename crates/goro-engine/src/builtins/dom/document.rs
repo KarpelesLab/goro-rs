@@ -654,9 +654,15 @@ fn register_node_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
         _ => {
             let en = a.str(1);
             match vm.find_class(en.as_bytes(), true)? {
-                Some(c) if c.is_subclass_of(&bc) && !c.has_flag(crate::class::cflags::ABSTRACT) => {
-                    Some(c)
+                // Test registerNodeClass_abstract_class.phpt.
+                Some(c) if c.is_subclass_of(&bc) && c.has_flag(crate::class::cflags::ABSTRACT) => {
+                    return vm.fthrow(
+                        a,
+                        "ValueError",
+                        "Argument #2 ($extendedClass) must not be an abstract class",
+                    );
                 }
+                Some(c) if c.is_subclass_of(&bc) => Some(c),
                 _ => {
                     return vm.fthrow(
                         a,
@@ -1284,13 +1290,13 @@ fn modern_check_options(vm: &mut Vm, a: &Args, i: usize, html: bool) -> R<u32> {
     let allowed: i64 = if html {
         (opt::NOERROR | goro_xml::xml::opt::COMPACT) as i64 | 8192 | 2147483648
     } else {
-        VALID_FLAGS & !(opt::NO_XXE as i64)
+        VALID_FLAGS
     };
     if o & !allowed != 0 || o < 0 {
         let list = if html {
             "LIBXML_NOERROR, LIBXML_COMPACT, LIBXML_HTML_NOIMPLIED, Dom\\HTML_NO_DEFAULT_NS"
         } else {
-            "LIBXML_RECOVER, LIBXML_NOENT, LIBXML_DTDLOAD, LIBXML_DTDATTR, LIBXML_DTDVALID, LIBXML_NOERROR, LIBXML_NOWARNING, LIBXML_NOBLANKS, LIBXML_XINCLUDE, LIBXML_NSCLEAN, LIBXML_NOCDATA, LIBXML_NONET, LIBXML_PEDANTIC, LIBXML_COMPACT, LIBXML_PARSEHUGE, LIBXML_BIGLINES"
+            "LIBXML_RECOVER, LIBXML_NOENT, LIBXML_DTDLOAD, LIBXML_DTDATTR, LIBXML_DTDVALID, LIBXML_NOERROR, LIBXML_NOWARNING, LIBXML_NOBLANKS, LIBXML_XINCLUDE, LIBXML_NSCLEAN, LIBXML_NOCDATA, LIBXML_NONET, LIBXML_PEDANTIC, LIBXML_COMPACT, LIBXML_PARSEHUGE, LIBXML_BIGLINES, LIBXML_NO_XXE"
         };
         return vm.fthrow(
             a,

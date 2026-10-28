@@ -64,6 +64,7 @@ pub static MODULE: Module = Module {
     ],
     constants: CONSTANTS,
     init: Some(init),
+    shutdown: Some(|_| xpath::clear_kept()),
     ..Module::EMPTY
 };
 

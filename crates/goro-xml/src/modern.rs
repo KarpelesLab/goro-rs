@@ -361,6 +361,12 @@ impl W<'_> {
                     if ad.name.prefix.is_none() && ignore_default_attr {
                         continue;
                     }
+                    // DOM Parsing: an empty prefixed namespace declaration
+                    // is not well-formed (test
+                    // ext/dom/tests/modern/xml/serialize_empty_xmlns.phpt).
+                    if ad.name.prefix.is_some() && v.is_empty() && self.opts.require_well_formed {
+                        self.err = Some(NotWellFormed("empty namespace declaration"));
+                    }
                     if ad.name.prefix.is_some() {
                         let lp = local_prefixes.iter().find(|(p, _)| *p == ad.name.local);
                         let matches = lp.is_some_and(|(_, u)| u.as_deref().unwrap_or("") == v);
@@ -409,11 +415,13 @@ impl W<'_> {
             self.out.push('"');
         }
         let empty = arena.first_child(n).is_none() && e.template_contents.is_none();
-        if ns.as_deref() == Some(HTML_NS) && empty && is_void(&e.name.local) {
+        // LIBXML_NOEMPTYTAG applies to void HTML elements too (test
+        // modern/spec/xml_serialize_LIBXML_NOEMPTYTAG.phpt).
+        if ns.as_deref() == Some(HTML_NS) && empty && is_void(&e.name.local) && !self.opts.no_empty_tags {
             self.out.push_str(" />");
             return;
         }
-        if ns.as_deref() != Some(HTML_NS) && empty {
+        if (ns.as_deref() != Some(HTML_NS) || self.opts.no_empty_tags) && empty {
             if self.opts.no_empty_tags {
                 self.out.push_str("></");
                 self.out.push_str(&qname);

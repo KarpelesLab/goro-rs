@@ -194,6 +194,13 @@ fn register_php_function_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if ns == PHP_NS {
         return vm.fthrow(a, "ValueError", "Argument #1 ($namespaceURI) must not be \"http://php.net/xpath\" because it is reserved by PHP");
     }
+    // Test registerPhpFunctionNS_errors.phpt.
+    if name.contains('\0') {
+        return vm.fthrow(a, "ValueError", "Argument #2 ($name) must not contain any null bytes");
+    }
+    if ns.contains('\0') {
+        return vm.fthrow(a, "ValueError", "Argument #1 ($namespaceURI) must not contain any null bytes");
+    }
     if name.is_empty() || name.contains(':') || !goro_xml::chars::is_ncname(&name) {
         return vm.fthrow(a, "ValueError", "Argument #2 ($name) must be a valid callback name");
     }
@@ -385,6 +392,13 @@ impl xpath::FunctionHandler for Handler {
             ));
         }
         let first = args.remove(0);
+        if matches!(first, xpath::Value::Number(_) | xpath::Value::Boolean(_)) {
+            // Test php_function_edge_cases.phpt.
+            // SAFETY: as in `call_php`.
+            let vm = unsafe { &mut *self.vm };
+            let u = vm.throw_error_msg("TypeError", "Handler name must be a string");
+            return Err(XPathError::callback("", Some(Box::new(Pending(u)))));
+        }
         let name = first.to_string_value(arena);
         let callable = match &self.allowed {
             Allowed::None => {
@@ -506,6 +520,11 @@ fn run(vm: &mut Vm, a: &Args) -> R<Option<xpath::Value>> {
             (r, std::mem::take(&mut c.namespace_nodes))
         })
     };
+    // Nodes returned by callbacks stay alive until the next evaluation
+    // (the results are wrapped after this returns; test
+    // modern/xml/return_dom_node_from_xpath.phpt).
+    let old = KEPT.with(|k| std::mem::replace(&mut *k.borrow_mut(), std::mem::take(&mut handler.keep)));
+    drop(old);
     match r {
         Ok(v) => {
             NS_NODES.with(|n| n.borrow_mut().extend(ns_nodes));
@@ -529,8 +548,16 @@ fn run(vm: &mut Vm, a: &Args) -> R<Option<xpath::Value>> {
 }
 
 thread_local! {
+    /// Node objects the last evaluation's callbacks returned.
+    static KEPT: std::cell::RefCell<Vec<ObjRef>> = const { std::cell::RefCell::new(Vec::new()) };
     /// Namespace nodes of the last results, freed once wrapped.
     static NS_NODES: std::cell::RefCell<Vec<NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Drops the node objects kept for the last evaluation (request end).
+pub(crate) fn clear_kept() {
+    let old = KEPT.with(|k| std::mem::take(&mut *k.borrow_mut()));
+    drop(old);
 }
 
 /// Frees the namespace nodes no PHP object took.

@@ -377,9 +377,17 @@ fn replace_child(vm: &mut Vm, a: &mut Args) -> R<Value> {
         if ar.parent(child) != Some(parent) {
             return Err(DomError::NotFound);
         }
-        if modern && matches!(ar.data(parent), NodeData::Document(_)) {
-            // Validity as if `child` were not there (DOM Standard
-            // "replace").
+        if modern {
+            // Test modern/spec/Node_replaceChild_edge_cases.phpt.
+            if matches!(ar.data(node), NodeData::EntityRef(_)) {
+                return Err(DomError::HierarchyRequest);
+            }
+            if matches!(ar.data(parent), NodeData::Document(_))
+                && matches!(ar.data(node), NodeData::Text(_) | NodeData::CData(_))
+            {
+                DETAIL.with(|d| d.set(Some("Cannot insert text as a child of a document")));
+                return Err(DomError::HierarchyRequest);
+            }
         }
         let old_root = ar.root(node);
         let r = ar.replace_child(parent, node, child)?;

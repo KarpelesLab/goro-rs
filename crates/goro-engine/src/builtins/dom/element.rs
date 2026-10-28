@@ -1415,7 +1415,11 @@ fn insert_nodes(
             }
             let r = xmlstore::with(|s| {
                 let ar = &mut s.arena;
-                if ar.is_inclusive_ancestor(n, frag) {
+                // A document can't go into the fragment (test
+                // modern/spec/append_text_nodes_invalid_hierarchy.phpt).
+                if ar.is_inclusive_ancestor(n, frag)
+                    || matches!(ar.data(n), NodeData::Document(_) | NodeData::Attribute(_))
+                {
                     return Err(DomError::HierarchyRequest);
                 }
                 let old_root = ar.root(n);

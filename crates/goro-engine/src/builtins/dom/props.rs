@@ -651,7 +651,9 @@ pub(crate) fn set_prop(vm: &mut Vm, o: &ObjRef, name: &str, v: Value) -> R<()> {
             "xmlVersion", "standalone", "xmlStandalone", "documentURI", "title", "body",
             "characterSet", "charset", "inputEncoding",
         ];
-        if !WRITABLE.contains(&name) {
+        let cls = vm.class_of(o);
+        let entity = matches!(name, "encoding" | "version") && vm.instance_of_lname(&cls, b"domentity");
+        if !WRITABLE.contains(&name) || entity {
             return readonly(vm);
         }
         return throw_dom(vm, DomError::InvalidState);
