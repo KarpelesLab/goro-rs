@@ -10,4 +10,5 @@ pub mod mt_rand;
 pub mod natcmp;
 pub mod phonetic;
 pub mod printf;
+pub mod sort;
 pub mod strings;
