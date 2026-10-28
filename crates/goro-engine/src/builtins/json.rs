@@ -327,7 +327,7 @@ impl Vm {
                 && ObjRef::ptr_eq(o2, o)
             {
                 // Returning $this serializes its properties.
-                let props = self.visible_props(o);
+                let props = self.visible_props_from(o, std::ptr::null());
                 e.depth += 1;
                 let r = self.json_object_pairs(e, props);
                 e.depth -= 1;
@@ -359,9 +359,9 @@ impl Vm {
                     .filter(|(k, _)| !matches!(k, goro_runtime::KeyRef::Str(s) if s.as_bytes().first() == Some(&0)))
                     .map(|(k, v)| (k.to_value(), v.deref()))
                     .collect(),
-                None => self.visible_props(o),
+                None => self.visible_props_from(o, std::ptr::null()),
             },
-            None => self.visible_props(o),
+            None => self.visible_props_from(o, std::ptr::null()),
         };
         e.stack.push(id);
         e.depth += 1;

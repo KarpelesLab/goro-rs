@@ -20,6 +20,8 @@ const M_PROPS_REF: i64 = 6;
 /// Plain object by value: [object, snapshot of its visible properties]
 /// (the object stays alive while iterated).
 const M_PROPS_VAL: i64 = 7;
+/// Properties by name, read as the loop reaches them (hooked objects).
+const M_PROPS_NAMES: i64 = 8;
 
 #[inline]
 fn enc(mode: i64, data: i64) -> Value {
@@ -201,9 +203,11 @@ impl Vm {
                     return Ok(true);
                 }
                 // Plain object: its visible properties.
-                if by_ref {
-                    let names: Vec<Value> =
-                        self.visible_props(&o).into_iter().map(|(k, _)| k).collect();
+                let hooked = Self::has_hooked_props(&self.class_of(&o));
+                if by_ref || hooked {
+                    // By name: references, or hooks run as the loop reaches
+                    // each property (test Zend/tests/property_hooks/foreach).
+                    let names: Vec<Value> = self.visible_prop_names(&o);
                     self.check_deferred()?;
                     if names.is_empty() {
                         return Ok(false);
@@ -214,7 +218,7 @@ impl Vm {
                     ]);
                     unsafe {
                         *sa = Some(Value::Array(pack));
-                        *sb = Some(enc(M_PROPS_REF, 0));
+                        *sb = Some(enc(if by_ref { M_PROPS_REF } else { M_PROPS_NAMES }, 0));
                     }
                     return Ok(true);
                 }
@@ -425,6 +429,7 @@ impl Vm {
                         _ => continue,
                     };
                     unsafe { *sb = Some(enc(M_PROPS_REF, pos as i64)) };
+                    self.no_hooked_ref(&o, &name)?;
                     let r = self.prop_action(&o, &name, 0, PathAction::MakeRef, None)?;
                     let p = self.slot_ptr(val);
                     let old = unsafe { (*p).replace(r) };
@@ -435,8 +440,75 @@ impl Vm {
                     return Ok(true);
                 }
             }
+            M_PROPS_NAMES => {
+                let Some(Value::Array(pack)) = (unsafe { (*sa).clone() }) else {
+                    return Ok(false);
+                };
+                let o = match pack.get_int(0) {
+                    Some(Value::Object(o)) => o.clone(),
+                    _ => return Ok(false),
+                };
+                let Some(Value::Array(names)) = pack.get_int(1).cloned() else {
+                    return Ok(false);
+                };
+                let mut pos = data as u32;
+                loop {
+                    let Some((p, _, n)) = names.data().next_from(pos) else {
+                        return Ok(false);
+                    };
+                    pos = p + 1;
+                    let name = match n {
+                        Value::Str(s) => s.clone(),
+                        Value::Int(i) => goro_runtime::PhpStr::from(i.to_string()),
+                        _ => continue,
+                    };
+                    unsafe { *sb = Some(enc(M_PROPS_NAMES, pos as i64)) };
+                    let v = self.read_prop(&o, &name, true, None)?;
+                    let p = self.slot_ptr(val);
+                    let old = unsafe { (*p).replace(v) };
+                    drop(old);
+                    if key != NONE {
+                        self.put(key, n.clone());
+                    }
+                    return Ok(true);
+                }
+            }
             _ => Ok(false),
         }
+    }
+
+    /// foreach by reference over a hooked property whose get hook does not
+    /// return by reference (test Zend/tests/property_hooks/
+    /// foreach_val_to_ref).
+    fn no_hooked_ref(&mut self, o: &ObjRef, name: &goro_runtime::PhpStr) -> R<()> {
+        let cls = self.class_of(o);
+        let idx = cls
+            .prop_map
+            .borrow()
+            .get(name)
+            .and_then(|v| v.first().copied());
+        let Some(idx) = idx else {
+            return Ok(());
+        };
+        let p = cls.props.borrow()[idx as usize].clone();
+        if p.get.is_none() && p.set.is_none() {
+            return Ok(());
+        }
+        let by_ref = p.get.as_ref().is_some_and(|g| {
+            g.code()
+                .is_some_and(|c| c.flags & crate::bytecode::fflags::BY_REF != 0)
+        });
+        if by_ref {
+            return Ok(());
+        }
+        self.throw(
+            "Error",
+            &format!(
+                "Cannot create reference to property {}::${}",
+                cls.name.dname(),
+                name.to_string_lossy()
+            ),
+        )
     }
 
     pub(crate) fn fe_free(&mut self, iter: Reg) -> R<()> {

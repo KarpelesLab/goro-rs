@@ -489,7 +489,15 @@ impl Vm {
                     out.extend_from_slice(cls.name.dname().as_bytes());
                     out.extend_from_slice(b"::__set_state(array(\n");
                 }
-                let props = self.object_props_array(o, true);
+                let props = if cls.native.props_for.is_none()
+                    && cls.native.debug_props.is_none()
+                    && Self::has_hooked_props(&cls)
+                {
+                    self.hooked_props_mangled(o)
+                } else {
+                    self.object_props_array(o, true)
+                };
+                self.check_deferred()?;
                 self.dump_stack.push(id);
                 for (k, x) in props.iter() {
                     out.extend_from_slice(format!("{}   ", pad).as_bytes());
