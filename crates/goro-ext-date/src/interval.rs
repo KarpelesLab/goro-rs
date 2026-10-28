@@ -147,9 +147,24 @@ impl Interval {
 
     /// `DateInterval::createFromDateString()`: the relative part of a
     /// date/time string ("3 days", "next monday"). Errors give the message
-    /// "Unknown or bad format (S) at position N (C): MESSAGE".
+    /// "Unknown or bad format (S) at position N (C): MESSAGE", or "String
+    /// 'S' contains non-relative elements" for a date, time or zone
+    /// ("noon", "10:00", "UTC"; observed on PHP 8.5), both
+    /// DateMalformedIntervalStringException.
     pub fn from_date_string(s: &[u8]) -> Result<Interval, String> {
         let p = parse::parse(s);
+        let absolute = p.have_date
+            || p.have_time
+            || p.zone.is_some()
+            || p.y.is_some()
+            || p.m.is_some()
+            || p.d.is_some();
+        if p.errors.is_empty() && absolute {
+            return Err(format!(
+                "String '{}' contains non-relative elements",
+                String::from_utf8_lossy(s)
+            ));
+        }
         if let Some((pos, msg)) = p.errors.first() {
             let t = trim(s);
             let c = t.get(*pos).copied().unwrap_or(b' ');
@@ -282,13 +297,34 @@ impl Interval {
     }
 }
 
-/// `DateTime::add()`: years, months and days on the wall clock, then hours
-/// and below as elapsed time (tests DateTime_add-*.phpt, rfc-datetime_and_
-/// daylight_saving_time-type3-fa.phpt). Intervals from
-/// `createFromDateString()` apply like `modify()`.
+/// "Only non-special relative time specifications are supported for
+/// subtraction" (DateInvalidOperationException, prefixed with the method).
+pub const SUB_SPECIAL: &str =
+    "Only non-special relative time specifications are supported for subtraction";
+
+/// `DateTime::sub()`: [`add`] backwards; an interval from
+/// `createFromDateString()` with a weekday or "X of" part is refused
+/// (observed on PHP 8.5).
+pub fn sub(dt: &DateTime, iv: &Interval) -> Result<DateTime, &'static str> {
+    if let Some(fs) = &iv.from_string
+        && (fs.relative.weekday.is_some() || fs.relative.special != parse::Special::None)
+    {
+        return Err(SUB_SPECIAL);
+    }
+    Ok(add(dt, iv, -1))
+}
+
+/// `DateTime::add()` (`sign` 1) and the arithmetic of `sub()` (-1): years,
+/// months and days on the wall clock, then hours and below as elapsed time
+/// (tests DateTime_add-*.phpt, rfc-datetime_and_daylight_saving_time-
+/// type3-fa.phpt). Intervals from `createFromDateString()` apply their
+/// relative part like `modify()`, keeping the time and ignoring "first/last
+/// day of" (observed on PHP 8.5: adding "last day of next month" to June
+/// 15th gives July 15th).
 pub fn add(dt: &DateTime, iv: &Interval, sign: i64) -> DateTime {
     if let Some(fs) = &iv.from_string {
         let mut r = fs.relative;
+        r.first_last_day_of = 0;
         if sign < 0 {
             r.y = -r.y;
             r.m = -r.m;

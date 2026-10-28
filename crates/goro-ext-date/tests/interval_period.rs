@@ -448,3 +448,101 @@ fn phpt_date_period() {
     assert_eq!(got[1], "Thursday 2008-02-28 00:00:00");
     assert_eq!(got[23], "Thursday 2009-12-31 00:00:00");
 }
+
+#[test]
+fn add_sub_from_string() {
+    // observed on PHP 8.5 (base 2021-06-15 13:45:56 UTC)
+    let b = dt("2021-06-15 13:45:56", "UTC");
+    let show = |d: &DateTime| String::from_utf8(d.format(b"Y-m-d H:i:s D")).unwrap();
+    for (s, add, sub) in [
+        ("next monday", "2021-06-21 13:45:56 Mon", None),
+        (
+            "+2 days 3 hours",
+            "2021-06-17 16:45:56 Thu",
+            Some("2021-06-13 10:45:56 Sun"),
+        ),
+        (
+            "last day of next month",
+            "2021-07-15 13:45:56 Thu",
+            Some("2021-05-15 13:45:56 Sat"),
+        ),
+        ("3 weekdays", "2021-06-18 13:45:56 Fri", None),
+        (
+            "first monday of next month",
+            "2021-07-05 13:45:56 Mon",
+            None,
+        ),
+        (
+            "-1 week",
+            "2021-06-08 13:45:56 Tue",
+            Some("2021-06-22 13:45:56 Tue"),
+        ),
+        ("monday next week", "2021-06-21 13:45:56 Mon", None),
+        (
+            "1 year ago",
+            "2020-06-15 13:45:56 Mon",
+            Some("2022-06-15 13:45:56 Wed"),
+        ),
+        (
+            "today",
+            "2021-06-15 13:45:56 Tue",
+            Some("2021-06-15 13:45:56 Tue"),
+        ),
+        (
+            "tomorrow",
+            "2021-06-16 13:45:56 Wed",
+            Some("2021-06-14 13:45:56 Mon"),
+        ),
+        (
+            "first day of",
+            "2021-06-15 13:45:56 Tue",
+            Some("2021-06-15 13:45:56 Tue"),
+        ),
+    ] {
+        let iv = Interval::from_date_string(s.as_bytes()).unwrap();
+        assert_eq!(show(&interval::add(&b, &iv, 1)), add, "{s}");
+        match sub {
+            Some(want) => assert_eq!(show(&interval::sub(&b, &iv).unwrap()), want, "{s}"),
+            None => assert_eq!(interval::sub(&b, &iv), Err(interval::SUB_SPECIAL), "{s}"),
+        }
+    }
+    for s in [
+        "noon",
+        "@123",
+        "2021-01-01",
+        "UTC",
+        "+0200",
+        "10:00",
+        "+1 day noon",
+    ] {
+        assert_eq!(
+            Interval::from_date_string(s.as_bytes()),
+            Err(format!("String '{s}' contains non-relative elements")),
+            "{s}"
+        );
+    }
+    let mut back = Interval::parse_iso(b"P1M").unwrap();
+    back.invert = true;
+    let ymd = |d: &DateTime| String::from_utf8(d.format(b"Y-m-d")).unwrap();
+    assert_eq!(ymd(&interval::add(&b, &back, 1)), "2021-05-15");
+    assert_eq!(ymd(&interval::sub(&b, &back).unwrap()), "2021-07-15");
+    let p1m = Interval::parse_iso(b"P1M").unwrap();
+    assert_eq!(
+        ymd(&interval::sub(&dt("2010-03-31", "UTC"), &p1m).unwrap()),
+        "2010-03-03"
+    );
+    assert_eq!(
+        ymd(&interval::add(&dt("2010-01-31", "UTC"), &p1m, 1)),
+        "2010-03-03"
+    );
+    let d = interval::diff(
+        &dt("2021-01-01", "UTC"),
+        &dt("2021-03-15 10:00", "UTC"),
+        false,
+    );
+    assert_eq!(
+        String::from_utf8(interval::add(&dt("2022-01-31", "UTC"), &d, 1).format(b"Y-m-d H:i"))
+            .unwrap(),
+        "2022-04-14 10:00"
+    );
+}
