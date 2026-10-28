@@ -652,7 +652,7 @@ pub(crate) fn set_prop(vm: &mut Vm, o: &ObjRef, name: &str, v: Value) -> R<()> {
         "innerHTML" if modern => super::modern::set_inner_html(vm, n, &text)?,
         "outerHTML" if modern => super::modern::set_outer_html(vm, n, &text)?,
         "substitutedNodeValue" if modern => {
-            super::node::set_text_content(vm, n, &text)?;
+            super::node::set_node_value(vm, n, &text, false)?;
         }
         "prefix" => {
             let c = vm.class_of(o).name.to_string_lossy();

@@ -57,11 +57,10 @@ pub(crate) fn set_data(n: NodeId, text: &str) {
 /// A `Dom\` offset or count: DOM's `unsigned long` (modulo 2^32), above
 /// 2^31-1 an IndexSizeError (tests modern/spec/CharacterData_*_mod32.phpt).
 fn ulong(vm: &mut Vm, v: i64) -> R<i64> {
-    let u = (v as u64 & 0xffff_ffff) as i64;
-    if u > i32::MAX as i64 {
+    if v > i32::MAX as i64 {
         return throw_dom(vm, DomError::IndexSize);
     }
-    Ok(u)
+    Ok((v as u64 & 0xffff_ffff) as i64)
 }
 
 fn check_offset(vm: &mut Vm, a: &Args, n: NodeId, off: i64, len: usize) -> R<Option<usize>> {

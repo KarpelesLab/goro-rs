@@ -70,6 +70,10 @@ fn validate_fixtures() {
                     .collect(),
             )
         };
+        // The php-src tests (DOMDocument_loadXML_variation2.phpt) expect
+        // "got (a b )" where libxml 2.15 prints "got (a b)": goro follows
+        // the tests, the recorded fixture has the newer form.
+        let got: Vec<String> = got.iter().map(|g| g.replace(" )", ")")).collect();
         if ok != *result || &got != errs {
             fails += 1;
             eprintln!(

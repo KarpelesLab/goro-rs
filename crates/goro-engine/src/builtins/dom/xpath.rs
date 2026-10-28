@@ -205,7 +205,10 @@ fn register_php_function_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Null)
 }
 
-fn quote(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+fn quote(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if a.str(0).as_bytes().contains(&0) {
+        return vm.fthrow(a, "ValueError", "Argument #1 ($str) must not contain any null bytes");
+    }
     let s = s8(&a.str(0));
     let out = if !s.contains('\'') {
         format!("'{s}'")

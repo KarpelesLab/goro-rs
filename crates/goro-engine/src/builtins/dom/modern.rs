@@ -312,6 +312,12 @@ pub(crate) fn set_title(d: NodeId, t: &str) {
             }
         };
         a.set_text_content(el, t);
+        if t.is_empty() {
+            // An empty text node stays (observed on PHP 8.5, test
+            // Document_title_setter.phpt).
+            let tx = a.new_text(d, "");
+            a.raw_append(el, tx);
+        }
     });
 }
 

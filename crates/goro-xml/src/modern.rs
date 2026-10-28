@@ -169,10 +169,16 @@ impl W<'_> {
                 }
                 let kids: Vec<NodeId> = arena.children(n).collect();
                 for (i, c) in kids.iter().enumerate() {
-                    if i > 0 {
+                    let doctype = matches!(arena.data(*c), NodeData::Doctype(_));
+                    if i > 0 && !matches!(arena.data(kids[i - 1]), NodeData::Doctype(_)) {
                         self.out.push('\n');
                     }
                     self.node(*c, None, map, index, 0, format);
+                    // A doctype is always followed by a newline (tests
+                    // ext/dom/tests/modern/spec/Document_implementation_*).
+                    if doctype {
+                        self.out.push('\n');
+                    }
                 }
             }
             NodeData::Fragment => {

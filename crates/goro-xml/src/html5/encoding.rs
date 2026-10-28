@@ -350,6 +350,24 @@ pub fn decode(input: &[u8], e: WhatwgEncoding) -> String {
 /// represent are written as decimal character references (`&#NNNN;`), as
 /// the WHATWG "encode" with the HTML error mode does.
 pub fn encode(s: &str, e: WhatwgEncoding) -> Vec<u8> {
+    encode_with(s, e, false)
+}
+
+/// [`encode`] writing `?` for characters the encoding cannot represent
+/// (`Dom\HTMLDocument::saveHtml()`; tests ext/dom/tests/modern/html/
+/// encoding/HTMLDocument_Shift_JIS.phpt).
+pub fn encode_lossy(s: &str, e: WhatwgEncoding) -> Vec<u8> {
+    encode_with(s, e, true)
+}
+
+fn encode_with(s: &str, e: WhatwgEncoding, question: bool) -> Vec<u8> {
+    let unmappable = |out: &mut Vec<u8>, cp: u32| {
+        if question {
+            out.push(b'?');
+        } else {
+            out.extend_from_slice(format!("&#{cp};").as_bytes());
+        }
+    };
     match e {
         WhatwgEncoding::Utf8 | WhatwgEncoding::Replacement => s.as_bytes().to_vec(),
         WhatwgEncoding::Utf16be => s.encode_utf16().flat_map(|u| u.to_be_bytes()).collect(),
@@ -364,7 +382,7 @@ pub fn encode(s: &str, e: WhatwgEncoding) -> Vec<u8> {
                     } else if let Some(i) = t.iter().position(|&x| x as u32 == cp && x != 0) {
                         out.push(0x80 + i as u8);
                     } else {
-                        out.extend_from_slice(format!("&#{cp};").as_bytes());
+                        unmappable(&mut out, cp);
                     }
                 }
                 return out;
@@ -386,7 +404,7 @@ pub fn encode(s: &str, e: WhatwgEncoding) -> Vec<u8> {
                     &goro_charset::Subst::default(),
                 );
                 if r.illegal > 0 {
-                    out.extend_from_slice(format!("&#{};", c as u32).as_bytes());
+                    unmappable(&mut out, c as u32);
                 } else {
                     out.extend_from_slice(&r.bytes);
                 }

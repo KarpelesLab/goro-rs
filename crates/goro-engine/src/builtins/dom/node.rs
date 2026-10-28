@@ -87,7 +87,10 @@ pub(crate) fn legacy_insert(
         let can_have = matches!(
             a.data(parent),
             NodeData::Element(_) | NodeData::Document(_) | NodeData::Fragment
-        );
+        ) || (matches!(a.data(parent), NodeData::Attribute(_))
+            // Attributes hold text and entity references (tests gh17145,
+            // gh16594).
+            && matches!(a.data(node), NodeData::Text(_) | NodeData::EntityRef(_)));
         if !can_have {
             return Err(LegacyInsertError::Dom(DomError::HierarchyRequest));
         }

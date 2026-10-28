@@ -1138,7 +1138,7 @@ fn modern_check_options(vm: &mut Vm, a: &Args, i: usize, html: bool) -> R<u32> {
     };
     if o & !allowed != 0 || o < 0 {
         let list = if html {
-            "LIBXML_HTML_NOIMPLIED, LIBXML_COMPACT, LIBXML_NOERROR, Dom\\HTML_NO_DEFAULT_NS"
+            "LIBXML_NOERROR, LIBXML_COMPACT, LIBXML_HTML_NOIMPLIED, Dom\\HTML_NO_DEFAULT_NS"
         } else {
             "LIBXML_RECOVER, LIBXML_NOENT, LIBXML_DTDLOAD, LIBXML_DTDATTR, LIBXML_DTDVALID, LIBXML_NOERROR, LIBXML_NOWARNING, LIBXML_NOBLANKS, LIBXML_XINCLUDE, LIBXML_NSCLEAN, LIBXML_NOCDATA, LIBXML_NONET, LIBXML_PEDANTIC, LIBXML_COMPACT, LIBXML_PARSEHUGE, LIBXML_BIGLINES"
         };
@@ -1235,7 +1235,7 @@ fn html_parse(vm: &mut Vm, a: &Args, input: &[u8], source: &str, url: Option<Str
                 return vm.fthrow(
                     a,
                     "ValueError",
-                    "Argument #3 ($overrideEncoding) must be a valid encoding",
+                    "Argument #3 ($overrideEncoding) must be a valid document encoding",
                 );
             }
         },
@@ -1383,7 +1383,7 @@ pub(crate) fn modern_html(n: NodeId) -> Vec<u8> {
         let d = ar.doc_of(n);
         let enc = ar.doc(d).encoding.clone().unwrap_or_else(|| "UTF-8".into());
         match goro_xml::html5::encoding::encoding_for_label(&enc) {
-            Some(e) => goro_xml::html5::encoding::encode(&s, e),
+            Some(e) => goro_xml::html5::encoding::encode_lossy(&s, e),
             None => s.into_bytes(),
         }
     })
@@ -1637,7 +1637,7 @@ pub(crate) fn set_doc_prop(
             };
             match ok {
                 Some(name) => with_arena(|ar| ar.doc_mut(d).encoding = Some(name)),
-                None => return throw_dom_msg(vm, "Invalid document encoding", 9),
+                None => return vm.throw("ValueError", "Invalid document encoding"),
             }
         }
         "version" | "xmlVersion" => {

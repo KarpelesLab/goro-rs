@@ -73,6 +73,7 @@ class DOMImplementation {
     (
         "dom\\implementation",
         r#"<?php namespace Dom;
+#[\NotCloneable]
 class Implementation {
     public function createDocumentType(string $qualifiedName, string $publicId, string $systemId): \Dom\DocumentType {}
     public function createDocument(?string $namespace, string $qualifiedName, ?\Dom\DocumentType $doctype = NULL): \Dom\XMLDocument {}
@@ -571,16 +572,16 @@ class Element extends \Dom\Node implements \Dom\ParentNode, \Dom\ChildNode {
     public ?string $prefix { get {} set {} }
     public string $localName { get {} set {} }
     public string $tagName { get {} set {} }
+    public string $id { get {} set {} }
+    public string $className { get {} set {} }
+    public \Dom\TokenList $classList { get {} set {} }
+    public \Dom\NamedNodeMap $attributes { get {} set {} }
     public \Dom\HTMLCollection $children { get {} set {} }
     public ?\Dom\Element $firstElementChild { get {} set {} }
     public ?\Dom\Element $lastElementChild { get {} set {} }
     public int $childElementCount { get {} set {} }
     public ?\Dom\Element $previousElementSibling { get {} set {} }
     public ?\Dom\Element $nextElementSibling { get {} set {} }
-    public string $id { get {} set {} }
-    public string $className { get {} set {} }
-    public \Dom\TokenList $classList { get {} set {} }
-    public \Dom\NamedNodeMap $attributes { get {} set {} }
     public string $innerHTML { get {} set {} }
     public string $outerHTML { get {} set {} }
     public string $substitutedNodeValue { get {} set {} }

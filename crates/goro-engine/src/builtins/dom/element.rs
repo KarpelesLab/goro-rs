@@ -1202,7 +1202,21 @@ pub(crate) fn reconcile_imported(ar: &mut Arena, root: NodeId, doc: NodeId) {
 
 // ---------------------------------------------------------------- queries
 
+/// Arguments of the lookup methods must not contain NUL bytes (test
+/// gh16465.phpt).
+fn no_nul(vm: &mut Vm, a: &Args, i: usize, name: &str) -> R<()> {
+    if a.str(i).as_bytes().contains(&0) {
+        return vm.fthrow(
+            a,
+            "ValueError",
+            &format!("Argument #{} (${name}) must not contain any null bytes", i + 1),
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn get_elements_by_tag_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    no_nul(vm, a, 0, "qualifiedName")?;
     let n = this_node(vm, a)?;
     let name = s8(&a.str(0));
     let modern = modern_fn(a);
@@ -1210,6 +1224,8 @@ pub(crate) fn get_elements_by_tag_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 pub(crate) fn get_elements_by_tag_name_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    no_nul(vm, a, 1, "localName")?;
+    no_nul(vm, a, 0, "namespace")?;
     let n = this_node(vm, a)?;
     let ns = a.opt_str(0).map(|s| s8(&s));
     let local = s8(&a.str(1));
