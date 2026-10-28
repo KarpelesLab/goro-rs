@@ -105,8 +105,11 @@ impl Default for ParseOptions {
     }
 }
 
-/// Safe on a default 8 MiB main-thread stack.
-pub const DEFAULT_STACK_LIMIT: usize = 6 << 20;
+/// Safe on any thread with the default 2 MiB stack: a few hundred levels of
+/// nested calls or arrays, thousands of nested operators. A caller that runs
+/// the parser on a larger stack should raise it (PHP 8.5 accepts nesting up
+/// to its parser stack of about 10000 entries).
+pub const DEFAULT_STACK_LIMIT: usize = 1 << 20;
 
 /// Parses a PHP file. The AST lives in `arena` and borrows from `src`.
 pub fn parse<'a>(arena: &'a Arena, src: &'a [u8]) -> PResult<Program<'a>> {
