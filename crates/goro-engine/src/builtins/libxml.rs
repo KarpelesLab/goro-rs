@@ -579,7 +579,14 @@ impl EntityLoader for PhpLoader {
                 }
                 None => Some(vm.cwd.to_string_lossy().into_owned()),
             };
-            return match call_user_loader(vm, &self.fname, public_id, &url, ctx, dir.as_deref()) {
+            // Loads outside a parse with no base (a schema from a string)
+            // pass the reference as written (test bug76777.phpt).
+            let given = if self.bare && base.is_none() {
+                system_id.to_string()
+            } else {
+                url.clone()
+            };
+            return match call_user_loader(vm, &self.fname, public_id, &given, ctx, dir.as_deref()) {
                 Ok(UserLoad::Bytes(b)) => Ok(b),
                 Ok(UserLoad::Null) => {
                     self.warnings.push(format!(

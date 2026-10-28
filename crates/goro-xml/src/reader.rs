@@ -255,6 +255,11 @@ impl XmlReader {
         true
     }
 
+    /// True once node `n` has been parsed to its end.
+    pub fn is_node_complete(&self, n: NodeId) -> bool {
+        self.is_closed(n)
+    }
+
     fn is_closed(&self, n: NodeId) -> bool {
         n == self.doc && self.done || self.closed.contains(&n)
     }

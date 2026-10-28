@@ -4,6 +4,7 @@
 //! instance); error messages and states from the ext/xmlreader tests and
 //! observations on PHP 8.5.
 
+use super::dom::document::{SchemaLang, load_schema};
 use goro_runtime::{ObjRef, Value};
 use goro_xml::reader::XmlReader;
 
@@ -135,6 +136,12 @@ struct Open {
     started: bool,
     /// The reader's entity loader (owned by `r`).
     loader: *mut libxml::PhpLoader,
+    /// `setSchema()` / `setRelaxNGSchema()`.
+    schema: Option<goro_xml::schema::Compiled>,
+    /// The document was validated against `schema`.
+    schema_done: bool,
+    /// No schema validity error so far.
+    schema_valid: bool,
 }
 
 #[derive(Default)]
@@ -210,7 +217,22 @@ fn this(a: &Args) -> ObjRef {
 /// Reports the errors the last operation produced.
 fn report(vm: &mut Vm, a: &Args, o: &ObjRef) -> R<()> {
     let Some((errs, input, flags)) = with_open(o, |op| {
-        (op.r.take_errors(), std::mem::take(&mut op.input), op.flags)
+        let mut errs = op.r.take_errors();
+        // Schema validation once the document element is complete (the
+        // errors show on the read() that gets there; test 013.phpt).
+        if let Some(s) = &op.schema
+            && !op.schema_done
+            && let Some(root) = op.r.arena.document_element(op.r.doc)
+            && op.r.is_node_complete(root)
+        {
+            op.schema_done = true;
+            let v = s.validate_root(&mut op.r.arena, root, false);
+            if !v.is_empty() {
+                op.schema_valid = false;
+            }
+            errs.extend(v);
+        }
+        (errs, std::mem::take(&mut op.input), op.flags)
     }) else {
         return Ok(());
     };
@@ -348,6 +370,9 @@ fn load(vm: &mut Vm, o: &ObjRef, input: Vec<u8>, enc: Option<&str>, flags: u32, 
             flags,
             started: false,
             loader,
+            schema: None,
+            schema_done: false,
+            schema_valid: true,
         }))
     });
 }
@@ -727,14 +752,23 @@ fn set_parser_property(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn is_valid(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = this(a);
     Ok(Value::Bool(
-        with_open(&o, |op| op.started && op.r.props.validate && !op.r.failed).unwrap_or(false),
+        with_open(&o, |op| {
+            op.started
+                && !op.r.failed
+                && if op.schema.is_some() {
+                    op.schema_valid
+                } else {
+                    op.r.props.validate
+                }
+        })
+        .unwrap_or(false),
     ))
 }
 
-/// Schemas: validation is not available; a schema can only be unset
-/// (`null`) before reading (observed on PHP 8.5: the errors for
-/// unloaded or started readers).
-fn schema_common(vm: &mut Vm, a: &Args, what: &str) -> R<Value> {
+/// `setSchema()`, `setRelaxNGSchema()`, `setRelaxNGSchemaSource()`: only
+/// before reading (observed on PHP 8.5: the errors for unloaded or
+/// started readers; tests setSchema_error.phpt, 007.phpt, 013.phpt).
+fn schema_common(vm: &mut Vm, a: &Args, what: &str, lang: SchemaLang) -> R<Value> {
     let o = this(a);
     if let Some(s) = a.opt_str(0)
         && s.is_empty()
@@ -749,25 +783,35 @@ fn schema_common(vm: &mut Vm, a: &Args, what: &str) -> R<Value> {
     match state {
         None | Some(true) => vm.throw("Error", "Schema must be set prior to reading"),
         Some(false) => {
-            if a.opt_str(0).is_none() {
+            let Some(s) = a.opt_str(0) else {
+                with_open(&o, |op| op.schema = None);
                 return Ok(Value::Bool(true));
+            };
+            let path = (what == "filename").then(|| s.to_string_lossy());
+            match load_schema(vm, &a.fname(), lang, path.as_deref(), s.as_bytes())? {
+                Ok(c) => {
+                    with_open(&o, |op| op.schema = Some(c));
+                    Ok(Value::Bool(true))
+                }
+                Err(_) => {
+                    vm.fwarn(a, "Schema contains errors")?;
+                    Ok(Value::Bool(false))
+                }
             }
-            vm.fwarn(a, "Schema contains errors")?;
-            Ok(Value::Bool(false))
         }
     }
 }
 
 fn set_schema(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    schema_common(vm, a, "filename")
+    schema_common(vm, a, "filename", SchemaLang::Xsd)
 }
 
 fn set_relaxng_schema(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    schema_common(vm, a, "filename")
+    schema_common(vm, a, "filename", SchemaLang::RelaxNg)
 }
 
 fn set_relaxng_schema_source(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    schema_common(vm, a, "source")
+    schema_common(vm, a, "source", SchemaLang::RelaxNg)
 }
 
 // ------------------------------------------------------------------ expand

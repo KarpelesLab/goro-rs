@@ -35,6 +35,14 @@ pub enum Domain {
     XInclude = 11,
     /// XML_FROM_XPATH
     XPath = 12,
+    /// XML_FROM_SCHEMASP
+    SchemasP = 16,
+    /// XML_FROM_SCHEMASV
+    SchemasV = 17,
+    /// XML_FROM_RELAXNGP
+    RelaxNgP = 18,
+    /// XML_FROM_RELAXNGV
+    RelaxNgV = 19,
     /// XML_FROM_C14N
     C14n = 21,
     /// XML_FROM_VALID
@@ -96,13 +104,26 @@ impl XmlError {
             (_, LEVEL_WARNING) => "parser warning",
             _ => "parser error",
         };
-        let file = self.file.as_deref().unwrap_or("Entity");
+        // Schema errors print the bare message (observed on PHP 8.5; test
+        // DOMDocument_schemaValidate_error2.phpt).
+        if matches!(
+            self.domain,
+            Domain::SchemasP | Domain::SchemasV | Domain::RelaxNgP | Domain::RelaxNgV
+        ) {
+            return vec![self.text().to_string()];
+        }
+        // Files print "file:line:", strings "Entity: line N:" (test
+        // DOMDocument_schemaValidate_error1.phpt).
+        let loc = match &self.file {
+            Some(f) => format!("{f}:{}:", self.line),
+            None => format!("Entity: line {}:", self.line),
+        };
         // Namespace errors have no location prefix (observed on PHP 8.5).
         // Errors without a position (I/O) print none either.
         let mut v = vec![if self.domain == Domain::Namespace || self.line == 0 {
             format!("{what} : {}", self.text())
         } else {
-            format!("{file}: line {}: {what} : {}", self.line, self.text())
+            format!("{loc} {what} : {}", self.text())
         }];
         if self.line > 0 {
             let line = input

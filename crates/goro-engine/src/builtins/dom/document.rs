@@ -48,9 +48,9 @@ pub const METHODS: &[(&str, NativeFn)] = &[
     ("domdocument::validate", validate),
     ("domdocument::xinclude", xinclude),
     ("domdocument::schemavalidate", schema_validate),
-    ("domdocument::schemavalidatesource", schema_validate),
-    ("domdocument::relaxngvalidate", schema_validate),
-    ("domdocument::relaxngvalidatesource", schema_validate),
+    ("domdocument::schemavalidatesource", schema_validate_source),
+    ("domdocument::relaxngvalidate", relaxng_validate),
+    ("domdocument::relaxngvalidatesource", relaxng_validate_source),
     ("domdocument::append", super::element::append),
     ("domdocument::prepend", super::element::prepend),
     ("domdocument::replacechildren", super::element::replace_children),
@@ -72,9 +72,9 @@ pub const METHODS: &[(&str, NativeFn)] = &[
     ("dom\\document::adoptnode", adopt_node),
     ("dom\\document::registernodeclass", register_node_class),
     ("dom\\document::schemavalidate", schema_validate),
-    ("dom\\document::schemavalidatesource", schema_validate),
-    ("dom\\document::relaxngvalidate", schema_validate),
-    ("dom\\document::relaxngvalidatesource", schema_validate),
+    ("dom\\document::schemavalidatesource", schema_validate_source),
+    ("dom\\document::relaxngvalidate", relaxng_validate),
+    ("dom\\document::relaxngvalidatesource", relaxng_validate_source),
     ("dom\\document::append", super::element::append),
     ("dom\\document::prepend", super::element::prepend),
     ("dom\\document::replacechildren", super::element::replace_children),
@@ -688,10 +688,122 @@ fn register_node_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
 }
 
+/// Which schema language a validation method uses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SchemaLang {
+    Xsd,
+    RelaxNg,
+}
+
+/// Loads and compiles a schema from a file (`Some(path)`) or a string,
+/// showing libxml's errors on failure (observed on PHP 8.5; tests
+/// DOMDocument_schemaValidate_error*.phpt, DOMDocument_relaxNGValidate_error*.phpt).
+/// `Err(true)`: the caller's "invalid schema" warning follows.
+pub(crate) fn load_schema(
+    vm: &mut Vm,
+    fname: &str,
+    lang: SchemaLang,
+    path: Option<&str>,
+    source: &[u8],
+) -> R<Result<goro_xml::schema::Compiled, bool>> {
+    let (bytes, url) = match path {
+        Some(p) => {
+            // Paths longer than PHP_MAXPATHLEN (test
+            // DOMDocument_schemaValidate_error6.phpt).
+            if p.len() > 4096 {
+                let what = match lang {
+                    SchemaLang::Xsd => "Invalid Schema file source",
+                    SchemaLang::RelaxNg => "Invalid RelaxNG file source",
+                };
+                vm.warn(&format!("{fname}(): {what}"))?;
+                return Ok(Err(false));
+            }
+            let url = file_url(vm, p);
+            match libxml::load_document(vm, fname, p)? {
+                Ok(b) => (b, Some(url)),
+                Err(m) => {
+                    if let Some(m) = m {
+                        vm.warn(&format!("{fname}(): {m}"))?;
+                    } else {
+                        let e2 = match lang {
+                            SchemaLang::Xsd => goro_xml::schema::xsd_not_found(&url),
+                            SchemaLang::RelaxNg => goro_xml::schema::rng_not_found(&url),
+                        };
+                        let errs = [libxml::io_error(&url), e2];
+                        libxml::report(vm, fname, &errs, Style::Generic, 0, None)?;
+                    }
+                    return Ok(Err(true));
+                }
+            }
+        }
+        None => (source.to_vec(), None),
+    };
+    let mut loader = PhpLoader::new(vm, fname);
+    loader.bare = true;
+    let r = match lang {
+        SchemaLang::Xsd => goro_xml::schema::compile_xsd(&bytes, url.as_deref(), &mut loader)
+            .map(goro_xml::schema::Compiled::Xsd),
+        SchemaLang::RelaxNg => goro_xml::schema::compile_rng(&bytes, url.as_deref(), &mut loader)
+            .map(goro_xml::schema::Compiled::RelaxNg),
+    };
+    loader.finish(vm)?;
+    match r {
+        Ok(c) => Ok(Ok(c)),
+        Err(errs) => {
+            libxml::report(vm, fname, &errs, Style::Generic, 0, Some(&bytes))?;
+            Ok(Err(true))
+        }
+    }
+}
+
+fn validate_with(vm: &mut Vm, a: &mut Args, lang: SchemaLang, from_file: bool) -> R<Value> {
+    let d = this_doc(vm, a)?;
+    let fname = a.fname();
+    let src = a.str(0);
+    let path = if from_file {
+        match check_path(vm, a, 0, "filename")? {
+            Some(p) => Some(p),
+            None => return Ok(Value::Bool(false)),
+        }
+    } else {
+        if src.is_empty() {
+            return vm.fthrow(a, "ValueError", "Argument #1 ($source) must not be empty");
+        }
+        None
+    };
+    let create = lang == SchemaLang::Xsd && a.has(1) && a.int(1) & 1 != 0;
+    let schema = match load_schema(vm, &fname, lang, path.as_deref(), src.as_bytes())? {
+        Ok(s) => s,
+        Err(warn) => {
+            if warn {
+                let invalid = match lang {
+                    SchemaLang::Xsd => "Invalid Schema",
+                    SchemaLang::RelaxNg => "Invalid RelaxNG",
+                };
+                vm.warn(&format!("{fname}(): {invalid}"))?;
+            }
+            return Ok(Value::Bool(false));
+        }
+    };
+    let errs = with_arena(|ar| schema.validate(ar, d, create));
+    libxml::report(vm, &fname, &errs, Style::Generic, 0, None)?;
+    Ok(Value::Bool(errs.is_empty()))
+}
+
 fn schema_validate(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let _ = this_doc(vm, a)?;
-    vm.fwarn(a, "Schema validation is not supported")?;
-    Ok(Value::Bool(false))
+    validate_with(vm, a, SchemaLang::Xsd, true)
+}
+
+fn schema_validate_source(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    validate_with(vm, a, SchemaLang::Xsd, false)
+}
+
+fn relaxng_validate(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    validate_with(vm, a, SchemaLang::RelaxNg, true)
+}
+
+fn relaxng_validate_source(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    validate_with(vm, a, SchemaLang::RelaxNg, false)
 }
 
 // ------------------------------------------------------------- loading
