@@ -58,11 +58,38 @@ impl Vm {
             }
         }
         self.autoloading.retain(|n| *n != lname);
+        // Variance checks that waited for this class (test Zend/tests/
+        // type_declarations/variance/class_order_autoload1).
+        if result.is_ok() && self.delayed_obligations.iter().any(|(n, _, _)| *n == lname) {
+            let all = std::mem::take(&mut self.delayed_obligations);
+            let (mine, rest): (Vec<_>, Vec<_>) = all.into_iter().partition(|(n, _, _)| *n == lname);
+            self.delayed_obligations = rest;
+            for (_, ob, decl) in mine {
+                self.check_obligations(vec![ob], &decl)?;
+            }
+        }
         result
     }
 
     /// Declares a class from its declaration (DeclareClass, early binding).
     pub fn declare_class(&mut self, decl: &Rc<ClassDecl>) -> R<Rc<Class>> {
+        let was = std::mem::replace(&mut self.early_binding, false);
+        let r = self.declare_class_opt(decl);
+        self.early_binding = was;
+        Ok(r?.expect("class deferred outside early binding"))
+    }
+
+    /// Binds a class while its file is loaded; `None` when its variance
+    /// checks need classes not declared yet (it is declared when its
+    /// declaration runs).
+    pub fn early_bind_class(&mut self, decl: &Rc<ClassDecl>) -> R<Option<Rc<Class>>> {
+        let was = std::mem::replace(&mut self.early_binding, true);
+        let r = self.declare_class_opt(decl);
+        self.early_binding = was;
+        r
+    }
+
+    fn declare_class_opt(&mut self, decl: &Rc<ClassDecl>) -> R<Option<Rc<Class>>> {
         let lname = lower(&decl.name);
         if let Some(prev) = self.classes.get(&lname) {
             let _ = prev;
@@ -82,7 +109,9 @@ impl Vm {
                 decl.line_start,
             ));
         }
-        let cls = self.link_class(decl)?;
+        let Some(cls) = self.link_class(decl)? else {
+            return Ok(None);
+        };
         decl.declared.set(true);
         // PHP 8.1: Serializable without __serialize()/__unserialize() is
         // deprecated (message observed on PHP 8.5).
@@ -105,7 +134,7 @@ impl Vm {
                 decl.line_start,
             )?;
         }
-        Ok(cls)
+        Ok(Some(cls))
     }
 
     /// Whether every dependency of a top-level class is already declared
@@ -125,7 +154,20 @@ impl Vm {
         Err(self.fatal_at(msg, &decl.file, decl.line_start))
     }
 
-    fn link_class(&mut self, decl: &Rc<ClassDecl>) -> R<Rc<Class>> {
+    fn link_class(&mut self, decl: &Rc<ClassDecl>) -> R<Option<Rc<Class>>> {
+        // A class linked while another one is (autoloading) has its own
+        // variance checks.
+        let saved = std::mem::take(&mut self.obligations);
+        // Classes declared by code run while linking (autoloaders) are
+        // not bound early.
+        let eb = std::mem::replace(&mut self.early_binding, false);
+        let r = self.link_class_inner(decl, eb);
+        self.early_binding = eb;
+        self.obligations = saved;
+        r
+    }
+
+    fn link_class_inner(&mut self, decl: &Rc<ClassDecl>, eb: bool) -> R<Option<Rc<Class>>> {
         let cname = decl.name.dname();
         // Parent.
         let parent = match &decl.parent {
@@ -458,10 +500,43 @@ impl Vm {
             *cls.method_order.borrow_mut() = order;
         }
         self.finish_class(&cls);
+        // Interface methods against their implementations.
+        if decl.kind != ClassKind::Interface {
+            let ifs: Vec<Rc<Class>> = cls.interfaces.borrow().clone();
+            for i in ifs {
+                let names: Vec<PhpStr> = i.method_order.borrow().clone();
+                for n in names {
+                    let (Some(im), Some(m)) = (i.find_method_str(&n), cls.find_method_str(&n))
+                    else {
+                        continue;
+                    };
+                    if Rc::ptr_eq(&im, &m) || m.scope().is_some_and(|c| c.is_interface()) {
+                        continue;
+                    }
+                    if !std::ptr::eq(im.scope.get(), Rc::as_ptr(&i)) {
+                        continue;
+                    }
+                    self.obligations.push(super::variance::Obligation {
+                        child: m,
+                        parent: im,
+                    });
+                }
+            }
+        }
+        let obs = std::mem::take(&mut self.obligations);
+        if eb {
+            self.early_binding = true;
+            let ok = self.obligations_resolvable(&obs);
+            self.early_binding = false;
+            if !ok? {
+                return Ok(None);
+            }
+        }
         self.register_class(cls.clone());
+        self.check_obligations(obs, decl)?;
         // #[\Override] checks.
         self.check_override_attrs(&cls, decl)?;
-        Ok(cls)
+        Ok(Some(cls))
     }
 
     fn check_override_attrs(&mut self, cls: &Rc<Class>, decl: &ClassDecl) -> R<()> {
@@ -1035,6 +1110,10 @@ impl Vm {
                     || prev.scope().is_some_and(|c| c.is_interface())
                 {
                     self.check_signature(cls, &f, &prev, decl)?;
+                    self.obligations.push(super::variance::Obligation {
+                        child: f.clone(),
+                        parent: prev.clone(),
+                    });
                 }
                 *f.proto.borrow_mut() = Some(prev.clone());
             }

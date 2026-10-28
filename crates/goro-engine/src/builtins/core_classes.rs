@@ -54,7 +54,7 @@ pub static MODULE: Module = Module {
         ),
         (
             "iteratoraggregate",
-            "<?php interface IteratorAggregate extends Traversable { public function getIterator(): Iterator; }",
+            "<?php interface IteratorAggregate extends Traversable { public function getIterator(): Traversable; }",
         ),
         (
             "arrayaccess",

@@ -36,6 +36,7 @@ pub mod objects;
 pub mod output;
 pub mod setup;
 pub mod types;
+pub mod variance;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -409,6 +410,15 @@ pub struct Vm {
     /// being evaluated: their item's own deprecation is not raised again
     /// (a constant whose message is itself).
     pub deprecating: Vec<usize>,
+    /// Classes are being bound early (when a file is loaded): variance
+    /// checks needing unknown classes defer the class to run time.
+    pub early_binding: bool,
+    /// Variance checks of the class being linked.
+    pub(crate) obligations: Vec<variance::Obligation>,
+    /// Variance checks waiting for a class being autoloaded (lowercase
+    /// name, check, declaring class).
+    pub(crate) delayed_obligations:
+        Vec<(PhpStr, variance::Obligation, Rc<crate::class::ClassDecl>)>,
     /// The method name a `__call`/`__callStatic` call is about to run for.
     pub magic_call_name: Option<PhpStr>,
     /// register_tick_function(): (callable, arguments).

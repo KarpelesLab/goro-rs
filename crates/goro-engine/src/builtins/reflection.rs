@@ -1871,7 +1871,7 @@ fn func_string(
 /// Return types of methods of internal classes are "tentative" (PHP 8.1:
 /// extending classes may still omit them), except in final classes and
 /// for constructors (observed on PHP 8.5).
-fn is_tentative(f: &Func) -> bool {
+pub(crate) fn is_tentative(f: &Func) -> bool {
     // Methods added in PHP 8.0 and later, and magic methods, have real
     // return types (PHP manual changelogs).
     const REAL: &[&str] = &[

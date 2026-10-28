@@ -120,7 +120,7 @@ impl Vm {
         for &i in &unit.toplevel_classes {
             let decl = unit.main.classes[i as usize].clone();
             if self.can_early_bind(&decl) {
-                self.declare_class(&decl)?;
+                self.early_bind_class(&decl)?;
             }
         }
         Ok(())
