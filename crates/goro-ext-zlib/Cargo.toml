@@ -6,3 +6,4 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+goro-ext-hash = { path = "../goro-ext-hash" }

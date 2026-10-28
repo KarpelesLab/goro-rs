@@ -86,3 +86,11 @@ bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
   and enums through an engine hook trait. Checked against a 33.7k-line
   PHP 8.5 fixture; 1.25-7.6x PHP's throughput on multi-MB documents
   (iterative, so nesting depth is bounded by `$depth` only).
+- `goro-ext-zlib`: the zlib extension on bytes: `gz*`/`zlib_*` one-shot
+  functions with PHP's buffer rounds and warnings, `deflate_*`/`inflate_*`
+  contexts (flush modes, dictionaries, statuses), the gzip file layer under
+  `gzopen()` and the `zlib.*` filters. Its deflate encoder produces the same
+  bytes as PHP 8.5 for every level, strategy, memory level, window and flush
+  pattern tried (~3.6k compressed outputs, ~3.6k behaviour cases recorded
+  from PHP 8.5); compression at 1.0-1.3x and decompression at 1.3-1.5x
+  PHP's throughput.
