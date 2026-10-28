@@ -171,6 +171,8 @@ fn cli(args: Vec<OsString>) -> i32 {
     let mut each: Option<Script> = None;
     let mut end: Option<Vec<u8>> = None;
     let mut interactive = false;
+    let mut server: Option<Vec<u8>> = None;
+    let mut docroot: Option<Vec<u8>> = None;
     let mut positional = false;
     let mut i = 0;
     'args: while i < args.len() {
@@ -308,10 +310,8 @@ fn cli(args: Vec<OsString>) -> i32 {
                 'w' => mode = Mode::Strip,
                 's' => mode = Mode::Highlight,
                 'a' => interactive = true,
-                't' | 'S' => {
-                    eprintln!("The built-in web server is not supported by goro");
-                    return 1;
-                }
+                'S' => server = val,
+                't' => docroot = val,
                 '6' => {
                     // --ini: no configuration file is read by default.
                     println!(
@@ -365,6 +365,21 @@ fn cli(args: Vec<OsString>) -> i32 {
             from_file.extend(ini);
             ini = from_file;
         }
+    }
+    if let Some(addr) = server
+        && matches!(mode, Mode::Run)
+    {
+        // The built-in web server (PHP manual: Built-in web server).
+        let router = match script {
+            Some(Script::File(f)) => Some(f),
+            _ => None,
+        };
+        return goro_engine::cli_server::serve(goro_engine::cli_server::ServerOptions {
+            addr,
+            docroot,
+            router,
+            ini,
+        });
     }
     if interactive && matches!(mode, Mode::Run) {
         println!("Interactive shell (-a) requires the readline extension.");

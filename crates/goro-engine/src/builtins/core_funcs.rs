@@ -1670,6 +1670,11 @@ fn error_log(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 return Ok(Value::Bool(ok));
             }
             vm.out.flush();
+            if vm.out.sapi.server {
+                // The web server's log (observed on PHP 8.5).
+                crate::cli_server::log(&msg.to_string_lossy());
+                return Ok(Value::Bool(true));
+            }
             let mut v = msg.to_vec();
             v.push(b'\n');
             vm.write_stderr(&v);

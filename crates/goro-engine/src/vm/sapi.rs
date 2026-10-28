@@ -29,6 +29,8 @@ pub struct Sapi {
     pub input: Vec<u8>,
     /// Files received with the request (is_uploaded_file()).
     pub uploads: Vec<Vec<u8>>,
+    /// The request's header fields (getallheaders()).
+    pub request_headers: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 /// How a response reaches the client; the web server's HTTP layer

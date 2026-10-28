@@ -51,6 +51,15 @@ pub static MODULE: Module = Module {
     ..Module::EMPTY
 };
 
+/// Once output started, the web server's headers are final: they are
+/// sent, with the default Content-type (test
+/// sapi/cli/tests/php_cli_server_019).
+pub fn commit(vm: &mut Vm) {
+    if vm.out.written > 0 && vm.out.sapi.conn.is_some() {
+        vm.out.flush();
+    }
+}
+
 /// The headers can no longer change.
 pub fn sent(vm: &Vm) -> bool {
     vm.out.written > 0 || vm.out.sapi.sent
@@ -201,6 +210,7 @@ fn header_remove(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn headers_list(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    commit(vm);
     let list = vm
         .out
         .sapi
@@ -216,7 +226,7 @@ fn headers_sent(vm: &mut Vm, a: &mut Args) -> R<Value> {
         (Some((f, l)), true) => (f.clone(), *l as i64),
         _ => (Vec::new(), 0),
     };
-    if a.len() > 0 {
+    if !a.is_empty() {
         a.set_ref(0, Value::Str(PhpStr::from(f)));
     }
     if a.len() > 1 {

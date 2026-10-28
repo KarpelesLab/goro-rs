@@ -155,6 +155,18 @@ impl Vm {
         }
         let label = level_label(level);
         let file = String::from_utf8_lossy(file);
+        let fatal_level =
+            level & (E_ERROR | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR | E_PARSE) != 0;
+        if fatal_level
+            && self.out.sapi.server
+            && self.ini.display_errors == 0
+            && !crate::builtins::headers::sent(self)
+        {
+            // A fatal error with errors hidden makes the web server's
+            // response a 500 (test sapi/cli/tests/bug43177).
+            self.out.sapi.status = 500;
+            self.out.sapi.status_line = Some(b"HTTP/1.0 500 Internal Server Error".to_vec());
+        }
         if self.ini.log_errors {
             let text = format!("PHP {}:  {} in {} on line {}\n", label, msg, file, line);
             self.out.flush();
@@ -169,6 +181,13 @@ impl Vm {
             }
             _ => {
                 let text = if self.ini.html_errors {
+                    // The message is HTML-escaped (test
+                    // sapi/cli/tests/gh13113).
+                    let msg = msg
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;")
+                        .replace('"', "&quot;");
                     format!(
                         "<br />\n<b>{}</b>:  {} in <b>{}</b> on line <b>{}</b><br />\n",
                         label, msg, file, line
