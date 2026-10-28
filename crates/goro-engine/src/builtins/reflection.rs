@@ -709,7 +709,13 @@ pub static MODULE: Module = Module {
         ("reflectiongenerator::__construct", g_construct),
         ("reflectiongenerator::getexecutingline", g_line),
         ("reflectiongenerator::getexecutingfile", g_file),
-        ("reflectiongenerator::gettrace", empty_array),
+        ("reflectiongenerator::gettrace", g_trace),
+        ("reflectionfiber::__construct", fb_construct),
+        ("reflectionfiber::getfiber", fb_fiber),
+        ("reflectionfiber::getexecutingfile", fb_file),
+        ("reflectionfiber::getexecutingline", fb_line),
+        ("reflectionfiber::getcallable", fb_callable),
+        ("reflectionfiber::gettrace", fb_trace),
         ("reflectiongenerator::getfunction", g_function),
         ("reflectiongenerator::getthis", g_this),
         ("reflectiongenerator::getexecutinggenerator", g_gen),
@@ -763,6 +769,7 @@ pub enum Refl {
         repeated: bool,
     },
     Generator(ObjRef),
+    Fiber(ObjRef),
     Reference(usize),
     Extension(PhpStr),
     GlobalConst(PhpStr),
@@ -779,7 +786,9 @@ impl goro_runtime::NativeData for ReflData {
             | Refl::Param {
                 closure: Some(c), ..
             } => visit(&Value::Object(c.clone())),
-            Refl::Generator(g) | Refl::Object(_, g) => visit(&Value::Object(g.clone())),
+            Refl::Generator(g) | Refl::Fiber(g) | Refl::Object(_, g) => {
+                visit(&Value::Object(g.clone()))
+            }
             _ => {}
         }
     }
@@ -5730,57 +5739,74 @@ fn g_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(g) = a.obj(0) else {
         return Ok(Value::Null);
     };
-    let done = vm
-        .with_gen(&g, |d| d.state == crate::vm::iter::GenState::Done)
-        .unwrap_or(true);
-    if done {
-        return refl_error(
-            vm,
-            "Cannot create ReflectionGenerator based on a terminated Generator",
-        );
-    }
+    let _ = vm;
+    // PHP 8.4+: finished generators can be reflected too (observed on
+    // PHP 8.5; test ReflectionGenerator_after_termination).
     set_data(&o, Refl::Generator(g));
     Ok(Value::Null)
 }
-fn g_line(vm: &mut Vm, a: &mut Args) -> R<Value> {
+fn gen_done(vm: &Vm, g: &ObjRef) -> bool {
+    vm.with_gen(g, |d| d.state == crate::vm::iter::GenState::Done)
+        .unwrap_or(true)
+}
+/// The generator, unless it has finished ("Cannot fetch information from
+/// a closed Generator").
+fn open_gen(vm: &mut Vm, a: &Args) -> R<Option<ObjRef>> {
     let Some(g) = gen_of(a) else {
+        return Ok(None);
+    };
+    if gen_done(vm, &g) {
+        return refl_error(vm, "Cannot fetch information from a closed Generator");
+    }
+    Ok(Some(g))
+}
+/// Where the innermost generator stands; a generator not started yet is
+/// at its function's first line.
+fn gen_location(vm: &mut Vm, g: &ObjRef) -> (PhpStr, u32) {
+    let inner = vm.generator_executing_gen(g);
+    if let Some(at) = vm.generator_executing(&inner) {
+        let started = vm
+            .with_gen(&inner, |d| d.state != crate::vm::iter::GenState::Created)
+            .unwrap_or(true);
+        if started {
+            return at;
+        }
+    }
+    match vm.generator_func_info(&inner) {
+        Some((f, _, _)) => match code_of(&f) {
+            Some(c) => (c.file.clone(), c.line_start),
+            None => (PhpStr::empty(), 0),
+        },
+        None => (vm.cur_file(), vm.cur_line()),
+    }
+}
+fn g_line(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let Some(g) = open_gen(vm, a)? else {
         return Ok(Value::Null);
     };
-    let l = vm
-        .with_gen(&g, |d| {
-            d.frame
-                .as_ref()
-                .map(|f| f.code().line_of(f.ip.saturating_sub(1) as usize))
-        })
-        .flatten()
-        .unwrap_or(0);
-    Ok(Value::Int(l as i64))
+    Ok(Value::Int(gen_location(vm, &g).1 as i64))
 }
 fn g_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some(g) = gen_of(a) else {
+    let Some(g) = open_gen(vm, a)? else {
         return Ok(Value::Null);
     };
-    let f = vm
-        .with_gen(&g, |d| d.frame.as_ref().map(|f| f.code().file.clone()))
-        .flatten()
-        .unwrap_or_default();
-    Ok(Value::Str(f))
+    Ok(Value::Str(gen_location(vm, &g).0))
+}
+fn g_trace(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let Some(g) = open_gen(vm, a)? else {
+        return Ok(Value::Array(PhpArray::new()));
+    };
+    let opts = a.int_or(0, 1);
+    Ok(Value::Array(vm.generator_trace(&g, opts)))
 }
 fn g_function(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(g) = gen_of(a) else {
         return Ok(Value::Null);
     };
-    let info = vm
-        .with_gen(&g, |d| {
-            d.frame
-                .as_ref()
-                .map(|f| (f.func.clone(), f.closure.clone()))
-        })
-        .flatten();
-    match info {
-        Some((f, c)) => {
-            if f.scope().is_some() && c.is_none() {
-                let cls = vm.rc_class(f.scope.get());
+    match vm.generator_func_info(&g) {
+        Some((f, c, scope)) => {
+            if !scope.is_null() && c.is_none() {
+                let cls = vm.rc_class(scope);
                 return Ok(Value::Object(new_refl(
                     vm,
                     "ReflectionMethod",
@@ -5800,7 +5826,7 @@ fn g_function(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
 }
 fn g_this(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some(g) = gen_of(a) else {
+    let Some(g) = open_gen(vm, a)? else {
         return Ok(Value::Null);
     };
     Ok(vm
@@ -5809,17 +5835,82 @@ fn g_this(vm: &mut Vm, a: &mut Args) -> R<Value> {
         .map(Value::Object)
         .unwrap_or_default())
 }
-fn g_gen(_vm: &mut Vm, a: &mut Args) -> R<Value> {
-    Ok(gen_of(a).map(Value::Object).unwrap_or_default())
+fn g_gen(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let Some(g) = open_gen(vm, a)? else {
+        return Ok(Value::Null);
+    };
+    Ok(Value::Object(vm.generator_executing_gen(&g)))
 }
 fn g_closed(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(g) = gen_of(a) else {
         return Ok(Value::Bool(true));
     };
-    Ok(Value::Bool(
-        vm.with_gen(&g, |d| d.state == crate::vm::iter::GenState::Done)
-            .unwrap_or(true),
-    ))
+    Ok(Value::Bool(gen_done(vm, &g)))
+}
+
+// ---------------------------------------------------------------- fibers
+
+fn fiber_of(a: &Args) -> Option<ObjRef> {
+    data(a.this_obj(), |r| match r {
+        Refl::Fiber(f) => Some(f.clone()),
+        _ => None,
+    })
+}
+fn fb_construct(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let o = a.this_obj().clone();
+    if let Some(f) = a.obj(0) {
+        set_data(&o, Refl::Fiber(f));
+    }
+    Ok(Value::Null)
+}
+fn fb_fiber(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(fiber_of(a).map(Value::Object).unwrap_or_default())
+}
+const FIBER_NO_INFO: &str =
+    "Cannot fetch information from a fiber that has not been started or is terminated";
+/// Where the fiber stands: its Fiber::suspend() call, or the caller when
+/// it is the running fiber.
+fn fiber_location(vm: &mut Vm, a: &Args) -> R<(PhpStr, u32)> {
+    let Some(f) = fiber_of(a) else {
+        return vm.throw("Error", FIBER_NO_INFO);
+    };
+    use crate::builtins::fiber::FiberStatus;
+    match vm.fiber_info(&f).map(|i| i.0) {
+        Some(FiberStatus::Suspended) => match vm.fiber_executing(&f) {
+            Some(at) => Ok(at),
+            None => vm.throw("Error", FIBER_NO_INFO),
+        },
+        Some(FiberStatus::Running) => Ok((vm.cur_file(), vm.cur_line())),
+        _ => vm.throw("Error", FIBER_NO_INFO),
+    }
+}
+fn fb_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Str(fiber_location(vm, a)?.0))
+}
+fn fb_line(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    Ok(Value::Int(fiber_location(vm, a)?.1 as i64))
+}
+fn fb_callable(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let Some(f) = fiber_of(a) else {
+        return Ok(Value::Null);
+    };
+    match vm.fiber_info(&f) {
+        Some((crate::builtins::fiber::FiberStatus::Terminated, _)) | None => vm.throw(
+            "Error",
+            "Cannot fetch the callable from a fiber that has terminated",
+        ),
+        Some((_, c)) => Ok(c),
+    }
+}
+fn fb_trace(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let Some(f) = fiber_of(a) else {
+        return vm.throw("Error", FIBER_NO_INFO);
+    };
+    let opts = a.int_or(0, 1);
+    match vm.fiber_trace(&f, opts) {
+        Some(t) => Ok(Value::Array(t)),
+        None => vm.throw("Error", FIBER_NO_INFO),
+    }
 }
 
 #[allow(dead_code)]
