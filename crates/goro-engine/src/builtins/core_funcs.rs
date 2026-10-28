@@ -351,23 +351,6 @@ pub static MODULE: Module = Module {
             uniqid,
         ),
         (
-            "function headers_sent(&$filename = null, &$line = null): bool",
-            headers_sent,
-        ),
-        (
-            "function header(string $header, bool $replace = true, int $response_code = 0): void",
-            header,
-        ),
-        (
-            "function header_remove(?string $name = null): void",
-            noop_void,
-        ),
-        ("function headers_list(): array", empty_array),
-        (
-            "function http_response_code(int $response_code = 0): int|bool",
-            http_response_code,
-        ),
-        (
             "function setlocale(int $category, $locales, ...$rest): string|false",
             setlocale,
         ),
@@ -2040,17 +2023,6 @@ pub struct ResponseHeaders {
     pub content_type: Option<PhpStr>,
 }
 
-/// header(): nothing is sent in the CLI; the Content-Type is remembered.
-fn header(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let h = a.str(0);
-    if let Some(p) = h.iter().position(|&c| c == b':')
-        && h[..p].trim_ascii().eq_ignore_ascii_case(b"content-type")
-    {
-        vm.ext::<ResponseHeaders>().content_type = Some(PhpStr::from(h[p + 1..].trim_ascii()));
-    }
-    Ok(Value::Null)
-}
-
 fn noop_void(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Null)
 }
@@ -2059,12 +2031,12 @@ fn zero_int(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Int(0))
 }
 
-fn empty_array(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Array(PhpArray::new()))
-}
-
-fn php_sapi_name(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Str(PhpStr::from("cli")))
+fn php_sapi_name(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    Ok(Value::Str(PhpStr::from(if vm.out.sapi.server {
+        "cli-server"
+    } else {
+        "cli"
+    })))
 }
 
 fn phpversion(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2389,14 +2361,6 @@ fn uniqid(_vm: &mut Vm, a: &mut Args) -> R<Value> {
         s.extend_from_slice(format!("{:.8}", f).as_bytes());
     }
     Ok(Value::Str(PhpStr::from(s)))
-}
-
-fn headers_sent(vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Bool(vm.out.written > 0))
-}
-
-fn http_response_code(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Bool(false))
 }
 
 fn setlocale(_vm: &mut Vm, a: &mut Args) -> R<Value> {

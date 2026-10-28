@@ -228,14 +228,6 @@ pub static MODULE: Module = Module {
             disk_free_space,
         ),
         (
-            "function is_uploaded_file(string $filename): bool",
-            ret_false,
-        ),
-        (
-            "function move_uploaded_file(string $from, string $to): bool",
-            ret_false,
-        ),
-        (
             "function fputcsv($stream, array $fields, string $separator = \",\", string $enclosure = \"\\\"\", string $escape = \"\\\\\", string $eol = \"\\n\"): int|false",
             fputcsv,
         ),
@@ -837,7 +829,7 @@ pub fn open_stream(
             }
             b"input" => Stream::new(
                 Backing::Memory {
-                    data: Vec::new(),
+                    data: vm.out.sapi.input.clone(),
                     pos: 0,
                 },
                 b"rb",
@@ -2290,9 +2282,6 @@ fn noop(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 }
 fn ret_true(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Bool(true))
-}
-fn ret_false(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Bool(false))
 }
 fn ret_zero(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Int(0))
