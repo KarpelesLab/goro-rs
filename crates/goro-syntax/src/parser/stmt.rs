@@ -875,7 +875,7 @@ impl<'a> Parser<'a> {
         // 8.5 with token_get_all(TOKEN_PARSE)): a fatal error when the value
         // is not a literal, else a warning (zend.multibyte is not supported).
         for (name, value) in directives.iter() {
-            if name.name.eq_ignore_ascii_case(b"encoding") {
+            if self.opts_encoding_checks() && name.name.eq_ignore_ascii_case(b"encoding") {
                 if !matches!(
                     value.kind,
                     ExprKind::String(..) | ExprKind::Int(_) | ExprKind::Float(_)

@@ -411,6 +411,13 @@ pub struct Vm {
     pub deprecating: Vec<usize>,
     /// The method name a `__call`/`__callStatic` call is about to run for.
     pub magic_call_name: Option<PhpStr>,
+    /// register_tick_function(): (callable, arguments).
+    pub tick_funcs: Vec<(Value, Vec<Value>)>,
+    /// Statements run under declare(ticks), and whether tick functions run.
+    pub tick_count: u64,
+    pub in_tick: bool,
+    /// The tick function running.
+    pub tick_running: Option<Value>,
     /// Attributes of user constants declared with `const` (by normalized
     /// name).
     pub const_attrs: HashMap<PhpStr, Rc<[crate::bytecode::AttrInfo]>>,

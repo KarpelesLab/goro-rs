@@ -798,6 +798,7 @@ impl Vm {
                         self.declare_class(&decl)?;
                     }
                 }
+                Op::Tick { every } => self.tick(every)?,
                 Op::DeclareConst { name, val } => {
                     let n = self.get(name)?;
                     let v = self.get(val)?;
