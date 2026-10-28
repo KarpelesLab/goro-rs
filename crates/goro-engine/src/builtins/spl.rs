@@ -625,11 +625,19 @@ pub struct AoData {
     /// A sort is running: the data can't change (test
     /// ArrayObject_exchange_array_during_sorting).
     sorting: bool,
+    /// A RecursiveArrayIterator child made from an array element: the
+    /// parent and the element's position. The data is that element, so
+    /// changes reach the parent (tests bug42654, bug42654_2); `storage`
+    /// is the fallback once the element is gone.
+    link: Option<(ObjRef, u32)>,
 }
 
 impl goro_runtime::NativeData for AoData {
     fn trace(&self, visit: &mut dyn FnMut(&Value)) {
         visit(&self.storage);
+        if let Some((p, _)) = &self.link {
+            visit(&Value::Object(p.clone()));
+        }
     }
     fn clear(&mut self) {
         self.storage = Value::Array(PhpArray::new());
@@ -647,6 +655,7 @@ fn ao_hooks() -> NativeHooks {
                     iter_class: PhpStr::from("ArrayIterator"),
                     pos: 0,
                     sorting: false,
+                    link: None,
                 },
             )
         }),
@@ -655,14 +664,15 @@ fn ao_hooks() -> NativeHooks {
             // A cloned ArrayObject wrapping another object gets a copy of
             // its data (tests ArrayObject_clone_other_std_props,
             // arrayObject_clone_basic2).
-            let copy = match with(from, |d: &mut AoData| d.storage.clone()) {
+            let copy = match Some(ao_own_storage(from)) {
                 Some(Value::Object(x)) if !shares && !ObjRef::ptr_eq(&x, from) => {
                     Some(ao_array(vm, from))
                 }
                 _ => None,
             };
+            let own = ao_own_storage(from);
             let d = with(from, |d: &mut AoData| AoData {
-                storage: match (&d.storage, copy) {
+                storage: match (&own, copy) {
                     (_, Some(c)) => Value::Array(c),
                     (Value::Array(_), _) if shares => Value::Object(from.clone()),
                     // An object wrapping itself: the clone wraps the clone
@@ -674,6 +684,7 @@ fn ao_hooks() -> NativeHooks {
                 iter_class: d.iter_class.clone(),
                 pos: d.pos,
                 sorting: false,
+                link: None,
             });
             if let Some(d) = d {
                 set_native(to, d);
@@ -737,6 +748,12 @@ fn ao_owner(o: &ObjRef) -> ObjRef {
 /// The storage array's slot, when the data is an array.
 fn ao_storage_ptr(o: &ObjRef) -> Option<*mut Value> {
     let owner = ao_owner(o);
+    let link = with(&owner, |d: &mut AoData| d.link.clone()).flatten();
+    if let Some((parent, pos)) = link
+        && let Some(p) = ao_elem_ptr(&parent, pos)
+    {
+        return Some(p);
+    }
     with(&owner, |d: &mut AoData| {
         if matches!(d.storage, Value::Array(_)) {
             Some(&mut d.storage as *mut Value)
@@ -745,6 +762,40 @@ fn ao_storage_ptr(o: &ObjRef) -> Option<*mut Value> {
         }
     })
     .flatten()
+}
+
+/// The slot of the array at position `pos` of `parent`'s data (see
+/// [`AoData::link`]).
+fn ao_elem_ptr(parent: &ObjRef, pos: u32) -> Option<*mut Value> {
+    let pp = ao_storage_ptr(parent)?;
+    // SAFETY: storage slots live in the owners' native data, which nothing
+    // replaces while the pointer is used.
+    let Value::Array(a) = (unsafe { &mut *pp }) else {
+        return None;
+    };
+    let v = a.make_mut().value_at_mut(pos)? as *mut Value;
+    match unsafe { &mut *v } {
+        Value::Array(_) => Some(v),
+        Value::Ref(r) => {
+            let mut g = r.borrow_mut();
+            let p = &mut *g as *mut Value;
+            drop(g);
+            matches!(unsafe { &*p }, Value::Array(_)).then_some(p)
+        }
+        _ => None,
+    }
+}
+
+/// The object's own data (an array or an object), following a child's
+/// link.
+fn ao_own_storage(o: &ObjRef) -> Value {
+    let link = with(o, |d: &mut AoData| d.link.clone()).flatten();
+    if let Some((parent, pos)) = link
+        && let Some(p) = ao_elem_ptr(&parent, pos)
+    {
+        return unsafe { (*p).clone() };
+    }
+    with(o, |d: &mut AoData| d.storage.clone()).unwrap_or_default()
 }
 
 /// The wrapped plain object, when the data is an object's properties.
@@ -956,6 +1007,7 @@ fn ao_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let storage = ao_input(vm, a, v, "__construct")?;
     let flags = ao_inherit_flags(a, &storage, flags);
     with(&o, |d: &mut AoData| {
+        d.link = None;
         d.storage = storage;
         d.flags = flags;
         d.iter_class = ic;
@@ -1006,6 +1058,7 @@ fn ai_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let storage = ao_input(vm, a, v, "__construct")?;
     let flags = ao_inherit_flags(a, &storage, a.int_or(1, 0));
     with(&o, |d: &mut AoData| {
+        d.link = None;
         d.storage = storage;
         d.flags = flags;
         d.pos = 0;
@@ -1272,10 +1325,8 @@ fn is_iterator_class(vm: &Vm, a: &Args) -> bool {
 
 fn ao_serialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
-    let (flags, storage, ic) = with(&o, |d: &mut AoData| {
-        (d.flags, d.storage.clone(), d.iter_class.clone())
-    })
-    .unwrap();
+    let storage = ao_own_storage(&o);
+    let (flags, ic) = with(&o, |d: &mut AoData| (d.flags, d.iter_class.clone())).unwrap();
     // An object wrapping itself is flagged instead of stored (test
     // ArrayObject/bug74669).
     let (flags, storage) = match &storage {
@@ -1327,6 +1378,7 @@ fn ao_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if flags & AO_IS_SELF != 0 {
         with(&o, |d: &mut AoData| {
             d.flags = flags & !AO_IS_SELF;
+            d.link = None;
             d.storage = Value::Object(o.clone());
         });
         restore_members(vm, &o, &m)?;
@@ -1346,6 +1398,7 @@ fn ao_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     with(&o, |d: &mut AoData| {
         d.flags = flags;
+        d.link = None;
         d.storage = storage;
     });
     restore_members(vm, &o, &m)?;
@@ -1379,7 +1432,8 @@ fn ao_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn ao_serialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
-    let (flags, storage) = with(&o, |d: &mut AoData| (d.flags, d.storage.clone())).unwrap();
+    let storage = ao_own_storage(&o);
+    let flags = with(&o, |d: &mut AoData| d.flags).unwrap();
     // One numbering, where the flags are value 1 (test bug45826).
     vm.with_ser_ctx(|vm| {
         let mut out = b"x:".to_vec();
@@ -1465,6 +1519,7 @@ fn ao_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     with(&o, |d: &mut AoData| {
         d.flags = flags;
+        d.link = None;
         d.storage = storage;
     });
     Ok(Value::Null)
@@ -1481,6 +1536,7 @@ fn ao_get_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     let it = vm.instantiate(&cls)?;
     with(&it, |d: &mut AoData| {
+        d.link = None;
         d.storage = Value::Object(o.clone());
         d.flags = flags;
         d.pos = 0;
@@ -1494,7 +1550,10 @@ fn ao_exchange(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let old = ao_array(vm, &o);
     let v = a.val(0);
     let storage = ao_input(vm, a, v, "exchangeArray")?;
-    with(&o, |d: &mut AoData| d.storage = storage);
+    with(&o, |d: &mut AoData| {
+        d.link = None;
+        d.storage = storage;
+    });
     Ok(Value::Array(old))
 }
 
@@ -1514,7 +1573,7 @@ fn ao_get_iter_class(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn ao_debug_info(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let mut out = members(vm, &o);
-    let storage = with(&o, |d: &mut AoData| d.storage.clone()).unwrap_or_default();
+    let storage = ao_own_storage(&o);
     if matches!(&storage, Value::Object(x) if ObjRef::ptr_eq(x, &o)) {
         // test ArrayObject/array_022
         return Ok(Value::Array(out));
@@ -1742,8 +1801,8 @@ fn rai_has_children(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn rai_get_children(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let flags = ao_flags(&o);
-    let cur = ai_entry(vm, &o).map(|e| e.2);
-    let Some(cur) = cur else {
+    let entry = ai_entry(vm, &o);
+    let Some((pos, _, cur)) = entry else {
         return Ok(Value::Null);
     };
     match &cur {
@@ -1781,10 +1840,17 @@ fn rai_get_children(vm: &mut Vm, a: &mut Args) -> R<Value> {
             // ArrayObject/bug38618).
             vm.deprecated("ArrayIterator::__construct(): Using an object as a backing array for ArrayIterator is deprecated, as it allows violating class constraints and invariants")?;
         }
+        let is_arr = matches!(cur, Value::Array(_));
         with(&child, |d: &mut AoData| {
+            d.link = None;
             d.storage = cur;
             d.flags = flags;
             d.pos = 0;
+            // An array element is shared with the parent (tests
+            // bug42654, bug42654_2).
+            if is_arr {
+                d.link = Some((o.clone(), pos));
+            }
         });
     }
     Ok(Value::Object(child))
