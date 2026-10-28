@@ -160,11 +160,55 @@ pub trait NativeStream {
     }
 }
 
-/// A stream wrapper implemented in Rust.
+/// A stream wrapper implemented in Rust. The path operations are optional
+/// (PHP manual: streamWrapper, the same operations for user wrappers):
+/// without one, the file functions treat the URL as before (a plain path).
 pub struct NativeWrapper {
     /// Opens `url` with fopen's `mode`; warns (unless `quiet`) and returns
     /// none on failure, as fopen() does.
     pub open: fn(&mut Vm, &Args, &[u8], &[u8], bool) -> R<Option<Stream>>,
+    /// url_stat(url, flags): a stat array in a user wrapper's shape (keys
+    /// "mode", "size"... or 0..12), none when there is no such file.
+    /// `flags` are STREAM_URL_STAT_LINK (1) | STREAM_URL_STAT_QUIET (2).
+    pub url_stat: Option<fn(&mut Vm, &[u8], i64) -> R<Option<PhpArray>>>,
+    /// unlink(url): warns itself on failure.
+    pub unlink: Option<fn(&mut Vm, &Args, &[u8]) -> R<bool>>,
+    /// rename(from, to).
+    pub rename: Option<fn(&mut Vm, &Args, &[u8], &[u8]) -> R<bool>>,
+    /// mkdir(url, mode, options) with STREAM_MKDIR_RECURSIVE (1).
+    pub mkdir: Option<fn(&mut Vm, &Args, &[u8], i64, i64) -> R<bool>>,
+    /// rmdir(url).
+    pub rmdir: Option<fn(&mut Vm, &Args, &[u8]) -> R<bool>>,
+    /// opendir(url): the entry names, none (after a warning) on failure.
+    pub opendir: Option<fn(&mut Vm, &Args, &[u8]) -> R<Option<Vec<Vec<u8>>>>>,
+    /// touch() (option 1, value [mtime, atime] or empty) and chmod()
+    /// (option 6, value the mode), as stream_metadata.
+    pub metadata: Option<fn(&mut Vm, &Args, &[u8], i64, &Value) -> R<bool>>,
+    /// include/require of a URL: the source and the name the included
+    /// file runs under, none when it can't be read.
+    pub include: Option<IncludeHook>,
+}
+
+/// include/require of a URL: `(vm, "include"..., url, quiet)` gives the
+/// source and the name the included file runs under, or none (after a
+/// warning unless `quiet`) when it can't be read.
+pub type IncludeHook = fn(&mut Vm, &str, &[u8], bool) -> R<Option<(Vec<u8>, Vec<u8>)>>;
+
+impl NativeWrapper {
+    /// A wrapper that only opens streams.
+    pub const fn new(open: fn(&mut Vm, &Args, &[u8], &[u8], bool) -> R<Option<Stream>>) -> Self {
+        NativeWrapper {
+            open,
+            url_stat: None,
+            unlink: None,
+            rename: None,
+            mkdir: None,
+            rmdir: None,
+            opendir: None,
+            metadata: None,
+            include: None,
+        }
+    }
 }
 
 /// Which side of a stream a filter is attached to.

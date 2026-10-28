@@ -366,7 +366,50 @@ impl Vm {
             self.put(dst, v);
             return Ok(());
         }
+        if let Some(op) = crate::builtins::streams::wrapper_for(self, &path).and_then(|w| w.include)
+        {
+            if self.include_native(dst, op, &path, kind, fname, false)? {
+                return Ok(());
+            }
+            return self.include_failed(dst, &path, kind, fname);
+        }
         let resolved = self.resolve_include(&path);
+        if resolved.is_none()
+            && !path.is_empty()
+            && !path.starts_with(b"/")
+            && !path.windows(3).any(|w| w == b"://")
+        {
+            // A relative path from a file inside a wrapper with an include
+            // hook (phar://): include_path entries of that wrapper, then
+            // the directory of the calling script (PHP manual: Phar, using
+            // Phar archives).
+            let mut dirs: Vec<Vec<u8>> = self
+                .ini
+                .include_path
+                .split(|&c| c == b':')
+                .filter(|d| d.windows(3).any(|w| w == b"://"))
+                .map(|d| d.to_vec())
+                .collect();
+            let cur = self.cur_file();
+            if let Some(p) = cur.iter().rposition(|&c| c == b'/')
+                && cur.windows(3).any(|w| w == b"://")
+            {
+                dirs.push(cur[..p].to_vec());
+            }
+            for mut d in dirs {
+                let Some(op) =
+                    crate::builtins::streams::wrapper_for(self, &d).and_then(|w| w.include)
+                else {
+                    continue;
+                };
+                let rel = path.strip_prefix(b"./").unwrap_or(&path);
+                d.push(b'/');
+                d.extend_from_slice(rel);
+                if self.include_native(dst, op, &d, kind, fname, true)? {
+                    return Ok(());
+                }
+            }
+        }
         let Some(resolved) = resolved else {
             if path.is_empty() {
                 self.raise(0, "")?;
@@ -432,6 +475,57 @@ impl Vm {
         };
         let v = self.run_attached(&src, &shown, false, fname)?;
         self.put(dst, v);
+        Ok(())
+    }
+
+    /// include of a URL through a native wrapper's include hook (which
+    /// warns when it can't open the file, unless `quiet`): false when the
+    /// file can't be read.
+    fn include_native(
+        &mut self,
+        dst: Reg,
+        op: crate::builtins::streams::IncludeHook,
+        url: &[u8],
+        kind: IncludeKind,
+        fname: &str,
+        quiet: bool,
+    ) -> R<bool> {
+        let Some((src, name)) = op(self, fname, url, quiet)? else {
+            return Ok(false);
+        };
+        let key = PhpStr::new(&name);
+        if self.included_set.contains(&key) {
+            if matches!(kind, IncludeKind::IncludeOnce | IncludeKind::RequireOnce) {
+                self.put(dst, Value::Bool(true));
+                return Ok(true);
+            }
+        } else {
+            self.included_set.insert(key.clone());
+            self.included.push(key);
+        }
+        let v = self.run_attached(&src, &name, false, fname)?;
+        self.put(dst, v);
+        Ok(true)
+    }
+
+    /// The end of an include whose file can't be opened.
+    fn include_failed(&mut self, dst: Reg, path: &[u8], kind: IncludeKind, fname: &str) -> R<()> {
+        let ip = self.ini.include_path.to_string_lossy();
+        if matches!(kind, IncludeKind::Require | IncludeKind::RequireOnce) {
+            let msg = format!(
+                "Failed opening required '{}' (include_path='{}')",
+                String::from_utf8_lossy(path),
+                ip
+            );
+            return Err(self.fatal(&msg));
+        }
+        self.warn(&format!(
+            "{}(): Failed opening '{}' for inclusion (include_path='{}')",
+            fname,
+            String::from_utf8_lossy(path),
+            ip
+        ))?;
+        self.put(dst, Value::Bool(false));
         Ok(())
     }
 

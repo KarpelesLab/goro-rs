@@ -1855,6 +1855,9 @@ fn unlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if let Some(cls) = super::userstream::wrapper_for(vm, &f) {
         return super::userstream::path_op(vm, a, &cls, "unlink", vec![Value::Str(f)]);
     }
+    if let Some(op) = super::streams::wrapper_for(vm, &f).and_then(|w| w.unlink) {
+        return Ok(Value::Bool(op(vm, a, &f)?));
+    }
     let p = vm.fs_path(&f);
     if p.is_dir() {
         vm.fwarn(a, &format!("{}: Is a directory", f.to_string_lossy()))?;
@@ -1880,6 +1883,9 @@ fn rename(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "rename",
             vec![Value::Str(from), Value::Str(to)],
         );
+    }
+    if let Some(op) = super::streams::wrapper_for(vm, &from).and_then(|w| w.rename) {
+        return Ok(Value::Bool(op(vm, a, &from, &to)?));
     }
     match std::fs::rename(vm.fs_path(&from), vm.fs_path(&to)) {
         Ok(()) => Ok(Value::Bool(true)),
@@ -1949,6 +1955,9 @@ fn mkdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
             vec![Value::Str(d), Value::Int(perms), Value::Int(opts)],
         );
     }
+    if let Some(op) = super::streams::wrapper_for(vm, &d).and_then(|w| w.mkdir) {
+        return Ok(Value::Bool(op(vm, a, &d, perms, rec as i64)?));
+    }
     let p = vm.fs_path(&d);
     let r = if rec {
         if p.is_dir() {
@@ -1996,6 +2005,9 @@ fn rmdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
             vec![Value::Str(d), Value::Int(8)],
         );
     }
+    if let Some(op) = super::streams::wrapper_for(vm, &d).and_then(|w| w.rmdir) {
+        return Ok(Value::Bool(op(vm, a, &d)?));
+    }
     match std::fs::remove_dir(vm.fs_path(&d)) {
         Ok(()) => Ok(Value::Bool(true)),
         Err(e) => fs_warn(vm, a, &d, &e),
@@ -2007,11 +2019,24 @@ fn rmdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn user_stat(vm: &mut Vm, a: &Args, flags: i64) -> R<Option<Option<PhpArray>>> {
     let f = a.str(0);
     let Some(cls) = super::userstream::wrapper_for(vm, &f) else {
+        if let Some(op) = super::streams::wrapper_for(vm, &f).and_then(|w| w.url_stat) {
+            return Ok(Some(op(vm, &f, flags)?.map(|st| stat_from_user(&st))));
+        }
         return Ok(None);
     };
     Ok(Some(
         super::userstream::url_stat(vm, &cls, &f, flags)?.map(|st| stat_from_user(&st)),
     ))
+}
+
+/// url_stat() through a native wrapper with one (is_readable(),
+/// is_writable() read the mode bits, as for user wrappers).
+fn native_stat(vm: &mut Vm, a: &Args) -> R<Option<Option<PhpArray>>> {
+    let f = a.str(0);
+    match super::streams::wrapper_for(vm, &f).and_then(|w| w.url_stat) {
+        Some(op) => Ok(Some(op(vm, &f, 2)?.map(|st| stat_from_user(&st)))),
+        None => Ok(None),
+    }
 }
 
 fn user_mode(st: &PhpArray) -> u32 {
@@ -2084,11 +2109,21 @@ fn is_readable(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
+    if let Some(st) = native_stat(vm, a)? {
+        return Ok(Value::Bool(
+            st.is_some_and(|st| user_mode(&st) & 0o444 != 0),
+        ));
+    }
     Ok(Value::Bool(access(vm, a, libc::R_OK)))
 }
 fn is_writable(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
+    }
+    if let Some(st) = native_stat(vm, a)? {
+        return Ok(Value::Bool(
+            st.is_some_and(|st| user_mode(&st) & 0o222 != 0),
+        ));
     }
     Ok(Value::Bool(access(vm, a, libc::W_OK)))
 }
@@ -2196,6 +2231,13 @@ fn touch(vm: &mut Vm, a: &mut Args) -> R<Value> {
             vec![Value::Str(f), Value::Int(1), Value::Array(times)],
         );
     }
+    if let Some(op) = super::streams::wrapper_for(vm, &f).and_then(|w| w.metadata) {
+        let times = match (a.opt_int(1), a.opt_int(2)) {
+            (None, _) => PhpArray::new(),
+            (Some(m), at) => PhpArray::from_values([Value::Int(m), Value::Int(at.unwrap_or(m))]),
+        };
+        return Ok(Value::Bool(op(vm, a, &f, 1, &Value::Array(times))?));
+    }
     let p = vm.fs_path(&f);
     if !p.exists() && std::fs::File::create(&p).is_err() {
         vm.fwarn(
@@ -2242,6 +2284,9 @@ fn chmod(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "stream_metadata",
             vec![Value::Str(f), Value::Int(6), Value::Int(m)],
         );
+    }
+    if let Some(op) = super::streams::wrapper_for(vm, &f).and_then(|w| w.metadata) {
+        return Ok(Value::Bool(op(vm, a, &f, 6, &Value::Int(m))?));
     }
     match std::fs::set_permissions(vm.fs_path(&f), std::fs::Permissions::from_mode(m as u32)) {
         Ok(()) => Ok(Value::Bool(true)),
@@ -2699,12 +2744,19 @@ fn scandir(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.fthrow(a, "ValueError", "Argument #1 ($directory) cannot be empty");
     }
     let order = a.int_or(1, 0);
+    let native = super::streams::wrapper_for(vm, &d).and_then(|w| w.opendir);
     let listed = match super::userstream::wrapper_for(vm, &d) {
         Some(cls) => match super::userstream::list(vm, a, &cls, &d)? {
             Some(n) => Ok(n),
             None => return Ok(Value::Bool(false)),
         },
-        None => list_dir(vm, &d),
+        None => match native {
+            Some(op) => match op(vm, a, &d)? {
+                Some(n) => Ok(n),
+                None => return Ok(Value::Bool(false)),
+            },
+            None => list_dir(vm, &d),
+        },
     };
     match listed {
         Ok(mut names) => {
@@ -2755,6 +2807,15 @@ fn opendir(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
             None => Value::Bool(false),
         });
+    }
+    if let Some(op) = super::streams::wrapper_for(vm, &d).and_then(|w| w.opendir) {
+        let Some(entries) = op(vm, a, &d)? else {
+            return Ok(Value::Bool(false));
+        };
+        let s = Stream::new(Backing::Dir { entries, pos: 0 }, b"r", &d, "", "dir");
+        let r = new_stream_res(s);
+        vm.last_dir = Some(r.clone());
+        return Ok(Value::Resource(r));
     }
     match list_dir(vm, &d) {
         Ok(entries) => {

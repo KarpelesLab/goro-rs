@@ -170,7 +170,7 @@ const fn consts() -> [(&'static str, ConstVal); 27] {
 
 static CONSTANTS: [(&str, ConstVal); 27] = consts();
 
-static WRAPPER: NativeWrapper = NativeWrapper { open: wrapper_open };
+static WRAPPER: NativeWrapper = NativeWrapper::new(wrapper_open);
 
 fn init(vm: &mut Vm) {
     register_filter(vm, "zlib.*", zlib_filter);
