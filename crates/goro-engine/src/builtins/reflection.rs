@@ -1198,10 +1198,11 @@ fn fa_extension(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !f.is_native() {
         return Ok(Value::Null);
     }
+    let e = func_ext(vm, &f).unwrap_or("Core");
     Ok(Value::Object(new_refl(
         vm,
         "ReflectionExtension",
-        Refl::Extension(PhpStr::from("standard")),
+        Refl::Extension(PhpStr::from(e)),
     )?))
 }
 fn fa_extension_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1209,17 +1210,7 @@ fn fa_extension_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !f.is_native() {
         return Ok(Value::Bool(false));
     }
-    let name = vm
-        .modules
-        .iter()
-        .find(|m| {
-            m.functions.iter().any(|(s, _)| {
-                crate::registry::sig_name(s).eq_ignore_ascii_case(&f.name.to_string_lossy())
-            })
-        })
-        .map(|m| m.name)
-        .unwrap_or("Core");
-    Ok(Value::from(name))
+    Ok(Value::from(func_ext(vm, &f).unwrap_or("Core")))
 }
 fn fa_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, c, _) = need_func!(vm, a);
@@ -1611,9 +1602,6 @@ fn func_ext(vm: &Vm, f: &Func) -> Option<&'static str> {
         }
         return None;
     }
-    if core_function(&f.name) {
-        return Some("Core");
-    }
     let n = f.name.to_string_lossy();
     Some(
         vm.modules
@@ -1623,7 +1611,7 @@ fn func_ext(vm: &Vm, f: &Func) -> Option<&'static str> {
                     .iter()
                     .any(|(s, _)| crate::registry::sig_name(s).eq_ignore_ascii_case(&n))
             })
-            .map(|m| m.name)
+            .map(|m| item_ext(m.name, Item::Func, &n))
             .unwrap_or("Core"),
     )
 }
@@ -5179,6 +5167,61 @@ fn ext_name_of(a: &Args) -> PhpStr {
         _ => PhpStr::empty(),
     })
 }
+/// Item kinds of a module, for [`item_ext`].
+#[derive(Clone, Copy, PartialEq)]
+enum Item {
+    Func,
+    Const,
+    Ini,
+}
+
+/// The extension PHP files a module's item under: goro's "Core" module
+/// also carries functions, constants and settings of ext/standard
+/// (PHP manual: Function handling, Classes/Objects, Errors... are Core;
+/// sleep(), CONNECTION_*, user_agent are standard).
+fn item_ext(module: &'static str, kind: Item, name: &str) -> &'static str {
+    if module != "Core" {
+        return module;
+    }
+    let core = match kind {
+        Item::Func => core_function(name.as_bytes()),
+        Item::Const => {
+            ["E_", "PHP_", "ZEND_", "DEBUG_BACKTRACE_", "UPLOAD_ERR_", "PEAR_"]
+                .iter()
+                .any(|p| name.starts_with(p))
+                || matches!(name, "DEFAULT_INCLUDE_PATH" | "TRUE" | "FALSE" | "NULL" | "STDIN" | "STDOUT" | "STDERR")
+        }
+        Item::Ini => !matches!(
+            name,
+            "user_agent"
+                | "default_socket_timeout"
+                | "auto_detect_line_endings"
+                | "from"
+                | "url_rewriter.tags"
+                | "url_rewriter.hosts"
+                | "browscap"
+                | "assert.active"
+                | "assert.bail"
+                | "assert.callback"
+                | "assert.exception"
+                | "assert.warning"
+        ),
+    };
+    if core { "Core" } else { "standard" }
+}
+
+/// The modules whose items may belong to extension `n` (Core's items are
+/// split between Core and standard).
+fn ext_modules(vm: &Vm, n: &[u8]) -> Vec<&'static Module> {
+    vm.modules
+        .iter()
+        .filter(|m| {
+            m.name.as_bytes() == n || (m.name == "Core" && n.eq_ignore_ascii_case(b"standard"))
+        })
+        .copied()
+        .collect()
+}
+
 fn ext_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let n = a.str(0);
@@ -5214,9 +5257,13 @@ fn ext_functions(vm: &mut Vm, a: &mut Args) -> R<Value> {
         .filter(|m| m.name.as_bytes() == n.as_bytes())
         .copied()
         .collect();
-    for m in mods {
+    let _ = mods;
+    for m in ext_modules(vm, &n) {
         for (sig, _) in m.functions {
             let name = crate::registry::sig_name(sig);
+            if item_ext(m.name, Item::Func, name).as_bytes() != n.as_bytes() {
+                continue;
+            }
             if let Some(f) = vm.functions.get(&lower(name.as_bytes())).cloned() {
                 let o = new_refl(
                     vm,
@@ -5235,13 +5282,11 @@ fn ext_functions(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn ext_constants(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = ext_name_of(a);
     let mut out = PhpArray::new();
-    for m in vm
-        .modules
-        .iter()
-        .filter(|m| m.name.as_bytes() == n.as_bytes())
-    {
+    for m in ext_modules(vm, &n) {
         for (k, v) in m.constants {
-            out.insert(Key::from(*k), v.to_value());
+            if item_ext(m.name, Item::Const, k).as_bytes() == n.as_bytes() {
+                out.insert(Key::from(*k), v.to_value());
+            }
         }
     }
     Ok(Value::Array(out))
@@ -5255,8 +5300,12 @@ fn ext_ini(vm: &mut Vm, a: &mut Args) -> R<Value> {
         .filter(|m| m.name.as_bytes() == n.as_bytes())
         .copied()
         .collect();
-    for m in mods {
+    let _ = mods;
+    for m in ext_modules(vm, &n) {
         for (k, _) in m.ini {
+            if item_ext(m.name, Item::Ini, k).as_bytes() != n.as_bytes() {
+                continue;
+            }
             let v = vm.get_ini(k.as_bytes()).map(Value::Str).unwrap_or_default();
             out.insert(Key::from(*k), v);
         }
@@ -5325,10 +5374,11 @@ fn const_ext(vm: &Vm, n: &[u8]) -> Option<&'static str> {
     if matches!(n, b"STDIN" | b"STDOUT" | b"STDERR") {
         return Some("Core");
     }
+    let name = String::from_utf8_lossy(n).into_owned();
     vm.modules
         .iter()
         .find(|m| m.constants.iter().any(|(k, _)| k.as_bytes() == n))
-        .map(|m| m.name)
+        .map(|m| item_ext(m.name, Item::Const, &name))
 }
 
 fn gc_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
