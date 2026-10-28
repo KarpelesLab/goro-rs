@@ -42,5 +42,6 @@ pub mod tree;
 pub mod writer;
 pub mod xinclude;
 pub mod xml;
+pub mod xpath;
 
 pub use tree::{Arena, NodeId, NodeType, QName, Str};
