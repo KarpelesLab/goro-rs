@@ -53,10 +53,10 @@ fn mk(s: &str, zone: &TimeZone) -> DateTime {
 fn php85_format() {
     let data = include_str!("fixtures/php85_format.txt");
     let utc = TimeZone::from_id("UTC").unwrap();
-    let mut lines = data.lines().peekable();
+    let lines = data.lines();
     let mut checked = 0;
     let mut cur: Option<DateTime> = None;
-    while let Some(line) = lines.next() {
+    for line in lines {
         if let Some(rest) = line.strip_prefix("  ") {
             // "  c=value" for the current date
             let (c, v) = rest.split_at(1);

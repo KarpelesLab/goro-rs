@@ -104,18 +104,17 @@ pub fn resolve(p: &Parsed, base_ts: i64, base_us: u32, zone: &TimeZone, mode: Mo
                 set(days, &mut y, &mut m, &mut d);
                 d = pick(y, m);
             }
-            // a time past midnight moves to the next month's first/last
-            // day ("last day of 2006.331 24:55" is February 28th)
+            // the day is set again after the time carries ("last day of
+            // 2006.331 24:55" is February 28th, "24:19:56, first day of"
+            // the 1st at 00:19:56; observed on PHP 8.5)
             let local = civil::civil_to_ts(y, m, d, h, i, s);
             let c = civil::Civil::from_ts(local);
-            if (c.y, c.m as i64) != norm_month(y, m) {
-                y = c.y;
-                m = c.m as i64;
-                d = pick(y, m) + (c.d as i64 - 1).min(0);
-                h = c.h as i64;
-                i = c.i as i64;
-                s = c.s as i64;
-            }
+            y = c.y;
+            m = c.m as i64;
+            d = pick(y, m);
+            h = c.h as i64;
+            i = c.i as i64;
+            s = c.s as i64;
         } else {
             if !month_of {
                 // the absolute fields are normalised before the relative
@@ -157,16 +156,25 @@ pub fn resolve(p: &Parsed, base_ts: i64, base_us: u32, zone: &TimeZone, mode: Mo
                 d = d.saturating_add(r.d);
             }
         }
-        if let Special::Weekdays(n) = r.special {
-            let days = add_weekdays(civil::days_from_civil(y, m, d), n);
-            set(days, &mut y, &mut m, &mut d);
-        }
-        // relative hours and below last, on the wall clock ("2004-04-07
-        // +1 hour" in Jerusalem lands in the gap; test bug33415-2.phpt)
+        // relative hours and below, on the wall clock ("2004-04-07 +1
+        // hour" in Jerusalem lands in the gap; test bug33415-2.phpt)
         h = h.saturating_add(r.h);
         i = i.saturating_add(r.i);
         s = s.saturating_add(r.s);
         us = us.saturating_add(r.us);
+        if let Special::Weekdays(n) = r.special {
+            // business days count from the date the relative time reaches
+            // ("-5 weekday @104931342", observed on PHP 8.5)
+            let extra = us.div_euclid(1_000_000);
+            let c =
+                civil::Civil::from_ts(civil::civil_to_ts(y, m, d, h, i, s.saturating_add(extra)));
+            us = us.rem_euclid(1_000_000);
+            let days = add_weekdays(civil::days_from_civil(c.y, c.m as i64, c.d as i64), n);
+            set(days, &mut y, &mut m, &mut d);
+            h = c.h as i64;
+            i = c.i as i64;
+            s = c.s as i64;
+        }
     }
 
     let extra_s = us.div_euclid(1_000_000);
