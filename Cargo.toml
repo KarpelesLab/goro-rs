@@ -8,6 +8,7 @@ members = [
     "crates/goro-ext-standard",
     "crates/goro-regex",
     "crates/goro-ext-date",
+    "crates/goro-charset",
 ]
 
 [workspace.package]
