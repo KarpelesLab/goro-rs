@@ -794,6 +794,14 @@ fn data<T>(o: &ObjRef, f: impl FnOnce(&Refl) -> T) -> T {
 }
 
 fn set_data(o: &ObjRef, r: Refl) {
+    // Reflection objects cannot be cloned or serialized (observed on PHP
+    // 8.5: "Trying to clone an uncloneable object of class ReflectionClass").
+    let c: &Rc<dyn goro_runtime::ClassInfo> = o.class();
+    let any: &dyn std::any::Any = &**c;
+    if let Some(cls) = any.downcast_ref::<Class>() {
+        cls.flags
+            .set(cls.flags.get() | cflags::NOT_CLONEABLE | cflags::NOT_SERIALIZABLE);
+    }
     *o.obj().native.borrow_mut() = Some(Box::new(ReflData(r)));
 }
 
@@ -1650,7 +1658,7 @@ fn func_string(
     doc_text(&mut s, indent, code_of(f).and_then(|c| c.doc_comment.as_ref()));
     let kind = if cls.is_some() {
         "Method"
-    } else if closure.is_some() && code_of(f).is_some_and(|c| c.flags & fflags::CLOSURE != 0) {
+    } else if closure.is_some() {
         "Closure"
     } else {
         "Function"
@@ -1843,6 +1851,9 @@ fn prop_string(vm: &mut Vm, cls: &Class, name: &PhpStr, dynamic: bool, indent: &
     if prop_abstract(cls, name) {
         m |= 64;
     }
+    if p.flags & mflags::PRIVATE_SET != 0 {
+        m |= 32;
+    }
     if m & 64 != 0 {
         s.push_str("abstract ");
     }
@@ -1892,9 +1903,9 @@ fn prop_string(vm: &mut Vm, cls: &Class, name: &PhpStr, dynamic: bool, indent: &
     if hooked {
         s.push_str(" {");
         for get in [true, false] {
-            if let Some(h) = hook_func(cls, name, get) {
+            if hook_func(cls, name, get).is_some() {
                 s.push(' ');
-                if h.flags & mflags::FINAL != 0 {
+                if hook_final(cls, name, get) {
                     s.push_str("final ");
                 }
                 s.push_str(if get { "get;" } else { "set;" });
@@ -2635,6 +2646,11 @@ fn c_has_prop(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if has_member_prop(&c, &n) {
         return Ok(Value::Bool(true));
     }
+    if let Some(obj) = this_object(a)
+        && obj.obj().props.borrow().get_str(&n).is_some()
+    {
+        return Ok(Value::Bool(true));
+    }
     // ReflectionObject also sees dynamic properties.
     let robj = vm.get_prop_raw(a.this_obj(), b"name");
     let _ = robj;
@@ -2664,6 +2680,21 @@ fn c_get_prop(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 cls: c2,
                 name: pn,
                 dynamic: false,
+            },
+        )?));
+    }
+    // ReflectionObject: dynamic properties of the object.
+    if !has_member_prop(&c, &n)
+        && let Some(obj) = this_object(a)
+        && obj.obj().props.borrow().get_str(&n).is_some()
+    {
+        return Ok(Value::Object(new_refl(
+            vm,
+            "ReflectionProperty",
+            Refl::Prop {
+                cls: c,
+                name: n,
+                dynamic: true,
             },
         )?));
     }
@@ -3672,6 +3703,12 @@ fn p_is_init(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if dynamic {
         return Ok(Value::Bool(o.obj().props.borrow().get_str(&n).is_some()));
     }
+    if !vm.class_of(&o).is_subclass_of(&c) {
+        return refl_error(
+            vm,
+            "Given object is not an instance of the class this property was declared in",
+        );
+    }
     match info.and_then(|p| p.slot) {
         Some(slot) => {
             let v = o.obj().slots.borrow()[slot as usize].clone();
@@ -3841,6 +3878,19 @@ fn p_has_hooks(vm: &mut Vm, a: &mut Args) -> R<Value> {
         pinfo(&c, &n).is_some_and(|p| p.has_hooks.0 || p.has_hooks.1),
     ))
 }
+/// Whether a property's hook is declared final.
+fn hook_final(c: &Class, n: &PhpStr, get: bool) -> bool {
+    let Some(decl_class) = prop_decl_class(c, n) else {
+        return false;
+    };
+    let dc = unsafe { &*decl_class };
+    dc.decl.as_ref().is_some_and(|d| {
+        d.props
+            .iter()
+            .any(|p| p.name == *n && p.hook_flags & if get { 4 } else { 8 } != 0)
+    })
+}
+
 /// A property with an abstract hook (in an interface or declared
 /// `abstract`) is abstract.
 fn prop_abstract(c: &Class, n: &PhpStr) -> bool {
@@ -4303,9 +4353,17 @@ fn par_optional(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Bool(i >= nreq || p.variadic))
 }
 fn par_has_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let (_, _, _, p) = need_param!(vm, a);
+    let (f, _, i, p) = need_param!(vm, a);
+    // A default before a required parameter is not available (the
+    // parameter is implicitly required).
+    let nreq = match &f.kind {
+        FuncKind::User(c) => c.num_required as usize,
+        FuncKind::Native { .. } => vm.native_sig(&f).num_required as usize,
+    };
     Ok(Value::Bool(
-        !matches!(p.default, ParamDefault::None) && p.default_text.as_deref() != Some("UNKNOWN"),
+        i >= nreq
+            && !matches!(p.default, ParamDefault::None)
+            && p.default_text.as_deref() != Some("UNKNOWN"),
     ))
 }
 fn par_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -4965,7 +5023,7 @@ fn rr_from(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let key = vm.to_key(&k, "array")?;
     match arr.get(key.as_ref()) {
         None => refl_error(vm, "Array key not found"),
-        Some(Value::Ref(r)) if r.refcount() > 1 || true => {
+        Some(Value::Ref(r)) if r.refcount() > 1 => {
             let id = r.addr();
             let cls = vm.find_class(b"ReflectionReference", false)?.unwrap();
             let o = vm.instantiate_raw(&cls)?;

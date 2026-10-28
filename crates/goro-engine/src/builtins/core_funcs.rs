@@ -1102,7 +1102,29 @@ fn property_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(c) = c else {
         return Ok(Value::Bool(false));
     };
-    if c.prop_map.borrow().contains_key(&p) || c.find_static(&p).is_some() {
+    // Private properties of ancestors do not count (observed on PHP 8.5).
+    // For objects, a private property of the calling scope's class is
+    // found too (observed on PHP 8.5; test Zend/tests/inheritance/bug50810).
+    let scope = if matches!(v, Value::Object(_)) {
+        vm.scope_ptr()
+    } else {
+        std::ptr::null()
+    };
+    let own_or_visible = |flags: u32, decl: *const crate::class::Class| {
+        flags & crate::class::mflags::PRIVATE == 0
+            || std::ptr::eq(decl, Rc::as_ptr(&c))
+            || std::ptr::eq(decl, scope)
+    };
+    let declared = {
+        let map = c.prop_map.borrow();
+        map.get(&p)
+            .map(|idxs| {
+                let pi = c.props.borrow()[idxs[0] as usize].clone();
+                own_or_visible(pi.flags, pi.class)
+            })
+            .unwrap_or(false)
+    };
+    if declared || c.find_static(&p).is_some_and(|s| own_or_visible(s.flags, s.class)) {
         return Ok(Value::Bool(true));
     }
     if let Value::Object(o) = &v {

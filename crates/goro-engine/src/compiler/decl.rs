@@ -1224,7 +1224,7 @@ impl<'a> Compiler<'a> {
                         );
                     }
                     let attrs = self.attributes(p.attrs)?;
-                    for it in p.props {
+                    for (pi, it) in p.props.iter().enumerate() {
                         if props.iter().any(|x| x.name.as_bytes() == it.name.name) {
                             return self.err(
                                 format!(
@@ -1290,7 +1290,12 @@ impl<'a> Compiler<'a> {
                             get,
                             set,
                             hook_flags,
-                            doc: it.doc_comment.or(p.doc_comment).map(PhpStr::new),
+                            // A declaration's doc comment belongs to its
+                            // first property (observed on PHP 8.5).
+                            doc: it
+                                .doc_comment
+                                .or(if pi == 0 { p.doc_comment } else { None })
+                                .map(PhpStr::new),
                             attrs: attrs.clone(),
                             line: it.span.line,
                         });
@@ -1712,7 +1717,8 @@ impl<'a> Compiler<'a> {
                 self.compile_fn(spec)?
             };
             if h.modifiers.has(Modifiers::FINAL) {
-                code.flags |= fflags::ABSTRACT & 0;
+                // Recorded for Reflection (`{ final get; }`): bits 4/8.
+                hflags |= if is_get { 4 } else { 8 };
             }
             if is_get {
                 get = Some(Rc::new(code));
