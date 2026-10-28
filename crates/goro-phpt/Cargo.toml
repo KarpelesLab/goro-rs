@@ -1,0 +1,8 @@
+[package]
+name = "goro-phpt"
+description = "Runner for PHP's .phpt test format"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]

@@ -1,0 +1,8 @@
+[package]
+name = "goro-engine"
+description = "Compiler and virtual machine executing PHP"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]

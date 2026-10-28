@@ -1,0 +1,8 @@
+[package]
+name = "goro-syntax"
+description = "Lexer, parser and AST for PHP 8.5 source"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]

@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/goro-syntax",
+    "crates/goro-runtime",
+    "crates/goro-engine",
+    "crates/goro-phpt",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/KarpelesLab/goro-rs"
+
+[package]
+name = "goro"
+description = "A clean-room PHP 8.5 implementation in Rust"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "goro"
+path = "src/main.rs"
+
+[dependencies]
+goro-syntax = { path = "crates/goro-syntax" }
+goro-runtime = { path = "crates/goro-runtime" }
+goro-engine = { path = "crates/goro-engine" }
+goro-phpt = { path = "crates/goro-phpt" }
+
+[profile.release]
+debug = 1
+lto = "thin"
+codegen-units = 16
