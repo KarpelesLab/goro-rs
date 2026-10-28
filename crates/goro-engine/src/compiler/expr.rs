@@ -599,7 +599,16 @@ impl<'a> Compiler<'a> {
                 self.parent_hook_call(sc, hint, line)
             }
             ExprKind::StaticCall(sc) => self.chain_root(e, |c| {
-                let class = c.class_spec(&sc.class)?;
+                let mut class = c.class_spec(&sc.class)?;
+                // `self::m()` forwards the late static binding class (PHP
+                // manual, Late Static Bindings: forwarding calls), so it
+                // stays relative instead of naming the class.
+                if let ClassRef::Name(n) = &sc.class
+                    && n.kind == NameKind::Unqualified
+                    && n.name.eq_ignore_ascii_case(b"self")
+                {
+                    class = ClassSpec::SelfRef;
+                }
                 let n = c.member_name(&sc.name)?;
                 c.free_spec(class);
                 c.free(n);

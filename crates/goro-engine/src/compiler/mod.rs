@@ -610,7 +610,11 @@ impl<'a> Compiler<'a> {
         if params.iter().any(|p| p.ty.is_some()) {
             flags |= fflags::TYPED_PARAMS;
         }
+        let byref_mask = crate::bytecode::byref_mask(&params);
+        let direct_params = params.iter().filter(|p| !p.variadic).count() as u32;
         Ok(FuncCode {
+            byref_mask,
+            direct_params,
             name,
             class_name: self.class.as_ref().map(|c| c.name.clone()),
             file: self.file.clone(),
