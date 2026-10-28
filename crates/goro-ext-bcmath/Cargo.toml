@@ -1,0 +1,8 @@
+[package]
+name = "goro-ext-bcmath"
+description = "PHP bcmath extension: arbitrary precision decimal arithmetic and BcMath\\Number"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]

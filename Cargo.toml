@@ -12,6 +12,7 @@ members = [
     "crates/goro-ext-hash",
     "crates/goro-ext-json",
     "crates/goro-ext-zlib",
+    "crates/goro-ext-bcmath",
 ]
 
 [workspace.package]
