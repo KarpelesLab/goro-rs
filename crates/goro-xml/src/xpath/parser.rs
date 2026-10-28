@@ -22,7 +22,7 @@ pub(crate) enum Axis {
     Parent,
     Preceding,
     PrecedingSibling,
-    SelfAxis,
+    Myself,
 }
 
 impl Axis {
@@ -40,7 +40,7 @@ impl Axis {
             "parent" => Axis::Parent,
             "preceding" => Axis::Preceding,
             "preceding-sibling" => Axis::PrecedingSibling,
-            "self" => Axis::SelfAxis,
+            "self" => Axis::Myself,
             _ => return None,
         })
     }
@@ -807,7 +807,7 @@ impl Parser {
             Some(Tok::Dot) => {
                 self.pos += 1;
                 return Ok(Step {
-                    axis: Axis::SelfAxis,
+                    axis: Axis::Myself,
                     test: NodeTest::Node,
                     preds: Vec::new(),
                 });

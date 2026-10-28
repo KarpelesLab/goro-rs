@@ -8,6 +8,7 @@
 //!
 //! Tests marked `doubleEscaped` (lone surrogates) are skipped.
 
+#[path = "h5common/mod.rs"]
 mod common;
 
 use common::Json;

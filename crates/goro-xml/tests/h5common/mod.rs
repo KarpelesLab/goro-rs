@@ -37,8 +37,7 @@ pub fn parse(s: &str) -> Json {
         b: s.as_bytes(),
         i: 0,
     };
-    let v = p.value();
-    v
+    p.value()
 }
 
 struct P<'a> {

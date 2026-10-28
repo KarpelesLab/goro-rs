@@ -752,7 +752,7 @@ impl Eval<'_> {
                     }
                 }
             }
-            Axis::SelfAxis => {
+            Axis::Myself => {
                 if self.matches(n, axis, test) {
                     out.push(n);
                 }
@@ -954,7 +954,7 @@ impl Eval<'_> {
             NormalizeSpace => {
                 let s = self.arg_string(args, 0, c)?;
                 let parts: Vec<&str> = s
-                    .split(|ch: char| matches!(ch, ' ' | '\t' | '\n' | '\r'))
+                    .split([' ', '\t', '\n', '\r'])
                     .filter(|p| !p.is_empty())
                     .collect();
                 Value::String(parts.join(" "))
