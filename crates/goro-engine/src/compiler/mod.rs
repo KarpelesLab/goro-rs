@@ -9,6 +9,7 @@
 
 mod decl;
 mod expr;
+mod hrh;
 mod scan;
 
 use std::collections::HashMap;
@@ -237,6 +238,8 @@ pub struct Compiler<'a> {
     pub(crate) in_const_expr: bool,
     /// Compiling the base of a member access chain.
     pub(crate) in_chain: bool,
+    /// Compiling the value of a `const` statement.
+    pub(crate) in_const_stmt: bool,
     /// Pending `?->` short-circuit jumps of the current chain.
     pub(crate) nullsafe_jumps: Vec<(usize, Reg)>,
 }
@@ -270,6 +273,7 @@ pub fn compile_program<'a>(
         zend_multibyte: ZEND_MULTIBYTE.with(|c| c.get()),
         in_const_expr: false,
         in_chain: false,
+        in_const_stmt: false,
         nullsafe_jumps: Vec::new(),
     };
     if let Some((cls, parent)) = eval_class {
@@ -296,6 +300,11 @@ pub fn compile_program<'a>(
             line: n.line,
         });
     }
+    if hrh::mentioned(src) {
+        for l in hrh::lines_stmts(prog.stmts, false) {
+            c.notice(goro_runtime::Level::Deprecated, hrh::MESSAGE, l);
+        }
+    }
     c.f.flags |= fflags::PSEUDO_MAIN;
     c.f.line = 1;
     let mut hoisted = Vec::new();
@@ -305,6 +314,7 @@ pub fn compile_program<'a>(
         c.check_namespaces(prog.stmts)?;
         c.top_stmts(prog.stmts, &mut hoisted, &mut classes)
     })();
+    hrh::order(&mut c.notices);
     if let Err(mut e) = r {
         e.notices = std::mem::take(&mut c.notices);
         return Err(e);
@@ -757,6 +767,24 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// A function can't take the name of a `use function` import (test
+    /// Zend/tests/name_collision/name_collision_08).
+    fn func_import_check(&mut self, fd: &'a FunctionDecl<'a>, line: u32) -> CResult<()> {
+        let full = self.qualify(fd.name.name);
+        if let Some(imp) = self.use_func.get(&fd.name.name.to_ascii_lowercase())
+            && !imp.eq_ignore_ascii_case(&full)
+        {
+            return self.err(
+                format!(
+                    "Cannot redeclare function {}() (previously declared as local import)",
+                    String::from_utf8_lossy(&full)
+                ),
+                line,
+            );
+        }
+        Ok(())
+    }
+
     fn top_stmts(
         &mut self,
         stmts: &'a [Stmt<'a>],
@@ -767,6 +795,7 @@ impl<'a> Compiler<'a> {
             match &s.kind {
                 StmtKind::Function(fd) => {
                     self.f.line = s.span.line;
+                    self.func_import_check(fd, s.span.line)?;
                     let idx = self.func_decl(fd)?;
                     hoisted.push(idx);
                 }
@@ -1044,6 +1073,7 @@ impl<'a> Compiler<'a> {
                 return Ok(());
             }
             StmtKind::Function(fd) => {
+                self.func_import_check(fd, s.span.line)?;
                 let idx = self.func_decl(fd)?;
                 self.emit(Op::DeclareFunction { func: idx });
             }
@@ -1096,8 +1126,23 @@ impl<'a> Compiler<'a> {
                     // Zend/tests/first_class_callable/constexpr/error_*).
                     self.check_const_expr(&c.value)?;
                     let full = self.qualify(c.name.name);
+                    // Test Zend/tests/name_collision/name_collision_09.
+                    if let Some(imp) = self.use_const.get(c.name.name)
+                        && *imp != full
+                    {
+                        return self.err(
+                            format!(
+                                "Cannot declare const {} because the name is already in use",
+                                String::from_utf8_lossy(&full)
+                            ),
+                            s.span.line,
+                        );
+                    }
                     let name = self.str_const(&full);
-                    let v = self.expr(&c.value)?;
+                    self.in_const_stmt = true;
+                    let v = self.expr(&c.value);
+                    self.in_const_stmt = false;
+                    let v = v?;
                     self.free(v);
                     self.emit(Op::DeclareConst { name, val: v });
                 }
@@ -1261,9 +1306,31 @@ impl<'a> Compiler<'a> {
 
     fn foreach_stmt(&mut self, f: &'a ForeachStmt<'a>, line: u32) -> CResult<()> {
         let iter = self.hidden_pair();
+        // `as [&$x, $y]` iterates by reference (test Zend/tests/list/
+        // list_reference_004).
+        fn list_has_ref(e: &Expr<'_>) -> bool {
+            match &e.kind {
+                ExprKind::List { items, .. } | ExprKind::Array { items, .. } => items
+                    .iter()
+                    .flatten()
+                    .any(|i| i.by_ref || list_has_ref(&i.value)),
+                _ => false,
+            }
+        }
+        let by_ref = f.by_ref || list_has_ref(&f.value);
+        // Tests Zend/tests/restrict_globals/invalid_foreach*.
+        if matches!(f.value.kind, ExprKind::Variable(b"GLOBALS")) {
+            return self.err(
+                "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax",
+                line,
+            );
+        }
         // A `?->` chain is iterated as a value (test Zend/tests/
         // nullsafe_operator/023).
-        let src = if f.by_ref && !expr::contains_nullsafe(&f.expr) {
+        let src = if by_ref
+            && !expr::contains_nullsafe(&f.expr)
+            && !matches!(f.expr.kind, ExprKind::Variable(b"this"))
+        {
             self.ref_of(&f.expr)?
         } else {
             self.expr(&f.expr)?
@@ -1273,13 +1340,13 @@ impl<'a> Compiler<'a> {
         let reset = self.emit(Op::FeReset {
             iter,
             src,
-            by_ref: f.by_ref,
+            by_ref,
             t: 0,
         });
         let top = self.here();
         // Value target.
         let (val_dst, direct_val) = match &f.value.kind {
-            ExprKind::Variable(n) if !f.by_ref && *n != b"this" => (self.cv(n), true),
+            ExprKind::Variable(n) if !by_ref && *n != b"this" => (self.cv(n), true),
             _ => (self.tmp(), false),
         };
         let (key_dst, direct_key) = match &f.key {
@@ -1297,7 +1364,7 @@ impl<'a> Compiler<'a> {
             t: 0,
         });
         if !direct_val {
-            if f.by_ref {
+            if by_ref {
                 self.bind_ref_to(&f.value, val_dst)?;
             } else if let ExprKind::List { items, .. } | ExprKind::Array { items, .. } =
                 &f.value.kind

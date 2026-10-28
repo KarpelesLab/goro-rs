@@ -1293,7 +1293,13 @@ fn is_a_impl(vm: &mut Vm, a: &mut Args, allow_string_default: bool, strict_sub: 
         _ => return Ok(Value::Bool(false)),
     };
     let lname = lower(cn.strip_prefix(b"\\").unwrap_or(&cn));
-    if strict_sub && c.lname == lname {
+    if strict_sub
+        && (c.lname == lname
+            || vm
+                .classes
+                .get(&lname)
+                .is_some_and(|t| std::ptr::eq(&**t, &*c)))
+    {
         return Ok(Value::Bool(false));
     }
     Ok(Value::Bool(vm.instance_of_lname(&c, &lname)))
@@ -1379,9 +1385,6 @@ fn class_alias(vm: &mut Vm, a: &mut Args) -> R<Value> {
         vm.warn(&format!("Class \"{}\" not found", orig.to_string_lossy()))?;
         return Ok(Value::Bool(false));
     };
-    if c.has_flag(cflags::INTERNAL) {
-        return vm.value_error("class_alias(): Argument #1 ($class) must be a user-defined class name, internal class name given");
-    }
     let la = lower(alias.strip_prefix(b"\\").unwrap_or(&alias));
     // tests Zend/tests/type_declarations/scalar_reserved*_class_alias
     if crate::compiler::is_reserved_class_alias(&la) {
@@ -1390,14 +1393,24 @@ fn class_alias(vm: &mut Vm, a: &mut Args) -> R<Value> {
             alias.to_string_lossy()
         )));
     }
-    if vm.classes.contains_key(&la) {
-        vm.warn(&format!(
-            "Cannot declare class {}, because the name is already in use",
-            alias.to_string_lossy()
-        ))?;
+    if let Some(prev) = vm.classes.get(&la).cloned() {
+        // The kind named is the aliased class's (test Zend/tests/
+        // class_alias/class_alias_004).
+        let kind = |k: &Class| match k.kind {
+            crate::class::ClassKind::Interface => "interface",
+            crate::class::ClassKind::Trait => "trait",
+            crate::class::ClassKind::Enum => "enum",
+            crate::class::ClassKind::Class => "class",
+        };
+        let msg =
+            crate::vm::classes::redeclare_msg(&prev, &alias).replacen(kind(&prev), kind(&c), 1);
+        vm.warn(&msg)?;
         return Ok(Value::Bool(false));
     }
-    vm.classes.insert(la, c);
+    vm.classes.insert(la.clone(), c);
+    // Aliases are listed by get_declared_classes() (test Zend/tests/
+    // class_alias/bug62343).
+    vm.class_order.push(la);
     Ok(Value::Bool(true))
 }
 
@@ -1407,13 +1420,22 @@ fn declared(vm: &mut Vm, pred: fn(&Class) -> bool) -> PhpArray {
     for l in lazy {
         let _ = vm.find_class(&l, false);
     }
+    // Internal classes first, then user classes and aliases (by their
+    // lowercased names) in declaration order (observed on PHP 8.5).
     let mut out = PhpArray::new();
-    for n in vm.class_order.clone() {
-        if let Some(c) = vm.classes.get(&n)
-            && pred(c)
-            && c.lname == n
-        {
-            let _ = out.push(Value::Str(c.name.clone()));
+    for internal in [true, false] {
+        for n in &vm.class_order {
+            if let Some(c) = vm.classes.get(n)
+                && pred(c)
+                && (c.has_flag(cflags::INTERNAL) && c.lname == *n) == internal
+            {
+                let shown = if c.lname == *n {
+                    c.name.clone()
+                } else {
+                    n.clone()
+                };
+                let _ = out.push(Value::Str(shown));
+            }
         }
     }
     out

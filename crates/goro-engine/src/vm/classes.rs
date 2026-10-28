@@ -100,21 +100,8 @@ impl Vm {
                     decl.line_start,
                 ));
             }
-            let what = match decl.kind {
-                ClassKind::Interface => "interface",
-                ClassKind::Trait => "trait",
-                ClassKind::Enum => "enum",
-                ClassKind::Class => "class",
-            };
-            return Err(self.fatal_at(
-                &format!(
-                    "Cannot declare {} {}, because the name is already in use",
-                    what,
-                    decl.name.dname()
-                ),
-                &decl.file,
-                decl.line_start,
-            ));
+            let msg = redeclare_msg(prev, &decl.name);
+            return Err(self.fatal_at(&msg, &decl.file, decl.line_start));
         }
         let Some(cls) = self.link_class(decl)? else {
             return Ok(None);
@@ -366,6 +353,22 @@ impl Vm {
             if decl.enum_backing.is_some() {
                 let be = self.find_class(b"BackedEnum", false)?.unwrap();
                 ifaces.insert(1, be);
+            }
+        }
+        // An interface listed twice, also through an alias (test
+        // Zend/tests/class_alias/class_alias_009).
+        if decl.kind == ClassKind::Interface {
+            for (i, ic) in ifaces.iter().enumerate() {
+                if ifaces[..i].iter().any(|p| Rc::ptr_eq(p, ic)) {
+                    return self.link_err(
+                        decl,
+                        &format!(
+                            "Interface {} cannot implement previously implemented interface {}",
+                            cname,
+                            ic.name.dname()
+                        ),
+                    );
+                }
             }
         }
         // Interfaces (and their parents).
@@ -2884,5 +2887,27 @@ fn const_code_same(a: &ConstExpr, b: &ConstExpr) -> bool {
                 && format!("{:?}", x.consts) == format!("{:?}", y.consts)
         }
         _ => false,
+    }
+}
+
+/// "Cannot redeclare class A (previously declared in f.php:3)": the kind
+/// is the existing declaration's (tests Zend/tests/name_collision/*,
+/// class_alias/*).
+pub(crate) fn redeclare_msg(prev: &Class, name: &PhpStr) -> String {
+    let what = match prev.kind {
+        ClassKind::Interface => "interface",
+        ClassKind::Trait => "trait",
+        ClassKind::Enum => "enum",
+        ClassKind::Class => "class",
+    };
+    match &prev.file {
+        Some(f) if !prev.has_flag(cflags::INTERNAL) => format!(
+            "Cannot redeclare {} {} (previously declared in {}:{})",
+            what,
+            name.dname(),
+            f.to_string_lossy(),
+            prev.line_start
+        ),
+        _ => format!("Cannot redeclare {} {}", what, name.dname()),
     }
 }

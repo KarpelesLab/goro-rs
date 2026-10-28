@@ -891,8 +891,17 @@ impl Vm {
                     self.send_val(arg, v, false)?;
                 }
                 Op::SendValRef { src, arg } => {
-                    let v = self.get(src)?;
-                    self.send_val(arg, v, true)?;
+                    // A by-reference function's result passes its reference
+                    // on to a by-reference parameter (test Zend/tests/
+                    // nullsafe_operator/027).
+                    let v = self.get_raw(src);
+                    match v {
+                        Value::Ref(r) if self.pending_arg_by_ref(arg) => {
+                            self.send_ref(arg, Value::Ref(r))?
+                        }
+                        Value::Ref(r) => self.send_val(arg, r.get(), true)?,
+                        v => self.send_val(arg, v, true)?,
+                    }
                 }
                 Op::SendVar { var, arg } => self.send_var(var, arg)?,
                 Op::SendRef { src, arg } => {
@@ -939,9 +948,17 @@ impl Vm {
                 }
                 Op::DeclareClass { class } => {
                     let decl = self.code_ref().classes[class as usize].clone();
+                    if decl.run_declared.get()
+                        && let Some(prev) =
+                            self.classes.get(&crate::class::lower(&decl.name)).cloned()
+                    {
+                        let msg = crate::vm::classes::redeclare_msg(&prev, &decl.name);
+                        return Err(self.fatal_at(&msg, &decl.file, decl.line_start));
+                    }
                     if !decl.declared.get() {
                         self.declare_class(&decl)?;
                     }
+                    decl.run_declared.set(true);
                 }
                 Op::Tick { every } => self.tick(every)?,
                 Op::DeclareConst { name, val } => {
@@ -1143,8 +1160,17 @@ impl Vm {
                     if kind == 1 {
                         // A run-time notice.
                         self.notice_msg(&m)?;
+                    } else if kind == 2 {
+                        if self.scope_ptr().is_null() {
+                            return Err(self.throw_error_msg("Error", &m));
+                        }
                     } else {
                         return Err(self.throw_error_msg("Error", &m));
+                    }
+                }
+                Op::RefCheck { src } => {
+                    if !matches!(self.peek(src), Some(Value::Ref(_))) {
+                        self.notice_msg("Attempting to set reference to non referenceable value")?;
                     }
                 }
                 Op::MatchError { src } => {

@@ -160,6 +160,9 @@ pub struct ClassDecl {
     pub line_end: u32,
     /// Set once linked (a declaration runs at most once).
     pub declared: Cell<bool>,
+    /// Its declaration statement ran (a second run is a redeclaration:
+    /// test Zend/tests/name_collision/declare_already_in_use).
+    pub run_declared: Cell<bool>,
 }
 
 /// A class constant of a linked class.
