@@ -23,12 +23,14 @@ pub mod json;
 pub mod math;
 pub mod mbstring;
 pub mod misc;
+pub mod openssl;
 pub mod output;
 pub mod password;
 pub mod pcre;
 pub mod random;
 pub mod reflection;
 pub mod serialize;
+pub mod sockets;
 pub mod sodium;
 pub mod spl;
 pub mod spl_autoload;
@@ -54,6 +56,7 @@ pub fn modules() -> Vec<&'static Module> {
         &info::MODULE,
         &fiber::MODULE,
         &file::MODULE,
+        &sockets::MODULE,
         &streams::MODULE,
         &serialize::MODULE,
         &json::MODULE,
@@ -82,5 +85,6 @@ pub fn modules() -> Vec<&'static Module> {
         &filter::MODULE,
         &sodium::MODULE,
         &uri::MODULE,
+        &openssl::MODULE,
     ]
 }

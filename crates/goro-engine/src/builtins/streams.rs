@@ -121,6 +121,38 @@ pub trait NativeStream {
     fn close(&mut self, _vm: &mut Vm) -> R<()> {
         Ok(())
     }
+    /// The stream as `Any`, for modules that downcast their own streams.
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
+    /// The descriptor stream_select() polls, if any.
+    fn raw_fd(&self) -> Option<i32> {
+        None
+    }
+    /// Whether reads can return data without touching the descriptor
+    /// (decrypted TLS bytes): stream_select() then reports it readable.
+    fn buffered(&self) -> bool {
+        false
+    }
+    /// A socket: reads return what is available (like pipes), and
+    /// stream_get_meta_data() has no wrapper fields.
+    fn is_socket(&self) -> bool {
+        false
+    }
+    /// stream_set_blocking(); false when unsupported.
+    fn set_blocking(&mut self, _blocking: bool) -> bool {
+        false
+    }
+    /// stream_set_timeout(); false when unsupported.
+    fn set_timeout(&mut self, _secs: f64) -> bool {
+        false
+    }
+    /// Entries for stream_get_meta_data() (timed_out, blocked, crypto...).
+    fn meta(&self, _m: &mut goro_runtime::PhpArray) {}
+    /// The stream context attached to the stream, if any.
+    fn context(&self) -> Option<Value> {
+        None
+    }
 }
 
 /// A stream wrapper implemented in Rust.
