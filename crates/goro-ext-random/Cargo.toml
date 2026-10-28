@@ -1,0 +1,8 @@
+[package]
+name = "goro-ext-random"
+description = "PHP random extension: engines, Randomizer, rand/mt_rand/random_int"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]

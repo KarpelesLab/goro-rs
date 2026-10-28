@@ -13,6 +13,7 @@ members = [
     "crates/goro-ext-json",
     "crates/goro-ext-zlib",
     "crates/goro-ext-bcmath",
+    "crates/goro-ext-random",
 ]
 
 [workspace.package]
