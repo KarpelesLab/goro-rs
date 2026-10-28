@@ -179,6 +179,15 @@ pub fn register_filter(vm: &mut Vm, name: &'static str, f: FilterFactory) {
     vm.ext::<StreamRegistry>().filters.push((name, f));
 }
 
+/// The internal function running (`fread`, `fwrite`...), which prefixes
+/// the diagnostics of filters and wrappers.
+pub fn caller(vm: &Vm) -> String {
+    vm.ex
+        .native_calls
+        .last()
+        .map_or_else(String::new, |c| c.func.display_name())
+}
+
 /// The native wrapper of `url`'s scheme, if one is registered.
 pub(crate) fn wrapper_for(vm: &mut Vm, url: &[u8]) -> Option<&'static NativeWrapper> {
     let p = url.windows(3).position(|w| w == b"://")?;
@@ -199,19 +208,23 @@ pub(crate) fn wrapper_names(vm: &mut Vm) -> Vec<Vec<u8>> {
 }
 
 fn find_factory(vm: &mut Vm, name: &[u8]) -> Option<FilterFactory> {
+    // An exact name wins, then the longest family prefix
+    // (`convert.iconv.*` before `convert.*`).
     let reg = vm.ext::<StreamRegistry>();
+    let mut best: Option<(usize, FilterFactory)> = None;
     for (n, f) in &reg.filters {
         if let Some(prefix) = n.strip_suffix('*') {
             if name.len() > prefix.len()
                 && name[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+                && best.is_none_or(|(l, _)| prefix.len() > l)
             {
-                return Some(*f);
+                best = Some((prefix.len(), *f));
             }
         } else if name.eq_ignore_ascii_case(n.as_bytes()) {
             return Some(*f);
         }
     }
-    None
+    best.map(|(_, f)| f)
 }
 
 // ---------------------------------------------------------------- filters on streams

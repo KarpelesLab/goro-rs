@@ -231,6 +231,7 @@ pub fn run(opts: RunOptions) -> i32 {
     } else {
         strip_shebang(src)
     };
+    builtins::output::start_ini_handler(&mut vm);
     vm.run_script(&src, &path)
 }
 

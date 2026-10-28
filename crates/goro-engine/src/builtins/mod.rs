@@ -15,6 +15,7 @@ pub mod filter;
 pub mod gmp;
 pub mod hash;
 pub mod highlight;
+pub mod iconv;
 pub mod info;
 mod info_text;
 pub mod ini;
@@ -37,6 +38,7 @@ pub mod uri;
 pub mod userstream;
 pub mod var;
 pub mod weakmap;
+pub mod zlib;
 
 use crate::registry::Module;
 
@@ -67,6 +69,8 @@ pub fn modules() -> Vec<&'static Module> {
         &ini::MODULE,
         &pcre::MODULE,
         &mbstring::MODULE,
+        &iconv::MODULE,
+        &zlib::MODULE,
         &ctype::MODULE,
         &date::MODULE,
         &array::MODULE,
