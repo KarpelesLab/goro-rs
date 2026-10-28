@@ -597,10 +597,18 @@ fn call_user_func_array(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn forward_static_call(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    // Test class_object/forward_static_call_002.phpt.
+    if vm.scope_ptr().is_null() {
+        return vm.throw(
+            "Error",
+            "Cannot call forward_static_call() when no class scope is active",
+        );
+    }
     call_user_func(vm, a)
 }
 
 fn forward_static_call_array(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    // Observed on PHP 8.5: no scope check here, unlike forward_static_call().
     call_user_func_array(vm, a)
 }
 
