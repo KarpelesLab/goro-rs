@@ -5,6 +5,7 @@ pub mod array;
 pub mod core_classes;
 pub mod core_funcs;
 pub mod enums;
+pub mod ini;
 pub mod math;
 pub mod misc;
 pub mod output;
@@ -26,6 +27,7 @@ pub fn modules() -> Vec<&'static Module> {
         &strmisc::MODULE,
         &password::MODULE,
         &misc::MODULE,
+        &ini::MODULE,
         &array::MODULE,
         &math::MODULE,
     ]

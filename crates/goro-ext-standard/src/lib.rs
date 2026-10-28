@@ -9,6 +9,7 @@ pub mod encoding;
 pub mod error;
 pub mod float;
 pub mod html;
+pub mod ini;
 pub mod math;
 pub mod mt_rand;
 pub mod natcmp;
