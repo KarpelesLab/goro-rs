@@ -37,6 +37,7 @@ mod locale;
 mod msgfmt;
 mod numfmt;
 mod text;
+mod spoof;
 mod timezone;
 mod translit;
 mod uconv;
@@ -57,6 +58,7 @@ pub static MODULES: &[&Module] = &[
     &breakiter::MODULE,
     &uconv::MODULE,
     &translit::MODULE,
+    &spoof::MODULE,
 ];
 
 pub static MODULE: Module = Module {
