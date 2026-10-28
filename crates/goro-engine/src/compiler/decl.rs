@@ -299,7 +299,10 @@ impl<'a> Compiler<'a> {
                     if th.mask & tmask::VOID != 0 {
                         self.notice(
                             goro_runtime::Level::Deprecated,
-                            "Returning by reference from a void function is deprecated",
+                            format!(
+                                "{}(): Returning by reference from a void function is deprecated",
+                                self.f.method_name.to_string_lossy()
+                            ),
                             spec.span.line,
                         );
                     }

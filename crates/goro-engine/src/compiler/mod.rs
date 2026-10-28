@@ -1536,7 +1536,14 @@ impl<'a> Compiler<'a> {
                     implicit,
                 });
             }
-            self.emit(Op::Return { src: val });
+            if self.f.flags & fflags::BY_REF != 0 {
+                // A by-reference function returning no variable: "Only
+                // variable references should be returned by reference"
+                // (test Zend/tests/return_ref_none.phpt).
+                self.emit(Op::ReturnRef { src: val });
+            } else {
+                self.emit(Op::Return { src: val });
+            }
         }
     }
 
