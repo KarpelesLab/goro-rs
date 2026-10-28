@@ -294,6 +294,7 @@ class ReflectionIntersectionType extends ReflectionType {
 }
 class ReflectionAttribute implements Reflector {
     const IS_INSTANCEOF = 2;
+    public string $name = "";
     public function getName(): string {}
     public function getTarget(): int {}
     public function isRepeated(): bool {}
@@ -857,6 +858,9 @@ fn new_refl(vm: &mut Vm, class: &str, r: Refl) -> R<ObjRef> {
             if let Some(p) = ps.get(*idx) {
                 vm.set_prop_raw(&o, b"name", Value::Str(p.name.clone()));
             }
+        }
+        Refl::Attr { info, .. } => {
+            vm.set_prop_raw(&o, b"name", Value::Str(info.name.clone()));
         }
         Refl::Extension(n) | Refl::GlobalConst(n) => {
             vm.set_prop_raw(&o, b"name", Value::Str(n.clone()))
@@ -2158,7 +2162,13 @@ fn visible_props(cls: &Rc<Class>) -> (Vec<PhpStr>, Vec<PhpStr>) {
 /// Constants in Reflection's order: the class's own, then inherited ones
 /// in the parent's order, then those of interfaces.
 fn const_order(cls: &Rc<Class>) -> Vec<Rc<crate::class::ClassConst>> {
-    let all = cls.consts.borrow().clone();
+    let all: Vec<_> = cls
+        .consts
+        .borrow()
+        .iter()
+        .filter(|k| k.flags & mflags::PRIVATE == 0 || std::ptr::eq(k.class, Rc::as_ptr(cls)))
+        .cloned()
+        .collect();
     let cp = Rc::as_ptr(cls);
     let mut out: Vec<Rc<crate::class::ClassConst>> = all
         .iter()
@@ -3087,7 +3097,7 @@ fn const_modifiers(flags: u32) -> i64 {
 fn c_consts(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let filter = a.opt_int(0);
-    let consts = c.consts.borrow().clone();
+    let consts = const_order(&c);
     let mut out = PhpArray::new();
     for k in consts {
         if let Some(f) = filter
@@ -3107,7 +3117,7 @@ fn c_consts(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn c_refl_consts(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let filter = a.opt_int(0);
-    let consts = c.consts.borrow().clone();
+    let consts = const_order(&c);
     let mut out = PhpArray::new();
     for k in consts {
         if let Some(f) = filter
@@ -3379,7 +3389,12 @@ fn new_with_args(vm: &mut Vm, c: &Rc<Class>, args: PhpArray) -> R<Value> {
                 closure: None,
                 magic_name: None,
             };
-            vm.call_callee_named(callee, args)?;
+            // A constructor that throws leaves an object whose destructor
+            // does not run (observed on PHP 8.5; test bug77882).
+            if let Err(e) = vm.call_callee_named(callee, args) {
+                o.mark_destructor_called();
+                return Err(e);
+            }
         }
         None => {
             if !args.is_empty() {
@@ -4728,6 +4743,9 @@ fn par_default_is_const(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn par_default_const_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (_, _, _, p) = need_param!(vm, a);
+    if matches!(p.default, ParamDefault::None) {
+        return refl_error(vm, "Internal error: Failed to retrieve the default value");
+    }
     Ok(default_const_name(&p)
         .map(|s| Value::Str(PhpStr::from(s)))
         .unwrap_or_default())
