@@ -487,6 +487,7 @@ pub static MODULE: Module = Module {
         ("assert.callback", ""),
         ("memory_limit", "128M"),
         ("include_path", ".:/usr/share/php"),
+        ("ignore_user_abort", "0"),
         ("max_execution_time", "0"),
         ("output_buffering", "0"),
         ("output_handler", ""),
@@ -1758,6 +1759,15 @@ fn ini_get_all(vm: &mut Vm, _a: &mut Args) -> R<Value> {
 fn set_include_path(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let old = vm.ini.include_path.clone();
     let p = a.str(0);
+    // Test general_functions/include_path.phpt: an empty path is refused,
+    // and ini_restore() restores the startup value.
+    if p.is_empty() {
+        return Ok(Value::Bool(false));
+    }
+    vm.ini
+        .originals
+        .entry(PhpStr::from("include_path"))
+        .or_insert(Some(old.clone()));
     vm.set_ini(b"include_path", &p);
     Ok(Value::Str(old))
 }
@@ -1912,6 +1922,10 @@ fn uname() -> (String, String, String, String, String) {
 
 fn php_uname(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mode = a.str(0);
+    // Test general_functions/php_uname_error.phpt.
+    if a.has(0) && mode.len() != 1 {
+        return vm.value_error("php_uname(): Argument #1 ($mode) must be a single character");
+    }
     let (s, n, r, v, m) = uname();
     let out = match mode.first() {
         Some(b's') => s,
@@ -1921,7 +1935,7 @@ fn php_uname(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Some(b'm') => m,
         Some(b'a') | None => format!("{} {} {} {} {}", s, n, r, v, m),
         _ => {
-            return vm.value_error("php_uname(): Argument #1 ($mode) must be a single character, and one of \"a\", \"m\", \"n\", \"r\", \"s\", or \"v\"");
+            return vm.value_error("php_uname(): Argument #1 ($mode) must be one of \"a\", \"m\", \"n\", \"r\", \"s\", or \"v\"");
         }
     };
     Ok(Value::Str(PhpStr::from(out)))
@@ -2024,6 +2038,9 @@ fn getenv(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn putenv(vm: &mut Vm, a: &mut Args) -> R<Value> {
     use std::os::unix::ffi::OsStrExt;
     let s = a.str(0);
+    if s.is_empty() {
+        return vm.value_error("putenv(): Argument #1 ($assignment) must have a valid syntax");
+    }
     match s.iter().position(|&c| c == b'=') {
         Some(0) => vm.value_error("putenv(): Argument #1 ($assignment) must have a valid syntax"),
         Some(p) => {
@@ -2047,8 +2064,17 @@ fn set_time_limit(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Bool(true))
 }
 
-fn ignore_user_abort(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Int(0))
+/// Returns the previous setting and updates ignore_user_abort (test
+/// general_functions/bug72300.phpt).
+fn ignore_user_abort(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let old = vm
+        .get_ini(b"ignore_user_abort")
+        .map(|v| goro_runtime::convert::str_to_int(&v))
+        .unwrap_or(0);
+    if let Some(Value::Bool(b)) = a.get(0) {
+        vm.set_ini(b"ignore_user_abort", if *b { b"1" } else { b"0" });
+    }
+    Ok(Value::Int(old))
 }
 
 fn sys_get_temp_dir(vm: &mut Vm, _a: &mut Args) -> R<Value> {
@@ -2150,7 +2176,12 @@ fn uniqid(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut s = prefix.to_vec();
     s.extend_from_slice(format!("{:08x}{:05x}", d.as_secs(), d.subsec_micros()).as_bytes());
     if a.bool_or(1, false) {
-        s.extend_from_slice(format!(".{:08}", d.subsec_nanos() % 100_000_000).as_bytes());
+        // PHP manual: uniqid more_entropy adds a combined LCG value, printed
+        // as "%.8F" of a number below 10 (test uniqid_basic.phpt).
+        let mut b = [0u8; 8];
+        super::math::os_random(&mut b);
+        let f = (u64::from_le_bytes(b) >> 11) as f64 / (1u64 << 53) as f64 * 10.0;
+        s.extend_from_slice(format!("{:.8}", f).as_bytes());
     }
     Ok(Value::Str(PhpStr::from(s)))
 }
