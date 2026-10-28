@@ -966,9 +966,6 @@ fn ret_false(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 fn ret_true(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Bool(true))
 }
-fn ret_null(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Null)
-}
 fn empty_array(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Array(PhpArray::new()))
 }
@@ -2425,10 +2422,11 @@ fn find_method_in(vm: &mut Vm, cls: &Rc<Class>, name: &[u8]) -> R<Rc<Func>> {
     if let Some(f) = cls.find_method_str(&ln) {
         return Ok(f);
     }
-    if cls.lname.as_bytes() == b"closure" && ln.as_bytes() == b"__invoke" {
-        if let Some(f) = cls.find_method_str(&ln) {
-            return Ok(f);
-        }
+    if cls.lname.as_bytes() == b"closure"
+        && ln.as_bytes() == b"__invoke"
+        && let Some(f) = cls.find_method_str(&ln)
+    {
+        return Ok(f);
     }
     refl_error(
         vm,
@@ -3908,9 +3906,7 @@ fn p_get_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return Ok(v);
     }
     let Some(o) = a.obj(0) else {
-        return vm.type_error(&format!(
-            "ReflectionProperty::getValue(): Argument #1 ($object) must be provided for instance properties"
-        ));
+        return vm.type_error("ReflectionProperty::getValue(): Argument #1 ($object) must be provided for instance properties");
     };
     let decl = info.as_ref().map(|p| p.class).unwrap_or(Rc::as_ptr(&c));
     if !vm.class_of(&o).is_subclass_of(unsafe { &*decl }) {

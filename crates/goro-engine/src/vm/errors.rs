@@ -7,7 +7,6 @@ use std::rc::Rc;
 use goro_runtime::{ErrorKind, Key, ObjRef, PhpArray, PhpError, PhpStr, Value};
 
 use super::{R, Unwind, Vm, frame_flags};
-use crate::bytecode::slot_of;
 
 pub const E_ERROR: i64 = 1;
 pub const E_WARNING: i64 = 2;
@@ -412,7 +411,7 @@ impl Vm {
             .copied()
             .filter(|&(s, e, _, _)| s <= ip && ip < e && !(s <= target && target < e))
             .collect();
-        v.sort_by(|a, b| b.0.cmp(&a.0));
+        v.sort_by_key(|a| std::cmp::Reverse(a.0));
         for (_, _, slot, is_iter) in v {
             if is_iter {
                 let _ = self.fe_free(slot);

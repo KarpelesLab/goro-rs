@@ -1,7 +1,7 @@
 //! Core functions (PHP manual: Function handling, Classes/Objects, Error
 //! handling, Misc., PHP options/info).
 
-use crate::class::{DisplayName, TypeName};
+use crate::class::TypeName;
 use std::rc::Rc;
 
 use goro_runtime::{Key, KeyRef, PhpArray, PhpStr, Value};
@@ -1778,13 +1778,13 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     // open_basedir can only be tightened at run time (PHP manual: "can only
     // be set to a more restrictive value").
-    if k.as_bytes() == b"open_basedir" && !old.is_empty() {
-        if v.is_empty()
+    if k.as_bytes() == b"open_basedir"
+        && !old.is_empty()
+        && (v.is_empty()
             || v.split(|&c| c == b':')
-                .any(|d| !d.is_empty() && !vm.basedir_allows(d))
-        {
-            return Ok(Value::Bool(false));
-        }
+                .any(|d| !d.is_empty() && !vm.basedir_allows(d)))
+    {
+        return Ok(Value::Bool(false));
     }
     if super::misc::assert_ini_deprecated(&k, &v) {
         vm.fdeprecated(

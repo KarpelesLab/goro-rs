@@ -25,7 +25,6 @@ pub(crate) enum FnKind {
     Method { is_static: bool, is_ctor: bool },
     Closure { is_static: bool },
     Arrow { is_static: bool },
-    Hook,
 }
 
 pub(crate) struct FnSpec<'a> {
@@ -1015,8 +1014,6 @@ impl<'a> Compiler<'a> {
             name: cname.clone(),
             parent: parent.as_ref().map(|p| PhpStr::intern(p)),
             is_trait: kind == ClassKind::Trait,
-            is_interface: kind == ClassKind::Interface,
-            is_enum: kind == ClassKind::Enum,
         });
         let r = self.class_members(cd, kind, &cname, line);
         self.class = saved_class;
@@ -1757,7 +1754,7 @@ impl<'a> Compiler<'a> {
                 )),
                 prop_name: Some(pname.clone()),
             };
-            let mut code = if !is_get && h.params.is_none() {
+            let code = if !is_get && h.params.is_none() {
                 // implicit `$value` parameter
                 self.compile_set_hook(spec, pname, ty, matches!(h.body, HookBody::Expr(_)))?
             } else if !is_get && matches!(h.body, HookBody::Expr(_)) {
@@ -2048,6 +2045,7 @@ fn hooks_use_backing(hooks: &[PropertyHook<'_>], name: &[u8]) -> bool {
     hooks.iter().all(|h| matches!(h.body, HookBody::Abstract)) && false
 }
 
+#[allow(clippy::redundant_closure)] // `f` is a &mut dyn FnMut taking &Expr, the items are &&Expr
 fn walk_stmts<'a>(stmts: &'a [Stmt<'a>], f: &mut dyn FnMut(&'a Expr<'a>)) {
     for s in stmts {
         match &s.kind {
@@ -2326,7 +2324,6 @@ pub fn parse_native_sig(
         f: FState::new(fd.params.iter().map(|p| p.name.name).collect()),
         notices: Vec::new(),
         anon_count: 0,
-        closure_count: 0,
         src: &src,
         known_const: kc,
         in_const_expr: false,

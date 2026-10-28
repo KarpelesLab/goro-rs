@@ -1,6 +1,6 @@
 //! Output control functions (PHP manual: Output Control) and flush().
 
-use crate::class::{DisplayName, TypeName};
+use crate::class::DisplayName;
 use goro_runtime::{Key, PhpArray, PhpStr, Value};
 
 use crate::func::Args;

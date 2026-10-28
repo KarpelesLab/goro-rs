@@ -437,7 +437,7 @@ impl Vm {
     pub(crate) fn op_assign_dim(&mut self, var: Reg, key: Reg, val: Reg, res: Reg) -> R<()> {
         // Fast path: the variable holds an array.
         let p = self.slot_ptr(var);
-        if let Some(Value::Array(a)) = unsafe { &mut *p } {
+        if let Some(Value::Array(_a)) = unsafe { &mut *p } {
             let k = if key == NONE {
                 None
             } else {
@@ -1480,8 +1480,4 @@ impl RefPtr for PhpRef {
         drop(g);
         p
     }
-}
-
-pub(crate) fn rc_ptr<T>(r: &Rc<T>) -> *const T {
-    Rc::as_ptr(r)
 }

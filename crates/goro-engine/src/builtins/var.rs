@@ -942,8 +942,8 @@ impl Vm {
         let r = match v {
             Value::Str(_) | Value::Array(_) | Value::Object(_) => {
                 // Resolve without autoload noise.
-                let ok = self.resolve_callable_quiet(v);
-                ok
+
+                self.resolve_callable_quiet(v)
             }
             _ => false,
         };

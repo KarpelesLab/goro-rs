@@ -1561,7 +1561,8 @@ fn localeconv(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 /// default_charset (PHP manual: htmlentities, "encoding";
 /// mbstring.internal_encoding does not count: htmlentities25).
 fn default_html_charset(vm: &Vm) -> PhpStr {
-    for k in [&b"internal_encoding"[..]] {
+    {
+        let k = &b"internal_encoding"[..];
         if let Some(v) = vm.get_ini(k)
             && !v.is_empty()
         {

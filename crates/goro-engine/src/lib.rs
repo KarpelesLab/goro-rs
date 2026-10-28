@@ -8,6 +8,16 @@
 //!
 //! [`run`] runs a script as the `php` CLI does.
 
+// Native hooks are plain fn pointers with spelled-out signatures; the VM
+// hands raw slot pointers through crate-internal APIs on purpose (the
+// dispatch loop owns their lifetime); float limits are written with the
+// digits PHP documents.
+#![allow(
+    clippy::type_complexity,
+    clippy::not_unsafe_ptr_arg_deref,
+    clippy::excessive_precision
+)]
+
 pub mod builtins;
 pub mod bytecode;
 pub mod class;

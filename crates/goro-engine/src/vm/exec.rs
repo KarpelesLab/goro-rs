@@ -1,7 +1,5 @@
 //! The dispatch loop and operand access.
 
-use std::rc::Rc;
-
 use goro_runtime::{PhpArray, PhpStr, Value};
 
 use super::{R, Slot, Unwind, Vm, frame_flags};
@@ -292,12 +290,6 @@ impl Vm {
         }
         let n = self.var_name(r);
         self.warn(&format!("Undefined variable ${}", n.to_string_lossy()))
-    }
-
-    /// The value of a variable for reading (binding attached scopes).
-    #[inline]
-    pub(crate) fn var_value(&mut self, r: Reg) -> R<Value> {
-        self.get(r)
     }
 
     // ------------------------------------------------------------ the loop
@@ -1474,14 +1466,5 @@ impl Vm {
         while self.ex.frames.len() > to {
             self.pop_frame();
         }
-    }
-
-    /// The slot value of a frame's variable by index (for debug).
-    pub(crate) fn slot_value(&self, r: Reg) -> Option<&Value> {
-        unsafe { (*self.slot_ptr(r)).as_ref() }
-    }
-
-    pub(crate) fn code_rc(&self) -> Rc<crate::func::Func> {
-        self.frame().func.clone()
     }
 }

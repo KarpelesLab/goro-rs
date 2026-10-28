@@ -1,7 +1,7 @@
 //! Type declarations: checks and coercions (PHP manual: Type declarations,
 //! "Coercive typing with union types"; observed on PHP 8.5).
 
-use crate::class::{DisplayName, TypeName};
+use crate::class::TypeName;
 use goro_runtime::numeric::{Numericness, parse_numeric};
 use goro_runtime::{PhpStr, Value};
 
@@ -115,7 +115,10 @@ impl Vm {
             }
             Value::Float(f) => {
                 if wants_int {
-                    if f.is_finite() && *f >= -9.2233720368547758e18 && *f < 9.2233720368547758e18 {
+                    if f.is_finite()
+                        && *f >= -9.223_372_036_854_776e18
+                        && *f < 9.223_372_036_854_776e18
+                    {
                         if f.fract() != 0.0 {
                             if wants_string && false {
                                 // string preferred? (no: int first)
@@ -172,8 +175,8 @@ impl Vm {
                                 // int only: integral float strings convert;
                                 // others with a deprecation.
                                 if f.is_finite()
-                                    && f >= -9.2233720368547758e18
-                                    && f < 9.2233720368547758e18
+                                    && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18)
+                                        .contains(&f)
                                 {
                                     if f.fract() != 0.0 {
                                         self.deprecated(&format!(

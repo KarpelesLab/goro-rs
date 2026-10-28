@@ -930,9 +930,9 @@ impl Vm {
         let r = self.unser_elem(u);
         let shared = std::mem::take(&mut u.shared);
         let mut seen = std::collections::HashSet::new();
-        let v = match r {
-            Ok(v) => self.unser_finish(v, &shared, &mut seen),
-            Err(e) => return Err(e),
+        let v = {
+            let v = r?;
+            self.unser_finish(v, &shared, &mut seen)
         };
         // Every value is finished before any of the calls runs.
         let deferred: Vec<(ObjRef, Option<Value>)> = std::mem::take(&mut u.deferred)
@@ -1004,17 +1004,16 @@ impl Vm {
         if let Some(p) = idx {
             if let Some(t) = &p.ty {
                 let vv = v.deref();
-                match self.check_type(&vv, t, true, p.class, Rc::as_ptr(&cls))? {
-                    crate::vm::types::Check::Fail => {
-                        return self.type_error(&format!(
-                            "Cannot assign {} to property {}::${} of type {}",
-                            crate::class::TypeName::tname(&vv),
-                            unsafe { (*p.class).name.dname() },
-                            p.name.dname(),
-                            t.display()
-                        ));
-                    }
-                    _ => {}
+                if let crate::vm::types::Check::Fail =
+                    self.check_type(&vv, t, true, p.class, Rc::as_ptr(&cls))?
+                {
+                    return self.type_error(&format!(
+                        "Cannot assign {} to property {}::${} of type {}",
+                        crate::class::TypeName::tname(&vv),
+                        unsafe { (*p.class).name.dname() },
+                        p.name.dname(),
+                        t.display()
+                    ));
                 }
             }
             let mut slots = o.obj().slots.borrow_mut();
@@ -1205,10 +1204,10 @@ impl Vm {
     }
 
     /// The whole of `data` as one serialized value.
-    pub fn unserialize_quiet(&mut self, data: &[u8]) -> Result<Value, ()> {
+    pub fn unserialize_quiet(&mut self, data: &[u8]) -> Option<Value> {
         match self.unserialize_prefix(data) {
-            Some((v, n)) if n == data.len() => Ok(v),
-            _ => Err(()),
+            Some((v, n)) if n == data.len() => Some(v),
+            _ => None,
         }
     }
 }

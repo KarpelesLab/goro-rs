@@ -2705,41 +2705,32 @@ fn array_rand(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let arr = a.array(0);
     let num = a.int_or(1, 1);
     let n = arr.len();
-    if n == 0 {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($array) must not be empty");
-    }
-    if num < 1 || num as u64 > n as u64 {
-        return vm.fthrow(
-            a,
-            "ValueError",
-            "Argument #2 ($num) must be between 1 and the number of elements in argument #1 ($array)",
-        );
-    }
-    let keys: Vec<Value> = arr.iter().map(|(k, _)| key_value(k)).collect();
-    if num == 1 {
-        let i = mt(vm).range(0, n as i64 - 1) as usize;
-        return Ok(keys[i].clone());
-    }
-    // Pick `num` distinct positions (or the positions to leave out when
-    // more than half are wanted), then list the keys in array order.
-    let num = num as usize;
-    let negative = num > n / 2;
-    let want = if negative { n - num } else { num };
-    let mut picked = vec![false; n];
-    let mut left = want;
-    while left > 0 {
-        let i = mt(vm).range(0, n as i64 - 1) as usize;
-        if !picked[i] {
-            picked[i] = true;
-            left -= 1;
+    // Picks as Random\\Randomizer::pickArrayKeys() does, from the global
+    // Mt19937 whatever its mode (test ext/random/tests/01_functions/
+    // array_rand_mt_rand_php.phpt).
+    struct Count(usize);
+    impl goro_ext_random::randomizer::PickSource for Count {
+        fn count(&self) -> usize {
+            self.0
         }
     }
-    let out = keys
-        .into_iter()
-        .enumerate()
-        .filter(|(i, _)| picked[*i] != negative)
-        .map(|(_, k)| k);
-    Ok(Value::Array(list_of(out)))
+    let r = goro_ext_random::randomizer::pick_keys(
+        mt(vm),
+        goro_ext_random::randomizer::PickCaller::ArrayRand,
+        &Count(n),
+        num,
+    );
+    let picked = match r {
+        Ok(p) => p,
+        Err(e) => return Err(super::math::random_err(vm, e)),
+    };
+    let keys: Vec<Value> = arr.iter().map(|(k, _)| key_value(k)).collect();
+    if num == 1 {
+        return Ok(keys[picked[0]].clone());
+    }
+    Ok(Value::Array(list_of(
+        picked.into_iter().map(|i| keys[i].clone()),
+    )))
 }
 
 fn shuffle(vm: &mut Vm, a: &mut Args) -> R<Value> {

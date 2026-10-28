@@ -61,8 +61,6 @@ pub(crate) struct ClassCtx {
     pub name: PhpStr,
     pub parent: Option<PhpStr>,
     pub is_trait: bool,
-    pub is_interface: bool,
-    pub is_enum: bool,
 }
 
 pub(crate) struct LoopCtx {
@@ -71,7 +69,6 @@ pub(crate) struct LoopCtx {
     is_switch: bool,
     /// Iterator (foreach) or subject (switch) slot to free when leaving.
     free: Option<(Reg, bool)>,
-    finally_depth: usize,
     /// `regions.len()` when the loop was entered.
     region_len: usize,
     /// First instruction of the loop (where its temporary is live).
@@ -89,7 +86,6 @@ pub(crate) enum Region {
 }
 
 pub(crate) struct FinCtx {
-    ret: Reg,
     fastcalls: Vec<usize>,
     /// The try range this finally belongs to.
     range: u32,
@@ -204,7 +200,6 @@ pub struct Compiler<'a> {
     pub(crate) f: FState<'a>,
     pub(crate) notices: Vec<CompileNotice>,
     pub(crate) anon_count: u32,
-    pub(crate) closure_count: u32,
     pub(crate) src: &'a [u8],
     /// Constants known at compile time (internal constants), for folding.
     pub(crate) known_const: Option<&'a dyn Fn(&[u8]) -> Option<Value>>,
@@ -237,7 +232,6 @@ pub fn compile_program<'a>(
         f: FState::new(sc.vars),
         notices: Vec::new(),
         anon_count: 0,
-        closure_count: 0,
         src,
         known_const,
         in_const_expr: false,
@@ -249,11 +243,9 @@ pub fn compile_program<'a>(
             name: cls,
             parent,
             is_trait: false,
-            is_interface: false,
-            is_enum: false,
         });
     }
-    for e in &prog.compile_errors {
+    if let Some(e) = prog.compile_errors.first() {
         return Err(CompileError {
             message: e.message.clone(),
             line: e.line,
@@ -452,10 +444,6 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    pub(crate) fn free_pair(&mut self, r: Reg) {
-        let _ = r;
-    }
-
     pub(crate) fn cv(&mut self, name: &'a [u8]) -> Reg {
         if let Some(i) = self.f.cvs.iter().position(|n| *n == name) {
             return i as u32;
@@ -469,10 +457,6 @@ impl<'a> Compiler<'a> {
         let s = self.hidden();
         self.f.extra_cvs.push((name, s));
         s
-    }
-
-    pub(crate) fn has_cv(&self, name: &[u8]) -> Option<Reg> {
-        self.f.cvs.iter().position(|n| *n == name).map(|i| i as u32)
     }
 
     // ------------------------------------------------------------ names
@@ -1165,7 +1149,6 @@ impl<'a> Compiler<'a> {
     }
 
     fn push_loop(&mut self, is_switch: bool, free: Option<(Reg, bool)>) {
-        let fd = self.f.finallys.len();
         let region_len = self.f.regions.len();
         self.f.region_ids += 1;
         self.f.regions.push(Region::Loop(self.f.region_ids, free));
@@ -1174,7 +1157,6 @@ impl<'a> Compiler<'a> {
             continues: Vec::new(),
             is_switch,
             free,
-            finally_depth: fd,
             region_len,
             start: self.f.ops.len() as u32,
         });
@@ -1438,25 +1420,6 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    /// Frees the loop temporaries of loops `from..to`, innermost first.
-    fn free_loops(&mut self, from: usize, to: usize) {
-        if from >= to {
-            return;
-        }
-        let frees: Vec<(Reg, bool)> = self.f.loops[from..to]
-            .iter()
-            .rev()
-            .filter_map(|l| l.free)
-            .collect();
-        for (slot, is_iter) in frees {
-            if is_iter {
-                self.emit(Op::FeFree { iter: slot });
-            } else {
-                self.emit(Op::Free { slot });
-            }
-        }
-    }
-
     fn has_loop_frees(&self) -> bool {
         self.f.loops.iter().any(|l| l.free.is_some())
     }
@@ -1516,7 +1479,6 @@ impl<'a> Compiler<'a> {
         });
         if has_finally {
             self.f.finallys.push(FinCtx {
-                ret,
                 fastcalls: Vec::new(),
                 range: range_idx as u32,
             });

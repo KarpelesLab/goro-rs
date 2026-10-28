@@ -191,11 +191,11 @@ impl Vm {
             dyn_vars: PhpArray::new(),
         };
         for (k, v) in pre.iter() {
-            if let KeyRef::Str(name) = k {
-                if let Some(i) = main.cv_slot(name) {
-                    self.globals.slots[i as usize] = Some(v.clone());
-                    continue;
-                }
+            if let KeyRef::Str(name) = k
+                && let Some(i) = main.cv_slot(name)
+            {
+                self.globals.slots[i as usize] = Some(v.clone());
+                continue;
             }
             self.globals.dyn_vars.insert(k.to_owned(), v.clone());
         }
@@ -300,10 +300,10 @@ impl Vm {
         let resolved = self.resolve_include(&path);
         let Some(resolved) = resolved else {
             if path.is_empty() {
-                self.raise(super::errors::E_DEPRECATED & 0, "")?;
+                self.raise(0, "")?;
                 let is_req = matches!(kind, IncludeKind::Require | IncludeKind::RequireOnce);
                 if is_req {
-                    return self.value_error(&format!("Path cannot be empty"));
+                    return self.value_error("Path cannot be empty");
                 }
                 return self.value_error("Path cannot be empty");
             }

@@ -413,13 +413,14 @@ impl Stream {
     }
 
     pub fn read_some(&mut self, vm: &mut Vm, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.pending.is_empty() && matches!(self.backing, Backing::User { .. }) {
-            if let Err(e) = super::userstream::fill(vm, self) {
-                if vm.err.deferred.is_none() {
-                    vm.err.deferred = Some(e);
-                }
-                return Err(std::io::Error::other("user stream error"));
+        if self.pending.is_empty()
+            && matches!(self.backing, Backing::User { .. })
+            && let Err(e) = super::userstream::fill(vm, self)
+        {
+            if vm.err.deferred.is_none() {
+                vm.err.deferred = Some(e);
             }
+            return Err(std::io::Error::other("user stream error"));
         }
         if !self.pending.is_empty() {
             let n = buf.len().min(self.pending.len());
@@ -2813,8 +2814,10 @@ pub fn csv_parse(
         while j < n && (data[j] == b' ' || data[j] == b'\t') && Some(data[j]) != enc {
             j += 1;
         }
-        if enc.is_some() && j < n && Some(data[j]) == enc {
-            let e = enc.unwrap();
+        if let Some(e) = enc
+            && j < n
+            && data[j] == e
+        {
             i = j + 1;
             loop {
                 if i >= n {
@@ -2921,10 +2924,7 @@ fn fgetcsv(vm: &mut Vm, a: &mut Args) -> R<Value> {
         // Read a logical line (enclosures may span lines).
         let mut buf = Vec::new();
         let mut in_enc = false;
-        loop {
-            let Some(line) = read_line(vm, s, None) else {
-                break;
-            };
+        while let Some(line) = read_line(vm, s, None) {
             for &c in &line {
                 if Some(c) == enc {
                     in_enc = !in_enc;

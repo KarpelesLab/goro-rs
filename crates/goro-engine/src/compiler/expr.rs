@@ -2280,7 +2280,7 @@ impl<'a> Compiler<'a> {
         &mut self,
         items: &'a [Option<ArrayItem<'a>>],
         h: Reg,
-        line: u32,
+        _line: u32,
     ) -> CResult<()> {
         let mut idx = 0i64;
         for it in items {
@@ -2329,7 +2329,7 @@ impl<'a> Compiler<'a> {
                 let h2 = self.hidden();
                 self.free(d);
                 self.emit(Op::Copy { dst: h2, src: d });
-                self.destructure_ref(sub, h2, line)?;
+                self.destructure_ref(sub, h2, _line)?;
                 self.emit(Op::Free { slot: h2 });
                 self.free(h2);
             } else {
@@ -2528,7 +2528,7 @@ impl<'a> Compiler<'a> {
 
     /// Moves temporaries of a path into hidden slots (readable twice).
     fn pin_path(&mut self, p: LPath) -> LPath {
-        let mut pin = |c: &mut Self, r: Reg| -> Reg {
+        let pin = |c: &mut Self, r: Reg| -> Reg {
             if is_tmp(r) {
                 let h = c.hidden();
                 c.emit(Op::Copy { dst: h, src: r });

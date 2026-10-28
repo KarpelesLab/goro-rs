@@ -237,7 +237,7 @@ impl Vm {
             Value::Str(s) => s,
             other => self.to_php_str(&other)?,
         };
-        let v = self.read_prop(&o, &n, quiet, Some(cache).filter(|_| is_const(name)))?;
+        let v = self.read_prop(&o, &n, quiet, is_const(name).then_some(cache))?;
         self.put(dst, v);
         Ok(())
     }
@@ -578,7 +578,7 @@ impl Vm {
             other => self.to_php_str(&other)?,
         };
         let v = self.get(val)?;
-        self.write_prop(&o, &n, v, Some(cache).filter(|_| is_const(name)))
+        self.write_prop(&o, &n, v, is_const(name).then_some(cache))
     }
 
     /// Fills a property inline cache for `$o->name` read-modify-writes
@@ -1774,7 +1774,7 @@ impl Vm {
     fn class_const_in_expr(&mut self, class: ClassSpec, cls: &Rc<Class>, n: &PhpStr) -> R<Value> {
         if matches!(class, ClassSpec::SelfRef | ClassSpec::Parent)
             && !n.as_bytes().eq_ignore_ascii_case(b"class")
-            && cls.find_const(&n).is_none()
+            && cls.find_const(n).is_none()
         {
             let w = if matches!(class, ClassSpec::SelfRef) {
                 "self"

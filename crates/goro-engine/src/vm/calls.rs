@@ -8,7 +8,7 @@ use std::rc::Rc;
 use goro_runtime::{Key, KeyRef, ObjRef, PhpArray, PhpRef, PhpStr, Value};
 
 use super::types::Check;
-use super::{Frame, Pending, R, Slot, StackMark, Unwind, Vm, frame_flags, pending_flags};
+use super::{Frame, Pending, R, Slot, StackMark, Vm, frame_flags, pending_flags};
 use crate::bytecode::*;
 use crate::class::{Class, mflags};
 use crate::func::{Args, Func, FuncKind, NativeSig};
@@ -1317,7 +1317,7 @@ impl Vm {
                 let argc = self.pending().argc;
                 self.put_arg(i as u32, v);
                 // Named args don't count as positional.
-                self.pending().argc = argc.max(0);
+                self.pending().argc = argc;
                 let p = self.pending();
                 if (i as u32) >= p.argc {
                     // keep argc as positional count
@@ -1505,7 +1505,7 @@ impl Vm {
         &mut self,
         func: &Rc<Func>,
         sig: &NativeSig,
-        args: &mut Vec<Value>,
+        args: &mut [Value],
         passed: u64,
         has_named: bool,
     ) -> R<()> {
@@ -2499,12 +2499,7 @@ impl Vm {
                 };
                 self.put_arg(i, v);
             } else {
-                let v = if magic {
-                    a.into_deref()
-                } else {
-                    a.into_deref()
-                };
-                self.put_arg(i, v);
+                self.put_arg(i, a.into_deref());
             }
         }
         let _ = &mut named;

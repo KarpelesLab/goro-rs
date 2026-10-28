@@ -3,7 +3,7 @@
 //! WeakReference / WeakMap. Declarations follow the PHP manual's class
 //! synopses.
 
-use crate::class::{DisplayName, TypeName};
+use crate::class::DisplayName;
 use std::rc::Rc;
 
 use goro_runtime::{Key, ObjRef, PhpArray, PhpStr, Value};

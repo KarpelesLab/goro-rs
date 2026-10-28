@@ -1061,9 +1061,7 @@ fn ao_serialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let _ = out.push(Value::Int(flags));
     let _ = out.push(storage);
     let _ = out.push(Value::Array(members(vm, &o)));
-    if is_iterator_class(vm, a) {
-        let _ = out.push(Value::Null);
-    } else if ic.as_bytes() == b"ArrayIterator" {
+    if is_iterator_class(vm, a) || ic.as_bytes() == b"ArrayIterator" {
         let _ = out.push(Value::Null);
     } else {
         let _ = out.push(Value::Str(ic));
@@ -1600,7 +1598,7 @@ fn fa_index(vm: &mut Vm, a: &Args, k: &Value) -> R<i64> {
                 r.id(),
                 r.id()
             ))?;
-            Ok(r.id() as i64)
+            Ok(r.id())
         }
         other => vm.type_error(&format!(
             "Cannot access offset of type {} on {}",
@@ -2165,7 +2163,7 @@ fn dll_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
             let mut found = None;
             while end <= rest.len() {
                 if (end == rest.len() || rest[end] == b':')
-                    && let Ok(v) = vm.unserialize_quiet(&rest[cur..end])
+                    && let Some(v) = vm.unserialize_quiet(&rest[cur..end])
                 {
                     found = Some((end, v));
                     break;
@@ -2681,7 +2679,7 @@ impl OsData {
                     out.push(e);
                 }
             }
-            if cur >= out.len() + 1 {
+            if cur > out.len() {
                 new_pos = out.len();
             }
             self.entries = out;

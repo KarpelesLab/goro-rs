@@ -904,10 +904,7 @@ impl Vm {
         let v = if val == NONE {
             Value::Null
         } else if by_ref {
-            match self.get_raw(val) {
-                Value::Ref(r) => Value::Ref(r),
-                other => other,
-            }
+            self.get_raw(val)
         } else {
             self.get(val)?
         };
@@ -1164,8 +1161,6 @@ impl Vm {
             ),
         }
     }
-
-    pub(crate) fn rc_unused(_: Rc<()>) {}
 
     #[allow(dead_code)]
     fn key_ref_unused(_: KeyRef<'_>) {}
