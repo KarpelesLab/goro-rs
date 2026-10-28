@@ -1208,6 +1208,11 @@ impl Vm {
         if let Some(a) = alias {
             f.lname = lower(&a);
             f.name = a;
+        } else {
+            // An alias a trait made of another trait's method keeps its
+            // name (test ext/reflection/tests/bug69180.phpt).
+            f.lname = m.lname.clone();
+            f.name = m.name.clone();
         }
         f.scope.set(cp);
         f.from_trait.set(Rc::as_ptr(t));

@@ -676,6 +676,9 @@ impl<'a> Compiler<'a> {
                 }
                 StmtKind::Class(cd) if cd.name.is_some() => {
                     self.f.line = s.span.line;
+                    if !self.file.is_empty() && needs_rtd_key(cd) {
+                        next_rtd_key();
+                    }
                     let idx = self.class_decl(cd)?;
                     classes.push(idx);
                     self.emit(Op::DeclareClass { class: idx });
@@ -867,6 +870,9 @@ impl<'a> Compiler<'a> {
                 self.emit(Op::DeclareFunction { func: idx });
             }
             StmtKind::Class(cd) => {
+                if cd.name.is_some() && !self.file.is_empty() {
+                    next_rtd_key();
+                }
                 let idx = self.class_decl(cd)?;
                 self.emit(Op::DeclareClass { class: idx });
             }
@@ -1647,4 +1653,32 @@ pub(crate) fn is_ref_capable(e: &Expr<'_>) -> bool {
         ExprKind::Prop { nullsafe, .. } => !nullsafe,
         _ => false,
     }
+}
+
+thread_local! {
+    /// Runtime declaration keys handed out so far in this request (across
+    /// files and eval): anonymous classes are numbered with them.
+    static RTD_KEYS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// The next runtime declaration key. As observed on PHP 8.5, anonymous
+/// classes take one, and so do class declarations that are not bound at
+/// compile time (conditional ones, and ones with interfaces, traits or
+/// enums); `class@anonymous` names end in `$key`.
+pub(crate) fn next_rtd_key() -> u32 {
+    RTD_KEYS.with(|k| {
+        let v = k.get();
+        k.set(v + 1);
+        v
+    })
+}
+
+/// Whether a top-level class declaration is bound at run time.
+fn needs_rtd_key(cd: &goro_syntax::ast::ClassDecl) -> bool {
+    cd.kind == goro_syntax::ast::ClassKind::Enum
+        || !cd.implements.is_empty()
+        || cd
+            .members
+            .iter()
+            .any(|m| matches!(m, goro_syntax::ast::ClassMember::TraitUse(_)))
 }

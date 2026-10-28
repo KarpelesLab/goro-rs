@@ -487,6 +487,10 @@ impl<'a> Compiler<'a> {
                 },
             };
             let is_null_default = matches!(&default, ParamDefault::Const(Value::Null));
+            // A type made nullable only by its null default (an explicit
+            // ?T with null before a required parameter is just optional:
+            // test ext/reflection/tests/bug62715.phpt).
+            let implicit_null = is_null_default && ty.as_ref().is_some_and(|t| !t.allows_null());
             if let (Some(t), true) = (&mut ty, is_null_default)
                 && !t.allows_null()
             {
@@ -506,7 +510,7 @@ impl<'a> Compiler<'a> {
             }
             if p.default.is_some() && i < last_required && !p.variadic {
                 let rname = spec.params[last_required - 1].name.name;
-                if !(is_null_default && p.ty.is_some()) {
+                if !implicit_null {
                     self.notice(
                         goro_runtime::Level::Deprecated,
                         format!(
@@ -937,7 +941,7 @@ impl<'a> Compiler<'a> {
                 let mut v = prefix;
                 v.extend_from_slice(b"@anonymous\0");
                 v.extend_from_slice(self.file.as_bytes());
-                v.extend_from_slice(format!(":{}${:x}", line, self.anon_count).as_bytes());
+                v.extend_from_slice(format!(":{}${:x}", line, super::next_rtd_key()).as_bytes());
                 self.anon_count += 1;
                 v
             }

@@ -829,7 +829,11 @@ impl Vm {
                 "Error",
                 &format!(
                     "Non-static method {}::{}() cannot be called statically",
-                    cls.name.dname(),
+                    // The declaring class (test ext/reflection/tests/
+                    // ReflectionObject_getName_error1.phpt).
+                    m.scope()
+                        .map(|c| c.name.dname())
+                        .unwrap_or_else(|| cls.name.dname()),
                     m.name.dname()
                 ),
             );
