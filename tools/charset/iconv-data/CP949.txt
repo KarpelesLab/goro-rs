@@ -1,0 +1,19 @@
+# iconv charset CP949: differences from the public base table, observed
+# on PHP 8.5 (glibc 2.43 iconv) with tools/charset/iconv_obs_tables.php.
+# D <bytes> <code points|e (no output)|- (illegal)>: decoding
+# I <prefix> <bytes>: prefix+byte is incomplete (needs more input)
+# S <prefix> <n> <bytes>: //IGNORE skips n bytes of prefix+byte (default 1)
+# R <prefix> <n> <bytes>: illegal, but //IGNORE writes U+FFFD for the n bytes
+# E <code point> <bytes|x>: encoding, when not the shortest/lowest sequence
+base yes
+S a2 2 e9-fd
+S a5 2 ab-af,ba-c0,d9-e0,f9-fd
+S a6 2 e5-fd
+S a7 2 f0-fd
+S a8 2 a5,a7,b0
+S aa 2 f4-fd
+S ab 2 f7-fd
+S ac 2 c2-c8,ca-d0,f2-fd
+S ad 2 a1-c8,ca-fd
+S ae 2 a1-c8,ca-fd
+S af 2 a1-c8,ca-fd

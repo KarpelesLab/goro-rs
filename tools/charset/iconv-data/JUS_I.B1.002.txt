@@ -1,0 +1,18 @@
+# iconv charset JUS_I.B1.002: differences from the public base table, observed
+# on PHP 8.5 (glibc 2.43 iconv) with tools/charset/iconv_obs_tables.php.
+# D <bytes> <code points|e (no output)|- (illegal)>: decoding
+# I <prefix> <bytes>: prefix+byte is incomplete (needs more input)
+# S <prefix> <n> <bytes>: //IGNORE skips n bytes of prefix+byte (default 1)
+# R <prefix> <n> <bytes>: illegal, but //IGNORE writes U+FFFD for the n bytes
+# E <code point> <bytes|x>: encoding, when not the shortest/lowest sequence
+base ascii
+D 40 17D
+D 5b 160
+D 5c 110
+D 5d 106
+D 5e 10C
+D 60 17E
+D 7b 161
+D 7c 111
+D 7d 107
+D 7e 10D

@@ -1,0 +1,16 @@
+# iconv charset JOHAB: differences from the public base table, observed
+# on PHP 8.5 (glibc 2.43 iconv) with tools/charset/iconv_obs_tables.php.
+# D <bytes> <code points|e (no output)|- (illegal)>: decoding
+# I <prefix> <bytes>: prefix+byte is incomplete (needs more input)
+# S <prefix> <n> <bytes>: //IGNORE skips n bytes of prefix+byte (default 1)
+# R <prefix> <n> <bytes>: illegal, but //IGNORE writes U+FFFD for the n bytes
+# E <code point> <bytes|x>: encoding, when not the shortest/lowest sequence
+base yes
+D d9e6 20AC
+D d9e7 AE
+D d9e8 327E
+S 84 2 42-43,45,48-49,51,53,55-5d
+S db 2 3b-3f,4a-50,69-70,9b-a0,e5-f9
+S dc 2 92-a0,a5,a7,b0
+S dd 2 f4-f9
+S de 2 99-a0,c2-d0

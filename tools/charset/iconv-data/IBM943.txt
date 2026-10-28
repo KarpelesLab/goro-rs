@@ -1,0 +1,629 @@
+# iconv charset IBM943: differences from the public base table, observed
+# on PHP 8.5 (glibc 2.43 iconv) with tools/charset/iconv_obs_tables.php.
+# D <bytes> <code points|e (no output)|- (illegal)>: decoding
+# I <prefix> <bytes>: prefix+byte is incomplete (needs more input)
+# S <prefix> <n> <bytes>: //IGNORE skips n bytes of prefix+byte (default 1)
+# R <prefix> <n> <bytes>: illegal, but //IGNORE writes U+FFFD for the n bytes
+# E <code point> <bytes|x>: encoding, when not the shortest/lowest sequence
+base yes
+D 1a 1C
+D 1c 7F
+D 7f 1A
+D 815c 2014
+D 8160 301C
+D 8161 2016
+D 817c 2212
+D eefa A6
+D fa55 A6
+I - 85-86,eb-ec,ef
+S 81 2 00-3f,7f,ad-b7,c0-c7,cf-d9,e9-ef,f8-fb
+S 82 2 00-4e,59-5f,7a-7f,9b-9e,f2-fc
+S 83 2 00-3f,7f,97-9e,b7-be,d7-fc
+S 84 2 00-3f,61-6f,7f,92-9e,bf-fc
+S 85 2 00-7f,81-9f,a1-fc
+S 86 2 00-7f,81-9f,a1-fc
+S 87 2 00-3f,5e,76-7d,7f,9d-9f,a1-fc
+S 88 2 00-7f,81-9e
+S 89 2 00-3f,7f
+S 8a 2 00-3f,7f
+S 8b 2 00-3f,7f
+S 8c 2 00-3f,7f
+S 8d 2 00-3f,7f
+S 8e 2 00-3f,7f
+S 8f 2 00-3f,7f
+S 90 2 00-3f,7f
+S 91 2 00-3f,7f
+S 92 2 00-3f,7f
+S 93 2 00-3f,7f
+S 94 2 00-3f,7f
+S 95 2 00-3f,7f
+S 96 2 00-3f,7f
+S 97 2 00-3f,7f
+S 98 2 00-3f,73-7f,81-9e
+S 99 2 00-3f,7f
+S 9a 2 00-3f,7f
+S 9b 2 00-3f,7f
+S 9c 2 00-3f,7f
+S 9d 2 00-3f,7f
+S 9e 2 00-3f,7f
+S 9f 2 00-3f,7f
+S e0 2 00-3f,7f
+S e1 2 00-3f,7f
+S e2 2 00-3f,7f
+S e3 2 00-3f,7f
+S e4 2 00-3f,7f
+S e5 2 00-3f,7f
+S e6 2 00-3f,7f
+S e7 2 00-3f,7f
+S e8 2 00-3f,7f
+S e9 2 00-3f,7f
+S ea 2 00-3f,7f,a5-fc
+S eb 2 00-7f,81-9f,a1-fc
+S ec 2 00-7f,81-9f,a1-fc
+S ed 2 00-3f,7f
+S ee 2 00-3f,7f,ed-ee
+S ef 2 00-7f,81-9f,a1-fc
+S f0 2 00-3f,7f
+S f1 2 00-3f,7f
+S f2 2 00-3f,7f
+S f3 2 00-3f,7f
+S f4 2 00-3f,7f
+S f5 2 00-3f,7f
+S f6 2 00-3f,7f
+S f7 2 00-3f,7f
+S f8 2 00-3f,7f
+S f9 2 00-3f,7f
+S fa 2 00-3f,7f
+S fb 2 00-3f,7f
+S fc 2 00-3f,4c-7f,81-9f,a1-fc
+E 80 7f
+E 81 7f
+E 82 7f
+E 83 7f
+E 84 7f
+E 85 7f
+E 86 7f
+E 87 7f
+E 88 7f
+E 89 7f
+E 8A 7f
+E 8B 7f
+E 8C 7f
+E 8D 7f
+E 8E 7f
+E 8F 7f
+E 90 7f
+E 91 7f
+E 92 7f
+E 93 7f
+E 94 7f
+E 95 7f
+E 96 7f
+E 97 7f
+E 98 7f
+E 99 7f
+E 9A 7f
+E 9B 7f
+E 9C 7f
+E 9D 7f
+E 9E 7f
+E 9F 7f
+E A0 7f
+E A1 7f
+E A2 7f
+E A3 7f
+E A4 7f
+E A5 5c
+E A6 fa55
+E A9 7f
+E AA 7f
+E AB 7f
+E AC 7f
+E AD 7f
+E AE 7f
+E AF 7f
+E B2 7f
+E B3 7f
+E B5 7f
+E B7 7f
+E B8 7f
+E B9 7f
+E BA 7f
+E BB 7f
+E BC 7f
+E BD 7f
+E BE 7f
+E BF 7f
+E C0 7f
+E C1 7f
+E C2 7f
+E C3 7f
+E C4 7f
+E C5 7f
+E C6 7f
+E C7 7f
+E C8 7f
+E C9 7f
+E CA 7f
+E CB 7f
+E CC 7f
+E CD 7f
+E CE 7f
+E CF 7f
+E D0 7f
+E D1 7f
+E D2 7f
+E D3 7f
+E D4 7f
+E D5 7f
+E D6 7f
+E D8 7f
+E D9 7f
+E DA 7f
+E DB 7f
+E DC 7f
+E DD 7f
+E DE 7f
+E DF 7f
+E E0 7f
+E E1 7f
+E E2 7f
+E E3 7f
+E E4 7f
+E E5 7f
+E E6 7f
+E E7 7f
+E E8 7f
+E E9 7f
+E EA 7f
+E EB 7f
+E EC 7f
+E ED 7f
+E EE 7f
+E EF 7f
+E F0 7f
+E F1 7f
+E F2 7f
+E F3 7f
+E F4 7f
+E F5 7f
+E F6 7f
+E F8 7f
+E F9 7f
+E FA 7f
+E FB 7f
+E FC 7f
+E FD 7f
+E FE 7f
+E FF 7f
+E 2015 815c
+E 203E 7e
+E 2116 fa59
+E 2121 fa5a
+E 2160 fa4a
+E 2161 fa4b
+E 2162 fa4c
+E 2163 fa4d
+E 2164 fa4e
+E 2165 fa4f
+E 2166 fa50
+E 2167 fa51
+E 2168 fa52
+E 2169 fa53
+E 2170 fa40
+E 2171 fa41
+E 2172 fa42
+E 2173 fa43
+E 2174 fa44
+E 2175 fa45
+E 2176 fa46
+E 2177 fa47
+E 2178 fa48
+E 2179 fa49
+E 2225 8161
+E 3231 fa58
+E 4E28 fa68
+E 4EE1 fa69
+E 4EFC fa6a
+E 4F00 fa6b
+E 4F03 fa6c
+E 4F39 fa6d
+E 4F56 fa6e
+E 4F8A fa70
+E 4F92 fa6f
+E 4F94 fa72
+E 4F9A fa71
+E 4FC9 fa61
+E 4FCD fa73
+E 4FE0 8ba0
+E 4FFF fa76
+E 501E fa77
+E 5022 fa75
+E 5040 fa74
+E 5042 fa7a
+E 5046 fa78
+E 5070 fa79
+E 5094 fa7b
+E 50D8 fa7d
+E 50F4 fa7c
+E 514A fa7e
+E 5164 fa80
+E 519D fa81
+E 51BE fa82
+E 51EC fa83
+E 5215 fa84
+E 525D 948d
+E 529C fa85
+E 52A6 fa86
+E 52AF fb77
+E 52C0 fa87
+E 52DB fa88
+E 5300 fa89
+E 5307 fa8a
+E 5324 fa8b
+E 5372 fa8c
+E 5393 fa8d
+E 53B2 fa8e
+E 53DD fa8f
+E 548A fa92
+E 549C fa91
+E 54A9 fa93
+E 54FF fa94
+E 555E 88a0
+E 5586 fa95
+E 5699 8a9a
+E 56CA 9458
+E 5759 fa96
+E 5765 fa97
+E 57AC fa98
+E 57C7 fa9a
+E 57C8 fa99
+E 5861 9355
+E 589E fa9d
+E 58B2 fa9e
+E 590B fa9f
+E 5953 faa0
+E 595B faa1
+E 595D faa2
+E 5963 faa3
+E 59A4 faa4
+E 59BA faa5
+E 5B56 faa6
+E 5BC0 faa7
+E 5BD8 faa9
+E 5BEC faaa
+E 5C1E faab
+E 5C5B 9ba0
+E 5C62 8ec6
+E 5CA6 faac
+E 5CBA faad
+E 5CF5 faae
+E 5D27 faaf
+E 5D42 fab2
+E 5D53 fab0
+E 5D6D fab3
+E 5DB8 fab4
+E 5DB9 fab5
+E 5DD0 fab6
+E 5F21 fab7
+E 5F34 fab8
+E 5F45 fa67
+E 5F67 fab9
+E 5FB7 faba
+E 5FDE fabb
+E 605D fabc
+E 6085 fabd
+E 608A fabe
+E 60D5 fac0
+E 60DE fabf
+E 60F2 fac2
+E 6111 fac3
+E 6120 fac1
+E 6130 fac5
+E 6137 fac4
+E 6198 fac6
+E 6213 fac7
+E 62A6 fac8
+E 63F5 fac9
+E 6414 917e
+E 6451 92cd
+E 6460 faca
+E 649D facb
+E 64CE facc
+E 6522 9db7
+E 654E facd
+E 6600 face
+E 6609 fad1
+E 6615 facf
+E 661E fad3
+E 6624 fad4
+E 662E fad2
+E 6631 fa63
+E 663B fad0
+E 6657 fad6
+E 6659 fad7
+E 6665 fad5
+E 6673 fad9
+E 6699 fada
+E 66A0 fadb
+E 66B2 fadc
+E 66BF fadd
+E 66FA fade
+E 66FB fa66
+E 670E fadf
+E 6766 fae1
+E 67BB fae2
+E 67C0 fae4
+E 6801 fae5
+E 6805 8df2
+E 6844 fae6
+E 6852 fae3
+E 688E 9e94
+E 68C8 fa64
+E 68CF fae7
+E 6968 fae9
+E 6998 faeb
+E 69E2 faec
+E 6A30 faed
+E 6A46 faef
+E 6A6B faee
+E 6A73 faf0
+E 6A7E faf1
+E 6AE2 faf2
+E 6AE4 faf3
+E 6BD6 faf4
+E 6C3F faf5
+E 6C5C faf6
+E 6C6F faf8
+E 6C86 faf7
+E 6CDA faf9
+E 6D04 fafa
+E 6D6F fafc
+E 6D87 fafb
+E 6D96 fb40
+E 6DAC fb41
+E 6DCF fb42
+E 6DF2 fb44
+E 6DF8 fb43
+E 6DFC fb45
+E 6E27 fb48
+E 6E39 fb46
+E 6E3C fb49
+E 6E5C fb47
+E 6EBF fb4a
+E 6F51 94ac
+E 6F88 fb4b
+E 6FB5 fb4c
+E 6FF5 fb4d
+E 7005 fb4e
+E 7006 93c0
+E 7007 fb4f
+E 7028 fb50
+E 7085 fb51
+E 70AB fb52
+E 70BB fa62
+E 7104 fb54
+E 710F fb53
+E 7130 898b
+E 7146 fb56
+E 7147 fb57
+E 715C fb55
+E 71C1 fb59
+E 71FE fb5a
+E 72B1 fb5b
+E 72BE fb5c
+E 7324 fb5d
+E 7377 fb5f
+E 73BD fb60
+E 73C9 fb61
+E 73D2 fb64
+E 73D6 fb62
+E 73E3 fb63
+E 73F5 fb66
+E 7407 fb65
+E 7426 fb67
+E 7429 fb69
+E 742A fb68
+E 742E fb6a
+E 7462 fb6b
+E 7489 fb6c
+E 749F fb6d
+E 7501 fb6e
+E 752F faa8
+E 756F fb6f
+E 7626 9189
+E 7682 fb70
+E 769B fb73
+E 769C fb71
+E 769E fb72
+E 76A6 fb74
+E 7746 fb76
+E 7821 fb78
+E 784E fb79
+E 7864 fb7a
+E 787A fb7b
+E 7930 fb7c
+E 7994 fb81
+E 799B fb83
+E 79B1 9398
+E 7AD1 fb84
+E 7AE7 fb85
+E 7AEB fb87
+E 7B9E fb88
+E 7C1E 925c
+E 7D48 fb8a
+E 7D5C fb8b
+E 7DA0 fb8d
+E 7DB7 fb8c
+E 7DD6 fb8e
+E 7E48 e379
+E 7E52 fb8f
+E 7E61 8f4a
+E 7E6B 8c71
+E 7E8A fa5c
+E 7F47 fb90
+E 7FA1 fb91
+E 8141 e445
+E 8301 fb93
+E 8346 8c74
+E 8362 fb94
+E 837F fb95
+E 83C7 fb96
+E 83F6 fb97
+E 840A 9789
+E 8448 fb98
+E 84B4 fb99
+E 84DC fa60
+E 8523 8fd3
+E 8553 fb9a
+E 8559 fb9b
+E 856B fb9c
+E 85B0 fb9e
+E 87EC 90e4
+E 8807 fba1
+E 881F 9858
+E 88F5 fba2
+E 891C fa5d
+E 8A12 fba3
+E 8A37 fba4
+E 8A79 fba5
+E 8AA7 fba6
+E 8ABE fba7
+E 8ADF fba8
+E 8AF6 fbaa
+E 8B53 fbab
+E 8B7F fbac
+E 8CF0 fbad
+E 8CF4 fbae
+E 8D12 fbaf
+E 8D76 fbb0
+E 8EC0 8beb
+E 8ECF fbb2
+E 9067 fbb5
+E 90DE fbb6
+E 9115 fbb8
+E 9127 fbb9
+E 91AC 8fdd
+E 91B1 94ae
+E 91D7 fbbb
+E 91DA fbba
+E 91DE fbbc
+E 91E4 fbbf
+E 91E5 fbc0
+E 91ED fbbd
+E 91EE fbbe
+E 9206 fbc1
+E 920A fbc3
+E 9210 fbc2
+E 9239 fbca
+E 923A fbc4
+E 923C fbc6
+E 9240 fbc5
+E 924E fbc7
+E 9251 fbc9
+E 9259 fbc8
+E 9267 fbcb
+E 9277 fbcd
+E 9278 fbce
+E 9288 fa5f
+E 92A7 fbcc
+E 92D0 fbd2
+E 92D3 fbd6
+E 92D5 fbd4
+E 92D7 fbd0
+E 92D9 fbd1
+E 92E0 fbd5
+E 92E7 fbcf
+E 92F9 fa65
+E 92FB fbd9
+E 92FF fbdc
+E 9302 fbde
+E 931D fbdd
+E 931E fbdb
+E 9321 fbd8
+E 9325 fbd7
+E 9348 fa5e
+E 9357 fbe0
+E 9370 fbdf
+E 93A4 fbe1
+E 93C6 fbe2
+E 93DE fbe3
+E 93F8 fbe4
+E 9431 fbe5
+E 9445 fbe6
+E 9448 fbe7
+E 9592 fbe8
+E 969D fbeb
+E 96AF fbec
+E 9733 fbed
+E 973B fbee
+E 9743 fbef
+E 974D fbf0
+E 974F fbf1
+E 9751 fbf2
+E 9755 fbf3
+E 9830 966a
+E 9839 e8f6
+E 9857 fbf4
+E 985A 935e
+E 9865 fbf5
+E 9927 fbf8
+E 999E fbfa
+E 9A4E fbfb
+E 9A52 91cb
+E 9AD9 fbfc
+E 9ADC fc40
+E 9B72 fc42
+E 9B75 fc41
+E 9B8F fc43
+E 9BB1 fc44
+E 9BBB fc45
+E 9C00 fc46
+E 9D6B fc48
+E 9D70 fc47
+E 9DD7 89a8
+E 9E19 fc4a
+E 9E7C 8cb2
+E 9EB4 8d8d
+E 9EB5 96cb
+E 9ED1 fc4b
+E F86F fa59
+E F929 fae0
+E F9DC fbe9
+E FA0E fa90
+E FA0F fa9b
+E FA10 fa9c
+E FA11 fab1
+E FA12 fad8
+E FA13 fae8
+E FA14 faea
+E FA15 fb58
+E FA16 fb5e
+E FA17 fb75
+E FA18 fb7d
+E FA19 fb7e
+E FA1A fb80
+E FA1B fb82
+E FA1C fb86
+E FA1D fb89
+E FA1E fb92
+E FA1F fb9d
+E FA20 fb9f
+E FA21 fba0
+E FA22 fba9
+E FA23 fbb1
+E FA24 fbb3
+E FA25 fbb4
+E FA26 fbb7
+E FA27 fbd3
+E FA28 fbda
+E FA29 fbea
+E FA2A fbf6
+E FA2B fbf7
+E FA2C fbf9
+E FA2D fc49
+E FF02 fa57
+E FF07 fa56
+E FF0D 817c
+E FF5E 8160
+E FFE4 fa55

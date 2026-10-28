@@ -1,0 +1,57 @@
+# iconv charset SHIFT_JIS: differences from the public base table, observed
+# on PHP 8.5 (glibc 2.43 iconv) with tools/charset/iconv_obs_tables.php.
+# D <bytes> <code points|e (no output)|- (illegal)>: decoding
+# I <prefix> <bytes>: prefix+byte is incomplete (needs more input)
+# S <prefix> <n> <bytes>: //IGNORE skips n bytes of prefix+byte (default 1)
+# R <prefix> <n> <bytes>: illegal, but //IGNORE writes U+FFFD for the n bytes
+# E <code point> <bytes|x>: encoding, when not the shortest/lowest sequence
+base yes
+D 815f FF3C
+I - 85-87
+S 81 2 7f,ad-b7,c0-c7,cf-d9,e9-ea
+S 82 2 40-4e,59-5f,7a-7f,9b-9e
+S 83 2 7f,97-9e,b7-be,d7-ea
+S 84 2 61-6f,7f,92-9e,bf-ea
+S 85 2 40-7f,81-9f,a1-ea
+S 86 2 40-7f,81-9f,a1-ea
+S 87 2 40-7f,81-9f,a1-ea
+S 88 2 40-7f,81-9e
+S 89 2 7f
+S 8a 2 7f
+S 8b 2 7f
+S 8c 2 7f
+S 8d 2 7f
+S 8e 2 7f
+S 8f 2 7f
+S 90 2 7f
+S 91 2 7f
+S 92 2 7f
+S 93 2 7f
+S 94 2 7f
+S 95 2 7f
+S 96 2 7f
+S 97 2 7f
+S 98 2 73-7f,81-9e
+S 99 2 7f
+S 9a 2 7f
+S 9b 2 7f
+S 9c 2 7f
+S 9d 2 7f
+S 9e 2 7f
+S 9f 2 7f
+S e0 2 7f
+S e1 2 7f
+S e2 2 7f
+S e3 2 7f
+S e4 2 7f
+S e5 2 7f
+S e6 2 7f
+S e7 2 7f
+S e8 2 7f
+S e9 2 7f
+S ea 2 7f,a5-ea
+E 5C 5c
+E 7E 7e
+E FFE0 8191
+E FFE1 8192
+E FFE2 81ca

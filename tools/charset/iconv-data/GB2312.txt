@@ -1,0 +1,68 @@
+# iconv charset GB2312: differences from the public base table, observed
+# on PHP 8.5 (glibc 2.43 iconv) with tools/charset/iconv_obs_tables.php.
+# D <bytes> <code points|e (no output)|- (illegal)>: decoding
+# I <prefix> <bytes>: prefix+byte is incomplete (needs more input)
+# S <prefix> <n> <bytes>: //IGNORE skips n bytes of prefix+byte (default 1)
+# R <prefix> <n> <bytes>: illegal, but //IGNORE writes U+FFFD for the n bytes
+# E <code point> <bytes|x>: encoding, when not the shortest/lowest sequence
+base yes
+D 80 -
+D a1a4 30FB
+D a1aa 2015
+D a2a1 -
+D a2a2 -
+D a2a3 -
+D a2a4 -
+D a2a5 -
+D a2a6 -
+D a2a7 -
+D a2a8 -
+D a2a9 -
+D a2aa -
+D a6e0 -
+D a6e1 -
+D a6e2 -
+D a6e3 -
+D a6e4 -
+D a6e5 -
+D a6e6 -
+D a6e7 -
+D a6e8 -
+D a6e9 -
+D a6ea -
+D a6eb -
+D a6ee -
+D a6ef -
+D a6f0 -
+D a6f1 -
+D a6f2 -
+D a6f4 -
+D a6f5 -
+D a8bb -
+D a8bd -
+D a8be -
+D a8c0 -
+I - 8e-8f,aa-af,f8-fe
+S 8e 2 a1-fe
+S 8f 2 a1-fe
+S a2 2 a1-b0,e3-e4,ef-f0,fd-fe
+S a4 2 f4-fe
+S a5 2 f7-fe
+S a6 2 b9-c0,d9-fe
+S a7 2 c2-d0,f2-fe
+S a8 2 bb-c4,ea-fe
+S a9 2 a1-a3,f0-fe
+S aa 2 a1-fe
+S ab 2 a1-fe
+S ac 2 a1-fe
+S ad 2 a1-fe
+S ae 2 a1-fe
+S af 2 a1-fe
+S d7 2 fa-fe
+S f8 2 a1-fe
+S f9 2 a1-fe
+S fa 2 a1-fe
+S fb 2 a1-fe
+S fc 2 a1-fe
+S fd 2 a1-fe
+S fe 2 a1-fe

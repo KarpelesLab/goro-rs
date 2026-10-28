@@ -1,0 +1,66 @@
+# iconv charset ASMO_449: differences from the public base table, observed
+# on PHP 8.5 (glibc 2.43 iconv) with tools/charset/iconv_obs_tables.php.
+# D <bytes> <code points|e (no output)|- (illegal)>: decoding
+# I <prefix> <bytes>: prefix+byte is incomplete (needs more input)
+# S <prefix> <n> <bytes>: //IGNORE skips n bytes of prefix+byte (default 1)
+# R <prefix> <n> <bytes>: illegal, but //IGNORE writes U+FFFD for the n bytes
+# E <code point> <bytes|x>: encoding, when not the shortest/lowest sequence
+base ascii
+D 24 A4
+D 2c 60C
+D 3b 61B
+D 3f 61F
+D 41 621
+D 42 622
+D 43 623
+D 44 624
+D 45 625
+D 46 626
+D 47 627
+D 48 628
+D 49 629
+D 4a 62A
+D 4b 62B
+D 4c 62C
+D 4d 62D
+D 4e 62E
+D 4f 62F
+D 50 630
+D 51 631
+D 52 632
+D 53 633
+D 54 634
+D 55 635
+D 56 636
+D 57 637
+D 58 638
+D 59 639
+D 5a 63A
+D 60 640
+D 61 641
+D 62 642
+D 63 643
+D 64 644
+D 65 645
+D 66 646
+D 67 647
+D 68 648
+D 69 649
+D 6a 64A
+D 6b 64B
+D 6c 64C
+D 6d 64D
+D 6e 64E
+D 6f 64F
+D 70 650
+D 71 651
+D 72 652
+D 73 -
+D 74 -
+D 75 -
+D 76 -
+D 77 -
+D 78 -
+D 79 -
+D 7a -
+D 7e 203E

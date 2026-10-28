@@ -1,0 +1,138 @@
+# iconv charset EUC-KR: differences from the public base table, observed
+# on PHP 8.5 (glibc 2.43 iconv) with tools/charset/iconv_obs_tables.php.
+# D <bytes> <code points|e (no output)|- (illegal)>: decoding
+# I <prefix> <bytes>: prefix+byte is incomplete (needs more input)
+# S <prefix> <n> <bytes>: //IGNORE skips n bytes of prefix+byte (default 1)
+# R <prefix> <n> <bytes>: illegal, but //IGNORE writes U+FFFD for the n bytes
+# E <code point> <bytes|x>: encoding, when not the shortest/lowest sequence
+base yes
+D 80 80
+D 81 81
+D 82 82
+D 83 83
+D 84 84
+D 85 85
+D 86 86
+D 87 87
+D 88 88
+D 89 89
+D 8a 8A
+D 8b 8B
+D 8c 8C
+D 8d 8D
+D 8e 8E
+D 8f 8F
+D 90 90
+D 91 91
+D 92 92
+D 93 93
+D 94 94
+D 95 95
+D 96 96
+D 97 97
+D 98 98
+D 99 99
+D 9a 9A
+D 9b 9B
+D 9c 9C
+D 9d 9D
+D 9e 9E
+D 9f 9F
+D a2e8 327E
+I - ad-af,c9,fe-ff
+S a1 2 00-9f,ff
+S a2 2 00-9f,e9-ff
+S a3 2 00-9f,ff
+S a4 2 00-9f,ff
+S a5 2 00-9f,ab-af,ba-c0,d9-e0,f9-ff
+S a6 2 00-9f,e5-ff
+S a7 2 00-9f,f0-ff
+S a8 2 00-9f,a5,a7,b0,ff
+S a9 2 00-9f,ff
+S aa 2 00-9f,f4-ff
+S ab 2 00-9f,f7-ff
+S ac 2 00-9f,c2-d0,f2-ff
+S ad 2 00-9f,a1-ff
+S ae 2 00-9f,a1-ff
+S af 2 00-9f,a1-ff
+S b0 2 00-9f,ff
+S b1 2 00-9f,ff
+S b2 2 00-9f,ff
+S b3 2 00-9f,ff
+S b4 2 00-9f,ff
+S b5 2 00-9f,ff
+S b6 2 00-9f,ff
+S b7 2 00-9f,ff
+S b8 2 00-9f,ff
+S b9 2 00-9f,ff
+S ba 2 00-9f,ff
+S bb 2 00-9f,ff
+S bc 2 00-9f,ff
+S bd 2 00-9f,ff
+S be 2 00-9f,ff
+S bf 2 00-9f,ff
+S c0 2 00-9f,ff
+S c1 2 00-9f,ff
+S c2 2 00-9f,ff
+S c3 2 00-9f,ff
+S c4 2 00-9f,ff
+S c5 2 00-9f,ff
+S c6 2 00-9f,ff
+S c7 2 00-9f,ff
+S c8 2 00-9f,ff
+S c9 2 00-9f,a1-ff
+S ca 2 00-9f,ff
+S cb 2 00-9f,ff
+S cc 2 00-9f,ff
+S cd 2 00-9f,ff
+S ce 2 00-9f,ff
+S cf 2 00-9f,ff
+S d0 2 00-9f,ff
+S d1 2 00-9f,ff
+S d2 2 00-9f,ff
+S d3 2 00-9f,ff
+S d4 2 00-9f,ff
+S d5 2 00-9f,ff
+S d6 2 00-9f,ff
+S d7 2 00-9f,ff
+S d8 2 00-9f,ff
+S d9 2 00-9f,ff
+S da 2 00-9f,ff
+S db 2 00-9f,ff
+S dc 2 00-9f,ff
+S dd 2 00-9f,ff
+S de 2 00-9f,ff
+S df 2 00-9f,ff
+S e0 2 00-9f,ff
+S e1 2 00-9f,ff
+S e2 2 00-9f,ff
+S e3 2 00-9f,ff
+S e4 2 00-9f,ff
+S e5 2 00-9f,ff
+S e6 2 00-9f,ff
+S e7 2 00-9f,ff
+S e8 2 00-9f,ff
+S e9 2 00-9f,ff
+S ea 2 00-9f,ff
+S eb 2 00-9f,ff
+S ec 2 00-9f,ff
+S ed 2 00-9f,ff
+S ee 2 00-9f,ff
+S ef 2 00-9f,ff
+S f0 2 00-9f,ff
+S f1 2 00-9f,ff
+S f2 2 00-9f,ff
+S f3 2 00-9f,ff
+S f4 2 00-9f,ff
+S f5 2 00-9f,ff
+S f6 2 00-9f,ff
+S f7 2 00-9f,ff
+S f8 2 00-9f,ff
+S f9 2 00-9f,ff
+S fa 2 00-9f,ff
+S fb 2 00-9f,ff
+S fc 2 00-9f,ff
+S fd 2 00-9f,ff
+S fe 2 00-9f,a1-ff
+S ff 2 00-9f,a1-ff
+E 20A9 a3dc

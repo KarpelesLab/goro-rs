@@ -1,0 +1,69 @@
+# iconv charset ISO_10367-BOX: differences from the public base table, observed
+# on PHP 8.5 (glibc 2.43 iconv) with tools/charset/iconv_obs_tables.php.
+# D <bytes> <code points|e (no output)|- (illegal)>: decoding
+# I <prefix> <bytes>: prefix+byte is incomplete (needs more input)
+# S <prefix> <n> <bytes>: //IGNORE skips n bytes of prefix+byte (default 1)
+# R <prefix> <n> <bytes>: illegal, but //IGNORE writes U+FFFD for the n bytes
+# E <code point> <bytes|x>: encoding, when not the shortest/lowest sequence
+base ascii
+D 80 80
+D 81 81
+D 82 82
+D 83 83
+D 84 84
+D 85 85
+D 86 86
+D 87 87
+D 88 88
+D 89 89
+D 8a 8A
+D 8b 8B
+D 8c 8C
+D 8d 8D
+D 8e 8E
+D 8f 8F
+D 90 90
+D 91 91
+D 92 92
+D 93 93
+D 94 94
+D 95 95
+D 96 96
+D 97 97
+D 98 98
+D 99 99
+D 9a 9A
+D 9b 9B
+D 9c 9C
+D 9d 9D
+D 9e 9E
+D 9f 9F
+D c0 2551
+D c1 2550
+D c2 2554
+D c3 2557
+D c4 255A
+D c5 255D
+D c6 2560
+D c7 2563
+D c8 2566
+D c9 2569
+D ca 256C
+D cb E019
+D cc 2584
+D cd 2588
+D ce 25AA
+D d0 2502
+D d1 2500
+D d2 250C
+D d3 2510
+D d4 2514
+D d5 2518
+D d6 251C
+D d7 2524
+D d8 252C
+D d9 2534
+D da 253C
+D db 2591
+D dc 2592
+D dd 2593

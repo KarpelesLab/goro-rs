@@ -1,0 +1,80 @@
+# iconv charset INIS-8: differences from the public base table, observed
+# on PHP 8.5 (glibc 2.43 iconv) with tools/charset/iconv_obs_tables.php.
+# D <bytes> <code points|e (no output)|- (illegal)>: decoding
+# I <prefix> <bytes>: prefix+byte is incomplete (needs more input)
+# S <prefix> <n> <bytes>: //IGNORE skips n bytes of prefix+byte (default 1)
+# R <prefix> <n> <bytes>: illegal, but //IGNORE writes U+FFFD for the n bytes
+# E <code point> <bytes|x>: encoding, when not the shortest/lowest sequence
+base none
+D 00 0
+D 01 1
+D 02 2
+D 03 3
+D 04 4
+D 05 5
+D 06 6
+D 07 7
+D 08 8
+D 09 9
+D 0a A
+D 0b B
+D 0c C
+D 0d D
+D 0e E
+D 0f F
+D 10 10
+D 11 11
+D 12 12
+D 13 13
+D 14 14
+D 15 15
+D 16 16
+D 17 17
+D 18 18
+D 19 19
+D 1a 1A
+D 1b 1B
+D 1c 1C
+D 1d 1D
+D 1e 1E
+D 1f 1F
+D 20 20
+D 3a 3B1
+D 3b 3B2
+D 3c 3B3
+D 3d 3B4
+D 3e 39E
+D 5e 2192
+D 5f 222B
+D 60 2070
+D 61 B9
+D 62 B2
+D 63 B3
+D 64 2074
+D 65 2075
+D 66 2076
+D 67 2077
+D 68 2078
+D 69 2079
+D 6a 207A
+D 6b 207B
+D 6c 30EB
+D 6d 394
+D 6e 39B
+D 6f 3A9
+D 70 2080
+D 71 2081
+D 72 2082
+D 73 2083
+D 74 2084
+D 75 2085
+D 76 2086
+D 77 2087
+D 78 2088
+D 79 2089
+D 7a 3A3
+D 7b 3BC
+D 7c 3BD
+D 7d 3C9
+D 7e 3C0
+D 7f 7F
