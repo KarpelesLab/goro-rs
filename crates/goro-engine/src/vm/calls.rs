@@ -1471,7 +1471,53 @@ impl Vm {
         p.func.is_native() && matches!(p.func.lname.as_bytes(), b"array_multisort" | b"extract")
     }
 
+    /// The slot of by-value argument `arg` of the pending call when it is
+    /// a parameter of a user function (the common case of a send).
+    #[inline(always)]
+    fn direct_arg_slot(&mut self, arg: u32) -> Option<*mut Slot> {
+        let p = self.ex.pending.last_mut()?;
+        if arg < 63 && p.byref >> arg & 1 == 0 && arg < p.np && !p.base.is_null() {
+            p.argc = p.argc.max(arg + 1);
+            p.passed |= 1 << arg;
+            // SAFETY: a parameter slot of the callee.
+            Some(unsafe { p.base.add(arg as usize) })
+        } else {
+            None
+        }
+    }
+
+    /// Appends by-value argument `arg` of a native (or trampoline) call
+    /// when it is the next one; gives the value back otherwise.
+    #[inline(always)]
+    fn push_native_arg(&mut self, arg: u32, v: Value) -> Result<(), Value> {
+        let Some(p) = self.ex.pending.last_mut() else {
+            return Err(v);
+        };
+        if arg < 63 && p.byref >> arg & 1 == 0 && p.base.is_null() && arg as usize == p.args.len() {
+            p.argc = p.argc.max(arg + 1);
+            p.passed |= 1 << arg;
+            p.args.push(v);
+            Ok(())
+        } else {
+            Err(v)
+        }
+    }
+
+    #[inline]
     pub(crate) fn send_val(&mut self, arg: u32, v: Value, from_call: bool) -> R<()> {
+        if let Some(s) = self.direct_arg_slot(arg) {
+            let old = unsafe { (*s).replace(v) };
+            drop(old);
+            return Ok(());
+        }
+        match self.push_native_arg(arg, v) {
+            Ok(()) => Ok(()),
+            Err(v) => self.send_val_slow(arg, v, from_call),
+        }
+    }
+
+    #[inline(never)]
+    fn send_val_slow(&mut self, arg: u32, v: Value, from_call: bool) -> R<()> {
         if self.pending_arg_by_ref(arg) {
             if self.pending_prefers_ref() {
                 self.put_arg(arg, v);
@@ -1488,7 +1534,44 @@ impl Vm {
         Ok(())
     }
 
+    #[inline]
     pub(crate) fn send_var(&mut self, var: Reg, arg: u32) -> R<()> {
+        let src = self.slot_ptr(var);
+        // A defined variable to a by-value parameter.
+        if unsafe { (*src).is_some() }
+            && let Some(s) = self.direct_arg_slot(arg)
+        {
+            let v = match unsafe { &*src } {
+                Some(Value::Ref(r)) => r.get(),
+                Some(v) => v.clone(),
+                None => unreachable!(),
+            };
+            let old = unsafe { (*s).replace(v) };
+            drop(old);
+            return Ok(());
+        }
+        if unsafe { (*src).is_some() }
+            && let Some(p) = self.ex.pending.last()
+            && p.base.is_null()
+        {
+            let v = match unsafe { &*src } {
+                Some(Value::Ref(r)) => r.get(),
+                Some(v) => v.clone(),
+                None => unreachable!(),
+            };
+            return match self.push_native_arg(arg, v) {
+                Ok(()) => Ok(()),
+                Err(v) => {
+                    drop(v);
+                    self.send_var_slow(var, arg)
+                }
+            };
+        }
+        self.send_var_slow(var, arg)
+    }
+
+    #[inline(never)]
+    fn send_var_slow(&mut self, var: Reg, arg: u32) -> R<()> {
         if self.pending_arg_by_ref(arg) {
             let r = self.var_make_ref(var)?;
             self.put_arg(arg, Value::Ref(r));
@@ -1675,10 +1758,17 @@ impl Vm {
         };
         let ret_var = dst != NONE && dst & TMP == 0;
         let top = self.ex.pending.last().expect("DoCall without pending call");
-        if top.flags & (pending_flags::NO_CTOR | pending_flags::MAGIC_CALL) == 0
-            && let FuncKind::User(_) = &top.func.kind
-        {
-            self.activate(ret, ret_var, false)?;
+        if top.flags & (pending_flags::NO_CTOR | pending_flags::MAGIC_CALL) == 0 {
+            if let FuncKind::User(_) = &top.func.kind {
+                self.activate(ret, ret_var, false)?;
+                return Ok(None);
+            }
+            let is_new = top.flags & pending_flags::NEW != 0;
+            let parts = self.take_native_pending();
+            let v = self.call_native_parts(parts, false)?;
+            if !is_new && !ret.is_null() {
+                self.put(dst, v);
+            }
             return Ok(None);
         }
         let p = self.ex.pending.pop().unwrap();
@@ -1741,20 +1831,60 @@ impl Vm {
     }
 
     fn call_native_pending_ex(&mut self, mut p: Pending, dynamic: bool) -> R<Value> {
-        let func = p.func.clone();
-        let FuncKind::Native { handler, .. } = &func.kind else {
+        let parts = NativeParts {
+            func: p.func.clone(),
+            args: std::mem::take(&mut p.args),
+            named: p.named_extra.take(),
+            this: p.this.take(),
+            static_class: p.static_class,
+            passed: p.passed,
+            has_named: p.has_named,
+        };
+        self.give_args_vec(std::mem::take(&mut p.extra));
+        drop(p);
+        self.call_native_parts(parts, dynamic)
+    }
+
+    /// Pops the pending (native) call on top, without moving it whole.
+    #[inline]
+    fn take_native_pending(&mut self) -> NativeParts {
+        let p = self.ex.pending.last_mut().unwrap();
+        let parts = NativeParts {
+            func: p.func.clone(),
+            args: std::mem::take(&mut p.args),
+            named: p.named_extra.take(),
+            this: p.this.take(),
+            static_class: p.static_class,
+            passed: p.passed,
+            has_named: p.has_named,
+        };
+        let extra = std::mem::take(&mut p.extra);
+        let len = self.ex.pending.len();
+        self.ex.pending.truncate(len - 1);
+        if extra.capacity() != 0 {
+            self.give_args_vec(extra);
+        }
+        parts
+    }
+
+    fn call_native_parts(&mut self, parts: NativeParts, dynamic: bool) -> R<Value> {
+        let NativeParts {
+            func,
+            mut args,
+            named,
+            this,
+            static_class,
+            passed,
+            has_named,
+        } = parts;
+        let FuncKind::Native { handler, info, .. } = &func.kind else {
             unreachable!()
         };
         let handler = *handler;
-        let sig = self.native_sig(&func);
-        let mut args = std::mem::take(&mut p.args);
-        let named = p.named_extra.take();
-        let this = p.this.take();
-        let static_class = p.static_class;
-        let passed = p.passed;
-        let has_named = p.has_named;
-        self.give_args_vec(std::mem::take(&mut p.extra));
-        drop(p);
+        let sig = match info.get() {
+            Some(s) => s.clone(),
+            None => self.native_sig(&func),
+        };
         if let Err(e) = self.prepare_native_args(&func, &sig, &mut args, passed, has_named) {
             self.give_args_vec(args);
             return Err(e);
@@ -1823,7 +1953,13 @@ impl Vm {
     ) -> R<()> {
         let np = sig.params.len();
         let n = args.len();
-        let fname = func.display_name();
+        // The name for messages, made only when one is raised.
+        let fname = || func.display_name();
+        let plain: &[u8] = if func.scope().is_none() {
+            func.name.as_bytes()
+        } else {
+            b""
+        };
         if has_named {
             for i in 0..n.min(np) {
                 if i < 64 && passed & (1 << i) == 0 {
@@ -1839,7 +1975,7 @@ impl Vm {
                                 "ArgumentCountError",
                                 &format!(
                                     "{}(): Argument #{} (${}) must be passed explicitly, because the default value is not known",
-                                    fname,
+                                    fname(),
                                     i + 1,
                                     p.name.to_string_lossy()
                                 ),
@@ -1857,7 +1993,7 @@ impl Vm {
                                 "ArgumentCountError",
                                 &format!(
                                     "{}(): Argument #{} (${}) not passed",
-                                    fname,
+                                    fname(),
                                     i + 1,
                                     p.name.dname()
                                 ),
@@ -1881,7 +2017,7 @@ impl Vm {
                     "ArgumentCountError",
                     &format!(
                         "{}(): Argument #{} (${}) not passed",
-                        fname,
+                        fname(),
                         n + 1,
                         p.name.dname()
                     ),
@@ -1891,7 +2027,7 @@ impl Vm {
                 "ArgumentCountError",
                 &format!(
                     "{}() expects {} {} argument{}, {} given",
-                    fname,
+                    fname(),
                     word,
                     cnt,
                     if cnt == 1 { "" } else { "s" },
@@ -1935,7 +2071,7 @@ impl Vm {
                             "TypeError",
                             &format!(
                                 "{}(): Argument #{} (${}) must be of type {}, {} given",
-                                fname,
+                                fname(),
                                 i + 1,
                                 p.name.to_string_lossy(),
                                 shown(ty),
@@ -1953,21 +2089,21 @@ impl Vm {
             // "get_parent_class(): Argument #1 ($object_or_class) must be an
             // object or a valid class name, int given").
             if i == 0
-                && matches!(fname.as_bytes(), b"get_parent_class" | b"get_class_methods")
+                && matches!(plain, b"get_parent_class" | b"get_class_methods")
                 && !matches!(args[0], Value::Object(_) | Value::Str(_))
             {
                 return self.throw(
                     "TypeError",
                     &format!(
                         "{}(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given",
-                        fname,
+                        fname(),
                         Vm::type_name_given(&args[0])
                     ),
                 );
             }
             // ini_set()'s value names no given type (observed on PHP 8.5).
             if i == 1
-                && fname.as_bytes() == b"ini_set"
+                && plain == b"ini_set"
                 && matches!(args[1], Value::Array(_) | Value::Resource(_))
             {
                 return self.throw(
@@ -1977,7 +2113,7 @@ impl Vm {
             }
             // strtr()'s $from is an array with two arguments and a string
             // with three (observed on PHP 8.5).
-            if i == 1 && fname.as_bytes() == b"strtr" {
+            if i == 1 && plain == b"strtr" {
                 let want = if n == 2 { "array" } else { "string" };
                 let bad = match &args[1] {
                     Value::Array(_) => n != 2,
@@ -2005,7 +2141,7 @@ impl Vm {
                 if scalar && !strict {
                     self.deprecated(&format!(
                         "{}(): Passing null to parameter #{} (${}) of type {} is deprecated",
-                        fname,
+                        fname(),
                         i + 1,
                         p.name.dname(),
                         ty.display()
@@ -2021,6 +2157,22 @@ impl Vm {
                     };
                     continue;
                 }
+            }
+            // Exact scalar and array matches need no check (callable
+            // parameters may still deprecate a string or array).
+            let m = ty.mask;
+            if m & tmask::CALLABLE == 0
+                && match &args[i] {
+                    Value::Int(_) => m & tmask::INT != 0,
+                    Value::Float(_) => m & tmask::FLOAT != 0,
+                    Value::Str(_) => m & tmask::STRING != 0,
+                    Value::Array(_) => m & tmask::ARRAY != 0,
+                    Value::Bool(true) => m & tmask::TRUE != 0,
+                    Value::Bool(false) => m & tmask::FALSE != 0,
+                    _ => false,
+                }
+            {
+                continue;
             }
             match self.check_type(&args[i], ty, strict, func.scope.get(), std::ptr::null())? {
                 Check::Ok
@@ -2042,7 +2194,7 @@ impl Vm {
                         "TypeError",
                         &format!(
                             "{}(): Argument #{} (${}) must be a valid callback{}, {}",
-                            fname,
+                            fname(),
                             i + 1,
                             p.name.to_string_lossy(),
                             if ty.allows_null() { " or null" } else { "" },
@@ -2062,7 +2214,7 @@ impl Vm {
                         "TypeError",
                         &format!(
                             "{}(): Argument #{}{} must be of type {}, {} given",
-                            fname,
+                            fname(),
                             i + 1,
                             pname,
                             shown(ty),
@@ -2965,6 +3117,19 @@ impl Vm {
         let mut named: Vec<(PhpStr, Value)> = Vec::new();
         for (i, a) in args.into_iter().enumerate() {
             let i = i as u32;
+            // Plain values to by-value parameters.
+            let a = if matches!(a, Value::Ref(_)) {
+                a
+            } else if let Some(s) = self.direct_arg_slot(i) {
+                let old = unsafe { (*s).replace(a) };
+                drop(old);
+                continue;
+            } else {
+                match self.push_native_arg(i, a) {
+                    Ok(()) => continue,
+                    Err(a) => a,
+                }
+            };
             if !magic && self.pending_arg_by_ref(i) {
                 let v = match a {
                     Value::Ref(_) => a,
@@ -3493,6 +3658,17 @@ impl Vm {
 }
 
 /// `__call` / `__callStatic`.
+/// A native call taken off the pending stack.
+struct NativeParts {
+    func: Rc<Func>,
+    args: Vec<Value>,
+    named: Option<PhpArray>,
+    this: Option<ObjRef>,
+    static_class: *const Class,
+    passed: u64,
+    has_named: bool,
+}
+
 /// Whether the arguments in `base` bind without work: every parameter is
 /// passed (or has a default the frame fills in: a constant, or prologue
 /// code), and each value matches its parameter's type exactly. Pure (no
