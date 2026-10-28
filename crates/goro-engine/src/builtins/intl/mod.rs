@@ -37,6 +37,7 @@ mod locale;
 mod msgfmt;
 mod numfmt;
 mod text;
+mod resbundle;
 mod spoof;
 mod timezone;
 mod translit;
@@ -59,6 +60,7 @@ pub static MODULES: &[&Module] = &[
     &uconv::MODULE,
     &translit::MODULE,
     &spoof::MODULE,
+    &resbundle::MODULE,
 ];
 
 pub static MODULE: Module = Module {

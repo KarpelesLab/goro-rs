@@ -22,6 +22,7 @@ pub mod locale;
 pub mod msgfmt;
 pub mod numfmt;
 pub mod timezone;
+pub mod resbundle;
 pub mod spoof;
 pub mod translit;
 pub mod uconv;
