@@ -282,7 +282,24 @@ impl Vm {
                         && self.has_magic_get(&cls)
                         && !self.guarded(o, name, 0)
                     {
-                        return self.magic_get(o, &cls, name);
+                        let v = self.magic_get(o, &cls, name)?;
+                        // test Zend/tests/type_declarations/typed_properties_030
+                        if let Some(t) = &p.ty {
+                            let strict = self.caller_strict();
+                            return match self.check_type(&v, t, strict, p.class, p.class)? {
+                                crate::vm::types::Check::Ok => Ok(v),
+                                crate::vm::types::Check::Coerced(c) => Ok(c),
+                                crate::vm::types::Check::Fail => self.type_error(&format!(
+                                    "Value of type {} returned from {}::__get() must be compatible with unset property {}::${} of type {}",
+                                    Vm::type_name_given(&v),
+                                    cls.name.dname(),
+                                    Self::prop_class_name(&p),
+                                    name.to_string_lossy(),
+                                    t.display()
+                                )),
+                            };
+                        }
+                        return Ok(v);
                     }
                     // `??`, `??=`: an uninitialized typed property is unset.
                     if p.ty.is_some() && quiet {

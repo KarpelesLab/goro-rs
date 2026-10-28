@@ -802,6 +802,51 @@ impl Vm {
                         let x = x.clone().into_deref();
                         v = Some(self.typed_static_ref_value(sp, x)?);
                     }
+                    // Compound assignments and ++/-- of a typed static
+                    // property keep its type (test Zend/tests/
+                    // type_declarations/typed_properties_075).
+                    if let (PathAction::AssignOp(..) | PathAction::IncDec(_), Some(sp)) =
+                        (path.action, &static_decl)
+                        && let Some(t) = sp.ty.clone()
+                    {
+                        let old = r.get();
+                        let new = match path.action {
+                            PathAction::AssignOp(op, _) => {
+                                let rhs = v.clone().unwrap_or_default().into_deref();
+                                self.binary_op(op, &old, &rhs)?
+                            }
+                            PathAction::IncDec(op) => {
+                                let n = self.incdec_value(op, &old)?;
+                                if let (Value::Int(_), Value::Float(_)) = (&old, &n)
+                                    && t.mask & tmask::INT != 0
+                                    && t.mask & (tmask::FLOAT | tmask::MIXED) == 0
+                                {
+                                    let inc = op.is_inc();
+                                    return self.type_error(&format!(
+                                        "Cannot {} property {}::${} of type {} past its {} value",
+                                        if inc { "increment" } else { "decrement" },
+                                        unsafe { (*sp.class).name.dname() },
+                                        sp.name.to_string_lossy(),
+                                        t.display(),
+                                        if inc { "maximal" } else { "minimal" }
+                                    ));
+                                }
+                                n
+                            }
+                            _ => unreachable!(),
+                        };
+                        let new = self.typed_static_ref_value(sp, new)?;
+                        let prev = r.set(new.clone());
+                        drop(prev);
+                        if res != NONE {
+                            let out = match path.action {
+                                PathAction::IncDec(op) if op.is_post() => old,
+                                _ => new,
+                            };
+                            self.put(res, out);
+                        }
+                        return Ok(());
+                    }
                     // `A::$x =& $y` rebinds the property's storage.
                     if let (PathAction::BindRef(_), Some(Value::Ref(src)), Some(sp)) =
                         (path.action, &v, &static_decl)
