@@ -49,7 +49,11 @@ impl Vm {
         })?;
         let consts = &self.constants;
         let kc = |n: &[u8]| -> Option<Value> {
-            // Only engine constants that can't be redefined.
+            // Only engine constants that can't be redefined; deprecated
+            // ones warn at run time.
+            if crate::builtins::misc::const_deprecation(n).is_some() {
+                return None;
+            }
             let v = consts.get(&PhpStr::new(n))?;
             match v {
                 Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Null | Value::Str(_) => {
@@ -911,16 +915,23 @@ impl Vm {
         let n = self.code_ref().consts[name as usize].clone();
         let Value::Str(n) = n else { unreachable!() };
         let found = match self.lookup_constant(&n)? {
-            Some(v) => Some(v),
+            Some(v) => Some((v, n.clone())),
             None if fallback => {
                 let g = self.code_ref().consts[name as usize + 2].clone();
                 let Value::Str(g) = g else { unreachable!() };
-                self.lookup_constant(&g)?
+                self.lookup_constant(&g)?.map(|v| (v, g))
             }
             None => None,
         };
         match found {
-            Some(v) => {
+            // Deprecated internal constants warn on every fetch, so they
+            // are not cached.
+            Some((v, n)) if crate::builtins::misc::const_deprecation(&n).is_some() => {
+                self.const_deprecated(&n)?;
+                self.put(dst, v);
+                Ok(())
+            }
+            Some((v, _)) => {
                 let idx = self.const_cache.len();
                 self.const_cache.push(v.clone());
                 self.code_ref().caches[cache as usize].set(Cache {
@@ -973,6 +984,19 @@ impl Vm {
             _ => {}
         }
         Ok(None)
+    }
+
+    /// Raises the deprecation of an internal constant, if it has one.
+    pub(crate) fn const_deprecated(&mut self, name: &[u8]) -> R<()> {
+        let name = name.strip_prefix(b"\\").unwrap_or(name);
+        if let Some(why) = crate::builtins::misc::const_deprecation(name) {
+            self.deprecated(&format!(
+                "Constant {} is deprecated since {}",
+                String::from_utf8_lossy(name),
+                why
+            ))?;
+        }
+        Ok(())
     }
 
     pub(crate) fn declare_constant(&mut self, n: Value, v: Value) -> R<()> {

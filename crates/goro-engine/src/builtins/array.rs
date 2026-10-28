@@ -2189,6 +2189,7 @@ struct SetOp {
 fn callable_or_error(vm: &mut Vm, a: &Args, i: usize) -> R<Value> {
     let v = a.val(i);
     if vm.is_callable_value(&v, false) {
+        vm.callable_deprecation(&v)?;
         return Ok(v);
     }
     let why = vm.callable_error(&v);

@@ -251,9 +251,11 @@ impl Vm {
                     {
                         return r;
                     }
-                    let n = goro_runtime::convert::to_number_cast(&v, self);
+                    // "could not be converted to float" (test
+                    // general_functions/type.phpt).
+                    let f = goro_runtime::convert::to_float(&v, self);
                     self.check_deferred()?;
-                    Value::Float(n.to_f64())
+                    Value::Float(f)
                 }
                 _ => {
                     let f = goro_runtime::convert::to_float(&v, self);

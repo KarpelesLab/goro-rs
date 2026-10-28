@@ -271,6 +271,9 @@ impl Vm {
     /// Prepares a call of a callable value (`$f()`, `call_user_func`...).
     pub(crate) fn init_callable_call(&mut self, v: Value, nargs: u32) -> R<()> {
         let _ = nargs;
+        if matches!(v, Value::Str(_) | Value::Array(_)) {
+            self.check_dynamic_callable(&v)?;
+        }
         let c = self.resolve_callable(&v, true)?;
         if c.func.is_native() && is_scope_introspecting(&c.func.lname) {
             return self.throw(
@@ -326,30 +329,27 @@ impl Vm {
                 };
                 match target {
                     Value::Object(o) => {
-                        let mut m = m.as_bytes();
+                        let m = m.as_bytes();
                         let cls = self.class_of(&o);
-                        // "parent::method"
-                        if m.len() > 8 && m[..8].eq_ignore_ascii_case(b"parent::") {
-                            m = &m[8..];
-                            let parent = cls.parent.clone();
-                            if let Some(p) = parent {
+                        // "parent::method", "A::method"
+                        match self.qualified_method(&cls, m) {
+                            Some(Ok((p, m))) => {
                                 let mut c = self.resolve_method(&o, &p, m, for_call)?;
                                 c.static_class = Rc::as_ptr(&cls);
-                                return Ok(c);
+                                Ok(c)
                             }
+                            Some(Err(e)) => self.throw("Error", &e),
+                            None => self.resolve_method(&o, &cls, m, for_call),
                         }
-                        self.resolve_method(&o, &cls, m, for_call)
                     }
                     Value::Str(cn) => {
                         let c = self.class_for_callable(&cn)?;
-                        let mut m = m.as_bytes();
-                        if m.len() > 8 && m[..8].eq_ignore_ascii_case(b"parent::") {
-                            m = &m[8..];
-                            if let Some(p) = c.parent.clone() {
-                                return self.resolve_static_method(&p, m, for_call, true);
-                            }
+                        let m = m.as_bytes();
+                        match self.qualified_method(&c, m) {
+                            Some(Ok((p, m))) => self.resolve_static_method(&p, m, for_call, true),
+                            Some(Err(e)) => self.throw("Error", &e),
+                            None => self.resolve_static_method(&c, m, for_call, true),
                         }
-                        self.resolve_static_method(&c, m, for_call, true)
                     }
                     _ => self.throw("Error", "Array callback must have exactly two elements"),
                 }
@@ -379,6 +379,177 @@ impl Vm {
             }
             _ => self.throw("Error", "Value not callable"),
         }
+    }
+
+    /// The PHP 8.2 deprecations of scope-relative callables, raised where
+    /// a callable is checked (parameters of internal functions,
+    /// is_callable()); observed on PHP 8.5: 'Use of "self" in callables is
+    /// deprecated', 'Callables of the form ["B", "parent::g"] are
+    /// deprecated'. Reported when the class part resolves, whether or not
+    /// the method exists.
+    pub fn callable_deprecation(&mut self, v: &Value) -> R<()> {
+        fn rel(c: &[u8]) -> Option<&'static str> {
+            let l = c.to_ascii_lowercase();
+            match &l[..] {
+                b"self" => Some("self"),
+                b"parent" => Some("parent"),
+                b"static" => Some("static"),
+                _ => None,
+            }
+        }
+        let msg = match v {
+            Value::Str(s) => match find_double_colon(s).and_then(|p| rel(&s[..p])) {
+                Some(r) if self.relative_class_resolves(r) => {
+                    format!("Use of \"{}\" in callables is deprecated", r)
+                }
+                _ => return Ok(()),
+            },
+            Value::Array(a) if a.len() == 2 => {
+                let (Some(t), Some(m)) = (a.get_int(0), a.get_int(1)) else {
+                    return Ok(());
+                };
+                let (t, m) = (t.deref(), m.deref());
+                let Value::Str(m) = m else { return Ok(()) };
+                let cname = match &t {
+                    Value::Str(c) => {
+                        if let Some(r) = rel(c) {
+                            if self.relative_class_resolves(r) {
+                                self.deprecated(&format!(
+                                    "Use of \"{}\" in callables is deprecated",
+                                    r
+                                ))?;
+                            }
+                            return Ok(());
+                        }
+                        if self.find_class(c, true)?.is_none() {
+                            return Ok(());
+                        }
+                        c.to_string_lossy()
+                    }
+                    Value::Object(o) => self.class_of(o).name.to_string_lossy(),
+                    _ => return Ok(()),
+                };
+                if find_double_colon(&m).is_none() {
+                    return Ok(());
+                }
+                format!(
+                    "Callables of the form [\"{}\", \"{}\"] are deprecated",
+                    cname,
+                    m.to_string_lossy()
+                )
+            }
+            _ => return Ok(()),
+        };
+        self.deprecated(&msg)
+    }
+
+    fn relative_class_resolves(&self, r: &str) -> bool {
+        let p = if r == "static" {
+            self.static_class_ptr()
+        } else {
+            self.scope_ptr()
+        };
+        !p.is_null() && (r != "parent" || unsafe { (*p).parent.is_some() })
+    }
+
+    /// A class-qualified method in an array callable (`[$obj, "A::m"]`,
+    /// `["B", "parent::m"]`): the class the method is looked up in, which
+    /// must be `base` or one of its ancestors (observed on PHP 8.5: "class P
+    /// is not a subclass of B"). `None` when the name is not qualified.
+    pub(crate) fn qualified_method<'m>(
+        &mut self,
+        base: &Rc<Class>,
+        m: &'m [u8],
+    ) -> Option<Result<(Rc<Class>, &'m [u8]), String>> {
+        let p = find_double_colon(m)?;
+        let (cn, meth) = (&m[..p], &m[p + 2..]);
+        let l = crate::class::lower(cn);
+        let target = match l.as_bytes() {
+            b"parent" => match base.parent.clone() {
+                Some(c) => c,
+                None => return Some(Err("class has no parent".to_string())),
+            },
+            b"self" | b"static" => base.clone(),
+            _ => {
+                let saved = self.err.deferred.take();
+                let r = self.find_class(cn, true).ok().flatten();
+                self.err.deferred = saved;
+                match r {
+                    Some(c) => c,
+                    None => {
+                        return Some(Err(format!(
+                            "class \"{}\" not found",
+                            String::from_utf8_lossy(cn)
+                        )));
+                    }
+                }
+            }
+        };
+        if !base.is_subclass_of(&target) {
+            return Some(Err(format!(
+                "class {} is not a subclass of {}",
+                base.name.to_string_lossy(),
+                target.name.to_string_lossy()
+            )));
+        }
+        Some(Ok((target, meth)))
+    }
+
+    /// `$f()` takes class names literally: no self/parent/static and no
+    /// "parent::" methods (observed on PHP 8.5: Class "self" not found).
+    fn check_dynamic_callable(&mut self, v: &Value) -> R<()> {
+        let is_rel = |c: &[u8]| {
+            let l = c.to_ascii_lowercase();
+            matches!(&l[..], b"self" | b"parent" | b"static")
+        };
+        match v {
+            Value::Str(s) => {
+                // The class part ends at the last "::" (observed on PHP 8.5:
+                // Class "B::parent" not found for "B::parent::f").
+                if let Some(p) = s.windows(2).rposition(|w| w == b"::")
+                    && (is_rel(&s[..p]) || find_double_colon(&s[..p]).is_some())
+                {
+                    return self.throw(
+                        "Error",
+                        &format!("Class \"{}\" not found", String::from_utf8_lossy(&s[..p])),
+                    );
+                }
+            }
+            Value::Array(a) if a.len() == 2 => {
+                let (Some(t), Some(m)) = (a.get_int(0), a.get_int(1)) else {
+                    return Ok(());
+                };
+                let (t, m) = (t.deref(), m.deref());
+                let cls = match &t {
+                    Value::Str(c) if is_rel(c) => {
+                        return self.throw(
+                            "Error",
+                            &format!("Class \"{}\" not found", c.to_string_lossy()),
+                        );
+                    }
+                    Value::Str(c) => match self.find_class(c, true)? {
+                        Some(c) => c,
+                        None => return Ok(()),
+                    },
+                    Value::Object(o) => self.class_of(o),
+                    _ => return Ok(()),
+                };
+                if let Value::Str(m) = m
+                    && find_double_colon(&m).is_some()
+                {
+                    return self.throw(
+                        "Error",
+                        &format!(
+                            "Call to undefined method {}::{}()",
+                            cls.name.dname(),
+                            m.to_string_lossy()
+                        ),
+                    );
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn class_for_callable(&mut self, name: &[u8]) -> R<Rc<Class>> {
@@ -911,10 +1082,18 @@ impl Vm {
                 match t {
                     Value::Object(o) => {
                         let cls = self.class_of(&o);
-                        method_reason(self, &cls, &m, true)
+                        match self.qualified_method(&cls, &m) {
+                            Some(Ok((c, mm))) => method_reason(self, &c, mm, true),
+                            Some(Err(e)) => e,
+                            None => method_reason(self, &cls, &m, true),
+                        }
                     }
                     Value::Str(cn) => match class_named(self, &cn) {
-                        Some(c) => method_reason(self, &c, &m, false),
+                        Some(c) => match self.qualified_method(&c, &m) {
+                            Some(Ok((q, mm))) => method_reason(self, &q, mm, false),
+                            Some(Err(e)) => e,
+                            None => method_reason(self, &c, &m, false),
+                        },
                         None => format!("class \"{}\" not found", cn.to_string_lossy()),
                     },
                     _ => "first array member is not a valid class name or object".to_string(),
@@ -1442,6 +1621,22 @@ impl Vm {
             if let Value::Ref(r) = &args[i] {
                 args[i] = r.get();
             }
+            // Class-name parameters are not juggled (observed on PHP 8.5:
+            // "get_parent_class(): Argument #1 ($object_or_class) must be an
+            // object or a valid class name, int given").
+            if i == 0
+                && matches!(fname.as_bytes(), b"get_parent_class" | b"get_class_methods")
+                && !matches!(args[0], Value::Object(_) | Value::Str(_))
+            {
+                return self.throw(
+                    "TypeError",
+                    &format!(
+                        "{}(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given",
+                        fname,
+                        Vm::type_name_given(&args[0])
+                    ),
+                );
+            }
             if args[i].is_null() && !ty.allows_null() {
                 let scalar = ty.mask & (tmask::BOOL | tmask::INT | tmask::FLOAT | tmask::STRING)
                     != 0
@@ -1467,6 +1662,12 @@ impl Vm {
                 }
             }
             match self.check_type(&args[i], ty, strict, func.scope.get(), std::ptr::null())? {
+                Check::Ok
+                    if ty.mask & tmask::CALLABLE != 0
+                        && matches!(args[i], Value::Str(_) | Value::Array(_)) =>
+                {
+                    self.callable_deprecation(&args[i])?;
+                }
                 Check::Ok => {}
                 Check::Coerced(v) => args[i] = v,
                 Check::Fail if ty.mask & !tmask::NULL == tmask::CALLABLE && ty.classes.is_empty() => {

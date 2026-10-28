@@ -9,7 +9,7 @@
 mod charset;
 mod strip_tags;
 #[rustfmt::skip]
-mod tables;
+pub mod tables;
 
 pub use charset::Charset;
 pub use strip_tags::{AllowedTags, strip_tags};

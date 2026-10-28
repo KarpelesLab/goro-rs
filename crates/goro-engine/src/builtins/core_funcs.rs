@@ -487,6 +487,7 @@ pub static MODULE: Module = Module {
         ("assert.callback", ""),
         ("memory_limit", "128M"),
         ("include_path", ".:/usr/share/php"),
+        ("ignore_user_abort", "0"),
         ("max_execution_time", "0"),
         ("output_buffering", "0"),
         ("output_handler", ""),
@@ -596,10 +597,18 @@ fn call_user_func_array(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn forward_static_call(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    // Test class_object/forward_static_call_002.phpt.
+    if vm.scope_ptr().is_null() {
+        return vm.throw(
+            "Error",
+            "Cannot call forward_static_call() when no class scope is active",
+        );
+    }
     call_user_func(vm, a)
 }
 
 fn forward_static_call_array(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    // Observed on PHP 8.5: no scope check here, unlike forward_static_call().
     call_user_func_array(vm, a)
 }
 
@@ -777,7 +786,9 @@ fn extract(vm: &mut Vm, a: &mut Args) -> R<Value> {
             } else {
                 name.clone()
             }),
-            3 => Some(prefixed(&prefix, name)),
+            // Observed on PHP 8.5: EXTR_PREFIX_ALL skips an empty key
+            // (EXTR_PREFIX_INVALID makes it "prefix_").
+            3 => (!name.is_empty()).then(|| prefixed(&prefix, name)),
             4 => Some(if valid_var_name(name) {
                 name.clone()
             } else {
@@ -916,7 +927,10 @@ fn constant(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.class_constant(&c, &cn);
     }
     match vm.lookup_constant(&name)? {
-        Some(v) => Ok(v),
+        Some(v) => {
+            vm.const_deprecated(&name)?;
+            Ok(v)
+        }
         None => vm.throw(
             "Error",
             &format!("Undefined constant \"{}\"", name.to_string_lossy()),
@@ -1022,7 +1036,14 @@ fn class_arg(vm: &mut Vm, v: &Value, autoload: bool) -> R<Option<Rc<Class>>> {
 fn get_parent_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = if a.has(0) {
         let v = a.val(0);
-        class_arg(vm, &v, true)?
+        let c = class_arg(vm, &v, true)?;
+        if c.is_none() {
+            return vm.type_error(&format!(
+                "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given",
+                v.tname()
+            ));
+        }
+        c
     } else {
         let p = vm.scope_ptr();
         (!p.is_null()).then(|| vm.rc_class(p))
@@ -1696,10 +1717,9 @@ fn assert(vm: &mut Vm, a: &mut Args) -> R<Value> {
     {
         return Ok(Value::Bool(true));
     }
-    let desc = match a.val(1) {
-        Value::Null => Value::from("assert(false)"),
-        d => d,
-    };
+    // The compiler passes the assertion's source text when no description
+    // is given; an explicit null stays null.
+    let desc = a.val(1);
     // assert.callback / assert.exception / assert.warning / assert.bail.
     super::misc::assert_failed(vm, desc)
 }
@@ -1724,11 +1744,20 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(old) = vm.get_ini(&k) else {
         return Ok(Value::Bool(false));
     };
+    if super::misc::assert_ini_deprecated(&k, &v) {
+        vm.fdeprecated(
+            a,
+            &format!("{} INI setting is deprecated", k.to_string_lossy()),
+        )?;
+    }
     vm.ini
         .originals
         .entry(k.clone())
         .or_insert(Some(old.clone()));
     vm.set_ini(&k, &v);
+    if k.as_bytes() == b"assert.callback" {
+        super::misc::assert_callback_reset(vm);
+    }
     Ok(Value::Str(old))
 }
 
@@ -1740,17 +1769,50 @@ fn ini_restore(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Null)
 }
 
-fn ini_get_all(vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    let mut keys: Vec<&PhpStr> = vm.ini.values.keys().collect();
+/// PHP manual: ini_get_all(); an extension's settings are those its
+/// module registers, an unknown extension is a warning.
+fn ini_get_all(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let details = a.bool_or(1, true);
+    let mut keys: Vec<PhpStr> = match a.opt_str(0) {
+        None => vm.ini.values.keys().cloned().collect(),
+        Some(ext) => {
+            let mods: Vec<_> = vm
+                .modules
+                .iter()
+                .filter(|m| m.name.as_bytes().eq_ignore_ascii_case(&ext))
+                .collect();
+            if mods.is_empty() {
+                vm.fwarn(
+                    a,
+                    &format!("Extension \"{}\" cannot be found", ext.to_string_lossy()),
+                )?;
+                return Ok(Value::Bool(false));
+            }
+            mods.iter()
+                .flat_map(|m| m.ini.iter().map(|(k, _)| PhpStr::from(*k)))
+                .collect()
+        }
+    };
     keys.sort();
+    keys.dedup();
     let mut out = PhpArray::new();
     for k in keys {
-        let v = vm.ini.values[k].clone();
+        let Some(v) = vm.ini.values.get(&k).cloned() else {
+            continue;
+        };
+        if !details {
+            out.insert(Key::Str(k), Value::Str(v));
+            continue;
+        }
+        let g = match vm.ini.originals.get(&k) {
+            Some(Some(o)) => o.clone(),
+            _ => v.clone(),
+        };
         let mut e = PhpArray::new();
-        e.insert(Key::from("global_value"), Value::Str(v.clone()));
+        e.insert(Key::from("global_value"), Value::Str(g));
         e.insert(Key::from("local_value"), Value::Str(v));
         e.insert(Key::from("access"), Value::Int(7));
-        out.insert(Key::Str(k.clone()), Value::Array(e));
+        out.insert(Key::Str(k), Value::Array(e));
     }
     Ok(Value::Array(out))
 }
@@ -1758,6 +1820,15 @@ fn ini_get_all(vm: &mut Vm, _a: &mut Args) -> R<Value> {
 fn set_include_path(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let old = vm.ini.include_path.clone();
     let p = a.str(0);
+    // Test general_functions/include_path.phpt: an empty path is refused,
+    // and ini_restore() restores the startup value.
+    if p.is_empty() {
+        return Ok(Value::Bool(false));
+    }
+    vm.ini
+        .originals
+        .entry(PhpStr::from("include_path"))
+        .or_insert(Some(old.clone()));
     vm.set_ini(b"include_path", &p);
     Ok(Value::Str(old))
 }
@@ -1912,6 +1983,10 @@ fn uname() -> (String, String, String, String, String) {
 
 fn php_uname(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mode = a.str(0);
+    // Test general_functions/php_uname_error.phpt.
+    if a.has(0) && mode.len() != 1 {
+        return vm.value_error("php_uname(): Argument #1 ($mode) must be a single character");
+    }
     let (s, n, r, v, m) = uname();
     let out = match mode.first() {
         Some(b's') => s,
@@ -1921,7 +1996,7 @@ fn php_uname(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Some(b'm') => m,
         Some(b'a') | None => format!("{} {} {} {} {}", s, n, r, v, m),
         _ => {
-            return vm.value_error("php_uname(): Argument #1 ($mode) must be a single character, and one of \"a\", \"m\", \"n\", \"r\", \"s\", or \"v\"");
+            return vm.value_error("php_uname(): Argument #1 ($mode) must be one of \"a\", \"m\", \"n\", \"r\", \"s\", or \"v\"");
         }
     };
     Ok(Value::Str(PhpStr::from(out)))
@@ -2024,6 +2099,9 @@ fn getenv(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn putenv(vm: &mut Vm, a: &mut Args) -> R<Value> {
     use std::os::unix::ffi::OsStrExt;
     let s = a.str(0);
+    if s.is_empty() {
+        return vm.value_error("putenv(): Argument #1 ($assignment) must have a valid syntax");
+    }
     match s.iter().position(|&c| c == b'=') {
         Some(0) => vm.value_error("putenv(): Argument #1 ($assignment) must have a valid syntax"),
         Some(p) => {
@@ -2047,8 +2125,17 @@ fn set_time_limit(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Bool(true))
 }
 
-fn ignore_user_abort(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Int(0))
+/// Returns the previous setting and updates ignore_user_abort (test
+/// general_functions/bug72300.phpt).
+fn ignore_user_abort(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let old = vm
+        .get_ini(b"ignore_user_abort")
+        .map(|v| goro_runtime::convert::str_to_int(&v))
+        .unwrap_or(0);
+    if let Some(Value::Bool(b)) = a.get(0) {
+        vm.set_ini(b"ignore_user_abort", if *b { b"1" } else { b"0" });
+    }
+    Ok(Value::Int(old))
 }
 
 fn sys_get_temp_dir(vm: &mut Vm, _a: &mut Args) -> R<Value> {
@@ -2150,7 +2237,12 @@ fn uniqid(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut s = prefix.to_vec();
     s.extend_from_slice(format!("{:08x}{:05x}", d.as_secs(), d.subsec_micros()).as_bytes());
     if a.bool_or(1, false) {
-        s.extend_from_slice(format!(".{:08}", d.subsec_nanos() % 100_000_000).as_bytes());
+        // PHP manual: uniqid more_entropy adds a combined LCG value, printed
+        // as "%.8F" of a number below 10 (test uniqid_basic.phpt).
+        let mut b = [0u8; 8];
+        super::math::os_random(&mut b);
+        let f = (u64::from_le_bytes(b) >> 11) as f64 / (1u64 << 53) as f64 * 10.0;
+        s.extend_from_slice(format!("{:.8}", f).as_bytes());
     }
     Ok(Value::Str(PhpStr::from(s)))
 }

@@ -30,6 +30,10 @@ pub static MODULE: Module = Module {
             "function assert_options(int $option, mixed $value = UNKNOWN): mixed",
             assert_options,
         ),
+        (
+            "function version_compare(string $version1, string $version2, ?string $operator = null): int|bool",
+            version_compare,
+        ),
     ],
     constants: &[
         ("ASSERT_ACTIVE", ConstVal::Int(1)),
@@ -196,6 +200,16 @@ fn escapeshellarg(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "Argument #1 ($arg) must not contain any null bytes",
         );
     }
+    // Observed on PHP 8.5: arguments are limited to 2 MiB with the quotes.
+    if s.len() + 2 >= SHELL_ARG_MAX {
+        return vm.throw(
+            "ValueError",
+            &format!(
+                "Argument exceeds the allowed length of {} bytes",
+                SHELL_ARG_MAX
+            ),
+        );
+    }
     let mut out = Vec::with_capacity(s.len() + 2);
     out.push(b'\'');
     for &c in s {
@@ -206,8 +220,19 @@ fn escapeshellarg(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     }
     out.push(b'\'');
+    if out.len() > SHELL_ARG_MAX {
+        return vm.throw(
+            "ValueError",
+            &format!(
+                "Escaped argument exceeds the allowed length of {} bytes",
+                SHELL_ARG_MAX
+            ),
+        );
+    }
     Ok(sv(out))
 }
+
+const SHELL_ARG_MAX: usize = 2 * 1024 * 1024;
 
 fn escapeshellcmd(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let s = a.bytes(0);
@@ -216,6 +241,15 @@ fn escapeshellcmd(vm: &mut Vm, a: &mut Args) -> R<Value> {
             a,
             "ValueError",
             "Argument #1 ($command) must not contain any null bytes",
+        );
+    }
+    if s.len() + 2 >= SHELL_ARG_MAX {
+        return vm.throw(
+            "ValueError",
+            &format!(
+                "Command exceeds the allowed length of {} bytes",
+                SHELL_ARG_MAX
+            ),
         );
     }
     let mut out = Vec::with_capacity(s.len() + 8);
@@ -260,6 +294,15 @@ fn escapeshellcmd(vm: &mut Vm, a: &mut Args) -> R<Value> {
             _ => out.push(c),
         }
     }
+    if out.len() > SHELL_ARG_MAX {
+        return vm.throw(
+            "ValueError",
+            &format!(
+                "Escaped command exceeds the allowed length of {} bytes",
+                SHELL_ARG_MAX
+            ),
+        );
+    }
     Ok(sv(out))
 }
 
@@ -277,6 +320,59 @@ fn ini_flag(vm: &Vm, name: &[u8]) -> i64 {
         .unwrap_or(0)
 }
 
+/// Whether setting `k` to `v` changes a deprecated assert.* setting from
+/// its default (observed on PHP 8.5: "assert.bail INI setting is
+/// deprecated" for `ini_set("assert.bail", "1")`, not for "0").
+pub(crate) fn assert_ini_deprecated(k: &[u8], v: &[u8]) -> bool {
+    let truthy = |v: &[u8]| {
+        let l = v.to_ascii_lowercase();
+        match &l[..] {
+            b"on" | b"yes" | b"true" => true,
+            b"off" | b"no" | b"false" | b"none" | b"" => false,
+            _ => goro_runtime::convert::str_to_int(&l) != 0,
+        }
+    };
+    match k {
+        b"assert.active" | b"assert.warning" | b"assert.exception" => !truthy(v),
+        b"assert.bail" => truthy(v),
+        b"assert.callback" => !v.is_empty(),
+        _ => false,
+    }
+}
+
+/// Startup diagnostics for deprecated `-d` settings, in registration
+/// order (observed on PHP 8.5).
+pub(crate) fn startup_ini_deprecations(vm: &mut Vm, ini: &[(Vec<u8>, Vec<u8>)]) {
+    for k in [
+        &b"assert.active"[..],
+        b"assert.bail",
+        b"assert.warning",
+        b"assert.callback",
+        b"assert.exception",
+    ] {
+        let Some((_, v)) = ini.iter().rev().find(|(n, _)| n.as_slice() == k) else {
+            continue;
+        };
+        if assert_ini_deprecated(k, v) {
+            let _ = vm.raise_at(
+                crate::vm::errors::E_DEPRECATED,
+                &format!(
+                    "PHP Startup: {} INI setting is deprecated",
+                    String::from_utf8_lossy(k)
+                ),
+                goro_runtime::PhpStr::from("Unknown"),
+                0,
+            );
+        }
+    }
+}
+
+/// ini_set("assert.callback") replaces a callback set by assert_options()
+/// (test assert/assert03.phpt).
+pub(crate) fn assert_callback_reset(vm: &mut Vm) {
+    vm.ext::<AssertState>().callback = None;
+}
+
 fn assert_callback(vm: &mut Vm) -> Value {
     if let Some(cb) = vm.ext::<AssertState>().callback.clone() {
         return cb;
@@ -292,6 +388,15 @@ fn assert_callback(vm: &mut Vm) -> Value {
 /// assert). `desc` is the description argument (a string or Throwable).
 pub(crate) fn assert_failed(vm: &mut Vm, desc: Value) -> R<Value> {
     let cb = assert_callback(vm);
+    if !cb.is_null() && !vm.is_callable_value(&cb, false) {
+        // Test assert/assert_variation.phpt.
+        let why = vm.callable_error(&cb);
+        let shown = match &cb {
+            Value::Str(s) => s.to_string_lossy(),
+            _ => "Array".to_string(),
+        };
+        return vm.throw("Error", &format!("Invalid callback {}, {}", shown, why));
+    }
     if !cb.is_null() {
         let file = vm.cur_file();
         let line = vm.cur_line() as i64;
@@ -307,6 +412,10 @@ pub(crate) fn assert_failed(vm: &mut Vm, desc: Value) -> R<Value> {
     if ini_flag(vm, b"assert.exception") != 0 {
         return match desc {
             Value::Object(o) => Err(Unwind::Throw(o)),
+            Value::Null => {
+                let e = vm.create_exception("AssertionError", "", 0)?;
+                Err(Unwind::Throw(e))
+            }
             other => {
                 let msg = vm.to_php_str(&other)?;
                 let e = vm.create_exception("AssertionError", &msg.to_string_lossy(), 0)?;
@@ -319,8 +428,13 @@ pub(crate) fn assert_failed(vm: &mut Vm, desc: Value) -> R<Value> {
             Value::Object(o) => vm.get_prop_raw(o, b"message"),
             other => other.clone(),
         };
-        let m = vm.to_php_str(&msg)?;
-        vm.warn(&format!("assert(): {} failed", m.to_string_lossy()))?;
+        // Observed on PHP 8.5: a null description gives "Assertion failed".
+        if msg.is_null() {
+            vm.warn("assert(): Assertion failed")?;
+        } else {
+            let m = vm.to_php_str(&msg)?;
+            vm.warn(&format!("assert(): {} failed", m.to_string_lossy()))?;
+        }
     }
     if ini_flag(vm, b"assert.bail") != 0 {
         vm.exit_status = 255;
@@ -364,4 +478,156 @@ fn assert_options(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     }
     Ok(old)
+}
+
+// ---------------------------------------------------------------- version_compare
+
+/// Canonical form (PHP manual: version_compare): '-', '_' and '+' become
+/// '.', and a '.' separates digits from other characters.
+fn canon_version(v: &[u8]) -> Vec<Vec<u8>> {
+    let mut parts: Vec<Vec<u8>> = Vec::new();
+    let mut cur: Vec<u8> = Vec::new();
+    let flush = |cur: &mut Vec<u8>, parts: &mut Vec<Vec<u8>>| {
+        if !cur.is_empty() {
+            parts.push(std::mem::take(cur));
+        }
+    };
+    for &c in v {
+        if matches!(c, b'.' | b'-' | b'_' | b'+') {
+            flush(&mut cur, &mut parts);
+            continue;
+        }
+        if let Some(&last) = cur.last()
+            && last.is_ascii_digit() != c.is_ascii_digit()
+        {
+            flush(&mut cur, &mut parts);
+        }
+        cur.push(c);
+    }
+    flush(&mut cur, &mut parts);
+    parts
+}
+
+/// The order of special forms: anything else < dev < alpha = a < beta = b
+/// < RC = rc < # (numbers) < pl = p.
+fn special_rank(p: &[u8]) -> i32 {
+    let l = p.to_ascii_lowercase();
+    let l = l.as_slice();
+    if l.starts_with(b"dev") {
+        0
+    } else if l.starts_with(b"a") {
+        1
+    } else if l.starts_with(b"b") {
+        2
+    } else if l.starts_with(b"rc") {
+        3
+    } else if l == b"#" {
+        4
+    } else if l.starts_with(b"p") {
+        5
+    } else {
+        -1
+    }
+}
+
+fn cmp_part(a: &[u8], b: &[u8]) -> i32 {
+    let ad = a[0].is_ascii_digit();
+    let bd = b[0].is_ascii_digit();
+    match (ad, bd) {
+        (true, true) => {
+            let x: u128 = std::str::from_utf8(a)
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let y: u128 = std::str::from_utf8(b)
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            (x > y) as i32 - (x < y) as i32
+        }
+        (false, false) => {
+            let (x, y) = (special_rank(a), special_rank(b));
+            (x > y) as i32 - (x < y) as i32
+        }
+        (true, false) => {
+            let y = special_rank(b);
+            (4 > y) as i32 - (4 < y) as i32
+        }
+        (false, true) => {
+            let x = special_rank(a);
+            (x > 4) as i32 - (x < 4) as i32
+        }
+    }
+}
+
+pub(crate) fn compare_versions(a: &[u8], b: &[u8]) -> i32 {
+    let pa = canon_version(a);
+    let pb = canon_version(b);
+    let n = pa.len().max(pb.len());
+    for i in 0..n {
+        let c = match (pa.get(i), pb.get(i)) {
+            (Some(x), Some(y)) => cmp_part(x, y),
+            // A longer version: a number makes it newer, a special form is
+            // compared with "#".
+            (Some(x), None) => cmp_part(x, b"#"),
+            (None, Some(y)) => cmp_part(b"#", y),
+            (None, None) => 0,
+        };
+        if c != 0 {
+            return c;
+        }
+    }
+    0
+}
+
+fn version_compare(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let c = compare_versions(a.bytes(0), a.bytes(1));
+    let Some(op) = a.opt_str(2) else {
+        return Ok(Value::Int(c as i64));
+    };
+    let r = match op.as_bytes() {
+        b"<" | b"lt" => c < 0,
+        b"<=" | b"le" => c <= 0,
+        b">" | b"gt" => c > 0,
+        b">=" | b"ge" => c >= 0,
+        b"==" | b"=" | b"eq" => c == 0,
+        b"!=" | b"<>" | b"ne" => c != 0,
+        _ => {
+            return vm.fthrow(
+                a,
+                "ValueError",
+                "Argument #3 ($operator) must be a valid comparison operator",
+            );
+        }
+    };
+    Ok(Value::Bool(r))
+}
+
+// ---------------------------------------------------------- deprecated constants
+
+/// Why an internal constant is deprecated: the text after "Constant X is
+/// deprecated since " (observed on PHP 8.5 through
+/// ReflectionConstant::isDeprecated() and constant()).
+pub(crate) fn const_deprecation(name: &[u8]) -> Option<&'static str> {
+    const ASSERT: &str = "8.3, as assert_options() is deprecated";
+    const SUN: &str = "8.4, as date_sunrise() and date_sunset() were deprecated in 8.1";
+    const FILE: &str = "8.1, as the constant has no effect";
+    const FILTER: &str = "8.1, use htmlspecialchars() instead";
+    Some(match name {
+        b"E_STRICT" => "8.4, the error level was removed",
+        b"DATE_RFC7231" => {
+            "8.5, as this format ignores the associated timezone and always uses GMT"
+        }
+        b"SUNFUNCS_RET_TIMESTAMP" | b"SUNFUNCS_RET_STRING" | b"SUNFUNCS_RET_DOUBLE" => SUN,
+        b"FILTER_SANITIZE_STRING" | b"FILTER_SANITIZE_STRIPPED" => FILTER,
+        b"MT_RAND_PHP" => "8.3, as it uses a biased non-standard variant of Mt19937",
+        b"ASSERT_ACTIVE" | b"ASSERT_CALLBACK" | b"ASSERT_BAIL" | b"ASSERT_WARNING"
+        | b"ASSERT_EXCEPTION" => ASSERT,
+        b"FILE_TEXT" | b"FILE_BINARY" => FILE,
+        b"CURLOPT_BINARYTRANSFER" => "8.4, as it had no effect since 5.1.2",
+        b"DOM_PHP_ERR" => "8.4, as it is no longer used",
+        b"SOAP_FUNCTIONS_ALL" => "8.4, as enabling all functions is a possible security concern",
+        n if n.starts_with(b"MHASH_") => "8.5, as the mhash*() functions were deprecated",
+        _ => return None,
+    })
 }
