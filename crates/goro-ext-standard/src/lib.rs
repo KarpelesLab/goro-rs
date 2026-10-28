@@ -5,6 +5,7 @@
 
 pub mod error;
 pub mod float;
+pub mod html;
 pub mod math;
 pub mod mt_rand;
 pub mod natcmp;
