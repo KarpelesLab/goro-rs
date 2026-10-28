@@ -992,6 +992,16 @@ impl Vm {
                     Some(t) => self.coerce_prop(&p, t, v, &cls)?,
                     None => v,
                 };
+                // A property holding a typed reference (test Zend/tests/
+                // type_declarations/typed_properties_062).
+                let tref = match &o.obj().slots.borrow()[p.slot as usize] {
+                    Value::Ref(r) if r.is_typed() => Some(r.clone()),
+                    _ => None,
+                };
+                let v = match tref {
+                    Some(r) => self.typed_ref_value(&r, v)?,
+                    None => v,
+                };
                 let slots_ptr = o.obj().slots.as_ptr();
                 let slot = unsafe { &mut (&mut *slots_ptr)[p.slot as usize] };
                 if self.is_uninit(slot) {
@@ -1227,6 +1237,16 @@ impl Vm {
             PathAction::Assign(_) => {
                 let v = value.unwrap();
                 self.write_prop(o, name, v.clone(), None)?;
+                // The assignment's value is the coerced one (test Zend/tests/
+                // type_declarations/typed_properties_077).
+                if !o.is_lazy()
+                    && let Some(pi) = self.typed_prop_info(o, name)
+                    && pi.get.is_none()
+                    && pi.set.is_none()
+                    && let Some(cur) = o.obj().slots.borrow().get(pi.slot as usize)
+                {
+                    return Ok(cur.clone().into_deref());
+                }
                 Ok(v)
             }
             PathAction::Unset => {
@@ -1264,14 +1284,43 @@ impl Vm {
                     && t.mask & (tmask::FLOAT | tmask::MIXED) == 0
                 {
                     let inc = op.is_inc();
+                    // Through a reference (test Zend/tests/type_declarations/
+                    // typed_properties_097).
+                    let is_ref = matches!(
+                        o.obj().slots.borrow().get(p.slot as usize),
+                        Some(Value::Ref(_))
+                    );
                     return self.type_error(&format!(
-                        "Cannot {} property {}::${} of type {} past its {} value",
+                        "Cannot {} {}property {}::${} of type {} past its {} value",
                         if inc { "increment" } else { "decrement" },
+                        if is_ref { "a reference held by " } else { "" },
                         Self::prop_class_name(&p),
                         name.to_string_lossy(),
                         t.display(),
                         if inc { "maximal" } else { "minimal" }
                     ));
+                }
+                // An untyped property bound to a typed reference (test
+                // Zend/tests/type_declarations/typed_properties_062).
+                if let (Value::Int(_), Value::Float(_)) = (&old, &new)
+                    && let Some(r) = self.prop_typed_ref(o, name)
+                {
+                    for p in self.typed_ref_props(&r) {
+                        if let Some(t) = &p.ty
+                            && t.mask & tmask::INT != 0
+                            && t.mask & (tmask::FLOAT | tmask::MIXED) == 0
+                        {
+                            let inc = op.is_inc();
+                            return self.type_error(&format!(
+                                "Cannot {} a reference held by property {}::${} of type {} past its {} value",
+                                if inc { "increment" } else { "decrement" },
+                                Self::prop_class_name(&p),
+                                p.name.to_string_lossy(),
+                                t.display(),
+                                if inc { "maximal" } else { "minimal" }
+                            ));
+                        }
+                    }
                 }
                 self.write_prop(o, name, new.clone(), None)?;
                 Ok(if op.is_post() { old } else { new })
@@ -1337,33 +1386,45 @@ impl Vm {
                     }
                     Err(e) => return Err(e),
                 }
+                // Binding a typed property: the referenced value must fit
+                // its type, checked before the property is touched (tests
+                // Zend/tests/type_declarations/typed_properties_093, 096).
+                let typed = self.typed_prop_info(o, name);
+                // A readonly one fails its write fetch first (test
+                // Zend/tests/readonly_props/readonly_modification).
+                if typed
+                    .as_ref()
+                    .is_some_and(|p| p.flags & mflags::READONLY != 0)
+                {
+                    self.prop_ptr(o, name, false)?;
+                }
+                if let Some(pi) = &typed {
+                    let cur = r.get();
+                    let t = pi.ty.as_ref().unwrap();
+                    let strict = self.caller_strict();
+                    match self.check_type(&cur, t, strict, pi.class, pi.class)? {
+                        crate::vm::types::Check::Ok => {}
+                        crate::vm::types::Check::Coerced(c) => {
+                            let old = r.set(c);
+                            drop(old);
+                        }
+                        crate::vm::types::Check::Fail => {
+                            return self.type_error(&format!(
+                                "Cannot assign {} to property {}::${} of type {}",
+                                Vm::type_name_given(&cur),
+                                unsafe { (*pi.class).name.dname() },
+                                name.dname(),
+                                t.display()
+                            ));
+                        }
+                    }
+                    let cur = r.get();
+                    let _ = self.typed_ref_value(&r, cur)?;
+                }
                 match self.prop_ptr(o, name, false)? {
                     Some(p) => {
-                        // Binding a typed property: the referenced value
-                        // must fit its type.
-                        if let Some(pi) = self.typed_prop_info(o, name) {
-                            let cur = r.get();
-                            let t = pi.ty.as_ref().unwrap();
-                            let strict = self.caller_strict();
-                            match self.check_type(&cur, t, strict, pi.class, pi.class)? {
-                                crate::vm::types::Check::Ok => {}
-                                crate::vm::types::Check::Coerced(c) => {
-                                    let old = r.set(c);
-                                    drop(old);
-                                }
-                                crate::vm::types::Check::Fail => {
-                                    return self.type_error(&format!(
-                                        "Cannot assign {} to property {}::${} of type {}",
-                                        Vm::type_name_given(&cur),
-                                        unsafe { (*pi.class).name.dname() },
-                                        name.dname(),
-                                        t.display()
-                                    ));
-                                }
-                            }
-                            let cur = r.get();
-                            let _ = self.typed_ref_value(&r, cur)?;
-                            self.type_ref(&r, &pi, Some(o));
+                        if let Some(pi) = &typed {
+                            self.type_ref(&r, pi, Some(o));
                         }
                         let old = unsafe { std::mem::replace(&mut *p, Value::Ref(r.clone())) };
                         drop(old);
@@ -1380,6 +1441,21 @@ impl Vm {
 
     /// Pointer to an initialized, accessible property without hooks, type
     /// or readonly constraints (in-place updates).
+    /// The typed reference a declared property of `o` holds, if any.
+    fn prop_typed_ref(&mut self, o: &ObjRef, name: &PhpStr) -> Option<PhpRef> {
+        if o.is_lazy() {
+            return None;
+        }
+        let cls = self.class_of(o);
+        match self.lookup_prop(&cls, name, self.scope_ptr()) {
+            PropLookup::Found(p) => match o.obj().slots.borrow().get(p.slot as usize) {
+                Some(Value::Ref(r)) if r.is_typed() => Some(r.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn existing_plain_prop(&mut self, o: &ObjRef, name: &PhpStr) -> Option<*mut Value> {
         if o.is_lazy() {
             return None;
@@ -1397,7 +1473,7 @@ impl Vm {
                 }
                 let slots = o.obj().slots.as_ptr();
                 let slot = unsafe { &mut (&mut *slots)[p.slot as usize] };
-                if self.is_uninit(slot) {
+                if self.is_uninit(slot) || matches!(slot, Value::Ref(r) if r.is_typed()) {
                     return None;
                 }
                 Some(slot as *mut Value)

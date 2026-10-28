@@ -689,6 +689,8 @@ pub(crate) fn const_deprecation(name: &[u8]) -> Option<&'static str> {
         b"ASSERT_ACTIVE" | b"ASSERT_CALLBACK" | b"ASSERT_BAIL" | b"ASSERT_WARNING"
         | b"ASSERT_EXCEPTION" => ASSERT,
         b"FILE_TEXT" | b"FILE_BINARY" => FILE,
+        // Test ext/intl/tests/deprecated_U_MULTIPLE_DECIMAL_SEPERATORS.
+        b"U_MULTIPLE_DECIMAL_SEPERATORS" => "8.3, use U_MULTIPLE_DECIMAL_SEPARATORS instead",
         b"CURLOPT_BINARYTRANSFER" => "8.4, as it had no effect since 5.1.2",
         b"DOM_PHP_ERR" => "8.4, as it is no longer used",
         b"SOAP_FUNCTIONS_ALL" => "8.4, as enabling all functions is a possible security concern",

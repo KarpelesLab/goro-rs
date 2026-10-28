@@ -37,6 +37,8 @@ options:
   --mem-limit MB      address-space limit of each test process (default 6144;
                       0: none)
   --heavy             also run tests needing several GB of memory or disk
+  --min-free-gb GB    refuse to start when less memory is available (default
+                      30; 0: no check)
 
 usage: goro --test-compare [--fixed] BASELINE NEW
   lists tests that went from PASS to anything else; exits 1 if any did
@@ -55,6 +57,7 @@ struct Options {
     results: Option<PathBuf>,
     guard: Option<PathBuf>,
     mem_limit_mb: u64,
+    min_free_gb: u64,
     heavy: bool,
     paths: Vec<PathBuf>,
 }
@@ -78,6 +81,7 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
         results: None,
         guard: None,
         mem_limit_mb: 6144,
+        min_free_gb: 30,
         heavy: false,
         paths: Vec::new(),
     };
@@ -100,6 +104,13 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
                     .to_string_lossy()
                     .parse()
                     .map_err(|_| "bad --mem-limit value".to_string())?;
+            }
+            "--min-free-gb" => {
+                let v = value(&mut it, "--min-free-gb")?;
+                o.min_free_gb = v
+                    .to_string_lossy()
+                    .parse()
+                    .map_err(|_| "bad --min-free-gb value".to_string())?;
             }
             "-h" | "--help" => return Err(String::new()),
             "-j" => {
@@ -138,6 +149,15 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
     }
     o.jobs = o.jobs.max(1);
     Ok(o)
+}
+
+/// The kernel's estimate of the memory available for new processes
+/// (MemAvailable in /proc/meminfo), in bytes.
+fn available_memory() -> Option<u64> {
+    let s = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = s.lines().find(|l| l.starts_with("MemAvailable:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb << 10)
 }
 
 fn absolute(p: &Path) -> PathBuf {
@@ -246,6 +266,19 @@ pub fn test_main(args: &[OsString]) -> i32 {
             return if e.is_empty() { 0 } else { 2 };
         }
     };
+    // Test processes can each take gigabytes: don't start on a machine
+    // short of memory.
+    if o.min_free_gb > 0
+        && let Some(avail) = available_memory()
+        && avail < o.min_free_gb << 30
+    {
+        eprintln!(
+            "goro --test: only {} GB of memory available, {} GB required (--min-free-gb)",
+            avail >> 30,
+            o.min_free_gb
+        );
+        return 2;
+    }
     let php = match &o.php {
         Some(p) => find_program(p),
         None => match std::env::current_exe() {

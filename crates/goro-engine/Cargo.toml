@@ -23,6 +23,7 @@ goro-ext-zlib = { path = "../goro-ext-zlib" }
 goro-ext-zip = { path = "../goro-ext-zip" }
 goro-xml = { path = "../goro-xml" }
 goro-ext-openssl = { path = "../goro-ext-openssl" }
+goro-ext-intl = { path = "../goro-ext-intl" }
 libc = "0.2"
 corosensei = "0.2"
 compcol = { version = "0.7", default-features = false, features = ["alloc", "std", "bzip2"] }
