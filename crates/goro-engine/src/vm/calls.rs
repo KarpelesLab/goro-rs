@@ -868,7 +868,15 @@ impl Vm {
                 &format!(
                     "Call to {} method {}::{}() from {}",
                     vis,
-                    cls.name.dname(),
+                    // a private method is named after its class (test
+                    // tests/classes/private_003b)
+                    if m.flags & mflags::PRIVATE != 0 {
+                        m.scope()
+                            .map(|c| c.name.dname())
+                            .unwrap_or_else(|| cls.name.dname())
+                    } else {
+                        cls.name.dname()
+                    },
                     m.name.dname(),
                     from
                 ),
@@ -981,7 +989,13 @@ impl Vm {
                     &format!(
                         "Call to {} method {}::{}() from {}",
                         vis,
-                        cls.name.dname(),
+                        if m.flags & mflags::PRIVATE != 0 {
+                            m.scope()
+                                .map(|c| c.name.dname())
+                                .unwrap_or_else(|| cls.name.dname())
+                        } else {
+                            cls.name.dname()
+                        },
                         m.name.dname(),
                         from
                     ),
