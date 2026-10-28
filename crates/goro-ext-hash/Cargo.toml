@@ -1,0 +1,8 @@
+[package]
+name = "goro-ext-hash"
+description = "PHP hash extension algorithms: message digests, HMAC, HKDF, PBKDF2, checksums and non-cryptographic hashes"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
