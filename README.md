@@ -51,6 +51,14 @@ Fresh start. The previous code base is kept on the `old` branch for the
 record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
 
+php-src test suite (8.5.4), share of the tests that run: **70.3%** overall
+(Zend/tests 70.8%, tests/ 84.1%, ext 69.1%), as of 2026-10-28. Several
+extension libraries below are finished but not yet wired into the engine.
+
+- `goro-engine` and the `goro` binary: compiler and VM running PHP 8.5
+  scripts (classes, enums, closures, generators, fibers, attributes,
+  references, exceptions, output buffering, streams, SPL, Reflection,
+  serialization). Speed is currently 1.3–4.7x PHP's time on benchmarks.
 - `goro-runtime`: PHP values (16-byte `Value`, byte strings, copy-on-write
   ordered arrays, references, objects, destructor queue, cycle collector),
   conversions, comparisons and arithmetic, checked against PHP 8.5 output.
