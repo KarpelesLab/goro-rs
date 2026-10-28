@@ -1157,7 +1157,7 @@ fn get_mangled_object_vars(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(o) = a.obj(0) else {
         return Ok(Value::Null);
     };
-    Ok(Value::Array(vm.object_props_array(&o, true)))
+    Ok(Value::Array(vm.object_props_cast(&o)))
 }
 
 fn get_class_vars(vm: &mut Vm, a: &mut Args) -> R<Value> {

@@ -84,7 +84,11 @@ impl Vm {
         // PHP 8.1: Serializable without __serialize()/__unserialize() is
         // deprecated (message observed on PHP 8.5).
         if cls.kind != ClassKind::Interface
-            && cls.interfaces.borrow().iter().any(|i| i.lname.as_bytes() == b"serializable")
+            && cls
+                .interfaces
+                .borrow()
+                .iter()
+                .any(|i| i.lname.as_bytes() == b"serializable")
             && !(cls.find_method(b"__serialize").is_some()
                 && cls.find_method(b"__unserialize").is_some())
         {

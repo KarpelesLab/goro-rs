@@ -2261,6 +2261,25 @@ impl Vm {
         out
     }
 
+    /// The property table as an array with numeric names as integer keys,
+    /// as `(array)` and get_mangled_object_vars() give it (RFC: Convert
+    /// numeric keys in object/array casts).
+    pub fn object_props_cast(&mut self, o: &ObjRef) -> PhpArray {
+        let a = self.object_props_array(o, true);
+        if !a.iter().any(|(k, _)| matches!(k, goro_runtime::KeyRef::Str(s) if matches!(Key::from_php_str(s), Key::Int(_)))) {
+            return a;
+        }
+        let mut out = PhpArray::new();
+        for (k, v) in a.iter() {
+            let k = match k {
+                goro_runtime::KeyRef::Str(s) => Key::from_php_str(s),
+                k => k.to_owned(),
+            };
+            out.insert(k, v.clone());
+        }
+        out
+    }
+
     /// Properties visible from the current scope (get_object_vars,
     /// foreach): (name, value) pairs.
     pub fn visible_props(&mut self, o: &ObjRef) -> Vec<(Value, Value)> {

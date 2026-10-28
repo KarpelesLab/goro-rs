@@ -267,7 +267,7 @@ impl Vm {
             CastTo::Bool => Value::Bool(self.to_bool(&v)),
             CastTo::Array => match v {
                 Value::Array(_) => v,
-                Value::Object(ref o) => Value::Array(self.object_props_array(o, true)),
+                Value::Object(ref o) => Value::Array(self.object_props_cast(o)),
                 _ => Value::Array(goro_runtime::convert::to_array(&v, self)),
             },
             CastTo::Object => match v {

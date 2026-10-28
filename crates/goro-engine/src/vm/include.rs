@@ -700,18 +700,46 @@ impl Vm {
         self.bind_ref_var(var, Value::Ref(r))
     }
 
-    /// `$GLOBALS` as an array (a read-only copy since PHP 8.1).
+    /// `$GLOBALS` as an array (a read-only copy since PHP 8.1). Like any
+    /// array copy it keeps references that something else shares
+    /// (`$a[0] =& $a` serializes as a reference to the global).
     pub fn globals_array(&mut self) -> PhpArray {
+        fn keep(v: &Value) -> Value {
+            match v {
+                Value::Ref(r) if r.refcount() > 1 => v.clone(),
+                _ => v.deref(),
+            }
+        }
+        // Order as PHP's symbol table has it: the request's variables
+        // ($_ENV and $_REQUEST only once filled: they are created on
+        // first use), the script's variables, then dynamic ones.
+        let is_auto = |k: &goro_runtime::KeyRef| {
+            matches!(k, goro_runtime::KeyRef::Str(s) if matches!(s.as_bytes(),
+                b"_GET" | b"_POST" | b"_COOKIE" | b"_FILES" | b"argv" | b"argc"
+                | b"_SERVER" | b"_ENV" | b"_REQUEST"))
+        };
         let mut a = PhpArray::new();
+        for (k, v) in self.globals.dyn_vars.iter() {
+            if is_auto(&k) {
+                if matches!(&k, goro_runtime::KeyRef::Str(s) if matches!(s.as_bytes(), b"_ENV" | b"_REQUEST"))
+                    && matches!(v.deref(), Value::Array(x) if x.is_empty())
+                {
+                    continue;
+                }
+                a.insert(k.to_owned(), keep(v));
+            }
+        }
         if let Some(code) = self.globals.code.clone() {
             for (i, n) in code.cv_names.iter().enumerate() {
                 if let Some(v) = &self.globals.slots[i] {
-                    a.insert(Key::from_php_str(n), v.deref());
+                    a.insert(Key::from_php_str(n), keep(v));
                 }
             }
         }
         for (k, v) in self.globals.dyn_vars.iter() {
-            a.insert(k.to_owned(), v.deref());
+            if !is_auto(&k) {
+                a.insert(k.to_owned(), keep(v));
+            }
         }
         a
     }

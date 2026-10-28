@@ -12,7 +12,7 @@ use std::cmp::Ordering;
 use crate::array::PhpArray;
 use crate::convert::{float_to_string, int_to_string, to_bool_quiet};
 use crate::ctx::Ctx;
-use crate::error::PhpResult;
+use crate::error::{PhpError, PhpResult};
 use crate::numeric::{Number, numeric_value};
 use crate::value::Value;
 
@@ -259,6 +259,7 @@ pub fn compare_arrays(a: &PhpArray, b: &PhpArray, ctx: &mut dyn Ctx) -> PhpResul
     if a.len() != b.len() {
         return Ok(ord(a.len().cmp(&b.len())));
     }
+    let _g = NestGuard::enter(a)?;
     for (k, v) in a.iter() {
         let Some(w) = b.get(k) else {
             return Ok(1);
@@ -269,6 +270,52 @@ pub fn compare_arrays(a: &PhpArray, b: &PhpArray, ctx: &mut dyn Ctx) -> PhpResul
         }
     }
     Ok(0)
+}
+
+thread_local! {
+    /// Arrays whose elements are being compared.
+    static COMPARING: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Recursion protection of array comparisons: comparing an array that
+/// contains itself (through a reference) throws "Nesting level too deep -
+/// recursive dependency?" (observed on PHP 8.5).
+struct NestGuard(usize);
+
+impl NestGuard {
+    fn enter(a: &PhpArray) -> PhpResult<NestGuard> {
+        let addr = a.data_addr();
+        if addr != 0 {
+            let seen = COMPARING.with(|c| {
+                let mut c = c.borrow_mut();
+                if c.contains(&addr) {
+                    true
+                } else {
+                    c.push(addr);
+                    false
+                }
+            });
+            if seen {
+                return Err(PhpError::error(
+                    "Nesting level too deep - recursive dependency?",
+                ));
+            }
+        }
+        Ok(NestGuard(addr))
+    }
+}
+
+impl Drop for NestGuard {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            COMPARING.with(|c| {
+                let mut c = c.borrow_mut();
+                if let Some(i) = c.iter().rposition(|&x| x == self.0) {
+                    c.remove(i);
+                }
+            });
+        }
+    }
 }
 
 /// `$a == $b`.
@@ -324,6 +371,7 @@ pub fn loose_eq_arrays(a: &PhpArray, b: &PhpArray, ctx: &mut dyn Ctx) -> PhpResu
     if a.len() != b.len() {
         return Ok(false);
     }
+    let _g = NestGuard::enter(a)?;
     for (k, v) in a.iter() {
         let Some(w) = b.get(k) else {
             return Ok(false);
