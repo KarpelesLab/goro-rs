@@ -2981,6 +2981,7 @@ pub fn parse_native_sig(
         zend_multibyte: false,
         in_const_expr: false,
         in_chain: false,
+        in_const_stmt: false,
         nullsafe_jumps: Vec::new(),
     };
     c.f.method_name = PhpStr::new(fd.name.name);

@@ -1276,7 +1276,11 @@ impl Vm {
                             };
                             return self.throw(
                                 "Error",
-                                &format!("Call to a member function {}() on {}", n, other.tname()),
+                                &format!(
+                                    "Call to a member function {}() on {}",
+                                    n,
+                                    Vm::type_name_given(&other)
+                                ),
                             );
                         }
                     }

@@ -237,6 +237,8 @@ pub struct Compiler<'a> {
     pub(crate) in_const_expr: bool,
     /// Compiling the base of a member access chain.
     pub(crate) in_chain: bool,
+    /// Compiling the value of a `const` statement.
+    pub(crate) in_const_stmt: bool,
     /// Pending `?->` short-circuit jumps of the current chain.
     pub(crate) nullsafe_jumps: Vec<(usize, Reg)>,
 }
@@ -270,6 +272,7 @@ pub fn compile_program<'a>(
         zend_multibyte: ZEND_MULTIBYTE.with(|c| c.get()),
         in_const_expr: false,
         in_chain: false,
+        in_const_stmt: false,
         nullsafe_jumps: Vec::new(),
     };
     if let Some((cls, parent)) = eval_class {
@@ -1097,7 +1100,10 @@ impl<'a> Compiler<'a> {
                     self.check_const_expr(&c.value)?;
                     let full = self.qualify(c.name.name);
                     let name = self.str_const(&full);
-                    let v = self.expr(&c.value)?;
+                    self.in_const_stmt = true;
+                    let v = self.expr(&c.value);
+                    self.in_const_stmt = false;
+                    let v = v?;
                     self.free(v);
                     self.emit(Op::DeclareConst { name, val: v });
                 }
@@ -1261,9 +1267,21 @@ impl<'a> Compiler<'a> {
 
     fn foreach_stmt(&mut self, f: &'a ForeachStmt<'a>, line: u32) -> CResult<()> {
         let iter = self.hidden_pair();
+        // `as [&$x, $y]` iterates by reference (test Zend/tests/list/
+        // list_reference_004).
+        fn list_has_ref(e: &Expr<'_>) -> bool {
+            match &e.kind {
+                ExprKind::List { items, .. } | ExprKind::Array { items, .. } => items
+                    .iter()
+                    .flatten()
+                    .any(|i| i.by_ref || list_has_ref(&i.value)),
+                _ => false,
+            }
+        }
+        let by_ref = f.by_ref || list_has_ref(&f.value);
         // A `?->` chain is iterated as a value (test Zend/tests/
         // nullsafe_operator/023).
-        let src = if f.by_ref && !expr::contains_nullsafe(&f.expr) {
+        let src = if by_ref && !expr::contains_nullsafe(&f.expr) {
             self.ref_of(&f.expr)?
         } else {
             self.expr(&f.expr)?
@@ -1273,13 +1291,13 @@ impl<'a> Compiler<'a> {
         let reset = self.emit(Op::FeReset {
             iter,
             src,
-            by_ref: f.by_ref,
+            by_ref,
             t: 0,
         });
         let top = self.here();
         // Value target.
         let (val_dst, direct_val) = match &f.value.kind {
-            ExprKind::Variable(n) if !f.by_ref && *n != b"this" => (self.cv(n), true),
+            ExprKind::Variable(n) if !by_ref && *n != b"this" => (self.cv(n), true),
             _ => (self.tmp(), false),
         };
         let (key_dst, direct_key) = match &f.key {
@@ -1297,7 +1315,7 @@ impl<'a> Compiler<'a> {
             t: 0,
         });
         if !direct_val {
-            if f.by_ref {
+            if by_ref {
                 self.bind_ref_to(&f.value, val_dst)?;
             } else if let ExprKind::List { items, .. } | ExprKind::Array { items, .. } =
                 &f.value.kind

@@ -812,6 +812,11 @@ pub enum Op {
         msg: u32,
         kind: u8,
     },
+    /// `[&$a] = f()`: the notice when the result isn't a reference (it is
+    /// still destructured).
+    RefCheck {
+        src: Reg,
+    },
     /// `match` without a matching arm.
     MatchError {
         src: Reg,

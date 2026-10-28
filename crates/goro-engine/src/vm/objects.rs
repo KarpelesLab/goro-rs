@@ -1938,12 +1938,8 @@ impl Vm {
                             ),
                         }
                     }
-                    _ => self.throw(
-                        "Error",
-                        "Cannot use value of type {} as class name"
-                            .replace("{}", &v.tname())
-                            .as_str(),
-                    ),
+                    // Observed on PHP 8.5 (test Zend/tests/nullsafe_operator/019).
+                    _ => self.throw("Error", "Class name must be a valid object or a string"),
                 }
             }
         }
@@ -1955,12 +1951,30 @@ impl Vm {
             ClassSpec::SelfRef => (self.scope_ptr(), "self"),
             ClassSpec::Parent => (self.scope_ptr(), "parent"),
             ClassSpec::Static => (self.static_class_ptr(), "static"),
+            ClassSpec::Dynamic(r) => {
+                // `$x::class` needs an object (observed on PHP 8.5).
+                let v = self.get(r)?;
+                if let Value::Object(o) = &v {
+                    return Ok(self.class_of(o));
+                }
+                return self.type_error(&format!(
+                    "Cannot use \"::class\" on {}",
+                    Vm::type_name_given(&v)
+                ));
+            }
             other => return self.resolve_class_spec(other, false),
         };
         if p.is_null() {
+            // Functions outside classes fail at compile time (observed on
+            // PHP 8.5; test Zend/tests/class_name/class_name_as_scalar_error_007).
+            let in_const = self.code_ref().flags & crate::bytecode::fflags::CONST_EXPR != 0;
             return self.throw(
                 "Error",
-                &format!("Cannot use \"{}\" when no class scope is active", word),
+                &if in_const {
+                    format!("Cannot use \"{}\" when no class scope is active", word)
+                } else {
+                    format!("Cannot use \"{}\" in the global scope", word)
+                },
             );
         }
         let c = self.rc_class(p);
