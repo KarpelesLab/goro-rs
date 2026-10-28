@@ -15,7 +15,10 @@ use crate::vm::{R, Vm};
 pub static MODULE: Module = Module {
     name: "exif",
     functions: &[
-        ("function exif_tagname(int $index): string|false", exif_tagname),
+        (
+            "function exif_tagname(int $index): string|false",
+            exif_tagname,
+        ),
         (
             "function exif_read_data($file, ?string $required_sections = null, bool $as_arrays = false, bool $read_thumbnail = false): array|false",
             exif_read_data,
@@ -99,7 +102,11 @@ pub(crate) fn to_value(n: Node) -> Value {
 /// (test exif_read_data_streams_seek.phpt).
 pub(crate) fn stream_bytes(vm: &mut Vm, s: &mut Stream) -> Vec<u8> {
     let pos = stream_tell(s);
-    super::file::do_seek(vm, s, 0, 0);
+    // A stream that cannot seek (a pipe) reads as empty: "File too small
+    // (0)" (test gh16409.phpt).
+    if !super::file::do_seek(vm, s, 0, 0) {
+        return Vec::new();
+    }
     let d = super::file::read_rest(vm, s);
     if let Some(p) = pos {
         super::file::do_seek(vm, s, p, 0);
@@ -289,7 +296,10 @@ pub(crate) fn emit_bare(vm: &mut Vm, a: &Args, name: &[u8], diags: Vec<Diag>) ->
         match d {
             Diag::ReadError => vm.fnotice(
                 a,
-                &format!("Error reading from {}!", String::from_utf8_lossy(cut_nul(name))),
+                &format!(
+                    "Error reading from {}!",
+                    String::from_utf8_lossy(cut_nul(name))
+                ),
             )?,
             Diag::Warning(m) | Diag::WarningBare(m) => vm.fwarn(a, &m)?,
             Diag::Notice(m) | Diag::NoticeBare(m) => vm.fnotice(a, &m)?,

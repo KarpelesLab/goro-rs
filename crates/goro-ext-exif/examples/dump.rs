@@ -61,7 +61,11 @@ fn fmt_float(f: f64) -> String {
     if (-5..15).contains(&e) {
         return format!("{}", f);
     }
-    let m = if m.contains('.') { m.to_string() } else { format!("{m}.0") };
+    let m = if m.contains('.') {
+        m.to_string()
+    } else {
+        format!("{m}.0")
+    };
     format!("{}E{}{}", m, if e < 0 { "-" } else { "+" }, e.abs())
 }
 
@@ -146,7 +150,10 @@ fn main() {
                 if s.channels != 0 {
                     m.push((b"channels".to_vec(), Node::Int(s.channels as i64)));
                 }
-                m.push((b"mime".to_vec(), Node::Str(imageinfo::mime_type(s.itype).into())));
+                m.push((
+                    b"mime".to_vec(),
+                    Node::Str(imageinfo::mime_type(s.itype).into()),
+                ));
                 m.push((b"width_unit".to_vec(), Node::Str(s.width_unit.into())));
                 m.push((b"height_unit".to_vec(), Node::Str(s.height_unit.into())));
                 let mut tmp = Vec::new();
@@ -161,9 +168,7 @@ fn main() {
             }
         }
         for (k, v) in info {
-            out.extend_from_slice(
-                format!("{k}: {} {:032x}\n", v.len(), md5(&v)).as_bytes(),
-            );
+            out.extend_from_slice(format!("{k}: {} {:032x}\n", v.len(), md5(&v)).as_bytes());
         }
         out.extend_from_slice(b"-- exif_imagetype\n");
         let mut dg = Vec::new();
@@ -226,7 +231,8 @@ fn md5(data: &[u8]) -> u128 {
     let k: Vec<u32> = (0..64)
         .map(|i| ((i as f64 + 1.0).sin().abs() * 4294967296.0) as u32)
         .collect();
-    let (mut a0, mut b0, mut c0, mut d0) = (0x67452301u32, 0xefcdab89u32, 0x98badcfeu32, 0x10325476u32);
+    let (mut a0, mut b0, mut c0, mut d0) =
+        (0x67452301u32, 0xefcdab89u32, 0x98badcfeu32, 0x10325476u32);
     let mut msg = data.to_vec();
     let bitlen = (data.len() as u64).wrapping_mul(8);
     msg.push(0x80);

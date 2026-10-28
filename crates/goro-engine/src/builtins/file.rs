@@ -79,6 +79,10 @@ pub static MODULE: Module = Module {
             ret_zero,
         ),
         (
+            "function stream_set_chunk_size($stream, int $size): int",
+            stream_set_chunk_size,
+        ),
+        (
             "function stream_set_read_buffer($stream, int $size): int",
             ret_zero,
         ),
@@ -2296,6 +2300,19 @@ fn ret_false(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 }
 fn ret_zero(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Int(0))
+}
+
+/// stream_set_chunk_size(): the previous chunk size (PHP manual; reads
+/// are not chunked here, so it is always the default 8192).
+fn stream_set_chunk_size(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if a.int(1) <= 0 {
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #2 ($size) must be greater than 0",
+        );
+    }
+    with_stream(vm, a, 0, |_vm, _s| Ok(Value::Int(8192)))
 }
 
 fn realpath(vm: &mut Vm, a: &mut Args) -> R<Value> {

@@ -91,7 +91,10 @@ fn size_of(vm: &mut Vm, a: &mut Args, d: &[u8], name: &[u8]) -> R<Value> {
         Key::from("mime"),
         Value::Str(PhpStr::from(imageinfo::mime_type(s.itype))),
     );
-    arr.insert(Key::from("width_unit"), Value::Str(PhpStr::from(s.width_unit)));
+    arr.insert(
+        Key::from("width_unit"),
+        Value::Str(PhpStr::from(s.width_unit)),
+    );
     arr.insert(
         Key::from("height_unit"),
         Value::Str(PhpStr::from(s.height_unit)),
@@ -161,7 +164,10 @@ fn iptcembed(vm: &mut Vm, a: &mut Args) -> R<Value> {
         open_stream(vm, a, &f, b"rb", true)?
     };
     let Some(mut s) = s else {
-        vm.fwarn(a, &format!("Unable to open {}", String::from_utf8_lossy(&f)))?;
+        vm.fwarn(
+            a,
+            &format!("Unable to open {}", String::from_utf8_lossy(&f)),
+        )?;
         return Ok(Value::Bool(false));
     };
     let d = super::file::read_rest(vm, &mut s);

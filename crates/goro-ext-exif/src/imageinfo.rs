@@ -354,10 +354,7 @@ fn swf_rect(b: &[u8]) -> (u32, u32) {
     let xmax = take(nbits);
     let ymin = take(nbits);
     let ymax = take(nbits);
-    (
-        ((xmax - xmin) / 20) as u32,
-        ((ymax - ymin) / 20) as u32,
-    )
+    (((xmax - xmin) / 20) as u32, ((ymax - ymin) / 20) as u32)
 }
 
 fn swf(d: &[u8]) -> Option<ImageSize> {
@@ -371,9 +368,15 @@ fn swc(d: &[u8]) -> Option<ImageSize> {
     // (observed on PHP 8.5).
     let z = Rd::new(d, 8).read(64)?;
     let mut out = Vec::new();
-    let mut inf = goro_ext_zlib::inflate::Inflater::new(goro_ext_zlib::inflate::InflateWrap::Zlib, 15);
+    let mut inf =
+        goro_ext_zlib::inflate::Inflater::new(goro_ext_zlib::inflate::InflateWrap::Zlib, 15);
     let rest = &d[8..];
-    let (_, st) = inf.inflate(rest, &mut out, 4096, goro_ext_zlib::inflate::InflateFlush::None);
+    let (_, st) = inf.inflate(
+        rest,
+        &mut out,
+        4096,
+        goro_ext_zlib::inflate::InflateFlush::None,
+    );
     let _ = z;
     if let goro_ext_zlib::inflate::InflateStatus::DataError(_) = st {
         return None;
@@ -389,13 +392,7 @@ fn swc(d: &[u8]) -> Option<ImageSize> {
 
 fn psd(d: &[u8]) -> Option<ImageSize> {
     let b = Rd::new(d, 0).read(22)?;
-    Some(ImageSize::px(
-        be32(b, 18),
-        be32(b, 14),
-        IMAGETYPE_PSD,
-        0,
-        0,
-    ))
+    Some(ImageSize::px(be32(b, 18), be32(b, 14), IMAGETYPE_PSD, 0, 0))
 }
 
 fn bmp(d: &[u8]) -> Option<ImageSize> {
@@ -713,7 +710,7 @@ pub fn boxes(d: &[u8], start: usize, end: usize) -> Vec<([u8; 4], usize, usize)>
         } else if size == 0 {
             size = (end - pos) as u64;
         }
-        if size < hdr || pos as u64 + size > end as u64 {
+        if size < hdr || size > (end - pos) as u64 {
             break;
         }
         out.push((typ, pos + hdr as usize, pos + size as usize));

@@ -10,7 +10,9 @@
 //! observations of PHP 8.5 on crafted files.
 
 use crate::Diag;
-use crate::imageinfo::{self, IMAGETYPE_HEIF, IMAGETYPE_JPEG, IMAGETYPE_TIFF_II, IMAGETYPE_TIFF_MM};
+use crate::imageinfo::{
+    self, IMAGETYPE_HEIF, IMAGETYPE_JPEG, IMAGETYPE_TIFF_II, IMAGETYPE_TIFF_MM,
+};
 use crate::makernote::{self, Maker};
 use crate::tags::{self, Table};
 
@@ -290,8 +292,11 @@ impl<'a> Info<'a> {
             });
             return;
         }
-        self.diags
-            .push(if notice { Diag::Notice(msg) } else { Diag::Warning(msg) });
+        self.diags.push(if notice {
+            Diag::Notice(msg)
+        } else {
+            Diag::Warning(msg)
+        });
     }
     fn warn(&mut self, msg: impl Into<String>) {
         self.report(false, msg.into());
@@ -426,8 +431,13 @@ impl<'a> Info<'a> {
                 if d == 0 { 0 } else { self.get32(v) / d }
             }
             11 | 12 => {
+                // Out of range floats count as 0 (test float_cast_overflow.phpt).
                 let f = self.number(fmt, v);
-                if f.is_nan() { 0 } else { f as i64 as u32 }
+                if f.is_nan() || !(0.0..4294967296.0).contains(&f) {
+                    0
+                } else {
+                    f as u32
+                }
             }
             _ => 0,
         }
@@ -457,6 +467,37 @@ impl<'a> Info<'a> {
                 tags::diag_name(table, tag)
             ));
             fmt = 1;
+            // Past the error limit IFD0 is given up, sub IFDs go on
+            // (observed on PHP 8.5, tests bug76557.phpt, bug71534.phpt).
+            if self.suppressed && section == S_IFD0 {
+                return Err(HARD);
+            }
+        }
+        // TIFF files: the IFD pointers are followed from the entry's value
+        // field whatever their format (observed on PHP 8.5, tests
+        // duplicate_copyright_tag_leak.phpt, nesting_level_oom.phpt).
+        if self.tiff_mode && matches!(table, Table::Ifd) {
+            let sub = match tag {
+                TAG_EXIF_IFD => Some((S_EXIF, Table::Ifd)),
+                TAG_GPS_IFD => Some((S_GPS, Table::Gps)),
+                TAG_INTEROP_IFD => Some((S_INTEROP, Table::Interop)),
+                TAG_SUB_IFD => Some((S_THUMBNAIL, Table::Ifd)),
+                _ => None,
+            };
+            if let Some((sec, tab)) = sub {
+                let off = self.get32(&ent[8..]);
+                if off as u64 + 2 > self.file_size as u64 {
+                    self.warn(format!(
+                        "Error in TIFF: filesize(x{:04X}) less than start of IFD dir(x{:04X})",
+                        self.file_size,
+                        off as u64 + 2
+                    ));
+                    return Ok(());
+                }
+                self.found |= (1 << sec) | (1 << S_ANY_TAG);
+                let _ = self.process_ifd(base + off as usize, base, sec, tab, None);
+                return Ok(());
+            }
         }
         let size = FMT_SIZE[fmt as usize] as u64;
         let byte_count = count as u64 * size;
@@ -503,6 +544,23 @@ impl<'a> Info<'a> {
         }
         self.tag_count += 1;
 
+        // TIFF image size: LONG or else a 16-bit value, in any IFD
+        // (observed on PHP 8.5, tests bug72627.phpt, float_cast_overflow.phpt).
+        if self.tiff_mode && count > 0 && matches!(table, Table::Ifd) {
+            let v = || {
+                let raw = &ent[8..12];
+                if fmt == 4 {
+                    self.get32(raw)
+                } else {
+                    self.get16(raw) as u32
+                }
+            };
+            if tag == TAG_IMAGEWIDTH && self.width == 0 {
+                self.width = v();
+            } else if tag == TAG_IMAGEHEIGHT && self.height == 0 {
+                self.height = v();
+            }
+        }
         // Thumbnail location (IFD1).
         if section == S_THUMBNAIL {
             match tag {
@@ -510,8 +568,14 @@ impl<'a> Info<'a> {
                     self.empty_tag(tag, table);
                     return Err(HARD);
                 }
-                TAG_IMAGEWIDTH => self.thumb.width = self.uint(fmt, value),
-                TAG_IMAGEHEIGHT => self.thumb.height = self.uint(fmt, value),
+                // In TIFF files only; a JPEG file's thumbnail size comes from
+                // its SOF (observed on PHP 8.5, test bug77540.phpt).
+                TAG_IMAGEWIDTH if self.tiff_mode || matches!(fmt, 3 | 4) => {
+                    self.thumb.width = self.uint(fmt, value)
+                }
+                TAG_IMAGEHEIGHT if self.tiff_mode || matches!(fmt, 3 | 4) => {
+                    self.thumb.height = self.uint(fmt, value)
+                }
                 TAG_STRIP_OFFSETS | TAG_JPEG_IF_OFFSET => {
                     if count == 0 {
                         self.empty_tag(tag, table);
@@ -548,12 +612,6 @@ impl<'a> Info<'a> {
                 {
                     self.empty_tag(tag, table);
                     return Err(HARD);
-                }
-                TAG_IMAGEWIDTH if self.tiff_mode && self.width == 0 => {
-                    self.width = self.uint(fmt, value)
-                }
-                TAG_IMAGEHEIGHT if self.tiff_mode && self.height == 0 => {
-                    self.height = self.uint(fmt, value)
                 }
                 TAG_PHOTOMETRIC if self.tiff_mode => {
                     self.is_color = self.uint(fmt, value) >= 2;
@@ -601,7 +659,8 @@ impl<'a> Info<'a> {
             self.convert(fmt, count, value)
         };
         let is_pointer = matches!(table, Table::Ifd)
-            && matches!(tag, TAG_EXIF_IFD | TAG_GPS_IFD | TAG_INTEROP_IFD);
+            && (matches!(tag, TAG_EXIF_IFD | TAG_GPS_IFD | TAG_INTEROP_IFD)
+                || tag == TAG_SUB_IFD && self.tiff_mode);
         // TIFF files do not list the IFD pointers (observed on PHP 8.5).
         let deferred = is_pointer || tag == TAG_MAKER_NOTE && matches!(table, Table::Ifd);
         if !deferred {
@@ -623,15 +682,12 @@ impl<'a> Info<'a> {
                 TAG_EXIF_IFD => Some((S_EXIF, Table::Ifd)),
                 TAG_GPS_IFD => Some((S_GPS, Table::Gps)),
                 TAG_INTEROP_IFD => Some((S_INTEROP, Table::Interop)),
-                TAG_SUB_IFD if self.tiff_mode => Some((section, Table::Ifd)),
+                TAG_SUB_IFD if self.tiff_mode => Some((S_THUMBNAIL, Table::Ifd)),
                 _ => None,
             };
             if let Some((sec, tab)) = sub {
-                let off = if byte_count >= 4 || count == 0 {
-                    self.get32(if byte_count >= 4 { value } else { &ent[8..] })
-                } else {
-                    self.uint(fmt, value)
-                };
+                // A 32-bit offset whatever the format (observed on PHP 8.5).
+                let off = self.get32(if byte_count >= 4 { value } else { &ent[8..] });
                 if off as u64 + 2 > self.file_size as u64 {
                     if self.tiff_mode {
                         self.warn(format!(
@@ -645,10 +701,16 @@ impl<'a> Info<'a> {
                     return Err(SOFT);
                 }
                 self.found |= 1 << sec;
-                if self.process_ifd(base + off as usize, base, sec, tab, None).is_err() {
+                self.found |= 1 << S_ANY_TAG;
+                if self
+                    .process_ifd(base + off as usize, base, sec, tab, None)
+                    .is_err()
+                    && !self.tiff_mode
+                {
                     return Err(SOFT);
                 }
-            } else if tag == TAG_MAKER_NOTE && self.maker_note(e, value, base, byte_count).is_err() {
+            } else if tag == TAG_MAKER_NOTE && self.maker_note(e, value, base, byte_count).is_err()
+            {
                 return Err(SOFT);
             }
         }
@@ -804,11 +866,14 @@ impl<'a> Info<'a> {
                 let e = self.bytes(dir + 2 + i * 12, 12).unwrap();
                 let tag = self.get16(e);
                 let fmt = self.get16(&e[2..]);
-                if fmt == 0 || fmt > 12 {
+                if fmt > 12 {
                     self.notice(format!(
                         "Read from TIFF: tag(0x{tag:04X},{:>12}): Illegal format code 0x{fmt:04X}, switching to BYTE",
                         tags::diag_name(table, tag)
                     ));
+                    if self.suppressed && section == S_IFD0 {
+                        return Err(HARD);
+                    }
                 }
             }
         }
@@ -819,7 +884,13 @@ impl<'a> Info<'a> {
             return Ok(());
         }
         let Some(nx) = self.bytes(dir + 2 + n * 12, 4) else {
-            return Ok(());
+            if self.tiff_mode {
+                return Ok(());
+            }
+            // The next IFD offset is part of the directory (observed on PHP
+            // 8.5, test bug72094.phpt).
+            self.warn("Illegal IFD size");
+            return Err(HARD);
         };
         let next = self.get32(nx);
         if next == 0 {
@@ -853,6 +924,11 @@ impl<'a> Info<'a> {
                 }
                 return Err(HARD);
             }
+            if self.thumb.filetype != IMAGETYPE_JPEG {
+                // A strip thumbnail inside a JPEG file is refused (observed
+                // on PHP 8.5, test bug68113.phpt).
+                return Err(HARD);
+            }
             if self.read_thumbnail {
                 let s = base + self.thumb.offset as usize;
                 self.thumb.data = Some(self.file[s..s + self.thumb.size as usize].to_vec());
@@ -878,9 +954,15 @@ impl<'a> Info<'a> {
     /// makers use (see [`makernote`]).
     fn maker_note(&mut self, _e: usize, value: &'a [u8], base: usize, len: usize) -> Res<()> {
         let make = self.make.clone().unwrap_or_default();
-        let Some(desc) = makernote::find(&make, value) else {
+        let Some(desc) = makernote::find(&make) else {
             return Ok(());
         };
+        if !desc.id.is_empty() && value.len() >= desc.id.len() && !value.starts_with(desc.id) {
+            // Another layout of a known maker: the section is seen, its
+            // tags are not read (observed on PHP 8.5, test bug72682.phpt).
+            self.found |= 1 << S_MAKERNOTE;
+            return Ok(());
+        }
         // Absolute position of the maker note data.
         let start = value.as_ptr() as usize - self.file.as_ptr() as usize;
         let off = desc.ifd_offset;
@@ -914,13 +996,14 @@ impl<'a> Info<'a> {
 
     /// A TIFF header at absolute offset `t` (Exif in JPEG or HEIF).
     fn process_tiff_in_jpeg(&mut self, t: usize, len: usize) -> Res<()> {
-        if len < 8 {
-            self.warn("Missing TIFF alignment marker");
-            return Err(HARD);
-        }
-        let Some(h) = self.bytes(t, 8) else {
-            self.warn("Missing TIFF alignment marker");
-            return Err(HARD);
+        // The header is read from the file, its length checked against the
+        // segment (observed on PHP 8.5: tests bug72094.phpt, bug79282.phpt).
+        let h = match self.bytes(t, 4) {
+            Some(h) if len >= 2 => h,
+            _ => {
+                self.warn("Missing TIFF alignment marker");
+                return Err(HARD);
+            }
         };
         match &h[..2] {
             b"II" => self.motorola = false,
@@ -935,7 +1018,10 @@ impl<'a> Info<'a> {
             self.warn("Invalid TIFF start (1)");
             return Err(HARD);
         }
-        let first = self.get32(&h[4..]);
+        let first = match self.bytes(t + 4, 4) {
+            Some(o) => self.get32(o),
+            None => u32::MAX,
+        };
         if first as u64 > len as u64 {
             self.warn("Invalid IFD start");
             return Ok(());
@@ -954,9 +1040,20 @@ impl<'a> Info<'a> {
     fn scan_jpeg(&mut self) -> Res<()> {
         let f = self.file;
         let mut pos = 2usize;
+        let mut last = 0u8;
         loop {
             let mut a = 0;
             let mut marker;
+            if last == 0xFE && f.get(pos).is_some_and(|&c| c != 0xFF) {
+                // PHP manual (exif_read_data) / test bug13213.phpt: a COM
+                // segment with a wrong length is skipped to the next 0xFF.
+                self.notice(
+                    "Image has corrupt COM section: some software set wrong length information",
+                );
+                while f.get(pos).is_some_and(|&c| c != 0xFF) {
+                    pos += 1;
+                }
+            }
             loop {
                 let Some(&c) = f.get(pos) else {
                     self.warn("Unexpected end of file reached");
@@ -979,7 +1076,7 @@ impl<'a> Info<'a> {
             }
             let itemlen = u16::from_be_bytes([f[pos], f[pos + 1]]) as usize;
             if itemlen < 2 {
-                self.warn("Invalid marker");
+                self.warn("File structure corrupted");
                 return Err(HARD);
             }
             let avail = f.len() - pos - 2;
@@ -994,12 +1091,16 @@ impl<'a> Info<'a> {
             let data_at = pos + 2;
             let data = &f[data_at..data_at + itemlen - 2];
             pos += itemlen;
+            last = marker;
             match marker {
                 0xDA | 0xD9 => return Ok(()),
                 0xFE => self.comment(data),
                 0xE1 => {
                     if data.len() >= 6 && &data[..6] == b"Exif\0\0" {
-                        if self.process_tiff_in_jpeg(data_at + 6, data.len() - 6).is_err() {
+                        if self
+                            .process_tiff_in_jpeg(data_at + 6, data.len() - 6)
+                            .is_err()
+                        {
                             self.warn("File structure corrupted");
                             return Err(HARD);
                         }
@@ -1032,6 +1133,7 @@ impl<'a> Info<'a> {
             self.warn(format!("File too small ({})", f.len()));
             return Err(HARD);
         }
+        let short = f.len() < 12;
         if f[..2] == [0xFF, 0xD8] {
             self.file_type = IMAGETYPE_JPEG;
             if self.scan_jpeg().is_err() {
@@ -1055,7 +1157,13 @@ impl<'a> Info<'a> {
             }
             let first = self.get32(&f[4..]);
             self.found |= 1 << S_IFD0;
-            let _ = self.process_ifd(first as usize, 0, S_IFD0, Table::Ifd, None);
+            if let Err(f) = self.process_ifd(first as usize, 0, S_IFD0, Table::Ifd, None)
+                && f.hard
+            {
+                // Past the error limit the file is given up (observed on PHP
+                // 8.5, tests bug71534.phpt, nesting_level_oom.phpt).
+                return Err(HARD);
+            }
             if self.read_thumbnail {
                 self.thumbnail_check_tiff();
             }
@@ -1065,7 +1173,11 @@ impl<'a> Info<'a> {
             self.file_type = IMAGETYPE_HEIF;
             return self.scan_heif();
         }
-        self.warn("File not supported");
+        // Too short for a HEIF header: no diagnostic (observed on PHP 8.5,
+        // ext/standard/tests/image/bug70052_2.wbmp).
+        if !short {
+            self.warn("File not supported");
+        }
         Err(HARD)
     }
 
@@ -1103,7 +1215,10 @@ impl<'a> Info<'a> {
         if self.width != 0 && self.height != 0 {
             put(
                 "html",
-                Node::s(format!("width=\"{}\" height=\"{}\"", self.width, self.height)),
+                Node::s(format!(
+                    "width=\"{}\" height=\"{}\"",
+                    self.width, self.height
+                )),
             );
             put("Height", Node::Int(self.height as i64));
             put("Width", Node::Int(self.width as i64));
@@ -1230,7 +1345,7 @@ fn cstr(v: &[u8]) -> Vec<u8> {
 fn is_heif_ftyp(f: &[u8]) -> bool {
     f.len() >= 12 && &f[4..8] == b"ftyp" && {
         let b = &f[8..12];
-        b == b"heic" || b == b"heix" || b == b"mif1" || b == b"avif"
+        b == b"heic" || b == b"heix" || b == b"mif1"
     }
 }
 
@@ -1278,6 +1393,11 @@ fn heif_exif_location(f: &[u8]) -> Option<(usize, usize)> {
             continue;
         }
         let ver = f[s];
+        // Version 0 tables are not read (observed on PHP 8.5: "Invalid HEIF
+        // file" for ext/standard/tests/image/test4pix.heic).
+        if ver == 0 {
+            return None;
+        }
         let sizes = be16(f, s + 4) as u32;
         let off_size = (sizes >> 12) & 15;
         let len_size = (sizes >> 8) & 15;
@@ -1304,7 +1424,11 @@ fn heif_exif_location(f: &[u8]) -> Option<(usize, usize)> {
             Some(v)
         };
         for _ in 0..count {
-            let item = if ver < 2 { rd(&mut p, 2)? } else { rd(&mut p, 4)? } as u32;
+            let item = if ver < 2 {
+                rd(&mut p, 2)?
+            } else {
+                rd(&mut p, 4)?
+            } as u32;
             if ver == 1 || ver == 2 {
                 rd(&mut p, 2)?;
             }

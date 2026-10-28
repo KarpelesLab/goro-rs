@@ -118,10 +118,8 @@ const DESCS: &[Desc] = &[
 ];
 
 /// The layout for a note with this Make and data.
-pub fn find(make: &[u8], data: &[u8]) -> Option<&'static Desc> {
-    DESCS.iter().find(|d| {
-        make.starts_with(d.make) && (d.id.is_empty() || data.starts_with(d.id))
-    })
+pub fn find(make: &[u8]) -> Option<&'static Desc> {
+    DESCS.iter().find(|d| make.starts_with(d.make))
 }
 
 /// Tag names (observed on PHP 8.5).
@@ -158,9 +156,7 @@ static OLYMPUS: &[(u16, &str)] = &[
     (0x0204, "DigitalZoom"),
 ];
 /// Samsung (test bug72735.phpt images).
-static SAMSUNG: &[(u16, &str)] = &[
-    (0x0001, "Version"),
-];
+static SAMSUNG: &[(u16, &str)] = &[(0x0001, "Version")];
 /// Panasonic (tests bug72735.phpt, bug75785.phpt). Two ids share some names: the later value takes the earlier key's place.
 static PANASONIC: &[(u16, &str)] = &[
     (0x0001, "Quality"),
@@ -215,6 +211,18 @@ static PANASONIC: &[(u16, &str)] = &[
     (0x006D, "City"),
     (0x006F, "Landmark"),
     (0x0070, "IntelligentResolution"),
+    (0x0077, "BurstSheed"),
+    (0x007C, "ClearRetouch"),
+    (0x0080, "City2"),
+    (0x0086, "ManometerPressure"),
+    (0x008C, "AccelerometerZ"),
+    (0x008D, "AccelerometerX"),
+    (0x008E, "AccelerometerY"),
+    (0x0093, "SweepPanoramaDirection"),
+    (0x0094, "PanoramaFieldOfView"),
+    (0x0096, "TimerRecording"),
+    (0x009D, "InternalNDFilter"),
+    (0x00A3, "ClearRetouchValue"),
     (0x8000, "MakerNoteVersion"),
     (0x8001, "SceneMode"),
     (0x8004, "WBRedLevel"),
