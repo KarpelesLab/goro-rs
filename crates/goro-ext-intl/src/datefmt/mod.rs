@@ -67,17 +67,22 @@ fn time_pattern(loc: Loc, sec: &str, style: i64) -> String {
         .to_string()
 }
 
-/// The date-time glue of a date style ("{1} 'at' {0}").
+/// The date-time glue of a date style ("{1} 'at' {0}"). The "atTime"
+/// glue is the locale's Gregorian one for every calendar (expected output
+/// of ext/intl/tests/dateformat_create_cal_arg_variant5.phpt: Spanish
+/// Islamic dates keep ", ").
 fn glue(loc: Loc, sec: &str, style: i64) -> &'static str {
     let s = style_name(style);
-    loc.get(sec, &format!("dateTimeFormats-atTime/standard/{s}"))
+    loc.get("gregorian", &format!("dateTimeFormats-atTime/standard/{s}"))
         .or_else(|| loc.get(sec, &format!("dateTimeFormats/{s}")))
         .or_else(|| loc.get("gregorian", &format!("dateTimeFormats/{s}")))
         .unwrap_or("{1} {0}")
 }
 
 fn join(glue: &str, date: &str, time: &str) -> String {
-    glue.replace("{1}", "\u{0}").replace("{0}", time).replace('\u{0}', date)
+    glue.replace("{1}", "\u{0}")
+        .replace("{0}", time)
+        .replace('\u{0}', date)
 }
 
 /// The pattern of a (date style, time style) pair for a locale and the
@@ -89,7 +94,11 @@ pub fn styles_pattern(locale: &str, cal: CalType, date_style: i64, time_style: i
         (NONE, NONE) => NONE_NONE_PATTERN.to_string(),
         (NONE, t) => time_pattern(loc, sec, t),
         (d, NONE) => date_pattern(loc, sec, d),
-        (d, t) => join(glue(loc, sec, d), &date_pattern(loc, sec, d), &time_pattern(loc, sec, t)),
+        (d, t) => join(
+            glue(loc, sec, d),
+            &date_pattern(loc, sec, d),
+            &time_pattern(loc, sec, t),
+        ),
     }
 }
 
@@ -160,17 +169,19 @@ impl DateFormatter {
     /// Formats a calendar whose fields are complete.
     pub fn format_cal(&self, c: &Calendar) -> String {
         let sy = Symbols::new(&self.locale.base, c.cal_type);
-        if self.date_style & RELATIVE != 0 && self.date_style != NONE {
-            if let Some(s) = self.relative(&sy, c) {
-                return s;
-            }
+        if self.date_style & RELATIVE != 0
+            && self.date_style != NONE
+            && let Some(s) = self.relative(&sy, c)
+        {
+            return s;
         }
         format::format(&sy, &self.toks, c)
     }
 
     fn relative(&self, sy: &Symbols, c: &Calendar) -> Option<String> {
         let now = self.calendar.at(crate::timezone::now_ms()).ok()?;
-        let diff = c.field(crate::calendar::JULIAN_DAY) as i64 - now.field(crate::calendar::JULIAN_DAY) as i64;
+        let diff = c.field(crate::calendar::JULIAN_DAY) as i64
+            - now.field(crate::calendar::JULIAN_DAY) as i64;
         if !(-2..=2).contains(&diff) {
             return None;
         }
@@ -189,9 +200,19 @@ impl DateFormatter {
         let loc = sy.loc;
         let sec = c.cal_type.data_section();
         let g = loc
-            .get(sec, &format!("dateTimeFormats-relative/standard/{}", style_name(self.date_style)))
+            .get(
+                sec,
+                &format!(
+                    "dateTimeFormats-relative/standard/{}",
+                    style_name(self.date_style)
+                ),
+            )
             .unwrap_or_else(|| glue(loc, sec, self.date_style));
-        let time = format::format(sy, &format::tokenize(&time_pattern(loc, sec, self.time_style)), c);
+        let time = format::format(
+            sy,
+            &format::tokenize(&time_pattern(loc, sec, self.time_style)),
+            c,
+        );
         let g_toks = format::tokenize(g);
         let mut out = String::new();
         for t in g_toks {
@@ -217,7 +238,12 @@ impl DateFormatter {
 /// time arguments).
 pub fn format_pattern(locale: &str, pattern: &str, udate_ms: f64, tz_id: &str) -> String {
     let l = LocaleId::parse(locale);
-    let cal = Calendar::new(CalType::Gregorian, TimeZone::create(tz_id), &l.region_or_likely(), udate_ms);
+    let cal = Calendar::new(
+        CalType::Gregorian,
+        TimeZone::create(tz_id),
+        &l.region_or_likely(),
+        udate_ms,
+    );
     let f = DateFormatter::new(&l, NONE, NONE, Some(pattern), CalType::Gregorian, cal);
     f.format_ms(udate_ms).unwrap_or_default()
 }
@@ -225,7 +251,12 @@ pub fn format_pattern(locale: &str, pattern: &str, udate_ms: f64, tz_id: &str) -
 /// The pattern of IntlDateFormatter styles (FULL … SHORT, NONE) for a
 /// locale (Gregorian calendar).
 pub fn style_pattern(locale: &str, date_style: i64, time_style: i64) -> String {
-    styles_pattern(&LocaleId::parse(locale).base, CalType::Gregorian, date_style, time_style)
+    styles_pattern(
+        &LocaleId::parse(locale).base,
+        CalType::Gregorian,
+        date_style,
+        time_style,
+    )
 }
 
 /// The best pattern of a skeleton for a locale (UTS #35
@@ -238,7 +269,12 @@ pub fn skeleton_pattern(locale: &str, skeleton: &str) -> String {
 /// in milliseconds and the end position (in bytes), or None.
 pub fn parse_pattern(locale: &str, pattern: &str, text: &str, tz_id: &str) -> Option<(f64, usize)> {
     let l = LocaleId::parse(locale);
-    let cal = Calendar::new(CalType::Gregorian, TimeZone::create(tz_id), &l.region_or_likely(), 0.0);
+    let cal = Calendar::new(
+        CalType::Gregorian,
+        TimeZone::create(tz_id),
+        &l.region_or_likely(),
+        0.0,
+    );
     let f = DateFormatter::new(&l, NONE, NONE, Some(pattern), CalType::Gregorian, cal);
     let mut pos = 0;
     let (mut c, _) = f.parse(text, &mut pos).ok()?;
@@ -251,8 +287,15 @@ mod tests {
 
     fn fmt(locale: &str, d: i64, t: i64, tz: &str, ms: f64) -> String {
         let l = LocaleId::parse(locale);
-        let cal = Calendar::new(l.calendar(), TimeZone::create(tz), &l.region_or_likely(), 0.0);
-        DateFormatter::new(&l, d, t, None, l.calendar(), cal).format_ms(ms).unwrap()
+        let cal = Calendar::new(
+            l.calendar(),
+            TimeZone::create(tz),
+            &l.region_or_likely(),
+            0.0,
+        );
+        DateFormatter::new(&l, d, t, None, l.calendar(), cal)
+            .format_ms(ms)
+            .unwrap()
     }
 
     #[test]
@@ -261,34 +304,78 @@ mod tests {
             fmt("en_US", FULL, FULL, "GMT+05:00", 0.0),
             "Thursday, January 1, 1970 at 5:00:00\u{202f}AM GMT+05:00"
         );
-        assert_eq!(fmt("en_US", LONG, LONG, "GMT+05:00", 0.0), "January 1, 1970 at 5:00:00\u{202f}AM GMT+5");
-        assert_eq!(fmt("en_US", MEDIUM, MEDIUM, "GMT+05:00", 0.0), "Jan 1, 1970, 5:00:00\u{202f}AM");
-        assert_eq!(fmt("en_US", SHORT, SHORT, "GMT-10:00", 0.0), "12/31/69, 2:00\u{202f}PM");
-        assert_eq!(fmt("en_US", NONE, NONE, "GMT-10:00", 0.0), "19691231 02:00 PM");
+        assert_eq!(
+            fmt("en_US", LONG, LONG, "GMT+05:00", 0.0),
+            "January 1, 1970 at 5:00:00\u{202f}AM GMT+5"
+        );
+        assert_eq!(
+            fmt("en_US", MEDIUM, MEDIUM, "GMT+05:00", 0.0),
+            "Jan 1, 1970, 5:00:00\u{202f}AM"
+        );
+        assert_eq!(
+            fmt("en_US", SHORT, SHORT, "GMT-10:00", 0.0),
+            "12/31/69, 2:00\u{202f}PM"
+        );
+        assert_eq!(
+            fmt("en_US", NONE, NONE, "GMT-10:00", 0.0),
+            "19691231 02:00 PM"
+        );
         assert_eq!(
             fmt("es_ES", FULL, FULL, "Atlantic/Azores", 1_325_376_000_000.0),
             "sábado, 31 de diciembre de 2011, 23:00:00 (hora estándar de las Azores)"
         );
         assert_eq!(
-            fmt("en_US@calendar=hebrew", FULL, FULL, "GMT+05:12", 1_325_376_000_000.0),
+            fmt(
+                "en_US@calendar=hebrew",
+                FULL,
+                FULL,
+                "GMT+05:12",
+                1_325_376_000_000.0
+            ),
             "Sunday, 6 Tevet 5772 at 5:12:00\u{202f}AM GMT+05:12"
         );
     }
 
     #[test]
     fn patterns() {
-        assert_eq!(format_pattern("en_US", "dd-MM-YY", 0.0, "America/New_York"), "31-12-70");
-        assert_eq!(format_pattern("en_US", "yyyy-DDD.hh:mm:ss z", 0.0, "America/New_York"), "1969-365.07:00:00 EST");
-        assert_eq!(format_pattern("vi_VN", "'tháng' MM, y", 1_428_133_423_941.0, "Asia/Ho_Chi_Minh"), "tháng 04, 2015");
-        assert_eq!(format_pattern("ko_KR", "y년 MMM", 1_428_133_423_941.0, "Asia/Ho_Chi_Minh"), "2015년 4월");
+        assert_eq!(
+            format_pattern("en_US", "dd-MM-YY", 0.0, "America/New_York"),
+            "31-12-70"
+        );
+        assert_eq!(
+            format_pattern("en_US", "yyyy-DDD.hh:mm:ss z", 0.0, "America/New_York"),
+            "1969-365.07:00:00 EST"
+        );
+        assert_eq!(
+            format_pattern(
+                "vi_VN",
+                "'tháng' MM, y",
+                1_428_133_423_941.0,
+                "Asia/Ho_Chi_Minh"
+            ),
+            "tháng 04, 2015"
+        );
+        assert_eq!(
+            format_pattern("ko_KR", "y년 MMM", 1_428_133_423_941.0, "Asia/Ho_Chi_Minh"),
+            "2015년 4월"
+        );
     }
 
     #[test]
     fn parsing() {
         assert_eq!(
-            parse_pattern("en_US", "EEEE, MMMM d, y 'at' h:mm:ss\u{202f}a zzzz", "Thursday, January 1, 1970 at 5:00:00\u{202f}AM GMT+05:00", "UTC").map(|x| x.0),
+            parse_pattern(
+                "en_US",
+                "EEEE, MMMM d, y 'at' h:mm:ss\u{202f}a zzzz",
+                "Thursday, January 1, 1970 at 5:00:00\u{202f}AM GMT+05:00",
+                "UTC"
+            )
+            .map(|x| x.0),
             Some(0.0)
         );
-        assert_eq!(parse_pattern("en_GB", "yyyy-MM-dd", "2017-10-12", "UTC").map(|x| x.1), Some(10));
+        assert_eq!(
+            parse_pattern("en_GB", "yyyy-MM-dd", "2017-10-12", "UTC").map(|x| x.1),
+            Some(10)
+        );
     }
 }

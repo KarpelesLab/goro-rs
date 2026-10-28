@@ -127,7 +127,8 @@ impl Symbols {
     pub fn new(locale: &str, cal_type: CalType) -> Symbols {
         let loc = Loc::resolve(locale);
         let lang = locale.split('_').next().unwrap_or("en");
-        let numbers = intl::number::default_numbering_system(if lang.is_empty() { "en" } else { lang });
+        let numbers =
+            intl::number::default_numbering_system(if lang.is_empty() { "en" } else { lang });
         Symbols {
             loc,
             locale: locale.to_string(),
@@ -184,7 +185,8 @@ fn width_name(n: usize) -> &'static str {
 
 /// The CLDR key of the month (ICU MONTH) in a year.
 pub fn month_key(ct: CalType, month: i32, eyear: i32) -> String {
-    if ct == CalType::Hebrew && month == 6 && crate::calendar::systems::is_hebrew_leap(eyear as i64) {
+    if ct == CalType::Hebrew && month == 6 && crate::calendar::systems::is_hebrew_leap(eyear as i64)
+    {
         return "7-yeartype-leap".into();
     }
     (month + 1).to_string()
@@ -192,19 +194,41 @@ pub fn month_key(ct: CalType, month: i32, eyear: i32) -> String {
 
 /// A month name: `standalone` context, width by count (3 abbreviated, 4
 /// wide, 5 narrow).
-pub fn month_name(sy: &Symbols, standalone: bool, n: usize, month: i32, eyear: i32) -> Option<&'static str> {
+pub fn month_name(
+    sy: &Symbols,
+    standalone: bool,
+    n: usize,
+    month: i32,
+    eyear: i32,
+) -> Option<&'static str> {
     let k = month_key(sy.cal_type, month, eyear);
     let w = width_name(n);
-    let (a, b) = if standalone { ("stand-alone", "format") } else { ("format", "stand-alone") };
-    sy.name(&[format!("months/{a}/{w}/{k}"), format!("months/{b}/{w}/{k}"), format!("months/{a}/wide/{k}")])
+    let (a, b) = if standalone {
+        ("stand-alone", "format")
+    } else {
+        ("format", "stand-alone")
+    };
+    sy.name(&[
+        format!("months/{a}/{w}/{k}"),
+        format!("months/{b}/{w}/{k}"),
+        format!("months/{a}/wide/{k}"),
+    ])
 }
 
 /// A weekday name (dow 1 = Sunday).
 pub fn day_name(sy: &Symbols, standalone: bool, n: usize, dow: i32) -> Option<&'static str> {
     let k = DAY_KEYS[((dow - 1).rem_euclid(7)) as usize];
     let w = width_name(n);
-    let (a, b) = if standalone { ("stand-alone", "format") } else { ("format", "stand-alone") };
-    sy.name(&[format!("days/{a}/{w}/{k}"), format!("days/{b}/{w}/{k}"), format!("days/{a}/abbreviated/{k}")])
+    let (a, b) = if standalone {
+        ("stand-alone", "format")
+    } else {
+        ("format", "stand-alone")
+    };
+    sy.name(&[
+        format!("days/{a}/{w}/{k}"),
+        format!("days/{b}/{w}/{k}"),
+        format!("days/{a}/abbreviated/{k}"),
+    ])
 }
 
 /// An era name: count 1-3 abbreviated, 4 wide, 5 narrow.
@@ -225,14 +249,24 @@ pub fn ampm_name(sy: &Symbols, n: usize, pm: bool) -> &'static str {
         _ => "abbreviated",
     };
     let k = if pm { "pm" } else { "am" };
-    sy.name(&[format!("dayPeriods/format/{w}/{k}"), format!("dayPeriods/format/abbreviated/{k}")])
-        .unwrap_or(if pm { "PM" } else { "AM" })
+    sy.name(&[
+        format!("dayPeriods/format/{w}/{k}"),
+        format!("dayPeriods/format/abbreviated/{k}"),
+    ])
+    .unwrap_or(if pm { "PM" } else { "AM" })
 }
 
 fn quarter_name(sy: &Symbols, standalone: bool, n: usize, q: i32) -> Option<&'static str> {
     let w = width_name(n.min(5));
-    let (a, b) = if standalone { ("stand-alone", "format") } else { ("format", "stand-alone") };
-    sy.name(&[format!("quarters/{a}/{w}/{q}"), format!("quarters/{b}/{w}/{q}")])
+    let (a, b) = if standalone {
+        ("stand-alone", "format")
+    } else {
+        ("format", "stand-alone")
+    };
+    sy.name(&[
+        format!("quarters/{a}/{w}/{q}"),
+        format!("quarters/{b}/{w}/{q}"),
+    ])
 }
 
 /// Formats the instant `c` holds (fields complete) with tokens.
@@ -260,7 +294,9 @@ pub fn format_field(sy: &Symbols, ch: char, n: usize, c: &Calendar) -> String {
     let f = |x: usize| c.field(x);
     let ct = sy.cal_type;
     match ch {
-        'G' => era_name(sy, n, f(cal::ERA)).map(str::to_string).unwrap_or_else(|| sy.num(f(cal::ERA) as i64, 1)),
+        'G' => era_name(sy, n, f(cal::ERA))
+            .map(str::to_string)
+            .unwrap_or_else(|| sy.num(f(cal::ERA) as i64, 1)),
         'y' => {
             let y = f(cal::YEAR);
             year_str(sy, y, n)
@@ -283,13 +319,19 @@ pub fn format_field(sy: &Symbols, ch: char, n: usize, c: &Calendar) -> String {
             if n <= 2 {
                 sy.num(q as i64, n)
             } else {
-                quarter_name(sy, ch == 'q', n, q).map(str::to_string).unwrap_or_else(|| q.to_string())
+                quarter_name(sy, ch == 'q', n, q)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| q.to_string())
             }
         }
         'M' | 'L' => {
             let m = f(cal::MONTH);
             if n <= 2 {
-                let num = if ct == CalType::Hebrew { f(cal::ORDINAL_MONTH) + 1 } else { m + 1 };
+                let num = if ct == CalType::Hebrew {
+                    f(cal::ORDINAL_MONTH) + 1
+                } else {
+                    m + 1
+                };
                 sy.num(num as i64, n)
             } else {
                 month_name(sy, ch == 'L', n, m, f(cal::EXTENDED_YEAR))
@@ -311,7 +353,9 @@ pub fn format_field(sy: &Symbols, ch: char, n: usize, c: &Calendar) -> String {
             if n <= 2 {
                 sy.num(f(cal::DOW_LOCAL) as i64, if ch == 'c' { 1 } else { n })
             } else {
-                day_name(sy, ch == 'c', n, f(cal::DAY_OF_WEEK)).unwrap_or("").to_string()
+                day_name(sy, ch == 'c', n, f(cal::DAY_OF_WEEK))
+                    .unwrap_or("")
+                    .to_string()
             }
         }
         'a' | 'b' | 'B' => {
@@ -381,7 +425,9 @@ fn zone_field(sy: &Symbols, ch: char, n: usize, c: &Calendar) -> String {
         ('O', _) => name(Style::LongGmt),
         ('v', 1..=3) => name(Style::ShortGeneric),
         ('v', _) => name(Style::LongGeneric),
-        ('V', 1) => crate::timezone::short_id(tz.id()).unwrap_or("unk").to_string(),
+        ('V', 1) => crate::timezone::short_id(tz.id())
+            .unwrap_or("unk")
+            .to_string(),
         ('V', 2) => {
             if tz.is_custom() {
                 tz.id().to_string()

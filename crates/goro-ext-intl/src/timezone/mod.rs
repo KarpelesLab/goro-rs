@@ -149,7 +149,12 @@ impl TimeZone {
 
     /// (raw, DST) offsets for local (wall) time `local_ms`, resolving
     /// skipped and repeated wall times with the options.
-    pub fn offsets_local(&self, local_ms: f64, skipped: WallTime, repeated: WallTime) -> (i32, i32) {
+    pub fn offsets_local(
+        &self,
+        local_ms: f64,
+        skipped: WallTime,
+        repeated: WallTime,
+    ) -> (i32, i32) {
         let z = match &self.kind {
             Kind::Fixed(o) => return (*o, 0),
             Kind::Unknown => return (0, 0),
@@ -308,10 +313,10 @@ fn split(z: ZoneId, ts: i64) -> (i32, i32) {
         for t in z.transitions(ts - 400 * 86_400, ts) {
             prev_start = Some(t.ts);
         }
-        if let Some(t) = z.transitions(ts, ts + 400 * 86_400).next() {
-            if t.ty.is_dst == want_dst {
-                return Some(t.ty.offset);
-            }
+        if let Some(t) = z.transitions(ts, ts + 400 * 86_400).next()
+            && t.ty.is_dst == want_dst
+        {
+            return Some(t.ty.offset);
         }
         if let Some(s) = prev_start {
             let p = z.type_at(s - 1);
@@ -349,8 +354,48 @@ fn zone_signature(z: ZoneId) -> Vec<(i64, i32, bool)> {
 
 // ---------------------------------------------------------------- ids
 
+/// The three-letter ids of the Java TimeZone class that ICU keeps as
+/// aliases (Java SE TimeZone API documentation, "three-letter time zone
+/// IDs"), where the IANA database lacks them.
+const LEGACY_IDS: &[(&str, &str)] = &[
+    ("ACT", "Australia/Darwin"),
+    ("AET", "Australia/Sydney"),
+    ("AGT", "America/Argentina/Buenos_Aires"),
+    ("ART", "Africa/Cairo"),
+    ("AST", "America/Anchorage"),
+    ("BET", "America/Sao_Paulo"),
+    ("BST", "Asia/Dhaka"),
+    ("CAT", "Africa/Harare"),
+    ("CNT", "America/St_Johns"),
+    ("CST", "America/Chicago"),
+    ("CTT", "Asia/Shanghai"),
+    ("EAT", "Africa/Addis_Ababa"),
+    ("ECT", "Europe/Paris"),
+    ("IET", "America/Indiana/Indianapolis"),
+    ("IST", "Asia/Kolkata"),
+    ("JST", "Asia/Tokyo"),
+    ("MIT", "Pacific/Apia"),
+    ("NET", "Asia/Yerevan"),
+    ("NST", "Pacific/Auckland"),
+    ("PLT", "Asia/Karachi"),
+    ("PNT", "America/Phoenix"),
+    ("PRT", "America/Puerto_Rico"),
+    ("PST", "America/Los_Angeles"),
+    ("SST", "Pacific/Guadalcanal"),
+    ("VST", "Asia/Ho_Chi_Minh"),
+];
+
+fn legacy_target(id: &str) -> Option<&'static str> {
+    LEGACY_IDS.iter().find(|(k, _)| *k == id).map(|(_, v)| *v)
+}
+
 /// The IANA zone of a system id (exact spelling).
 fn system_zone(id: &str) -> Option<ZoneId> {
+    if let Some(t) = legacy_target(id)
+        && ZoneId::find(id).is_none_or(|z| z.name() != id)
+    {
+        return ZoneId::find(t);
+    }
     if let Some(z) = ZoneId::find(id)
         && z.name() == id
     {
@@ -387,7 +432,9 @@ fn cldr_alias_map() -> &'static HashMap<&'static str, &'static str> {
 }
 
 /// The BCP 47 record of a CLDR canonical id.
-fn bcp47_for(canon: &str) -> Option<&'static (&'static str, &'static str, &'static str, bool, &'static str)> {
+fn bcp47_for(
+    canon: &str,
+) -> Option<&'static (&'static str, &'static str, &'static str, bool, &'static str)> {
     static M: OnceLock<HashMap<&'static str, usize>> = OnceLock::new();
     let m = M.get_or_init(|| {
         let mut m = HashMap::new();
@@ -426,6 +473,9 @@ pub fn all_ids() -> &'static [String] {
                 set.insert(a.to_string());
             }
         }
+        for (a, _) in LEGACY_IDS {
+            set.insert(a.to_string());
+        }
         set.into_iter().collect()
     })
 }
@@ -433,6 +483,11 @@ pub fn all_ids() -> &'static [String] {
 /// `getCanonicalID()`: (canonical id, is a system id). Custom ids give
 /// their normalized form and false.
 pub fn canonical_id(id: &str) -> Option<(String, bool)> {
+    if let Some(t) = legacy_target(id)
+        && ZoneId::find(id).is_none_or(|z| z.name() != id)
+    {
+        return canonical_id(t);
+    }
     if let Some(c) = cldr_alias_map().get(id) {
         return Some((c.to_string(), true));
     }
@@ -443,10 +498,12 @@ pub fn canonical_id(id: &str) -> Option<(String, bool)> {
         // an IANA name CLDR does not list: follow the link to its zone
         if z.is_link() {
             for o in ZoneId::all() {
-                if !o.is_link() && o != z && zone_signature(o) == zone_signature(z) {
-                    if let Some(c) = cldr_alias_map().get(o.name()) {
-                        return Some((c.to_string(), true));
-                    }
+                if !o.is_link()
+                    && o != z
+                    && zone_signature(o) == zone_signature(z)
+                    && let Some(c) = cldr_alias_map().get(o.name())
+                {
+                    return Some((c.to_string(), true));
                 }
             }
         }
@@ -474,9 +531,10 @@ pub fn equivalent_ids(id: &str) -> Vec<String> {
     let Some(z) = system_zone(id) else {
         return Vec::new();
     };
-    static G: OnceLock<HashMap<Vec<(i64, i32, bool)>, Vec<String>>> = OnceLock::new();
+    type Groups = HashMap<Vec<(i64, i32, bool)>, Vec<String>>;
+    static G: OnceLock<Groups> = OnceLock::new();
     let g = G.get_or_init(|| {
-        let mut g: HashMap<Vec<(i64, i32, bool)>, Vec<String>> = HashMap::new();
+        let mut g: Groups = HashMap::new();
         for n in all_ids() {
             if let Some(z) = system_zone(n) {
                 g.entry(zone_signature(z)).or_default().push(n.clone());
@@ -647,8 +705,16 @@ pub fn parse_custom_id(id: &str) -> Option<i32> {
             1 | 2 => (rest.parse().ok()?, 0, 0),
             3 => (rest[..1].parse().ok()?, rest[1..].parse().ok()?, 0),
             4 => (rest[..2].parse().ok()?, rest[2..].parse().ok()?, 0),
-            5 => (rest[..1].parse().ok()?, rest[1..3].parse().ok()?, rest[3..].parse().ok()?),
-            6 => (rest[..2].parse().ok()?, rest[2..4].parse().ok()?, rest[4..].parse().ok()?),
+            5 => (
+                rest[..1].parse().ok()?,
+                rest[1..3].parse().ok()?,
+                rest[3..].parse().ok()?,
+            ),
+            6 => (
+                rest[..2].parse().ok()?,
+                rest[2..4].parse().ok()?,
+                rest[4..].parse().ok()?,
+            ),
             _ => return None,
         }
     };
@@ -686,7 +752,10 @@ mod tests {
 
     #[test]
     fn canonical() {
-        assert_eq!(canonical_id("Portugal"), Some(("Europe/Lisbon".into(), true)));
+        assert_eq!(
+            canonical_id("Portugal"),
+            Some(("Europe/Lisbon".into(), true))
+        );
         assert_eq!(canonical_id("Asia/Kolkata").unwrap().0, "Asia/Calcutta");
         assert_eq!(iana_id("Asia/Calcutta").as_deref(), Some("Asia/Kolkata"));
         assert_eq!(region("Europe/Amsterdam").as_deref(), Some("NL"));
@@ -712,7 +781,10 @@ mod tests {
 
     #[test]
     fn windows() {
-        assert_eq!(windows_id("America/Havana").as_deref(), Some("Cuba Standard Time"));
+        assert_eq!(
+            windows_id("America/Havana").as_deref(),
+            Some("Cuba Standard Time")
+        );
         assert_eq!(
             id_for_windows_id("Pacific Standard Time", Some("ZZ")).as_deref(),
             Some("America/Los_Angeles")

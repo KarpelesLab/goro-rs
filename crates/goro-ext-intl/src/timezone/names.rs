@@ -49,7 +49,9 @@ pub fn metazone(canon: &str, ms: f64) -> Option<&'static str> {
 pub fn golden_zone(mz: &str, territory: &str) -> Option<&'static str> {
     let find = |t: &str| {
         sup::METAZONE_MAP
-            .binary_search_by(|(m, tt, _)| (m.as_bytes(), tt.as_bytes()).cmp(&(mz.as_bytes(), t.as_bytes())))
+            .binary_search_by(|(m, tt, _)| {
+                (m.as_bytes(), tt.as_bytes()).cmp(&(mz.as_bytes(), t.as_bytes()))
+            })
             .ok()
             .map(|i| sup::METAZONE_MAP[i].2)
     };
@@ -220,7 +222,14 @@ pub enum Opt {
 
 /// A zone's name in a style at UTC time `ms` (`daylight`: the DST
 /// variant of specific names, None to follow the zone at `ms`).
-pub fn display_name(loc: Loc, locale: &str, tz: &TimeZone, ms: f64, style: Style, daylight: Option<bool>) -> String {
+pub fn display_name(
+    loc: Loc,
+    locale: &str,
+    tz: &TimeZone,
+    ms: f64,
+    style: Style,
+    daylight: Option<bool>,
+) -> String {
     let (raw, dst) = tz.offsets(ms);
     let in_dst = daylight.unwrap_or(dst != 0);
     let offset = if daylight.is_some() {
@@ -234,7 +243,9 @@ pub fn display_name(loc: Loc, locale: &str, tz: &TimeZone, ms: f64, style: Style
     };
     if tz.is_custom() {
         return match style {
-            Style::ShortSpecific | Style::ShortGeneric | Style::ShortGmt => localized_gmt(loc, offset, true),
+            Style::ShortSpecific | Style::ShortGeneric | Style::ShortGmt => {
+                localized_gmt(loc, offset, true)
+            }
             Style::ExemplarCity => exemplar_city(loc, super::UNKNOWN_ID),
             _ => localized_gmt(loc, offset, false),
         };
@@ -244,7 +255,11 @@ pub fn display_name(loc: Loc, locale: &str, tz: &TimeZone, ms: f64, style: Style
     let kind = if in_dst { "daylight" } else { "standard" };
     match style {
         Style::ShortSpecific | Style::LongSpecific => {
-            let w = if style == Style::ShortSpecific { "short" } else { "long" };
+            let w = if style == Style::ShortSpecific {
+                "short"
+            } else {
+                "long"
+            };
             let key = format!("{w}/{kind}");
             if let Some(n) = zone_name(loc, &canon, &key) {
                 return n.to_string();
@@ -257,7 +272,11 @@ pub fn display_name(loc: Loc, locale: &str, tz: &TimeZone, ms: f64, style: Style
             localized_gmt(loc, offset, style == Style::ShortSpecific)
         }
         Style::ShortGeneric | Style::LongGeneric => {
-            let w = if style == Style::ShortGeneric { "short" } else { "long" };
+            let w = if style == Style::ShortGeneric {
+                "short"
+            } else {
+                "long"
+            };
             let key = format!("{w}/generic");
             if let Some(n) = zone_name(loc, &canon, &key) {
                 return n.to_string();
@@ -340,14 +359,32 @@ mod tests {
         let en = Loc::resolve("en_US");
         let tz = TimeZone::create("Europe/Lisbon");
         let jan = 1_325_376_000_000.0;
-        assert_eq!(display_name(en, "en_US", &tz, jan, Style::LongSpecific, None), "Western European Standard Time");
-        assert_eq!(display_name(en, "en_US", &tz, jan, Style::ShortGeneric, None), "Portugal Time");
-        assert_eq!(display_name(en, "en_US", &tz, jan, Style::LongGeneric, None), "Western European Time");
-        assert_eq!(display_name(en, "en_US", &tz, jan, Style::ShortSpecific, None), "GMT");
+        assert_eq!(
+            display_name(en, "en_US", &tz, jan, Style::LongSpecific, None),
+            "Western European Standard Time"
+        );
+        assert_eq!(
+            display_name(en, "en_US", &tz, jan, Style::ShortGeneric, None),
+            "Portugal Time"
+        );
+        assert_eq!(
+            display_name(en, "en_US", &tz, jan, Style::LongGeneric, None),
+            "Western European Time"
+        );
+        assert_eq!(
+            display_name(en, "en_US", &tz, jan, Style::ShortSpecific, None),
+            "GMT"
+        );
         assert_eq!(localized_gmt(en, 5 * 3_600_000, true), "GMT+5");
-        assert_eq!(localized_gmt(en, 5 * 3_600_000 + 12 * 60_000, false), "GMT+05:12");
+        assert_eq!(
+            localized_gmt(en, 5 * 3_600_000 + 12 * 60_000, false),
+            "GMT+05:12"
+        );
         assert_eq!(localized_gmt(en, -10 * 3_600_000, true), "GMT-10");
         let pt = Loc::resolve("pt_PT");
-        assert_eq!(display_name(pt, "pt_PT", &tz, jan, Style::LongGeneric, None), "Hora da Europa Ocidental");
+        assert_eq!(
+            display_name(pt, "pt_PT", &tz, jan, Style::LongGeneric, None),
+            "Hora da Europa Ocidental"
+        );
     }
 }

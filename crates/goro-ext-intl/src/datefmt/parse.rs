@@ -72,7 +72,10 @@ impl<'a> P<'a> {
 fn unicode_digit(c: char) -> Option<u32> {
     // decimal digits of other scripts (Nd blocks of ten)
     let cp = c as u32;
-    for base in [0x660u32, 0x6F0, 0x966, 0x9E6, 0xA66, 0xAE6, 0xB66, 0xBE6, 0xC66, 0xCE6, 0xD66, 0xE50, 0xED0, 0xF20, 0x1040, 0xFF10] {
+    for base in [
+        0x660u32, 0x6F0, 0x966, 0x9E6, 0xA66, 0xAE6, 0xB66, 0xBE6, 0xC66, 0xCE6, 0xD66, 0xE50,
+        0xED0, 0xF20, 0x1040, 0xFF10,
+    ] {
         if (base..base + 10).contains(&cp) {
             return Some(cp - base);
         }
@@ -93,7 +96,8 @@ fn eq_ci(a: char, b: char) -> bool {
 
 fn is_numeric_field(c: char, n: usize) -> bool {
     match c {
-        'y' | 'Y' | 'u' | 'd' | 'D' | 'F' | 'g' | 'w' | 'W' | 'h' | 'H' | 'k' | 'K' | 'm' | 's' | 'S' | 'A' | 'r' => true,
+        'y' | 'Y' | 'u' | 'd' | 'D' | 'F' | 'g' | 'w' | 'W' | 'h' | 'H' | 'k' | 'K' | 'm' | 's'
+        | 'S' | 'A' | 'r' => true,
         'M' | 'L' | 'Q' | 'q' | 'e' | 'c' => n <= 2,
         _ => false,
     }
@@ -121,7 +125,12 @@ fn match_names(p: &mut P, cands: &[(String, i32)]) -> Option<i32> {
 }
 
 /// Parses with tokens.
-pub fn parse(f: &DateFormatter, toks: &[Tok], text: &str, pos: &mut usize) -> Result<(Calendar, bool), usize> {
+pub fn parse(
+    f: &DateFormatter,
+    toks: &[Tok],
+    text: &str,
+    pos: &mut usize,
+) -> Result<(Calendar, bool), usize> {
     let sy = f.symbols();
     let mut p = P { s: text, pos: *pos };
     if p.pos > text.len() || !text.is_char_boundary(p.pos) {
@@ -150,13 +159,12 @@ pub fn parse(f: &DateFormatter, toks: &[Tok], text: &str, pos: &mut usize) -> Re
                     return Err(p.pos);
                 }
                 // tolerate punctuation the text writes differently or omits
-                if lt.chars().all(|c| !c.is_alphanumeric()) {
-                    if let Some(ch) = p.rest().chars().next()
-                        && !ch.is_alphanumeric()
-                        && lt.contains(ch)
-                    {
-                        p.pos += ch.len_utf8();
-                    }
+                if lt.chars().all(|c| !c.is_alphanumeric())
+                    && let Some(ch) = p.rest().chars().next()
+                    && !ch.is_alphanumeric()
+                    && lt.contains(ch)
+                {
+                    p.pos += ch.len_utf8();
                 }
             }
             Tok::Field(ch, n) => {
@@ -164,7 +172,17 @@ pub fn parse(f: &DateFormatter, toks: &[Tok], text: &str, pos: &mut usize) -> Re
                 p.skip_ws();
                 let abut = matches!(toks.get(i + 1), Some(Tok::Field(c2, n2)) if is_numeric_field(*c2, *n2));
                 let start = p.pos;
-                if !field(&sy, &mut p, &mut c, ch, n, abut, &mut zone, &mut pm, &mut hour12) {
+                if !field(
+                    &sy,
+                    &mut p,
+                    &mut c,
+                    ch,
+                    n,
+                    abut,
+                    &mut zone,
+                    &mut pm,
+                    &mut hour12,
+                ) {
                     return Err(start);
                 }
             }
@@ -214,10 +232,14 @@ fn field(
         let r = p.digits(max)?;
         Some(if neg { (-r.0, r.1) } else { r })
     };
-    let set = |c: &mut Calendar, f: usize, v: i64| c.set(f, v.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+    let set = |c: &mut Calendar, f: usize, v: i64| {
+        c.set(f, v.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+    };
     match ch {
         'y' | 'Y' | 'u' => {
-            let Some((v, digits)) = num(p) else { return false };
+            let Some((v, digits)) = num(p) else {
+                return false;
+            };
             let v = if n == 2 && digits == 2 && ch != 'u' && sy.cal_type.is_gregorian_like() {
                 // two-digit years: the century window starting 80 years ago
                 let now_year = crate::calendar::systems::jd_to_greg(
@@ -264,13 +286,19 @@ fn field(
         }
         'd' => num(p).map(|(v, _)| set(c, cal::DATE, v)).is_some(),
         'D' => num(p).map(|(v, _)| set(c, cal::DAY_OF_YEAR, v)).is_some(),
-        'F' => num(p).map(|(v, _)| set(c, cal::DAY_OF_WEEK_IN_MONTH, v)).is_some(),
+        'F' => num(p)
+            .map(|(v, _)| set(c, cal::DAY_OF_WEEK_IN_MONTH, v))
+            .is_some(),
         'w' => num(p).map(|(v, _)| set(c, cal::WEEK_OF_YEAR, v)).is_some(),
         'W' => num(p).map(|(v, _)| set(c, cal::WEEK_OF_MONTH, v)).is_some(),
         'g' => num(p).map(|(v, _)| set(c, cal::JULIAN_DAY, v)).is_some(),
-        'A' => num(p).map(|(v, _)| set(c, cal::MILLISECONDS_IN_DAY, v)).is_some(),
+        'A' => num(p)
+            .map(|(v, _)| set(c, cal::MILLISECONDS_IN_DAY, v))
+            .is_some(),
         'H' => num(p).map(|(v, _)| set(c, cal::HOUR_OF_DAY, v)).is_some(),
-        'k' => num(p).map(|(v, _)| set(c, cal::HOUR_OF_DAY, if v == 24 { 0 } else { v })).is_some(),
+        'k' => num(p)
+            .map(|(v, _)| set(c, cal::HOUR_OF_DAY, if v == 24 { 0 } else { v }))
+            .is_some(),
         'h' | 'K' => match num(p) {
             Some((v, _)) => {
                 *hour12 = Some(if ch == 'h' && v == 12 { 0 } else { v as i32 });
@@ -464,4 +492,3 @@ fn parse_zone(sy: &Symbols, p: &mut P, ch: char) -> Option<TimeZone> {
     }
     None
 }
-

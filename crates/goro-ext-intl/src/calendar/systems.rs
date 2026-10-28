@@ -124,7 +124,11 @@ impl CalType {
     pub fn is_gregorian_like(self) -> bool {
         matches!(
             self,
-            CalType::Gregorian | CalType::Iso8601 | CalType::Japanese | CalType::Buddhist | CalType::Roc
+            CalType::Gregorian
+                | CalType::Iso8601
+                | CalType::Japanese
+                | CalType::Buddhist
+                | CalType::Roc
         )
     }
 
@@ -135,7 +139,9 @@ impl CalType {
     /// The highest MONTH value (12 for the 13-month calendars).
     pub fn max_month(self) -> i32 {
         match self {
-            CalType::Hebrew | CalType::Coptic | CalType::Ethiopic | CalType::EthiopicAmeteAlem => 12,
+            CalType::Hebrew | CalType::Coptic | CalType::Ethiopic | CalType::EthiopicAmeteAlem => {
+                12
+            }
             _ => 11,
         }
     }
@@ -257,7 +263,11 @@ fn hybrid_to_jd(y: i64, m: i64, d: i64, cutover: i64) -> i64 {
         return julian_to_jd(y, m, d);
     }
     let g = greg_to_jd(y, m, d);
-    if g >= cutover { g } else { julian_to_jd(y, m, d) }
+    if g >= cutover {
+        g
+    } else {
+        julian_to_jd(y, m, d)
+    }
 }
 
 fn hybrid_year_start(y: i64, cutover: i64) -> i64 {
@@ -286,12 +296,12 @@ fn tabular_islamic_to_jd(ct: CalType, y: i64, m: i64, d: i64) -> i64 {
     islamic_epoch(ct) - 1 + (y - 1) * 354 + fdiv(3 + 11 * y, 30) + 29 * (m - 1) + m / 2 + d
 }
 
-
 /// New moon number `k` (k = 0 near 2000-01-06) as a Julian date (UT),
 /// Meeus "Astronomical Algorithms" ch. 49 (main periodic terms).
 fn new_moon_jde(k: f64) -> f64 {
     let t = k / 1236.85;
-    let jde = 2_451_550.097_66 + 29.530_588_861 * k + 0.000_154_37 * t * t - 0.000_000_150 * t * t * t
+    let jde = 2_451_550.097_66 + 29.530_588_861 * k + 0.000_154_37 * t * t
+        - 0.000_000_150 * t * t * t
         + 0.000_000_000_73 * t * t * t * t;
     let e = 1.0 - 0.002_516 * t - 0.000_007_4 * t * t;
     let rad = |x: f64| x.to_radians();
@@ -299,7 +309,9 @@ fn new_moon_jde(k: f64) -> f64 {
     let mp = rad(201.5643 + 385.816_935_28 * k + 0.010_758_2 * t * t + 0.000_012_38 * t * t * t);
     let f = rad(160.7108 + 390.670_502_84 * k - 0.001_611_8 * t * t - 0.000_002_27 * t * t * t);
     let om = rad(124.7746 - 1.563_755_88 * k + 0.002_067_2 * t * t);
-    let corr = -0.40720 * mp.sin() + 0.17241 * e * m.sin() + 0.01608 * (2.0 * mp).sin()
+    let corr = -0.40720 * mp.sin()
+        + 0.17241 * e * m.sin()
+        + 0.01608 * (2.0 * mp).sin()
         + 0.01039 * (2.0 * f).sin()
         + 0.00739 * e * (mp - m).sin()
         - 0.00514 * e * (mp + m).sin()
@@ -350,7 +362,11 @@ fn hebrew_elapsed(y: i64) -> i64 {
     let months = fdiv(235 * y - 234, 19);
     let parts = 12_084 + 13_753 * months;
     let day = months * 29 + fdiv(parts, 25_920);
-    if (3 * (day + 1)).rem_euclid(7) < 3 { day + 1 } else { day }
+    if (3 * (day + 1)).rem_euclid(7) < 3 {
+        day + 1
+    } else {
+        day
+    }
 }
 
 fn hebrew_new_year(y: i64) -> i64 {
@@ -539,7 +555,11 @@ fn clamp32(v: i64) -> i32 {
 /// The date fields of JDN `jd`.
 pub fn fields_from_jd(ct: CalType, jd: i64, cutover: i64) -> Ymd {
     match ct {
-        CalType::Gregorian | CalType::Iso8601 | CalType::Japanese | CalType::Buddhist | CalType::Roc => {
+        CalType::Gregorian
+        | CalType::Iso8601
+        | CalType::Japanese
+        | CalType::Buddhist
+        | CalType::Roc => {
             let (y, m, d, _) = hybrid_ymd(jd, cutover);
             let doy = jd - hybrid_year_start(y, cutover) + 1;
             let (era, year) = match ct {
@@ -574,7 +594,10 @@ pub fn fields_from_jd(ct: CalType, jd: i64, cutover: i64) -> Ymd {
                 leap_month: false,
             }
         }
-        CalType::Islamic | CalType::IslamicRgsa | CalType::IslamicCivil | CalType::IslamicTbla
+        CalType::Islamic
+        | CalType::IslamicRgsa
+        | CalType::IslamicCivil
+        | CalType::IslamicTbla
         | CalType::IslamicUmalqura => {
             let (y, m, d, ystart) = match ct {
                 CalType::IslamicCivil | CalType::IslamicTbla => {
@@ -756,17 +779,29 @@ pub fn fields_from_jd(ct: CalType, jd: i64, cutover: i64) -> Ymd {
 
 /// The JDN of day `dom` (1-based, may overflow) of month `month`
 /// (0-based, may overflow into other years) of extended year `eyear`.
-pub fn jd_from(ct: CalType, eyear: i64, month: i64, dom: i64, leap_month: bool, cutover: i64) -> i64 {
+pub fn jd_from(
+    ct: CalType,
+    eyear: i64,
+    month: i64,
+    dom: i64,
+    leap_month: bool,
+    cutover: i64,
+) -> i64 {
     month_start(ct, eyear, month, leap_month, cutover) + dom - 1
 }
 
 /// The JDN of the first day of a month (month normalized across years).
 pub fn month_start(ct: CalType, eyear: i64, month: i64, leap_month: bool, cutover: i64) -> i64 {
     match ct {
-        CalType::Gregorian | CalType::Iso8601 | CalType::Japanese | CalType::Buddhist | CalType::Roc => {
+        CalType::Gregorian
+        | CalType::Iso8601
+        | CalType::Japanese
+        | CalType::Buddhist
+        | CalType::Roc => {
             let y = eyear + fdiv(month, 12);
             let m = month.rem_euclid(12);
-            hybrid_year_start(y, cutover) + days_before_month(m as usize, hybrid_is_leap(y, cutover))
+            hybrid_year_start(y, cutover)
+                + days_before_month(m as usize, hybrid_is_leap(y, cutover))
         }
         CalType::IslamicCivil | CalType::IslamicTbla => {
             let y = eyear + fdiv(month, 12);
@@ -899,13 +934,17 @@ pub fn year_length(ct: CalType, eyear: i64, cutover: i64) -> i64 {
         CalType::Hebrew => hebrew_year_len(eyear),
         CalType::Chinese | CalType::Dangi => {
             let ry = eyear - chinese_offset(ct);
-            match (lunisolar_to_jd(ct, ry + 1, 1, 1, false), lunisolar_to_jd(ct, ry, 1, 1, false)) {
+            match (
+                lunisolar_to_jd(ct, ry + 1, 1, 1, false),
+                lunisolar_to_jd(ct, ry, 1, 1, false),
+            ) {
                 (Some(a), Some(b)) => a - b,
                 _ => 365,
             }
         }
         CalType::Coptic | CalType::Ethiopic | CalType::EthiopicAmeteAlem => {
-            month_start(ct, eyear + 1, 0, false, cutover) - month_start(ct, eyear, 0, false, cutover)
+            month_start(ct, eyear + 1, 0, false, cutover)
+                - month_start(ct, eyear, 0, false, cutover)
         }
         _ => month_start(ct, eyear, 12, false, cutover) - month_start(ct, eyear, 0, false, cutover),
     }
@@ -922,7 +961,9 @@ pub fn months_in_year(ct: CalType, eyear: i64) -> i64 {
             }
         }
         CalType::Coptic | CalType::Ethiopic | CalType::EthiopicAmeteAlem => 13,
-        CalType::Chinese | CalType::Dangi => lunisolar_months(ct, eyear - chinese_offset(ct)).len() as i64,
+        CalType::Chinese | CalType::Dangi => {
+            lunisolar_months(ct, eyear - chinese_offset(ct)).len() as i64
+        }
         _ => 12,
     }
 }
@@ -970,7 +1011,11 @@ pub fn eyear_from_era(ct: CalType, era: i64, year: i64) -> i64 {
 /// The era for an unset ERA field.
 pub fn default_era(ct: CalType) -> i64 {
     match ct {
-        CalType::Gregorian | CalType::Iso8601 | CalType::Coptic | CalType::Ethiopic | CalType::Roc => 1,
+        CalType::Gregorian
+        | CalType::Iso8601
+        | CalType::Coptic
+        | CalType::Ethiopic
+        | CalType::Roc => 1,
         CalType::Japanese => sup::JAPANESE_ERAS.len() as i64 - 1,
         CalType::Chinese | CalType::Dangi => 1,
         _ => 0,
@@ -1005,7 +1050,10 @@ mod tests {
         // 2012-01-01 = 6 Tevet 5772
         let f = fields_from_jd(CalType::Hebrew, greg_to_jd(2012, 1, 1), CUT);
         assert_eq!((f.eyear, f.month, f.dom), (5772, 3, 6));
-        assert_eq!(jd_from(CalType::Hebrew, 5772, 3, 6, false, CUT), greg_to_jd(2012, 1, 1));
+        assert_eq!(
+            jd_from(CalType::Hebrew, 5772, 3, 6, false, CUT),
+            greg_to_jd(2012, 1, 1)
+        );
     }
 
     #[test]
@@ -1028,8 +1076,14 @@ mod tests {
     #[test]
     fn others() {
         // Coptic new year 1728 = 2011-09-12; Ethiopic 2004 = 2011-09-12
-        assert_eq!(coptic_to_jd(CalType::Coptic, 1728, 1, 1), greg_to_jd(2011, 9, 12));
-        assert_eq!(coptic_to_jd(CalType::Ethiopic, 2004, 1, 1), greg_to_jd(2011, 9, 12));
+        assert_eq!(
+            coptic_to_jd(CalType::Coptic, 1728, 1, 1),
+            greg_to_jd(2011, 9, 12)
+        );
+        assert_eq!(
+            coptic_to_jd(CalType::Ethiopic, 2004, 1, 1),
+            greg_to_jd(2011, 9, 12)
+        );
         // Indian 1934-01-01 Saka = 2012-03-21 (leap year)
         assert_eq!(indian_year_start(1934), greg_to_jd(2012, 3, 21));
         let f = fields_from_jd(CalType::Japanese, greg_to_jd(2019, 5, 1), CUT);

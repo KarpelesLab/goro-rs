@@ -97,7 +97,11 @@ fn normalize(locale: &str, skel: &str) -> String {
                     need_ampm = true;
                 }
             }
-            'J' => out.push(if pref == 'h' || pref == 'K' { 'h' } else { pref }),
+            'J' => out.push(if pref == 'h' || pref == 'K' {
+                'h'
+            } else {
+                pref
+            }),
             _ => out.push(c),
         }
     }
@@ -196,7 +200,12 @@ fn find_pattern(loc: Loc, req: &Skel) -> Option<String> {
     // drop fields until a match exists, then append the rest
     let mut best: Option<(usize, String, Skel)> = None;
     for mask in 1u32..(1 << req.len()) - 1 {
-        let sub: Skel = req.iter().enumerate().filter(|(i, _)| mask & (1 << i) != 0).map(|(_, f)| *f).collect();
+        let sub: Skel = req
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| mask & (1 << i) != 0)
+            .map(|(_, f)| *f)
+            .collect();
         if let Some((_, p)) = best_exact(loc, &sub)
             && best.as_ref().is_none_or(|(n, _, _)| sub.len() > *n)
         {
@@ -220,8 +229,16 @@ pub fn best_pattern(locale: &str, skeleton: &str) -> String {
     if let Some((_, p)) = best_exact(loc, &req) {
         return adjust(p, &req);
     }
-    let date: Skel = req.iter().copied().filter(|(c, _)| !is_time_type(ftype(*c))).collect();
-    let time: Skel = req.iter().copied().filter(|(c, _)| is_time_type(ftype(*c))).collect();
+    let date: Skel = req
+        .iter()
+        .copied()
+        .filter(|(c, _)| !is_time_type(ftype(*c)))
+        .collect();
+    let time: Skel = req
+        .iter()
+        .copied()
+        .filter(|(c, _)| is_time_type(ftype(*c)))
+        .collect();
     if !date.is_empty() && !time.is_empty() {
         let dp = find_pattern(loc, &date).unwrap_or_default();
         let tp = find_pattern(loc, &time).unwrap_or_default();
@@ -237,7 +254,10 @@ pub fn best_pattern(locale: &str, skeleton: &str) -> String {
         let glue = loc
             .get("gregorian", &format!("dateTimeFormats/{style}"))
             .unwrap_or("{1} {0}");
-        return glue.replace("{1}", "\u{0}").replace("{0}", &tp).replace('\u{0}', &dp);
+        return glue
+            .replace("{1}", "\u{0}")
+            .replace("{0}", &tp)
+            .replace('\u{0}', &dp);
     }
     find_pattern(loc, &req).unwrap_or_default()
 }
@@ -252,7 +272,10 @@ mod tests {
         assert_eq!(best_pattern("de_DE", "jjmm"), "HH:mm");
         assert_eq!(best_pattern("en_US", "YYYYMMMdd"), "MMM dd, YYYY");
         assert_eq!(best_pattern("de_DE", "YYYYMMMdd"), "dd. MMM YYYY");
-        assert_eq!(best_pattern("de_DE", "YYYYMMMddjjmm"), "dd. MMM YYYY, HH:mm");
+        assert_eq!(
+            best_pattern("de_DE", "YYYYMMMddjjmm"),
+            "dd. MMM YYYY, HH:mm"
+        );
         assert_eq!(best_pattern("en_US", ""), "");
     }
 }

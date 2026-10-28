@@ -76,7 +76,10 @@ impl LocaleId {
             }
             let t = match i {
                 0 => p.to_ascii_lowercase(),
-                _ if p.len() == 4 && p.bytes().all(|b| b.is_ascii_alphabetic()) && parts.len() == 1 => {
+                _ if p.len() == 4
+                    && p.bytes().all(|b| b.is_ascii_alphabetic())
+                    && parts.len() == 1 =>
+                {
                     let mut c = p.to_ascii_lowercase();
                     c[..1].make_ascii_uppercase();
                     c
@@ -96,7 +99,8 @@ impl LocaleId {
                     continue;
                 }
                 match item.split_once('=') {
-                    Some((k, v)) => keywords.push((k.trim().to_ascii_lowercase(), v.trim().to_ascii_lowercase())),
+                    Some((k, v)) => keywords
+                        .push((k.trim().to_ascii_lowercase(), v.trim().to_ascii_lowercase())),
                     None => {
                         // "@euro": the POSIX variant ICU maps to a currency
                         if item.eq_ignore_ascii_case("euro") {
@@ -116,7 +120,10 @@ impl LocaleId {
     }
 
     pub fn keyword(&self, k: &str) -> Option<&str> {
-        self.keywords.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str())
+        self.keywords
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.as_str())
     }
 
     /// The language subtag.
@@ -142,7 +149,11 @@ impl LocaleId {
         if self.keywords.is_empty() {
             return self.base.clone();
         }
-        let kw: Vec<String> = self.keywords.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let kw: Vec<String> = self
+            .keywords
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
         format!("{}@{}", self.base, kw.join(";"))
     }
 
@@ -194,7 +205,8 @@ impl LocaleId {
             .or_else(|| sup::CALENDAR_PREFS.iter().find(|(t, _)| *t == "001"))
             .map(|(_, v)| *v)
             .unwrap_or("gregorian");
-        CalType::from_name(pref.split(' ').next().unwrap_or("gregorian")).unwrap_or(CalType::Gregorian)
+        CalType::from_name(pref.split(' ').next().unwrap_or("gregorian"))
+            .unwrap_or(CalType::Gregorian)
     }
 }
 
@@ -212,7 +224,11 @@ pub fn preferred_calendars(region: &str) -> Vec<&'static str> {
 
 /// The ICU ids of all CLDR locales (available locales lists).
 pub fn available_locales() -> Vec<&'static str> {
-    let mut v: Vec<&'static str> = sup::LOCALES.iter().copied().filter(|l| *l != "und").collect();
+    let mut v: Vec<&'static str> = sup::LOCALES
+        .iter()
+        .copied()
+        .filter(|l| *l != "und")
+        .collect();
     v.sort();
     v
 }

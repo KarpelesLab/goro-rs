@@ -115,7 +115,12 @@ pub fn week_data(region: &str) -> (i32, i32, i32, i32) {
     let world = get("001").unwrap_or(("001", 2, 1, 7, 1));
     let r = get(region).unwrap_or(world);
     let pick = |a: u8, b: u8| if a == 0 { b as i32 } else { a as i32 };
-    (pick(r.1, world.1), pick(r.2, world.2), pick(r.3, world.3), pick(r.4, world.4))
+    (
+        pick(r.1, world.1),
+        pick(r.2, world.2),
+        pick(r.3, world.3),
+        pick(r.4, world.4),
+    )
 }
 
 fn floor_div(a: f64, b: f64) -> f64 {
@@ -127,7 +132,11 @@ impl Calendar {
     /// `region`, set to `now` (milliseconds).
     pub fn new(ct: CalType, tz: TimeZone, region: &str, now: f64) -> Calendar {
         let (fd, md, ws, we) = week_data(region);
-        let (fd, md) = if ct == CalType::Iso8601 { (2, 4) } else { (fd, md) };
+        let (fd, md) = if ct == CalType::Iso8601 {
+            (2, 4)
+        } else {
+            (fd, md)
+        };
         let mut c = Calendar {
             cal_type: ct,
             time: now,
@@ -554,16 +563,24 @@ impl Calendar {
         // ties go to the earlier one
         let groups: [(u8, i32, bool); 5] = [
             (0, self.stamp[DATE].max(month_stamp), true),
-            (1, self.stamp[WEEK_OF_MONTH].max(dow_stamp).max(month_stamp), self.stamp[WEEK_OF_MONTH] > UNSET),
+            (
+                1,
+                self.stamp[WEEK_OF_MONTH].max(dow_stamp).max(month_stamp),
+                self.stamp[WEEK_OF_MONTH] > UNSET,
+            ),
             (
                 2,
-                self.stamp[DAY_OF_WEEK_IN_MONTH].max(dow_stamp).max(month_stamp),
+                self.stamp[DAY_OF_WEEK_IN_MONTH]
+                    .max(dow_stamp)
+                    .max(month_stamp),
                 self.stamp[DAY_OF_WEEK_IN_MONTH] > UNSET,
             ),
             (3, self.stamp[DAY_OF_YEAR], self.stamp[DAY_OF_YEAR] > UNSET),
             (
                 4,
-                self.stamp[WEEK_OF_YEAR].max(dow_stamp).max(self.stamp[YEAR_WOY]),
+                self.stamp[WEEK_OF_YEAR]
+                    .max(dow_stamp)
+                    .max(self.stamp[YEAR_WOY]),
                 self.stamp[WEEK_OF_YEAR] > UNSET,
             ),
         ];
@@ -614,7 +631,9 @@ impl Calendar {
             }
             3 => {
                 let eyear = self.resolve_eyear(false);
-                systems::month_start(ct, eyear, 0, false, self.cutover_jd) + self.fields[DAY_OF_YEAR] as i64 - 1
+                systems::month_start(ct, eyear, 0, false, self.cutover_jd)
+                    + self.fields[DAY_OF_YEAR] as i64
+                    - 1
             }
             _ => {
                 let eyear = self.resolve_eyear(true);
@@ -680,10 +699,8 @@ impl Calendar {
         } else {
             self.tz.local_to_utc_ms(local, self.skipped, self.repeated)
         };
-        if !t.is_finite() || t > MAX_MILLIS || t < MIN_MILLIS {
-            if !self.lenient {
-                return Err(U_ILLEGAL_ARGUMENT_ERROR);
-            }
+        if (!t.is_finite() || t > MAX_MILLIS || t < MIN_MILLIS) && !self.lenient {
+            return Err(U_ILLEGAL_ARGUMENT_ERROR);
         }
         self.time = t;
         Ok(())
@@ -706,10 +723,17 @@ impl Calendar {
         let ct = self.cal_type;
         match field {
             ERA => match ct {
-                CalType::Japanese => (0, 0, sup::JAPANESE_ERAS.len() as i32 - 1, sup::JAPANESE_ERAS.len() as i32 - 1),
-                CalType::Gregorian | CalType::Iso8601 | CalType::Roc | CalType::Coptic | CalType::Ethiopic => {
-                    (0, 0, 1, 1)
-                }
+                CalType::Japanese => (
+                    0,
+                    0,
+                    sup::JAPANESE_ERAS.len() as i32 - 1,
+                    sup::JAPANESE_ERAS.len() as i32 - 1,
+                ),
+                CalType::Gregorian
+                | CalType::Iso8601
+                | CalType::Roc
+                | CalType::Coptic
+                | CalType::Ethiopic => (0, 0, 1, 1),
                 CalType::Chinese | CalType::Dangi => (1, 1, 83_333, 83_333),
                 _ => (0, 0, 0, 0),
             },
@@ -718,7 +742,16 @@ impl Calendar {
                 CalType::Japanese => (1, 1, 1, MAX_YEAR),
                 _ => (1, 1, MAX_YEAR, MAX_YEAR),
             },
-            MONTH | ORDINAL_MONTH => (0, 0, if ct == CalType::Hebrew { 12 } else { ct.max_month() }, ct.max_month()),
+            MONTH | ORDINAL_MONTH => (
+                0,
+                0,
+                if ct == CalType::Hebrew {
+                    12
+                } else {
+                    ct.max_month()
+                },
+                ct.max_month(),
+            ),
             WEEK_OF_YEAR => match ct {
                 CalType::Hebrew => (1, 1, 50, 56),
                 CalType::Chinese | CalType::Dangi => (1, 1, 50, 55),
@@ -760,18 +793,17 @@ impl Calendar {
             HOUR_OF_DAY => (0, 0, 23, 23),
             MINUTE | SECOND => (0, 0, 59, 59),
             MILLISECOND => (0, 0, 999, 999),
-            ZONE_OFFSET => (-16 * 3_600_000, -16 * 3_600_000, 12 * 3_600_000, 30 * 3_600_000),
+            ZONE_OFFSET => (
+                -16 * 3_600_000,
+                -16 * 3_600_000,
+                12 * 3_600_000,
+                30 * 3_600_000,
+            ),
             DST_OFFSET => (0, 0, 3_600_000, 2 * 3_600_000),
             YEAR_WOY | EXTENDED_YEAR => (-MAX_YEAR, -MAX_YEAR, MAX_YEAR, MAX_YEAR),
             JULIAN_DAY => (-0x7F00_0000, -0x7F00_0000, 0x7F00_0000, 0x7F00_0000),
             MILLISECONDS_IN_DAY => (0, 0, 86_399_999, 86_399_999),
-            IS_LEAP_MONTH => {
-                if ct.is_lunisolar() {
-                    (0, 0, 1, 1)
-                } else {
-                    (0, 0, 0, 0)
-                }
-            }
+            IS_LEAP_MONTH if ct.is_lunisolar() => (0, 0, 1, 1),
             _ => (0, 0, 0, 0),
         }
     }
@@ -813,16 +845,28 @@ impl Calendar {
         let eyear = self.fields[EXTENDED_YEAR] as i64;
         let ct = self.cal_type;
         Ok(match field {
-            DATE => self.month_length(eyear, self.fields[MONTH] as i64, self.fields[IS_LEAP_MONTH] != 0) as i32,
+            DATE => self.month_length(
+                eyear,
+                self.fields[MONTH] as i64,
+                self.fields[IS_LEAP_MONTH] != 0,
+            ) as i32,
             DAY_OF_YEAR => self.year_length(eyear) as i32,
             MONTH => self.maximum(MONTH),
             ORDINAL_MONTH => systems::months_in_year(ct, eyear) as i32 - 1,
             DAY_OF_WEEK_IN_MONTH => {
-                let len = self.month_length(eyear, self.fields[MONTH] as i64, self.fields[IS_LEAP_MONTH] != 0);
+                let len = self.month_length(
+                    eyear,
+                    self.fields[MONTH] as i64,
+                    self.fields[IS_LEAP_MONTH] != 0,
+                );
                 ((len - 1) / 7 + 1) as i32
             }
             WEEK_OF_MONTH => {
-                let len = self.month_length(eyear, self.fields[MONTH] as i64, self.fields[IS_LEAP_MONTH] != 0) as i32;
+                let len = self.month_length(
+                    eyear,
+                    self.fields[MONTH] as i64,
+                    self.fields[IS_LEAP_MONTH] != 0,
+                ) as i32;
                 let dom = self.fields[DATE];
                 let dow = self.fields[DAY_OF_WEEK];
                 let last_dow = (dow + (len - dom) - 1).rem_euclid(7) + 1;
@@ -868,7 +912,13 @@ impl Calendar {
 
     /// Moves to (eyear, month, dom pinned to the month), keeping the time
     /// of day.
-    fn set_ymd_pinned(&mut self, eyear: i64, month: i64, leap: bool, ordinal: bool) -> CalResult<()> {
+    fn set_ymd_pinned(
+        &mut self,
+        eyear: i64,
+        month: i64,
+        leap: bool,
+        ordinal: bool,
+    ) -> CalResult<()> {
         let ct = self.cal_type;
         let cut = self.cutover_jd;
         let start = if ordinal {
@@ -901,8 +951,10 @@ impl Calendar {
                 let eyear = self.fields[EXTENDED_YEAR] as i64;
                 let sign = if field == YEAR
                     && self.fields[ERA] == 0
-                    && matches!(ct, CalType::Gregorian | CalType::Iso8601 | CalType::Roc | CalType::Coptic)
-                {
+                    && matches!(
+                        ct,
+                        CalType::Gregorian | CalType::Iso8601 | CalType::Roc | CalType::Coptic
+                    ) {
                     -1
                 } else {
                     1
@@ -915,7 +967,13 @@ impl Calendar {
                     // keep the week and day of week
                     let woy = self.fields[WEEK_OF_YEAR] as i64;
                     let dow = self.fields[DAY_OF_WEEK];
-                    let start = systems::month_start(ct, self.fields[YEAR_WOY] as i64 + a, 0, false, self.cutover_jd);
+                    let start = systems::month_start(
+                        ct,
+                        self.fields[YEAR_WOY] as i64 + a,
+                        0,
+                        false,
+                        self.cutover_jd,
+                    );
                     let jd = self.jd_of_week(start, woy, dow);
                     let ms = self.ms_in_day_now();
                     return self.set_local(jd, ms);
@@ -933,7 +991,10 @@ impl Calendar {
                     let o = self.fields[ORDINAL_MONTH] as i64 + a;
                     return self.set_ymd_pinned(eyear, o, false, true);
                 }
-                let n = if matches!(ct, CalType::Coptic | CalType::Ethiopic | CalType::EthiopicAmeteAlem) {
+                let n = if matches!(
+                    ct,
+                    CalType::Coptic | CalType::Ethiopic | CalType::EthiopicAmeteAlem
+                ) {
                     13
                 } else {
                     12
@@ -982,7 +1043,11 @@ impl Calendar {
         match field {
             DATE => {
                 let eyear = self.fields[EXTENDED_YEAR] as i64;
-                let len = self.month_length(eyear, self.fields[MONTH] as i64, self.fields[IS_LEAP_MONTH] != 0);
+                let len = self.month_length(
+                    eyear,
+                    self.fields[MONTH] as i64,
+                    self.fields[IS_LEAP_MONTH] != 0,
+                );
                 let dom = self.fields[DATE] as i64;
                 let nd = wrap(dom + a, 1, len);
                 let jd = self.cur_jd() + nd - dom;
@@ -1032,7 +1097,10 @@ impl Calendar {
             }
             MINUTE => {
                 let v = self.fields[MINUTE] as i64;
-                self.set_local(self.cur_jd(), ms + (wrap(v + a, 0, 59) - v) as f64 * 60_000.0)
+                self.set_local(
+                    self.cur_jd(),
+                    ms + (wrap(v + a, 0, 59) - v) as f64 * 60_000.0,
+                )
             }
             SECOND => {
                 let v = self.fields[SECOND] as i64;
@@ -1054,7 +1122,11 @@ impl Calendar {
             WEEK_OF_MONTH | DAY_OF_WEEK_IN_MONTH => {
                 // move by weeks, staying in the month
                 let eyear = self.fields[EXTENDED_YEAR] as i64;
-                let len = self.month_length(eyear, self.fields[MONTH] as i64, self.fields[IS_LEAP_MONTH] != 0);
+                let len = self.month_length(
+                    eyear,
+                    self.fields[MONTH] as i64,
+                    self.fields[IS_LEAP_MONTH] != 0,
+                );
                 let dom = self.fields[DATE] as i64;
                 let first = (dom - 1) % 7 + 1;
                 let count = (len - first) / 7 + 1;
@@ -1178,12 +1250,20 @@ impl Calendar {
             return if on_ms == 0 { WEEKEND } else { WEEKEND_ONSET };
         }
         if dow == off {
-            return if off_ms >= 86_400_000 { WEEKEND } else { WEEKEND_CEASE };
+            return if off_ms >= 86_400_000 {
+                WEEKEND
+            } else {
+                WEEKEND_CEASE
+            };
         }
         // strictly between onset and cease (cyclically)
         let span = (off - on).rem_euclid(7);
         let pos = (dow - on).rem_euclid(7);
-        if pos > 0 && pos < span { WEEKEND } else { WEEKDAY }
+        if pos > 0 && pos < span {
+            WEEKEND
+        } else {
+            WEEKDAY
+        }
     }
 
     /// `getWeekendTransition()`.
@@ -1250,7 +1330,12 @@ mod tests {
         c.set(MONTH, 1);
         c.set(DATE, 29);
         assert_eq!(c.get_time(), Ok(1_330_473_600_000.0));
-        let mut c = Calendar::new(CalType::Gregorian, TimeZone::create("Europe/Amsterdam"), "NL", 0.0);
+        let mut c = Calendar::new(
+            CalType::Gregorian,
+            TimeZone::create("Europe/Amsterdam"),
+            "NL",
+            0.0,
+        );
         c.clear();
         assert_eq!(c.get_time(), Ok(-3_600_000.0));
     }
