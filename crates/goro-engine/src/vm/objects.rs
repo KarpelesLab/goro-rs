@@ -396,6 +396,19 @@ impl Vm {
             }
             PropLookup::Dynamic => {
                 self.static_as_instance(&cls, name)?;
+                if let Some(h) = cls.native.prop {
+                    // `??` reads only what isset() finds (PHP manual: null
+                    // coalescing operator; test ext/simplexml bug72957).
+                    if quiet
+                        && let Some(r) = h(self, o, name, crate::class::ObjAccess::Isset)
+                        && !self.to_bool(&r?)
+                    {
+                        return Ok(Value::Null);
+                    }
+                    if let Some(r) = h(self, o, name, crate::class::ObjAccess::Read) {
+                        return r;
+                    }
+                }
                 let v = o.obj().props.borrow().get_str(name).cloned();
                 match v {
                     Some(v) => Ok(v.into_deref()),
@@ -479,6 +492,20 @@ impl Vm {
             }));
         }
         if objects_ok {
+            let v = self.read_prop(o, name, false, None)?;
+            if let Value::Object(_) = v {
+                return Ok(Some(v));
+            }
+            // Internal computed properties read as plain values: a null
+            // one gives "Attempt to assign property on null" (ext/dom,
+            // test bug47430.phpt).
+            if v.is_null() && p.get.as_ref().is_some_and(|g| g.is_native()) {
+                return Ok(Some(v));
+            }
+        } else if p.get.as_ref().is_some_and(|g| g.is_native()) {
+            // ... and objects as themselves (`foreach ($o->list as &$x)`
+            // reaches the object's iterator; test
+            // ext/dom/tests/modern/token_list/foreach_by_ref.phpt).
             let v = self.read_prop(o, name, false, None)?;
             if let Value::Object(_) = v {
                 return Ok(Some(v));
@@ -647,6 +674,17 @@ impl Vm {
             }
             PropLookup::Hidden(_) => return self.magic_isset(o, &cls, name, empty),
             PropLookup::Dynamic => {
+                if let Some(h) = cls.native.prop {
+                    let op = if empty {
+                        crate::class::ObjAccess::Empty
+                    } else {
+                        crate::class::ObjAccess::Isset
+                    };
+                    if let Some(r) = h(self, o, name, op) {
+                        let v = r?;
+                        return Ok(self.to_bool(&v));
+                    }
+                }
                 let v = o.obj().props.borrow().get_str(name).cloned();
                 match v {
                     Some(v) => Some(v.into_deref()),
@@ -903,6 +941,14 @@ impl Vm {
                     && !self.in_hook(o, &p)
                 {
                     let h = h.clone();
+                    // Internal classes' computed properties take values as
+                    // plain typed properties do ("Cannot assign X to
+                    // property C::$p of type T"; ext/dom, test
+                    // Document_body_setter_errors.phpt).
+                    let v = match &p.ty {
+                        Some(t) if h.is_native() => self.coerce_prop(&p, t, v, &cls)?,
+                        _ => v,
+                    };
                     self.call_hook(o, &p, h, vec![v])?;
                     return Ok(());
                 }
@@ -1004,6 +1050,11 @@ impl Vm {
             }
             PropLookup::Dynamic => {
                 self.static_as_instance(&cls, name)?;
+                if let Some(h) = cls.native.prop
+                    && let Some(r) = h(self, o, name, crate::class::ObjAccess::Write(v.clone()))
+                {
+                    return r.map(|_| ());
+                }
                 if let Some(h) = cls.native.dyn_prop
                     && let Some(r) = h(self, o, name, crate::class::DynPropOp::Write)
                 {
@@ -1266,11 +1317,16 @@ impl Vm {
                 None => {
                     let v = self.read_prop(o, name, true, None)?;
                     let cls = self.class_of(o);
-                    self.notice_msg(&format!(
-                        "Indirect modification of overloaded property {}::${} has no effect",
-                        cls.name.dname(),
-                        name.to_string_lossy()
-                    ))?;
+                    // Natively overloaded properties hand out a detached
+                    // reference silently (observed on PHP 8.5; test
+                    // ext/simplexml gh17736).
+                    if cls.native.prop.is_none() {
+                        self.notice_msg(&format!(
+                            "Indirect modification of overloaded property {}::${} has no effect",
+                            cls.name.dname(),
+                            name.to_string_lossy()
+                        ))?;
+                    }
                     Ok(Value::Ref(PhpRef::new(v)))
                 }
             },
@@ -1464,6 +1520,9 @@ impl Vm {
                 )
             }
             PropLookup::Dynamic => {
+                if cls.native.prop.is_some() {
+                    return Ok(None);
+                }
                 if let Some(h) = cls.native.dyn_prop
                     && let Some(r) = h(self, o, name, crate::class::DynPropOp::Write)
                 {
@@ -1512,6 +1571,7 @@ impl Vm {
             if let PropLookup::Found(p) = self.lookup_prop(&cls, name, scope)
                 && let Some(t) = &p.ty
                 && p.flags & mflags::READONLY == 0
+                && p.flags & mflags::VIRTUAL == 0
             {
                 let cur = o.obj().slots.borrow()[p.slot as usize].clone();
                 let cur_null = cur.is_null() || self.is_uninit(&cur);
@@ -1568,8 +1628,22 @@ impl Vm {
             Some(p) => Ok(Some(super::dims::Place::Ptr(p))),
             None => {
                 // Through __get or a hook: a temporary (objects are handles,
-                // so nested property writes still reach them).
-                let v = self.read_prop(o, name, false, None)?;
+                // so nested property writes still reach them). Overloaded
+                // properties are fetched as such (they may be created).
+                let v = match cls.native.prop {
+                    Some(h)
+                        if matches!(
+                            self.lookup_prop(&cls, name, self.scope_ptr()),
+                            PropLookup::Dynamic
+                        ) =>
+                    {
+                        match h(self, o, name, crate::class::ObjAccess::Fetch) {
+                            Some(r) => r?,
+                            None => self.read_prop(o, name, false, None)?,
+                        }
+                    }
+                    _ => self.read_prop(o, name, false, None)?,
+                };
                 if !matches!(v, Value::Object(_)) && !next_is_prop {
                     self.notice_msg(&format!(
                         "Indirect modification of overloaded property {}::${} has no effect",
@@ -1593,10 +1667,15 @@ impl Vm {
         match self.lookup_prop(&cls, name, scope) {
             PropLookup::Found(p) => {
                 if p.get.is_some() || p.set.is_some() || p.flags & mflags::VIRTUAL != 0 {
+                    // Internal classes' computed properties (ext/dom):
+                    // "Cannot unset DOMElement::$nodeValue" (observed on
+                    // PHP 8.5).
+                    let internal = p.get.as_ref().is_some_and(|g| g.is_native());
                     return self.throw(
                         "Error",
                         &format!(
-                            "Cannot unset hooked property {}::${}",
+                            "Cannot unset {}{}::${}",
+                            if internal { "" } else { "hooked property " },
                             cls.name.dname(),
                             name.to_string_lossy()
                         ),
@@ -1665,6 +1744,11 @@ impl Vm {
                 )
             }
             PropLookup::Dynamic => {
+                if let Some(h) = cls.native.prop
+                    && let Some(r) = h(self, o, name, crate::class::ObjAccess::Unset)
+                {
+                    return r.map(|_| ());
+                }
                 if let Some(h) = cls.native.dyn_prop
                     && let Some(r) = h(self, o, name, crate::class::DynPropOp::Unset)
                 {

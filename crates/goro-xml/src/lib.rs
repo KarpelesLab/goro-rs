@@ -39,6 +39,7 @@ pub mod html5;
 pub mod modern;
 pub mod reader;
 pub mod sax;
+pub mod schema;
 pub mod serialize;
 pub mod tree;
 pub mod writer;

@@ -20,6 +20,7 @@ goro-ext-sodium = { path = "../goro-ext-sodium" }
 goro-ext-uri = { path = "../goro-ext-uri" }
 goro-charset = { path = "../goro-charset" }
 goro-ext-zlib = { path = "../goro-ext-zlib" }
+goro-xml = { path = "../goro-xml" }
 goro-ext-openssl = { path = "../goro-ext-openssl" }
 libc = "0.2"
 corosensei = "0.2"

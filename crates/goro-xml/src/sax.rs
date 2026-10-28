@@ -314,6 +314,10 @@ struct Adaptor<'a> {
     last_error: Option<XmlError>,
     failed: bool,
     raw: String,
+    /// The end tag the default handler gets for an empty-element tag.
+    pending_end: Option<String>,
+    /// The external entity handler refused: stop.
+    refused: bool,
     ns_stack: &'a mut Vec<Vec<Option<String>>>,
     bom: usize,
     fatal: bool,
@@ -439,6 +443,17 @@ impl Sink for Adaptor<'_> {
             }
             self.h.start_element(&name, &attrs, &self.pos);
         } else {
+            // An empty-element tag reaches the default handler as a start
+            // tag and an end tag (observed on PHP 8.5; test gh20439_2).
+            if self.handlers.default && self.raw.ends_with("/>") {
+                let n = self.raw.len();
+                self.raw.replace_range(n - 2.., ">");
+                let name: String = self.raw[1..]
+                    .chars()
+                    .take_while(|c| !c.is_whitespace() && *c != '>' && *c != '/')
+                    .collect();
+                self.pending_end = Some(format!("</{name}>"));
+            }
             self.default_raw();
         }
     }
@@ -449,6 +464,12 @@ impl Sink for Adaptor<'_> {
             let n = self.name(name);
             self.h.end_element(&n, &self.pos);
         } else {
+            if self.raw.is_empty()
+                && let Some(e) = self.pending_end.take()
+            {
+                self.raw = e;
+            }
+            self.pending_end = None;
             self.default_raw();
         }
         // PHP's libxml-based parser never calls the end namespace
@@ -523,7 +544,20 @@ impl Sink for Adaptor<'_> {
                     let p = d.public_id.as_deref().map(|p| self.out(p));
                     let ok = self.h.external_entity_ref(&n, &s, p.as_deref(), &self.pos);
                     if !ok {
+                        // The handler refused: the parse stops with
+                        // XML_ERROR_EXTERNAL_ENTITY_HANDLING (observed on
+                        // PHP 8.5; test bug71592).
                         self.failed = true;
+                        self.refused = true;
+                        self.last_error = Some(XmlError {
+                            domain: crate::error::Domain::Parser,
+                            code: 21,
+                            level: LEVEL_ERROR,
+                            message: String::new(),
+                            file: None,
+                            line: self.pos.line,
+                            column: self.pos.column,
+                        });
                     }
                 } else if self.handlers.default {
                     let b = self.out(&format!("&{name};"));
@@ -543,7 +577,14 @@ impl Sink for Adaptor<'_> {
         false
     }
 
+    fn abort(&self) -> bool {
+        self.refused
+    }
+
     fn error(&mut self, e: &XmlError) {
+        if self.refused {
+            return;
+        }
         if e.level >= LEVEL_ERROR {
             self.failed = true;
             self.last_error = Some(e.clone());
@@ -613,6 +654,12 @@ impl SaxParser {
                 namespaces: self.ns_separator.is_some(),
                 ..Default::default()
             };
+            // The namespace-aware parser reports the DTD's default
+            // attributes, the other does not (observed on PHP 8.5; test
+            // bug35447).
+            if self.ns_separator.is_some() {
+                po.flags |= opt::DTDATTR;
+            }
             if self.options.parse_huge {
                 po.flags |= opt::PARSEHUGE;
             }
@@ -629,6 +676,8 @@ impl SaxParser {
             last_error: None,
             failed: false,
             raw: String::new(),
+            pending_end: None,
+            refused: false,
             ns_stack: &mut self.ns_stack,
             bom,
             fatal: false,

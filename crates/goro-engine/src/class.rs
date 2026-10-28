@@ -313,6 +313,58 @@ pub struct NativeHooks {
     /// the values serialized in the payload between the braces.
     pub unserialize_legacy:
         Option<fn(&mut crate::vm::Vm, &goro_runtime::ObjRef, Vec<Value>) -> crate::vm::R<()>>,
+    /// Overloaded properties (SimpleXMLElement): asked first about every
+    /// access to a property the class does not declare. `None` means "no
+    /// opinion" (the engine's usual handling); otherwise the result:
+    /// the value for `Read`, `Bool` for `Isset`/`Empty`, anything for
+    /// `Write`/`Unset`. Nested writes (`$o->a->b = 1`, `$o->a[] = 1`)
+    /// fetch `a` with `Read` and write into the object it returns (like
+    /// `__get`). References to such properties are not available.
+    pub prop: Option<
+        fn(
+            &mut crate::vm::Vm,
+            &goro_runtime::ObjRef,
+            &PhpStr,
+            ObjAccess,
+        ) -> Option<crate::vm::R<Value>>,
+    >,
+    /// Overloaded dimensions `$o[k]` (without ArrayAccess): `key` is
+    /// `None` for `$o[]`. Same results as [`NativeHooks::prop`]; nested
+    /// writes (`$o[k][] = 1`, `$o[k]->p = 1`) fetch with `Read`, and
+    /// compound assignments read then write.
+    pub dim: Option<
+        fn(
+            &mut crate::vm::Vm,
+            &goro_runtime::ObjRef,
+            Option<&Value>,
+            ObjAccess,
+        ) -> Option<crate::vm::R<Value>>,
+    >,
+    /// Called when the object is destroyed (where `__destruct` runs,
+    /// after it): internal classes that must flush or release something
+    /// with the VM at hand (XMLWriter writes its buffer out).
+    pub destroy: Option<fn(&mut crate::vm::Vm, &goro_runtime::ObjRef)>,
+    /// Static native methods of the class called on an object get it as
+    /// `$this`, so methods callable both ways can tell (PHP manual:
+    /// XMLReader::open() and XMLReader::XML() can be called statically or
+    /// on an instance).
+    pub static_this: bool,
+}
+
+/// The access [`NativeHooks::prop`] and [`NativeHooks::dim`] are asked
+/// about.
+#[derive(Clone, Debug)]
+pub enum ObjAccess {
+    Read,
+    /// A read for a nested write (`$o[k]['x'] = 1`, `$o[k]->p = 1`): the
+    /// hook may create what is missing; otherwise like `Read`.
+    Fetch,
+    /// `isset()`.
+    Isset,
+    /// `empty()`.
+    Empty,
+    Write(Value),
+    Unset,
 }
 
 /// The unary operators [`NativeHooks::do_unary`] receives.
@@ -397,7 +449,7 @@ impl ClassInfo for Class {
         &self.name
     }
     fn has_destructor(&self) -> bool {
-        self.has_dtor.get()
+        self.has_dtor.get() || self.native.destroy.is_some()
     }
 }
 

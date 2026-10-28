@@ -522,7 +522,16 @@ impl Vm {
                         Err(_) => false,
                     }
                 }
-                _ => self.instance_of_lname(&cls, &l),
+                _ => {
+                    self.instance_of_lname(&cls, &l)
+                        // Class aliases (class_alias(), internal aliases
+                        // such as Dom\DOMException; test
+                        // ext/dom/tests/modern/xml/canonicalize_unattached.phpt).
+                        || self
+                            .classes
+                            .get(&l)
+                            .is_some_and(|c| c.lname != l && cls.is_subclass_of(c))
+                }
             };
             if ok {
                 matched = true;

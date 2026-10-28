@@ -127,6 +127,9 @@ pub struct Parser<'l> {
     pub dtd: Option<DtdData>,
     /// The external subset, when loaded.
     pub ext: Option<DtdData>,
+    /// The URL of the external subset being read: references in it
+    /// resolve against it (XML 1.0 4.2.2).
+    pub(crate) ext_base: Option<String>,
     pub(crate) standalone: i8,
     /// The declared version.
     pub version: Option<String>,
@@ -166,6 +169,8 @@ pub struct Parser<'l> {
     raw_attr_buf: Vec<RawAttr>,
     attr_buf: Vec<Attribute>,
     utf8_chunks: bool,
+    /// The encoding later chunks are decoded from, when not UTF-8.
+    chunk_enc: Option<goro_charset::Encoding>,
     final_pending: bool,
     cr_next: usize,
     text_begin: usize,
@@ -209,6 +214,7 @@ impl<'l> Parser<'l> {
             names: HashSet::default(),
             dtd: None,
             ext: None,
+            ext_base: None,
             standalone: -1,
             version: None,
             encoding: None,
@@ -242,6 +248,7 @@ impl<'l> Parser<'l> {
             raw_attr_buf: Vec::new(),
             attr_buf: Vec::new(),
             utf8_chunks: false,
+            chunk_enc: None,
             final_pending: false,
             cr_next: 0,
             text_begin: 0,
@@ -480,14 +487,60 @@ impl<'l> Parser<'l> {
         }
         self.buf = d.text;
         self.enc_error = d.error_at.is_some();
+        self.chunk_enc = d.from;
         true
+    }
+
+    /// Decodes buffered input of a non-UTF-8 document (chunked input),
+    /// keeping an incomplete trailing code unit for the next chunk.
+    fn decode_more_enc(&mut self, enc: goro_charset::Encoding, is_final: bool) {
+        use goro_charset::Encoding as E;
+        let raw = std::mem::take(&mut self.raw);
+        let mut cut = raw.len();
+        if !is_final {
+            match enc {
+                E::Utf16Be | E::Utf16Le | E::Ucs2 => {
+                    cut -= cut % 2;
+                    if cut >= 2 {
+                        let hi = if enc == E::Utf16Le {
+                            raw[cut - 1]
+                        } else {
+                            raw[cut - 2]
+                        };
+                        if (0xD8..0xDC).contains(&hi) {
+                            cut -= 2;
+                        }
+                    }
+                }
+                E::Utf32Be | E::Utf32Le | E::Ucs4 => cut -= cut % 4,
+                _ => {}
+            }
+        }
+        if cut == 0 {
+            self.raw = raw;
+            return;
+        }
+        let d = crate::encoding::decode(&raw[..cut], Some(enc));
+        if self.opts.sax {
+            let base = self.buf.len();
+            self.cr_positions
+                .extend(d.cr.iter().map(|p| (((p >> 1) + base) << 1) | (p & 1)));
+        }
+        self.buf.extend_from_slice(&d.text);
+        if d.error_at.is_some() {
+            self.enc_error = true;
+        }
+        self.raw = raw[cut..].to_vec();
     }
 
     fn decode_more(&mut self, is_final: bool) {
         if self.raw.is_empty() {
             return;
         }
-        // Chunked input: UTF-8 only (and ISO-8859-1 via the first chunk's
+        if let Some(e) = self.chunk_enc {
+            return self.decode_more_enc(e, is_final);
+        }
+        // Chunked input: UTF-8 (and ISO-8859-1 via the first chunk's
         // decision is rare); keep an incomplete trailing sequence or a
         // trailing CR for the next chunk.
         let raw = std::mem::take(&mut self.raw);
@@ -800,6 +853,11 @@ impl<'l> Parser<'l> {
             let (n, l) = (o.raw.clone(), o.line);
             return self.fatal(77, format!("Premature end of data in tag {n} line {l}"));
         }
+        if self.buf.is_empty() {
+            // Nothing at all (test ext/dom/tests/modern/xml/
+            // XMLDocument_createFromFile_empty_input.phpt).
+            return self.fatal(4, "Document is empty");
+        }
         self.fatal(4, "Start tag expected, '<' not found")
     }
 
@@ -857,7 +915,11 @@ impl<'l> Parser<'l> {
                         return Status::NeedMore;
                     }
                     self.flush_errors(sink);
-                    if self.recover() && !self.halted && self.phase == Phase::Content {
+                    if self.recover()
+                        && !self.halted
+                        && self.phase == Phase::Content
+                        && self.pos < self.buf.len()
+                    {
                         self.resync();
                         continue;
                     }
@@ -1214,7 +1276,21 @@ impl<'l> Parser<'l> {
             }
             self.pos += 1;
             self.skip_spaces();
-            let v = self.parse_decl_value()?;
+            let v = match self.parse_version_value()? {
+                Ok(v) => v,
+                Err(v) => {
+                    // A version number cut short by another character:
+                    // "String not closed", then the version complaint, and
+                    // the declaration fails (observed on PHP 8.5).
+                    if v.is_empty() {
+                        self.fatal(96, "Malformed declaration expecting version");
+                    } else if v.starts_with("1.") && v != "1.0" {
+                        self.warn(Domain::Parser, 97, format!("Unsupported version '{v}'"));
+                    }
+                    self.fatal(65, "Blank needed here");
+                    return Err(self.fatal(57, "parsing XML declaration: '?>' expected"));
+                }
+            };
             if !v.starts_with("1.") || v.len() < 3 || !v[2..].bytes().all(|b| b.is_ascii_digit()) {
                 return Err(self.fatal(108, format!("Unsupported version '{v}'")));
             }
@@ -1314,6 +1390,40 @@ impl<'l> Parser<'l> {
         self.version = version;
         self.encoding = encoding;
         Ok(())
+    }
+
+    /// The version value: digits, a dot, digits, then the closing quote.
+    /// `Err(scanned)` (after "String not closed") when something else
+    /// comes first.
+    fn parse_version_value(&mut self) -> R<Result<String, String>> {
+        let q = self.cur();
+        if q != b'"' && q != b'\'' {
+            if self.incomplete() {
+                return Err(Halt::Incomplete);
+            }
+            return Err(self.fatal(34, "String not started expecting ' or \""));
+        }
+        self.pos += 1;
+        let start = self.pos;
+        while self.cur().is_ascii_digit() {
+            self.pos += 1;
+        }
+        if self.cur() == b'.' {
+            self.pos += 1;
+            while self.cur().is_ascii_digit() {
+                self.pos += 1;
+            }
+        }
+        let v = self.slice((start, self.pos)).to_string();
+        if self.cur() == q && !self.eof() {
+            self.pos += 1;
+            return Ok(Ok(v));
+        }
+        if self.incomplete() {
+            return Err(Halt::Incomplete);
+        }
+        self.fatal(34, "String not closed expecting \" or '");
+        Ok(Err(v))
     }
 
     fn parse_decl_value(&mut self) -> R<String> {
@@ -1556,6 +1666,15 @@ impl<'l> Parser<'l> {
             }
             return Err(self.fatal(68, "StartTag: invalid element name"));
         };
+        // libxml's limit on names without XML_PARSE_HUGE (libxml2
+        // documentation: XML_MAX_NAME_LENGTH, 50000; test ext/xml
+        // XML_OPTION_PARSE_HUGE).
+        if nr.1 - nr.0 > 50000 && !self.opts.has(opt::PARSEHUGE) {
+            if self.incomplete() {
+                return Err(Halt::Incomplete);
+            }
+            return Err(self.fatal(68, "StartTag: invalid element name"));
+        }
         let raw_name = self.intern_range(nr);
         let line = self.line(tag_start);
         self.name_end_lc = Some(self.pos);
@@ -2303,6 +2422,12 @@ impl<'l> Parser<'l> {
         }
         self.flush_text(sink, false);
         let expand = sink.entity_start(name, Some(&ent));
+        if sink.abort() {
+            self.stopped = true;
+            self.pos = self.buf.len();
+            self.halted = true;
+            return Err(Halt::Fatal);
+        }
         let content = match ent.kind {
             EntityKind::InternalGeneral => ent.value.clone(),
             EntityKind::ExternalGeneralParsed => {
@@ -2332,6 +2457,18 @@ impl<'l> Parser<'l> {
         Ok(())
     }
 
+    /// The DOCTYPE details passed to the entity loader.
+    pub(crate) fn load_context(&self) -> super::LoadContext {
+        match &self.dtd {
+            Some(d) => super::LoadContext {
+                int_sub_name: Some(d.name.to_string()),
+                ext_sub_uri: d.system_id.clone(),
+                ext_sub_system: d.public_id.clone(),
+            },
+            None => super::LoadContext::default(),
+        }
+    }
+
     fn load_external(
         &mut self,
         public: Option<&str>,
@@ -2339,8 +2476,9 @@ impl<'l> Parser<'l> {
         name: &str,
     ) -> R<Option<String>> {
         let base = self.opts.url.clone();
+        let ctx = self.load_context();
         let res = match self.loader.as_mut() {
-            Some(l) => l.load(public, system, base.as_deref()),
+            Some(l) => l.load_with(public, system, base.as_deref(), &ctx),
             None => Err(LoadError::NotFound),
         };
         match res {

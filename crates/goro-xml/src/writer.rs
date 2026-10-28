@@ -214,6 +214,13 @@ impl XmlWriter {
         Ok(())
     }
 
+    /// The enclosing element's end tag gets no indentation.
+    fn mark_inline(&mut self) {
+        if let Some(Frame::Element { last_text, .. }) = self.stack.last_mut() {
+            *last_text = true;
+        }
+    }
+
     fn after_block(&mut self) {
         if self.indent {
             self.emit("\n");
@@ -615,6 +622,9 @@ impl XmlWriter {
         self.stack.pop();
         self.emit("-->");
         self.after_block();
+        // The closing tag after a comment is not indented (observed on
+        // PHP 8.5).
+        self.mark_inline();
         Ok(())
     }
 
@@ -639,7 +649,9 @@ impl XmlWriter {
         ) {
             return Err(WriterError::InvalidState);
         }
-        self.before_content(true)?;
+        // A PI gets no line break or indentation before it, one after it,
+        // and the closing tag after it no indentation (observed on PHP 8.5).
+        self.before_content(false)?;
         self.emit(&format!("<?{target}"));
         self.stack.push(Frame::Pi);
         self.pi_text = false;
@@ -654,6 +666,7 @@ impl XmlWriter {
         self.stack.pop();
         self.emit("?>");
         self.after_block();
+        self.mark_inline();
         Ok(())
     }
 
@@ -685,7 +698,13 @@ impl XmlWriter {
         Ok(())
     }
 
-    fn open_subset(&mut self) -> R {
+    /// Opens the internal subset; `Ok(false)` at the top level (DTD
+    /// declarations may be written without `startDtd()`, observed on PHP
+    /// 8.5: test ext/xmlwriter 008).
+    fn open_subset(&mut self) -> Result<bool, WriterError> {
+        if self.stack.is_empty() {
+            return Ok(false);
+        }
         match self.stack.last_mut() {
             Some(Frame::Dtd { subset }) => {
                 if !*subset {
@@ -695,7 +714,7 @@ impl XmlWriter {
                         self.emit("\n");
                     }
                 }
-                Ok(())
+                Ok(true)
             }
             _ => Err(WriterError::InvalidState),
         }
@@ -729,9 +748,12 @@ impl XmlWriter {
         }
     }
 
-    fn dtd_part(&mut self, frame: Frame, head: &str) -> R {
-        self.open_subset()?;
-        if self.indent {
+    fn dtd_part(&mut self, frame: Frame, name: &str, head: &str) -> R {
+        if !is_name(name) {
+            return Err(WriterError::InvalidName);
+        }
+        let in_subset = self.open_subset()?;
+        if self.indent && in_subset {
             let s = self.indent_str.clone();
             self.emit(&s);
         }
@@ -758,7 +780,7 @@ impl XmlWriter {
 
     /// `startDtdElement($qualifiedName)`.
     pub fn start_dtd_element(&mut self, name: &str) -> R {
-        self.dtd_part(Frame::DtdElement, &format!("<!ELEMENT {name} "))
+        self.dtd_part(Frame::DtdElement, name, &format!("<!ELEMENT {name} "))
     }
     /// `endDtdElement()`.
     pub fn end_dtd_element(&mut self) -> R {
@@ -772,7 +794,7 @@ impl XmlWriter {
     }
     /// `startDtdAttlist($name)`.
     pub fn start_dtd_attlist(&mut self, name: &str) -> R {
-        self.dtd_part(Frame::DtdAttlist, &format!("<!ATTLIST {name} "))
+        self.dtd_part(Frame::DtdAttlist, name, &format!("<!ATTLIST {name} "))
     }
     /// `endDtdAttlist()`.
     pub fn end_dtd_attlist(&mut self) -> R {
@@ -791,7 +813,7 @@ impl XmlWriter {
         } else {
             format!("<!ENTITY {name} \"")
         };
-        self.dtd_part(Frame::DtdEntity, &head)
+        self.dtd_part(Frame::DtdEntity, name, &head)
     }
     /// `endDtdEntity()`.
     pub fn end_dtd_entity(&mut self) -> R {
@@ -802,6 +824,48 @@ impl XmlWriter {
         self.start_dtd_entity(name, parameter)?;
         self.emit(content);
         self.end_dtd_part()
+    }
+
+    /// `writeDtdEntity($name, $content, $isParam, $publicId, $systemId,
+    /// $notationData)` for an external entity (a public or system ID
+    /// given): `<!ENTITY name PUBLIC "p" "s" NDATA n>` (observed on PHP
+    /// 8.5; test bug39504).
+    pub fn write_dtd_external_entity(
+        &mut self,
+        name: &str,
+        parameter: bool,
+        public: Option<&str>,
+        system: Option<&str>,
+        ndata: Option<&str>,
+    ) -> R {
+        if !is_name(name) {
+            return Err(WriterError::InvalidName);
+        }
+        let in_subset = self.open_subset()?;
+        if self.indent && in_subset {
+            let s = self.indent_str.clone();
+            self.emit(&s);
+        }
+        let mut t = if parameter {
+            format!("<!ENTITY % {name}")
+        } else {
+            format!("<!ENTITY {name}")
+        };
+        match (public, system) {
+            (Some(p), Some(sy)) => t.push_str(&format!(" PUBLIC \"{p}\" \"{sy}\"")),
+            (Some(p), None) => t.push_str(&format!(" PUBLIC \"{p}\"")),
+            (None, Some(sy)) => t.push_str(&format!(" SYSTEM \"{sy}\"")),
+            (None, None) => {}
+        }
+        if let Some(n) = ndata.filter(|n| !n.is_empty()) {
+            t.push_str(&format!(" NDATA {n}"));
+        }
+        t.push('>');
+        self.emit(&t);
+        if self.indent {
+            self.emit("\n");
+        }
+        Ok(())
     }
 
     /// `writeDtd($name, $publicId, $systemId, $content)`.
