@@ -611,15 +611,87 @@ fn tl_el(vm: &mut Vm, a: &Args) -> R<NodeId> {
 
 fn check_token(vm: &mut Vm, t: &str) -> R<()> {
     if t.is_empty() {
-        return throw_dom_msg(vm, "The token must not be empty", 12);
+        return throw_dom_msg(vm, "The empty string is not a valid token", 12);
     }
     if t.contains([' ', '\t', '\n', '\r', '\x0c']) {
         return throw_dom_msg(vm, "The token must not contain any ASCII whitespace", 5);
     }
-    if t.as_bytes().contains(&0) {
-        return vm.throw("ValueError", "Dom\\TokenList::add(): Argument #1 must not contain any null bytes");
-    }
     Ok(())
+}
+
+/// A named token argument without NUL bytes.
+fn named_token(vm: &mut Vm, a: &Args, i: usize, name: &str) -> R<String> {
+    let s = a.str(i);
+    if s.as_bytes().contains(&0) {
+        return vm.fthrow(
+            a,
+            "ValueError",
+            &format!("Argument #{} (${name}) must not contain any null bytes", i + 1),
+        );
+    }
+    Ok(s8(&s))
+}
+
+/// Dimension access on a TokenList (tests modern/token_list/dimensions*.phpt).
+pub(crate) fn token_dim(
+    vm: &mut Vm,
+    el: NodeId,
+    key: Option<&Value>,
+    op: crate::class::ObjAccess,
+) -> Option<R<Value>> {
+    use crate::class::ObjAccess;
+    let isset = matches!(op, ObjAccess::Isset | ObjAccess::Empty);
+    let Some(key) = key else {
+        return Some(vm.throw("Error", "Cannot append to Dom\\TokenList"));
+    };
+    if matches!(op, ObjAccess::Write(_) | ObjAccess::Unset) {
+        return None;
+    }
+    let bad = |vm: &mut Vm, t: String| -> Option<R<Value>> {
+        let m = if isset {
+            format!("Cannot access offset of type {t} in isset or empty")
+        } else {
+            format!("Cannot access offset of type {t} on Dom\\TokenList")
+        };
+        Some(vm.throw("TypeError", &m))
+    };
+    let idx = match key.deref() {
+        Value::Int(i) => i,
+        Value::Bool(b) => b as i64,
+        Value::Null => 0,
+        Value::Float(f) => {
+            if f.fract() != 0.0 && f.is_finite()
+                && let Err(e) = vm.deprecated(&format!(
+                    "Implicit conversion from float {} to int loses precision",
+                    goro_runtime::convert::float_repr(f)
+                ))
+            {
+                return Some(Err(e));
+            }
+            f as i64
+        }
+        Value::Str(s) => match goro_runtime::array::canonical_int(s.as_bytes()) {
+            Some(i) => i,
+            None => return bad(vm, "string".into()),
+        },
+        Value::Resource(r) => {
+            let id = r.id();
+            if let Err(e) = vm.warn(&format!(
+                "Resource ID#{id} used as offset, casting to integer ({id})"
+            )) {
+                return Some(Err(e));
+            }
+            id
+        }
+        other => return bad(vm, crate::class::TypeName::tname(&other)),
+    };
+    let t = with_arena(|ar| tokens(ar, el));
+    let found = if idx < 0 { None } else { t.get(idx as usize).cloned() };
+    Some(Ok(match op {
+        ObjAccess::Isset => Value::Bool(found.is_some()),
+        ObjAccess::Empty => Value::Bool(found.as_deref().is_none_or(|s| s.is_empty() || s == "0")),
+        _ => found.map_or(Value::Null, |s| sv(&s)),
+    }))
 }
 
 fn tl_item(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -634,7 +706,7 @@ fn tl_item(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn tl_contains(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let el = tl_el(vm, a)?;
-    let tok = s8(&a.str(0));
+    let tok = named_token(vm, a, 0, "token")?;
     Ok(Value::Bool(with_arena(|ar| tokens(ar, el)).contains(&tok)))
 }
 
@@ -682,7 +754,7 @@ fn tl_remove(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn tl_toggle(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let el = tl_el(vm, a)?;
-    let tok = s8(&a.str(0));
+    let tok = named_token(vm, a, 0, "token")?;
     check_token(vm, &tok)?;
     let force = match a.val(1) {
         Value::Null => None,
@@ -709,8 +781,8 @@ fn tl_toggle(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn tl_replace(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let el = tl_el(vm, a)?;
-    let old = s8(&a.str(0));
-    let new = s8(&a.str(1));
+    let old = named_token(vm, a, 0, "token")?;
+    let new = named_token(vm, a, 1, "newToken")?;
     check_token(vm, &old)?;
     check_token(vm, &new)?;
     let mut t = with_arena(|ar| tokens(ar, el));
@@ -752,7 +824,7 @@ fn tl_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
     )?))
 }
 
-pub(crate) fn token_iter_step(vm: &mut Vm, o: &ObjRef, pos: usize, op: ExtIterOp) -> R<Value> {
+pub(crate) fn token_iter_step(vm: &mut Vm, o: &ObjRef, pos: usize, op: ExtIterOp, state: &mut Value) -> R<Value> {
     let _ = vm;
     let el = {
         let n = o.obj().native.borrow();
@@ -768,7 +840,21 @@ pub(crate) fn token_iter_step(vm: &mut Vm, o: &ObjRef, pos: usize, op: ExtIterOp
         return Ok(Value::Null);
     };
     let t = with_arena(|ar| tokens(ar, el));
+    // A modification of the list since the last step keeps the position
+    // (test modern/token_list/iteration_01.phpt).
+    let now = Value::from(t.join(" ").as_bytes());
+    let changed = !state.is_null() && state.as_str() != now.as_str();
+    if !matches!(op, ExtIterOp::Next) {
+        *state = now;
+    }
     Ok(match op {
+        ExtIterOp::Next => {
+            if changed {
+                Value::Int(pos as i64)
+            } else {
+                Value::Null
+            }
+        }
         ExtIterOp::Valid => Value::Bool(pos < t.len()),
         ExtIterOp::Current => t.get(pos).map_or(Value::Null, |s| sv(s)),
         ExtIterOp::Key => Value::Int(pos as i64),
@@ -785,7 +871,11 @@ pub(crate) fn token_list_prop(vm: &mut Vm, el: NodeId, name: &str, is_set: bool,
                 .unwrap_or_default()
         }))),
         ("value", true) => {
-            let s = s8(&vm.to_php_str(&v)?);
+            let s = vm.to_php_str(&v)?;
+            if s.as_bytes().contains(&0) {
+                return vm.throw("ValueError", "Value must not contain any null bytes");
+            }
+            let s = s8(&s);
             with_arena(|ar| match ar.get_attr_node_ns(el, None, "class") {
                 Some(at) => ar.set_attr_value(at, &s),
                 None => {

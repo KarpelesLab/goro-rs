@@ -593,6 +593,18 @@ pub(crate) fn set_prop(vm: &mut Vm, o: &ObjRef, name: &str, v: Value) -> R<()> {
         )
     };
     let Some(n) = node_of(o) else {
+        // Read-only properties say so first (test property_write_errors).
+        const WRITABLE: &[&str] = &[
+            "nodeValue", "textContent", "data", "value", "id", "className", "prefix",
+            "innerHTML", "outerHTML", "substitutedNodeValue", "formatOutput",
+            "validateOnParse", "resolveExternals", "preserveWhiteSpace", "recover",
+            "substituteEntities", "strictErrorChecking", "encoding", "version",
+            "xmlVersion", "standalone", "xmlStandalone", "documentURI", "title", "body",
+            "characterSet", "charset", "inputEncoding",
+        ];
+        if !WRITABLE.contains(&name) {
+            return readonly(vm);
+        }
         return throw_dom(vm, DomError::InvalidState);
     };
     let modern = with_arena(|a| is_modern_node(a, n));

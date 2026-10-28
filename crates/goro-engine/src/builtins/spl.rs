@@ -2287,7 +2287,9 @@ fn fa_get_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
 pub struct ExtIter {
     pub target: ObjRef,
     pub pos: usize,
-    pub step: fn(&mut Vm, &ObjRef, usize, ExtIterOp) -> R<Value>,
+    pub step: fn(&mut Vm, &ObjRef, usize, ExtIterOp, &mut Value) -> R<Value>,
+    /// Whatever the collection keeps between steps.
+    pub state: Value,
 }
 
 /// What [`ExtIter::step`] is asked.
@@ -2296,11 +2298,14 @@ pub enum ExtIterOp {
     Valid,
     Current,
     Key,
+    /// Moving on: an `Int` result is the new position (else +1).
+    Next,
 }
 
 impl goro_runtime::NativeData for ExtIter {
     fn trace(&self, visit: &mut dyn FnMut(&Value)) {
         visit(&Value::Object(self.target.clone()));
+        visit(&self.state);
     }
 }
 
@@ -2308,7 +2313,7 @@ impl goro_runtime::NativeData for ExtIter {
 pub fn new_ext_iter(
     vm: &mut Vm,
     target: &ObjRef,
-    step: fn(&mut Vm, &ObjRef, usize, ExtIterOp) -> R<Value>,
+    step: fn(&mut Vm, &ObjRef, usize, ExtIterOp, &mut Value) -> R<Value>,
 ) -> R<ObjRef> {
     let cls = vm.find_class(b"InternalIterator", false)?.unwrap();
     let o = vm.instantiate_raw(&cls)?;
@@ -2318,6 +2323,7 @@ pub fn new_ext_iter(
             target: target.clone(),
             pos: 0,
             step,
+            state: Value::Null,
         },
     );
     Ok(o)
@@ -2326,15 +2332,29 @@ pub fn new_ext_iter(
 /// The InternalIterator methods for an [`ExtIter`] (None: not one).
 fn ext_iter(vm: &mut Vm, a: &Args, op: u8) -> Option<R<Value>> {
     let o = a.this_obj();
-    let (t, pos, step) = with(o, |d: &mut ExtIter| (d.target.clone(), d.pos, d.step))?;
+    let (t, pos, step, mut state) = with(o, |d: &mut ExtIter| {
+        (d.target.clone(), d.pos, d.step, std::mem::take(&mut d.state))
+    })?;
+    let r = match op {
+        0 => step(vm, &t, pos, ExtIterOp::Valid, &mut state),
+        1 => step(vm, &t, pos, ExtIterOp::Current, &mut state),
+        2 => step(vm, &t, pos, ExtIterOp::Key, &mut state),
+        3 => match step(vm, &t, pos, ExtIterOp::Next, &mut state) {
+            Ok(Value::Int(n)) => {
+                with(o, |d: &mut ExtIter| d.pos = n as usize);
+                Ok(Value::Null)
+            }
+            Ok(_) => {
+                with(o, |d: &mut ExtIter| d.pos += 1);
+                Ok(Value::Null)
+            }
+            Err(e) => Err(e),
+        },
+        _ => Ok(Value::Null),
+    };
+    with(o, |d: &mut ExtIter| d.state = state);
     Some(match op {
-        0 => step(vm, &t, pos, ExtIterOp::Valid),
-        1 => step(vm, &t, pos, ExtIterOp::Current),
-        2 => step(vm, &t, pos, ExtIterOp::Key),
-        3 => {
-            with(o, |d: &mut ExtIter| d.pos += 1);
-            Ok(Value::Null)
-        }
+        0..=3 => r,
         _ => {
             if pos > 0 {
                 return Some(vm.throw("Error", "Iterator does not support rewinding"));

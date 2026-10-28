@@ -441,6 +441,14 @@ impl Vm {
             if v.is_null() && p.get.as_ref().is_some_and(|g| g.is_native()) {
                 return Ok(Some(v));
             }
+        } else if p.get.as_ref().is_some_and(|g| g.is_native()) {
+            // ... and objects as themselves (`foreach ($o->list as &$x)`
+            // reaches the object's iterator; test
+            // ext/dom/tests/modern/token_list/foreach_by_ref.phpt).
+            let v = self.read_prop(o, name, false, None)?;
+            if let Value::Object(_) = v {
+                return Ok(Some(v));
+            }
         }
         self.throw(
             "Error",

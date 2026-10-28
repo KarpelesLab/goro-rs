@@ -335,7 +335,7 @@ fn l_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
     )?))
 }
 
-fn iter_step(vm: &mut Vm, o: &ObjRef, pos: usize, op: ExtIterOp) -> R<Value> {
+fn iter_step(vm: &mut Vm, o: &ObjRef, pos: usize, op: ExtIterOp, _state: &mut Value) -> R<Value> {
     let v = items(o);
     let is_map = matches!(
         list_of(o).map(|l| l.0),
@@ -347,6 +347,7 @@ fn iter_step(vm: &mut Vm, o: &ObjRef, pos: usize, op: ExtIterOp) -> R<Value> {
             Some(&n) => wrap_node(vm, n),
             None => Ok(Value::Null),
         },
+        ExtIterOp::Next => Ok(Value::Null),
         ExtIterOp::Key => {
             if is_map && let Some(&n) = v.get(pos) {
                 let name = with_arena(|a| a.node_name(n));
@@ -468,8 +469,8 @@ fn list_dim(
 ) -> Option<R<Value>> {
     use crate::class::ObjAccess as DimOp;
     let (kind, modern) = list_of(o)?;
-    if matches!(kind, ListKind::ClassList(_)) {
-        return None;
+    if let ListKind::ClassList(el) = kind {
+        return super::modern::token_dim(vm, el, key, op);
     }
     let cname = vm.class_of(o).name.to_string_lossy();
     let Some(key) = key else {
