@@ -94,6 +94,15 @@ bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
   base-10⁸ limbs (Karatsuba, Knuth division) and puremp for large
   divisions and roots: faster than PHP on 20-digit operands and 4-500x
   faster at 10k-100k digits.
+- `goro-ext-gmp`: ext/gmp on puremp: every `gmp_*()` function (PHP's
+  integer-string parsing in bases 0/2-62, import/export word orders,
+  rounding modes, GMP's results for inexact `gmp_divexact()`, its
+  prime/probable-prime answers, its seeded `gmp_random_*` streams) and the
+  `GMP` class (operators, comparisons, casts, serialization, constructor),
+  with PHP's argument coercion, deprecations and error messages. Checked
+  against a 52.8k-case PHP 8.5 fixture. Single-limb fast paths
+  (Montgomery `powm`, Baillie-PSW, binary GCD) put small operations at or
+  below PHP's times; large operands run at 1.5-3.5x GMP's times.
 - `goro-ext-random`: ext/random on plain values: the Mt19937 (both
   modes), PcgOneseq128XslRr64, Xoshiro256StarStar and Secure engines with
   their seeding, jumps and serialized states, user engines through a trait,
