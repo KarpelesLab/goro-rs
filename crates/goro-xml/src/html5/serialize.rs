@@ -10,7 +10,9 @@
 //! CDATA sections are written as escaped text; entity references as
 //! `&name;`; doctypes as `<!DOCTYPE name>`.
 
-use crate::tree::{Arena, HTML_NS, MATHML_NS, NodeData, NodeId, SVG_NS, XLINK_NS, XML_NS, XMLNS_NS};
+use crate::tree::{
+    Arena, HTML_NS, MATHML_NS, NodeData, NodeId, SVG_NS, XLINK_NS, XML_NS, XMLNS_NS,
+};
 
 /// Serialization options.
 #[derive(Clone, Copy, Debug, Default)]

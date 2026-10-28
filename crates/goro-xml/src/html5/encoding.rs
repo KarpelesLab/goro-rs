@@ -115,16 +115,16 @@ pub fn prescan(input: &[u8]) -> Option<WhatwgEncoding> {
             }
             continue;
         }
-        if rest.len() >= 6 && rest[1..5].eq_ignore_ascii_case(b"meta") && (is_sp(rest[5]) || rest[5] == b'/') {
+        if rest.len() >= 6
+            && rest[1..5].eq_ignore_ascii_case(b"meta")
+            && (is_sp(rest[5]) || rest[5] == b'/')
+        {
             p += 5;
             let mut names: Vec<Vec<u8>> = Vec::new();
             let mut got_pragma = false;
             let mut need_pragma: Option<bool> = None;
             let mut charset: Option<Option<WhatwgEncoding>> = None;
-            loop {
-                let Some((name, value)) = get_attribute(b, &mut p) else {
-                    break;
-                };
+            while let Some((name, value)) = get_attribute(b, &mut p) {
                 if names.contains(&name) {
                     continue;
                 }
@@ -174,7 +174,11 @@ pub fn prescan(input: &[u8]) -> Option<WhatwgEncoding> {
             p += 1;
             continue;
         }
-        let tag_start = if rest.len() >= 2 && rest[1] == b'/' { 2 } else { 1 };
+        let tag_start = if rest.len() >= 2 && rest[1] == b'/' {
+            2
+        } else {
+            1
+        };
         if rest.len() > tag_start && rest[tag_start].is_ascii_alphabetic() {
             p += tag_start;
             while p < n && !is_sp(b[p]) && b[p] != b'>' {
@@ -188,10 +192,8 @@ pub fn prescan(input: &[u8]) -> Option<WhatwgEncoding> {
             continue;
         }
         if rest.starts_with(b"<!") || rest.starts_with(b"</") || rest.starts_with(b"<?") {
-            match b[p + 1..].iter().position(|&c| c == b'>') {
-                Some(off) => p = p + 1 + off + 1,
-                None => return None,
-            }
+            let off = b[p + 1..].iter().position(|&c| c == b'>')?;
+            p = p + 1 + off + 1;
             continue;
         }
         p += 1;

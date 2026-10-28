@@ -107,9 +107,9 @@ pub(crate) struct Tag {
     pub self_closing: bool,
     /// Byte offset of the `<`.
     pub start: usize,
-    /// Byte offsets of the first and last character of the tag name.
+    /// Byte offsets of the tag name (`name_end` exclusive).
     pub name_first: usize,
-    pub name_last: usize,
+    pub name_end: usize,
 }
 
 impl Tag {
@@ -130,9 +130,9 @@ pub(crate) struct Doctype {
     pub force_quirks: bool,
     /// Byte offset of the `<`.
     pub start: usize,
-    /// Offsets of the first and last character of the `DOCTYPE` keyword.
+    /// Offsets of the `DOCTYPE` keyword (`kw_end` exclusive).
     pub kw_first: usize,
-    pub kw_last: usize,
+    pub kw_end: usize,
 }
 
 /// A token.
@@ -142,14 +142,16 @@ pub(crate) enum Token {
     Doctype(Box<Doctype>),
     Comment {
         text: String,
+        /// Offset of the `<`.
         start: usize,
+        /// Offset where the comment data starts in the source.
+        data: usize,
     },
-    /// A run of character tokens; `first`/`last` are the byte offsets of the
-    /// first and last source character covered.
+    /// A run of character tokens covering the source bytes `first..end`.
     Text {
         text: String,
         first: usize,
-        last: usize,
+        end: usize,
     },
     Eof {
         pos: usize,
@@ -232,6 +234,27 @@ fn c1_replacement(n: u32) -> Option<u32> {
     })
 }
 
+/// How many leading bytes of `s` are a prefix of some reference name.
+fn prefix_scan_len(s: &[u8]) -> usize {
+    let mut l = 0;
+    while l < s.len() && l < 40 {
+        let c = s[l];
+        if !(c.is_ascii_alphanumeric() || c == b';') {
+            break;
+        }
+        let pre = &s[..l + 1];
+        let i = ENTITIES.partition_point(|(k, _)| k.as_bytes() < pre);
+        if i >= ENTITIES.len() || !ENTITIES[i].0.as_bytes().starts_with(pre) {
+            break;
+        }
+        l += 1;
+        if c == b';' {
+            break;
+        }
+    }
+    l
+}
+
 /// Looks up the longest named character reference at the start of `s`
 /// (which follows the `&`). Returns the matched length and the replacement.
 pub(crate) fn match_named_ref(s: &[u8]) -> Option<(usize, &'static str)> {
@@ -248,10 +271,11 @@ pub(crate) fn match_named_ref(s: &[u8]) -> Option<(usize, &'static str)> {
             .ok()
             .map(|i| ENTITIES[i].1)
     };
-    if s.get(n) == Some(&b';') && n < 40 {
-        if let Some(v) = find(&s[..n + 1]) {
-            return Some((n + 1, v));
-        }
+    if s.get(n) == Some(&b';')
+        && n < 40
+        && let Some(v) = find(&s[..n + 1])
+    {
+        return Some((n + 1, v));
     }
     // Legacy names without semicolon are at most 6 characters long.
     let mut l = n.min(6);
@@ -273,6 +297,8 @@ pub(crate) struct Tokenizer {
     /// the HTML namespace (CDATA sections allowed).
     pub allow_cdata: bool,
     pub collect_errors: bool,
+    /// Follow the WHATWG standard where PHP 8.5 differs.
+    pub standard: bool,
     pub errors: Vec<TokError>,
 
     tag: Tag,
@@ -282,6 +308,7 @@ pub(crate) struct Tokenizer {
     attr_open: bool,
     comment: Vec<u8>,
     comment_start: usize,
+    comment_data: usize,
     doctype: Doctype,
     dt_buf: Vec<u8>,
     temp: Vec<u8>,
@@ -289,9 +316,20 @@ pub(crate) struct Tokenizer {
 
     text: Vec<u8>,
     text_first: usize,
-    text_last: usize,
-    queue: std::collections::VecDeque<Token>,
+    text_end: usize,
+    /// A markup construct started after the pending text: the text is
+    /// complete even if the input ends inside the construct.
+    text_closed: bool,
+    queue: std::collections::VecDeque<(Token, bool)>,
     eof_emitted: bool,
+    /// Whether the token returned by `step` was produced by the end of the
+    /// input.
+    front_flag: bool,
+    /// Whether the last token returned by [`Tokenizer::next_token`] was
+    /// produced by the end of the input (PHP reports no tree errors for
+    /// those, observed on PHP 8.5: `abc` alone gives no
+    /// `unexpected-token-in-initial-mode`).
+    pub last_at_eof: bool,
 }
 
 impl Tokenizer {
@@ -303,6 +341,7 @@ impl Tokenizer {
             return_state: State::Data,
             allow_cdata: false,
             collect_errors: true,
+            standard: false,
             errors: Vec::new(),
             tag: Tag::default(),
             tag_name: Vec::new(),
@@ -311,15 +350,19 @@ impl Tokenizer {
             attr_open: false,
             comment: Vec::new(),
             comment_start: 0,
+            comment_data: 0,
             doctype: Doctype::default(),
             dt_buf: Vec::new(),
             temp: Vec::new(),
             last_start_tag: Vec::new(),
             text: Vec::new(),
             text_first: 0,
-            text_last: 0,
+            text_end: 0,
+            text_closed: false,
             queue: std::collections::VecDeque::new(),
             eof_emitted: false,
+            front_flag: false,
+            last_at_eof: false,
         }
     }
 
@@ -328,9 +371,23 @@ impl Tokenizer {
         &self.input
     }
 
+    /// Records an error, except the ones PHP never reports (observed on PHP
+    /// 8.5: end-of-file errors, `duplicate-attribute`,
+    /// `end-tag-with-attributes`, `end-tag-with-trailing-solidus`,
+    /// `cdata-in-html-content`, `unknown-named-character-reference`).
     #[inline]
     fn err(&mut self, code: &'static str, pos: usize) {
-        if self.collect_errors {
+        if self.collect_errors
+            && !code.starts_with("eof-")
+            && !matches!(
+                code,
+                "duplicate-attribute"
+                    | "end-tag-with-attributes"
+                    | "end-tag-with-trailing-solidus"
+                    | "cdata-in-html-content"
+                    | "unknown-named-character-reference"
+            )
+        {
             self.errors.push(TokError { code, pos });
         }
     }
@@ -342,21 +399,13 @@ impl Tokenizer {
 
     // ----- text accumulation ------------------------------------------------
 
-    /// Start offset of the character whose last byte is at `end - 1`.
-    fn char_start_before(&self, end: usize) -> usize {
-        let mut s = end - 1;
-        while s > 0 && (self.input[s] & 0xC0) == 0x80 {
-            s -= 1;
-        }
-        s
-    }
-
     #[inline]
-    fn text_mark(&mut self, first: usize, last: usize) {
+    fn text_mark(&mut self, first: usize, end: usize) {
         if self.text.is_empty() {
             self.text_first = first;
+            self.text_closed = false;
         }
-        self.text_last = last;
+        self.text_end = end;
     }
 
     /// Emits the input bytes `[a, b)` as character tokens.
@@ -365,8 +414,7 @@ impl Tokenizer {
         if a == b {
             return;
         }
-        let last = self.char_start_before(b);
-        self.text_mark(a, last);
+        self.text_mark(a, b);
         let (input, text) = (&self.input, &mut self.text);
         text.extend_from_slice(&input[a..b]);
     }
@@ -375,7 +423,7 @@ impl Tokenizer {
     /// `first..=last`.
     #[inline]
     fn emit_str(&mut self, s: &[u8], first: usize, last: usize) {
-        self.text_mark(first, last);
+        self.text_mark(first, last + 1);
         self.text.extend_from_slice(s);
     }
 
@@ -387,19 +435,48 @@ impl Tokenizer {
         Some(Token::Text {
             text,
             first: self.text_first,
-            last: self.text_last,
+            end: self.text_end,
         })
     }
 
     /// Emits a non-character token (flushing pending text first).
     fn emit(&mut self, t: Token) -> Token {
+        self.front_flag = false;
         match self.take_text() {
             Some(text) => {
-                self.queue.push_back(t);
+                self.queue.push_back((t, false));
                 text
             }
             None => t,
         }
+    }
+
+    /// Ends the input: emits the pending text, then `t` (an unfinished
+    /// comment or doctype), then EOF.
+    fn finish(&mut self, t: Option<Token>) -> Token {
+        self.eof_emitted = true;
+        if let Some(text) = self.take_text() {
+            let closed = self.text_closed;
+            self.queue.push_back((text, !closed));
+        }
+        if let Some(t) = t {
+            self.queue.push_back((t, true));
+        }
+        self.queue.push_back((
+            Token::Eof {
+                pos: self.input.len(),
+            },
+            true,
+        ));
+        let (t, f) = self.queue.pop_front().unwrap();
+        self.front_flag = f;
+        t
+    }
+
+    /// Marks the start of a markup construct (the pending text is complete).
+    #[inline]
+    fn close_text(&mut self) {
+        self.text_closed = true;
     }
 
     // ----- tag helpers --------------------------------------------------------
@@ -409,11 +486,12 @@ impl Tokenizer {
             end,
             start: lt,
             name_first: self.pos,
-            name_last: self.pos,
+            name_end: self.pos,
             ..Tag::default()
         };
         self.tag_name.clear();
         self.attr_open = false;
+        self.close_text();
     }
 
     fn start_attr(&mut self) {
@@ -462,10 +540,26 @@ impl Tokenizer {
         !self.last_start_tag.is_empty() && self.tag_name == self.last_start_tag
     }
 
-    fn emit_comment(&mut self) -> Token {
+    fn comment_token(&mut self) -> Token {
         let text = bytes_to_string(std::mem::take(&mut self.comment));
-        let start = self.comment_start;
-        self.emit(Token::Comment { text, start })
+        Token::Comment {
+            text,
+            start: self.comment_start,
+            data: self.comment_data,
+        }
+    }
+
+    fn emit_comment(&mut self) -> Token {
+        let t = self.comment_token();
+        self.emit(t)
+    }
+
+    /// Starts a comment token whose data begins at the current position.
+    fn begin_comment(&mut self, lt: usize) {
+        self.comment.clear();
+        self.comment_start = lt;
+        self.comment_data = self.pos;
+        self.close_text();
     }
 
     fn emit_doctype(&mut self) -> Token {
@@ -474,9 +568,7 @@ impl Tokenizer {
     }
 
     fn emit_eof(&mut self) -> Token {
-        self.eof_emitted = true;
-        let pos = self.input.len();
-        self.emit(Token::Eof { pos })
+        self.finish(None)
     }
 
     /// True when the next bytes match `s` ASCII case-insensitively.
@@ -516,24 +608,28 @@ impl Tokenizer {
 
     fn named_ref(&mut self, amp: usize) {
         let rest = &self.input[self.pos..];
+        // PHP scans as far as the characters still begin some reference
+        // name, and uses the character there for the attribute rule and
+        // for the position of the error (observed on PHP 8.5: `&notit;` is
+        // reported at the second `t`; `a='&noti'` gives "¬i").
+        let scan_end = self.pos + prefix_scan_len(rest);
         match match_named_ref(rest) {
             Some((len, value)) => {
                 let last_semicolon = rest[len - 1] == b';';
-                let next = rest.get(len).copied();
                 let end = self.pos + len;
+                let next = self.input.get(scan_end).copied();
                 if self.in_attr()
                     && !last_semicolon
                     && next.is_some_and(|c| c == b'=' || c.is_ascii_alphanumeric())
                 {
                     // Historical: left as is in attributes.
-                    let (a, b) = (amp, end);
-                    let s = self.input[a..b].to_vec();
-                    self.flush_ref(&s, a, b - 1);
+                    let s = self.input[amp..end].to_vec();
+                    self.flush_ref(&s, amp, end - 1);
                     self.pos = end;
                     return;
                 }
-                if !last_semicolon {
-                    self.err("missing-semicolon-after-character-reference", end);
+                if !last_semicolon && scan_end < self.input.len() {
+                    self.err("missing-semicolon-after-character-reference", scan_end);
                 }
                 self.flush_ref(value.as_bytes(), amp, end - 1);
                 self.pos = end;
@@ -578,17 +674,23 @@ impl Tokenizer {
                     _ => break,
                 }
             } as u32;
-            code = code.saturating_mul(if hex { 16 } else { 10 }).saturating_add(d);
+            code = code
+                .saturating_mul(if hex { 16 } else { 10 })
+                .saturating_add(d);
             if code > 0x10FFFF {
                 code = 0x110000;
             }
             p += 1;
         }
-        // Errors are reported at the character after the ampersand
-        // (observed on PHP 8.5).
+        // Errors are reported at the character after the ampersand, and
+        // not at all when the reference runs into the end of the input;
+        // a missing semicolon is not reported (observed on PHP 8.5).
         let epos = amp + 1;
+        let at_end = p >= self.input.len();
         if p == digits_start {
-            self.err("absence-of-digits-in-numeric-character-reference", epos);
+            if !at_end {
+                self.err("absence-of-digits-in-numeric-character-reference", p);
+            }
             let s = self.input[amp..p].to_vec();
             self.flush_ref(&s, amp, p - 1);
             self.pos = p;
@@ -596,8 +698,10 @@ impl Tokenizer {
         }
         if self.input.get(p) == Some(&b';') {
             p += 1;
-        } else {
-            self.err("missing-semicolon-after-character-reference", epos);
+        }
+        let collect = self.collect_errors;
+        if at_end {
+            self.collect_errors = false;
         }
         let mut cp = code;
         if code == 0 {
@@ -620,6 +724,7 @@ impl Tokenizer {
                 cp = r;
             }
         }
+        self.collect_errors = collect;
         let ch = char::from_u32(cp).unwrap_or('\u{FFFD}');
         let mut buf = [0u8; 4];
         let s = ch.encode_utf8(&mut buf).as_bytes().to_vec();
@@ -631,16 +736,19 @@ impl Tokenizer {
 
     /// Returns the next token. After the EOF token, keeps returning EOF.
     pub fn next_token(&mut self) -> Token {
-        if let Some(t) = self.queue.pop_front() {
+        if let Some((t, f)) = self.queue.pop_front() {
+            self.last_at_eof = f;
             return t;
         }
         if self.eof_emitted {
+            self.last_at_eof = true;
             return Token::Eof {
                 pos: self.input.len(),
             };
         }
         loop {
             if let Some(t) = self.step() {
+                self.last_at_eof = self.front_flag;
                 return t;
             }
         }
@@ -734,8 +842,7 @@ impl Tokenizer {
                     }
                     Some(b'?') => {
                         self.err("unexpected-question-mark-instead-of-tag-name", self.pos);
-                        self.comment.clear();
-                        self.comment_start = lt;
+                        self.begin_comment(lt);
                         self.state = BogusComment;
                     }
                     None => {
@@ -763,7 +870,7 @@ impl Tokenizer {
                         // The ignored characters still belong to the
                         // surrounding text span.
                         if !self.text.is_empty() {
-                            self.text_last = self.pos - 1;
+                            self.text_end = self.pos;
                         }
                         self.state = Data;
                     }
@@ -774,8 +881,7 @@ impl Tokenizer {
                     }
                     Some(_) => {
                         self.err("invalid-first-character-of-tag-name", self.pos);
-                        self.comment.clear();
-                        self.comment_start = lt;
+                        self.begin_comment(lt);
                         self.state = BogusComment;
                     }
                 }
@@ -796,7 +902,7 @@ impl Tokenizer {
                     self.tag_name.push(c.to_ascii_lowercase());
                 }
                 if p > start {
-                    self.tag.name_last = self.char_start_before(p);
+                    self.tag.name_end = p;
                 }
                 self.pos = p;
                 match self.cur() {
@@ -815,7 +921,7 @@ impl Tokenizer {
                             0 => {
                                 self.err("unexpected-null-character", self.pos - 1);
                                 self.tag_name.extend_from_slice("\u{FFFD}".as_bytes());
-                                self.tag.name_last = self.pos - 1;
+                                self.tag.name_end = self.pos;
                             }
                             _ => self.state = BeforeAttrName,
                         }
@@ -890,7 +996,10 @@ impl Tokenizer {
                 };
                 let c = self.cur();
                 match c {
-                    Some(c) if (is_ws(c) || c == b'/' || c == b'>') && self.is_appropriate_end_tag() => {
+                    Some(c)
+                        if (is_ws(c) || c == b'/' || c == b'>')
+                            && self.is_appropriate_end_tag() =>
+                    {
                         self.pos += 1;
                         match c {
                             b'/' => self.state = SelfClosingStartTag,
@@ -904,7 +1013,7 @@ impl Tokenizer {
                     Some(c) if c.is_ascii_alphabetic() => {
                         self.tag_name.push(c.to_ascii_lowercase());
                         self.temp.push(c);
-                        self.tag.name_last = self.pos;
+                        self.tag.name_end = self.pos + 1;
                         self.pos += 1;
                     }
                     _ => {
@@ -1255,10 +1364,10 @@ impl Tokenizer {
                             self.attr_value.extend_from_slice("\u{FFFD}".as_bytes());
                         }
                         b'"' | b'\'' | b'<' | b'=' | b'`' => {
-                            self.err(
-                                "unexpected-character-in-unquoted-attribute-value",
-                                self.pos - 1,
-                            );
+                            // Reported at the end of the tag name (observed
+                            // on PHP 8.5).
+                            let at = self.tag.name_end;
+                            self.err("unexpected-character-in-unquoted-attribute-value", at);
                             self.attr_value.push(c);
                         }
                         _ => self.attr_value.push(c),
@@ -1312,8 +1421,8 @@ impl Tokenizer {
                         let (input, c) = (&self.input, &mut self.comment);
                         c.extend_from_slice(&input[start..end]);
                         self.pos = end;
-                        let t = self.emit_comment();
-                        return Some(self.then_eof(t));
+                        let t = self.comment_token();
+                        return Some(self.finish(Some(t)));
                     }
                     Some(off) => {
                         let at = start + off;
@@ -1333,17 +1442,27 @@ impl Tokenizer {
                 let lt = self.pos - 2;
                 if self.input[self.pos..].starts_with(b"--") {
                     self.pos += 2;
-                    self.comment.clear();
-                    self.comment_start = lt;
+                    self.begin_comment(lt);
                     self.state = CommentStart;
+                } else if !self.standard
+                    && self.pos + 2 > self.input.len()
+                    && b"--".starts_with(&self.input[self.pos..])
+                {
+                    // `<!` or `<!-` at the end of the input: an empty
+                    // comment, no error (observed on PHP 8.5).
+                    self.pos = self.input.len();
+                    self.begin_comment(lt);
+                    let t = self.comment_token();
+                    return Some(self.finish(Some(t)));
                 } else if self.lookahead_ci(b"doctype") {
                     self.doctype = self::Doctype {
                         start: lt,
                         kw_first: self.pos,
-                        kw_last: self.pos + 6,
+                        kw_end: self.pos + 7,
                         ..self::Doctype::default()
                     };
                     self.pos += 7;
+                    self.close_text();
                     self.state = Doctype;
                 } else if self.input[self.pos..].starts_with(b"[CDATA[") {
                     self.pos += 7;
@@ -1351,15 +1470,14 @@ impl Tokenizer {
                         self.state = CdataSection;
                     } else {
                         self.err("cdata-in-html-content", self.pos - 7);
-                        self.comment.clear();
+                        self.begin_comment(lt);
+                        self.comment_data = self.pos - 7;
                         self.comment.extend_from_slice(b"[CDATA[");
-                        self.comment_start = lt;
                         self.state = BogusComment;
                     }
                 } else {
                     self.err("incorrectly-opened-comment", self.pos);
-                    self.comment.clear();
-                    self.comment_start = lt;
+                    self.begin_comment(lt);
                     self.state = BogusComment;
                 }
             }
@@ -1387,7 +1505,14 @@ impl Tokenizer {
                     self.state = Data;
                     return Some(self.emit_comment());
                 }
-                None => return Some(self.eof_in_comment()),
+                None => {
+                    // `<!---` at the end of the input gives the comment "-"
+                    // (observed on PHP 8.5).
+                    if !self.standard {
+                        self.comment.push(b'-');
+                    }
+                    return Some(self.eof_in_comment());
+                }
                 Some(_) => {
                     self.comment.push(b'-');
                     self.state = Comment;
@@ -1486,10 +1611,14 @@ impl Tokenizer {
                     self.state = Comment;
                 }
             },
+            // PHP drops the "--!" of the spec in this state (observed on
+            // PHP 8.5: `<!-- a --! b-->` gives the comment " a  b").
             CommentEndBang => match self.cur() {
                 Some(b'-') => {
                     self.pos += 1;
-                    self.comment.extend_from_slice(b"--!");
+                    if self.standard {
+                        self.comment.extend_from_slice(b"--!");
+                    }
                     self.state = CommentEndDash;
                 }
                 Some(b'>') => {
@@ -1500,7 +1629,9 @@ impl Tokenizer {
                 }
                 None => return Some(self.eof_in_comment()),
                 Some(_) => {
-                    self.comment.extend_from_slice(b"--!");
+                    if self.standard {
+                        self.comment.extend_from_slice(b"--!");
+                    }
                     self.state = Comment;
                 }
             },
@@ -1597,10 +1728,15 @@ impl Tokenizer {
                             self.pos += 6;
                             self.state = AfterDoctypeSystemKw;
                         } else {
-                            self.err(
-                                "invalid-character-sequence-after-doctype-name",
-                                self.pos,
-                            );
+                            // Not reported when the input ends before six
+                            // characters (observed on PHP 8.5).
+                            let rest = &self.input[self.pos..];
+                            let partial = rest.len() < 6
+                                && (b"public"[..rest.len()].eq_ignore_ascii_case(rest)
+                                    || b"system"[..rest.len()].eq_ignore_ascii_case(rest));
+                            if !partial {
+                                self.err("invalid-character-sequence-after-doctype-name", self.pos);
+                            }
                             self.doctype.force_quirks = true;
                             self.state = BogusDoctype;
                         }
@@ -1882,6 +2018,11 @@ impl Tokenizer {
                     Some(b'>') => {
                         self.pos += 1;
                         self.state = Data;
+                        // The section's text is a token of its own.
+                        if let Some(t) = self.take_text() {
+                            self.front_flag = false;
+                            return Some(t);
+                        }
                     }
                     _ => {
                         self.emit_str(b"]]", p, p + 1);
@@ -1895,22 +2036,13 @@ impl Tokenizer {
 
     fn eof_in_comment(&mut self) -> Token {
         self.err("eof-in-comment", self.pos);
-        let t = self.emit_comment();
-        self.then_eof(t)
+        let t = self.comment_token();
+        self.finish(Some(t))
     }
 
     fn doctype_then_eof(&mut self) -> Token {
-        let t = self.emit_doctype();
-        self.then_eof(t)
-    }
-
-    /// `t` is what `emit` returned; queues the EOF token after it.
-    fn then_eof(&mut self, t: Token) -> Token {
-        self.eof_emitted = true;
-        self.queue.push_back(Token::Eof {
-            pos: self.input.len(),
-        });
-        t
+        let d = std::mem::take(&mut self.doctype);
+        self.finish(Some(Token::Doctype(Box::new(d))))
     }
 
     fn set_dt_name(&mut self) {

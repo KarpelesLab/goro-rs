@@ -18,8 +18,8 @@ mod modes;
 use super::tags::{T, foreign_attr_fix, svg_attr_fix, svg_tag_fix};
 use super::tokenizer::{Attr, State, Tag, Token, Tokenizer};
 use crate::tree::{
-    Arena, AttrData, ElementData, HTML_NS, MATHML_NS, NodeData, NodeId, QName,
-    QuirksMode, SVG_NS, Str,
+    Arena, AttrData, ElementData, HTML_NS, MATHML_NS, NodeData, NodeId, QName, QuirksMode, SVG_NS,
+    Str,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -80,12 +80,13 @@ enum Afe {
     },
 }
 
-/// A tree construction error: code and the source span of the token.
+/// A tree construction error: code and the source span of the token
+/// (`first..end` in bytes).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TreeError {
     pub code: &'static str,
     pub first: usize,
-    pub last: usize,
+    pub end: usize,
 }
 
 /// Options for the tree builder.
@@ -99,6 +100,8 @@ pub(crate) struct BuildOptions {
     pub scripting: bool,
     /// LIBXML_HTML_NOIMPLIED: initial-mode errors are not reported.
     pub no_implied: bool,
+    /// Follow the WHATWG standard where PHP 8.5 differs.
+    pub standard: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -145,6 +148,9 @@ pub(crate) struct TreeBuilder<'a> {
     opts: BuildOptions,
     pub errors: Vec<TreeError>,
     span: (usize, usize),
+    /// The token being processed came from the end of the input: PHP
+    /// reports no tree errors for it.
+    suppress: bool,
     names: HashMap<Box<str>, Str>,
     ns_html: Option<Str>,
     ns_svg: Str,
@@ -157,9 +163,11 @@ pub(crate) struct TreeBuilder<'a> {
     line_no: u32,
 }
 
+/// Whitespace for the tree builder. PHP does not count U+000C FORM FEED
+/// (observed on PHP 8.5: a lone form feed ends up in `body`).
 #[inline]
 fn is_ws_byte(c: u8) -> bool {
-    matches!(c, b'\t' | b'\n' | 0x0C | b'\r' | b' ')
+    matches!(c, b'\t' | b'\n' | b'\r' | b' ')
 }
 
 fn ws_prefix_len(s: &str) -> usize {
@@ -205,6 +213,7 @@ impl<'a> TreeBuilder<'a> {
             opts,
             errors: Vec::new(),
             span: (0, 0),
+            suppress: false,
             names: HashMap::new(),
             ns_html,
             ns_svg: Str::from(SVG_NS),
@@ -221,9 +230,7 @@ impl<'a> TreeBuilder<'a> {
     /// Runs the parser to the end of the input.
     pub fn run(&mut self) {
         loop {
-            self.tok.allow_cdata = self
-                .adjusted_current()
-                .is_some_and(|o| o.ns != Ns::Html);
+            self.tok.allow_cdata = self.adjusted_current().is_some_and(|o| o.ns != Ns::Html);
             let t = self.tok.next_token();
             let eof = matches!(t, Token::Eof { .. });
             self.dispatch(t);
@@ -247,10 +254,14 @@ impl<'a> TreeBuilder<'a> {
                 _ => State::Data,
             };
         }
-        let html = self.new_element_node(&Tag {
-            name: "html".into(),
-            ..Tag::default()
-        }, Ns::Html, "html");
+        let html = self.new_element_node(
+            &Tag {
+                name: "html".into(),
+                ..Tag::default()
+            },
+            Ns::Html,
+            "html",
+        );
         self.arena.raw_append(self.doc, html);
         let name = self.intern("html");
         self.stack.push(Open {
@@ -281,9 +292,10 @@ impl<'a> TreeBuilder<'a> {
     }
 
     fn dispatch(&mut self, t: Token) {
+        self.suppress = self.tok.last_at_eof;
         match t {
-            Token::Text { text, first, last } => {
-                self.span = (first, last);
+            Token::Text { text, first, end } => {
+                self.span = (first, end);
                 let mut s: &str = &text;
                 if self.skip_lf {
                     self.skip_lf = false;
@@ -302,7 +314,7 @@ impl<'a> TreeBuilder<'a> {
             }
             Token::Tag(tag) => {
                 self.skip_lf = false;
-                self.span = (tag.name_first, tag.name_last);
+                self.span = (tag.name_first, tag.name_end);
                 if tag.end {
                     if self.use_html_rules_for_end() {
                         self.end_tag(tag);
@@ -315,9 +327,11 @@ impl<'a> TreeBuilder<'a> {
                     self.foreign_start(tag);
                 }
             }
-            Token::Comment { text, start } => {
+            Token::Comment { text, start, data } => {
                 self.skip_lf = false;
-                self.span = (start, start);
+                // PHP's span for comments ends one byte early (observed on
+                // PHP 8.5: `<!--xyz-->` at column 28 is reported as 28-29).
+                self.span = (data, data + text.len().saturating_sub(1));
                 if self.use_html_rules_for_text() || self.stack.is_empty() {
                     self.comment_in_mode(text, start);
                 } else {
@@ -327,11 +341,11 @@ impl<'a> TreeBuilder<'a> {
             }
             Token::Doctype(d) => {
                 self.skip_lf = false;
-                self.span = (d.kw_first, d.kw_last);
+                self.span = (d.kw_first, d.kw_end);
                 if self.adjusted_current().is_none_or(|o| o.ns == Ns::Html) {
                     self.doctype_in_mode(d);
                 } else {
-                    // Foreign content: parse error, ignored.
+                    self.err("doctype-token-foreign-content-mode");
                 }
             }
             Token::Eof { pos } => {
@@ -393,15 +407,24 @@ impl<'a> TreeBuilder<'a> {
         }
     }
 
+    /// The tag of an HTML element name (`search` is an ordinary element
+    /// for PHP, observed on PHP 8.5).
+    pub(crate) fn tag_t(&self, name: &str) -> T {
+        match T::from_name(name) {
+            T::Search if !self.opts.standard => T::Other,
+            t => t,
+        }
+    }
+
     // ----- errors and lines ------------------------------------------------------
 
     #[inline]
     fn err(&mut self, code: &'static str) {
-        if self.opts.collect_errors {
+        if self.opts.collect_errors && !self.suppress {
             self.errors.push(TreeError {
                 code,
                 first: self.span.0,
-                last: self.span.1,
+                end: self.span.1,
             });
         }
     }
@@ -481,6 +504,13 @@ impl<'a> TreeBuilder<'a> {
                     name = "definitionURL";
                 }
                 match foreign_attr_fix(name) {
+                    // PHP turns xml:lang and xml:space into plain `lang` and
+                    // `space` attributes (observed on PHP 8.5).
+                    Some((_, l, crate::tree::XML_NS)) if !self.opts.standard => QName {
+                        prefix: None,
+                        local: self.intern(l),
+                        ns: None,
+                    },
                     Some((p, l, n)) => QName {
                         prefix: p.map(|p| self.intern(p)),
                         local: self.intern(l),
@@ -509,7 +539,7 @@ impl<'a> TreeBuilder<'a> {
             }
             self.arena.raw_append_attr(el, at);
         }
-        if ns == Ns::Html && local == "template" {
+        if ns == Ns::Html && local == "template" && self.ns_html.is_some() {
             let frag = self.arena.create(owner, NodeData::Fragment);
             if let Some(e) = self.arena.element_mut(el) {
                 e.template_contents = Some(frag);
@@ -587,14 +617,15 @@ impl<'a> TreeBuilder<'a> {
         let html_ip = ns == Ns::Math
             && local == "annotation-xml"
             && tag.attr("encoding").is_some_and(|e| {
-                e.eq_ignore_ascii_case("text/html") || e.eq_ignore_ascii_case("application/xhtml+xml")
+                e.eq_ignore_ascii_case("text/html")
+                    || e.eq_ignore_ascii_case("application/xhtml+xml")
             });
         let name = self.intern(&local);
         self.stack.push(Open {
             node: el,
             ns,
             t: if ns == Ns::Html {
-                T::from_name(&local)
+                self.tag_t(&local)
             } else {
                 T::Other
             },
@@ -662,7 +693,9 @@ impl<'a> TreeBuilder<'a> {
     }
 
     fn cur_is(&self, t: T) -> bool {
-        self.stack.last().is_some_and(|o| o.ns == Ns::Html && o.t == t)
+        self.stack
+            .last()
+            .is_some_and(|o| o.ns == Ns::Html && o.t == t)
     }
 
     fn pop(&mut self) -> Option<Open> {
@@ -756,7 +789,16 @@ impl<'a> TreeBuilder<'a> {
             if o.ns == Ns::Html
                 && matches!(
                     o.t,
-                    T::Dd | T::Dt | T::Li | T::Optgroup | T::Option | T::P | T::Rb | T::Rp | T::Rt | T::Rtc
+                    T::Dd
+                        | T::Dt
+                        | T::Li
+                        | T::Optgroup
+                        | T::Option
+                        | T::P
+                        | T::Rb
+                        | T::Rp
+                        | T::Rt
+                        | T::Rtc
                 )
                 && Some(o.t) != except
             {
@@ -896,7 +938,8 @@ impl<'a> TreeBuilder<'a> {
                 ..Tag::default()
             };
             let el = self.insert_html(&tag);
-            self.arena.node_mut(el).line = line;
+            // Recreated elements have no source line (observed on PHP 8.5).
+            let _ = line;
             if let Afe::El { node, .. } = &mut self.afe[i] {
                 *node = el;
             }
@@ -1013,7 +1056,7 @@ impl<'a> TreeBuilder<'a> {
                     ..Tag::default()
                 };
                 let new_el = self.new_element_node(&tag, Ns::Html, &name);
-                self.arena.node_mut(new_el).line = line;
+                let _ = line;
                 if let Afe::El { node: n, .. } = &mut self.afe[ai] {
                     *n = new_el;
                 }
@@ -1042,7 +1085,6 @@ impl<'a> TreeBuilder<'a> {
                 ..Tag::default()
             };
             let new_el = self.new_element_node(&tag, Ns::Html, &name);
-            self.arena.node_mut(new_el).line = line;
             while let Some(c) = self.arena.first_child(fb) {
                 self.arena.detach(c);
                 self.arena.raw_append(new_el, c);
@@ -1089,11 +1131,9 @@ impl<'a> TreeBuilder<'a> {
             }
             i -= 1;
             let last = i == 0;
-            let (ns, t) = if last && self.ctx.is_some() {
-                let c = self.ctx.as_ref().unwrap();
-                (c.ns, c.t)
-            } else {
-                (self.stack[i].ns, self.stack[i].t)
+            let (ns, t) = match &self.ctx {
+                Some(c) if last => (c.ns, c.t),
+                _ => (self.stack[i].ns, self.stack[i].t),
             };
             if ns != Ns::Html {
                 if last {

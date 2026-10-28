@@ -11,11 +11,11 @@
 //! ```
 //!
 //! `#script-on` tests are skipped (PHP parses with scripting disabled).
+//! The parser runs with `standard: true` (see `ParseOptions::standard`).
 
 use goro_xml::html5::{self, FragmentOptions, ParseOptions};
 use goro_xml::tree::{
-    Arena, DocKind, HTML_NS, MATHML_NS, NodeData, NodeId, QName, SVG_NS, XLINK_NS, XML_NS,
-    XMLNS_NS,
+    Arena, DocKind, HTML_NS, MATHML_NS, NodeData, NodeId, QName, SVG_NS, XLINK_NS, XML_NS, XMLNS_NS,
 };
 
 fn dump(arena: &Arena, n: NodeId, depth: usize, out: &mut String) {
@@ -100,10 +100,17 @@ fn parse_dat(text: &str) -> Vec<Case> {
                 break;
             }
             lines.next();
-            if l.starts_with('#') && matches!(
-                l,
-                "#errors" | "#new-errors" | "#document-fragment" | "#document" | "#script-off" | "#script-on"
-            ) {
+            if l.starts_with('#')
+                && matches!(
+                    l,
+                    "#errors"
+                        | "#new-errors"
+                        | "#document-fragment"
+                        | "#document"
+                        | "#script-off"
+                        | "#script-on"
+                )
+            {
                 section = l;
                 if l == "#script-off" {
                     script = Some(false);
@@ -149,6 +156,7 @@ fn run_case(c: &Case) -> String {
                 c.data.clone(),
                 &ParseOptions {
                     collect_errors: true,
+                    standard: true,
                     ..Default::default()
                 },
             );
@@ -177,6 +185,7 @@ fn run_case(c: &Case) -> String {
                 &c.data,
                 &FragmentOptions {
                     collect_errors: true,
+                    standard: true,
                 },
             );
             for k in arena.children(r.fragment).collect::<Vec<_>>() {

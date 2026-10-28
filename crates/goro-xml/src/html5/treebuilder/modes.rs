@@ -123,7 +123,10 @@ impl TreeBuilder<'_> {
         }
         let text = std::mem::take(&mut self.pending_table_text);
         if self.pending_table_text_nonws {
-            self.err("characters-in-table-text");
+            // Not reported inside templates (observed on PHP 8.5).
+            if !self.cur_is(T::Template) {
+                self.err("characters-in-table-text");
+            }
             self.foster = true;
             self.reconstruct_afe();
             self.insert_text(&text, self.span.0);
@@ -220,8 +223,8 @@ impl TreeBuilder<'_> {
                         self.orig_mode = self.mode;
                         self.mode = Mode::InTableText;
                     } else {
-                        // Anything else: foster parenting through "in body".
-                        self.err("unexpected-token");
+                        // Anything else: foster parenting through "in body"
+                        // (PHP reports nothing).
                         self.foster = true;
                         self.body_text(s, first);
                         self.foster = false;
@@ -230,6 +233,7 @@ impl TreeBuilder<'_> {
                 }
                 Mode::InTableText => {
                     if s.contains('\0') {
+                        self.err("null-character");
                         owned = s.replace('\0', "");
                         s = &owned;
                     }
@@ -249,7 +253,7 @@ impl TreeBuilder<'_> {
                         }
                     }
                     if !self.cur_is(T::Colgroup) {
-                        self.err("unexpected-token");
+                        self.err("missing-element-in-open-elements-stack");
                         // Ignore one character at a time; whitespace among
                         // the rest is also handled here.
                         let c = s.chars().next().unwrap();
@@ -261,6 +265,7 @@ impl TreeBuilder<'_> {
                 }
                 Mode::InSelect | Mode::InSelectInTable => {
                     if s.contains('\0') {
+                        self.err("null-character");
                         owned = s.replace('\0', "");
                         s = &owned;
                     }
@@ -280,7 +285,10 @@ impl TreeBuilder<'_> {
                     self.mode = Mode::InBody;
                 }
                 Mode::InFrameset | Mode::AfterFrameset => {
-                    let ws: String = s.chars().filter(|c| c.is_ascii_whitespace()).collect();
+                    let ws: String = s
+                        .chars()
+                        .filter(|&c| c.is_ascii() && super::is_ws_byte(c as u8))
+                        .collect();
                     if ws.len() != s.len() {
                         self.err("unexpected-token");
                     }
@@ -288,7 +296,10 @@ impl TreeBuilder<'_> {
                     return;
                 }
                 Mode::AfterAfterFrameset => {
-                    let ws: String = s.chars().filter(|c| c.is_ascii_whitespace()).collect();
+                    let ws: String = s
+                        .chars()
+                        .filter(|&c| c.is_ascii() && super::is_ws_byte(c as u8))
+                        .collect();
                     if ws.len() != s.len() {
                         self.err("unexpected-token");
                     }
@@ -302,6 +313,7 @@ impl TreeBuilder<'_> {
     fn body_text(&mut self, s: &str, first: usize) {
         let owned;
         let s = if s.contains('\0') {
+            self.err("null-character");
             owned = s.replace('\0', "");
             &owned
         } else {
@@ -319,7 +331,7 @@ impl TreeBuilder<'_> {
 
     pub(super) fn foreign_text(&mut self, s: &str, first: usize) {
         if s.contains('\0') {
-            self.err("unexpected-null-character");
+            self.err("null-character");
             let r = s.replace('\0', "\u{FFFD}");
             self.insert_text(&r, first);
             if !s.bytes().all(|c| c == 0 || super::is_ws_byte(c)) {
@@ -352,13 +364,17 @@ impl TreeBuilder<'_> {
 
     pub(super) fn doctype_in_mode(&mut self, d: Box<Doctype>) {
         self.flush_table_text_if_pending();
+        if self.mode == Mode::InColumnGroup && self.cur_is(T::Colgroup) {
+            self.pop();
+            self.mode = Mode::InTable;
+        }
         match self.mode {
             Mode::Initial => {
+                // PHP only checks the name and the public identifier
+                // (observed on PHP 8.5: `<!DOCTYPE html SYSTEM "x">` and
+                // `<!DOCTYPE html PUBLIC "">` are not reported).
                 let bad = d.name.as_deref() != Some("html")
-                    || d.public_id.is_some()
-                    || d.system_id
-                        .as_deref()
-                        .is_some_and(|s| s != "about:legacy-compat");
+                    || d.public_id.as_deref().is_some_and(|p| !p.is_empty());
                 if bad {
                     self.err("bad-doctype-token-in-initial-mode");
                 }
@@ -380,15 +396,27 @@ impl TreeBuilder<'_> {
                 self.quirks = doctype_quirks(&d);
                 self.mode = Mode::BeforeHtml;
             }
-            Mode::InBody => self.err("doctype-token-in-body-mode"),
+            Mode::InBody
+            | Mode::InCaption
+            | Mode::InCell
+            | Mode::InTemplate
+            | Mode::AfterAfterBody
+            | Mode::AfterAfterFrameset
+            | Mode::Text => self.err("doctype-token-in-body-mode"),
             Mode::InHead => self.err("doctype-token-in-head-mode"),
+            Mode::InHeadNoscript => self.err("doctype-token-in-head-noscript-mode"),
             Mode::BeforeHtml => self.err("doctype-token-in-before-html-mode"),
             Mode::BeforeHead => self.err("doctype-token-in-before-head-mode"),
-            Mode::AfterHead => self.err("doctype-token-in-after-head-mode"),
-            Mode::AfterAfterBody | Mode::AfterAfterFrameset => {
-                self.err("doctype-token-in-body-mode")
-            }
-            _ => self.err("unexpected-token"),
+            Mode::AfterHead => self.err("doctype-token-after-head-mode"),
+            Mode::InTable
+            | Mode::InTableText
+            | Mode::InColumnGroup
+            | Mode::InTableBody
+            | Mode::InRow => self.err("doctype-token-in-table-mode"),
+            Mode::InSelect | Mode::InSelectInTable => self.err("doctype-token-in-select-mode"),
+            Mode::AfterBody => self.err("doctype-token-after-body-mode"),
+            Mode::InFrameset => self.err("doctype-token-in-frameset-mode"),
+            Mode::AfterFrameset => self.err("doctype-token-after-frameset-mode"),
         }
     }
 
@@ -480,7 +508,7 @@ impl TreeBuilder<'_> {
 
     pub(super) fn start_tag(&mut self, mut tag: Tag) {
         self.flush_table_text_if_pending();
-        let mut t = T::from_name(&tag.name);
+        let mut t = self.tag_t(&tag.name);
         loop {
             let flow = match self.mode {
                 Mode::Initial => {
@@ -576,7 +604,7 @@ impl TreeBuilder<'_> {
                         f
                     }
                     T::Head => {
-                        self.err("unexpected-token");
+                        self.err("head-token-after-head-mode");
                         Done
                     }
                     _ => {
@@ -619,7 +647,7 @@ impl TreeBuilder<'_> {
                     T::Template => self.in_head_start(&mut tag, t),
                     _ => {
                         if !self.cur_is(T::Colgroup) {
-                            self.err("unexpected-token");
+                            self.err("missing-element-in-open-elements-stack");
                             Done
                         } else {
                             self.pop();
@@ -647,7 +675,7 @@ impl TreeBuilder<'_> {
                             || self.in_scope(T::Thead, Scope::Table)
                             || self.in_scope(T::Tfoot, Scope::Table))
                         {
-                            self.err("unexpected-token");
+                            self.err("missing-element-in-scope");
                             Done
                         } else {
                             self.clear_to_table_body_context();
@@ -666,13 +694,7 @@ impl TreeBuilder<'_> {
                         self.afe.push(Afe::Marker);
                         Done
                     }
-                    T::Caption
-                    | T::Col
-                    | T::Colgroup
-                    | T::Tbody
-                    | T::Tfoot
-                    | T::Thead
-                    | T::Tr => {
+                    T::Caption | T::Col | T::Colgroup | T::Tbody | T::Tfoot | T::Thead | T::Tr => {
                         if !self.in_scope(T::Tr, Scope::Table) {
                             self.err("unexpected-token");
                             Done
@@ -1094,7 +1116,7 @@ impl TreeBuilder<'_> {
             T::Nobr => {
                 self.reconstruct_afe();
                 if self.in_scope(T::Nobr, Scope::Default) {
-                    self.err("unexpected-token");
+                    self.err("unexpected-element-in-scope");
                     self.adoption_agency("nobr", T::Nobr);
                     self.reconstruct_afe();
                 }
@@ -1219,9 +1241,9 @@ impl TreeBuilder<'_> {
             T::Rp | T::Rt => {
                 if self.in_scope(T::Ruby, Scope::Default) {
                     self.generate_implied_end_tags(Some(T::Rtc));
-                    if !(self.cur_is(T::Rtc) || self.cur_is(T::Ruby)) {
-                        self.err("missing-element-in-open-elements-stack");
-                    }
+                    // PHP reports this whatever the current node is
+                    // (observed on PHP 8.5: `<ruby><rt>`).
+                    self.err("missing-element-in-open-elements-stack");
                 }
                 self.insert_html(tag);
                 Done
@@ -1231,6 +1253,9 @@ impl TreeBuilder<'_> {
                 let ns = if *t == T::Math { Ns::Math } else { Ns::Svg };
                 self.insert_element(tag, ns);
                 if tag.self_closing {
+                    // Reported by PHP although the flag is acknowledged
+                    // (observed on PHP 8.5: `<svg/>`).
+                    self.err("non-void-html-element-start-tag-with-trailing-solidus");
                     self.pop();
                 }
                 Done
@@ -1284,10 +1309,7 @@ impl TreeBuilder<'_> {
     fn clear_to_table_body_context(&mut self) {
         while let Some(o) = self.stack.last() {
             if o.ns == Ns::Html
-                && matches!(
-                    o.t,
-                    T::Tbody | T::Tfoot | T::Thead | T::Template | T::Html
-                )
+                && matches!(o.t, T::Tbody | T::Tfoot | T::Thead | T::Template | T::Html)
             {
                 break;
             }
@@ -1317,7 +1339,7 @@ impl TreeBuilder<'_> {
     fn close_cell(&mut self) {
         self.generate_implied_end_tags(None);
         if !(self.cur_is(T::Td) || self.cur_is(T::Th)) {
-            self.err("unexpected-element-in-open-elements-stack");
+            self.err("missing-element-in-open-elements-stack");
         }
         while let Some(o) = self.stack.pop() {
             if o.ns == Ns::Html && matches!(o.t, T::Td | T::Th) {
@@ -1465,7 +1487,7 @@ impl TreeBuilder<'_> {
 
     pub(super) fn end_tag(&mut self, tag: Tag) {
         self.flush_table_text_if_pending();
-        let t = T::from_name(&tag.name);
+        let t = self.tag_t(&tag.name);
         loop {
             let flow = match self.mode {
                 Mode::Initial => {
@@ -1494,25 +1516,29 @@ impl TreeBuilder<'_> {
                         Again
                     }
                     _ => {
-                        self.err("unexpected-closed-token-in-before-head-mode");
+                        // Sic (observed on PHP 8.5).
+                        self.err("unexpected-closed_token-in-before-head-mode");
                         Done
                     }
                 },
                 Mode::InHead => self.in_head_end(&tag, t),
                 Mode::InHeadNoscript => match t {
                     T::Noscript => {
+                        // PHP reports every `</noscript>` here (observed on
+                        // PHP 8.5).
+                        self.err("unexpected-token");
                         self.pop();
                         self.mode = Mode::InHead;
                         Done
                     }
                     T::Br => {
-                        self.err("unexpected-closed-token");
+                        self.err("unexpected-token");
                         self.pop();
                         self.mode = Mode::InHead;
                         Again
                     }
                     _ => {
-                        self.err("unexpected-closed-token");
+                        self.err("unexpected-token");
                         Done
                     }
                 },
@@ -1572,7 +1598,7 @@ impl TreeBuilder<'_> {
                 Mode::InColumnGroup => match t {
                     T::Colgroup => {
                         if !self.cur_is(T::Colgroup) {
-                            self.err("unexpected-closed-token");
+                            self.err("missing-element-in-open-elements-stack");
                         } else {
                             self.pop();
                             self.mode = Mode::InTable;
@@ -1586,7 +1612,7 @@ impl TreeBuilder<'_> {
                     T::Template => self.in_head_end(&tag, t),
                     _ => {
                         if !self.cur_is(T::Colgroup) {
-                            self.err("unexpected-closed-token");
+                            self.err("missing-element-in-open-elements-stack");
                             Done
                         } else {
                             self.pop();
@@ -1598,7 +1624,7 @@ impl TreeBuilder<'_> {
                 Mode::InTableBody => match t {
                     T::Tbody | T::Tfoot | T::Thead => {
                         if !self.in_scope(t, Scope::Table) {
-                            self.err("unexpected-closed-token");
+                            self.err("missing-element-in-scope");
                         } else {
                             self.clear_to_table_body_context();
                             self.pop();
@@ -1611,7 +1637,7 @@ impl TreeBuilder<'_> {
                             || self.in_scope(T::Thead, Scope::Table)
                             || self.in_scope(T::Tfoot, Scope::Table))
                         {
-                            self.err("unexpected-closed-token");
+                            self.err("missing-element-in-scope");
                             Done
                         } else {
                             self.clear_to_table_body_context();
@@ -1646,7 +1672,7 @@ impl TreeBuilder<'_> {
                     }
                     T::Table => {
                         if !self.in_scope(T::Tr, Scope::Table) {
-                            self.err("unexpected-closed-token");
+                            self.err("unexpected-token");
                             Done
                         } else {
                             self.clear_to_row_context();
@@ -1681,7 +1707,7 @@ impl TreeBuilder<'_> {
                         } else {
                             self.generate_implied_end_tags(None);
                             if !self.cur_is(t) {
-                                self.err("unexpected-element-in-open-elements-stack");
+                                self.err("missing-element-in-open-elements-stack");
                             }
                             self.pop_until(t);
                             self.clear_afe_to_marker();
@@ -1742,7 +1768,7 @@ impl TreeBuilder<'_> {
                         Done
                     }
                     _ => {
-                        self.err("unexpected-closed-token");
+                        self.err("unexpected-token");
                         self.mode = Mode::InBody;
                         Again
                     }
@@ -1750,7 +1776,7 @@ impl TreeBuilder<'_> {
                 Mode::InFrameset => match t {
                     T::Frameset => {
                         if self.stack.len() == 1 {
-                            self.err("unexpected-closed-token");
+                            self.err("unexpected-token");
                         } else {
                             self.pop();
                             if !self.is_fragment() && !self.cur_is(T::Frameset) {
@@ -1760,7 +1786,7 @@ impl TreeBuilder<'_> {
                         Done
                     }
                     _ => {
-                        self.err("unexpected-closed-token");
+                        self.err("unexpected-token");
                         Done
                     }
                 },
@@ -1770,17 +1796,17 @@ impl TreeBuilder<'_> {
                         Done
                     }
                     _ => {
-                        self.err("unexpected-closed-token");
+                        self.err("unexpected-token");
                         Done
                     }
                 },
                 Mode::AfterAfterBody => {
-                    self.err("unexpected-closed-token");
+                    self.err("unexpected-token");
                     self.mode = Mode::InBody;
                     Again
                 }
                 Mode::AfterAfterFrameset => {
-                    self.err("unexpected-closed-token");
+                    self.err("unexpected-token");
                     Done
                 }
             };
@@ -1809,7 +1835,7 @@ impl TreeBuilder<'_> {
                 }
                 self.generate_all_implied_end_tags();
                 if !self.cur_is(T::Template) {
-                    self.err("unexpected-element-in-open-elements-stack");
+                    self.err("template-element-is-not-current-in-head-mode");
                 }
                 self.pop_until(T::Template);
                 self.clear_afe_to_marker();
@@ -1818,7 +1844,7 @@ impl TreeBuilder<'_> {
                 Done
             }
             _ => {
-                self.err("unexpected-closed-token");
+                self.err("unexpected-closed-token-in-head-mode");
                 Done
             }
         }
@@ -1828,7 +1854,7 @@ impl TreeBuilder<'_> {
         // "If the stack of open elements does not have a body element in
         // scope, this is a parse error; ignore the token."
         if !self.in_scope(T::Body, Scope::Default) {
-            self.err("unexpected-closed-token");
+            self.err("no-body-element-in-scope");
             return false;
         }
         true
@@ -1976,7 +2002,7 @@ impl TreeBuilder<'_> {
             | T::Tt
             | T::U => {
                 if !self.adoption_agency(&tag.name, t) {
-                    self.any_other_end_tag(&tag.name);
+                    self.any_other_end_tag(&tag.name, false);
                 }
                 Done
             }
@@ -1994,25 +2020,28 @@ impl TreeBuilder<'_> {
                 Done
             }
             T::Br => {
-                self.err("unexpected-closed-token");
+                // Not reported by PHP (observed on PHP 8.5: `</br>`).
                 let mut tag2 = Tag {
                     name: "br".into(),
                     start: tag.start,
                     name_first: tag.name_first,
-                    name_last: tag.name_last,
+                    name_end: tag.name_end,
                     ..Tag::default()
                 };
                 let mut tt = T::Br;
                 self.in_body_start(&mut tag2, &mut tt)
             }
             _ => {
-                self.any_other_end_tag(&tag.name);
+                self.any_other_end_tag(&tag.name, true);
                 Done
             }
         }
     }
 
-    fn any_other_end_tag(&mut self, name: &str) {
+    /// "Any other end tag" in body; `report` is false when coming from the
+    /// adoption agency algorithm (PHP reports nothing then, observed on PHP
+    /// 8.5: `<p></b>`).
+    fn any_other_end_tag(&mut self, name: &str, report: bool) {
         let mut i = self.stack.len();
         while i > 0 {
             i -= 1;
@@ -2057,8 +2086,9 @@ impl TreeBuilder<'_> {
                 Ns::Svg => matches!(&*o.name, "foreignObject" | "desc" | "title"),
             };
             if special {
-                // PHP reports nothing for this parse error (observed on
-                // PHP 8.5: `<body></b>`).
+                if report {
+                    self.err("unexpected-closed-token");
+                }
                 return;
             }
         }
@@ -2112,7 +2142,7 @@ impl TreeBuilder<'_> {
                 if self.cur_is(T::Optgroup) {
                     self.pop();
                 } else {
-                    self.err("unexpected-closed-token");
+                    self.err("unexpected-element-in-open-elements-stack");
                 }
                 Done
             }
@@ -2120,7 +2150,7 @@ impl TreeBuilder<'_> {
                 if self.cur_is(T::Option) {
                     self.pop();
                 } else {
-                    self.err("unexpected-closed-token");
+                    self.err("unexpected-element-in-open-elements-stack");
                 }
                 Done
             }
@@ -2184,7 +2214,9 @@ impl TreeBuilder<'_> {
 
     pub(super) fn foreign_end(&mut self, tag: Tag) {
         self.flush_table_text_if_pending();
-        if tag.name == "br" || tag.name == "p" {
+        // `</br>` and `</p>` get no special treatment in foreign content
+        // (observed on PHP 8.5: `<svg></p>` puts a `p` inside the `svg`).
+        if self.opts.standard && (tag.name == "br" || tag.name == "p") {
             self.err("unexpected-closed-token");
             self.pop_to_html_or_ip();
             self.end_tag(tag);
@@ -2192,7 +2224,7 @@ impl TreeBuilder<'_> {
         }
         let mut i = self.stack.len() - 1;
         if !self.stack[i].name.eq_ignore_ascii_case(&tag.name) {
-            self.err("unexpected-closed-token");
+            self.err("unexpected-element-in-open-elements-stack");
         }
         loop {
             if i == 0 {

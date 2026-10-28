@@ -103,6 +103,11 @@ pub struct ParseOptions {
     /// Collect parse errors (false for `LIBXML_NOERROR`, which also makes
     /// parsing a bit faster).
     pub collect_errors: bool,
+    /// Follow the current WHATWG standard where PHP 8.5 behaves
+    /// differently (`<search>` element, `</p>` and `</br>` in foreign
+    /// content, `xml:lang` on foreign elements, comments with `--!`).
+    /// Off by default; the html5lib-tests runner turns it on.
+    pub standard: bool,
 }
 
 /// The result of [`parse_document`].
@@ -139,11 +144,13 @@ pub fn parse_document_str(arena: &mut Arena, input: String, opts: &ParseOptions)
     }
     let mut tok = tokenizer::Tokenizer::new(tokenizer::preprocess(input));
     tok.collect_errors = opts.collect_errors;
+    tok.standard = opts.standard;
     let bopts = BuildOptions {
         no_default_ns: opts.no_default_ns,
         collect_errors: opts.collect_errors,
         scripting: false,
         no_implied: opts.no_implied,
+        standard: opts.standard,
     };
     let mut tb = TreeBuilder::new(arena, doc, doc, tok, bopts);
     tb.run();
@@ -201,7 +208,6 @@ fn collect_errors(tb: &TreeBuilder<'_>) -> Vec<ParseError> {
     }
     for e in &tb.errors {
         offs.push(e.first);
-        offs.push(e.last);
     }
     offs.sort_unstable();
     offs.dedup();
@@ -235,13 +241,16 @@ fn collect_errors(tb: &TreeBuilder<'_>) -> Vec<ParseError> {
     }
     for e in &tb.errors {
         let (l, c) = lookup(e.first);
-        let (_, c2) = lookup(e.last);
+        // PHP's end column is the start column plus the length of the
+        // token in bytes, minus one (observed on PHP 8.5: the tag name
+        // `a\u{100000}` at column 2 is reported as 2-6).
+        let len = e.end.saturating_sub(e.first) as u32;
         out.push(ParseError {
             kind: ErrorKind::Tree,
             code: e.code,
             line: l,
             column: c,
-            column_end: c2.max(c),
+            column_end: (c + len.saturating_sub(1)).max(c),
         });
     }
     out
@@ -252,6 +261,8 @@ fn collect_errors(tb: &TreeBuilder<'_>) -> Vec<ParseError> {
 pub struct FragmentOptions {
     /// Collect parse errors.
     pub collect_errors: bool,
+    /// See [`ParseOptions::standard`].
+    pub standard: bool,
 }
 
 /// The result of [`parse_fragment`].
@@ -283,9 +294,7 @@ pub fn parse_fragment(
         NodeData::Document(d) => d.quirks,
         _ => QuirksMode::NoQuirks,
     };
-    let no_default_ns = arena
-        .element(context)
-        .is_some_and(|e| e.name.ns.is_none());
+    let no_default_ns = arena.element(context).is_some_and(|e| e.name.ns.is_none());
     let (ns, local): (Ns, Str) = match arena.element(context) {
         Some(e) => {
             let ns = match e.name.ns.as_deref() {
@@ -298,25 +307,28 @@ pub fn parse_fragment(
         None => (Ns::Html, Str::from("body")),
     };
     let t = if ns == Ns::Html {
-        T::from_name(&local.to_ascii_lowercase())
+        match T::from_name(&local.to_ascii_lowercase()) {
+            T::Search if !opts.standard => T::Other,
+            t => t,
+        }
     } else {
         T::Other
     };
     let html_ip = ns == Ns::Math
         && &*local == "annotation-xml"
-        && arena
-            .get_attribute(context, "encoding")
-            .is_some_and(|v| {
-                v.eq_ignore_ascii_case("text/html")
-                    || v.eq_ignore_ascii_case("application/xhtml+xml")
-            });
+        && arena.get_attribute(context, "encoding").is_some_and(|v| {
+            v.eq_ignore_ascii_case("text/html") || v.eq_ignore_ascii_case("application/xhtml+xml")
+        });
     // Nearest form ancestor (inclusive) of the context.
     let mut form = None;
     let mut cur = Some(context);
     while let Some(c) = cur {
         if let Some(e) = arena.element(c)
             && &*e.name.local == "form"
-            && e.name.ns.as_deref().is_none_or(|n| n == crate::tree::HTML_NS)
+            && e.name
+                .ns
+                .as_deref()
+                .is_none_or(|n| n == crate::tree::HTML_NS)
         {
             form = Some(c);
             break;
@@ -326,11 +338,13 @@ pub fn parse_fragment(
     let scratch = arena.new_document(DocKind::Html5);
     let mut tok = tokenizer::Tokenizer::new(tokenizer::preprocess(input.to_string()));
     tok.collect_errors = opts.collect_errors;
+    tok.standard = opts.standard;
     let bopts = BuildOptions {
         no_default_ns,
         collect_errors: opts.collect_errors,
         scripting: false,
         no_implied: false,
+        standard: opts.standard,
     };
     let mut tb = TreeBuilder::new(arena, scratch, owner, tok, bopts);
     tb.init_fragment(
