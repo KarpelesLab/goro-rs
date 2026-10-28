@@ -137,10 +137,7 @@ macro_rules! enter_simple_frame {
             at!((*d).line_hint).write(0);
             frames.set_len(frames.len() + 1);
         }
-        $vm.ex.top = super::TopFrame {
-            base,
-            code: code as *const FuncCode,
-        };
+        $vm.ex.top = super::TopFrame::of(base, code);
         $vm.ex.ip = 0;
     }};
 }
@@ -545,7 +542,12 @@ impl Vm {
                 }
             }
         };
-        self.push_callee(Callee::func(func), 0);
+        if func.is_native() {
+            self.push_callee(Callee::func(func), 0);
+        } else {
+            let scope = func.scope.get();
+            self.push_user(func, None, scope, scope, 0);
+        }
         Ok(())
     }
 
@@ -3081,10 +3083,7 @@ impl Vm {
             self.ex.frames.truncate(len - 1);
             match self.ex.frames.last() {
                 Some(top) => {
-                    self.ex.top = super::TopFrame {
-                        base: top.base,
-                        code: top.code,
-                    };
+                    self.ex.top = super::TopFrame::of(top.base, top.code);
                     self.ex.ip = top.ip as usize;
                 }
                 None => self.ex.top = super::TopFrame::default(),

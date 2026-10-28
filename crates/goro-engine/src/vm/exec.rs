@@ -140,6 +140,23 @@ impl Vm {
         }
     }
 
+    /// The operand's value when it is an int (not through a reference).
+    #[inline(always)]
+    pub(crate) fn peek_int(&self, r: Reg) -> Option<i64> {
+        if r & CONST != 0 {
+            let code = self.code_ref();
+            match unsafe { code.consts.get_unchecked((r & !CONST) as usize) } {
+                Value::Int(i) => Some(*i),
+                _ => None,
+            }
+        } else {
+            match unsafe { &*self.slot_ptr(r) } {
+                Some(Value::Int(i)) => Some(*i),
+                _ => None,
+            }
+        }
+    }
+
     /// The value of an operand, dereferenced: constants are cloned,
     /// temporaries moved out, variables copied (with PHP's warning for an
     /// undefined variable).
@@ -165,6 +182,29 @@ impl Vm {
                 Ok(Value::Null)
             }
         }
+    }
+
+    /// [`get`](Self::get) inlined for constants, temporaries and plain
+    /// scalars (the hot operands of sends, returns and assignments).
+    #[inline(always)]
+    pub(crate) fn get_hot(&mut self, r: Reg) -> R<Value> {
+        let p = self.slot_ptr(r);
+        if r & (CONST | TMP) == TMP {
+            return Ok(match unsafe { (*p).take() } {
+                Some(Value::Ref(rf)) => rf.get(),
+                Some(v) => v,
+                None => Value::Null,
+            });
+        }
+        if r & CONST == 0 {
+            match unsafe { &*p } {
+                Some(Value::Int(i)) => return Ok(Value::Int(*i)),
+                Some(Value::Float(f)) => return Ok(Value::Float(*f)),
+                Some(Value::Bool(b)) => return Ok(Value::Bool(*b)),
+                _ => {}
+            }
+        }
+        self.get(r)
     }
 
     /// Like [`get`](Self::get) but without the undefined-variable warning.
@@ -338,12 +378,13 @@ impl Vm {
                 self.run_pending_destructors()?;
             }
             let ip = self.ex.ip;
-            let op = unsafe { *self.code_ref().ops.get_unchecked(ip) };
+            // SAFETY: the running frame's code; ip stays within it.
+            let op = unsafe { &*self.ex.top.ops.add(ip) };
             self.ex.ip = ip + 1;
-            match op {
+            match *op {
                 Op::Nop | Op::Ticks => {}
                 Op::Assign { dst, src } => {
-                    let v = self.get(src)?;
+                    let v = self.get_hot(src)?;
                     self.assign_var(dst, v)?;
                 }
                 Op::AssignRes { dst, src, res } => {
@@ -374,12 +415,11 @@ impl Vm {
                     drop(old);
                 }
                 Op::Add { dst, a, b } => {
-                    if let (Some(Value::Int(x)), Some(Value::Int(y))) = (self.peek(a), self.peek(b))
-                    {
-                        match x.checked_add(*y) {
+                    if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
+                        match x.checked_add(y) {
                             Some(s) => self.put_int(dst, s),
                             None => {
-                                let f = *x as f64 + *y as f64;
+                                let f = x as f64 + y as f64;
                                 self.put(dst, Value::Float(f));
                             }
                         }
@@ -394,12 +434,11 @@ impl Vm {
                     }
                 }
                 Op::Sub { dst, a, b } => {
-                    if let (Some(Value::Int(x)), Some(Value::Int(y))) = (self.peek(a), self.peek(b))
-                    {
-                        match x.checked_sub(*y) {
+                    if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
+                        match x.checked_sub(y) {
                             Some(s) => self.put_int(dst, s),
                             None => {
-                                let f = *x as f64 - *y as f64;
+                                let f = x as f64 - y as f64;
                                 self.put(dst, Value::Float(f));
                             }
                         }
@@ -414,12 +453,11 @@ impl Vm {
                     }
                 }
                 Op::Mul { dst, a, b } => {
-                    if let (Some(Value::Int(x)), Some(Value::Int(y))) = (self.peek(a), self.peek(b))
-                    {
-                        match x.checked_mul(*y) {
+                    if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
+                        match x.checked_mul(y) {
                             Some(s) => self.put_int(dst, s),
                             None => {
-                                let f = *x as f64 * *y as f64;
+                                let f = x as f64 * y as f64;
                                 self.put(dst, Value::Float(f));
                             }
                         }
@@ -435,8 +473,7 @@ impl Vm {
                 }
                 Op::Concat { dst, a, b } => self.op_concat(dst, a, b)?,
                 Op::Lt { dst, a, b } => {
-                    if let (Some(Value::Int(x)), Some(Value::Int(y))) = (self.peek(a), self.peek(b))
-                    {
+                    if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
                         let r = x < y;
                         self.put_bool(dst, r);
                     } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
@@ -450,8 +487,7 @@ impl Vm {
                     }
                 }
                 Op::Le { dst, a, b } => {
-                    if let (Some(Value::Int(x)), Some(Value::Int(y))) = (self.peek(a), self.peek(b))
-                    {
+                    if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
                         let r = x <= y;
                         self.put_bool(dst, r);
                     } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
@@ -465,8 +501,7 @@ impl Vm {
                     }
                 }
                 Op::Eq { dst, a, b } => {
-                    if let (Some(Value::Int(x)), Some(Value::Int(y))) = (self.peek(a), self.peek(b))
-                    {
+                    if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
                         let r = x == y;
                         self.put_bool(dst, r);
                     } else {
@@ -474,8 +509,7 @@ impl Vm {
                     }
                 }
                 Op::Identical { dst, a, b } => {
-                    if let (Some(Value::Int(x)), Some(Value::Int(y))) = (self.peek(a), self.peek(b))
-                    {
+                    if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
                         let r = x == y;
                         self.put_bool(dst, r);
                     } else {
@@ -538,16 +572,16 @@ impl Vm {
                     }
                 }
                 Op::JmpLt { a, b, t } => {
-                    let r = if let (Some(Value::Int(x)), Some(Value::Int(y))) =
-                        (self.peek(a), self.peek(b))
-                    {
+                    let r = if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
                         x < y
                     } else {
                         let x = self.get(a)?;
                         let y = self.get(b)?;
-                        goro_runtime::compare::less(&x, &y, self).map_err(|e| self.php_error(e))?
+                        let r = goro_runtime::compare::less(&x, &y, self)
+                            .map_err(|e| self.php_error(e))?;
+                        self.check_deferred()?;
+                        r
                     };
-                    self.check_deferred()?;
                     if r {
                         self.ex.ip = t as usize;
                     }
@@ -610,7 +644,7 @@ impl Vm {
                     self.check_deferred()?;
                 }
                 Op::Return { src } => {
-                    let v = self.get(src)?;
+                    let v = self.get_hot(src)?;
                     if let Some(v) = self.do_return(v, false)? {
                         return Ok(v);
                     }
@@ -752,7 +786,7 @@ impl Vm {
                 } => self.op_init_static_call(class, name, nargs, cache)?,
                 Op::InitParentHook { name, set } => self.op_init_parent_hook(name, set)?,
                 Op::Send { src, arg } => {
-                    let v = self.get(src)?;
+                    let v = self.get_hot(src)?;
                     self.send_val(arg, v, false)?;
                 }
                 Op::SendValRef { src, arg } => {
