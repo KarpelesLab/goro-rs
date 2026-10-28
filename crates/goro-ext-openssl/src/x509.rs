@@ -476,11 +476,12 @@ impl Cert {
         crate::pem::encode("CERTIFICATE", &self.der)
     }
 
-    /// Decimal up to 64 bits, `0x`-prefixed hex beyond (observed on PHP
+    /// Decimal up to 128 bits, `0x`-prefixed hex beyond (observed on PHP
     /// 8.5; test openssl_csr_sign_with_serial_hex.phpt).
     pub fn serial_decimal(&self) -> String {
         let neg = self.serial.first().is_some_and(|b| b & 0x80 != 0);
-        if !neg && crate::key::strip(&self.serial).len() > 8 {
+        // 128-bit serials still print in decimal (test bug39217.phpt).
+        if !neg && crate::key::strip(&self.serial).len() > 16 {
             return format!("0x{}", signed_hex(&self.serial));
         }
         signed_decimal(&self.serial)
