@@ -26,5 +26,6 @@ purecrypto = { version = "0.10", default-features = false, features = [
     "x509",
     "pkcs12",
     "tls",
+    "tls-legacy",
     "linux-getrandom",
 ] }

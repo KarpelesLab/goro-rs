@@ -266,6 +266,7 @@ fn stream_fd(r: &ResRef) -> Result<Option<RawFd>, &'static str> {
         Backing::Stdin => Some(0),
         Backing::Stdout | Backing::Output => Some(1),
         Backing::Stderr => Some(2),
+        Backing::Native(n) => n.raw_fd(),
         _ => None,
     })
 }
@@ -1119,7 +1120,9 @@ fn stream_select(vm: &mut Vm, a: &mut Args) -> R<Value> {
                     .and_then(|d| d.downcast_ref::<RefCell<Stream>>())
                     .map(|c| {
                         let s = c.borrow();
-                        si == 0 && !s.pending.is_empty()
+                        si == 0
+                            && (!s.pending.is_empty()
+                                || matches!(&s.backing, Backing::Native(n) if n.buffered()))
                     })
                     .unwrap_or(false)
             };
