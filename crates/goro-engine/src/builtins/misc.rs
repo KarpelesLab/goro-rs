@@ -31,6 +31,14 @@ pub static MODULE: Module = Module {
             assert_options,
         ),
         (
+            "function getservbyname(string $service, string $protocol): int|false",
+            getservbyname,
+        ),
+        (
+            "function getservbyport(int $port, string $protocol): string|false",
+            getservbyport,
+        ),
+        (
             "function version_compare(string $version1, string $version2, ?string $operator = null): int|bool",
             version_compare,
         ),
@@ -669,4 +677,63 @@ pub(crate) fn const_deprecation(name: &[u8]) -> Option<&'static str> {
         n if n.starts_with(b"MHASH_") => "8.5, as the mhash*() functions were deprecated",
         _ => return None,
     })
+}
+
+// ---------------------------------------------------------------- services
+
+/// The entries of /etc/services: (name, port, protocol, aliases) (PHP
+/// manual: getservbyname() reads the system's services database).
+fn services() -> Vec<(Vec<u8>, i64, Vec<u8>, Vec<Vec<u8>>)> {
+    let Ok(data) = std::fs::read("/etc/services") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in data.split(|&c| c == b'\n') {
+        let line = match line.iter().position(|&c| c == b'#') {
+            Some(p) => &line[..p],
+            None => line,
+        };
+        let mut f = line
+            .split(|c| c.is_ascii_whitespace())
+            .filter(|w| !w.is_empty());
+        let (Some(name), Some(pp)) = (f.next(), f.next()) else {
+            continue;
+        };
+        let Some(slash) = pp.iter().position(|&c| c == b'/') else {
+            continue;
+        };
+        let Some(port) = std::str::from_utf8(&pp[..slash])
+            .ok()
+            .and_then(|p| p.parse::<i64>().ok())
+        else {
+            continue;
+        };
+        out.push((
+            name.to_vec(),
+            port,
+            pp[slash + 1..].to_vec(),
+            f.map(|w| w.to_vec()).collect(),
+        ));
+    }
+    out
+}
+
+fn getservbyname(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (svc, proto) = (a.bytes(0).to_vec(), a.bytes(1).to_vec());
+    for (name, port, p, aliases) in services() {
+        if p == proto && (name == svc || aliases.contains(&svc)) {
+            return Ok(Value::Int(port));
+        }
+    }
+    Ok(Value::Bool(false))
+}
+
+fn getservbyport(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let (port, proto) = (a.int(0), a.bytes(1).to_vec());
+    for (name, p, pr, _) in services() {
+        if p == port && pr == proto {
+            return Ok(sv(name));
+        }
+    }
+    Ok(Value::Bool(false))
 }
