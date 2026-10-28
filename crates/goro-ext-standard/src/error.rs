@@ -16,6 +16,10 @@ pub enum StdError {
     ArgumentCountError(String),
     /// `TypeError`.
     TypeError(String),
+    /// `DivisionByZeroError`.
+    DivisionByZeroError(String),
+    /// `ArithmeticError`.
+    ArithmeticError(String),
     /// An `E_ERROR` fatal error.
     Fatal(String),
 }
