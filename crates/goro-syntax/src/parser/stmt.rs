@@ -371,21 +371,21 @@ impl<'a> Parser<'a> {
                         T::AmpFollowedByVarOrVararg | T::AmpNotFollowedByVarOrVararg
                     ) && matches!(self.peek_at(2), T::String | T::Readonly)) =>
             {
-                let f = self.function_decl(start, &[])?;
+                let f = self.function_decl(&[])?;
                 Ok(self.stmt(StmtKind::Function(self.alloc(f)), start))
             }
             T::Abstract | T::Final => {
                 let mods = self.class_modifiers()?;
-                let c = self.class_decl(start, &[], mods)?;
+                let c = self.class_decl(&[], mods)?;
                 Ok(self.stmt(StmtKind::Class(self.alloc(c)), start))
             }
             T::Readonly if self.peek_at(1) != T::LParen => {
                 let mods = self.class_modifiers()?;
-                let c = self.class_decl(start, &[], mods)?;
+                let c = self.class_decl(&[], mods)?;
                 Ok(self.stmt(StmtKind::Class(self.alloc(c)), start))
             }
             T::Class | T::Interface | T::Trait | T::Enum => {
-                let c = self.class_decl(start, &[], Modifiers::default())?;
+                let c = self.class_decl(&[], Modifiers::default())?;
                 Ok(self.stmt(StmtKind::Class(self.alloc(c)), start))
             }
             T::Attribute => self.attributed_statement(start, top),
@@ -469,16 +469,16 @@ impl<'a> Parser<'a> {
                         T::AmpFollowedByVarOrVararg | T::AmpNotFollowedByVarOrVararg
                     ) && matches!(self.peek_at(2), T::String | T::Readonly)) =>
             {
-                let f = self.function_decl(start, attrs)?;
+                let f = self.function_decl(attrs)?;
                 Ok(self.stmt(StmtKind::Function(self.alloc(f)), start))
             }
             T::Abstract | T::Final | T::Readonly => {
                 let mods = self.class_modifiers()?;
-                let c = self.class_decl(start, attrs, mods)?;
+                let c = self.class_decl(attrs, mods)?;
                 Ok(self.stmt(StmtKind::Class(self.alloc(c)), start))
             }
             T::Class | T::Interface | T::Trait | T::Enum => {
-                let c = self.class_decl(start, attrs, Modifiers::default())?;
+                let c = self.class_decl(attrs, Modifiers::default())?;
                 Ok(self.stmt(StmtKind::Class(self.alloc(c)), start))
             }
             T::Const if top => {
@@ -605,12 +605,11 @@ impl<'a> Parser<'a> {
     /// A `for` expression list. `(void) expr` is allowed (PHP 8.5),
     /// except as the last condition (observed on PHP 8.5: `for (;(void)
     /// true;)` expects ",").
-    fn for_exprs(&mut self, end: T, is_cond: bool) -> PResult<&'a [Expr<'a>]> {
+    fn for_exprs(&mut self, is_cond: bool) -> PResult<&'a [Expr<'a>]> {
         let mut v = self.bvec();
         // The list is optional: anything that cannot start one leaves it
         // empty (observed on PHP 8.5: `for (, ;;)` expects ";").
         if !super::expr::starts_expr(self.peek_kind()) && !self.at(T::VoidCast) {
-            let _ = end;
             return Ok(v.into_bump_slice());
         }
         loop {
@@ -644,11 +643,11 @@ impl<'a> Parser<'a> {
         let start = self.pos;
         self.bump();
         self.expect1(T::LParen)?;
-        let init = self.for_exprs(T::Semicolon, false)?;
+        let init = self.for_exprs(false)?;
         self.expect1(T::Semicolon)?;
-        let cond = self.for_exprs(T::Semicolon, true)?;
+        let cond = self.for_exprs(true)?;
         self.expect1(T::Semicolon)?;
-        let step = self.for_exprs(T::RParen, false)?;
+        let step = self.for_exprs(false)?;
         self.expect1(T::RParen)?;
         let (body, alt) = if self.eat(T::Colon) {
             let b = self.inner_statements(&[T::Endfor])?;

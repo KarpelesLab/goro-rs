@@ -245,8 +245,8 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Starts directly in PHP code (as `eval()` and `token_get_all()` do
-    /// not; used for `eval()`'d code).
+    /// Starts directly in PHP code, as for `eval()`'d code (files and
+    /// `token_get_all()` start in inline HTML).
     pub fn new_in_scripting(src: &'a [u8], opts: LexerOptions) -> Self {
         let mut l = Lexer::new(src, opts);
         l.state = State::Scripting;

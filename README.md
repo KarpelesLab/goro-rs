@@ -50,3 +50,8 @@ reported as SKIP for now.
 Fresh start. The previous code base is kept on the `old` branch for the
 record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
+
+- `goro-syntax`: lexer, parser and AST for PHP 8.5. The token stream
+  matches `token_get_all()`; every `--FILE--` section of the php-src
+  tests that PHP accepts parses, and the in-file parse errors the tests
+  expect come out with PHP's message and line (`tools/syntax-corpus.sh`).

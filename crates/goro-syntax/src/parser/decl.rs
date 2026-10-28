@@ -133,10 +133,8 @@ impl<'a> Parser<'a> {
         &self,
         mods: Modifiers,
         target: ModTarget,
-        first: &Token,
         span: Span,
     ) -> PResult<()> {
-        let _ = first;
         let bad = match target {
             ModTarget::Constant => {
                 mods.0
@@ -411,12 +409,10 @@ impl<'a> Parser<'a> {
     #[inline(never)]
     pub(crate) fn function_decl(
         &mut self,
-        start: usize,
         attrs: &'a [AttributeGroup<'a>],
     ) -> PResult<FunctionDecl<'a>> {
         // Reflection's start line is the `function` keyword's (observed on
         // PHP 8.5): the span starts there, after attributes.
-        let _ = start;
         let start = self.pos;
         let doc_comment = self.doc_comment_before(start);
         self.expect1(T::Function)?;
@@ -459,13 +455,11 @@ impl<'a> Parser<'a> {
     #[inline(never)]
     pub(crate) fn class_decl(
         &mut self,
-        start: usize,
         attrs: &'a [AttributeGroup<'a>],
         mods: Modifiers,
     ) -> PResult<ClassDecl<'a>> {
         // The span starts at the keyword (Reflection's start line, observed
         // on PHP 8.5).
-        let _ = start;
         let start = self.pos;
         let doc_comment = self.doc_comment_before(start);
         let kw = self.bump();
@@ -558,7 +552,7 @@ impl<'a> Parser<'a> {
         self.bump();
         let mut members = self.bvec();
         while !self.at(T::RBrace) {
-            members.push(self.class_member(kind)?);
+            members.push(self.class_member()?);
         }
         self.bump();
         Ok(ClassDecl {
@@ -576,7 +570,7 @@ impl<'a> Parser<'a> {
     }
 
     #[inline(never)]
-    fn class_member(&mut self, kind: ClassKind) -> PResult<ClassMember<'a>> {
+    fn class_member(&mut self) -> PResult<ClassMember<'a>> {
         let start = self.pos;
         if self.at(T::Use) {
             return Ok(ClassMember::TraitUse(self.trait_use()?));
@@ -587,7 +581,6 @@ impl<'a> Parser<'a> {
             &[]
         };
         if self.at(T::Case) {
-            let _ = kind;
             let doc_comment = self.doc_comment_before(self.pos);
             self.bump();
             let t = *self.peek();
@@ -620,7 +613,7 @@ impl<'a> Parser<'a> {
             T::Const => {
                 self.bump();
                 let sp = self.tok_span(&first);
-                self.check_member_modifiers(mods, ModTarget::Constant, &first, sp)?;
+                self.check_member_modifiers(mods, ModTarget::Constant, sp)?;
                 // `const T NAME = ...` (typed, PHP 8.3) or `const NAME = ...`.
                 let typed = {
                     let k0 = self.peek_kind();
@@ -676,7 +669,7 @@ impl<'a> Parser<'a> {
                 let doc_comment = self.doc_comment_before(fstart);
                 self.bump();
                 let sp = self.tok_span(&first);
-                self.check_member_modifiers(mods, ModTarget::Method, &first, sp)?;
+                self.check_member_modifiers(mods, ModTarget::Method, sp)?;
                 let by_ref = self.eat_amp();
                 let t = *self.peek();
                 if !(t.kind == T::String || t.kind.is_semi_reserved()) {
@@ -714,7 +707,7 @@ impl<'a> Parser<'a> {
             }
             k if mods.0 != 0 && (k == T::Variable || is_type_start(k)) => {
                 let sp = self.tok_span(&first);
-                self.check_member_modifiers(mods, ModTarget::Property, &first, sp)?;
+                self.check_member_modifiers(mods, ModTarget::Property, sp)?;
                 let ty = if self.at(T::Variable) {
                     None
                 } else {
