@@ -76,6 +76,9 @@ pub struct CharSet {
     pub high_all: bool,
     /// Precomputed: no code point >= 256 is in the set.
     pub high_none: bool,
+    /// Membership of code points 0..=255 as a lookup table (filled by
+    /// `finish`).
+    pub lut: [bool; 256],
 }
 
 impl Default for CharSet {
@@ -87,6 +90,7 @@ impl Default for CharSet {
             negated: false,
             high_all: false,
             high_none: true,
+            lut: [false; 256],
         }
     }
 }
@@ -94,13 +98,13 @@ impl Default for CharSet {
 impl CharSet {
     #[inline(always)]
     pub fn has_byte(&self, b: u8) -> bool {
-        self.bits[(b >> 6) as usize] >> (b & 63) & 1 != 0
+        self.lut[b as usize]
     }
 
     #[inline(always)]
     pub fn matches(&self, c: u32) -> bool {
         if c < 256 {
-            return self.bits[(c >> 6) as usize] >> (c & 63) & 1 != 0;
+            return self.lut[c as usize];
         }
         if self.high_none {
             return false;
@@ -127,6 +131,12 @@ impl CharSet {
         i > 0 && c <= r[i - 1].1
     }
 
+    /// No member is above 127 (the set matches single bytes in UTF-8).
+    #[inline(always)]
+    pub fn ascii_only(&self) -> bool {
+        self.high_none && self.bits[2] == 0 && self.bits[3] == 0
+    }
+
     pub fn set_bit(&mut self, c: u32) {
         self.bits[(c >> 6) as usize] |= 1 << (c & 63);
     }
@@ -149,6 +159,9 @@ impl CharSet {
 
     /// Computes `high_all` / `high_none` after building.
     pub fn finish(&mut self) {
+        for b in 0..256usize {
+            self.lut[b] = self.bits[b >> 6] >> (b & 63) & 1 != 0;
+        }
         self.ranges.sort_unstable();
         let mut merged: Vec<(u32, u32)> = Vec::with_capacity(self.ranges.len());
         for &(lo, hi) in &self.ranges {
@@ -373,6 +386,7 @@ impl ClassBuilder {
             negated,
             high_all: false,
             high_none: true,
+            lut: [false; 256],
         };
         set.finish();
         set

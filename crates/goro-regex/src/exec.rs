@@ -155,9 +155,9 @@ pub struct MatchData {
     pub mark: Option<Arc<[u8]>>,
 }
 
-struct Vm<'a> {
-    prog: &'a Prog,
-    s: &'a [u8],
+struct Vm<'p, 's> {
+    prog: &'p Prog,
+    s: &'s [u8],
     end: usize,
     utf: bool,
     start_offset: usize,
@@ -201,7 +201,7 @@ enum VerbAct {
     Then(usize),
 }
 
-impl<'a> Vm<'a> {
+impl Vm<'_, '_> {
     #[inline(always)]
     fn push(&mut self, sc: &mut Scratch, kind: u32, a: u32, b: usize, c: usize) {
         sc.bt.push(Bt { kind, a, b, c });
@@ -390,7 +390,7 @@ impl<'a> Vm<'a> {
         !self.utf
             || match item {
                 Item::Byte(_) | Item::Byte2(..) | Item::CodeUnit => true,
-                Item::Set(s) => s.high_none && (128..256).all(|b| !s.has_byte(b as u8)),
+                Item::Set(s) => s.ascii_only(),
                 _ => false,
             }
     }
@@ -424,14 +424,11 @@ impl<'a> Vm<'a> {
                     }
                 }
                 Item::Set(set) => {
-                    let bits = &set.bits;
-                    while pos < stop {
-                        let b = s[pos];
-                        if bits[(b >> 6) as usize] >> (b & 63) & 1 == 0 {
-                            break;
-                        }
-                        pos += 1;
-                    }
+                    let lut = &set.lut;
+                    pos += s[pos..stop]
+                        .iter()
+                        .position(|&b| !lut[b as usize])
+                        .unwrap_or(stop - pos);
                 }
                 Item::Any | Item::CodeUnit => pos = stop,
                 Item::AnyNoNl => {
@@ -466,6 +463,26 @@ impl<'a> Vm<'a> {
                 n += 1;
             }
             return (pos.min(end), n);
+        }
+        if let Item::Set(set) = item {
+            let lut = &set.lut;
+            while (n as usize) < limit && pos < end {
+                let b = s[pos];
+                if b < 0x80 {
+                    if !lut[b as usize] {
+                        break;
+                    }
+                    pos += 1;
+                } else {
+                    let (c, l) = utf8::decode(&s[..end], pos);
+                    if !set.matches(c) {
+                        break;
+                    }
+                    pos += l;
+                }
+                n += 1;
+            }
+            return (pos, n);
         }
         while (n as usize) < limit {
             match self.match_item(item, pos) {
@@ -901,6 +918,11 @@ impl<'a> Vm<'a> {
                     let Some(np) = self.match_item(item, e.c) else {
                         continue;
                     };
+                    let (count, np) = self.lazy_advance(e.a, count + 1, np);
+                    if self.count > self.limits.match_limit as u64 {
+                        return Err(MatchError::MatchLimit);
+                    }
+                    let count = count - 1;
                     if count + 1 < *max {
                         self.push_frame(sc, K_REP_LAZY, e.a, (count + 1) as usize, np)?;
                     } else {
@@ -988,6 +1010,35 @@ impl<'a> Vm<'a> {
                 _ => {}
             }
         }
+    }
+
+    /// For a lazy single-byte repeat followed by a literal byte, takes the
+    /// items that cannot be followed by that byte without trying the rest
+    /// of the pattern after each (counting each skipped try as PCRE2
+    /// would). Returns the new count and position.
+    #[inline]
+    fn lazy_advance(&mut self, rep_pc: Pc, mut count: u32, mut pos: usize) -> (u32, usize) {
+        let next = match self.prog.insts.get(rep_pc as usize + 1) {
+            Some(Inst::One(Item::Byte(b))) => *b,
+            Some(Inst::Lit(i)) => self.prog.lits[*i as usize][0],
+            _ => return (count, pos),
+        };
+        let Inst::Rep { item, max, .. } = &self.prog.insts[rep_pc as usize] else {
+            return (count, pos);
+        };
+        if !self.item_single_byte(item) {
+            return (count, pos);
+        }
+        let start = pos;
+        while count < *max && pos < self.end && self.s[pos] != next {
+            match self.match_item(item, pos) {
+                Some(p) => pos = p,
+                None => break,
+            }
+            count += 1;
+        }
+        self.count += (pos - start) as u64;
+        (count, pos)
     }
 
     /// For a greedy single-item repeat followed by a literal byte, moves the
@@ -1166,8 +1217,12 @@ impl<'a> Vm<'a> {
                             pc += 1;
                         }
                         Greed::Lazy => {
-                            if min < max {
-                                self.push_frame(sc, K_REP_LAZY, pc, min as usize, p)?;
+                            let (n, p) = self.lazy_advance(pc, min, p);
+                            if self.count > self.limits.match_limit as u64 {
+                                return Err(MatchError::MatchLimit);
+                            }
+                            if n < max {
+                                self.push_frame(sc, K_REP_LAZY, pc, n as usize, p)?;
                             }
                             pos = p;
                             pc += 1;
@@ -1569,6 +1624,200 @@ impl<'a> Vm<'a> {
                     && ms == self.start_offset))
     }
 
+    /// Matches a deterministic pattern at `start`. `run_end` receives the
+    /// end of the leading repeat's run (see [`OnePass::lead_run`]).
+    #[inline]
+    fn run_onepass(
+        &mut self,
+        op: &OnePass,
+        start: usize,
+        slots: &mut [usize],
+        run_end: &mut usize,
+    ) -> Result<Option<(usize, usize)>, MatchError> {
+        let Some(b) = op.back else {
+            return Ok(self
+                .onepass_steps(op, 0, op.steps.len(), start, start, slots, run_end, UNSET)
+                .map(|(pos, keep)| (if keep == UNSET { start } else { keep }, pos)));
+        };
+        let Some((pos, keep)) = self.onepass_steps(op, 0, b, start, start, slots, run_end, UNSET)
+        else {
+            return Ok(None);
+        };
+        let OpStep::BackRep {
+            item,
+            min,
+            max,
+            lazy,
+        } = &op.steps[b]
+        else {
+            unreachable!()
+        };
+        let (min, max) = (*min, *max);
+        let single = self.item_single_byte(item);
+        // The first byte the rest of the pattern needs, if known.
+        let next = match op.steps.get(b + 1) {
+            Some(OpStep::One(Item::Byte(x))) => Some(*x),
+            Some(OpStep::Lit(i)) => Some(self.prog.lits[*i as usize][0]),
+            _ => None,
+        };
+        self.count = op.frames as u64;
+        let limit = self.limits.match_limit as u64;
+        let n_steps = op.steps.len();
+        let finish = |me: usize, k: usize| (if k == UNSET { start } else { k }, me);
+        if !*lazy {
+            let (pmax, n) = self.scan_items(item, pos, max);
+            if Some(b) == op.lead_run {
+                *run_end = pmax;
+            }
+            if n < min {
+                return Ok(None);
+            }
+            let min_pos = if single {
+                pos + min as usize
+            } else {
+                self.scan_items(item, pos, min).0
+            };
+            let mut e = pmax;
+            loop {
+                if let Some(nb) = next {
+                    while e > min_pos && (e >= self.end || self.s[e] != nb) {
+                        e = if single {
+                            e - 1
+                        } else {
+                            utf8::prev_start(self.s, e)
+                        };
+                        self.count += 1;
+                    }
+                }
+                self.count += 1;
+                if self.count > limit {
+                    return Err(MatchError::MatchLimit);
+                }
+                if let Some((me, k)) =
+                    self.onepass_steps(op, b + 1, n_steps, e, start, slots, run_end, keep)
+                {
+                    let (ms, me) = finish(me, k);
+                    if !self.reject_empty(ms, me) {
+                        return Ok(Some((ms, me)));
+                    }
+                }
+                if e <= min_pos {
+                    return Ok(None);
+                }
+                e = if single {
+                    e - 1
+                } else {
+                    utf8::prev_start(self.s, e)
+                };
+            }
+        }
+        let (mut e, mut n) = self.scan_items(item, pos, min);
+        if n < min {
+            return Ok(None);
+        }
+        loop {
+            if let Some(nb) = next
+                && single
+            {
+                while n < max && e < self.end && self.s[e] != nb {
+                    match self.match_item(item, e) {
+                        Some(p) => e = p,
+                        None => break,
+                    }
+                    n += 1;
+                    self.count += 1;
+                }
+            }
+            self.count += 1;
+            if self.count > limit {
+                return Err(MatchError::MatchLimit);
+            }
+            if let Some((me, k)) =
+                self.onepass_steps(op, b + 1, n_steps, e, start, slots, run_end, keep)
+            {
+                let (ms, me) = finish(me, k);
+                if !self.reject_empty(ms, me) {
+                    return Ok(Some((ms, me)));
+                }
+            }
+            if n >= max {
+                return Ok(None);
+            }
+            match self.match_item(item, e) {
+                Some(p) => e = p,
+                None => return Ok(None),
+            }
+            n += 1;
+        }
+    }
+
+    /// Runs deterministic steps `from..to` at `pos`; returns the end
+    /// position and the \K position.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn onepass_steps(
+        &self,
+        op: &OnePass,
+        from: usize,
+        to: usize,
+        mut pos: usize,
+        _start: usize,
+        slots: &mut [usize],
+        run_end: &mut usize,
+        mut keep: usize,
+    ) -> Option<(usize, usize)> {
+        for (k, st) in op.steps[from..to].iter().enumerate() {
+            let k = k + from;
+            match st {
+                OpStep::One(item) => pos = self.match_item(item, pos)?,
+                OpStep::Lit(i) => {
+                    let lit = &self.prog.lits[*i as usize];
+                    if pos + lit.len() > self.end || self.s[pos..pos + lit.len()] != **lit {
+                        return None;
+                    }
+                    pos += lit.len();
+                }
+                OpStep::LitFold(i) => {
+                    let lit = &self.prog.lits[*i as usize];
+                    let n = lit.len();
+                    if pos + n > self.end
+                        || !self.s[pos..pos + n]
+                            .iter()
+                            .zip(lit.iter())
+                            .all(|(a, b)| a | 0x20 == *b)
+                    {
+                        return None;
+                    }
+                    pos += n;
+                }
+                OpStep::Rep { item, min, max } => {
+                    let (p, n) = self.scan_items(item, pos, *max);
+                    if Some(k) == op.lead_run {
+                        *run_end = p;
+                    }
+                    if n < *min {
+                        return None;
+                    }
+                    pos = p;
+                }
+                OpStep::Open(g) => slots[self.open_base + *g as usize] = pos,
+                OpStep::Close(g) => {
+                    let g = *g as usize;
+                    slots[2 * g] = slots[self.open_base + g];
+                    slots[2 * g + 1] = pos;
+                }
+                OpStep::Assert(a) => {
+                    if !self.check_assert(*a, pos) {
+                        return None;
+                    }
+                }
+                OpStep::Keep => keep = pos,
+                OpStep::BackRep { .. } => unreachable!(),
+            }
+        }
+        Some((pos, keep))
+    }
+
     fn match_start(&self, sc: &Scratch, start: usize) -> usize {
         let k = sc.slots[self.keep_slot];
         if k == UNSET { start } else { k }
@@ -1649,6 +1898,20 @@ impl<'a> Vm<'a> {
     }
 }
 
+/// The first byte >= 0x80 at or after `p`.
+#[inline]
+fn find_high_bit(s: &[u8], mut p: usize) -> Option<usize> {
+    while p + 8 <= s.len() {
+        let w = u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
+        let m = w & 0x8080_8080_8080_8080;
+        if m != 0 {
+            return Some(p + (m.trailing_zeros() / 8) as usize);
+        }
+        p += 8;
+    }
+    (p..s.len()).find(|&q| s[q] >= 0x80)
+}
+
 fn numeric_digit_value(c: u32) -> u32 {
     // Decimal digits come in runs of ten starting at a code point whose
     // value is zero; find the start of the run.
@@ -1659,6 +1922,405 @@ fn numeric_digit_value(c: u32) -> u32 {
         k += 1;
     }
     (c - z) % 10
+}
+
+/// Matching state for one subject: set up once, then [`Searcher::find`]
+/// can be called repeatedly (the global matching loop of
+/// preg_match_all() and friends).
+pub struct Searcher<'p, 's> {
+    vm: Vm<'p, 's>,
+    /// The subject has been checked for valid UTF-8 from this offset on.
+    utf_checked_from: Option<usize>,
+}
+
+impl<'p, 's> Searcher<'p, 's> {
+    pub fn new(prog: &'p Prog, s: &'s [u8], limits: Limits) -> Searcher<'p, 's> {
+        let ncap = prog.ncap as usize;
+        let open_base = 2 * (ncap + 1);
+        let loop_base = open_base + ncap + 1;
+        let keep_slot = loop_base + prog.nloops as usize;
+        let nslots = keep_slot + 1;
+        let mut limits = limits;
+        if let Some(l) = prog.limit_match {
+            limits.match_limit = limits.match_limit.min(l);
+        }
+        if let Some(l) = prog.limit_depth {
+            limits.depth_limit = limits.depth_limit.min(l);
+        }
+        Searcher {
+            vm: Vm {
+                prog,
+                s,
+                end: s.len(),
+                utf: prog.utf,
+                start_offset: 0,
+                attempt_start: 0,
+                opts: MatchOptions::default(),
+                limits,
+                count: 0,
+                frames: 0,
+                mark: NO_MARK,
+                last_mark: NO_MARK,
+                open_base,
+                loop_base,
+                keep_slot,
+                nslots,
+            },
+            utf_checked_from: None,
+        }
+    }
+
+    /// PCRE2's UTF checks (pcre2unicode "Validity of UTF strings").
+    fn check_utf(&mut self, start_offset: usize, opts: MatchOptions) -> Result<(), MatchError> {
+        let s = self.vm.s;
+        let prog = self.vm.prog;
+        if start_offset < s.len() && s[start_offset] & 0xc0 == 0x80 {
+            return Err(MatchError::BadUtf8Offset);
+        }
+        if opts.no_utf_check {
+            return Ok(());
+        }
+        // Check from the longest lookbehind before the start offset.
+        let mut from = start_offset;
+        for _ in 0..prog.max_lookbehind {
+            if from == 0 {
+                break;
+            }
+            from -= 1;
+            while from > 0 && s[from] & 0xc0 == 0x80 {
+                from -= 1;
+            }
+        }
+        if self.utf_checked_from.is_some_and(|c| c <= from) {
+            return Ok(());
+        }
+        if let Err((e, off)) = utf8::validate(&s[from..]) {
+            return Err(MatchError::BadUtf8 {
+                error: e,
+                offset: from + off,
+            });
+        }
+        self.utf_checked_from = Some(from);
+        Ok(())
+    }
+
+    /// Where to try next after a failed attempt at `p` (pcre2api "Newline
+    /// handling when matching": a CRLF is skipped as a unit when the
+    /// pattern has no explicit CR or LF).
+    #[inline]
+    fn bump(&self, p: usize) -> usize {
+        let s = self.vm.s;
+        let prog = self.vm.prog;
+        let len = s.len();
+        let mut q = p + if self.vm.utf {
+            utf8::len_from_lead(s[p])
+        } else {
+            1
+        };
+        if matches!(
+            prog.newline,
+            Newline::CrLf | Newline::AnyCrLf | Newline::Any
+        ) && s[p] == b'\r'
+            && q < len
+            && s[q] == b'\n'
+            && !prog.has_cr_lf
+        {
+            q += 1;
+        }
+        q.min(len)
+    }
+
+    /// Finds the first match at or after `start_offset`.
+    pub fn find(
+        &mut self,
+        sc: &mut Scratch,
+        start_offset: usize,
+        opts: MatchOptions,
+        out_slots: &mut Vec<usize>,
+    ) -> Result<Option<MatchData>, MatchError> {
+        let s = self.vm.s;
+        let prog = self.vm.prog;
+        let len = s.len();
+        if start_offset > len {
+            return Err(MatchError::BadOffset);
+        }
+        let utf = prog.utf;
+        if utf {
+            self.check_utf(start_offset, opts)?;
+        }
+        let ncap = prog.ncap as usize;
+        let (open_base, keep_slot, nslots) = (self.vm.open_base, self.vm.keep_slot, self.vm.nslots);
+        if sc.slots.len() != nslots {
+            sc.slots.clear();
+            sc.slots.resize(nslots, UNSET);
+        } else {
+            // Only the captures and \K can hold values from a previous
+            // match (the other registers are written before they are read).
+            sc.slots[..open_base].fill(UNSET);
+            sc.slots[keep_slot] = UNSET;
+        }
+        if !sc.bt.is_empty() {
+            sc.bt.clear();
+        }
+        if !sc.calls.is_empty() || !sc.popped.is_empty() || !sc.arena.is_empty() {
+            sc.calls.clear();
+            sc.popped.clear();
+            sc.arena.clear();
+        }
+        let vm = &mut self.vm;
+        vm.end = len;
+        vm.start_offset = start_offset;
+        vm.opts = opts;
+        vm.mark = NO_MARK;
+        let limits = vm.limits;
+        let st = &prog.start;
+        let anchored = st.anchored || opts.anchored;
+        let mut p = start_offset;
+        let onepass = prog.onepass.as_ref().filter(|op| {
+            limits.match_limit > op.frames
+                && limits.depth_limit > op.frames
+                && (!op.has_greedy || (len as u64) < limits.match_limit as u64 / 2)
+        });
+        // Required byte: fail early when it is absent (pcre2pattern on the
+        // "last single character that is required for a match").
+        let mut req_pos: Option<usize> = None;
+        loop {
+            if len - p < st.min_len {
+                break;
+            }
+            if let Some(op) = onepass
+                && let (Some(lit), Some(li)) = (&op.lead_lit, op.lead_run)
+                && !anchored
+            {
+                // Find the literal, then the start of the run before it.
+                let found = match &op.lead_finder {
+                    Some(f) => f.find(&s[p..]),
+                    None => memchr::memchr(lit[0], &s[p..]),
+                };
+                let Some(k) = found else { break };
+                let q = p + k;
+                let (OpStep::Rep { item, min, .. } | OpStep::BackRep { item, min, .. }) =
+                    &op.steps[li]
+                else {
+                    unreachable!()
+                };
+                let mut r = q;
+                while r > p && self.vm.match_item(item, r - 1).is_some() {
+                    r -= 1;
+                }
+                if q - r < *min as usize {
+                    p = q + 1;
+                    continue;
+                }
+                let mut run_end = 0;
+                match self.vm.run_onepass(op, r, &mut sc.slots, &mut run_end)? {
+                    Some((ms, me)) if !self.vm.reject_empty(ms, me) => {
+                        out_slots.clear();
+                        out_slots.extend_from_slice(&sc.slots[..2 * (ncap + 1)]);
+                        out_slots[0] = ms;
+                        out_slots[1] = me;
+                        return Ok(Some(MatchData {
+                            start: ms,
+                            end: me,
+                            mark: None,
+                        }));
+                    }
+                    _ => {
+                        // Starts inside the run can only do worse.
+                        p = (q + 1).max(run_end + 1);
+                        continue;
+                    }
+                }
+            }
+            if !anchored {
+                if st.startline && p > 0 && !self.vm.newline_before(p) {
+                    // Advance to the next line start.
+                    let q = if prog.newline == Newline::Lf {
+                        match memchr::memchr(b'\n', &s[p..]) {
+                            Some(k) => p + k + 1,
+                            None => len,
+                        }
+                    } else {
+                        let mut q = p + 1;
+                        while q < len && !self.vm.newline_before(q) {
+                            q += 1;
+                        }
+                        q
+                    };
+                    if q >= len {
+                        break;
+                    }
+                    p = q;
+                    continue;
+                }
+                if !st.prefix.is_empty() {
+                    let pre = &st.prefix;
+                    let found = if pre.len() == 1 {
+                        memchr::memchr(pre[0], &s[p..])
+                    } else if let Some(f) = &st.finder {
+                        f.find(&s[p..])
+                    } else {
+                        memchr::memmem::find(&s[p..], pre)
+                    };
+                    match found {
+                        Some(k) => p += k,
+                        None => break,
+                    }
+                    if st.startline && p > 0 && !self.vm.newline_before(p) {
+                        continue;
+                    }
+                } else if let Some((ai, bytes)) = &st.anchor {
+                    // Search for the rarest fixed-offset byte set.
+                    let from = p + ai;
+                    if from >= len {
+                        break;
+                    }
+                    let hay = &s[from..];
+                    let found = match bytes.as_slice() {
+                        [a] => memchr::memchr(*a, hay),
+                        [a, b] => memchr::memchr2(*a, *b, hay),
+                        [a, b, c] => memchr::memchr3(*a, *b, *c, hay),
+                        _ => None,
+                    };
+                    match found {
+                        Some(k) => p = from + k - ai,
+                        None => break,
+                    }
+                    if st.startline && p > 0 && !self.vm.newline_before(p) {
+                        continue;
+                    }
+                } else if let Some(fb) = &st.first_bytes {
+                    let found = match st.first_scan {
+                        FirstScan::One(a) => memchr::memchr(a, &s[p..]).map(|k| p + k),
+                        FirstScan::Two(a, b) => memchr::memchr2(a, b, &s[p..]).map(|k| p + k),
+                        FirstScan::Three(a, b, c) => {
+                            memchr::memchr3(a, b, c, &s[p..]).map(|k| p + k)
+                        }
+                        FirstScan::HighBit => find_high_bit(s, p),
+                        FirstScan::Table => {
+                            s[p..].iter().position(|&b| fb[b as usize]).map(|k| p + k)
+                        }
+                    };
+                    match found {
+                        Some(q) => p = q,
+                        None => break,
+                    }
+                    if st.startline && p > 0 && !self.vm.newline_before(p) {
+                        continue;
+                    }
+                }
+                if !st.sets.is_empty() {
+                    let n = st.sets.len();
+                    if p + n > len {
+                        break;
+                    }
+                    let ok = st
+                        .sets
+                        .iter()
+                        .zip(&s[p..p + n])
+                        .all(|(set, &b)| set[(b >> 6) as usize] >> (b & 63) & 1 != 0);
+                    if !ok {
+                        p += 1;
+                        continue;
+                    }
+                }
+                if let Some((negated, ucp)) = st.lead_wb
+                    && !self
+                        .vm
+                        .check_assert(Assertion::WordBoundary { negated, ucp }, p)
+                {
+                    if !negated && !ucp && p < len && class::is_ascii_word(s[p] as u32) {
+                        // Inside a word: no \b until the word ends.
+                        while p < len && class::is_ascii_word(s[p] as u32) {
+                            p += 1;
+                        }
+                        continue;
+                    }
+                    p += if utf && p < len {
+                        utf8::len_from_lead(s[p])
+                    } else {
+                        1
+                    };
+                    if p > len {
+                        break;
+                    }
+                    continue;
+                }
+                if let Some((a, b)) = st.required
+                    && req_pos.is_none_or(|r| r < p)
+                {
+                    let found = if a == b {
+                        memchr::memchr(a, &s[p..])
+                    } else {
+                        memchr::memchr2(a, b, &s[p..])
+                    };
+                    match found {
+                        Some(k) => req_pos = Some(p + k),
+                        None => break,
+                    }
+                }
+            }
+            if let Some(op) = onepass {
+                let mut run_end = 0;
+                match self.vm.run_onepass(op, p, &mut sc.slots, &mut run_end)? {
+                    Some((ms, me)) if !self.vm.reject_empty(ms, me) => {
+                        out_slots.clear();
+                        out_slots.extend_from_slice(&sc.slots[..2 * (ncap + 1)]);
+                        out_slots[0] = ms;
+                        out_slots[1] = me;
+                        return Ok(Some(MatchData {
+                            start: ms,
+                            end: me,
+                            mark: None,
+                        }));
+                    }
+                    _ => {
+                        if anchored || p >= len {
+                            break;
+                        }
+                        p = if op.lead_run.is_some() && run_end > p {
+                            // Starts inside the same run fail the same way.
+                            run_end + 1
+                        } else {
+                            self.bump(p)
+                        };
+                        if p > len {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+            }
+            let r = self.vm.run(sc, p)?;
+            match r {
+                Attempt::Match(ms, me) => {
+                    out_slots.clear();
+                    out_slots.extend_from_slice(&sc.slots[..2 * (ncap + 1)]);
+                    out_slots[0] = ms;
+                    out_slots[1] = me;
+                    let vm = &self.vm;
+                    let mark = (vm.mark != NO_MARK).then(|| prog.names[vm.mark].clone());
+                    return Ok(Some(MatchData {
+                        start: ms,
+                        end: me,
+                        mark,
+                    }));
+                }
+                Attempt::Commit => break,
+                Attempt::NoMatch | Attempt::Prune | Attempt::Skip(_) => {
+                    // The stack is empty and every slot change was undone.
+                    if anchored || p >= len {
+                        break;
+                    }
+                    p = match r {
+                        Attempt::Skip(q) if q > p => q.min(len),
+                        _ => self.bump(p),
+                    };
+                }
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// Runs a match: tries start positions from `start_offset` using the
@@ -1672,176 +2334,5 @@ pub fn exec(
     limits: Limits,
     out_slots: &mut Vec<usize>,
 ) -> Result<Option<MatchData>, MatchError> {
-    if start_offset > s.len() {
-        return Err(MatchError::BadOffset);
-    }
-    let utf = prog.utf;
-    if utf && !opts.no_utf_check {
-        if start_offset < s.len() && s[start_offset] & 0xc0 == 0x80 {
-            return Err(MatchError::BadUtf8Offset);
-        }
-        // Check from the longest lookbehind before the start offset.
-        let mut from = start_offset;
-        for _ in 0..prog.max_lookbehind {
-            if from == 0 {
-                break;
-            }
-            from -= 1;
-            while from > 0 && s[from] & 0xc0 == 0x80 {
-                from -= 1;
-            }
-        }
-        if let Err((e, off)) = utf8::validate(&s[from..]) {
-            return Err(MatchError::BadUtf8 {
-                error: e,
-                offset: from + off,
-            });
-        }
-        if start_offset > 0 && start_offset < s.len() && s[start_offset] & 0xc0 == 0x80 {
-            return Err(MatchError::BadUtf8Offset);
-        }
-    }
-    let ncap = prog.ncap as usize;
-    let open_base = 2 * (ncap + 1);
-    let loop_base = open_base + ncap + 1;
-    let keep_slot = loop_base + prog.nloops as usize;
-    let nslots = keep_slot + 1;
-    sc.slots.clear();
-    sc.slots.resize(nslots, UNSET);
-    sc.bt.clear();
-    sc.calls.clear();
-    sc.popped.clear();
-    sc.arena.clear();
-    let mut limits = limits;
-    if let Some(l) = prog.limit_match {
-        limits.match_limit = limits.match_limit.min(l);
-    }
-    if let Some(l) = prog.limit_depth {
-        limits.depth_limit = limits.depth_limit.min(l);
-    }
-    let mut vm = Vm {
-        prog,
-        s,
-        end: s.len(),
-        utf,
-        start_offset,
-        attempt_start: start_offset,
-        opts,
-        limits,
-        count: 0,
-        frames: 0,
-        mark: NO_MARK,
-        last_mark: NO_MARK,
-        open_base,
-        loop_base,
-        keep_slot,
-        nslots,
-    };
-    let st = &prog.start;
-    let anchored = st.anchored || opts.anchored;
-    let len = s.len();
-    let mut p = start_offset;
-    // Required byte: fail early when it is absent (pcre2pattern on the
-    // "last single character that is required for a match").
-    let mut req_pos: Option<usize> = None;
-    loop {
-        if len - p < st.min_len {
-            break;
-        }
-        if !anchored {
-            if st.startline && p > 0 && !vm.newline_before(p) {
-                // Advance to the next line start.
-                let mut q = p + 1;
-                while q < len && !vm.newline_before(q) {
-                    q += 1;
-                }
-                if q >= len {
-                    break;
-                }
-                p = q;
-                continue;
-            }
-            if !st.prefix.is_empty() {
-                let pre = &st.prefix;
-                let found = if pre.len() == 1 {
-                    memchr::memchr(pre[0], &s[p..])
-                } else {
-                    memchr::memmem::find(&s[p..], pre)
-                };
-                match found {
-                    Some(k) => p += k,
-                    None => break,
-                }
-                if st.startline && p > 0 && !vm.newline_before(p) {
-                    continue;
-                }
-            } else if let Some(fb) = &st.first_bytes {
-                while p < len && !fb[s[p] as usize] {
-                    p += 1;
-                }
-                if p >= len {
-                    break;
-                }
-                if st.startline && p > 0 && !vm.newline_before(p) {
-                    continue;
-                }
-            }
-            if let Some((a, b)) = st.required
-                && req_pos.is_none_or(|r| r < p)
-            {
-                let found = if a == b {
-                    memchr::memchr(a, &s[p..])
-                } else {
-                    memchr::memchr2(a, b, &s[p..])
-                };
-                match found {
-                    Some(k) => req_pos = Some(p + k),
-                    None => break,
-                }
-            }
-        }
-        let r = vm.run(sc, p)?;
-        match r {
-            Attempt::Match(ms, me) => {
-                out_slots.clear();
-                out_slots.extend_from_slice(&sc.slots[..2 * (ncap + 1)]);
-                out_slots[0] = ms;
-                out_slots[1] = me;
-                let mark = (vm.mark != NO_MARK).then(|| prog.names[vm.mark].clone());
-                return Ok(Some(MatchData {
-                    start: ms,
-                    end: me,
-                    mark,
-                }));
-            }
-            Attempt::Commit => break,
-            Attempt::NoMatch | Attempt::Prune | Attempt::Skip(_) => {
-                // The stack is empty and every slot change was undone.
-                if anchored || p >= len {
-                    break;
-                }
-                let next = match r {
-                    Attempt::Skip(q) if q > p => q,
-                    _ => {
-                        let mut q = p + if utf { utf8::len_from_lead(s[p]) } else { 1 };
-                        // CRLF bumpalong (pcre2api "Newline handling when
-                        // matching").
-                        if matches!(
-                            prog.newline,
-                            Newline::CrLf | Newline::AnyCrLf | Newline::Any
-                        ) && s[p] == b'\r'
-                            && q < len
-                            && s[q] == b'\n'
-                            && !prog.has_cr_lf
-                        {
-                            q += 1;
-                        }
-                        q
-                    }
-                };
-                p = next.min(len);
-            }
-        }
-    }
-    Ok(None)
+    Searcher::new(prog, s, limits).find(sc, start_offset, opts, out_slots)
 }

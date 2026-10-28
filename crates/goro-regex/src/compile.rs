@@ -99,7 +99,13 @@ pub fn compile(mut parsed: Parsed, flags: crate::Flags) -> CResult<Compiled> {
         match_unset_backref: flags.contains(crate::Flags::MATCH_UNSET_BACKREF),
         turkish: parsed.turkish,
         has_cr_lf: parsed.has_cr_lf,
+        onepass: None,
     };
+    let mut prog = prog;
+    prog.onepass = build_onepass(&prog);
+    if prog.start.prefix.len() > 1 {
+        prog.start.finder = Some(memchr::memmem::Finder::new(&prog.start.prefix).into_owned());
+    }
     Ok(Compiled {
         prog,
         names: parsed.names,
@@ -523,6 +529,177 @@ struct Emitter {
     next_tag: u32,
     has_verbs: bool,
     no_auto_possess: bool,
+}
+
+/// Recognises deterministic programs (see [`OnePass`]).
+fn build_onepass(prog: &Prog) -> Option<OnePass> {
+    let insts = &prog.insts;
+    let mut steps = Vec::new();
+    let mut frames = 2u32;
+    let mut has_greedy = false;
+    let mut depends_on_start = false;
+    let mut back: Option<usize> = None;
+    for (pc, ins) in insts.iter().enumerate() {
+        match ins {
+            Inst::One(i) => steps.push(OpStep::One(i.clone())),
+            Inst::Lit(i) => steps.push(OpStep::Lit(*i)),
+            Inst::LitFold(i) => steps.push(OpStep::LitFold(*i)),
+            Inst::CapOpen(g) => {
+                frames += 1;
+                steps.push(OpStep::Open(*g));
+            }
+            Inst::CapClose(g) => steps.push(OpStep::Close(*g)),
+            Inst::Assert(a) => {
+                if matches!(a, Assertion::StartOfMatch) {
+                    depends_on_start = true;
+                }
+                steps.push(OpStep::Assert(*a));
+            }
+            Inst::Keep => {
+                depends_on_start = true;
+                steps.push(OpStep::Keep);
+            }
+            Inst::Rep {
+                item,
+                min,
+                max,
+                greed,
+            } => {
+                let make_back = |steps: &mut Vec<OpStep>, back: &mut Option<usize>, lazy: bool| {
+                    if back.is_some() {
+                        return false;
+                    }
+                    *back = Some(steps.len());
+                    steps.push(OpStep::BackRep {
+                        item: item.clone(),
+                        min: *min,
+                        max: *max,
+                        lazy,
+                    });
+                    true
+                };
+                match greed {
+                    Greed::Possessive => {}
+                    Greed::Lazy => {
+                        if !make_back(&mut steps, &mut back, true) {
+                            return None;
+                        }
+                        frames += 1;
+                        continue;
+                    }
+                    Greed::Greedy => {
+                        // Deterministic if only $, \z or \Z can follow and
+                        // giving back characters cannot reach a newline.
+                        let next = insts[pc + 1..]
+                            .iter()
+                            .find(|i| !matches!(i, Inst::CapClose(_)));
+                        let at_dollar = matches!(
+                            next,
+                            Some(Inst::Assert(
+                                Assertion::Dollar { .. }
+                                    | Assertion::EndSubject
+                                    | Assertion::EndSubjectOrNewline
+                            ))
+                        );
+                        let after = insts[pc + 1..]
+                            .iter()
+                            .skip_while(|i| matches!(i, Inst::CapClose(_)))
+                            .nth(1);
+                        let then_end = matches!(after, Some(Inst::Match));
+                        let no_nl = matches!(item, Item::AnyNoNl)
+                            || [0x0a, 0x0b, 0x0c, 0x0d, 0x85, 0x2028, 0x2029]
+                                .iter()
+                                .all(|&c| !item_matches_cp(item, c));
+                        frames += 1;
+                        if !(at_dollar && then_end && no_nl) {
+                            if !make_back(&mut steps, &mut back, false) {
+                                return None;
+                            }
+                            continue;
+                        }
+                        has_greedy = true;
+                    }
+                }
+                steps.push(OpStep::Rep {
+                    item: item.clone(),
+                    min: *min,
+                    max: *max,
+                });
+            }
+            Inst::Match => {
+                if pc + 1 != insts.len() {
+                    return None;
+                }
+                break;
+            }
+            _ => return None,
+        }
+    }
+    // With a CRLF-aware bumpalong some start positions are never tried
+    // (pcre2api "Newline handling when matching"); skipping by runs or
+    // literals would try them.
+    let crlf_bump = matches!(
+        prog.newline,
+        Newline::CrLf | Newline::AnyCrLf | Newline::Any
+    ) && !prog.has_cr_lf;
+    if crlf_bump {
+        depends_on_start = true;
+    }
+    // The leading run optimisation (group openings and \b may come first).
+    let first = steps.iter().position(|s| {
+        !matches!(
+            s,
+            OpStep::Open(_) | OpStep::Assert(Assertion::WordBoundary { negated: false, .. })
+        )
+    });
+    let lead_run = match first.map(|i| (i, &steps[i])) {
+        Some((i, OpStep::Rep { item, min, max } | OpStep::BackRep { item, min, max, .. }))
+            if *min >= 1 && *max == u32::MAX && !depends_on_start =>
+        {
+            let single = match item {
+                Item::Byte(_) | Item::Byte2(..) => true,
+                Item::Set(s) => !prog.utf || (s.ascii_only()),
+                _ => !prog.utf && !matches!(item, Item::Chars(_)),
+            };
+            // Lookbehind-like assertions after the run look at the same
+            // characters whatever the start; \b right after the run does too.
+            single.then_some(i)
+        }
+        _ => None,
+    };
+    // A possessive leading run followed by a literal byte the run cannot
+    // match: matches are found from occurrences of that byte.
+    // For a backtracking leading repeat, the literal may also lie inside
+    // the run: a match then starts at the beginning of the run that holds
+    // an occurrence of the literal.
+    let lead_lit = lead_run.and_then(|i| {
+        let lit: Vec<u8> = match steps[i + 1..]
+            .iter()
+            .find(|s| !matches!(s, OpStep::Close(_)))?
+        {
+            OpStep::One(Item::Byte(b)) => vec![*b],
+            OpStep::Lit(l) => prog.lits[*l as usize].to_vec(),
+            _ => return None,
+        };
+        match &steps[i] {
+            OpStep::Rep { item, .. } => (!item_matches_cp(item, lit[0] as u32)).then_some(lit),
+            OpStep::BackRep { lazy: false, .. } => Some(lit),
+            _ => None,
+        }
+    });
+    let lead_finder = lead_lit
+        .as_ref()
+        .filter(|l| l.len() > 1)
+        .map(|l| memchr::memmem::Finder::new(l).into_owned());
+    Some(OnePass {
+        steps,
+        frames,
+        has_greedy,
+        lead_run,
+        back,
+        lead_lit,
+        lead_finder,
+    })
 }
 
 /// What follows a node being emitted.
@@ -1750,15 +1927,26 @@ fn required_byte(n: &Node, utf: bool) -> Option<(u8, u8)> {
     last_req(n, utf)
 }
 
-/// The code unit every match must start with, looking only through verbs,
-/// \K and groups (PCRE2's "first code unit"; it does not look through
-/// assertions: observed on PHP 8.5, /(\b(*COMMIT)2)/ is tried before the
-/// first "2").
+/// The code unit every match must start with, looking through verbs, \K,
+/// assertions and groups (PCRE2's "first code unit"; observed on PHP 8.5:
+/// /(*COMMIT)\K\BA/i skips to the first "a", and /(\b(*COMMIT)2)\1?/ is
+/// tried at every position because of the backreference).
 fn first_unit(n: &Node, utf: bool) -> Option<(u8, u8)> {
-    fn go(n: &Node, utf: bool) -> Result<Option<(u8, u8)>, ()> {
+    fn go(n: &Node, utf: bool, br: &[u32]) -> Result<Option<(u8, u8)>, ()> {
         // Ok(None): zero-width, look further; Ok(Some): found; Err: none.
         match n {
-            Node::Empty | Node::Keep => Ok(None),
+            Node::Empty | Node::Keep | Node::Assert(_) => Ok(None),
+            Node::Group {
+                kind: GroupKind::LookAhead { .. } | GroupKind::LookBehind { .. },
+                ..
+            } => Ok(None),
+            // A group that a backreference refers to gives no first code
+            // unit (observed on PHP 8.5: /(\b(*COMMIT)2)\1?/ is tried at
+            // every position).
+            Node::Group {
+                kind: GroupKind::Capture(g),
+                ..
+            } if br.contains(g) => Err(()),
             Node::Verb { verb, .. } => match verb {
                 Verb::Fail | Verb::Accept => Err(()),
                 _ => Ok(None),
@@ -1795,7 +1983,7 @@ fn first_unit(n: &Node, utf: bool) -> Option<(u8, u8)> {
             }
             Node::Seq(v) => {
                 for c in v {
-                    if let Some(u) = go(c, utf)? {
+                    if let Some(u) = go(c, utf, br)? {
                         return Ok(Some(u));
                     }
                 }
@@ -1804,7 +1992,7 @@ fn first_unit(n: &Node, utf: bool) -> Option<(u8, u8)> {
             Node::Alt(v) => {
                 let mut r = None;
                 for b in v {
-                    let u = go(b, utf)?.ok_or(())?;
+                    let u = go(b, utf, br)?.ok_or(())?;
                     match r {
                         None => r = Some(u),
                         Some(x) if x == u => {}
@@ -1817,12 +2005,13 @@ fn first_unit(n: &Node, utf: bool) -> Option<(u8, u8)> {
                 kind: GroupKind::NonCapture | GroupKind::Capture(_) | GroupKind::Atomic,
                 body,
                 ..
-            } => go(body, utf),
-            Node::Repeat { node, min, .. } if *min > 0 => go(node, utf),
+            } => go(body, utf, br),
+            Node::Repeat { node, min, .. } if *min > 0 => go(node, utf, br),
             _ => Err(()),
         }
     }
-    go(n, utf).ok().flatten()
+    let ctx = AnchorCtx::new(n);
+    go(n, utf, &ctx.backref_groups).ok().flatten()
 }
 
 fn start_info(n: &Node, parsed: &Parsed, flags: crate::Flags) -> StartInfo {
@@ -1894,5 +2083,172 @@ fn start_info(n: &Node, parsed: &Parsed, flags: crate::Flags) -> StartInfo {
     {
         s.required = None;
     }
+    if !commit_or_skip {
+        if s.prefix.len() < 2 {
+            let mut sets = Vec::new();
+            fixed_sets(n, parsed.utf, &mut sets);
+            if sets.len() >= 2 {
+                let (idx, cnt) = sets
+                    .iter()
+                    .enumerate()
+                    .map(|(i, set)| (i, set.iter().map(|w| w.count_ones()).sum::<u32>()))
+                    .min_by_key(|&(_, c)| c)
+                    .unwrap();
+                if cnt <= 3 {
+                    let bytes: Vec<u8> = (0..256u32)
+                        .filter(|&b| sets[idx][(b >> 6) as usize] >> (b & 63) & 1 != 0)
+                        .map(|b| b as u8)
+                        .collect();
+                    s.anchor = Some((idx, bytes));
+                }
+                s.sets = sets;
+            }
+        }
+        if let Some(Node::Assert(Assertion::WordBoundary { negated, ucp })) = first_item(n) {
+            s.lead_wb = Some((*negated, *ucp));
+        }
+    }
+    if let Some(fb) = &s.first_bytes {
+        let set: Vec<u8> = (0..256).filter(|&b| fb[b]).map(|b| b as u8).collect();
+        s.first_scan = match set.as_slice() {
+            [a] => FirstScan::One(*a),
+            [a, b] => FirstScan::Two(*a, *b),
+            [a, b, c] => FirstScan::Three(*a, *b, *c),
+            _ if set.iter().all(|&b| b >= 0x80) => FirstScan::HighBit,
+            _ => FirstScan::Table,
+        };
+    }
     s
+}
+
+/// The first node of the pattern, looking into sequences.
+fn first_item(n: &Node) -> Option<&Node> {
+    match n {
+        Node::Seq(v) => v.first().and_then(first_item),
+        other => Some(other),
+    }
+}
+
+/// Byte sets that every match has at offsets 0, 1, 2, ... (stops at the
+/// first item whose width in bytes is not fixed).
+fn fixed_sets(n: &Node, utf: bool, out: &mut Vec<[u64; 4]>) -> bool {
+    const MAX: usize = 16;
+    fn single(b: u8) -> [u64; 4] {
+        let mut s = [0u64; 4];
+        s[(b >> 6) as usize] |= 1 << (b & 63);
+        s
+    }
+    if out.len() >= MAX {
+        return false;
+    }
+    match n {
+        Node::Empty | Node::Keep | Node::Assert(_) => true,
+        Node::Char { c, caseless } => {
+            if !*caseless {
+                if utf {
+                    let mut v = Vec::new();
+                    utf8::encode(*c, &mut v);
+                    for b in v {
+                        out.push(single(b));
+                    }
+                } else {
+                    out.push(single(*c as u8));
+                }
+                return true;
+            }
+            let mut v = Vec::new();
+            class::case_equivalents(*c, CaseMode::Unicode, &mut v);
+            if !utf {
+                v.retain(|&x| x < 256);
+            }
+            let mut set = [0u64; 4];
+            let mut all_one_byte = true;
+            for x in v {
+                let mut e = Vec::new();
+                if utf {
+                    utf8::encode(x, &mut e);
+                } else {
+                    e.push(x as u8);
+                }
+                all_one_byte &= e.len() == 1;
+                set[(e[0] >> 6) as usize] |= 1 << (e[0] & 63);
+            }
+            out.push(set);
+            all_one_byte
+        }
+        Node::Set(s) => {
+            let one_byte = !utf || (s.ascii_only());
+            let mut set = [0u64; 4];
+            for b in 0..256u32 {
+                if one_byte {
+                    if s.has_byte(b as u8) {
+                        set[(b >> 6) as usize] |= 1 << (b & 63);
+                    }
+                } else if s.matches(b) {
+                    let mut e = Vec::new();
+                    utf8::encode(b, &mut e);
+                    set[(e[0] >> 6) as usize] |= 1 << (e[0] & 63);
+                }
+            }
+            if !one_byte {
+                if !s.high_none {
+                    for b in 0xc4..=0xf4u32 {
+                        set[(b >> 6) as usize] |= 1 << (b & 63);
+                    }
+                }
+                out.push(set);
+                return false;
+            }
+            out.push(set);
+            true
+        }
+        Node::Seq(v) => {
+            for c in v {
+                if !fixed_sets(c, utf, out) {
+                    return false;
+                }
+            }
+            true
+        }
+        Node::Group {
+            kind: GroupKind::NonCapture | GroupKind::Capture(_) | GroupKind::Atomic,
+            body,
+            ..
+        } => fixed_sets(body, utf, out),
+        Node::Repeat { node, min, max, .. } => {
+            for _ in 0..*min {
+                if !fixed_sets(node, utf, out) {
+                    return false;
+                }
+            }
+            *max == Some(*min)
+        }
+        Node::Alt(v) => {
+            // Union per offset, up to the shortest branch's fixed part.
+            let mut per: Vec<Vec<[u64; 4]>> = Vec::new();
+            for b in v {
+                let mut o = Vec::new();
+                fixed_sets(b, utf, &mut o);
+                if o.is_empty() {
+                    return false;
+                }
+                per.push(o);
+            }
+            let n = per.iter().map(|o| o.len()).min().unwrap_or(0);
+            for i in 0..n {
+                let mut set = [0u64; 4];
+                for o in &per {
+                    for k in 0..4 {
+                        set[k] |= o[i][k];
+                    }
+                }
+                if out.len() >= MAX {
+                    break;
+                }
+                out.push(set);
+            }
+            false
+        }
+        _ => false,
+    }
 }

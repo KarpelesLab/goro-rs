@@ -238,6 +238,7 @@ impl Regex {
     }
 
     /// Low-level match: on success fills `caps` and returns true.
+    #[inline]
     pub fn exec_with(
         &self,
         scratch: &mut Scratch,

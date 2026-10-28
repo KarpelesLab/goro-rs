@@ -172,6 +172,55 @@ pub enum Inst {
     Match,
 }
 
+/// One step of a deterministic pattern (see [`OnePass`]).
+#[derive(Clone, Debug)]
+pub enum OpStep {
+    One(Item),
+    Lit(u32),
+    LitFold(u32),
+    Rep {
+        item: Item,
+        min: u32,
+        max: u32,
+    },
+    /// The single backtracking point: a greedy or lazy repeat.
+    BackRep {
+        item: Item,
+        min: u32,
+        max: u32,
+        lazy: bool,
+    },
+    Open(u32),
+    Close(u32),
+    Assert(Assertion),
+    Keep,
+}
+
+/// A pattern that never needs to backtrack: a straight sequence of
+/// characters, literals, possessive (or provably deterministic) repeats,
+/// capture groups and assertions. Matched without the backtracking VM.
+#[derive(Clone, Debug)]
+pub struct OnePass {
+    pub steps: Vec<OpStep>,
+    /// The frames PCRE2 would use at most for an attempt (the fast path is
+    /// only taken when the limits exceed this).
+    pub frames: u32,
+    /// Some greedy repeats were treated as deterministic; PCRE2 would count
+    /// one frame per character they give back.
+    pub has_greedy: bool,
+    /// The first step (after group openings) is an unbounded repeat of a
+    /// single-byte item with min >= 1 and nothing later depends on the
+    /// start position: after a failure at p, starts inside the same run
+    /// fail too.
+    pub lead_run: Option<usize>,
+    /// Index of the [`OpStep::BackRep`], if any.
+    pub back: Option<usize>,
+    /// With `lead_run`: the literal that follows the run (for a possessive
+    /// run, one the run cannot match).
+    pub lead_lit: Option<Vec<u8>>,
+    pub lead_finder: Option<memchr::memmem::Finder<'static>>,
+}
+
 /// Start-of-match optimisation data (pcre2api: "start-up optimizations").
 #[derive(Clone, Debug, Default)]
 pub struct StartInfo {
@@ -192,6 +241,30 @@ pub struct StartInfo {
     pub required: Option<(u8, u8)>,
     /// The minimum match length in code units.
     pub min_len: usize,
+    /// Searcher for `prefix`.
+    pub finder: Option<memchr::memmem::Finder<'static>>,
+    /// Byte sets every match has at offsets 0, 1, ... from its start
+    /// (only when there is no literal prefix).
+    pub sets: Vec<[u64; 4]>,
+    /// Which of `sets` to search for, and its bytes when there are at most
+    /// three.
+    pub anchor: Option<(usize, Vec<u8>)>,
+    /// A word-boundary assertion every match starts with.
+    pub lead_wb: Option<(bool, bool)>,
+    /// How to scan for `first_bytes`.
+    pub first_scan: FirstScan,
+}
+
+/// Accelerated scans for the first byte of a match.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum FirstScan {
+    #[default]
+    Table,
+    One(u8),
+    Two(u8, u8),
+    Three(u8, u8, u8),
+    /// Only bytes >= 0x80 can start a match.
+    HighBit,
 }
 
 #[derive(Debug)]
@@ -220,4 +293,5 @@ pub struct Prog {
     pub turkish: bool,
     /// The pattern contains an explicit CR or LF (pcre2api: CRLF bumpalong).
     pub has_cr_lf: bool,
+    pub onepass: Option<OnePass>,
 }

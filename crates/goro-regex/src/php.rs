@@ -196,7 +196,7 @@ pub struct GlobalMatcher<'r, 's> {
     pub scratch: Scratch,
     pub caps: Captures,
     pub limits: Limits,
-    checked: bool,
+    searcher: Option<crate::exec::Searcher<'r, 's>>,
 }
 
 impl<'r, 's> GlobalMatcher<'r, 's> {
@@ -215,11 +215,12 @@ impl<'r, 's> GlobalMatcher<'r, 's> {
             scratch: Scratch::new(),
             caps: Captures::default(),
             limits,
-            checked: false,
+            searcher: None,
         }
     }
 
     /// Finds the next match; on success the captures are in `self.caps`.
+    #[inline]
     pub fn next_match(&mut self) -> Result<bool, MatchError> {
         if self.done {
             return Ok(false);
@@ -228,25 +229,24 @@ impl<'r, 's> GlobalMatcher<'r, 's> {
             let opts = MatchOptions {
                 notempty_atstart: self.retry_nonempty,
                 anchored: self.retry_nonempty,
-                no_utf_check: self.checked,
                 ..MatchOptions::default()
             };
-            let r = self.re.exec_with(
-                &mut self.scratch,
-                self.subject,
-                self.pos,
-                opts,
-                self.limits,
-                &mut self.caps,
-            );
+            let (re, subject, limits) = (self.re, self.subject, self.limits);
+            let searcher = self
+                .searcher
+                .get_or_insert_with(|| crate::exec::Searcher::new(re.prog(), subject, limits));
+            let r = searcher.find(&mut self.scratch, self.pos, opts, &mut self.caps.slots);
             let found = match r {
-                Ok(f) => f,
+                Ok(Some(m)) => {
+                    self.caps.mark = m.mark;
+                    true
+                }
+                Ok(None) => false,
                 Err(e) => {
                     self.done = true;
                     return Err(e);
                 }
             };
-            self.checked = true;
             if found {
                 let (s, e) = self.caps.get(0).unwrap();
                 self.pos = e;

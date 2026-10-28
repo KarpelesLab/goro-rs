@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Random pattern/subject pairs for differential testing of goro-regex
-against php85. Usage: gen_random.py <seed> <count> > cases.txt
+against php85. Usage: gen_random.py <seed> <count> [maxlen] > cases.txt
 Output lines: hex(php pattern) TAB hex(subject)."""
 import random
 import sys
 
 seed = int(sys.argv[1])
 count = int(sys.argv[2])
+# Optional: maximum subject length (default 14).
+maxlen = int(sys.argv[3]) if len(sys.argv) > 3 else 14
 R = random.Random(seed)
 
 ALPHA = ["a", "b", "c", "A", "B", "-", " ", "\n", "1", "2"]
@@ -125,7 +127,7 @@ class G:
 
 def subject(utf):
     al = UALPHA if utf else ALPHA
-    return "".join(R.choice(al) for _ in range(R.randint(0, 14)))
+    return "".join(R.choice(al) for _ in range(R.randint(0, maxlen)))
 
 
 out = sys.stdout.buffer
