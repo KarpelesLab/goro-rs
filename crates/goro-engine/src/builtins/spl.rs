@@ -1505,9 +1505,23 @@ fn ao_debug_info(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Array(out))
 }
 
+/// ARRAY_AS_PROPS goes through a user override of the offset method
+/// (test bug74058).
+fn ao_user_offset(vm: &mut Vm, o: &ObjRef, m: &[u8], args: Vec<Value>) -> R<Option<Value>> {
+    if user_override(vm, o, m).is_none() {
+        return Ok(None);
+    }
+    vm.call_method(o, m, args).map(Some)
+}
+
 fn ao_magic_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let n = a.str(0);
+    if ao_flags(&o) & 2 != 0
+        && let Some(v) = ao_user_offset(vm, &o, b"offsetget", vec![Value::Str(n.clone())])?
+    {
+        return Ok(v);
+    }
     if ao_flags(&o) & 2 != 0 {
         let arr = ao_array(vm, &o);
         return match arr.get(Key::from_php_str(&n).as_ref()) {
@@ -1528,6 +1542,11 @@ fn ao_magic_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let n = a.str(0);
     let v = a.val(1);
+    if ao_flags(&o) & 2 != 0
+        && ao_user_offset(vm, &o, b"offsetset", vec![Value::Str(n.clone()), v.clone()])?.is_some()
+    {
+        return Ok(Value::Null);
+    }
     if ao_flags(&o) & 2 != 0 {
         if let Some(p) = ao_storage_ptr(&o) {
             if let Value::Array(arr) = unsafe { &mut *p } {
@@ -1715,6 +1734,10 @@ fn rai_get_children(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 pub struct FaData {
     items: Vec<Value>,
+    /// setSize() is releasing elements: a setSize() from their
+    /// destructors waits for it (test bug81992b).
+    resizing: bool,
+    pending: Option<usize>,
 }
 
 impl goro_runtime::NativeData for FaData {
@@ -1743,10 +1766,26 @@ fn fa_hooks() -> NativeHooks {
         Some(out)
     }
     NativeHooks {
-        create: Some(|_, o| set_native(o, FaData { items: Vec::new() })),
+        create: Some(|_, o| {
+            set_native(
+                o,
+                FaData {
+                    items: Vec::new(),
+                    resizing: false,
+                    pending: None,
+                },
+            )
+        }),
         clone: Some(|_, from, to| {
             let items = with(from, |d: &mut FaData| d.items.clone()).unwrap_or_default();
-            set_native(to, FaData { items });
+            set_native(
+                to,
+                FaData {
+                    items,
+                    resizing: false,
+                    pending: None,
+                },
+            );
         }),
         debug_props: Some(table),
         props_for: Some(table),
@@ -1895,15 +1934,50 @@ fn fa_set_size(vm: &mut Vm, a: &mut Args) -> R<Value> {
         );
     }
     fa_alloc_check(vm, n)?;
-    let removed = with(a.this_obj(), |d: &mut FaData| {
-        if (n as usize) < d.items.len() {
-            d.items.split_off(n as usize)
-        } else {
-            d.items.resize(n as usize, Value::Null);
-            Vec::new()
+    let o = a.this_obj().clone();
+    if with(&o, |d: &mut FaData| {
+        if d.resizing {
+            d.pending = Some(n as usize);
         }
-    });
-    drop(removed);
+        d.resizing
+    })
+    .unwrap_or(false)
+    {
+        return Ok(Value::Bool(true));
+    }
+    let mut size = n as usize;
+    loop {
+        let removed = with(&o, |d: &mut FaData| {
+            d.resizing = true;
+            if size < d.items.len() {
+                d.items.split_off(size)
+            } else {
+                d.items.resize(size, Value::Null);
+                Vec::new()
+            }
+        })
+        .unwrap_or_default();
+        // Released in order; their destructors see the new size.
+        for v in removed {
+            drop(v);
+            if let Err(e) = vm.run_pending_destructors() {
+                with(&o, |d: &mut FaData| d.resizing = false);
+                return Err(e);
+            }
+        }
+        let next = with(&o, |d: &mut FaData| {
+            let p = d.pending.take();
+            if p.is_none() {
+                d.resizing = false;
+            }
+            p
+        })
+        .flatten();
+        match next {
+            Some(p) => size = p,
+            None => break,
+        }
+    }
     Ok(Value::Bool(true))
 }
 

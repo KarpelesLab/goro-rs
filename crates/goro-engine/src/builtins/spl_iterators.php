@@ -12,7 +12,19 @@ class IteratorIterator implements OuterIterator {
     protected $__valid = false;
     protected $__key = null;
     protected $__cur = null;
+    /* A second constructor call is refused, naming the internal class
+     * (observed on PHP 8.5; test iterator_031). */
+    protected function __h_once() {
+        $c = static::class;
+        while (!(new ReflectionClass($c))->isInternal()) {
+            $c = get_parent_class($c);
+        }
+        throw new BadMethodCallException("$c::getIterator() must be called exactly once per instance");
+    }
     public function __construct(Traversable $iterator, ?string $class = null) {
+        if ($this->__it !== null) {
+            $this->__h_once();
+        }
         while ($iterator instanceof IteratorAggregate) {
             $agg = $iterator;
             $iterator = $iterator->getIterator();
@@ -343,7 +355,12 @@ class InfiniteIterator extends IteratorIterator {
 
 class AppendIterator extends IteratorIterator {
     protected $__its = null;
-    public function __construct() { $this->__its = new ArrayIterator(); }
+    public function __construct() {
+        if ($this->__its !== null) {
+            $this->__h_once();
+        }
+        $this->__its = new ArrayIterator();
+    }
     protected function __h_chk() {
         if ($this->__its === null) {
             throw new Error("The object is in an invalid state as the parent constructor was not called");
