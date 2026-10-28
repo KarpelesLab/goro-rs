@@ -1175,7 +1175,18 @@ fn number_format(_vm: &mut Vm, a: &mut Args) -> R<Value> {
                 Value::Float(f) => f,
                 _ => 0.0,
             };
-            std_ext::math::number_format(f, dec, &dp, &ts)
+            // Observed on PHP 8.5: an integral float in the int range is
+            // rounded as an int ("-9,223,372,036,854,775,810" for
+            // -2^63 to tens, test math/number_format_basiclong_64bit.phpt),
+            // one beyond it as a float (2^63 stays ...808).
+            if dec < 0
+                && f.fract() == 0.0
+                && (-9.223372036854775808e18..9.223372036854775808e18).contains(&f)
+            {
+                std_ext::math::number_format_int(f as i64, dec, &dp, &ts)
+            } else {
+                std_ext::math::number_format(f, dec, &dp, &ts)
+            }
         }
     }))
 }
