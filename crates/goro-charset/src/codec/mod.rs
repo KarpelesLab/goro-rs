@@ -20,7 +20,7 @@ mod mobile;
 // mod qprint;
 mod single;
 mod unicode;
-// mod utf7;
+mod utf7;
 // mod uuencode;
 
 pub(crate) use unicode::utf8_valid_up_to;
@@ -193,6 +193,8 @@ pub fn decoder(enc: Encoding) -> Box<dyn Decode> {
         EightBit => Box::new(single::Latin1Dec),
         Iso8859_1 => Box::new(single::Latin1Dec),
         Base64 | Uuencode | QuotedPrintable => Box::new(single::Latin1Dec),
+        Utf7 => Box::new(utf7::Utf7Dec::new(false)),
+        Utf7Imap => Box::new(utf7::Utf7Dec::new(true)),
         Gb18030 | Gb18030_2022 | EucCn | Cp936 => Box::new(cjk_cn::GbDec::new(enc)),
         Hz => Box::new(cjk_cn::HzDec::default()),
         Jis | Iso2022Jp | Iso2022JpMs | Iso2022Jp2004 | Iso2022JpKddi | Cp50220 | Cp50221
@@ -229,6 +231,8 @@ pub fn encoder(enc: Encoding) -> Box<dyn Encode> {
         Ucs4Le => Box::new(unicode::Utf32Enc::new(true, false)),
         Ascii | SevenBit => Box::new(single::AsciiEnc),
         EightBit | Iso8859_1 | Base64 | Uuencode | QuotedPrintable => Box::new(single::Latin1Enc),
+        Utf7 => Box::new(utf7::Utf7Enc::new(false)),
+        Utf7Imap => Box::new(utf7::Utf7Enc::new(true)),
         Gb18030 | Gb18030_2022 | EucCn | Cp936 => Box::new(cjk_cn::GbEnc::new(enc)),
         Hz => Box::new(cjk_cn::HzEnc::default()),
         Jis | Iso2022Jp | Iso2022JpMs | Iso2022Jp2004 | Iso2022JpKddi | Cp50220 | Cp50221
