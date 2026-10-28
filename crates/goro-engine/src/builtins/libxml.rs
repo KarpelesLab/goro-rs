@@ -200,7 +200,11 @@ fn libxml_set_external_entity_loader(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn libxml_get_external_entity_loader(vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(vm.ext::<LibxmlState>().loader.clone().unwrap_or(Value::Null))
+    Ok(vm
+        .ext::<LibxmlState>()
+        .loader
+        .clone()
+        .unwrap_or(Value::Null))
 }
 
 // ------------------------------------------------------------------ errors
@@ -253,13 +257,7 @@ pub fn report(
 }
 
 /// Shows one error (not recorded).
-pub fn show(
-    vm: &mut Vm,
-    fname: &str,
-    e: &XmlError,
-    style: Style,
-    input: Option<&[u8]>,
-) -> R<()> {
+pub fn show(vm: &mut Vm, fname: &str, e: &XmlError, style: Style, input: Option<&[u8]>) -> R<()> {
     match style {
         Style::Dom => {
             if e.domain == Domain::Io {
@@ -348,9 +346,15 @@ fn call_user_loader(
     let s = |o: Option<&str>| o.map_or(Value::Null, |s| Value::from(s.as_bytes()));
     let mut c = PhpArray::new();
     c.insert(Key::from_bytes(b"directory"), s(directory));
-    c.insert(Key::from_bytes(b"intSubName"), s(ctx.int_sub_name.as_deref()));
+    c.insert(
+        Key::from_bytes(b"intSubName"),
+        s(ctx.int_sub_name.as_deref()),
+    );
     c.insert(Key::from_bytes(b"extSubURI"), s(ctx.ext_sub_uri.as_deref()));
-    c.insert(Key::from_bytes(b"extSubSystem"), s(ctx.ext_sub_system.as_deref()));
+    c.insert(
+        Key::from_bytes(b"extSubSystem"),
+        s(ctx.ext_sub_system.as_deref()),
+    );
     let r = vm.call_value(
         &cb,
         vec![s(public), Value::from(system.as_bytes()), Value::Array(c)],
@@ -399,14 +403,20 @@ pub fn read_resource(vm: &mut Vm, res: &goro_runtime::ResRef) -> Option<Vec<u8>>
 /// Reads a file or stream URL without PHP-level warnings (libxml reports
 /// failures itself). `None` when it can't be opened.
 pub fn read_url_quiet(vm: &mut Vm, path: &[u8]) -> R<Option<Vec<u8>>> {
-    let p = path.strip_prefix(b"file://").unwrap_or(path);
+    // file: URLs are percent-decoded (RFC 8089; test ext/xmlreader 008).
+    let decoded;
+    let p = match path.strip_prefix(b"file://") {
+        Some(rest) if rest.contains(&b'%') => {
+            decoded = percent_decode(rest);
+            &decoded[..]
+        }
+        Some(rest) => rest,
+        None => path,
+    };
     // Plain files directly; other URLs through the stream layer.
     if !p.windows(3).any(|w| w == b"://") && !p.starts_with(b"data:") {
         let fp = vm.fs_path(p);
-        return Ok(match std::fs::read(&fp) {
-            Ok(b) => Some(b),
-            Err(_) => None,
-        });
+        return Ok(std::fs::read(&fp).ok());
     }
     let f = vm.call_value(
         &Value::from(&b"fopen"[..]),
@@ -422,6 +432,25 @@ pub fn read_url_quiet(vm: &mut Vm, path: &[u8]) -> R<Option<Vec<u8>>> {
         Err(Unwind::Throw(e)) => Err(Unwind::Throw(e)),
         Err(e) => Err(e),
     }
+}
+
+fn percent_decode(s: &[u8]) -> Vec<u8> {
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if s[i] == b'%'
+            && i + 2 < s.len()
+            && let (Some(h), Some(l)) = (hex(s[i + 1]), hex(s[i + 2]))
+        {
+            out.push(h * 16 + l);
+            i += 3;
+            continue;
+        }
+        out.push(s[i]);
+        i += 1;
+    }
+    out
 }
 
 /// Resolves a system ID against a base URL (or the current directory),
@@ -441,16 +470,13 @@ pub fn resolve(vm: &Vm, system: &str, base: Option<&str>) -> String {
 pub fn load_document(vm: &mut Vm, fname: &str, path: &str) -> R<Result<Vec<u8>, Option<String>>> {
     if has_user_loader(vm) {
         let ctx = LoadContext::default();
-        return Ok(
-            match call_user_loader(vm, fname, None, path, &ctx, None)? {
-                UserLoad::Bytes(b) => Ok(b),
-                UserLoad::Null => Err(Some(
-                    "Failed to load external entity because the resolver function returned null"
-                        .into(),
-                )),
-                UserLoad::Invalid => Err(None),
-            },
-        );
+        return Ok(match call_user_loader(vm, fname, None, path, &ctx, None)? {
+            UserLoad::Bytes(b) => Ok(b),
+            UserLoad::Null => Err(Some(
+                "Failed to load external entity because the resolver function returned null".into(),
+            )),
+            UserLoad::Invalid => Err(None),
+        });
     }
     Ok(match read_url_quiet(vm, path.as_bytes())? {
         Some(b) => Ok(b),
@@ -528,14 +554,7 @@ impl EntityLoader for PhpLoader {
                 }
                 None => Some(vm.cwd.to_string_lossy().into_owned()),
             };
-            return match call_user_loader(
-                vm,
-                &self.fname,
-                public_id,
-                &url,
-                ctx,
-                dir.as_deref(),
-            ) {
+            return match call_user_loader(vm, &self.fname, public_id, &url, ctx, dir.as_deref()) {
                 Ok(UserLoad::Bytes(b)) => Ok(b),
                 Ok(UserLoad::Null) => {
                     self.warnings.push(format!(

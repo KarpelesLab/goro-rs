@@ -2005,6 +2005,7 @@ pub(crate) fn copy_hooks(h: &NativeHooks) -> NativeHooks {
         prop: h.prop,
         dim: h.dim,
         destroy: h.destroy,
+        static_this: h.static_this,
     }
 }
 

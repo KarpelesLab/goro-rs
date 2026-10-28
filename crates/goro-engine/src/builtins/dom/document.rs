@@ -1623,8 +1623,8 @@ pub(crate) fn dom_import_simplexml(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
 }
 
-fn simplexml_node(_o: &ObjRef) -> Option<NodeId> {
-    None
+fn simplexml_node(o: &ObjRef) -> Option<NodeId> {
+    crate::builtins::simplexml::sxe_node_of(o)
 }
 
 /// Throws for a legacy operation's error in a context without `Args`.

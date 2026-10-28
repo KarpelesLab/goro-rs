@@ -334,10 +334,18 @@ impl Vm {
                 )
             }
             PropLookup::Dynamic => {
-                if let Some(h) = cls.native.prop
-                    && let Some(r) = h(self, o, name, crate::class::ObjAccess::Read)
-                {
-                    return r;
+                if let Some(h) = cls.native.prop {
+                    // `??` reads only what isset() finds (PHP manual: null
+                    // coalescing operator; test ext/simplexml bug72957).
+                    if quiet
+                        && let Some(r) = h(self, o, name, crate::class::ObjAccess::Isset)
+                        && !self.to_bool(&r?)
+                    {
+                        return Ok(Value::Null);
+                    }
+                    if let Some(r) = h(self, o, name, crate::class::ObjAccess::Read) {
+                        return r;
+                    }
                 }
                 let v = o.obj().props.borrow().get_str(name).cloned();
                 match v {
@@ -1147,11 +1155,16 @@ impl Vm {
                 None => {
                     let v = self.read_prop(o, name, true, None)?;
                     let cls = self.class_of(o);
-                    self.notice_msg(&format!(
-                        "Indirect modification of overloaded property {}::${} has no effect",
-                        cls.name.dname(),
-                        name.to_string_lossy()
-                    ))?;
+                    // Natively overloaded properties hand out a detached
+                    // reference silently (observed on PHP 8.5; test
+                    // ext/simplexml gh17736).
+                    if cls.native.prop.is_none() {
+                        self.notice_msg(&format!(
+                            "Indirect modification of overloaded property {}::${} has no effect",
+                            cls.name.dname(),
+                            name.to_string_lossy()
+                        ))?;
+                    }
                     Ok(Value::Ref(PhpRef::new(v)))
                 }
             },
@@ -1412,8 +1425,22 @@ impl Vm {
             Some(p) => Ok(Some(super::dims::Place::Ptr(p))),
             None => {
                 // Through __get or a hook: a temporary (objects are handles,
-                // so nested property writes still reach them).
-                let v = self.read_prop(o, name, false, None)?;
+                // so nested property writes still reach them). Overloaded
+                // properties are fetched as such (they may be created).
+                let v = match cls.native.prop {
+                    Some(h)
+                        if matches!(
+                            self.lookup_prop(&cls, name, self.scope_ptr()),
+                            PropLookup::Dynamic
+                        ) =>
+                    {
+                        match h(self, o, name, crate::class::ObjAccess::Fetch) {
+                            Some(r) => r?,
+                            None => self.read_prop(o, name, false, None)?,
+                        }
+                    }
+                    _ => self.read_prop(o, name, false, None)?,
+                };
                 if !matches!(v, Value::Object(_)) && !next_is_prop {
                     self.notice_msg(&format!(
                         "Indirect modification of overloaded property {}::${} has no effect",

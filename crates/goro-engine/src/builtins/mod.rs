@@ -31,6 +31,7 @@ pub mod pcre;
 pub mod random;
 pub mod reflection;
 pub mod serialize;
+pub mod simplexml;
 pub mod sodium;
 pub mod spl;
 pub mod spl_autoload;
@@ -41,7 +42,10 @@ pub mod uri;
 pub mod userstream;
 pub mod var;
 pub mod weakmap;
+pub mod xml;
+pub mod xmlreader;
 pub mod xmlstore;
+pub mod xmlwriter;
 pub mod zlib;
 
 use crate::registry::Module;
@@ -87,5 +91,9 @@ pub fn modules() -> Vec<&'static Module> {
         &uri::MODULE,
         &libxml::MODULE,
         &dom::MODULE,
+        &xml::MODULE,
+        &xmlwriter::MODULE,
+        &xmlreader::MODULE,
+        &simplexml::MODULE,
     ]
 }

@@ -227,4 +227,9 @@ pub trait Sink {
     }
     /// SAX mode: a reference to an undeclared entity, before the error.
     fn undefined_entity(&mut self, _name: &str) {}
+    /// True when the receiver asked the parse to stop (checked after
+    /// [`Sink::entity_start`]); the parse then fails.
+    fn abort(&self) -> bool {
+        false
+    }
 }

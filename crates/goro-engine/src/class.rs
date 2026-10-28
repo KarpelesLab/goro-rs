@@ -337,6 +337,11 @@ pub struct NativeHooks {
     /// after it): internal classes that must flush or release something
     /// with the VM at hand (XMLWriter writes its buffer out).
     pub destroy: Option<fn(&mut crate::vm::Vm, &goro_runtime::ObjRef)>,
+    /// Static native methods of the class called on an object get it as
+    /// `$this`, so methods callable both ways can tell (PHP manual:
+    /// XMLReader::open() and XMLReader::XML() can be called statically or
+    /// on an instance).
+    pub static_this: bool,
 }
 
 /// The access [`NativeHooks::prop`] and [`NativeHooks::dim`] are asked
@@ -344,6 +349,9 @@ pub struct NativeHooks {
 #[derive(Clone, Debug)]
 pub enum ObjAccess {
     Read,
+    /// A read for a nested write (`$o[k]['x'] = 1`, `$o[k]->p = 1`): the
+    /// hook may create what is missing; otherwise like `Read`.
+    Fetch,
     /// `isset()`.
     Isset,
     /// `empty()`.
